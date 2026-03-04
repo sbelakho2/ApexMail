@@ -5,6 +5,9 @@ import { RenderHistory } from '@/components/forensic/RenderHistory';
 import { DebugTools } from '@/components/forensic/DebugTools';
 import { ForensicCTA } from '@/components/forensic/ForensicCTA';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: 'Forensic Debugging | Time Travel for Email',
   description:

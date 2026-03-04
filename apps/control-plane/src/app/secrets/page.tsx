@@ -2,6 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { formatDate, cn } from '../../lib/utils';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { useDialog } from '../../components/ui/confirm-dialog';
+import { PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * Secrets Vault - Secure credential management
@@ -45,11 +48,14 @@ const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
 
 
 export default function SecretsPage() {
+    const dialog = useDialog();
     const [secrets, setSecrets] = useState<Secret[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedSecret, setSelectedSecret] = useState<Secret | null>(null);
     const [filterType, setFilterType] = useState<string>('');
     const [showAddModal, setShowAddModal] = useState(false);
+    const [newSecret, setNewSecret] = useState({ name: '', type: 'api_key', description: '', value: '', rotationPolicy: 'manual' });
+    const [addingSecret, setAddingSecret] = useState(false);
 
     useEffect(() => {
         loadSecrets();
@@ -62,17 +68,30 @@ export default function SecretsPage() {
             const data = await response.json();
             setSecrets(data);
         } catch (err) {
-            console.error('Failed to load secrets:', err);
+            await dialog.alert({ title: 'Load Failed', message: err instanceof Error ? err.message : 'Failed to load secrets' });
         } finally {
             setLoading(false);
         }
     }
 
     async function rotateSecret(secretId: string) {
+        const confirmed = await dialog.confirm({
+            title: 'Rotate Secret',
+            message: 'Rotate this secret now? The current key will be invalidated immediately and all clients using it must update to the new value.',
+            confirmLabel: 'Rotate',
+            variant: 'destructive',
+        });
+        if (!confirmed) return;
+
         try {
+            const csrfToken = await getCsrfToken();
             const res = await fetch('/api/secrets', {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({ id: secretId, action: 'rotate' }),
             });
             if (res.ok) {
@@ -84,34 +103,80 @@ export default function SecretsPage() {
                         status: 'active' as const,
                     } : s
                 ));
+            } else {
+                await dialog.alert({ title: 'Rotate Failed', message: `Server returned ${res.status}` });
             }
         } catch (err) {
-            console.error('Failed to rotate secret:', err);
+            await dialog.alert({ title: 'Rotate Failed', message: err instanceof Error ? err.message : 'Failed to rotate secret' });
         }
         setSelectedSecret(null);
     }
 
     async function revokeSecret(secretId: string) {
-        const confirmed = window.confirm(
-            'Revoke this secret now? Clients using it will immediately lose access. You can rotate/create a new secret if revoked by mistake.'
-        );
+        const confirmed = await dialog.confirm({
+            title: 'Revoke Secret',
+            message: 'Revoke this secret now? Clients using it will immediately lose access. You can rotate/create a new secret if revoked by mistake.',
+            confirmLabel: 'Revoke',
+            variant: 'destructive',
+        });
         if (!confirmed) return;
 
         try {
+            const csrfToken = await getCsrfToken();
             const res = await fetch('/api/secrets', {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({ id: secretId, action: 'revoke' }),
             });
             if (res.ok) {
                 setSecrets(prev => prev.map(s =>
                     s.id === secretId ? { ...s, status: 'revoked' as const } : s
                 ));
+            } else {
+                await dialog.alert({ title: 'Revoke Failed', message: `Server returned ${res.status}` });
             }
         } catch (err) {
-            console.error('Failed to revoke secret:', err);
+            await dialog.alert({ title: 'Revoke Failed', message: err instanceof Error ? err.message : 'Failed to revoke secret' });
         }
         setSelectedSecret(null);
+    }
+
+    async function addSecret() {
+        if (!newSecret.name.trim() || !newSecret.value.trim()) return;
+        setAddingSecret(true);
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/api/secrets', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({
+                    name: newSecret.name,
+                    type: newSecret.type,
+                    description: newSecret.description,
+                    value: newSecret.value,
+                    rotationPolicy: newSecret.rotationPolicy,
+                }),
+            });
+            if (res.ok) {
+                setShowAddModal(false);
+                setNewSecret({ name: '', type: 'api_key', description: '', value: '', rotationPolicy: 'manual' });
+                loadSecrets();
+            } else {
+                await dialog.alert({ title: 'Add Failed', message: `Server returned ${res.status}` });
+            }
+        } catch (err) {
+            await dialog.alert({ title: 'Add Failed', message: err instanceof Error ? err.message : 'Failed to add secret' });
+        } finally {
+            setAddingSecret(false);
+        }
     }
 
     const filteredSecrets = filterType
@@ -123,11 +188,7 @@ export default function SecretsPage() {
     const expiredCount = secrets.filter(s => s.status === 'expired').length;
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading secrets..." />;
     }
 
     return (
@@ -376,12 +437,18 @@ export default function SecretsPage() {
                                 <input
                                     type="text"
                                     placeholder="MY_API_KEY"
+                                    value={newSecret.name}
+                                    onChange={e => setNewSecret(s => ({ ...s, name: e.target.value }))}
                                     className="w-full px-3 py-2 min-h-[44px] border border-border rounded-sm text-sm font-mono bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all text-foreground"
                                 />
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-foreground mb-2">Type</label>
-                                <select className="w-full px-3 py-2 min-h-[44px] border border-border rounded-sm text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all text-foreground">
+                                <select
+                                    value={newSecret.type}
+                                    onChange={e => setNewSecret(s => ({ ...s, type: e.target.value }))}
+                                    className="w-full px-3 py-2 min-h-[44px] border border-border rounded-sm text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all text-foreground"
+                                >
                                     {Object.entries(SECRET_TYPES).map(([key, config]) => (
                                         <option key={key} value={key}>{config.icon} {config.label}</option>
                                     ))}
@@ -392,6 +459,8 @@ export default function SecretsPage() {
                                 <input
                                     type="text"
                                     placeholder="What is this secret used for?"
+                                    value={newSecret.description}
+                                    onChange={e => setNewSecret(s => ({ ...s, description: e.target.value }))}
                                     className="w-full px-3 py-2 min-h-[44px] border border-border rounded-sm text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all text-foreground"
                                 />
                             </div>
@@ -400,12 +469,18 @@ export default function SecretsPage() {
                                 <textarea
                                     placeholder="Paste secret value here..."
                                     rows={3}
+                                    value={newSecret.value}
+                                    onChange={e => setNewSecret(s => ({ ...s, value: e.target.value }))}
                                     className="w-full px-3 py-2 min-h-[44px] border border-border rounded-sm text-sm font-mono bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all text-foreground"
                                 />
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-foreground mb-2">Rotation Policy</label>
-                                <select className="w-full px-3 py-2 min-h-[44px] border border-border rounded-sm text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all text-foreground">
+                                <select
+                                    value={newSecret.rotationPolicy}
+                                    onChange={e => setNewSecret(s => ({ ...s, rotationPolicy: e.target.value }))}
+                                    className="w-full px-3 py-2 min-h-[44px] border border-border rounded-sm text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all text-foreground"
+                                >
                                     <option value="manual">Manual</option>
                                     <option value="30d">Every 30 days</option>
                                     <option value="60d">Every 60 days</option>
@@ -423,10 +498,11 @@ export default function SecretsPage() {
                                 Cancel
                             </button>
                             <button
-                                onClick={() => setShowAddModal(false)}
-                                className="flex-1 px-4 py-2 min-h-[44px] bg-primary text-primary-foreground rounded-sm hover:bg-primary/90 font-medium transition-colors"
+                                onClick={addSecret}
+                                disabled={addingSecret || !newSecret.name.trim() || !newSecret.value.trim()}
+                                className="flex-1 px-4 py-2 min-h-[44px] bg-primary text-primary-foreground rounded-sm hover:bg-primary/90 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                                Add Secret
+                                {addingSecret ? 'Adding…' : 'Add Secret'}
                             </button>
                         </div>
                     </div>

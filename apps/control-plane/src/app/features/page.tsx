@@ -1,8 +1,11 @@
 'use client';
 
-import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import { cn, timeAgo } from '../../lib/utils';
 import { useSearchParams } from 'next/navigation';
+import { useDialog } from '../../components/ui/confirm-dialog';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { PageLoadingState, PageErrorState } from '../../components/ui/async-state';
 
 export const dynamic = 'force-dynamic';
 
@@ -58,15 +61,18 @@ const OVERRIDE_FORM_SCHEMA = {
 
 function FeatureFlagsPageContent() {
     const searchParams = useSearchParams();
+    const dialog = useDialog();
     const [flags, setFlags] = useState<FeatureFlag[]>([]);
     const [overrides, setOverrides] = useState<TenantOverride[]>([]);
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState<'flags' | 'overrides'>('flags');
     const [categoryFilter, setCategoryFilter] = useState<string>(searchParams.get('category') || 'all');
     const [searchQuery, setSearchQuery] = useState('');
+    const [loadError, setLoadError] = useState<string | null>(null);
     
     // Modal states
     const [editingFlag, setEditingFlag] = useState<FeatureFlag | null>(null);
+    const newTenantIdRef = useRef<HTMLInputElement>(null);
     const [showAddOverride, setShowAddOverride] = useState(false);
     const [overrideFormError, setOverrideFormError] = useState('');
 
@@ -79,6 +85,7 @@ function FeatureFlagsPageContent() {
             setOverrides(data.overrides);
         } catch (err) {
             console.error('Failed to load feature flags:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load feature flags');
         } finally {
             setLoading(false);
         }
@@ -88,29 +95,98 @@ function FeatureFlagsPageContent() {
         loadData();
     }, [loadData]);
 
-    function toggleFlag(flagId: string) {
+    async function toggleFlag(flagId: string) {
+        const flag = flags.find(f => f.id === flagId);
+        if (!flag) return;
+        const isKillswitch = flag.category === 'killswitch';
+        const newEnabled = !flag.enabled;
+
+        const confirmed = await dialog.confirm({
+            title: isKillswitch
+                ? (newEnabled ? 'Activate Killswitch' : 'Deactivate Killswitch')
+                : (newEnabled ? 'Enable Feature Flag' : 'Disable Feature Flag'),
+            message: isKillswitch
+                ? `${newEnabled ? 'Activate' : 'Deactivate'} killswitch "${flag.name}"? This may immediately affect all tenants.`
+                : `${newEnabled ? 'Enable' : 'Disable'} "${flag.name}" for ${flag.type === 'boolean' ? 'all tenants' : 'configured rollout'}?`,
+            confirmLabel: isKillswitch ? (newEnabled ? 'Activate' : 'Deactivate') : (newEnabled ? 'Enable' : 'Disable'),
+            variant: isKillswitch ? 'destructive' : 'default',
+        });
+        if (!confirmed) return;
+
+        const previousFlags = flags;
         setFlags(prev => prev.map(f => 
             f.id === flagId 
-                ? { ...f, enabled: !f.enabled, updatedAt: new Date().toISOString() }
+                ? { ...f, enabled: newEnabled, updatedAt: new Date().toISOString() }
                 : f
         ));
+        getCsrfToken().then(csrfToken => {
+            fetch('/api/features', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ id: flagId, enabled: newEnabled }),
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setFlags(previousFlags);
+                dialog.alert({ title: 'Toggle Failed', message: 'Could not persist the flag change. It has been reverted.' });
+            });
+        });
     }
 
     function updatePercentage(flagId: string, percentage: number) {
+        const previousFlags = flags;
         setFlags(prev => prev.map(f => 
             f.id === flagId 
                 ? { ...f, percentage, updatedAt: new Date().toISOString() }
                 : f
         ));
+        getCsrfToken().then(csrfToken => {
+            fetch('/api/features', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ id: flagId, percentage }),
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setFlags(previousFlags);
+                dialog.alert({ title: 'Update Failed', message: 'Could not persist the percentage change. It has been reverted.' });
+            });
+        });
     }
 
-    function deleteOverride(tenantId: string, flagKey: string) {
-        const confirmed = window.confirm(
-            'Remove this tenant override? The tenant will immediately fall back to default flag behavior. Recreate the override if this was accidental.'
-        );
+    async function deleteOverride(tenantId: string, flagKey: string) {
+        const confirmed = await dialog.confirm({
+            title: 'Remove Override',
+            message: 'Remove this tenant override? The tenant will immediately fall back to default flag behavior. Recreate the override if this was accidental.',
+            confirmLabel: 'Remove Override',
+            variant: 'destructive',
+        });
         if (!confirmed) return;
 
-        setOverrides(prev => prev.filter(o => !(o.tenantId === tenantId && o.flagKey === flagKey)));
+        // Optimistic update
+        const prev = overrides;
+        setOverrides(p => p.filter(o => !(o.tenantId === tenantId && o.flagKey === flagKey)));
+
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/api/features', {
+                method: 'DELETE',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ tenantId, flagKey }),
+            });
+            if (!res.ok) {
+                console.error('Failed to delete override, rolling back');
+                setOverrides(prev);
+                dialog.alert({ title: 'Delete Failed', message: 'Could not remove the override. It has been restored.' });
+            }
+        } catch (err) {
+            console.error('Failed to persist override deletion:', err);
+            setOverrides(prev);
+            dialog.alert({ title: 'Delete Failed', message: 'Could not remove the override. It has been restored.' });
+        }
     }
 
     const filteredFlags = flags.filter(flag => {
@@ -123,11 +199,11 @@ function FeatureFlagsPageContent() {
     });
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading feature flags..." />;
+    }
+
+    if (loadError) {
+        return <PageErrorState description={loadError} onRetry={() => { setLoadError(null); setLoading(true); loadData(); }} />;
     }
 
     return (
@@ -460,12 +536,13 @@ function FeatureFlagsPageContent() {
                                 <input
                                     type="text"
                                     placeholder="Add tenant ID..."
-                                    id="new-tenant-id"
+                                    ref={newTenantIdRef}
                                     className="flex-1 px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background text-foreground placeholder:text-muted-foreground"
                                 />
                                 <button
                                     onClick={() => {
-                                        const input = document.getElementById('new-tenant-id') as HTMLInputElement;
+                                        const input = newTenantIdRef.current;
+                                        if (!input) return;
                                         const tenantId = input.value.trim();
                                         if (tenantId && !editingFlag.allowlist?.includes(tenantId)) {
                                             const newList = [...(editingFlag.allowlist || []), tenantId];
@@ -505,7 +582,7 @@ function FeatureFlagsPageContent() {
                         </div>
                         <form 
                             className="p-6 space-y-4"
-                            onSubmit={(e) => {
+                            onSubmit={async (e) => {
                                 e.preventDefault();
                                 const form = e.target as HTMLFormElement;
                                 const formData = new FormData(form);
@@ -540,6 +617,25 @@ function FeatureFlagsPageContent() {
                                     reason,
                                     createdAt: new Date().toISOString(),
                                 };
+
+                                // Persist to backend
+                                try {
+                                    const csrfToken = await getCsrfToken();
+                                    const res = await fetch('/api/features', {
+                                        method: 'POST',
+                                        credentials: 'include',
+                                        headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                        body: JSON.stringify({ type: 'override', override: newOverride }),
+                                    });
+                                    if (!res.ok) {
+                                        setOverrideFormError('Failed to save override. Please try again.');
+                                        return;
+                                    }
+                                } catch {
+                                    setOverrideFormError('Network error. Please try again.');
+                                    return;
+                                }
+
                                 setOverrides(prev => [...prev, newOverride]);
                                 setShowAddOverride(false);
                             }}

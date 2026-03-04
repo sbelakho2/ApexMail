@@ -1,5 +1,8 @@
 import type { Metadata } from 'next';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
     title: 'Service Level Agreement',
     description: 'ApexMail SLA — our uptime and performance commitments.',

@@ -1,7 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import Link from 'next/link';
 import { ArrowRight, Zap, Clock, Shield, Headphones } from '@/components/ui/icons';
 
@@ -13,16 +9,10 @@ const ctaFeatures = [
 ];
 
 export function CTASection() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-20 lg:py-32 relative overflow-hidden bg-white">
-      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="text-center"
- >
+ <section className="py-20 lg:py-32 relative overflow-hidden bg-white">
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+ <div className="animate-in text-center">
  {/* Headline */}
  <h2 className="mb-6">
             <span className="text-surface-900">Ready to Ship</span>
@@ -39,28 +29,17 @@ export function CTASection() {
  {/* Features List */}
  <div className="grid sm:grid-cols-2 gap-x-8 gap-y-4 max-w-2xl mx-auto mb-12">
    {ctaFeatures.map((feature, index) => (
-     <motion.div
-       key={feature.text}
-       initial={{ opacity: 0, y: 12 }}
-       animate={inView ? { opacity: 1, y: 0 } : {}}
-       transition={{ delay: 0.2 + index * 0.1 }}
-       className="flex items-center gap-3 text-left"
-     >
+     <div key={feature.text} className="animate-in flex items-center gap-3 text-left">
        <div className="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
          <feature.icon className="w-4 h-4" />
        </div>
        <span className="text-surface-600 text-[14px] font-bold uppercase tracking-wide">{feature.text}</span>
-     </motion.div>
+     </div>
    ))}
  </div>
 
  {/* CTA Buttons */}
- <motion.div
-   initial={{ opacity: 0, y: 20 }}
-   animate={inView ? { opacity: 1, y: 0 } : {}}
-   transition={{ delay: 0.4 }}
-   className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16"
- >
+ <div className="animate-in delay-400 flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
    <Link
      href="https://app.apexmail.ee/signup"
      className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-white bg-brand-500 rounded-md border border-brand-500 hover:bg-brand-600 transition-colors w-full sm:w-auto"
@@ -74,15 +53,10 @@ export function CTASection() {
    >
      Book Architecture Review
    </Link>
- </motion.div>
+ </div>
 
  {/* Trust Badges */}
- <motion.div
-      initial={{ opacity: 0 }}
-      animate={inView ? { opacity: 1 } : {}}
-      transition={{ delay: 0.6 }}
-      className="flex flex-wrap items-center justify-center gap-6 text-[14px] font-bold uppercase tracking-widest text-surface-600"
-    >
+ <div className="animate-in delay-500 flex flex-wrap items-center justify-center gap-6 text-[14px] font-bold uppercase tracking-widest text-surface-600">
       <span className="flex items-center gap-2">
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"></span>
         99.9% Uptime SLA (Scale+)
@@ -99,8 +73,8 @@ export function CTASection() {
         <span className="w-1.5 h-1.5 rounded-full bg-surface-400"></span>
         Priority Support (Growth+)
       </span>
-    </motion.div>
- </motion.div>
+    </div>
+ </div>
  </div>
  </section>
  );

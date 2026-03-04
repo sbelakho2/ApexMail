@@ -19,10 +19,10 @@ function reportClientError(error: Error & { digest?: string }) {
     try {
         const serialized = JSON.stringify(payload);
         if (navigator.sendBeacon) {
-            navigator.sendBeacon('/api/client-errors', serialized);
+            navigator.sendBeacon('/v1/client-errors', serialized);
             return;
         }
-        void fetch('/api/client-errors', {
+        void fetch('/v1/client-errors', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: serialized,

@@ -17,6 +17,8 @@ pub fn router() -> Router<AppState> {
         .route("/", post(create_template).get(list_templates))
         .route("/:id", get(get_template).put(update_template).delete(delete_template))
         .route("/:id/render", post(render_template))
+        .route("/:id/duplicate", post(duplicate_template))
+        .route("/:id/rollback", post(rollback_template))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -366,6 +368,78 @@ async fn fetch_template(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<T
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("template not found".into()))
+}
+
+// ─── Duplicate / Rollback Handlers ─────────────────────────────
+
+async fn duplicate_template(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<TemplateResponse>), ApiError> {
+    require_scopes(&auth, &["templates:write"])?;
+
+    // Fetch original
+    let original = find_template(&state, id, auth.tenant_id).await?;
+
+    let new_id = Uuid::now_v7();
+    let now = chrono::Utc::now();
+    let new_name = format!("{} (copy)", original.name);
+
+    sqlx::query!(
+        "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at)
+         SELECT $1, tenant_id, $3, subject, html_body, text_body, 1, 'draft', $4, $4
+         FROM templates WHERE id = $2 AND tenant_id = $5",
+        new_id,
+        id,
+        new_name,
+        now,
+        auth.tenant_id,
+    )
+    .execute(&*state.db)
+    .await?;
+
+    let row = find_template(&state, new_id, auth.tenant_id).await?;
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RollbackRequest {
+    pub version: i32,
+}
+
+async fn rollback_template(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RollbackRequest>,
+) -> Result<Json<TemplateResponse>, ApiError> {
+    require_scopes(&auth, &["templates:write"])?;
+
+    // Restore from template_versions table
+    let result = sqlx::query!(
+        "UPDATE templates SET
+            html_body = tv.html_body,
+            text_body = tv.text_body,
+            subject = tv.subject,
+            version = tv.version,
+            updated_at = NOW()
+         FROM template_versions tv
+         WHERE templates.id = $1 AND templates.tenant_id = $2
+           AND tv.template_id = $1 AND tv.version = $3",
+        id,
+        auth.tenant_id,
+        body.version,
+    )
+    .execute(&*state.db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("template or version not found".into()));
+    }
+
+    let row = find_template(&state, id, auth.tenant_id).await?;
+    Ok(Json(row))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────

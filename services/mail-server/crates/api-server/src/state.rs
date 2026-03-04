@@ -7,18 +7,22 @@ use reqwest::Client;
 use sqlx::PgPool;
 
 use crate::config::Config;
+use crate::ip_provider::DedicatedIpProvider;
 use crate::ses_provider::SesIpProvider;
 
 /// Cheaply-cloneable handle shared across all request handlers.
 pub type AppState = Arc<AppStateInner>;
 
-/// Inner struct holding the database pool, Redis pool, config, and SES provider.
+/// Inner struct holding the database pool, Redis pool, config, and providers.
 pub struct AppStateInner {
     pub db: PgPool,
     pub redis: RedisPool,
     pub config: Config,
     pub http_client: Client,
+    /// SES provider — used for shared-pool sending only (no dedicated IPs).
     pub ses_provider: SesIpProvider,
+    /// Dedicated IP provider (Hetzner Cloud). `None` if HETZNER_API_TOKEN is unset.
+    pub ip_provider: Option<DedicatedIpProvider>,
 }
 
 impl AppStateInner {
@@ -28,6 +32,7 @@ impl AppStateInner {
         config: Config,
         http_client: Client,
         ses_provider: SesIpProvider,
+        ip_provider: Option<DedicatedIpProvider>,
     ) -> AppState {
         Arc::new(Self {
             db,
@@ -35,6 +40,7 @@ impl AppStateInner {
             config,
             http_client,
             ses_provider,
+            ip_provider,
         })
     }
 }

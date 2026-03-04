@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { useState } from 'react';
 import { ChevronRight, Send, Users, BarChart3, Webhook, Settings } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
@@ -153,48 +151,28 @@ const categories: EndpointCategory[] = [
 ];
 
 export function EndpointExplorer() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
   const [selectedCategory, setSelectedCategory] = useState<string>('Sending');
   const [selectedEndpoint, setSelectedEndpoint] = useState<Endpoint | null>(null);
 
   const category = categories.find((c) => c.name === selectedCategory) || categories[0];
 
   return (
-    <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+    <section className="py-20 lg:py-32 relative bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-12">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4"
-            >
+            <div className="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4">
               <Settings className="w-4 h-4 text-surface-500" />
               Endpoint Explorer
-            </motion.div>
-            <motion.h2
-              initial={{ opacity: 0, y: 20 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: 0.1 }}
-              className="text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight"
-            >
+            </div>
+            <h2 className="animate-in delay-100 text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight">
               Explore the Full API
             </motion.h2>
-            <motion.p
-              initial={{ opacity: 0, y: 20 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: 0.2 }}
-              className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium"
-            >
+            <p className="animate-in delay-200 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium">
               Browse all available endpoints. Click any endpoint to see request/response examples.
-            </motion.p>
+            </p>
           </div>
 
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.3 }}
-            className="grid lg:grid-cols-4 gap-6"
-          >
+          <div className="animate-in delay-300 grid lg:grid-cols-4 gap-6">
             {/* Categories */}
             <div className="lg:col-span-1 space-y-2">
               {categories.map((cat) => (
@@ -255,23 +233,19 @@ export function EndpointExplorer() {
                       <p className="text-sm text-surface-600 font-medium">{endpoint.description}</p>
                       
                       {selectedEndpoint?.path === endpoint.path && (
-                        <motion.div
-                          initial={{ opacity: 0, height: 0 }}
-                          animate={{ opacity: 1, height: 'auto' }}
-                          className="mt-6 pt-6 border-t border-surface-200"
-                        >
+                        <div className="animate-in mt-6 pt-6 border-t border-surface-200">
                           <div className="text-xs font-semibold text-surface-500 mb-3">Example Request/Response</div>
                           <pre className="text-xs text-surface-300 font-mono bg-surface-900 p-4 rounded-lg overflow-auto shadow-inner border border-surface-800">
                             {endpoint.example}
                           </pre>
-                        </motion.div>
+                        </div>
                       )}
                     </div>
                   ))}
                 </div>
               </div>
             </div>
-          </motion.div>
+          </div>
       </div>
     </section>
   );

@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback, Suspense } from 'react';
 import { cn, formatDateOnly, timeAgo } from '../../lib/utils';
 import { useSearchParams } from 'next/navigation';
 import { useDialog } from '../../components/ui/confirm-dialog';
+import { PageLoadingState, PageErrorState } from '../../components/ui/async-state';
+import { getCsrfToken } from '../../lib/client-csrf';
 
 export const dynamic = 'force-dynamic';
 
@@ -74,6 +76,7 @@ function ContentPageContent() {
     const [editingItem, setEditingItem] = useState<ContentItem | null>(null);
     const [isCreating, setIsCreating] = useState(false);
     const [editorFormError, setEditorFormError] = useState('');
+    const [loadError, setLoadError] = useState<string | null>(null);
 
     const loadData = useCallback(async () => {
         try {
@@ -81,8 +84,9 @@ function ContentPageContent() {
             if (!response.ok) throw new Error(`Failed to fetch content: ${response.status}`);
             const data = await response.json();
             setContent(data);
+            setLoadError(null);
         } catch (err) {
-            console.error('Failed to load content:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load content');
         } finally {
             setLoading(false);
         }
@@ -92,20 +96,61 @@ function ContentPageContent() {
         loadData();
     }, [loadData]);
 
-    function publishItem(itemId: string) {
+    async function publishItem(itemId: string) {
+        const confirmed = await dialog.confirm({
+            title: 'Publish Content',
+            message: 'This will make the content publicly visible. Continue?',
+            confirmLabel: 'Publish',
+        });
+        if (!confirmed) return;
+        const previousContent = [...content];
         setContent(prev => prev.map(item => 
             item.id === itemId 
                 ? { ...item, status: 'published' as const, publishedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
                 : item
         ));
+        getCsrfToken().then(csrfToken => {
+            fetch('/api/content', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ id: itemId, status: 'published' }),
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setContent(previousContent);
+                dialog.alert({ title: 'Publish Failed', message: 'Could not publish the item. The change has been reverted.' });
+            });
+        });
     }
 
-    function archiveItem(itemId: string) {
+    async function archiveItem(itemId: string) {
+        const confirmed = await dialog.confirm({
+            title: 'Archive Content',
+            message: 'This will remove the content from public view. Continue?',
+            confirmLabel: 'Archive',
+            variant: 'destructive',
+        });
+        if (!confirmed) return;
+        const previousContent = [...content];
         setContent(prev => prev.map(item => 
             item.id === itemId 
                 ? { ...item, status: 'archived' as const, updatedAt: new Date().toISOString() }
                 : item
         ));
+        getCsrfToken().then(csrfToken => {
+            fetch('/api/content', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ id: itemId, status: 'archived' }),
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setContent(previousContent);
+                dialog.alert({ title: 'Archive Failed', message: 'Could not archive the item. The change has been reverted.' });
+            });
+        });
     }
 
     function duplicateItem(item: ContentItem) {
@@ -121,7 +166,21 @@ function ContentPageContent() {
             updatedAt: new Date().toISOString(),
             views: 0,
         };
+        const previousContent = [...content];
         setContent(prev => [newItem, ...prev]);
+        getCsrfToken().then(csrfToken => {
+            fetch('/api/content', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ sourceId: item.id, title: newItem.title, slug: newItem.slug }),
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setContent(previousContent);
+                dialog.alert({ title: 'Duplicate Failed', message: 'Could not duplicate the item. The change has been reverted.' });
+            });
+        });
     }
 
     async function deleteItem(itemId: string) {
@@ -132,7 +191,22 @@ function ContentPageContent() {
             variant: 'destructive',
         });
         if (confirmed) {
+            const previousContent = content;
             setContent(prev => prev.filter(item => item.id !== itemId));
+            const csrfToken = await getCsrfToken();
+            try {
+                const res = await fetch('/api/content', {
+                    method: 'DELETE',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                    body: JSON.stringify({ id: itemId }),
+                });
+                if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+            } catch (err) {
+                console.error('Failed to persist delete:', err);
+                setContent(previousContent);
+                dialog.alert({ title: 'Delete Failed', message: 'Could not delete the item. The change has been reverted.' });
+            }
         }
     }
 
@@ -154,11 +228,11 @@ function ContentPageContent() {
     };
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading content..." />;
+    }
+
+    if (loadError) {
+        return <PageErrorState description={loadError} onRetry={() => { setLoading(true); setLoadError(null); loadData(); }} />;
     }
 
     return (
@@ -435,6 +509,25 @@ function ContentPageContent() {
                                     setContent(prev => [itemData, ...prev]);
                                 }
                                 
+                                // Persist create/edit to API
+                                getCsrfToken().then(csrfToken => {
+                                    fetch('/api/content', {
+                                        method: editingItem ? 'PUT' : 'POST',
+                                        credentials: 'include',
+                                        headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                        body: JSON.stringify(itemData),
+                                    }).then(res => {
+                                        if (!res.ok) throw new Error('Failed');
+                                    }).catch(() => {
+                                        if (editingItem) {
+                                            setContent(prev => prev.map(item => item.id === editingItem.id ? editingItem : item));
+                                        } else {
+                                            setContent(prev => prev.filter(item => item.id !== itemData.id));
+                                        }
+                                        dialog.alert({ title: 'Save Failed', message: 'Could not save content to the server. Your changes have been reverted.' });
+                                    });
+                                });
+
                                 setEditingItem(null);
                                 setIsCreating(false);
                             }}

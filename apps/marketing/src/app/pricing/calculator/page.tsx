@@ -4,6 +4,9 @@ import { InteractiveCalculator } from '@/components/calculator/InteractiveCalcul
 import { CompetitorBreakdown } from '@/components/calculator/CompetitorBreakdown';
 import { CalculatorCTA } from '@/components/calculator/CalculatorCTA';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: 'Pricing Calculator | Compare vs Competitors',
   description:

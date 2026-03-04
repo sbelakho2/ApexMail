@@ -51,6 +51,22 @@ export default function AnalyticsPage() {
     const timezone = getLocalTimeZone();
     const dataSource: 'simulated' | 'live' = analytics ? 'live' : 'simulated';
 
+    // Platform metrics for tenant/revenue/sales sections
+    const [platformMetrics, setPlatformMetrics] = useState<Record<string, string | number> | null>(null);
+
+    useEffect(() => {
+        fetch('/api/analytics/platform', { credentials: 'include' })
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data) setPlatformMetrics(data); })
+            .catch(() => { /* platform metrics not available */ });
+    }, []);
+
+    const pm = (key: string, fallback = '—'): string => {
+        if (!platformMetrics) return fallback;
+        const v = platformMetrics[key];
+        return v !== undefined && v !== null ? String(v) : fallback;
+    };
+
     useEffect(() => {
         let isCancelled = false;
         async function loadAnalytics() {
@@ -70,9 +86,8 @@ export default function AnalyticsPage() {
                 setGeneratedAt(new Date());
             } catch (error) {
                 if (isCancelled) return;
-                void error;
                 setAnalytics(null);
-                setAnalyticsError('Live analytics data is currently unavailable.');
+                setAnalyticsError(error instanceof Error ? error.message : 'Live analytics data is currently unavailable.');
             } finally {
                 if (!isCancelled) {
                     setLoadingAnalytics(false);
@@ -165,6 +180,11 @@ export default function AnalyticsPage() {
                     <h1 className="text-2xl font-bold text-foreground">Analytics & Insights</h1>
                     <p className="text-muted-foreground mt-1">Deep business intelligence across all operations • Times shown in {timezone}</p>
                     <p className="text-xs text-muted-foreground mt-1">Last updated {formatDateTime(generatedAt)}</p>
+                    {analyticsError && (
+                        <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+                            {analyticsError}
+                        </div>
+                    )}
                     <div className="mt-2 flex items-center gap-2 text-xs min-h-[20px]">
                         <span className={cn(
                             'inline-flex items-center rounded-full px-2 py-0.5 border',
@@ -409,10 +429,10 @@ export default function AnalyticsPage() {
             {activeSection === 'tenants' && (
                 <div className="space-y-6">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <StatCard label="Total Tenants" value="2,847" change={5.3} trend="up" icon="Users" />
-                        <StatCard label="Active (30d)" value="2,412" change={3.1} trend="up" icon="OK" />
-                        <StatCard label="New This Month" value="143" change={12.5} trend="up" icon="New" />
-                        <StatCard label="Churned" value="28" change={-15.2} trend="up" icon="Warn" />
+                        <StatCard label="Total Tenants" value={pm('totalTenants')} change={0} trend="up" icon="Users" />
+                        <StatCard label="Active (30d)" value={pm('activeTenants')} change={0} trend="up" icon="OK" />
+                        <StatCard label="New This Month" value={pm('newTenants')} change={0} trend="up" icon="New" />
+                        <StatCard label="Churned" value={pm('churnedTenants')} change={0} trend="up" icon="Warn" />
                     </div>
 
                     {/* Tenant Health Distribution */}
@@ -439,7 +459,7 @@ export default function AnalyticsPage() {
                                     { label: 'Free', value: 612 },
                                 ]}
                                 size={160}
-                                centerValue="2,847"
+                                centerValue={pm('totalTenants')}
                                 centerLabel="Total"
                             />
                         </div>
@@ -494,10 +514,10 @@ export default function AnalyticsPage() {
             {activeSection === 'revenue' && (
                 <div className="space-y-6">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <StatCard label="MRR" value="$847,320" change={12.5} trend="up" icon="MRR" />
-                        <StatCard label="ARR" value="$10.2M" change={12.5} trend="up" icon="ARR" />
-                        <StatCard label="ARPU" value="$298" change={6.8} trend="up" icon="ARPU" />
-                        <StatCard label="LTV" value="$8,940" change={4.2} trend="up" icon="LTV" />
+                        <StatCard label="MRR" value={pm('mrr')} change={0} trend="up" icon="MRR" />
+                        <StatCard label="ARR" value={pm('arr')} change={0} trend="up" icon="ARR" />
+                        <StatCard label="ARPU" value={pm('arpu')} change={0} trend="up" icon="ARPU" />
+                        <StatCard label="LTV" value={pm('ltv')} change={0} trend="up" icon="LTV" />
                     </div>
 
                     {/* Revenue Trend */}
@@ -535,7 +555,7 @@ export default function AnalyticsPage() {
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-foreground rounded-lg text-background">
                                     <span>Ending MRR</span>
-                                    <span className="font-bold">$847,320</span>
+                                    <span className="font-bold">{pm('mrr')}</span>
                                 </div>
                             </div>
                         </div>
@@ -564,10 +584,10 @@ export default function AnalyticsPage() {
             {activeSection === 'sales' && (
                 <div className="space-y-6">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <StatCard label="Pipeline Value" value="$1.2M" change={18.5} trend="up" icon="Value" />
-                        <StatCard label="Active Deals" value="234" change={12.3} trend="up" icon="Deals" />
-                        <StatCard label="Win Rate" value="34.2%" change={2.5} trend="up" icon="Win" />
-                        <StatCard label="Avg Deal Size" value="$4,230" change={8.1} trend="up" icon="Avg" />
+                        <StatCard label="Pipeline Value" value={pm('pipelineValue')} change={0} trend="up" icon="Value" />
+                        <StatCard label="Active Deals" value={pm('activeDeals')} change={0} trend="up" icon="Deals" />
+                        <StatCard label="Win Rate" value={pm('winRate')} change={0} trend="up" icon="Win" />
+                        <StatCard label="Avg Deal Size" value={pm('avgDealSize')} change={0} trend="up" icon="Avg" />
                     </div>
 
                     {/* Sales Funnel */}

@@ -18,6 +18,7 @@ pub fn router() -> Router<AppState> {
         .route("/engagement", get(engagement))
         .route("/deliverability", get(deliverability))
         .route("/export", get(export))
+        .route("/export/pdf", get(export_pdf))
         .route("/export/:job_id", get(get_export_job))
 }
 
@@ -631,6 +632,119 @@ struct DeliverabilityRow {
     delivered: i64,
     bounced: i64,
     complained: i64,
+}
+
+// ─── PDF Export (via pdf-renderer service) ─────────────────────
+
+/// `GET /analytics/export/pdf?from=...&to=...`
+///
+/// Calls the pdf-renderer service to generate a PDF analytics export and
+/// streams the result back to the client with `Content-Disposition: attachment`.
+async fn export_pdf(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(params): Query<AnalyticsQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::http::header;
+
+    require_scopes(&auth, &["analytics:read"])?;
+
+    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+    let to = params.to.unwrap_or_else(Utc::now);
+
+    // Gather summary data for the PDF template
+    let summary: Option<DashboardRow> = sqlx::query_as(
+        "SELECT
+            COUNT(*) as total_sent,
+            COUNT(*) FILTER (WHERE status = 'delivered') as total_delivered,
+            COUNT(*) FILTER (WHERE status = 'bounced') as total_bounced,
+            COUNT(*) FILTER (WHERE status = 'opened') as total_opened,
+            COUNT(*) FILTER (WHERE status = 'clicked') as total_clicked
+         FROM messages
+         WHERE tenant_id = $1 AND sent_at >= $2 AND sent_at < $3"
+    )
+        .bind(auth.tenant_id)
+        .bind(from)
+        .bind(to)
+        .fetch_optional(&state.db)
+        .await?;
+
+    let s = summary.unwrap_or(DashboardRow {
+        total_sent: 0,
+        total_delivered: 0,
+        total_bounced: 0,
+        total_opened: 0,
+        total_clicked: 0,
+    });
+
+    let total = s.total_sent.max(1) as f64;
+
+    let pdf_data = serde_json::json!({
+        "tenant_name": auth.tenant_id.to_string(),
+        "date_range": {
+            "from": from.format("%Y-%m-%d").to_string(),
+            "to": to.format("%Y-%m-%d").to_string(),
+        },
+        "generated_at": Utc::now().to_rfc3339(),
+        "summary": {
+            "total_sent": s.total_sent,
+            "total_delivered": s.total_delivered,
+            "total_bounced": s.total_bounced,
+            "total_opened": s.total_opened,
+            "total_clicked": s.total_clicked,
+            "total_unsubscribed": 0,
+            "total_complaints": 0,
+            "delivery_rate": (s.total_delivered as f64 / total * 100.0 * 10.0).round() / 10.0,
+            "open_rate": (s.total_opened as f64 / total * 100.0 * 10.0).round() / 10.0,
+            "click_rate": (s.total_clicked as f64 / total * 100.0 * 10.0).round() / 10.0,
+            "bounce_rate": (s.total_bounced as f64 / total * 100.0 * 10.0).round() / 10.0,
+            "complaint_rate": 0.0,
+        },
+        "daily_stats": [],
+        "top_campaigns": [],
+        "domain_breakdown": [],
+    });
+
+    let render_request = serde_json::json!({
+        "template": "analytics_export",
+        "data": pdf_data,
+    });
+
+    let pdf_renderer_url = std::env::var("PDF_RENDERER_URL")
+        .unwrap_or_else(|_| "http://pdf-renderer:3004".into());
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{pdf_renderer_url}/v1/pdf/render"))
+        .json(&render_request)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(format!("PDF renderer error: {e}")))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ApiError::Internal(format!("PDF render failed: {body}")));
+    }
+
+    let pdf_bytes = resp.bytes().await
+        .map_err(|e| ApiError::Internal(format!("Failed to read PDF: {e}")))?;
+
+    let filename = format!(
+        "analytics-export-{}-{}.pdf",
+        from.format("%Y%m%d"),
+        to.format("%Y%m%d")
+    );
+
+    Ok((
+        axum::http::StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/pdf".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        pdf_bytes.to_vec(),
+    ).into())
 }
 
 // ─── Tests ─────────────────────────────────────────────────────

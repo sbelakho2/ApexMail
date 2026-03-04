@@ -45,7 +45,7 @@ const PLANS: Plan[] = [
     name: 'starter',
     displayName: 'Starter',
     priceMonthly: 2500,
-    priceYearly: 25000,
+    priceYearly: 24900,
     emailLimit: 50000,
     features: [
       '50,000 emails/month',
@@ -59,7 +59,7 @@ const PLANS: Plan[] = [
     name: 'pro',
     displayName: 'Pro',
     priceMonthly: 6500,
-    priceYearly: 65000,
+    priceYearly: 64700,
     emailLimit: 150000,
     features: [
       '150,000 emails/month',
@@ -74,7 +74,7 @@ const PLANS: Plan[] = [
     name: 'growth',
     displayName: 'Growth',
     priceMonthly: 15000,
-    priceYearly: 150000,
+    priceYearly: 149400,
     emailLimit: 500000,
     features: [
       '500,000 emails/month',
@@ -89,7 +89,7 @@ const PLANS: Plan[] = [
     name: 'scale',
     displayName: 'Scale',
     priceMonthly: 35000,
-    priceYearly: 350000,
+    priceYearly: 348600,
     emailLimit: 2000000,
     features: [
       '2,000,000 emails/month',
@@ -103,7 +103,7 @@ const PLANS: Plan[] = [
     name: 'enterprise',
     displayName: 'Enterprise',
     priceMonthly: 80000,
-    priceYearly: 800000,
+    priceYearly: 796800,
     emailLimit: 5000000,
     features: [
       '5,000,000 emails/month',

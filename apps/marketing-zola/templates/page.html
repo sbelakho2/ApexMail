@@ -1,0 +1,33 @@
+{# ── Generic Page Template ──────────────────────────────────── #}
+{# Extends base.html, renders page content from Markdown #}
+
+{% extends "base.html" %}
+
+{% block title %}
+  {% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}
+{% endblock title %}
+
+{% block description %}
+  {% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}
+{% endblock description %}
+
+{% block og_title %}
+  {% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}
+{% endblock og_title %}
+
+{% block og_description %}
+  {% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}
+{% endblock og_description %}
+
+{% block canonical %}{{ page.permalink }}{% endblock canonical %}
+
+{% block head %}
+  {# Page-specific JSON-LD if provided in extra #}
+  {% if page.extra.jsonld %}
+  <script type="application/ld+json">{{ page.extra.jsonld | safe }}</script>
+  {% endif %}
+{% endblock head %}
+
+{% block content %}
+  {{ page.content | safe }}
+{% endblock content %}

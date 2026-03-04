@@ -1,0 +1,27 @@
+{# ── Section Index Template ──────────────────────────────────── #}
+{# For section landing pages (e.g., /features/, /compare/) #}
+
+{% extends "base.html" %}
+
+{% block title %}
+  {% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}
+{% endblock title %}
+
+{% block description %}
+  {% if section.description %}{{ section.description }}{% else %}{{ config.description }}{% endif %}
+{% endblock description %}
+
+{% block content %}
+  {{ section.content | safe }}
+
+  {% if section.pages %}
+  <div class="mx-auto max-w-7xl px-6 py-12">
+    {% for page in section.pages %}
+    <a href="{{ page.permalink }}" class="block mb-4 p-6 rounded-lg border border-surface-200 hover:border-brand-300 transition-colors">
+      <h2 class="text-xl font-semibold text-surface-900">{{ page.title }}</h2>
+      {% if page.description %}<p class="mt-2 text-surface-600">{{ page.description }}</p>{% endif %}
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+{% endblock content %}

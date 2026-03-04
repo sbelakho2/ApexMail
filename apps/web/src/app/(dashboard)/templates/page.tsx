@@ -26,6 +26,7 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import { formatRelativeTime } from '@/lib/utils';
+import { useAPI, getCsrfToken } from '@/hooks/use-api';
 
 interface Template {
     id: string;
@@ -47,13 +48,15 @@ function getTemplateVariables(content: string) {
         found.add(match[1]);
         match = regex.exec(content);
     }
-    return [...found];
+    return Array.from(found);
 }
 
 export default function TemplatesPage() {
-    const [templates, setTemplates] = React.useState<Template[]>([]);
-    const [loading, setLoading] = React.useState(true);
+    const { data: templatesData, isLoading: loading, mutate: mutateTemplates } = useAPI<{ templates?: Template[]; data?: Template[] }>('/v1/templates');
+    const templates = templatesData?.templates ?? templatesData?.data ?? [];
     const [search, setSearch] = React.useState('');
+    const [templatePage, setTemplatePage] = React.useState(1);
+    const templatesPerPage = 20;
     const [notice, setNotice] = React.useState('');
     const [error, setError] = React.useState('');
     const [previewTemplate, setPreviewTemplate] = React.useState<Template | null>(null);
@@ -61,20 +64,18 @@ export default function TemplatesPage() {
     const [previewRtl, setPreviewRtl] = React.useState(false);
     const [editTemplate, setEditTemplate] = React.useState<Template | null>(null);
     const [editContent, setEditContent] = React.useState('');
+    const [deleteTarget, setDeleteTarget] = React.useState<Template | null>(null);
+    const [showCreateDialog, setShowCreateDialog] = React.useState(false);
+    const [createName, setCreateName] = React.useState('');
+    const [createSubject, setCreateSubject] = React.useState('');
 
     const requiredVariables = ['first_name', 'unsubscribe_url'];
-
-    React.useEffect(() => {
-        fetch('/v1/templates')
-            .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
-            .then(json => setTemplates(json.templates ?? json.data ?? []))
-            .catch(() => setTemplates([]))
-            .finally(() => setLoading(false));
-    }, []);
 
     const filtered = templates.filter(t =>
         !search || t.name.toLowerCase().includes(search.toLowerCase()) || t.subject.toLowerCase().includes(search.toLowerCase())
     );
+    const totalTemplatePages = Math.max(1, Math.ceil(filtered.length / templatesPerPage));
+    const paginatedTemplates = filtered.slice((templatePage - 1) * templatesPerPage, templatePage * templatesPerPage);
 
     async function duplicateTemplate(template: Template) {
         setNotice('');
@@ -86,38 +87,55 @@ export default function TemplatesPage() {
             return;
         }
 
-        const res = await fetch(`/v1/templates/${template.id}/duplicate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: duplicateName }),
-        });
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch(`/v1/templates/${template.id}/duplicate`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ name: duplicateName }),
+            });
 
-        if (!res.ok) {
-            setError('Failed to duplicate template. Please retry.');
-            return;
+            if (!res.ok) {
+                setError('Failed to duplicate template. Please retry.');
+                return;
+            }
+
+            await mutateTemplates();
+            setNotice(`Template duplicated as "${duplicateName}".`);
+        } catch {
+            setError('Network error. Please check your connection and retry.');
         }
-
-        const json = await res.json();
-        setTemplates(prev => [json.template ?? json, ...prev]);
-        setNotice(`Template duplicated as "${duplicateName}".`);
     }
 
-    async function deleteTemplate(id: string) {
+    async function confirmDeleteTemplate() {
+        if (!deleteTarget) return;
         setNotice('');
         setError('');
-        const confirmed = window.confirm(
-            'Delete this template permanently? This action cannot be undone. If removed by mistake, recreate it from version history or a duplicate.'
-        );
-        if (!confirmed) return;
 
-        const res = await fetch(`/v1/templates/${id}`, { method: 'DELETE' });
-        if (res.ok) {
-            setTemplates(prev => prev.filter(t => t.id !== id));
-            setNotice('Template deleted.');
-            return;
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch(`/v1/templates/${deleteTarget.id}`, {
+                method: 'DELETE',
+                credentials: 'include',
+                headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : {},
+            });
+            if (res.ok) {
+                await mutateTemplates();
+                setNotice('Template deleted.');
+                setDeleteTarget(null);
+                return;
+            }
+
+            setError('Failed to delete template.');
+            setDeleteTarget(null);
+        } catch {
+            setError('Network error. Please check your connection and retry.');
+            setDeleteTarget(null);
         }
-
-        setError('Failed to delete template.');
     }
 
     function openEditor(template: Template) {
@@ -144,45 +162,88 @@ export default function TemplatesPage() {
 
         if (!validateTemplateVariables(editContent)) return;
 
-        const res = await fetch(`/v1/templates/${editTemplate.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: editContent }),
-        });
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch(`/v1/templates/${editTemplate.id}`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ content: editContent }),
+            });
 
-        if (!res.ok) {
-            setError('Failed to save template.');
-            return;
+            if (!res.ok) {
+                setError('Failed to save template.');
+                return;
+            }
+
+            await mutateTemplates();
+            setEditTemplate(null);
+            setNotice('Template saved after variable validation.');
+        } catch {
+            setError('Network error. Please check your connection and retry.');
         }
-
-        setTemplates(prev => prev.map((item) => {
-            if (item.id !== editTemplate.id) return item;
-            return {
-                ...item,
-                content: editContent,
-                version: (item.version ?? 1) + 1,
-                updatedAt: new Date().toISOString(),
-                versions: [
-                    { version: (item.version ?? 1) + 1, updatedAt: new Date().toISOString(), updatedBy: 'Current User' },
-                    ...(item.versions ?? []),
-                ],
-            };
-        }));
-
-        setEditTemplate(null);
-        setNotice('Template saved after variable validation.');
     }
 
-    function rollbackTemplate(templateId: string, version: number) {
-        setTemplates(prev => prev.map((item) => {
-            if (item.id !== templateId) return item;
-            return {
-                ...item,
-                version,
-                updatedAt: new Date().toISOString(),
-            };
-        }));
-        setNotice(`Rolled back template to v${version}.`);
+    async function rollbackTemplate(templateId: string, version: number) {
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch(`/v1/templates/${templateId}/rollback`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ version }),
+            });
+            if (res.ok) {
+                await mutateTemplates();
+                setNotice(`Rolled back template to v${version}.`);
+            } else {
+                setError('Failed to rollback template.');
+            }
+        } catch {
+            setError('Network error. Please check your connection and retry.');
+        }
+    }
+
+    async function createTemplate() {
+        if (!createName.trim()) {
+            setError('Template name is required.');
+            return;
+        }
+        setNotice('');
+        setError('');
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/v1/templates', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({
+                    name: createName.trim(),
+                    subject: createSubject.trim() || 'Untitled',
+                    content: 'Hello {{first_name}},\n\nYour update is ready.\n\nManage preferences: {{unsubscribe_url}}',
+                }),
+            });
+            if (!res.ok) {
+                setError('Failed to create template. Please try again.');
+                return;
+            }
+            await mutateTemplates();
+            setNotice(`Template "${createName.trim()}" created.`);
+            setShowCreateDialog(false);
+            setCreateName('');
+            setCreateSubject('');
+        } catch {
+            setError('Failed to create template. Please try again.');
+        }
     }
 
     return (
@@ -192,7 +253,7 @@ export default function TemplatesPage() {
                 description="Design and manage your email templates."
                 breadcrumbs={[{ label: 'Templates' }]}
                 actions={
-                    <Button><Plus className="mr-2 h-4 w-4" />New Template</Button>
+                    <Button onClick={() => setShowCreateDialog(true)}><Plus className="mr-2 h-4 w-4" />New Template</Button>
                 }
             />
 
@@ -201,7 +262,7 @@ export default function TemplatesPage() {
                     <div className="flex items-center gap-4">
                         <div className="relative flex-1">
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                            <Input placeholder="Search templates..." className="pl-9" value={search} onChange={e => setSearch(e.target.value)} />
+                            <Input placeholder="Search templates..." className="pl-9" aria-label="Search templates" value={search} onChange={e => setSearch(e.target.value)} />
                         </div>
                     </div>
                 </CardHeader>
@@ -225,7 +286,7 @@ export default function TemplatesPage() {
                             <Mail className="h-10 w-10 text-muted-foreground mb-4" />
                             <h3 className="font-semibold text-lg">No templates yet</h3>
                             <p className="text-muted-foreground text-sm mt-1 mb-4">Create your first email template to get started.</p>
-                            <Button><Plus className="mr-2 h-4 w-4" />Create Template</Button>
+                            <Button onClick={() => setShowCreateDialog(true)}><Plus className="mr-2 h-4 w-4" />Create Template</Button>
                         </div>
                     ) : (
                         <Table>
@@ -235,7 +296,7 @@ export default function TemplatesPage() {
                                 <TableHead>Updated</TableHead><TableHead />
                             </TableRow></TableHeader>
                             <TableBody>
-                                {filtered.map(t => (
+                                {paginatedTemplates.map(t => (
                                     <TableRow key={t.id}>
                                         <TableCell className="font-medium">{t.name}</TableCell>
                                         <TableCell className="text-muted-foreground">{t.subject || '—'}</TableCell>
@@ -249,7 +310,7 @@ export default function TemplatesPage() {
                                                     <DropdownMenuItem onClick={() => setPreviewTemplate(t)}><Eye className="mr-2 h-4 w-4" />Preview</DropdownMenuItem>
                                                     <DropdownMenuItem onClick={() => openEditor(t)}><Pencil className="mr-2 h-4 w-4" />Edit</DropdownMenuItem>
                                                     <DropdownMenuItem onClick={() => duplicateTemplate(t)}><Copy className="mr-2 h-4 w-4" />Duplicate</DropdownMenuItem>
-                                                    <DropdownMenuItem destructive onClick={() => deleteTemplate(t.id)}><Trash2 className="mr-2 h-4 w-4" />Delete</DropdownMenuItem>
+                                                    <DropdownMenuItem destructive onClick={() => setDeleteTarget(t)}><Trash2 className="mr-2 h-4 w-4" />Delete</DropdownMenuItem>
                                                 </DropdownMenuContent>
                                             </DropdownMenu>
                                         </TableCell>
@@ -260,6 +321,24 @@ export default function TemplatesPage() {
                     )}
                 </CardContent>
             </Card>
+
+            {/* Pagination */}
+            {totalTemplatePages > 1 && (
+                <div className="flex items-center justify-between">
+                    <p className="text-sm text-muted-foreground">
+                        Showing {((templatePage - 1) * templatesPerPage) + 1}–{Math.min(templatePage * templatesPerPage, filtered.length)} of {filtered.length}
+                    </p>
+                    <div className="flex items-center gap-2">
+                        <Button variant="outline" size="sm" disabled={templatePage <= 1} onClick={() => setTemplatePage(p => p - 1)}>
+                            Previous
+                        </Button>
+                        <span className="text-sm text-muted-foreground">Page {templatePage} of {totalTemplatePages}</span>
+                        <Button variant="outline" size="sm" disabled={templatePage >= totalTemplatePages} onClick={() => setTemplatePage(p => p + 1)}>
+                            Next
+                        </Button>
+                    </div>
+                </div>
+            )}
 
             <Dialog open={Boolean(previewTemplate)} onOpenChange={(open) => !open && setPreviewTemplate(null)}>
                 <DialogContent size="lg">
@@ -316,6 +395,47 @@ export default function TemplatesPage() {
                     <DialogFooter>
                         <Button variant="outline" onClick={() => setEditTemplate(null)}>Cancel</Button>
                         <Button onClick={saveTemplateChanges}>Save Template</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Delete Template</DialogTitle>
+                        <DialogDescription>
+                            Delete &ldquo;{deleteTarget?.name}&rdquo; permanently? This action cannot be undone.
+                            If removed by mistake, recreate it from version history or a duplicate.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+                        <Button variant="destructive" onClick={confirmDeleteTemplate}>Delete</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog open={showCreateDialog} onOpenChange={(open) => { if (!open) { setShowCreateDialog(false); setCreateName(''); setCreateSubject(''); } }}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Create New Template</DialogTitle>
+                        <DialogDescription>
+                            Enter a name and subject line for your new email template.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4 py-2">
+                        <div className="space-y-2">
+                            <Label htmlFor="create-name">Template Name</Label>
+                            <Input id="create-name" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="Welcome Email" />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="create-subject">Subject Line</Label>
+                            <Input id="create-subject" value={createSubject} onChange={(e) => setCreateSubject(e.target.value)} placeholder="Welcome to our platform" />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => { setShowCreateDialog(false); setCreateName(''); setCreateSubject(''); }}>Cancel</Button>
+                        <Button onClick={createTemplate}>Create Template</Button>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>

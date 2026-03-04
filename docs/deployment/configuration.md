@@ -119,17 +119,18 @@ ENCRYPTION_KEY="base64-encoded-32-byte-key"
 
 ### Email Delivery Transport
 
-ApexMail supports two delivery transports: **AWS SES** (default) and **self-hosted SMTP** (opt-in). The transport is selected via the `EMAIL_TRANSPORT_TYPE` environment variable.
+ApexMail uses a **hybrid per-message routing** architecture. Both AWS SES (shared pool) and self-hosted SMTP (dedicated IPs via Hetzner) are always available — the `TransportRouter` decides per-message which path to use based on tenant dedicated IP ownership.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `EMAIL_TRANSPORT_TYPE` | | `ses` | Transport backend: `ses` (AWS SES) or `smtp` (self-hosted) |
 | `DEFAULT_FROM_EMAIL` | | - | Default sender address |
 | `DEFAULT_FROM_NAME` | | - | Default sender name |
 
-#### AWS SES Configuration (default)
+> **Note:** There is no `EMAIL_TRANSPORT_TYPE` toggle for routing. Routing is automatic based on whether the tenant has dedicated IPs.
 
-When `EMAIL_TRANSPORT_TYPE=ses` (or omitted), emails are delivered via the AWS SES v2 API.
+#### AWS SES Configuration (Shared Pool)
+
+SES is used for tenants without dedicated IPs (the default path).
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -139,7 +140,6 @@ When `EMAIL_TRANSPORT_TYPE=ses` (or omitted), emails are delivered via the AWS S
 | `SES_CONFIGURATION_SET` | | - | SES configuration set for event tracking |
 
 ```env
-EMAIL_TRANSPORT_TYPE=ses
 AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxx
 AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 AWS_DEFAULT_REGION=eu-west-1
@@ -150,13 +150,32 @@ DEFAULT_FROM_NAME="ApexMail"
 
 SES handles DKIM signing automatically via Easy DKIM (2048-bit RSA). Domain identities are auto-provisioned when tenants verify domains.
 
-#### Self-Hosted SMTP Configuration (opt-in)
+#### Hetzner Cloud Configuration (Dedicated IPs)
 
-When `EMAIL_TRANSPORT_TYPE=smtp`, emails are delivered via direct SMTP relay or direct-to-MX.
+Hetzner is used for tenants with dedicated IPs. The `DedicatedIpProvider` manages floating IPs via the Hetzner Cloud API.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SMTP_HOST` | | `localhost` | SMTP relay host (or use outbound-queue for direct MX) |
+| `HETZNER_API_TOKEN` | ✓ (for dedicated IPs) | - | Hetzner Cloud API token |
+| `HETZNER_DEFAULT_LOCATION` | | `fsn1` | Default datacenter for new IPs |
+| `HETZNER_MTA_SERVER_ID` | | - | Server ID for IP assignment (single-server mode) |
+
+```env
+HETZNER_API_TOKEN=your-hetzner-cloud-api-token
+HETZNER_DEFAULT_LOCATION=fsn1
+HETZNER_MTA_SERVER_ID=12345678
+```
+
+Dedicated IPs are auto-provisioned when tenants upgrade to plans with dedicated IP access. See [Hetzner Tool Contract](../tool-contracts/hetzner.md) for details.
+
+#### Self-Hosted SMTP Configuration (Legacy/Advanced)
+
+For advanced deployments that bypass the hybrid routing and use direct SMTP relay:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `EMAIL_TRANSPORT_TYPE` | | `ses` | Set to `smtp` to force all traffic via SMTP relay |
+| `SMTP_HOST` | | `localhost` | SMTP relay host |
 | `SMTP_PORT` | | `587` | SMTP relay port |
 | `SMTP_SECURE` | | `true` | Use TLS |
 | `SMTP_USERNAME` | | - | SMTP auth username |
@@ -164,21 +183,7 @@ When `EMAIL_TRANSPORT_TYPE=smtp`, emails are delivered via direct SMTP relay or 
 | `OUTBOUND_IPS` | | - | Comma-separated outbound IPs for source binding |
 | `MTA_HOSTNAME` | ✓ | - | HELO/EHLO hostname |
 
-```env
-EMAIL_TRANSPORT_TYPE=smtp
-SMTP_HOST=localhost
-SMTP_PORT=25
-MTA_HOSTNAME=mail.example.com
-OUTBOUND_IPS=203.0.113.1,203.0.113.2
-DEFAULT_FROM_EMAIL=noreply@example.com
-DEFAULT_FROM_NAME="ApexMail"
-```
-
-When `OUTBOUND_IPS` is set, the outbound-queue service:
-- Initialises an IP pool with round-robin rotation
-- Source-binds TCP sockets to the selected IP
-- Enforces warmup daily limits per IP
-- Runs background DNSBL monitoring (every 15 minutes)
+> **Note:** This configuration is for operators who want to run a full self-hosted MTA without using the hybrid model. Most deployments should use the hybrid model with Hetzner dedicated IPs.
 
 ### DKIM Configuration
 
@@ -361,29 +366,23 @@ mailbox_size_limit = 0
 header_checks = regexp:/etc/postfix/header_checks
 ```
 
-### IP Warmup Schedule (Self-Hosted SMTP Only)
+### IP Warmup Schedule (Dedicated IPs via Hetzner)
 
-> **Note:** When using SES with dedicated IPs, warmup is handled automatically by AWS. This schedule applies only to self-hosted SMTP with `OUTBOUND_IPS`.
+> **Note:** Dedicated IPs are now provisioned via Hetzner Cloud floating IPs and managed by the `DedicatedIpProvider`. Warmup is handled automatically by the system.
 
-When using new IP addresses for self-hosted delivery, follow this warmup schedule:
+New dedicated IPs follow a 45-day warmup schedule:
 
 | Day | Daily Volume | Notes |
 |-----|--------------|-------|
-| 1-2 | 50 | Test deliverability |
-| 3-4 | 100 | Monitor bounces |
-| 5-7 | 250 | Check reputation |
-| 8-10 | 500 | Increase gradually |
-| 11-14 | 1,000 | Monitor feedback loops |
-| 15-21 | 2,500 | Watch for blocks |
-| 22-30 | 5,000 | Approach normal volume |
-| 31+ | 10,000+ | Full production |
+| 0-1 | 50 | Test deliverability |
+| 2-3 | 100 | Monitor bounces |
+| 4-7 | 250-500 | Check reputation |
+| 8-14 | 1,000-2,500 | Increase gradually |
+| 15-28 | 5,000-10,000 | Watch for blocks |
+| 29-44 | 25,000-50,000 | Approach normal volume |
+| 45+ | Unlimited | Full production |
 
-Configure warmup in environment:
-```env
-IP_WARMUP_ENABLED=true
-IP_WARMUP_DAY=15
-IP_WARMUP_MAX_DAILY=5000
-```
+During warmup, excess traffic overflows to SES shared sending automatically. No manual configuration needed.
 
 ---
 

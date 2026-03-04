@@ -21,6 +21,13 @@ import {
 } from '@/components/ui/dialog';
 import { Alert, AlertTitle, AlertDescription as AlertDesc } from '@/components/ui/alert';
 import { cn } from '@/lib/utils';
+import { useAPI, useAPIMutation, getCsrfToken, globalMutate, APIError } from '@/hooks/use-api';
+import { useUserStore } from '@/stores';
+
+// ---------- Constants ----------
+
+const WARMUP_DAYS = 45;
+const WARMUP_POLL_INTERVAL_MS = 30_000;
 
 // ---------- Types ----------
 
@@ -28,10 +35,11 @@ interface DedicatedIpResponse {
   id: string;
   ipAddress: string;
   ptrRecord: string | null;
-  status: 'pending' | 'warming' | 'active' | 'suspended' | 'retired';
+  status: 'pending' | 'provisioning' | 'warming' | 'active' | 'degraded' | 'cooldown' | 'releasing' | 'suspended' | 'disabled' | 'released' | 'retired';
   warmup: {
     startedAt: string | null;
     completedAt: string | null;
+    estimatedCompletion: string | null;
     progressPercent: number;
     currentDailyLimit: number | null;
   };
@@ -68,12 +76,20 @@ interface ListResponse {
 
 // ---------- Status helpers ----------
 
-const statusConfig: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline'; color: string }> = {
-  pending: { label: 'Pending', variant: 'outline', color: 'text-amber-600' },
-  warming: { label: 'Warming Up', variant: 'secondary', color: 'text-blue-600' },
-  active: { label: 'Active', variant: 'default', color: 'text-emerald-600' },
-  suspended: { label: 'Suspended', variant: 'destructive', color: 'text-red-600' },
-  retired: { label: 'Retired', variant: 'outline', color: 'text-surface-400' },
+const RETIRED_STATUSES = new Set(['retired', 'released']);
+
+const statusConfig: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
+  pending:      { label: 'Pending',      variant: 'outline' },
+  provisioning: { label: 'Provisioning', variant: 'outline' },
+  warming:      { label: 'Warming Up',   variant: 'secondary' },
+  active:       { label: 'Active',       variant: 'default' },
+  degraded:     { label: 'Degraded',     variant: 'destructive' },
+  cooldown:     { label: 'Cooling Down', variant: 'secondary' },
+  releasing:    { label: 'Releasing',    variant: 'outline' },
+  suspended:    { label: 'Suspended',    variant: 'destructive' },
+  disabled:     { label: 'Disabled',     variant: 'destructive' },
+  released:     { label: 'Released',     variant: 'outline' },
+  retired:      { label: 'Released',     variant: 'outline' },
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -84,41 +100,42 @@ function StatusBadge({ status }: { status: string }) {
 // ---------- Component ----------
 
 export default function DedicatedIpsPage() {
-  const [ips, setIps] = React.useState<DedicatedIpResponse[]>([]);
-  const [allocation, setAllocation] = React.useState<AllocationResponse | null>(null);
-  const [loading, setLoading] = React.useState(true);
+  const canAccess = useUserStore((s) => s.canAccess);
   const [error, setError] = React.useState<string | null>(null);
   const [provisioning, setProvisioning] = React.useState(false);
   const [showProvisionDialog, setShowProvisionDialog] = React.useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = React.useState<string | null>(null);
   const [releasing, setReleasing] = React.useState(false);
   const [successMessage, setSuccessMessage] = React.useState<string | null>(null);
+  const [offset, setOffset] = React.useState(0);
 
-  // Fetch IPs
-  const fetchIps = React.useCallback(async () => {
-    try {
-      const res = await fetch('/v1/dedicated-ips');
-      if (!res.ok) {
-        if (res.status === 403) {
-          setError('upgrade');
-          return;
-        }
-        throw new Error('Failed to load dedicated IPs');
-      }
-      const data: ListResponse = await res.json();
-      setIps(data.dedicatedIps);
-      setAllocation(data.allocation);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // Fetch IPs via useAPI (includes credentials + deduping)
+  const { data, isLoading: loading, error: fetchError, mutate: revalidate } = useAPI<ListResponse>(
+    `/v1/dedicated-ips?limit=20&offset=${offset}`,
+  );
 
+  const ips = data?.dedicatedIps ?? [];
+  const allocation = data?.allocation ?? null;
+  const pagination = data?.pagination ?? null;
+
+  // Map 403 to upgrade prompt
   React.useEffect(() => {
-    void fetchIps();
-  }, [fetchIps]);
+    if (fetchError instanceof APIError && fetchError.status === 403) {
+      setError('upgrade');
+    } else if (fetchError) {
+      setError(fetchError.message);
+    }
+  }, [fetchError]);
+
+  // Auto-refresh while any IP is warming
+  const hasWarmingIp = ips.some((ip) => ip.status === 'warming' || ip.status === 'provisioning');
+  React.useEffect(() => {
+    if (!hasWarmingIp) return;
+    const interval = setInterval(() => {
+      void revalidate();
+    }, WARMUP_POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [hasWarmingIp, revalidate]);
 
   // Clear success message after 5s
   React.useEffect(() => {
@@ -127,18 +144,30 @@ export default function DedicatedIpsPage() {
     return () => clearTimeout(t);
   }, [successMessage]);
 
-  // Provision new IP
+  // Provision new IP (POST with CSRF)
   async function handleProvision() {
     setProvisioning(true);
+    setError(null);
     try {
-      const res = await fetch('/v1/dedicated-ips', { method: 'POST' });
+      const csrfToken = await getCsrfToken();
+      if (!csrfToken) throw new Error('Unable to initialize CSRF token');
+      const res = await fetch('/v1/dedicated-ips', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error?.message ?? 'Failed to provision IP');
       }
       setShowProvisionDialog(false);
       setSuccessMessage('Dedicated IP provisioned! Warmup will begin automatically.');
-      await fetchIps();
+      setError(null);
+      void revalidate();
+      void globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/dedicated-ips'));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Provisioning failed');
     } finally {
@@ -146,23 +175,55 @@ export default function DedicatedIpsPage() {
     }
   }
 
-  // Release IP
+  // Release IP (DELETE with CSRF)
   async function handleRelease(id: string) {
     setReleasing(true);
+    setError(null);
     try {
-      const res = await fetch(`/v1/dedicated-ips/${id}`, { method: 'DELETE' });
+      const csrfToken = await getCsrfToken();
+      if (!csrfToken) throw new Error('Unable to initialize CSRF token');
+      const res = await fetch(`/v1/dedicated-ips/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error?.message ?? 'Failed to release IP');
       }
       setShowReleaseDialog(null);
       setSuccessMessage('Dedicated IP released. Billing will be prorated.');
-      await fetchIps();
+      setError(null);
+      void revalidate();
+      void globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/dedicated-ips'));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Release failed');
     } finally {
       setReleasing(false);
     }
+  }
+
+  // RBAC gate — dedicated-ips requires admin
+  if (!canAccess('dedicated-ips')) {
+    return (
+      <div className="space-y-6">
+        <PageHeader
+          title="Dedicated IPs"
+          description="Improve deliverability with your own dedicated sending IPs."
+          breadcrumbs={[{ label: 'Settings', href: '/settings' }, { label: 'Dedicated IPs' }]}
+        />
+        <Card>
+          <CardContent className="py-12 text-center">
+            <p className="text-muted-foreground">
+              You do not have permission to manage dedicated IPs. Contact an admin.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
   }
 
   // Plan upgrade needed
@@ -191,8 +252,8 @@ export default function DedicatedIpsPage() {
     );
   }
 
-  const activeIps = ips.filter(ip => ip.status !== 'retired');
-  const retiredIps = ips.filter(ip => ip.status === 'retired');
+  const activeIps = ips.filter(ip => !RETIRED_STATUSES.has(ip.status));
+  const retiredIps = ips.filter(ip => RETIRED_STATUSES.has(ip.status));
   const includedCount = allocation?.included ?? 0;
   const addOnCount = Math.max(0, (allocation?.active ?? 0) - includedCount);
   const addOnPrice = ((allocation?.addOnPriceMonthly ?? 3000) / 100);
@@ -201,7 +262,7 @@ export default function DedicatedIpsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Dedicated IPs"
-        description="Manage your dedicated sending IP addresses. Each IP goes through a 14-day warmup period."
+        description={`Manage your dedicated sending IP addresses. Each IP goes through a ${WARMUP_DAYS}-day warmup period.`}
         breadcrumbs={[{ label: 'Settings', href: '/settings' }, { label: 'Dedicated IPs' }]}
         actions={
           allocation?.addOnAvailable ? (
@@ -287,7 +348,7 @@ export default function DedicatedIpsPage() {
             <CardTitle>No Dedicated IPs</CardTitle>
             <p className="text-sm text-muted-foreground max-w-md mx-auto">
               Dedicated IPs give you full control over your sending reputation.
-              Each IP goes through an automatic 14-day warmup period to build deliverability.
+              Each IP goes through an automatic {WARMUP_DAYS}-day warmup period to build deliverability.
             </p>
             {allocation?.addOnAvailable && (
               <Button onClick={() => setShowProvisionDialog(true)}>
@@ -327,13 +388,25 @@ export default function DedicatedIpsPage() {
         </div>
       )}
 
+      {/* Pagination */}
+      {pagination && pagination.hasMore && (
+        <div className="flex justify-center pt-2">
+          <Button
+            variant="outline"
+            onClick={() => setOffset((prev) => prev + (pagination.limit ?? 20))}
+          >
+            Load More
+          </Button>
+        </div>
+      )}
+
       {/* Provision Confirmation Dialog */}
       <Dialog open={showProvisionDialog} onOpenChange={setShowProvisionDialog}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add Dedicated IP</DialogTitle>
             <DialogDescription>
-              A new dedicated IP will be provisioned and enter a 14-day automatic warmup period.
+              A new dedicated IP will be provisioned and enter a {WARMUP_DAYS}-day automatic warmup period.
               During warmup, sending limits gradually increase to build reputation.
               {addOnCount >= 0 && includedCount > 0 && (allocation?.active ?? 0) >= includedCount && (
                 <span className="block mt-2 font-medium text-foreground">
@@ -400,7 +473,7 @@ function IpCard({
   ip: DedicatedIpResponse;
   onRelease?: () => void;
 }) {
-  const isRetired = ip.status === 'retired';
+  const isRetired = RETIRED_STATUSES.has(ip.status);
   const isWarming = ip.status === 'warming';
   const bounceRate = ip.stats.emailsSentTotal > 0
     ? ((ip.stats.bouncesTotal / ip.stats.emailsSentTotal) * 100).toFixed(2)
@@ -408,6 +481,12 @@ function IpCard({
   const complaintRate = ip.stats.emailsSentTotal > 0
     ? ((ip.stats.complaintsTotal / ip.stats.emailsSentTotal) * 100).toFixed(3)
     : '0.000';
+
+  const estimatedCompletion = ip.warmup.estimatedCompletion
+    ? new Date(ip.warmup.estimatedCompletion).toLocaleDateString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+      })
+    : null;
 
   return (
     <Card className={cn(isRetired && 'opacity-60')}>
@@ -430,23 +509,30 @@ function IpCard({
                   <span className="text-muted-foreground">Warmup Progress</span>
                   <span className="font-medium">{ip.warmup.progressPercent}%</span>
                 </div>
-                <div className="h-2 rounded-full bg-surface-200 overflow-hidden" aria-hidden="true">
-                  <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none">
-                    <rect x="0" y="0" width="100" height="8" fill="rgb(var(--surface-200))" rx="999" ry="999" />
-                    <rect
-                      x="0"
-                      y="0"
-                      width={Math.max(0, Math.min(100, ip.warmup.progressPercent))}
-                      height="8"
-                      fill="rgb(var(--brand-500))"
-                      rx="999"
-                      ry="999"
-                    />
-                  </svg>
+                <div
+                  className="h-2 rounded-full bg-surface-200 overflow-hidden"
+                  role="progressbar"
+                  aria-valuenow={ip.warmup.progressPercent}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label="Warmup progress"
+                >
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${Math.max(0, Math.min(100, ip.warmup.progressPercent))}%`,
+                      backgroundColor: 'rgb(var(--brand-500))',
+                    }}
+                  />
                 </div>
                 {ip.warmup.currentDailyLimit && (
                   <div className="text-xs text-muted-foreground">
                     Current daily limit: {ip.warmup.currentDailyLimit.toLocaleString()} emails
+                  </div>
+                )}
+                {estimatedCompletion && (
+                  <div className="text-xs text-muted-foreground">
+                    Estimated completion: {estimatedCompletion}
                   </div>
                 )}
               </div>

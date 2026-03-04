@@ -237,11 +237,11 @@ function SignupPageContent() {
                                     />
                                     <label htmlFor="acceptTerms" className="text-sm text-surface-600">
                                         I agree to the{' '}
-                                        <a href="https://apexmail.ee/terms" target="_blank" rel="noopener" className="text-brand-600 hover:underline">
+                                        <a href="https://apexmail.ee/terms" target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline">
                                             Terms of Service
                                         </a>{' '}
                                         and{' '}
-                                        <a href="https://apexmail.ee/privacy" target="_blank" rel="noopener" className="text-brand-600 hover:underline">
+                                        <a href="https://apexmail.ee/privacy" target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline">
                                             Privacy Policy
                                         </a>
                                     </label>
@@ -251,8 +251,9 @@ function SignupPageContent() {
                                 )}
 
                                 <MCaptchaWidget
-                                    siteKey={process.env.NEXT_PUBLIC_MCAPTCHA_SITE_KEY}
-                                    onVerify={setMcaptchaToken}
+                                    token={mcaptchaToken ?? ''}
+                                    onTokenChange={(t) => setMcaptchaToken(t || null)}
+                                    error={mcaptchaError ?? undefined}
                                 />
                                 {mcaptchaError && (
                                     <p className="text-xs text-error-600">{mcaptchaError}</p>

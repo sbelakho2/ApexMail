@@ -1,5 +1,8 @@
 import type { Metadata } from 'next';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
     title: 'Cookie Policy',
     description: 'ApexMail Cookie Policy — how we use cookies and similar technologies.',

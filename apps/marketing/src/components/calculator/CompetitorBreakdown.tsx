@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { CheckCircle, AlertCircle } from '@/components/ui/icons';
 
 interface FeatureComparison {
@@ -118,35 +116,19 @@ const renderValue = (value: string | boolean) => {
 };
 
 export function CompetitorBreakdown() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   return (
-    <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+    <section className="py-20 lg:py-32 relative bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-16">
-          <motion.h2
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight"
-          >
+          <h2 className="animate-in text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight">
             Feature-by-Feature Comparison
           </motion.h2>
-          <motion.p
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.1 }}
-            className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed"
-          >
+          <p className="animate-in delay-100 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">
             It's not just about price. See how ApexMail compares on features that matter.
-          </motion.p>
+          </p>
         </div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.2 }}
-          className="bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden"
-        >
+        <div className="animate-in delay-200 bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full table-fixed">
               <thead>
@@ -173,15 +155,10 @@ export function CompetitorBreakdown() {
               </tbody>
             </table>
           </div>
-        </motion.div>
+        </div>
 
         {/* Legend */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={inView ? { opacity: 1 } : {}}
-          transition={{ delay: 0.4 }}
-          className="flex flex-wrap justify-center gap-8 mt-8"
-        >
+        <div className="animate-in delay-400 flex flex-wrap justify-center gap-8 mt-8">
           <div className="flex items-center gap-2 text-xs font-medium text-surface-500">
             <CheckCircle className="w-4 h-4 text-emerald-600" strokeWidth={2} />
             <span>Included</span>
@@ -194,7 +171,7 @@ export function CompetitorBreakdown() {
             <AlertCircle className="w-4 h-4 text-surface-400" />
             <span>Limited or Paid add-on</span>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

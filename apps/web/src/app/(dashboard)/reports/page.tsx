@@ -60,19 +60,22 @@ function ReportsPageContent() {
         }
     }, []);
 
-    const since = React.useMemo(() => new Date(Date.now() - windowDays * 86_400_000).toISOString(), [windowDays]);
-    const until = React.useMemo(() => new Date().toISOString(), [windowDays]);
+    const [refreshKey, setRefreshKey] = React.useState(0);
+    React.useEffect(() => {
+        const id = setInterval(() => setRefreshKey(k => k + 1), 60_000);
+        return () => clearInterval(id);
+    }, []);
+
+    const since = React.useMemo(() => new Date(Date.now() - windowDays * 86_400_000).toISOString(), [windowDays, refreshKey]);
+    const until = React.useMemo(() => new Date().toISOString(), [windowDays, refreshKey]);
 
     const dashboardQuery = useAPI<DashboardAnalyticsResponse>(`/v1/analytics/dashboard?since=${since}&until=${until}`, {
-        refreshInterval: 60_000,
         keepPreviousData: true,
     });
     const volumeQuery = useAPI<VolumeAnalyticsResponse>(`/v1/analytics/volume?since=${since}&until=${until}&granularity=day`, {
-        refreshInterval: 60_000,
         keepPreviousData: true,
     });
     const engagementQuery = useAPI<EngagementAnalyticsResponse>(`/v1/analytics/engagement?since=${since}&until=${until}&granularity=day`, {
-        refreshInterval: 60_000,
         keepPreviousData: true,
     });
 
@@ -91,16 +94,24 @@ function ReportsPageContent() {
         setIsExporting(true);
         setReportJobStatus('running');
 
+        const sanitizeCell = (val: string) => {
+            // Prevent CSV formula injection
+            if (/^[=+\-@\t\r]/.test(val)) val = "'" + val;
+            // Quote if contains comma, quote, or newline
+            if (/[,"\n\r]/.test(val)) return '"' + val.replace(/"/g, '""') + '"';
+            return val;
+        };
+
         try {
             const rows = [['Date', 'Sent', 'Delivered', 'Opens', 'Clicks']];
             const entries = volume.slice(0, Math.max(volume.length, engagement.length));
             entries.forEach((point, index) => {
                 rows.push([
-                    String(point?.date ?? engagement[index]?.date ?? ''),
-                    String(point?.sent ?? 0),
-                    String(point?.delivered ?? 0),
-                    String(engagement[index]?.opens ?? 0),
-                    String(engagement[index]?.clicks ?? 0),
+                    sanitizeCell(String(point?.date ?? engagement[index]?.date ?? '')),
+                    sanitizeCell(String(point?.sent ?? 0)),
+                    sanitizeCell(String(point?.delivered ?? 0)),
+                    sanitizeCell(String(engagement[index]?.opens ?? 0)),
+                    sanitizeCell(String(engagement[index]?.clicks ?? 0)),
                 ]);
             });
 
@@ -342,7 +353,7 @@ function ReportsPageContent() {
                             description="Send your first campaign or setup an automation to see detailed delivery and engagement reports."
                             action={{
                                 label: 'Go to Campaigns',
-                                onClick: () => window.location.href = '/campaigns'
+                                onClick: () => router.push('/campaigns')
                             }}
                         />
                     </CardContent>

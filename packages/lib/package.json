@@ -14,7 +14,8 @@
     "./cache": "./dist/cache/index.js",
     "./queue": "./dist/queue/index.js",
     "./time": "./dist/time/index.js",
-    "./id": "./dist/id/index.js"
+    "./id": "./dist/id/index.js",
+    "./bot-detection": "./dist/bot-detection/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -35,7 +36,9 @@
     "pg": "^8.11.0",
     "pino": "^8.17.0",
     "uuid": "^9.0.0",
-    "@apexmail/crypto-native": "workspace:*"
+    "@apexmail/crypto-native": "workspace:*",
+    "@apexmail/validator-native": "workspace:*",
+    "@apexmail/bot-detector-native": "workspace:*"
   },
   "devDependencies": {
     "pino-pretty": "^10.3.0",

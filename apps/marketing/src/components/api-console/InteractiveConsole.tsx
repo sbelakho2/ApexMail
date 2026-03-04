@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { useState } from 'react';
 import { Send, Clock, CheckCircle, Copy, Play } from '@/components/ui/icons';
 import { cn, formatTime, getLocalTimeZone } from '@/lib/utils';
@@ -32,7 +30,6 @@ interface WebhookEvent {
 }
 
 export function InteractiveConsole() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
   const [activeTab, setActiveTab] = useState<TabType>('request');
   const [isLoading, setIsLoading] = useState(false);
   const [response, setResponse] = useState<Record<string, unknown> | null>(null);
@@ -107,7 +104,7 @@ export function InteractiveConsole() {
   };
 
   return (
-    <section ref={ref} className="py-12 lg:py-20 relative bg-white">
+    <section className="py-12 lg:py-20 relative bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section head with cross-link to real product */}
         <div className="flex items-center justify-between mb-6">
@@ -119,11 +116,7 @@ export function InteractiveConsole() {
             </a>
           </p>
         </div>
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden"
-        >
+        <div className="animate-in bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden">
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 bg-white border-b border-surface-200">
             <div className="flex items-center gap-2">
@@ -282,12 +275,7 @@ export function InteractiveConsole() {
                   ) : (
                     <div className="space-y-3">
                       {webhooks.map((webhook) => (
-                        <motion.div
-                          key={webhook.id}
-                          initial={{ opacity: 0, x: -20 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          className="bg-surface-50 border border-surface-100 rounded-lg p-4"
-                        >
+                        <div key={webhook.id} className="animate-in bg-surface-50 border border-surface-100 rounded-lg p-4">
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-primary-600 font-mono text-xs font-semibold">{webhook.type}</span>
                             <span className="text-xs font-medium text-surface-600 tabular-nums">
@@ -297,7 +285,7 @@ export function InteractiveConsole() {
                           <pre className="text-xs text-surface-500 font-mono bg-white p-2 rounded border border-surface-200 overflow-auto">
                             {JSON.stringify(webhook.data, null, 2)}
                           </pre>
-                        </motion.div>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -327,7 +315,7 @@ export function InteractiveConsole() {
               </div>
             </div>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

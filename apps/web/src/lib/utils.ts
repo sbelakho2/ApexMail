@@ -40,6 +40,23 @@ export function formatRelativeTime(date: Date | string): string {
     const target = new Date(date);
     const diffInSeconds = Math.floor((now.getTime() - target.getTime()) / 1000);
 
+    // Handle future dates
+    if (diffInSeconds < 0) {
+        const absDiff = Math.abs(diffInSeconds);
+        if (absDiff < 60) return 'in a moment';
+        const mins = Math.floor(absDiff / 60);
+        if (mins < 60) return `in ${mins}m`;
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return `in ${hrs}h`;
+        const days = Math.floor(hrs / 24);
+        if (days < 7) return `in ${days}d`;
+        const weeks = Math.floor(days / 7);
+        if (weeks < 4) return `in ${weeks}w`;
+        const months = Math.floor(days / 30);
+        if (months < 12) return `in ${months}mo`;
+        return `in ${Math.floor(days / 365)}y`;
+    }
+
     if (diffInSeconds < 60) {
         return 'just now';
     }
@@ -288,27 +305,22 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 /**
  * Download data as file
  */
-let downloadAnchor: HTMLAnchorElement | null = null;
-
 export function downloadFile(data: string | Blob, filename: string, type = 'text/plain'): void {
     const blob = data instanceof Blob ? data : new Blob([data], { type });
     const url = URL.createObjectURL(blob);
 
-    if (!downloadAnchor) {
-        downloadAnchor = document.createElement('a');
-        downloadAnchor.style.display = 'none';
-        document.body.appendChild(downloadAnchor);
-    }
-
-    const link = downloadAnchor;
+    const link = document.createElement('a');
+    link.style.display = 'none';
     link.href = url;
     link.download = filename;
+    document.body.appendChild(link);
     link.click();
 
-    // Ensure object URL stays alive for click handling before cleanup.
+    // Clean up: remove anchor and revoke blob URL after the click event loop.
     setTimeout(() => {
+        document.body.removeChild(link);
         URL.revokeObjectURL(url);
-    }, 0);
+    }, 100);
 }
 
 /**
@@ -371,4 +383,64 @@ export function isMobile(): boolean {
 export function prefersDarkMode(): boolean {
     if (!isBrowser()) return false;
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+/**
+ * Sanitize user-generated text input before sending to the API.
+ * Strips script tags, event handlers, javascript: URIs, and null bytes.
+ * Defense-in-depth: the server should also sanitize, but this prevents
+ * sending obviously malicious payloads from the client.
+ */
+export function sanitizeUserInput(input: string, maxLength = 10_000): string {
+    return input
+        .slice(0, maxLength)
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
+        .replace(/javascript\s*:/gi, '')
+        .replace(/\x00/g, '')
+        .trim();
+}
+
+/**
+ * Extract a user-friendly error message from an unknown caught error.
+ * Consistent error extraction for try/catch blocks across the app.
+ */
+export function getErrorMessage(error: unknown, fallback = 'An unexpected error occurred'): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    if (error && typeof error === 'object') {
+        const obj = error as Record<string, unknown>;
+        if (typeof obj.message === 'string') return obj.message;
+        if (typeof obj.error === 'string') return obj.error;
+        if (obj.error && typeof obj.error === 'object') {
+            const inner = obj.error as Record<string, unknown>;
+            if (typeof inner.message === 'string') return inner.message;
+        }
+    }
+    return fallback;
+}
+
+/**
+ * Report a client-side error to the server error logging endpoint.
+ * Fails silently so it never interrupts user flow.
+ */
+export function reportClientError(error: unknown, context?: string): void {
+    if (!isBrowser()) return;
+    try {
+        const message = getErrorMessage(error);
+        fetch('/v1/client-errors', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message,
+                stack: error instanceof Error ? error.stack : undefined,
+                url: window.location.href,
+                userAgent: navigator.userAgent,
+                componentStack: context,
+                timestamp: new Date().toISOString(),
+            }),
+        }).catch(() => { /* swallow */ });
+    } catch {
+        // Never throw from error reporter
+    }
 }

@@ -1,7 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Shield, Lock, Key, Eye, Server, FileCheck, AlertTriangle, Fingerprint } from '@/components/ui/icons';
 
 const securityFeatures = [
@@ -46,17 +42,11 @@ const complianceLogos = [
 ];
 
 export function SecuritySection() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-20 lg:py-32 relative bg-surface-50">
-      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+ <section className="py-20 lg:py-32 relative bg-surface-50">
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  {/* Header */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="text-center mb-16"
- >
+ <div className="animate-in text-center mb-16">
  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-50 border border-surface-200 text-sm font-medium text-surface-600 mb-6">
           <Shield className="w-4 h-4" />
           Enterprise-Grade Security
@@ -69,18 +59,12 @@ export function SecuritySection() {
  We don&apos;t just check compliance boxes. We built security into the foundation, 
  not as an afterthought.
  </p>
- </motion.div>
+ </div>
 
  {/* Security Features Grid */}
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-16">
           {securityFeatures.map((feature, index) => (
-            <motion.div
-              key={feature.title}
-              initial={{ opacity: 0, y: 20 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: index * 0.1 }}
-              className="p-6 bg-surface-50 rounded-lg border border-surface-200 hover:border-surface-300 transition-colors"
-            >
+            <div key={feature.title} className="animate-in p-6 bg-surface-50 rounded-lg border border-surface-200 hover:border-surface-300 transition-colors">
               <div className="w-10 h-10 rounded-sm bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900 mb-5">
                 <feature.icon className="w-5 h-5" strokeWidth={1.5} />
               </div>
@@ -90,17 +74,12 @@ export function SecuritySection() {
               <p className="text-surface-600 text-sm leading-relaxed">
                 {feature.description}
               </p>
-            </motion.div>
+            </div>
           ))}
         </div>
 
  {/* Compliance Badges */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.6 }}
-          className="p-8 lg:p-10 bg-surface-50 rounded-lg border border-surface-200"
-        >
+        <div className="animate-in delay-500 p-8 lg:p-10 bg-surface-50 rounded-lg border border-surface-200">
           <div className="flex flex-col lg:flex-row items-center justify-between gap-10">
             <div className="text-center lg:text-left max-w-md">
               <h3 className="text-lg font-semibold text-surface-900 mb-2">Compliance Certifications</h3>
@@ -119,15 +98,10 @@ export function SecuritySection() {
               ))}
             </div>
           </div>
-        </motion.div>
+        </div>
 
  {/* Security Promise */}
- <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={inView ? { opacity: 1, y: 0 } : {}}
-      transition={{ delay: 0.8 }}
-      className="mt-12 text-center"
-    >
+ <div className="animate-in delay-500 mt-12 text-center">
       <div className="inline-flex items-center gap-3 px-6 py-4 bg-surface-50 border border-surface-200 rounded-lg">
         <FileCheck className="w-5 h-5 text-brand-500" />
         <div className="text-left">
@@ -135,7 +109,7 @@ export function SecuritySection() {
           <div className="text-[14px] text-surface-600 font-medium">Enterprise customers receive full penetration test results</div>
         </div>
       </div>
-    </motion.div>
+    </div>
  </div>
  </section>
  );

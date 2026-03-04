@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { formatNumber, cn, timeAgo } from '../../lib/utils';
 import { useDialog } from '../../components/ui/confirm-dialog';
+import { PageErrorState, PageLoadingState } from '../../components/ui/async-state';
+import { getCsrfToken } from '../../lib/client-csrf';
 
 /**
  * System Health Dashboard - Infrastructure monitoring
@@ -101,6 +103,7 @@ export default function SystemHealthPage() {
     const [activeTab, setActiveTab] = useState<'overview' | 'queues' | 'workers' | 'mta'>('overview');
     const [autoRefresh, setAutoRefresh] = useState(true);
     const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
 
     const loadData = useCallback(async () => {
         try {
@@ -112,8 +115,9 @@ export default function SystemHealthPage() {
             setMtaNodes(data.mtaNodes);
             setAlerts(data.alerts);
             setLastRefresh(new Date());
+            setLoadError(null);
         } catch (err) {
-            console.error('Failed to load system health:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load system health');
         } finally {
             setLoading(false);
         }
@@ -130,9 +134,21 @@ export default function SystemHealthPage() {
     }, [autoRefresh, loadData]);
 
     function acknowledgeAlert(alertId: string) {
+        const previousAlerts = [...alerts];
         setAlerts(prev => prev.map(a => 
             a.id === alertId ? { ...a, acknowledged: true } : a
         ));
+        getCsrfToken().then(csrfToken => {
+            fetch(`/api/system/alerts/${alertId}/acknowledge`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setAlerts(previousAlerts);
+            });
+        });
     }
 
     async function restartWorker(workerId: string) {
@@ -145,10 +161,14 @@ export default function SystemHealthPage() {
         if (!confirmed) return;
 
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch(`/api/system/workers/${workerId}/restart`, {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({
                     audit: {
                         action: 'system.worker.restart',
@@ -178,11 +198,11 @@ export default function SystemHealthPage() {
     const totalQueueDepth = queues.reduce((acc, q) => acc + q.depth, 0);
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading system health..." />;
+    }
+
+    if (loadError) {
+        return <PageErrorState description={loadError} onRetry={() => { setLoading(true); setLoadError(null); loadData(); }} />;
     }
 
     return (

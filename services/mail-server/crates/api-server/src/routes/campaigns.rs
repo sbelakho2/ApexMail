@@ -18,6 +18,7 @@ pub fn router() -> Router<AppState> {
         .route("/:id", get(get_campaign).delete(delete_campaign))
         .route("/:id/resume", post(resume_campaign))
         .route("/:id/pause", post(pause_campaign))
+        .route("/:id/resend", post(resend_campaign))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -259,6 +260,59 @@ async fn fetch_campaign(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<C
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("campaign not found".into()))
+}
+
+// ─── Resend Handler ────────────────────────────────────────────
+
+async fn resend_campaign(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_scopes(&auth, &["campaigns:write"])?;
+
+    // Verify campaign exists and belongs to tenant, and is in a resendable state
+    let campaign = sqlx::query!(
+        "SELECT id, status FROM campaigns WHERE id = $1 AND tenant_id = $2",
+        id,
+        auth.tenant_id,
+    )
+    .fetch_optional(&*state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("campaign not found".into()))?;
+
+    if campaign.status != "sent" && campaign.status != "partial" {
+        return Err(ApiError::BadRequest(format!(
+            "Campaign status '{}' is not resendable. Must be 'sent' or 'partial'.",
+            campaign.status
+        )));
+    }
+
+    // Create a new send job for failed/unsent recipients
+    let new_id = Uuid::now_v7();
+    sqlx::query!(
+        "INSERT INTO campaign_jobs (id, campaign_id, tenant_id, status, created_at)
+         VALUES ($1, $2, $3, 'queued', NOW())",
+        new_id,
+        id,
+        auth.tenant_id,
+    )
+    .execute(&*state.db)
+    .await?;
+
+    // Update campaign status
+    sqlx::query!(
+        "UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1",
+        id,
+    )
+    .execute(&*state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({
+        "job_id": new_id,
+        "campaign_id": id,
+        "status": "queued",
+    })))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────

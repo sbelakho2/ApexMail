@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { formatNumber, cn } from '../../lib/utils';
+import { PageErrorState, PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * Compliance Admin - Unified compliance dashboard
@@ -51,6 +52,7 @@ interface ComplianceOverview {
 export default function CompliancePage() {
     const [overview, setOverview] = useState<ComplianceOverview | null>(null);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
 
     useEffect(() => {
         loadComplianceOverview();
@@ -62,19 +64,20 @@ export default function CompliancePage() {
             if (!response.ok) throw new Error(`Failed to fetch compliance data: ${response.status}`);
             const data = await response.json();
             setOverview(data);
+            setLoadError(null);
         } catch (err) {
-            console.error('Failed to load compliance overview:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load compliance data');
         } finally {
             setLoading(false);
         }
     }
 
-    if (loading || !overview) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            </div>
-        );
+    if (loading) {
+        return <PageLoadingState label="Loading compliance data..." />;
+    }
+
+    if (loadError || !overview) {
+        return <PageErrorState description={loadError || 'No compliance data available'} onRetry={() => { setLoading(true); setLoadError(null); loadComplianceOverview(); }} />;
     }
 
     const totalTenants = overview.riskSummary.low + overview.riskSummary.medium + overview.riskSummary.high + overview.riskSummary.critical;
@@ -256,7 +259,12 @@ export default function CompliancePage() {
                                         <span>{new Date(alert.timestamp).toLocaleString()}</span>
                                     </div>
                                 </div>
-                                <button aria-label={`Investigate compliance alert: ${alert.message}`} type="button" className="text-sm font-medium text-primary hover:text-primary/80 whitespace-nowrap">
+                                <button
+                                    aria-label={`Investigate compliance alert: ${alert.message}`}
+                                    type="button"
+                                    onClick={() => window.open(`/audit?alertId=${alert.id}&tenantId=${alert.tenantId}`, '_self')}
+                                    className="text-sm font-medium text-primary hover:text-primary/80 whitespace-nowrap"
+                                >
                                     Investigate
                                 </button>
                             </div>

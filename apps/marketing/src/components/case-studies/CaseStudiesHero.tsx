@@ -1,18 +1,10 @@
-'use client';
-
-import { motion } from 'framer-motion';
 import { BookOpen } from '@/components/ui/icons';
 
 export function CaseStudiesHero() {
   return (
     <section className="pt-32 pb-20 bg-white">
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="text-center"
-        >
+        <div className="animate-in text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100 border border-surface-200 text-sm text-surface-700 mb-6 font-medium">
             <BookOpen className="w-4 h-4" />
             Customer Success
@@ -27,7 +19,7 @@ export function CaseStudiesHero() {
             See how engineering teams at startups and enterprises use ApexMail 
             to deliver millions of transactional emails with confidence.
           </p>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

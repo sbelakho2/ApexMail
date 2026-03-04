@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { useRouter } from 'next/navigation';
 import { Bot, Lightbulb, Clock, Target, TrendingUp, Sparkles, ArrowRight } from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -9,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
+import { useAPI } from '@/hooks/use-api';
 
 interface Insight {
     id: string;
@@ -19,78 +21,82 @@ interface Insight {
     confidence: number;
 }
 
+interface DashboardData {
+    dashboard?: {
+        engagement?: {
+            rates: { open: string; click: string; bounce: string };
+        };
+    };
+}
+
+interface AIData {
+    insights?: {
+        scores?: { subjectLines: number; sendTiming: number; targeting: number; deliverability: number };
+        recommendations?: string[];
+    };
+}
+
 const insightIcons = { subject_line: Lightbulb, send_time: Clock, audience: Target, deliverability: TrendingUp };
 const impactColors = { high: 'bg-success/10 text-success border-success/20', medium: 'bg-warning/10 text-warning border-warning/20', low: 'bg-muted text-muted-foreground border-border' };
 
 export default function AIInsightsPage() {
-    const [insights, setInsights] = React.useState<Insight[]>([]);
-    const [loading, setLoading] = React.useState(true);
-    const [aiScores, setAiScores] = React.useState<{ subjectLines: number; sendTiming: number; targeting: number; deliverability: number }>({ subjectLines: 0, sendTiming: 0, targeting: 0, deliverability: 0 });
-    const [aiRecommendations, setAiRecommendations] = React.useState<string[]>([]);
+    const router = useRouter();
+    const { data: dashboardJson, isLoading: dashLoading, mutate: mutateDash } = useAPI<DashboardData>('/v1/analytics/dashboard');
+    const { data: aiJson, isLoading: aiLoading, mutate: mutateAi } = useAPI<AIData>('/v1/analytics/ai/insights');
+    const loading = dashLoading || aiLoading;
 
-    const refreshInsights = React.useCallback(() => {
-        setLoading(true);
+    const aiScores = aiJson?.insights?.scores ?? { subjectLines: 0, sendTiming: 0, targeting: 0, deliverability: 0 };
 
-        // Fetch both dashboard stats and AI insight scores in parallel
-        Promise.all([
-            fetch('/v1/analytics/dashboard').then(r => r.ok ? r.json() : null).catch(() => null),
-            fetch('/v1/analytics/ai/insights').then(r => r.ok ? r.json() : null).catch(() => null),
-        ]).then(([dashboardJson, aiJson]) => {
-            // ── AI Scores ──
-            if (aiJson?.insights?.scores) {
-                setAiScores(aiJson.insights.scores);
-            }
-            if (aiJson?.insights?.recommendations) {
-                setAiRecommendations(aiJson.insights.recommendations);
-            }
+    const insights = React.useMemo(() => {
+        const generated: Insight[] = [];
+        const d = dashboardJson?.dashboard;
 
-            // ── Insights from dashboard data ──
-            const d = dashboardJson?.dashboard;
-            const generated: Insight[] = [];
+        if (d?.engagement) {
+            const openRate = parseFloat(d.engagement.rates.open);
+            const clickRate = parseFloat(d.engagement.rates.click);
+            const bounceRate = parseFloat(d.engagement.rates.bounce);
 
-            if (d?.engagement) {
-                const openRate = parseFloat(d.engagement.rates.open);
-                const clickRate = parseFloat(d.engagement.rates.click);
-                const bounceRate = parseFloat(d.engagement.rates.bounce);
+            if (openRate < 20) generated.push({ id: '1', type: 'subject_line', title: 'Improve subject lines', description: `Your open rate is ${openRate}%. Try A/B testing subject lines with personalization, emojis, or urgency to boost opens above 20%.`, impact: 'high', confidence: 85 });
+            if (clickRate < 2) generated.push({ id: '2', type: 'audience', title: 'Refine audience targeting', description: `Your click rate is ${clickRate}%. Consider segmenting your audience by engagement level and sending more relevant content to active subscribers.`, impact: 'high', confidence: 78 });
+            if (bounceRate > 2) generated.push({ id: '3', type: 'deliverability', title: 'Clean your email list', description: `Your bounce rate is ${bounceRate}%. Remove invalid addresses and implement double opt-in to improve deliverability.`, impact: 'high', confidence: 92 });
+            generated.push({ id: '4', type: 'send_time', title: 'Optimize send times', description: 'Use Send Time Optimizer to schedule emails at each recipient\'s peak engagement time.', impact: 'medium', confidence: 72 });
+        }
 
-                if (openRate < 20) generated.push({ id: '1', type: 'subject_line', title: 'Improve subject lines', description: `Your open rate is ${openRate}%. Try A/B testing subject lines with personalization, emojis, or urgency to boost opens above 20%.`, impact: 'high', confidence: 85 });
-                if (clickRate < 2) generated.push({ id: '2', type: 'audience', title: 'Refine audience targeting', description: `Your click rate is ${clickRate}%. Consider segmenting your audience by engagement level and sending more relevant content to active subscribers.`, impact: 'high', confidence: 78 });
-                if (bounceRate > 2) generated.push({ id: '3', type: 'deliverability', title: 'Clean your email list', description: `Your bounce rate is ${bounceRate}%. Remove invalid addresses and implement double opt-in to improve deliverability.`, impact: 'high', confidence: 92 });
-                generated.push({ id: '4', type: 'send_time', title: 'Optimize send times', description: 'Use Send Time Optimizer to schedule emails at each recipient\'s peak engagement time.', impact: 'medium', confidence: 72 });
-            }
+        // Merge AI-generated recommendations as insights
+        const recs = aiJson?.insights?.recommendations;
+        if (recs) {
+            recs.forEach((rec: string, i: number) => {
+                const existing = generated.find(g => rec.toLowerCase().includes(g.type));
+                if (!existing) {
+                    generated.push({
+                        id: `ai-${i}`,
+                        type: rec.toLowerCase().includes('subject') ? 'subject_line'
+                            : rec.toLowerCase().includes('send') ? 'send_time'
+                            : rec.toLowerCase().includes('churn') || rec.toLowerCase().includes('segment') ? 'audience'
+                            : 'deliverability',
+                        title: rec.split('.')[0] || rec,
+                        description: rec,
+                        impact: 'medium',
+                        confidence: 75,
+                    });
+                }
+            });
+        }
 
-            // Merge AI-generated recommendations as insights
-            if (aiJson?.insights?.recommendations) {
-                (aiJson.insights.recommendations as string[]).forEach((rec: string, i: number) => {
-                    const existing = generated.find(g => rec.toLowerCase().includes(g.type));
-                    if (!existing) {
-                        generated.push({
-                            id: `ai-${i}`,
-                            type: rec.toLowerCase().includes('subject') ? 'subject_line'
-                                : rec.toLowerCase().includes('send') ? 'send_time'
-                                : rec.toLowerCase().includes('churn') || rec.toLowerCase().includes('segment') ? 'audience'
-                                : 'deliverability',
-                            title: rec.split('.')[0] || rec,
-                            description: rec,
-                            impact: 'medium',
-                            confidence: 75,
-                        });
-                    }
-                });
-            }
+        if (generated.length === 0) {
+            generated.push(
+                { id: '1', type: 'subject_line', title: 'Start sending campaigns', description: 'Send your first campaign to get AI-powered insights on subject lines, timing, and audience targeting.', impact: 'medium', confidence: 100 },
+                { id: '2', type: 'send_time', title: 'Optimal send time analysis', description: 'Once you have sending data, AI will analyze engagement patterns to recommend the best times to reach your audience.', impact: 'medium', confidence: 100 },
+            );
+        }
 
-            if (generated.length === 0) {
-                generated.push(
-                    { id: '1', type: 'subject_line', title: 'Start sending campaigns', description: 'Send your first campaign to get AI-powered insights on subject lines, timing, and audience targeting.', impact: 'medium', confidence: 100 },
-                    { id: '2', type: 'send_time', title: 'Optimal send time analysis', description: 'Once you have sending data, AI will analyze engagement patterns to recommend the best times to reach your audience.', impact: 'medium', confidence: 100 },
-                );
-            }
+        return generated;
+    }, [dashboardJson, aiJson]);
 
-            setInsights(generated);
-        }).finally(() => setLoading(false));
-    }, []);
-
-    React.useEffect(() => { refreshInsights(); }, [refreshInsights]);
+    function refreshInsights() {
+        void mutateDash();
+        void mutateAi();
+    }
 
     return (
         <div className="flex flex-col gap-6">
@@ -151,7 +157,10 @@ export default function AIInsightsPage() {
                                         <p className="text-sm text-muted-foreground">{insight.description}</p>
                                         <div className="flex items-center gap-4 mt-2">
                                             <span className="text-sm text-muted-foreground">{insight.confidence}% confidence</span>
-                                            <Button variant="ghost" size="sm" className="min-h-[44px] text-sm">Apply <ArrowRight className="ml-1 h-4 w-4" /></Button>
+                                            <Button variant="ghost" size="sm" className="min-h-[44px] text-sm" onClick={() => {
+                                                const routes: Record<string, string> = { subject_line: '/campaigns/new', send_time: '/campaigns/new', audience: '/contacts', deliverability: '/domains' };
+                                                router.push(routes[insight.type] || '/campaigns');
+                                            }}>Apply <ArrowRight className="ml-1 h-4 w-4" /></Button>
                                         </div>
                                     </div>
                                 </div>

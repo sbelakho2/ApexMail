@@ -4,6 +4,8 @@ import { useEffect } from 'react';
 import {
     Key,
     Save,
+    CreditCard,
+    Webhook,
 } from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -32,6 +34,7 @@ import {
 } from '@/components/ui/dialog';
 import { cn, formatDate } from '@/lib/utils';
 import { PlanSelector, PaygUsageDashboard } from '@/components/billing';
+import { useAPI, getCsrfToken } from '@/hooks/use-api';
 import { useSettingsController } from './use-settings-controller';
 import { settingsSections } from './settings-sections';
 
@@ -55,6 +58,7 @@ export default function SettingsPage() {
             newWebhookEvents,
             settingsImportJson,
             revealedApiKey,
+            apiKeyRef,
             toasts,
             activePlanData,
             isDirty,
@@ -64,6 +68,12 @@ export default function SettingsPage() {
             deleteReason,
             deleteLoading,
             deleteError,
+            pendingResetSection,
+            pendingNavSection,
+            passwordForm,
+            passwordLoading,
+            passwordError,
+            notifications,
         },
         refs: {
             avatarInputRef,
@@ -75,6 +85,10 @@ export default function SettingsPage() {
             updateProfile,
             handleSave,
             resetSectionDefaults,
+            confirmResetDefaults,
+            confirmSectionChange,
+            setPendingResetSection,
+            setPendingNavSection,
             addWebhook,
             exportSettingsJson,
             importSettingsJson,
@@ -91,8 +105,44 @@ export default function SettingsPage() {
             setDeleteConfirmation,
             setDeleteReason,
             handleDeleteAccount,
+            setPasswordForm,
+            handlePasswordChange,
+            updateNotification,
+            handleEnable2FA,
+            handleRevokeSession,
+            handleGenerateApiKey,
+            handleRevokeApiKey,
+            handleRemoveWebhook,
+            handleRevokeConnectedApp,
+            pushToast,
         },
     } = useSettingsController();
+
+    // Fetch billing payment method + team member count dynamically
+    const { data: billingData } = useAPI<{ paymentMethod?: { brand: string; last4: string; expMonth: number; expYear: number } }>('/v1/billing/payment-method');
+    const { data: teamData } = useAPI<{ members: unknown[]; limit: number }>('/v1/team/members');
+    const paymentMethod = billingData?.paymentMethod;
+    const teamMemberCount = teamData?.members?.length ?? 0;
+    const teamMemberLimit = teamData?.limit ?? 0;
+
+    const openBillingPortal = async () => {
+        try {
+            const csrf = await getCsrfToken();
+            const res = await fetch('/api/billing', {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': csrf } : {}) },
+                body: JSON.stringify({ action: 'portal' }),
+            });
+            if (!res.ok) throw new Error('Failed to open billing portal');
+            const data = await res.json().catch(() => ({}));
+            if (data.url) {
+                const u = new URL(data.url);
+                if (u.hostname.endsWith('.stripe.com')) window.location.href = data.url;
+            }
+        } catch {
+            pushToast('Failed to open billing portal. Please try again.', 'error');
+        }
+    };
 
     useEffect(() => {
         if (!isDirty) return;
@@ -409,7 +459,7 @@ export default function SettingsPage() {
                                                 Notify when a campaign is sent successfully
                                             </p>
                                         </div>
-                                        <Switch defaultChecked />
+                                        <Switch checked={notifications.campaignSent} onCheckedChange={(v) => updateNotification('campaignSent', v)} />
                                     </div>
                                     <Separator />
                                     <div className="flex items-center justify-between">
@@ -419,7 +469,7 @@ export default function SettingsPage() {
                                                 Daily summary of new subscribers
                                             </p>
                                         </div>
-                                        <Switch defaultChecked />
+                                        <Switch checked={notifications.newSubscribers} onCheckedChange={(v) => updateNotification('newSubscribers', v)} />
                                     </div>
                                     <Separator />
                                     <div className="flex items-center justify-between">
@@ -429,7 +479,7 @@ export default function SettingsPage() {
                                                 Alert when bounce rate exceeds threshold
                                             </p>
                                         </div>
-                                        <Switch defaultChecked />
+                                        <Switch checked={notifications.bounceAlerts} onCheckedChange={(v) => updateNotification('bounceAlerts', v)} />
                                     </div>
                                     <Separator />
                                     <div className="flex items-center justify-between">
@@ -439,7 +489,7 @@ export default function SettingsPage() {
                                                 Receive weekly performance summary
                                             </p>
                                         </div>
-                                        <Switch />
+                                        <Switch checked={notifications.weeklyReport} onCheckedChange={(v) => updateNotification('weeklyReport', v)} />
                                     </div>
                                     <Separator />
                                     <div className="flex items-center justify-between">
@@ -449,7 +499,7 @@ export default function SettingsPage() {
                                                 Product updates and tips
                                             </p>
                                         </div>
-                                        <Switch />
+                                        <Switch checked={notifications.marketingEmails} onCheckedChange={(v) => updateNotification('marketingEmails', v)} />
                                     </div>
                                 </div>
 
@@ -528,21 +578,48 @@ export default function SettingsPage() {
                                 <div className="space-y-4">
                                     <h3 className="font-medium">Change Password</h3>
                                     <div className="grid gap-4 sm:max-w-md">
+                                        {passwordError ? (
+                                            <p className="text-sm text-destructive">{passwordError}</p>
+                                        ) : null}
                                         <div className="grid gap-2">
                                             <Label htmlFor="currentPassword">Current Password</Label>
-                                            <Input id="currentPassword" type="password" />
+                                            <Input
+                                                id="currentPassword"
+                                                type="password"
+                                                autoComplete="current-password"
+                                                value={passwordForm.current}
+                                                onChange={(e) => setPasswordForm(prev => ({ ...prev, current: e.target.value }))}
+                                            />
                                         </div>
                                         <div className="grid gap-2">
                                             <Label htmlFor="newPassword">New Password</Label>
-                                            <Input id="newPassword" type="password" />
+                                            <Input
+                                                id="newPassword"
+                                                type="password"
+                                                autoComplete="new-password"
+                                                value={passwordForm.new}
+                                                onChange={(e) => setPasswordForm(prev => ({ ...prev, new: e.target.value }))}
+                                            />
                                         </div>
                                         <div className="grid gap-2">
                                             <Label htmlFor="confirmPassword">
                                                 Confirm New Password
                                             </Label>
-                                            <Input id="confirmPassword" type="password" />
+                                            <Input
+                                                id="confirmPassword"
+                                                type="password"
+                                                autoComplete="new-password"
+                                                value={passwordForm.confirm}
+                                                onChange={(e) => setPasswordForm(prev => ({ ...prev, confirm: e.target.value }))}
+                                            />
                                         </div>
-                                        <Button className="w-fit">Update Password</Button>
+                                        <Button
+                                            className="w-fit"
+                                            onClick={handlePasswordChange}
+                                            disabled={passwordLoading}
+                                        >
+                                            {passwordLoading ? 'Updating...' : 'Update Password'}
+                                        </Button>
                                     </div>
                                 </div>
 
@@ -558,7 +635,7 @@ export default function SettingsPage() {
                                                 Add an extra layer of security to your account
                                             </p>
                                         </div>
-                                        <Button variant="outline">Enable 2FA</Button>
+                                        <Button variant="outline" onClick={handleEnable2FA}>Enable 2FA</Button>
                                     </div>
                                 </div>
 
@@ -566,30 +643,23 @@ export default function SettingsPage() {
 
                                 <div className="space-y-4">
                                     <h3 className="font-medium">Active Sessions</h3>
+                                    <p className="text-sm text-muted-foreground">
+                                        Sessions are managed through your account security settings. Use &quot;Revoke&quot; to end a session.
+                                    </p>
                                     <div className="space-y-3">
                                         <div className="flex items-center justify-between rounded-lg border p-4">
                                             <div>
-                                                <p className="font-medium">
-                                                    Chrome on macOS
-                                                </p>
+                                                <p className="font-medium">Current Session</p>
                                                 <p className="text-sm text-muted-foreground">
-                                                    San Francisco, CA • Current session
+                                                    This device • Active now
                                                 </p>
                                             </div>
                                             <Badge variant="success">Active</Badge>
                                         </div>
-                                        <div className="flex items-center justify-between rounded-lg border p-4">
-                                            <div>
-                                                <p className="font-medium">Safari on iPhone</p>
-                                                <p className="text-sm text-muted-foreground">
-                                                    San Francisco, CA • Last active 2 hours ago
-                                                </p>
-                                            </div>
-                                            <Button variant="ghost" size="sm">
-                                                Revoke
-                                            </Button>
-                                        </div>
                                     </div>
+                                    <Button variant="ghost" size="sm" className="text-destructive" onClick={() => handleRevokeSession('all-other')}>
+                                        Revoke All Other Sessions
+                                    </Button>
                                 </div>
                             </CardContent>
                         </Card>
@@ -612,7 +682,7 @@ export default function SettingsPage() {
                                             <div>
                                                 <p className="font-medium">Production Key</p>
                                                 <p className="font-mono text-sm text-muted-foreground">
-                                                    {revealedApiKey ? 'am_prod_abcd1234efgh5678ijkl9012mnop3456' : 'am_prod_****************************'}
+                                                    {revealedApiKey ? (apiKeyRef.current || 'am_prod_****************************') : 'am_prod_****************************'}
                                                 </p>
                                             </div>
                                             <div className="flex items-center gap-2">
@@ -623,13 +693,14 @@ export default function SettingsPage() {
                                                     variant="outline"
                                                     size="sm"
                                                     className="text-destructive"
+                                                    onClick={() => handleRevokeApiKey()}
                                                 >
                                                     Revoke
                                                 </Button>
                                             </div>
                                         </div>
                                     </div>
-                                    <Button variant="outline">
+                                    <Button variant="outline" onClick={handleGenerateApiKey}>
                                         <Key className="mr-2 h-4 w-4" />
                                         Generate New Key
                                     </Button>
@@ -653,7 +724,7 @@ export default function SettingsPage() {
                                                             {wh.events.join(', ')} • <Badge variant={wh.status === 'active' ? 'success' : 'secondary'} className="text-xs">{wh.status}</Badge>
                                                         </p>
                                                     </div>
-                                                    <Button variant="ghost" size="sm" className="text-destructive">Remove</Button>
+                                                    <Button variant="ghost" size="sm" className="text-destructive" onClick={() => handleRemoveWebhook(wh.id)}>Remove</Button>
                                                 </div>
                                             ))}
                                         </div>
@@ -690,14 +761,14 @@ export default function SettingsPage() {
                                             <p className="font-medium">Slack Workspace</p>
                                             <p className="text-xs text-muted-foreground">Read alerts, post notifications</p>
                                         </div>
-                                        <Button variant="outline" size="sm">Revoke Access</Button>
+                                        <Button variant="outline" size="sm" onClick={() => handleRevokeConnectedApp('Slack')}>Revoke Access</Button>
                                     </div>
                                     <div className="rounded-lg border p-4 flex items-center justify-between">
                                         <div>
                                             <p className="font-medium">Zapier Integration</p>
                                             <p className="text-xs text-muted-foreground">Webhook relay and event automation</p>
                                         </div>
-                                        <Button variant="outline" size="sm">Manage Permissions</Button>
+                                        <Button variant="outline" size="sm" onClick={() => handleRevokeConnectedApp('Zapier')}>Manage Permissions</Button>
                                     </div>
                                 </div>
                             </CardContent>
@@ -770,28 +841,24 @@ export default function SettingsPage() {
                                                     Emails Sent
                                                 </p>
                                                 <p className="text-xl font-semibold apex-metric-number">
-                                                    32,456 <span className="text-sm text-muted-foreground font-normal">/ {activePlanData?.emailLimit.toLocaleString()}</span>
+                                                    — <span className="text-sm text-muted-foreground font-normal">/ {activePlanData?.emailLimit.toLocaleString()}</span>
                                                 </p>
-                                                <div className="h-1.5 w-full bg-secondary mt-3 rounded-full overflow-hidden">
-                                                    <div className="h-full bg-primary rounded-full w-[65%]" />
-                                                </div>
+                                                <p className="text-xs text-muted-foreground mt-1">Usage data loads from your billing dashboard</p>
                                             </div>
                                             <div>
                                                 <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     API Calls
                                                 </p>
                                                 <p className="text-xl font-semibold apex-metric-number">
-                                                    234k <span className="text-sm text-muted-foreground font-normal">/ 2M</span>
+                                                    — <span className="text-sm text-muted-foreground font-normal">/ —</span>
                                                 </p>
-                                                <div className="h-1.5 w-full bg-secondary mt-3 rounded-full overflow-hidden">
-                                                    <div className="h-full bg-blue-500 rounded-full w-[45%]" />
-                                                </div>
+                                                <p className="text-xs text-muted-foreground mt-1">View detailed usage in Analytics</p>
                                             </div>
                                             <div>
                                                 <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     Team Members
                                                 </p>
-                                                <p className="text-xl font-semibold apex-metric-number">3 <span className="text-sm text-muted-foreground font-normal">/ 10</span></p>
+                                                <p className="text-xl font-semibold apex-metric-number">{teamMemberCount} <span className="text-sm text-muted-foreground font-normal">/ {teamMemberLimit || '∞'}</span></p>
                                             </div>
                                         </div>
                                     )}
@@ -805,13 +872,13 @@ export default function SettingsPage() {
                                                 <CreditCard className="h-4 w-4 text-muted-foreground" />
                                             </div>
                                             <div>
-                                                <p className="font-medium text-sm">Visa ending in 4242</p>
+                                                <p className="font-medium text-sm">{paymentMethod ? `${paymentMethod.brand} ending in ${paymentMethod.last4}` : 'No payment method'}</p>
                                                 <p className="text-xs text-muted-foreground">
-                                                    Expires 12/26
+                                                    {paymentMethod ? `Expires ${String(paymentMethod.expMonth).padStart(2, '0')}/${String(paymentMethod.expYear).slice(-2)}` : 'Add a card in billing portal'}
                                                 </p>
                                             </div>
                                         </div>
-                                        <Button variant="ghost" size="sm" className="min-h-[44px]">
+                                        <Button variant="ghost" size="sm" className="min-h-[44px]" onClick={openBillingPortal}>
                                             Update
                                         </Button>
                                     </div>
@@ -819,26 +886,12 @@ export default function SettingsPage() {
 
                                 <div className="space-y-4">
                                     <h3 className="font-medium">Billing History</h3>
-                                    <div className="space-y-2">
-                                        {[
-                                            { date: 'Dec 15, 2024', amount: '$65.00' },
-                                            { date: 'Nov 15, 2024', amount: '$65.00' },
-                                            { date: 'Oct 15, 2024', amount: '$65.00' },
-                                        ].map((invoice, i) => (
-                                            <div
-                                                key={i}
-                                                className="flex items-center justify-between py-2"
-                                            >
-                                                <p className="text-sm">{invoice.date}</p>
-                                                <div className="flex items-center gap-4">
-                                                    <p className="font-medium apex-metric-number">{invoice.amount}</p>
-                                                    <Button variant="ghost" size="sm">
-                                                        Download
-                                                    </Button>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
+                                    <p className="text-sm text-muted-foreground">
+                                        View and download invoices from your billing portal.
+                                    </p>
+                                    <Button variant="outline" size="sm" onClick={openBillingPortal}>
+                                        View Invoices &amp; History
+                                    </Button>
                                 </div>
                             </CardContent>
                         </Card>
@@ -869,6 +922,7 @@ export default function SettingsPage() {
                             <Input
                                 id="delete-password"
                                 type="password"
+                                autoComplete="current-password"
                                 placeholder="Enter your current password"
                                 value={deletePassword}
                                 onChange={(e) => setDeletePassword(e.target.value)}
@@ -914,6 +968,38 @@ export default function SettingsPage() {
                         >
                             {deleteLoading ? 'Deleting...' : 'Delete My Account'}
                         </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Reset Defaults Confirmation Dialog */}
+            <Dialog open={pendingResetSection !== null} onOpenChange={(open) => { if (!open) setPendingResetSection(null); }}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Reset Settings</DialogTitle>
+                        <DialogDescription>
+                            Reset {pendingResetSection} settings to defaults? This cannot be undone.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setPendingResetSection(null)}>Cancel</Button>
+                        <Button onClick={confirmResetDefaults}>Reset to Defaults</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Unsaved Changes Navigation Dialog */}
+            <Dialog open={pendingNavSection !== null} onOpenChange={(open) => { if (!open) setPendingNavSection(null); }}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Unsaved Changes</DialogTitle>
+                        <DialogDescription>
+                            You have unsaved changes. Leave this section anyway? Your changes will be lost.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setPendingNavSection(null)}>Stay</Button>
+                        <Button variant="destructive" onClick={confirmSectionChange}>Leave Without Saving</Button>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>

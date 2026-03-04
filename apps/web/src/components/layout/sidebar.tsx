@@ -21,6 +21,8 @@ import {
  LogOut,
  X,
  Server,
+ Globe,
+ Activity,
  type ApexIconComponent,
 } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
@@ -29,6 +31,7 @@ import { SimpleTooltip } from '@/components/ui/tooltip';
 import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useUIStore } from '@/stores';
+import { getCsrfToken } from '@/hooks/use-api';
 
 interface NavItem {
  title: string;
@@ -69,6 +72,7 @@ const mainNav: NavSection[] = [
  title: 'Analytics',
  items: [
  { title: 'Reports', href: '/reports', icon: BarChart3 },
+ { title: 'Activity', href: '/activity', icon: Activity },
  { title: 'AI Insights', href: '/ai-insights', icon: Bot },
  ],
  },
@@ -76,6 +80,7 @@ const mainNav: NavSection[] = [
  title: 'Settings',
  items: [
  { title: 'Account', href: '/settings', icon: Settings },
+ { title: 'Domains', href: '/domains', icon: Globe },
  { title: 'Dedicated IPs', href: '/settings/dedicated-ips', icon: Server },
  { title: 'Compliance', href: '/compliance', icon: Shield },
  { title: 'Billing', href: '/billing', icon: CreditCard },
@@ -103,16 +108,18 @@ interface SidebarProps extends VariantProps<typeof sidebarVariants> {
   onClose?: () => void;
 }
 
-export function Sidebar({ className, onClose }: SidebarProps) {
+export const Sidebar = React.memo(function Sidebar({ className, onClose }: SidebarProps) {
   const pathname = usePathname();
   const collapsed = useUIStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed);
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', {
+      const csrfToken = await getCsrfToken();
+      await fetch('/v1/auth/logout', {
         method: 'POST',
         credentials: 'include',
+        headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : {},
       });
     } catch {
       // fallback redirect below
@@ -250,6 +257,8 @@ export function Sidebar({ className, onClose }: SidebarProps) {
  </div>
  </aside>
  );
-}
+});
 
 export { mainNav, type NavItem, type NavSection };
+
+Sidebar.displayName = 'Sidebar';

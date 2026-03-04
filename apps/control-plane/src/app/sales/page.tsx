@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { cn, formatDate } from '../../lib/utils';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { PageLoadingState } from '../../components/ui/async-state';
 import {
     COMPETITOR_PROVIDERS,
     COMPETITOR_DETAILS,
@@ -407,20 +409,26 @@ export default function AutomatedSalesPage() {
 
     const clearSelection = useCallback(() => { setSelectedLeads(new Set()); }, []);
 
-    // Improvement #32: Notes update — persists to API
+    // Improvement #32: Notes update — persists to API with rollback
     const updateLeadNotes = useCallback(async (leadId: string, notes: string) => {
+        const previousLead = leads.find(l => l.id === leadId);
         setLeads(prev => prev.map(l => l.id === leadId ? { ...l, notes } : l));
         try {
-            await fetch('/api/sales/leads/update', {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/api/sales/leads/update', {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({ id: leadId, notes }),
             });
+            if (!res.ok) throw new Error('Failed');
         } catch (err) {
             console.error('Failed to persist notes:', err);
+            if (previousLead) {
+                setLeads(prev => prev.map(l => l.id === leadId ? { ...l, notes: previousLead.notes } : l));
+            }
         }
-    }, []);
+    }, [leads]);
 
     // ── Improvement #28: Discovery with progress ──
 
@@ -432,9 +440,10 @@ export default function AutomatedSalesPage() {
 
             setDiscoveryProgress(`Scraping ${enabledSources.length} sources across ${selectedCategories.length} categories...`);
 
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/sales/discovery/run', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({
                     sources: enabledSources,
@@ -469,9 +478,10 @@ export default function AutomatedSalesPage() {
         if (selectedLeads.size === 0) return;
 
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/sales/outreach/start', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({
                     leadIds: Array.from(selectedLeads),
@@ -499,24 +509,31 @@ export default function AutomatedSalesPage() {
 
     // Improvement #31: Bulk status change — persists to API
     async function bulkUpdateStatus(newStatus: LeadStatus) {
+        // Capture previous state for rollback
+        const previousLeads = leads.map(l => ({ ...l }));
+        const selectedIds = new Set(selectedLeads);
+
         // Optimistic update
         setLeads(prev => prev.map(l =>
-            selectedLeads.has(l.id) ? { ...l, status: newStatus } : l
+            selectedIds.has(l.id) ? { ...l, status: newStatus } : l
         ));
-        addToast('lead_discovered', 'Status Updated', `${selectedLeads.size} leads moved to ${LEAD_STATUS_CONFIG[newStatus]?.label}.`);
 
         // Persist to API
         try {
-            const updates = Array.from(selectedLeads).map(id => ({ id, status: newStatus }));
-            await fetch('/api/sales/leads/update', {
+            const updates = Array.from(selectedIds).map(id => ({ id, status: newStatus }));
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/api/sales/leads/update', {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({ updates }),
             });
+            if (!res.ok) throw new Error(`Server returned ${res.status}`);
+            addToast('lead_discovered', 'Status Updated', `${selectedIds.size} leads moved to ${LEAD_STATUS_CONFIG[newStatus]?.label}.`);
         } catch (err) {
             console.error('Failed to persist status change:', err);
-            addToast('error', 'Save Failed', 'Status changed locally but failed to save to server.');
+            setLeads(previousLeads);
+            addToast('error', 'Save Failed', 'Status change failed and has been reverted.');
         }
         clearSelection();
     }
@@ -524,9 +541,10 @@ export default function AutomatedSalesPage() {
     // Improvement #45: Campaign action (pause/resume/archive)
     async function handleCampaignAction(campaignId: string, action: 'pause' | 'resume' | 'archive' | 'cancel') {
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/sales/campaigns', {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({ campaignId, action }),
             });
@@ -549,9 +567,10 @@ export default function AutomatedSalesPage() {
     async function saveSettings() {
         setSettingsSaving(true);
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/sales/settings', {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({
                     scoringWeights,
@@ -579,17 +598,22 @@ export default function AutomatedSalesPage() {
     async function enrichSelectedLeads() {
         if (selectedLeads.size === 0) return;
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/sales/leads/enrich', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({ leadIds: Array.from(selectedLeads) }),
             });
             if (response.ok) {
                 const result = await response.json();
                 addToast('lead_discovered', 'Enrichment Started', `Enriching ${result.enriched ?? selectedLeads.size} leads with contact data...`);
-                // Refresh leads after a brief delay for enrichment to complete
-                setTimeout(() => loadLeads(), 3000);
+                void (async () => {
+                    for (let attempt = 0; attempt < 5; attempt++) {
+                        await new Promise((resolve) => setTimeout(resolve, 2000));
+                        await loadLeads();
+                    }
+                })();
             } else {
                 addToast('error', 'Enrichment Failed', 'Could not start lead enrichment.');
             }
@@ -655,11 +679,7 @@ export default function AutomatedSalesPage() {
     const pipelineForecast = useMemo(() => forecastPipelineRevenue(leads), [leads]);
 
     if (loading && leads.length === 0) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading sales data..." />;
     }
 
     const enabledSourceCount = sources.filter(s => s.enabled).length;
@@ -1486,11 +1506,44 @@ export default function AutomatedSalesPage() {
                         <h2 className="text-lg font-semibold text-destructive mb-2">Danger Zone</h2>
                         <p className="text-sm text-destructive/80 mb-4">These actions cannot be undone. Proceed with caution.</p>
                         <div className="flex gap-3">
-                            <button className="px-4 py-2 text-sm font-medium border border-destructive/30 text-destructive rounded-lg hover:bg-destructive/20 transition-colors">
-                                Reset All Scoring Weights
+                            <button onClick={async () => {
+                                const confirmed = pendingOutreach === '__reset_weights';
+                                if (!confirmed) {
+                                    setPendingOutreach('__reset_weights');
+                                    return;
+                                }
+                                setScoringWeights(DEFAULT_SCORING_WEIGHTS);
+                                setSettingsDirty(true);
+                                setPendingOutreach(null);
+                                try {
+                                    const csrfToken = await getCsrfToken();
+                                    await fetch('/api/sales/settings', {
+                                        method: 'PUT', credentials: 'include',
+                                        headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                        body: JSON.stringify({ scoringWeights: DEFAULT_SCORING_WEIGHTS }),
+                                    });
+                                } catch (err) { console.error('Failed to reset weights:', err); }
+                            }} className="px-4 py-2 text-sm font-medium border border-destructive/30 text-destructive rounded-lg hover:bg-destructive/20 transition-colors">
+                                {pendingOutreach === '__reset_weights' ? 'Click again to confirm' : 'Reset All Scoring Weights'}
                             </button>
-                            <button className="px-4 py-2 text-sm font-medium border border-destructive/30 text-destructive rounded-lg hover:bg-destructive/20 transition-colors">
-                                Clear All Leads
+                            <button onClick={async () => {
+                                const confirmed = pendingOutreach === '__clear_leads';
+                                if (!confirmed) {
+                                    setPendingOutreach('__clear_leads');
+                                    return;
+                                }
+                                setPendingOutreach(null);
+                                try {
+                                    const csrfToken = await getCsrfToken();
+                                    await fetch('/api/sales/leads', {
+                                        method: 'DELETE', credentials: 'include',
+                                        headers: { ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                    });
+                                    setLeads([]);
+                                    setSelectedLeads(new Set());
+                                } catch (err) { console.error('Failed to clear leads:', err); }
+                            }} className="px-4 py-2 text-sm font-medium border border-destructive/30 text-destructive rounded-lg hover:bg-destructive/20 transition-colors">
+                                {pendingOutreach === '__clear_leads' ? 'Click again to confirm' : 'Clear All Leads'}
                             </button>
                         </div>
                     </div>

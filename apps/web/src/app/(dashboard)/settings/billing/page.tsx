@@ -1,11 +1,13 @@
 'use client';
 
-import * as React from 'react';
+import Link from 'next/link';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { PlanSelector } from '@/components/billing/PlanSelector';
+import { useAPI, getCsrfToken } from '@/hooks/use-api';
 
 interface PlanInfo {
     name: string;
@@ -34,25 +36,8 @@ interface BillingInfo {
 }
 
 export default function SettingsBillingPage() {
-    const [billing, setBilling] = React.useState<BillingInfo | null>(null);
-    const [loading, setLoading] = React.useState(true);
-    const [error, setError] = React.useState<string | null>(null);
-
-    React.useEffect(() => {
-        async function fetchBilling() {
-            try {
-                const res = await fetch('/v1/billing');
-                if (!res.ok) throw new Error('Failed to load billing info');
-                const data: BillingInfo = await res.json();
-                setBilling(data);
-            } catch (err) {
-                setError(err instanceof Error ? err.message : 'An error occurred');
-            } finally {
-                setLoading(false);
-            }
-        }
-        void fetchBilling();
-    }, []);
+    const { data: billing, isLoading: loading, error: swrError } = useAPI<BillingInfo>('/api/billing');
+    const error = swrError ? (swrError instanceof Error ? swrError.message : 'An error occurred') : null;
 
     if (loading) {
         return (
@@ -109,7 +94,12 @@ export default function SettingsBillingPage() {
                 title="Billing"
                 description="Review plan details, usage, and payment methods."
                 breadcrumbs={[{ label: 'Settings', href: '/settings' }, { label: 'Billing' }]}
-                actions={<Button variant="outline">Manage Plan</Button>}
+                actions={
+                    <PlanSelector
+                        currentPlan={billing?.plan.name ?? 'free'}
+                        trigger={<Button variant="outline">Manage Plan</Button>}
+                    />
+                }
             />
 
             <div className="grid gap-6 lg:grid-cols-2">
@@ -135,7 +125,9 @@ export default function SettingsBillingPage() {
                             </div>
                             <div className="flex items-center justify-between">
                                 <span>Dedicated IPs</span>
-                                <span className="font-medium">{dedicatedIpLabel}</span>
+                                <Link href="/settings/dedicated-ips" className="font-medium text-brand-600 hover:underline">
+                                    {dedicatedIpLabel}
+                                </Link>
                             </div>
                         </div>
                     </CardContent>
@@ -156,7 +148,19 @@ export default function SettingsBillingPage() {
                                             Expires {String(pm.expMonth).padStart(2, '0')}/{pm.expYear}
                                         </div>
                                     </div>
-                                    <Button variant="outline" size="sm">Update</Button>
+                                    <Button variant="outline" size="sm" onClick={async () => {
+                                        const csrf = await getCsrfToken();
+                                        const res = await fetch('/api/billing', {
+                                            method: 'POST', credentials: 'include',
+                                            headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': csrf } : {}) },
+                                            body: JSON.stringify({ action: 'portal' }),
+                                        });
+                                        const data = await res.json();
+                                        if (data.url) {
+                                            const u = new URL(data.url);
+                                            if (u.hostname.endsWith('.stripe.com')) window.location.href = data.url;
+                                        }
+                                    }}>Update</Button>
                                 </div>
                                 <Separator />
                                 {nextInvoice && (
@@ -169,7 +173,19 @@ export default function SettingsBillingPage() {
                             <div className="text-sm text-muted-foreground">
                                 Add a payment method to start a paid plan.
                                 <div className="mt-2">
-                                    <Button variant="outline" size="sm">Add Payment Method</Button>
+                                    <Button variant="outline" size="sm" onClick={async () => {
+                                        const csrf = await getCsrfToken();
+                                        const res = await fetch('/api/billing', {
+                                            method: 'POST', credentials: 'include',
+                                            headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': csrf } : {}) },
+                                            body: JSON.stringify({ action: 'portal' }),
+                                        });
+                                        const data = await res.json();
+                                        if (data.url) {
+                                            const u = new URL(data.url);
+                                            if (u.hostname.endsWith('.stripe.com')) window.location.href = data.url;
+                                        }
+                                    }}>Add Payment Method</Button>
                                 </div>
                             </div>
                         )}

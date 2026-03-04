@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { cn, timeAgo, getStatusChipClasses } from '../../lib/utils';
 import { getCsrfToken } from '../../lib/client-csrf';
-import { PageLoadingState } from '../../components/ui/async-state';
+import { PageLoadingState, PageErrorState } from '../../components/ui/async-state';
 import { CATEGORY_CONFIG, PRIORITY_CONFIG, STATUS_CONFIG, Ticket, TicketAnalytics, TicketMessage } from './support-types';
 
 export const dynamic = 'force-dynamic';
@@ -25,6 +25,9 @@ const ENV_TEAM_MEMBERS = (process.env.NEXT_PUBLIC_CONTROL_PLANE_TEAM_MEMBERS || 
     .map((member) => member.trim())
     .filter(Boolean);
 
+const ASSISTANT_LABEL = 'Ava from ApexMail Support';
+const ASSISTANT_FACE = '👩‍💼';
+
 function SupportPageContent() {
     const searchParams = useSearchParams();
     const tenantFilter = searchParams.get('tenant');
@@ -41,6 +44,7 @@ function SupportPageContent() {
     const [searchQuery, setSearchQuery] = useState('');
     const [replyContent, setReplyContent] = useState('');
     const [sendingReply, setSendingReply] = useState(false);
+    const [actionError, setActionError] = useState<string | null>(null);
     const [triageShortcut, setTriageShortcut] = useState<'none' | 'urgent_unassigned' | 'sla_breach' | 'my_queue'>('none');
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [teamMembers, setTeamMembers] = useState<string[]>(() => ENV_TEAM_MEMBERS.length > 0 ? ENV_TEAM_MEMBERS : ['Support Queue']);
@@ -84,7 +88,7 @@ function SupportPageContent() {
                 }
             }
         } catch (err) {
-            console.error('Failed to load tickets:', err);
+            setActionError('Failed to load tickets. Please try again.');
         } finally {
             setLoading(false);
         }
@@ -97,7 +101,7 @@ function SupportPageContent() {
             if (!response.ok) throw new Error(`Failed: ${response.status}`);
             setAnalytics(await response.json());
         } catch (err) {
-            console.error('Failed to load analytics:', err);
+            setActionError('Failed to load analytics.');
         } finally {
             setAnalyticsLoading(false);
         }
@@ -125,7 +129,7 @@ function SupportPageContent() {
                 setSelectedTicket(prev => prev ? { ...prev, status: updated.status, updatedAt: updated.updatedAt } : null);
             }
         } catch (err) {
-            console.error('Failed to update status:', err);
+            setActionError('Failed to update ticket status.');
         }
     }
 
@@ -151,7 +155,7 @@ function SupportPageContent() {
                 setSelectedTicket(prev => prev ? { ...prev, assignee: updated.assignee, updatedAt: updated.updatedAt } : null);
             }
         } catch (err) {
-            console.error('Failed to assign:', err);
+            setActionError('Failed to assign ticket.');
         }
     }
 
@@ -177,7 +181,7 @@ function SupportPageContent() {
                 setSelectedTicket(prev => prev ? { ...prev, priority: updated.priority, updatedAt: updated.updatedAt } : null);
             }
         } catch (err) {
-            console.error('Failed to update priority:', err);
+            setActionError('Failed to update priority.');
         }
     }
 
@@ -234,7 +238,7 @@ function SupportPageContent() {
             );
             setReplyContent('');
         } catch (err) {
-            console.error('Failed to send reply:', err);
+            setActionError('Failed to send reply. Your message has been preserved.');
         } finally {
             setSendingReply(false);
         }
@@ -268,6 +272,13 @@ function SupportPageContent() {
 
     return (
         <div className="cp-page">
+            {/* Error Banner */}
+            {actionError && (
+                <div className="mb-4 p-3 rounded-lg bg-destructive/10 border border-destructive/20 flex items-center justify-between">
+                    <p className="text-sm text-destructive">{actionError}</p>
+                    <button onClick={() => setActionError(null)} className="text-destructive hover:text-destructive/80 text-sm font-medium">Dismiss</button>
+                </div>
+            )}
             {/* Header */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
                 <div>
@@ -770,7 +781,7 @@ function SupportPageContent() {
                                                           : message.authorType === 'bot' ? 'text-amber-600'
                                                           : 'text-muted-foreground'
                                                     )}>
-                                                        {message.authorType === 'bot' ? '🤖 ' : ''}{message.author}
+                                                        {message.authorType === 'bot' ? `${ASSISTANT_FACE} ${ASSISTANT_LABEL}` : message.author}
                                                     </span>
                                                     <span className="text-xs text-muted-foreground">{timeAgo(message.createdAt)}</span>
                                                 </div>

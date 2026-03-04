@@ -16,6 +16,7 @@ const CONTROL_PLANE_API_KEY = process.env.CONTROL_PLANE_API_KEY;
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 2;
+const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB — reject oversized proxy payloads
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 502, 503, 504]);
 
 // ─── Core fetch with retry ────────────────────────────────────
@@ -97,7 +98,15 @@ export async function proxyToRust(
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       try {
         const body = await request.text();
-        if (body) init.body = body;
+        if (body) {
+          if (body.length > MAX_BODY_BYTES) {
+            return NextResponse.json(
+              { error: 'Request body too large' },
+              { status: 413 },
+            );
+          }
+          init.body = body;
+        }
       } catch {
         // empty body is fine
       }

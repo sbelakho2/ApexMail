@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Database, Link as LinkIcon, Shield, Hash } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 
@@ -23,18 +21,12 @@ const ledgerCode = `// Every consent event is cryptographically linked
 }`;
 
 export function ConsentLedger() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-24 relative bg-surface-50">
+ <section className="py-20 lg:py-32 relative bg-surface-50">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Visual */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="order-2 lg:order-1"
- >
+ <div className="animate-in order-2 lg:order-1">
  <div className="bg-white rounded-lg border border-surface-200 overflow-hidden shadow-sm">
  {/* Header */}
  <div className="flex items-center justify-between gap-2 px-6 py-4 border-b border-surface-200 bg-surface-50/50">
@@ -67,15 +59,10 @@ export function ConsentLedger() {
  </div>
  </div>
  </div>
- </motion.div>
+ </div>
 
  {/* Right - Copy */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- className="order-1 lg:order-2"
- >
+ <div className="animate-in delay-200 order-1 lg:order-2">
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
           <Database className="w-4 h-4" />
           Consent Ledger
@@ -111,7 +98,7 @@ export function ConsentLedger() {
  Fortune 500 companies for GDPR Article 7 compliance.
  </p>
  </div>
- </motion.div>
+ </div>
  </div>
  </div>
  </section>

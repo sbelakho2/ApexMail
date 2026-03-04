@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { X, Eye, AlertTriangle } from '@/components/ui/icons';
+import { getCsrfToken } from '@/hooks/use-api';
 
 interface ImpersonationInfo {
     operatorName: string;
@@ -26,7 +27,7 @@ export function ImpersonationBanner() {
         // Check for impersonation session
         const checkImpersonation = async () => {
             try {
-                const response = await fetch('/api/auth/session', {
+                const response = await fetch('/v1/auth/session', {
                     cache: 'no-store',
                     credentials: 'include',
                 });
@@ -90,7 +91,12 @@ export function ImpersonationBanner() {
         setEndSessionError(null);
         setIsEndingSession(true);
         try {
-            const response = await fetch('/api/auth/impersonate/end', { method: 'POST' });
+            const csrfToken = await getCsrfToken();
+            const response = await fetch('/v1/auth/impersonate/end', {
+                method: 'POST',
+                credentials: 'include',
+                headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : {},
+            });
             if (!response.ok) {
                 throw new Error('Unable to end session');
             }

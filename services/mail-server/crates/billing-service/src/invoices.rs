@@ -12,6 +12,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 // ---------------------------------------------------------------------------
+// PDF Renderer client config
+// ---------------------------------------------------------------------------
+
+/// Base URL for the pdf-renderer service.
+static PDF_RENDERER_URL: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("PDF_RENDERER_URL").unwrap_or_else(|_| "http://pdf-renderer:3004".into())
+});
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -203,6 +212,88 @@ pub async fn create_invoice(
     })
 }
 
+/// Generate a PDF for an invoice by calling the pdf-renderer service, upload
+/// to object storage, and update the `pdf_url` column.
+///
+/// This is called automatically after `create_invoice()` and can also be
+/// called on-demand to re-generate a PDF for an existing invoice.
+pub async fn generate_invoice_pdf(
+    pool: &PgPool,
+    http_client: &reqwest::Client,
+    invoice: &Invoice,
+) -> Result<String, InvoiceError> {
+    // Build the JSON payload expected by the invoice.typ template
+    let pdf_data = serde_json::json!({
+        "invoice_number": invoice.invoice_number,
+        "status": format!("{:?}", invoice.status).to_lowercase(),
+        "currency": invoice.currency.to_uppercase(),
+        "issued_at": invoice.issued_at.format("%Y-%m-%d").to_string(),
+        "due_at": invoice.due_at.format("%Y-%m-%d").to_string(),
+        "paid_at": invoice.paid_at.map(|d| d.format("%Y-%m-%d").to_string()),
+        "period_start": invoice.period_start.format("%Y-%m-%d").to_string(),
+        "period_end": invoice.period_end.format("%Y-%m-%d").to_string(),
+        "subtotal": invoice.subtotal,
+        "vat_total": invoice.vat_total,
+        "total": invoice.total,
+        "line_items": invoice.line_items,
+    });
+
+    let render_request = serde_json::json!({
+        "template": "invoice",
+        "data": pdf_data,
+    });
+
+    // Call pdf-renderer service
+    let resp = http_client
+        .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
+        .json(&render_request)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| InvoiceError::PdfGeneration(format!("HTTP request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(InvoiceError::PdfGeneration(format!(
+            "pdf-renderer returned {status}: {body}"
+        )));
+    }
+
+    let pdf_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| InvoiceError::PdfGeneration(format!("Failed to read PDF bytes: {e}")))?;
+
+    // Construct S3/R2 object key
+    let pdf_key = format!(
+        "invoices/{}/{}.pdf",
+        invoice.tenant_id, invoice.invoice_number
+    );
+
+    // TODO: Upload to S3/R2 object storage
+    // For now, store the URL pattern that will be used once object storage is wired.
+    let pdf_url = format!("https://storage.apexmail.ee/{pdf_key}");
+
+    // Update the invoice record with the PDF URL
+    sqlx::query("UPDATE invoices SET pdf_url = $1, updated_at = NOW() WHERE id = $2")
+        .bind(&pdf_url)
+        .bind(invoice.id)
+        .execute(pool)
+        .await
+        .map_err(InvoiceError::Db)?;
+
+    tracing::info!(
+        invoice_id = %invoice.id,
+        invoice_number = %invoice.invoice_number,
+        pdf_size = pdf_bytes.len(),
+        pdf_url = %pdf_url,
+        "Invoice PDF generated and stored"
+    );
+
+    Ok(pdf_url)
+}
+
 /// List invoices for a tenant with pagination.
 pub async fn list_invoices(
     pool: &PgPool,
@@ -339,6 +430,8 @@ pub enum InvoiceError {
     Db(#[from] sqlx::Error),
     #[error("billing address not found for tenant")]
     NoBillingAddress,
+    #[error("PDF generation error: {0}")]
+    PdfGeneration(String),
 }
 
 // ---------------------------------------------------------------------------

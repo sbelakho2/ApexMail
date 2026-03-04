@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { formatNumber, formatCurrency, cn } from '../../lib/utils';
+import { PageErrorState, PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * Revenue Metrics - Business financial dashboard
@@ -51,32 +52,35 @@ export default function RevenuePage() {
     const [revenueByPlan, setRevenueByPlan] = useState<RevenueByPlan[]>([]);
     const [loading, setLoading] = useState(true);
     const [period, setPeriod] = useState<'month' | 'quarter' | 'year'>('month');
+    const [loadError, setLoadError] = useState<string | null>(null);
 
     useEffect(() => {
         loadRevenueData();
-    }, []);
+    }, [period]);
 
     async function loadRevenueData() {
+        setLoading(true);
         try {
-            const response = await fetch('/api/revenue', { credentials: 'include' });
+            const response = await fetch(`/api/revenue?period=${period}`, { credentials: 'include' });
             if (!response.ok) throw new Error(`Failed to fetch revenue: ${response.status}`);
             const data = await response.json();
             setStats(data.stats);
             setMonthlyData(data.monthlyData);
             setRevenueByPlan(data.revenueByPlan);
+            setLoadError(null);
         } catch (err) {
-            console.error('Failed to load revenue data:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load revenue data');
         } finally {
             setLoading(false);
         }
     }
 
-    if (loading || !stats) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+    if (loading) {
+        return <PageLoadingState label="Loading revenue data..." />;
+    }
+
+    if (loadError || !stats) {
+        return <PageErrorState description={loadError || 'No revenue data available'} onRetry={loadRevenueData} />;
     }
 
     const maxMrr = Math.max(...monthlyData.map(m => m.mrr));
@@ -261,6 +265,7 @@ export default function RevenuePage() {
             </div>
 
             {/* MRR Breakdown */}
+            {monthlyData.length > 0 && (
             <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="bg-success/5 rounded-xl border border-success/10 p-4">
                     <div className="text-sm text-success mb-1 font-medium">New MRR</div>
@@ -284,6 +289,7 @@ export default function RevenuePage() {
                     <div className="text-xs text-destructive/80 mt-1 font-medium">From cancellations</div>
                 </div>
             </div>
+            )}
         </div>
     );
 }

@@ -7,6 +7,9 @@ import { AuditTrail } from '@/components/compliance/AuditTrail';
 import { ComplianceCTA } from '@/components/compliance/ComplianceCTA';
 import { DemoErrorBoundary } from '@/components/ui/DemoErrorBoundary';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: 'Compliance-as-Code | GDPR, HIPAA, SOC 2',
   description: 'The first email API that keeps you out of court. Native consent ledger, auto-generated DPAs, and instant Right-to-be-Forgotten cascades.',

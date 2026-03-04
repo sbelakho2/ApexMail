@@ -1,7 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
     reactStrictMode: true,
-    transpilePackages: ['@apexmail/lib'],
     
     // Explicitly define that this is the CONTROL PLANE - completely separate from customer console
     env: {
@@ -32,6 +31,15 @@ const nextConfig = {
     // Block any accidental requests to customer API
     async headers() {
         return [
+            {
+                source: '/_next/static/:path*',
+                headers: [
+                    {
+                        key: 'Cache-Control',
+                        value: 'public, max-age=31536000, immutable',
+                    },
+                ],
+            },
             {
                 source: '/:path*',
                 headers: [
@@ -66,6 +74,12 @@ const nextConfig = {
                 ],
             },
         ];
+    },
+    compiler: {
+        removeConsole: process.env.NODE_ENV === 'production' ? { exclude: ['error', 'warn'] } : false,
+    },
+    experimental: {
+        optimizePackageImports: ['@radix-ui/react-icons', 'date-fns'],
     },
 };
 

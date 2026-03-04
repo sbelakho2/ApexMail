@@ -6,8 +6,8 @@
 |-------|-------|
 | **Service** | Amazon Simple Email Service v2 (SES) |
 | **Region** | `eu-west-1` (Ireland) |
-| **Role** | Primary email delivery (default) |
-| **Self-hosted alternative** | `SmtpSender` via outbound-queue (opt-in) |
+| **Role** | Shared-pool email delivery |
+| **Dedicated IPs** | Via Hetzner Cloud (see [hetzner.md](hetzner.md)) |
 | **AWS Account** | Dedicated, minimal — SES and SNS only |
 
 ---
@@ -85,24 +85,16 @@ The SES IAM user has minimal permissions for primary operation:
         "ses:CreateEmailIdentity",
         "ses:DeleteEmailIdentity",
         "ses:GetEmailIdentity",
+        "ses:GetAccount",
         "ses:PutEmailIdentityDkimSigningAttributes"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "DedicatedIPs",
-      "Effect": "Allow",
-      "Action": [
-        "ses:GetDedicatedIps",
-        "ses:PutDedicatedIpInPool",
-        "ses:PutDedicatedIpWarmupAttributes",
-        "ses:GetAccount"
       ],
       "Resource": "*"
     }
   ]
 }
 ```
+
+> **Note:** Dedicated IP permissions (`ses:GetDedicatedIps`, `ses:PutDedicatedIpInPool`, etc.) are no longer needed. Dedicated IPs are provisioned via Hetzner Cloud API.
 
 ### Credential Management
 
@@ -140,26 +132,23 @@ All emails are sent with a `SES_CONFIGURATION_SET` that routes events to SNS top
 
 ---
 
-## 4. Dedicated IPs (SES)
+## 4. Dedicated IPs
 
-SES dedicated IPs are plan-gated and managed automatically:
+> **Dedicated IPs are no longer provisioned via SES.** All dedicated IPs are Hetzner Cloud floating IPs, managed by `DedicatedIpProvider`.
+
+See [hetzner.md](hetzner.md) for dedicated IP provisioning, warmup, and lifecycle management.
+
+### Plan Allocation
 
 | Plan | Dedicated IPs | Cost |
 |------|--------------|------|
-| Free / Starter | 0 (shared SES pool) | — |
-| Pro | Add-on ($30/mo per IP) | $24.95/IP/mo (AWS) + margin |
+| Free / Starter | 0 (SES shared pool) | — |
+| Pro | Add-on ($30/mo per IP) | ~$4/IP/mo (Hetzner) + margin |
 | Growth | 1 included | Included |
 | Scale | 3 included | Included |
 | Enterprise | 10+ included, BYOIP supported | Custom pricing |
 
-### Lifecycle
-
-1. **Provision**: `SesIpProvider::allocate_ip()` picks from `ses_ip_inventory`, assigns to tenant's pool via `PutDedicatedIpInPool`.
-2. **Warmup**: SES warmup is automatic. `SesIpProvider::start_warmup()` calls `PutDedicatedIpWarmupAttributes`.
-3. **Sync**: `SesIpProvider::sync_warmup_progress()` periodically syncs warmup percentage from SES to the local database.
-4. **Release**: `SesIpProvider::release_ip()` moves IP back to default pool and marks records as retired.
-
-Auto-provisioning occurs on plan change via `autoProvisionDedicatedIps()` in `stripe-integration.ts`.
+Auto-provisioning occurs on plan change via `autoProvisionDedicatedIps()` in `stripe-integration.ts`, which calls `POST /v1/dedicated-ips` to create Hetzner floating IPs.
 
 ---
 

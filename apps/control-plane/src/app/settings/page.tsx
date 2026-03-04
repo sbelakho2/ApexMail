@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { formatDate, cn } from '../../lib/utils';
 import { hasCidrOverlap, isValidIpOrCidr } from './network-utils';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { useDialog } from '../../components/ui/confirm-dialog';
 
 /**
  * Platform Settings - Configure the SaaS platform
@@ -33,6 +35,7 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
 ];
 
 export default function SettingsPage() {
+    const dialog = useDialog();
     const [activeSection, setActiveSection] = useState('access');
     const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
     const [isDirty, setIsDirty] = useState(false);
@@ -52,7 +55,7 @@ export default function SettingsPage() {
     const [newIp, setNewIp] = useState('');
 
     // Integrations State
-    const [integrations] = useState([
+    const [integrations, setIntegrations] = useState([
         { id: 'google-calendar', name: 'Google Calendar', status: 'connected', icon: 'GC' },
         { id: 'hubspot', name: 'HubSpot CRM', status: 'not_connected', icon: 'HB' },
         { id: 'stripe', name: 'Stripe Payments', status: 'connected', icon: 'ST' },
@@ -280,9 +283,14 @@ export default function SettingsPage() {
         };
 
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/v1/operator/settings', {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify(payload),
             });
 
@@ -292,7 +300,8 @@ export default function SettingsPage() {
             }
 
             try {
-                localStorage.setItem('control-plane-settings-cache', JSON.stringify(payload));
+                const safeCache = { lastSavedAt: new Date().toISOString() };
+                localStorage.setItem('control-plane-settings-cache', JSON.stringify(safeCache));
             } catch {
                 setSaveError('Saved to backend, but local cache write failed.');
             }
@@ -310,9 +319,17 @@ export default function SettingsPage() {
         }
     }
 
-    function changeSection(nextSection: string) {
+    async function changeSection(nextSection: string) {
         if (nextSection === activeSection) return;
-        if (isDirty && !window.confirm('You have unsaved changes. Leave this section anyway?')) return;
+        if (isDirty) {
+            const confirmed = await dialog.confirm({
+                title: 'Unsaved Changes',
+                message: 'You have unsaved changes. Leave this section anyway?',
+                confirmLabel: 'Leave',
+                variant: 'destructive',
+            });
+            if (!confirmed) return;
+        }
         setActiveSection(nextSection);
         if (window.location.hash !== `#${nextSection}`) {
             window.history.replaceState(null, '', `#${nextSection}`);
@@ -561,7 +578,27 @@ export default function SettingsPage() {
                                                 </div>
                                             </div>
                                         </div>
-                                        <button className={cn(
+                                        <button onClick={async () => {
+                                            const action = integration.status === 'connected' ? 'configure' : 'connect';
+                                            try {
+                                                const csrfToken = await getCsrfToken();
+                                                const res = await fetch(`/api/integrations/${integration.id}`, {
+                                                    method: 'POST',
+                                                    credentials: 'include',
+                                                    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                                    body: JSON.stringify({ action }),
+                                                });
+                                                if (res.ok) {
+                                                    const updated = await res.json();
+                                                    setIntegrations(prev => prev.map(i => i.id === integration.id ? { ...i, status: updated.status || 'connected' } : i));
+                                                } else {
+                                                    await dialog.alert({ title: 'Integration Error', message: `Integration ${action} failed (${res.status}). Please try again.` });
+                                                }
+                                            } catch (err) {
+                                                console.error('Integration action failed:', err);
+                                                await dialog.alert({ title: 'Integration Error', message: 'Integration action failed. Please check your network.' });
+                                            }
+                                        }} className={cn(
                                             'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                                             integration.status === 'connected'
                                                 ? 'bg-muted text-foreground hover:bg-muted/80'
@@ -969,10 +1006,16 @@ export default function SettingsPage() {
                                         </div>
                                         <button
                                             aria-label={`${item.label} toggle`}
-                                            onClick={() => {
+                                            onClick={async () => {
                                                 if (!canEditHighRiskSettings || readOnlyReason) return;
-                                                if ((item.key === 'hipaaMode' || item.key === 'soc2Mode') && !window.confirm(`Confirm ${item.label} change. This action has compliance impact.`)) {
-                                                    return;
+                                                if (item.key === 'hipaaMode' || item.key === 'soc2Mode') {
+                                                    const confirmed = await dialog.confirm({
+                                                        title: `Confirm ${item.label} Change`,
+                                                        message: `This action has compliance impact. Are you sure you want to toggle ${item.label}?`,
+                                                        confirmLabel: 'Confirm',
+                                                        variant: 'destructive',
+                                                    });
+                                                    if (!confirmed) return;
                                                 }
                                                 setComplianceConfig({
                                                     ...complianceConfig,
@@ -1077,13 +1120,39 @@ export default function SettingsPage() {
                             )}
 
                             <div className="flex gap-2 pt-4 border-t border-border">
-                                <button aria-label="Run backup now" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
+                                <button aria-label="Run backup now" onClick={async () => {
+                                    try {
+                                        const csrfToken = await getCsrfToken();
+                                        await fetch('/api/settings/backup/run', {
+                                            method: 'POST', credentials: 'include',
+                                            headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                        });
+                                        setBackupConfig(prev => ({ ...prev, lastBackup: new Date().toISOString() }));
+                                    } catch (err) { console.error('Backup failed:', err); await dialog.alert({ title: 'Backup Failed', message: 'Backup failed. Please try again.' }); }
+                                }} className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
                                     Run Backup Now
                                 </button>
-                                <button aria-label="View backup history" className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">
+                                <button aria-label="View backup history" onClick={() => {
+                                    const el = document.querySelector('[data-section="backup-history"]');
+                                    if (el) el.scrollIntoView({ behavior: 'smooth' });
+                                }} className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">
                                     View Backup History
                                 </button>
-                                <button aria-label="Test disaster recovery failover" className="px-4 py-2 bg-warning/10 text-warning rounded-lg text-sm hover:bg-warning/20 font-medium transition-colors">
+                                <button aria-label="Test disaster recovery failover" onClick={async () => {
+                                    const confirmed = await dialog.confirm({
+                                        title: 'Test DR Failover',
+                                        message: 'This will simulate a disaster recovery failover. No data will be affected. Continue?',
+                                        confirmLabel: 'Run Test',
+                                    });
+                                    if (!confirmed) return;
+                                    try {
+                                        const csrfToken = await getCsrfToken();
+                                        await fetch('/api/settings/backup/dr-test', {
+                                            method: 'POST', credentials: 'include',
+                                            headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                        });
+                                    } catch (err) { console.error('DR test failed:', err); await dialog.alert({ title: 'DR Test Failed', message: 'DR test failed. Please try again.' }); }
+                                }} className="px-4 py-2 bg-warning/10 text-warning rounded-lg text-sm hover:bg-warning/20 font-medium transition-colors">
                                     Test DR Failover
                                 </button>
                             </div>

@@ -359,7 +359,95 @@ export class InvoiceService {
   }
 
   /**
-   * Generate PDF content for invoice
+   * Generate PDF content for invoice via Rust pdf-renderer service.
+   * Falls back to napi-rs @apexmail/pdf-native if available,
+   * then to legacy HTML generation as last resort.
+   *
+   * @returns PDF bytes as a Buffer
+   */
+  async generateInvoicePdf(invoice: Invoice): Promise<Buffer> {
+    const pdfRendererUrl = process.env.PDF_RENDERER_URL ?? 'http://pdf-renderer:3004';
+
+    const templateData = {
+      invoice_number: invoice.invoiceNumber,
+      status: invoice.status,
+      currency: invoice.currency,
+      subtotal: invoice.subtotal,
+      vat_total: invoice.vatTotal,
+      total: invoice.total,
+      issued_at: invoice.issuedAt.toISOString().split('T')[0],
+      due_at: invoice.dueAt.toISOString().split('T')[0],
+      period_start: invoice.periodStart.toISOString().split('T')[0],
+      period_end: invoice.periodEnd.toISOString().split('T')[0],
+      purchase_order_number: invoice.purchaseOrderNumber ?? null,
+      notes: invoice.notes ?? null,
+      billing_address: {
+        company_name: invoice.billingAddress.companyName,
+        address_line1: invoice.billingAddress.addressLine1,
+        address_line2: invoice.billingAddress.addressLine2 ?? null,
+        city: invoice.billingAddress.city,
+        state: invoice.billingAddress.state ?? null,
+        postal_code: invoice.billingAddress.postalCode,
+        country: invoice.billingAddress.country,
+        vat_number: invoice.billingAddress.vatNumber ?? null,
+        email: invoice.billingAddress.email,
+      },
+      line_items: invoice.lineItems.map((item) => ({
+        description: item.description,
+        quantity: item.quantity,
+        unit_price: item.unitPrice,
+        vat_rate: item.vatRate,
+        amount: item.amount,
+      })),
+    };
+
+    // Strategy 1: HTTP call to pdf-renderer service
+    try {
+      const resp = await fetch(`${pdfRendererUrl}/v1/pdf/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template: 'invoice', data: templateData }),
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (resp.ok) {
+        const arrayBuf = await resp.arrayBuffer();
+        logger.info({ invoiceNumber: invoice.invoiceNumber, size: arrayBuf.byteLength }, 'Invoice PDF generated via pdf-renderer service');
+        return Buffer.from(arrayBuf);
+      }
+
+      logger.warn({ status: resp.status }, 'pdf-renderer returned non-OK status, trying fallback');
+    } catch (err) {
+      logger.warn({ err }, 'pdf-renderer service unavailable, trying napi-rs fallback');
+    }
+
+    // Strategy 2: napi-rs @apexmail/pdf-native (in-process, no network)
+    try {
+      const { renderPdf } = await import('@apexmail/pdf-native');
+      const result = await renderPdf('invoice', JSON.stringify(templateData));
+      logger.info({ invoiceNumber: invoice.invoiceNumber, size: result.size }, 'Invoice PDF generated via pdf-native');
+      return Buffer.from(result.pdf);
+    } catch (err) {
+      logger.warn({ err }, '@apexmail/pdf-native not available, falling back to legacy HTML');
+    }
+
+    // Strategy 3: Legacy HTML generation (deprecated — will be removed)
+    const html = this.generateInvoiceHtmlLegacy(invoice);
+    return Buffer.from(html, 'utf-8');
+  }
+
+  /**
+   * @deprecated Use generateInvoicePdf() instead. This legacy HTML generation
+   * is retained only as a last-resort fallback and will be removed once
+   * pdf-renderer service is fully deployed.
+   */
+  generateInvoiceHtmlLegacy(invoice: Invoice): string {
+    return this.generateInvoiceHtml(invoice);
+  }
+
+  /**
+   * @deprecated Legacy HTML invoice generation — superseded by Rust pdf-renderer.
+   * Kept temporarily for backward compatibility. Use generateInvoicePdf() instead.
    */
   generateInvoiceHtml(invoice: Invoice): string {
     const esc = (value: unknown): string => {

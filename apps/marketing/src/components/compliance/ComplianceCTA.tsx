@@ -1,21 +1,11 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { ArrowRight, Calendar, Shield, FileText } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function ComplianceCTA() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-24 relative bg-surface-50">
+ <section className="py-20 lg:py-32 relative bg-surface-50">
  <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative">
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="bg-white rounded-2xl border border-surface-200 p-8 md:p-12 text-center"
- >
+ <div className="animate-in bg-white rounded-2xl border border-surface-200 p-8 md:p-12 text-center">
  <h2 className="text-3xl md:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  Ready to Sleep Better at Night?
  </h2>
@@ -58,15 +48,10 @@ export function ComplianceCTA() {
  </div>
  ))}
  </div>
- </motion.div>
+ </div>
 
  {/* Bottom Note */}
- <motion.p
- initial={{ opacity: 0 }}
- animate={inView ? { opacity: 1 } : {}}
- transition={{ delay: 0.3 }}
- className="text-center text-sm font-medium text-surface-500 mt-8"
- >
+ <p className="animate-in delay-300 text-center text-sm font-medium text-surface-500 mt-8">
  All compliance documentation, audit reports, and certifications available upon request.
  <br />
  Contact{' '}
@@ -74,7 +59,7 @@ export function ComplianceCTA() {
  compliance@apexmail.ee
  </a>{' '}
  for custom security questionnaires.
- </motion.p>
+ </p>
  </div>
  </section>
  );

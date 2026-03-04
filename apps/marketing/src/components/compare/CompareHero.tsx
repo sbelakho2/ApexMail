@@ -1,6 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
 import Link from 'next/link';
 import { ArrowRight, ArrowLeftRight } from '@/components/ui/icons';
 
@@ -20,12 +17,7 @@ export function CompareHero({ competitor }: CompareHeroProps) {
       </div>
 
       <div className="relative max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="text-center"
-        >
+        <div className="animate-in text-center">
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-lg bg-white border border-surface-200 text-sm text-primary-700 mb-6">
             <ArrowLeftRight className="w-4 h-4" />
             Feature Comparison
@@ -53,7 +45,7 @@ export function CompareHero({ competitor }: CompareHeroProps) {
               See Full Comparison
             </Link>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

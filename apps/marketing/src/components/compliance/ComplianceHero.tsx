@@ -1,6 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
 import Link from 'next/link';
 import { Shield, Scale, FileCheck, Lock, ArrowRight, Check } from '@/components/ui/icons';
 
@@ -15,14 +12,10 @@ const badges = [
 export function ComplianceHero() {
  return (
  <section className="relative min-h-screen flex items-center pt-32 pb-20 overflow-hidden bg-surface-50">
-      <div className="relative max-w-[1200px] mx-auto px-5 sm:px-6 lg:px-8 py-12 lg:py-20">
+      <div className="relative max-w-7xl mx-auto px-5 sm:px-6 lg:px-8 py-12 lg:py-20">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left Column */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={{ opacity: 1, y: 0 }}
- transition={{ duration: 0.5 }}
- >
+ <div className="animate-in">
  {/* Badge */}
  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-white border border-surface-200 text-[14px] font-medium text-surface-600 mb-8 p-1 pr-3">
           <span className="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center">
@@ -67,33 +60,22 @@ export function ComplianceHero() {
  Compliance Review
  </Link>
  </div>
- </motion.div>
+ </div>
 
  {/* Right Column - Compliance Badges */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={{ opacity: 1, y: 0 }}
- transition={{ duration: 0.5, delay: 0.2 }}
- className="relative"
- >
+ <div className="animate-in delay-200 relative">
  <div className="p-6 sm:p-8 bg-white rounded-lg border border-surface-200">
  <h3 className="text-[14px] font-semibold text-surface-500 mb-8 text-center">
  Compliance Certifications
  </h3>
  <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
  {badges.map((badge, index) => (
- <motion.div
- key={badge.name}
- initial={{ opacity: 0, scale: 0.8 }}
- animate={{ opacity: 1, scale: 1 }}
- transition={{ delay: 0.3 + index * 0.1 }}
- className="aspect-square rounded-sm bg-surface-50 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors"
- >
+ <div key={badge.name} className="animate-in aspect-square rounded-sm bg-surface-50 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors">
  <div className="w-10 h-10 rounded-sm bg-white flex items-center justify-center mb-3 border border-surface-200 text-surface-900">
  <Shield className="w-5 h-5" strokeWidth={1.5} />
  </div>
  <span className="text-[14px] font-semibold text-surface-900">{badge.name}</span>
- </motion.div>
+ </div>
  ))}
  </div>
  <div className="mt-10 p-4 rounded-sm bg-emerald-50 border border-emerald-100 ">
@@ -103,7 +85,7 @@ export function ComplianceHero() {
  </div>
  </div>
  </div>
- </motion.div>
+ </div>
  </div>
  </div>
  </section>

@@ -12,10 +12,37 @@ import { logSecurityEvent } from '@/lib/server-logger';
 
 let hasLoggedMissingSessionSecret = false;
 
+// ─── Security headers applied to every response ───────────────
+
+function addSecurityHeaders(response: NextResponse, pathname: string): NextResponse {
+    response.headers.set('X-Frame-Options', 'DENY');
+    response.headers.set('X-Content-Type-Options', 'nosniff');
+    response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    response.headers.set(
+        'Strict-Transport-Security',
+        'max-age=63072000; includeSubDomains; preload'
+    );
+    response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+
+    // Prevent caching of API responses (may contain sensitive data)
+    if (pathname.startsWith('/api/')) {
+        response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+        response.headers.set('Pragma', 'no-cache');
+    }
+
+    return response;
+}
+
 const PUBLIC_PATHS = [
     '/login',
+    '/signup',
+    '/forgot-password',
     '/api/auth/login',
+    '/api/auth/register',
+    '/api/auth/forgot-password',
     '/api/auth/session',
+    '/api/auth/sso/github',
+    '/api/auth/sso/google',
     '/api/csrf',
     '/api/health',
     '/favicon.ico',
@@ -126,13 +153,13 @@ export async function middleware(request: NextRequest) {
     const { pathname } = request.nextUrl;
 
     if (await isPublicPath(request)) {
-        return NextResponse.next();
+        return addSecurityHeaders(NextResponse.next(), pathname);
     }
 
     if (hasValidE2EBypass(request)) {
         const response = NextResponse.next();
         response.headers.set('X-E2E-Bypass', '1');
-        return response;
+        return addSecurityHeaders(response, pathname);
     }
 
     const impersonationToken = request.cookies.get(IMPERSONATION_SESSION_COOKIE)?.value;
@@ -144,18 +171,18 @@ export async function middleware(request: NextRequest) {
             hasLoggedMissingSessionSecret = true;
             logSecurityEvent('missing_session_secret', { path: pathname });
         }
-        return NextResponse.redirect(new URL('/login', request.url));
+        return addSecurityHeaders(NextResponse.redirect(new URL('/login', request.url)), pathname);
     }
 
     if (impersonationToken && sessionSecret) {
         const isValidImpersonation = await validateImpersonationSession(impersonationToken, sessionSecret);
         if (isValidImpersonation) {
-            return NextResponse.next();
+            return addSecurityHeaders(NextResponse.next(), pathname);
         }
     }
 
     if (!sessionToken) {
-        return NextResponse.redirect(new URL('/login', request.url));
+        return addSecurityHeaders(NextResponse.redirect(new URL('/login', request.url)), pathname);
     }
 
     const apiBaseUrl = process.env.API_URL || 'http://localhost:3001';
@@ -164,10 +191,10 @@ export async function middleware(request: NextRequest) {
     if (!isValidSession) {
         const response = NextResponse.redirect(new URL('/login', request.url));
         response.cookies.delete(USER_SESSION_COOKIE);
-        return response;
+        return addSecurityHeaders(response, pathname);
     }
 
-    return NextResponse.next();
+    return addSecurityHeaders(NextResponse.next(), pathname);
 }
 
 export const config = {

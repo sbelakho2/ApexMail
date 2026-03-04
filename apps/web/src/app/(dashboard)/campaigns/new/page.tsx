@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from 'react';
+import { useRouter } from 'next/navigation';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -8,23 +9,53 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { toast } from '@/hooks/use-toast';
+import { useAPIMutation, getCsrfToken } from '@/hooks/use-api';
+import { Loader2 } from '@/components/ui/icons';
 
 export default function NewCampaignPage() {
-    const [campaignName, setCampaignName] = React.useState('Weekly Product Update');
-    const [subject, setSubject] = React.useState('New features your team can use today');
+    const router = useRouter();
+    const [campaignName, setCampaignName] = React.useState('');
+    const [subject, setSubject] = React.useState('');
     const [audience, setAudience] = React.useState('all');
-    const [content, setContent] = React.useState('Hi there,\n\nWe shipped updates to improve deliverability and analytics visibility this week.');
+    const [content, setContent] = React.useState('');
     const [timezoneConfirmed, setTimezoneConfirmed] = React.useState(false);
     const [previewDevice, setPreviewDevice] = React.useState<'mobile' | 'tablet' | 'desktop'>('desktop');
     const [showPlainTextPreview, setShowPlainTextPreview] = React.useState(false);
     const [error, setError] = React.useState('');
+    const [isSaving, setIsSaving] = React.useState(false);
+    const [isScheduling, setIsScheduling] = React.useState(false);
 
-    const audienceEstimates: Record<string, number> = {
-        all: 12840,
-        newsletter: 6840,
-        vip: 320,
-        none: 0,
-    };
+    // Fetch audience lists from API
+    const [audienceLists, setAudienceLists] = React.useState<{ id: string; name: string; count: number }[]>([]);
+    const [listsLoading, setListsLoading] = React.useState(true);
+    const [listsError, setListsError] = React.useState(false);
+    React.useEffect(() => {
+        const controller = new AbortController();
+        fetch('/v1/lists', { credentials: 'include', signal: controller.signal })
+            .then(res => res.ok ? res.json() : { lists: [] })
+            .then(data => {
+                const lists = Array.isArray(data) ? data : (data.lists ?? data.data ?? []);
+                if (lists.length > 0) {
+                    setAudienceLists(lists.map((l: any) => ({ id: l.id ?? l.slug ?? l.name, name: l.name, count: l.subscriberCount ?? l.count ?? 0 })));
+                }
+            })
+            .catch((err) => { if (!controller.signal.aborted) setListsError(true); })
+            .finally(() => setListsLoading(false));
+        return () => controller.abort();
+    }, []);
+
+    // Unsaved changes warning
+    React.useEffect(() => {
+        const dirty = campaignName.trim() !== '' || subject.trim() !== '' || content.trim() !== '';
+        const handler = (e: BeforeUnloadEvent) => { if (dirty) { e.preventDefault(); } };
+        window.addEventListener('beforeunload', handler);
+        return () => window.removeEventListener('beforeunload', handler);
+    }, [campaignName, subject, content]);
+
+    const audienceEstimates: Record<string, number> = Object.fromEntries(
+        audienceLists.map(l => [l.id, l.count])
+    );
 
     const checklist = [
         { id: 'subject', label: 'Subject is set', done: subject.trim().length > 0 },
@@ -38,8 +69,18 @@ export default function NewCampaignPage() {
         .replace(/\s+/g, ' ')
         .trim();
 
-    const handleSchedule = () => {
+    const handleSchedule = async () => {
         setError('');
+
+        if (!campaignName.trim()) {
+            setError('Please enter a campaign name.');
+            return;
+        }
+
+        if (!subject.trim()) {
+            setError('Please enter an email subject line.');
+            return;
+        }
 
         if (!audience) {
             setError('Select an audience before scheduling this campaign.');
@@ -61,7 +102,81 @@ export default function NewCampaignPage() {
             return;
         }
 
-        window.alert(`Campaign "${campaignName}" scheduled for ${audienceEstimates[audience].toLocaleString()} recipients.`);
+        setIsScheduling(true);
+        try {
+            const csrfToken = await getCsrfToken();
+            if (!csrfToken) throw new Error('CSRF token unavailable');
+
+            const res = await fetch('/v1/campaigns', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken,
+                },
+                body: JSON.stringify({
+                    name: campaignName,
+                    subject,
+                    audience,
+                    content,
+                    status: 'scheduled',
+                }),
+            });
+
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || 'Failed to schedule campaign');
+            }
+
+            toast({ title: 'Campaign Scheduled', description: `"${campaignName}" scheduled for ${(audienceEstimates[audience] ?? 0).toLocaleString()} recipients.` });
+            router.push('/campaigns');
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to schedule campaign. Please try again.');
+        } finally {
+            setIsScheduling(false);
+        }
+    };
+
+    const handleSaveDraft = async () => {
+        if (!campaignName.trim()) {
+            setError('Please enter a campaign name to save.');
+            return;
+        }
+
+        setIsSaving(true);
+        setError('');
+        try {
+            const csrfToken = await getCsrfToken();
+            if (!csrfToken) throw new Error('CSRF token unavailable');
+
+            const res = await fetch('/v1/campaigns', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken,
+                },
+                body: JSON.stringify({
+                    name: campaignName,
+                    subject,
+                    audience,
+                    content,
+                    status: 'draft',
+                }),
+            });
+
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || 'Failed to save draft');
+            }
+
+            toast({ title: 'Draft Saved', description: `"${campaignName}" saved as draft.` });
+            router.push('/campaigns');
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to save draft. Please try again.');
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     return (
@@ -96,13 +211,18 @@ export default function NewCampaignPage() {
                         <Label htmlFor="audience">Audience</Label>
                         <Select value={audience} onValueChange={setAudience}>
                             <SelectTrigger id="audience">
-                                <SelectValue placeholder="Select audience" />
+                                <SelectValue placeholder={listsLoading ? 'Loading lists…' : 'Select audience'} />
                             </SelectTrigger>
                             <SelectContent>
-                                <SelectItem value="all">All Subscribers</SelectItem>
-                                <SelectItem value="newsletter">Newsletter</SelectItem>
-                                <SelectItem value="vip">VIP Customers</SelectItem>
-                                <SelectItem value="none">No matching recipients</SelectItem>
+                                {audienceLists.length > 0 ? (
+                                    audienceLists.map(l => (
+                                        <SelectItem key={l.id} value={l.id}>
+                                            {l.name} ({l.count.toLocaleString()})
+                                        </SelectItem>
+                                    ))
+                                ) : (
+                                    <SelectItem value="all">All Subscribers</SelectItem>
+                                )}
                             </SelectContent>
                         </Select>
                         <p className="text-xs text-muted-foreground">
@@ -172,8 +292,12 @@ export default function NewCampaignPage() {
 
                     <div className="sticky bottom-4 z-20 -mx-2 mt-2 rounded-xl border bg-background/95 p-3 backdrop-blur">
                         <div className="flex justify-end gap-3">
-                            <Button variant="outline">Save Draft</Button>
-                            <Button onClick={handleSchedule}>Schedule Campaign</Button>
+                            <Button variant="outline" onClick={handleSaveDraft} disabled={isSaving || isScheduling}>
+                                {isSaving ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Saving...</> : 'Save Draft'}
+                            </Button>
+                            <Button onClick={handleSchedule} disabled={isSaving || isScheduling}>
+                                {isScheduling ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Scheduling...</> : 'Schedule Campaign'}
+                            </Button>
                         </div>
                     </div>
                 </CardContent>

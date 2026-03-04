@@ -1,8 +1,7 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { useState, useEffect } from 'react';
+import { useInView } from 'react-intersection-observer';
 import { Gauge, Zap, Globe } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
@@ -39,47 +38,23 @@ export function LatencyComparison() {
     <section ref={ref} className="py-20 lg:py-32 relative bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-12">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4"
-          >
+          <div className="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4">
             <Gauge className="w-4 h-4 text-surface-500" />
             Performance Benchmarks
-          </motion.div>
-          <motion.h2
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.1 }}
-            className="text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight"
-          >
+          </div>
+          <h2 className="animate-in delay-100 text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight">
             Reduced Network Latency
           </motion.h2>
-          <motion.p
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.2 }}
-            className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium"
-          >
+          <p className="animate-in delay-200 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium">
             When your application and email infrastructure share the same network, 
             API communication is nearly instantaneous.
-          </motion.p>
-          <motion.p
-            initial={{ opacity: 0 }}
-            animate={inView ? { opacity: 1 } : {}}
-            transition={{ delay: 0.3 }}
-            className="text-xs text-surface-400 max-w-xl mx-auto mt-3"
-          >
+          </p>
+          <p className="animate-in delay-300 text-xs text-surface-400 max-w-xl mx-auto mt-3">
             Illustrative deployment scenarios. Actual latency depends on your network topology and region.
-          </motion.p>
+          </p>
         </div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.3 }}
-          className="bg-white border border-surface-200 shadow-sm rounded-lg p-8"
-        >
+        <div className="animate-in delay-300 bg-white border border-surface-200 shadow-sm rounded-lg p-8">
           {/* Latency illustration — relative bar widths only, not numeric measurements */}
           <div className="space-y-8" aria-label="Relative latency comparison by deployment scenario">
             {latencyScenarios.map((data, index) => (
@@ -94,12 +69,7 @@ export function LatencyComparison() {
                   </div>
                 </div>
                 <div className="h-3 bg-surface-100 rounded-full overflow-hidden">
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={animated ? { width: `${data.relativeWidth}%` } : {}}
-                    transition={{ duration: prefersReducedMotion ? 0 : 0.8, delay: prefersReducedMotion ? 0 : index * 0.15 }}
-                    className={cn('h-full rounded-full', data.color)}
-                  />
+                  <div : {}} className={cn('h-full rounded-full', data.color)} />
                 </div>
               </div>
             ))}
@@ -120,15 +90,10 @@ export function LatencyComparison() {
               <span className="text-xs font-medium text-surface-600">External API</span>
             </div>
           </div>
-        </motion.div>
+        </div>
 
         {/* Key Points */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.4 }}
-          className="grid md:grid-cols-3 gap-6 mt-12"
-        >
+        <div className="animate-in delay-400 grid md:grid-cols-3 gap-6 mt-12">
           {[
             {
               icon: Zap,
@@ -154,7 +119,7 @@ export function LatencyComparison() {
               <div className="text-sm text-surface-600 font-medium leading-relaxed">{item.description}</div>
             </div>
           ))}
-        </motion.div>
+        </div>
       </div>
     </section>
   );

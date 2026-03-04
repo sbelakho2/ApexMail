@@ -21,11 +21,13 @@ interface UserState {
     setUser: (user: User | null) => void;
     setLoading: (loading: boolean) => void;
     logout: () => void;
+    hasRole: (role: User['role'] | User['role'][]) => boolean;
+    canAccess: (feature: 'team' | 'billing' | 'settings' | 'api' | 'compliance' | 'dedicated-ips') => boolean;
 }
 
 export const useUserStore = create<UserState>()(
     devtools(
-        immer((set) => ({
+        immer((set, get) => ({
             user: null,
             isAuthenticated: false,
             isLoading: true,
@@ -43,6 +45,27 @@ export const useUserStore = create<UserState>()(
                     state.user = null;
                     state.isAuthenticated = false;
                 }),
+            hasRole: (role) => {
+                const user = get().user;
+                if (!user) return false;
+                if (Array.isArray(role)) return role.includes(user.role);
+                return user.role === role;
+            },
+            canAccess: (feature) => {
+                const user = get().user;
+                if (!user) return false;
+                const roleHierarchy: Record<User['role'], number> = { viewer: 0, member: 1, admin: 2 };
+                const userLevel = roleHierarchy[user.role] ?? 0;
+                const featureMinLevel: Record<string, number> = {
+                    team: 2,        // admin only
+                    billing: 2,     // admin only
+                    settings: 1,    // member+
+                    api: 1,         // member+
+                    compliance: 1,  // member+
+                    'dedicated-ips': 2, // admin only
+                };
+                return userLevel >= (featureMinLevel[feature] ?? 0);
+            },
         })),
         { name: 'UserStore' }
     )
@@ -114,57 +137,57 @@ const NOTIFICATION_LIMIT = 200;
 
 export const useNotificationStore = create<NotificationState>()(
     devtools(
-        immer((set) => ({
-            notifications: [],
-            unreadCount: 0,
-            addNotification: (notification) =>
-                set((state) => {
-                    const newNotification: Notification = {
-                        ...notification,
-                        id: crypto.randomUUID(),
-                        read: false,
-                        createdAt: new Date().toISOString(),
-                    };
-                    state.notifications.unshift(newNotification);
-                    if (state.notifications.length > NOTIFICATION_LIMIT) {
-                        state.notifications = state.notifications.slice(0, NOTIFICATION_LIMIT);
-                    }
-                    state.unreadCount = state.notifications.reduce(
-                        (count, item) => count + (item.read ? 0 : 1),
-                        0
-                    );
-                }),
-            markAsRead: (id) =>
-                set((state) => {
-                    const notification = state.notifications.find((n: Notification) => n.id === id);
-                    if (notification && !notification.read) {
-                        notification.read = true;
-                        state.unreadCount -= 1;
-                    }
-                }),
-            markAllAsRead: () =>
-                set((state) => {
-                    state.notifications.forEach((n: Notification) => {
-                        n.read = true;
-                    });
-                    state.unreadCount = 0;
-                }),
-            removeNotification: (id) =>
-                set((state) => {
-                    const index = state.notifications.findIndex((n: Notification) => n.id === id);
-                    if (index !== -1) {
-                        if (!state.notifications[index].read) {
+        persist(
+            immer((set) => ({
+                notifications: [],
+                unreadCount: 0,
+                addNotification: (notification) =>
+                    set((state) => {
+                        const newNotification: Notification = {
+                            ...notification,
+                            id: crypto.randomUUID(),
+                            read: false,
+                            createdAt: new Date().toISOString(),
+                        };
+                        state.notifications.unshift(newNotification);
+                        if (state.notifications.length > NOTIFICATION_LIMIT) {
+                            state.notifications = state.notifications.slice(0, NOTIFICATION_LIMIT);
+                        }
+                        state.unreadCount += 1;
+                    }),
+                markAsRead: (id) =>
+                    set((state) => {
+                        const notification = state.notifications.find((n: Notification) => n.id === id);
+                        if (notification && !notification.read) {
+                            notification.read = true;
                             state.unreadCount -= 1;
                         }
-                        state.notifications.splice(index, 1);
-                    }
-                }),
-            clearAll: () =>
-                set((state) => {
-                    state.notifications = [];
-                    state.unreadCount = 0;
-                }),
-        })),
+                    }),
+                markAllAsRead: () =>
+                    set((state) => {
+                        state.notifications.forEach((n: Notification) => {
+                            n.read = true;
+                        });
+                        state.unreadCount = 0;
+                    }),
+                removeNotification: (id) =>
+                    set((state) => {
+                        const index = state.notifications.findIndex((n: Notification) => n.id === id);
+                        if (index !== -1) {
+                            if (!state.notifications[index].read) {
+                                state.unreadCount -= 1;
+                            }
+                            state.notifications.splice(index, 1);
+                        }
+                    }),
+                clearAll: () =>
+                    set((state) => {
+                        state.notifications = [];
+                        state.unreadCount = 0;
+                    }),
+            })),
+            { name: 'apexmail-notifications', version: 1 }
+        ),
         { name: 'NotificationStore' }
     )
 );

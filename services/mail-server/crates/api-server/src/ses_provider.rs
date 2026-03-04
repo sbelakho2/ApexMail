@@ -1,20 +1,20 @@
-//! AWS SES v2 dedicated IP provider.
+//! AWS SES v2 shared-pool sending provider.
 //!
-//! Wraps the `aws-sdk-sesv2` client to manage dedicated IP pools,
-//! IP assignments, and warmup configuration per tenant.
+//! **DEPRECATED for dedicated IPs** — Dedicated IP provisioning has moved
+//! to [`crate::ip_provider::DedicatedIpProvider`] (Hetzner Cloud).
 //!
-//! ## Tenant isolation model
+//! This module is still used for:
+//! - SES shared IP pool configuration (the default send path)
+//! - SES identity management (Easy DKIM, verification)
 //!
-//! Each tenant receives a dedicated SES IP pool named
-//! `apexmail-{tenant_id_short}` (first 12 hex chars of the UUID).
-//! IPs are assigned to pools via `PutDedicatedIpInPool`.
+//! The dedicated IP methods (`allocate_ip`, `release_ip`, `start_warmup`)
+//! below are retained only for backward compatibility during migration.
+//! All new dedicated IP operations should go through `DedicatedIpProvider`.
 //!
-//! ## Inventory model
+//! ## Tenant isolation model (shared path)
 //!
-//! ApexMail maintains an `ses_ip_inventory` table of all dedicated IPs
-//! leased from AWS. IPs have an `assignment_status` of `available`,
-//! `assigned`, or `releasing`. The provider picks from `available` IPs
-//! when a customer provisions, and returns them to `available` on release.
+//! Shared sending uses the default SES IP pool. No per-tenant pools
+//! are needed for the shared path — SES manages IP rotation internally.
 
 use aws_sdk_sesv2::Client as SesClient;
 use aws_sdk_sesv2::types::ScalingMode;

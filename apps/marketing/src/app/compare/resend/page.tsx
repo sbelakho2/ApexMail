@@ -3,6 +3,9 @@ import { CompareHero } from '@/components/compare/CompareHero';
 import { CompareTable } from '@/components/compare/CompareTable';
 import { CompareCTA } from '@/components/compare/CompareCTA';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: 'ApexMail vs Resend | Feature Comparison',
   description:

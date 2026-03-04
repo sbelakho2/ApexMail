@@ -1,0 +1,171 @@
+{# ── Feature Details ──────────────────────────────────────────── #}
+{# Converted from features/FeatureDetails.tsx                    #}
+
+<section class="py-20 lg:py-32 bg-surface-50">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="animate-in text-center mb-20">
+      <h2 class="text-3xl lg:text-4xl font-bold text-surface-900 mb-4">Deep Dive Into Key Features</h2>
+      <p class="text-lg text-surface-600 max-w-2xl mx-auto">See how ApexMail makes complex email infrastructure simple.</p>
+    </div>
+
+    <div class="space-y-32">
+      {# ── Developer-First API ── #}
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
+        <div>
+          <span class="text-sm font-bold text-primary-600 mb-2 block">Build in Minutes</span>
+          <h3 class="text-2xl lg:text-3xl font-bold text-surface-900 mb-4">Developer-First API</h3>
+          <p class="text-lg text-surface-600 mb-6">Our RESTful API is designed for developers who value simplicity and power. TypeScript types, comprehensive SDKs, and instant feedback.</p>
+          <ul class="space-y-3 mb-8">
+            {% set api_benefits = ["Send your first email in under 10 seconds", "Idempotency keys for safe retries", "Webhook signatures for security", "Batch sending up to 1,000 emails", "Real-time status updates"] %}
+            {% for b in api_benefits %}
+            <li class="flex items-start gap-3">
+              <span class="w-5 h-5 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              </span>
+              <span class="text-surface-700">{{ b }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+          <a href="/docs/api" class="inline-flex items-center gap-2 text-primary-600 font-semibold hover:text-primary-700 transition-colors">
+            Read API Docs
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </a>
+        </div>
+        <div>
+          <div class="rounded-lg border border-surface-200 bg-surface-900 overflow-hidden shadow-sm">
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
+              <div class="flex gap-1.5">
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+              </div>
+              <span class="text-xs text-surface-500 ml-2 font-mono font-medium">example.ts</span>
+            </div>
+            <pre class="p-4 text-sm text-surface-300 font-mono overflow-x-auto"><code>import { ApexMail } from '@apexmail/node';
+
+const apexmail = new ApexMail('am_live_xxx');
+
+// Send with full type safety
+const { id } = await apexmail.emails.send({
+  from: 'hello@company.com',
+  to: 'user@example.com',
+  subject: 'Welcome!',
+  html: '&lt;h1&gt;Hello &#123;&#123;name&#125;&#125;!&lt;/h1&gt;',
+  data: { name: 'John' },
+  tags: [{ name: 'type', value: 'welcome' }],
+});
+
+// Track delivery
+const email = await apexmail.emails.get(id);
+console.log(email.status); // 'delivered'</code></pre>
+          </div>
+        </div>
+      </div>
+
+      {# ── Built-In Compliance ── #}
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
+        <div class="lg:order-2">
+          <span class="text-sm font-bold text-primary-600 mb-2 block">GDPR &amp; HIPAA</span>
+          <h3 class="text-2xl lg:text-3xl font-bold text-surface-900 mb-4">Built-In Compliance</h3>
+          <p class="text-lg text-surface-600 mb-6">Compliance is baked into every layer. Automated data subject requests, encrypted storage, and complete audit trails.</p>
+          <ul class="space-y-3 mb-8">
+            {% set comp_benefits = ["One-click GDPR data export & deletion", "Automatic consent tracking", "HIPAA BAA available (Enterprise plan)", "EU data residency option", "Complete audit logs"] %}
+            {% for b in comp_benefits %}
+            <li class="flex items-start gap-3">
+              <span class="w-5 h-5 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              </span>
+              <span class="text-surface-700">{{ b }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+          <a href="/compliance" class="inline-flex items-center gap-2 text-primary-600 font-semibold hover:text-primary-700 transition-colors">
+            Learn About Compliance
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </a>
+        </div>
+        <div class="lg:order-1">
+          <div class="rounded-lg border border-surface-200 bg-surface-900 overflow-hidden shadow-sm">
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
+              <div class="flex gap-1.5">
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+              </div>
+              <span class="text-xs text-surface-500 ml-2 font-mono font-medium">example.ts</span>
+            </div>
+            <pre class="p-4 text-sm text-surface-300 font-mono overflow-x-auto"><code>// Handle GDPR requests automatically
+await apexmail.compliance.gdpr.createRequest({
+  email: 'user@example.com',
+  type: 'export', // or 'delete'
+});
+
+// Check consent status
+const consent = await apexmail.compliance.consent.get({
+  email: 'user@example.com',
+});
+
+// Record consent
+await apexmail.compliance.consent.record({
+  email: 'user@example.com',
+  source: 'signup_form',
+  purposes: ['marketing', 'transactional'],
+});</code></pre>
+          </div>
+        </div>
+      </div>
+
+      {# ── AI-Powered Optimization ── #}
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
+        <div>
+          <span class="text-sm font-bold text-primary-600 mb-2 block">Automatic Intelligence</span>
+          <h3 class="text-2xl lg:text-3xl font-bold text-surface-900 mb-4">AI-Powered Optimization</h3>
+          <p class="text-lg text-surface-600 mb-6">AI-powered send-time optimization is included on Pro+ plans. The platform automatically learns each recipient's engagement patterns to maximize open rates.</p>
+          <ul class="space-y-3 mb-8">
+            {% set ai_benefits = ["Automatic send-time optimization per recipient (Pro+ plans)", "Bayesian engagement modeling with cold-start priors", "ML-based A/B test autopilot (Thompson Sampling)", "Inbox placement scoring and deliverability insights", "Churn prediction and re-engagement signals"] %}
+            {% for b in ai_benefits %}
+            <li class="flex items-start gap-3">
+              <span class="w-5 h-5 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              </span>
+              <span class="text-surface-700">{{ b }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+          <a href="/docs/analytics" class="inline-flex items-center gap-2 text-primary-600 font-semibold hover:text-primary-700 transition-colors">
+            View Analytics Docs
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </a>
+        </div>
+        <div>
+          <div class="rounded-lg border border-surface-200 bg-surface-900 overflow-hidden shadow-sm">
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
+              <div class="flex gap-1.5">
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+                <span class="w-2.5 h-2.5 rounded-full bg-surface-700"></span>
+              </div>
+              <span class="text-xs text-surface-500 ml-2 font-mono font-medium">example.ts</span>
+            </div>
+            <pre class="p-4 text-sm text-surface-300 font-mono overflow-x-auto"><code>// Schedule with send-time optimization enabled
+const { id } = await apexmail.emails.send({
+  from: 'hello@company.com',
+  to: 'user@example.com',
+  subject: 'Your weekly digest',
+  html: '&lt;p&gt;Here\'s what\'s new...&lt;/p&gt;',
+  // Platform automatically selects optimal
+  // delivery time based on recipient engagement
+  optimizeSendTime: true,
+});
+
+// Retrieve message analytics
+const events = await apexmail.events.list({
+  messageId: id,
+});
+console.log(events); // delivered, opened, clicked...</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

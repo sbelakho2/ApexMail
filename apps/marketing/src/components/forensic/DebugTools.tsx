@@ -1,12 +1,8 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Bug, Terminal, Smartphone, Mail, AlertTriangle } from '@/components/ui/icons';
 
 export function DebugTools() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   const tools = [
     {
       icon: Terminal,
@@ -35,46 +31,26 @@ export function DebugTools() {
   ];
 
   return (
-    <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+    <section className="py-20 lg:py-32 relative bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-16">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4"
-          >
+          <div className="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4">
             <Bug className="w-4 h-4 text-surface-500" />
             Debug Tools
-          </motion.div>
-          <motion.h2
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.1 }}
-            className="text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight"
-          >
+          </div>
+          <h2 className="animate-in delay-100 text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight">
             A Complete Debugging Arsenal
           </motion.h2>
-          <motion.p
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.2 }}
-            className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium"
-          >
+          <p className="animate-in delay-200 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium">
             Everything you need to find and fix email rendering issues, 
             integrated into your existing workflow.
-          </motion.p>
+          </p>
         </div>
 
         {/* Tools Grid */}
         <div className="grid md:grid-cols-2 gap-6 mb-16">
           {tools.map((tool, index) => (
-            <motion.div
-              key={tool.name}
-              initial={{ opacity: 0, y: 20 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: 0.1 * index }}
-              className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 hover:border-surface-300 transition-all"
-            >
+            <div key={tool.name} className="animate-in delay-100 bg-white border border-surface-200 shadow-sm rounded-lg p-8 hover:border-surface-300 transition-all">
               <div className="flex items-start gap-6">
                 <div className="w-12 h-12 rounded-lg bg-surface-100/50 flex items-center justify-center flex-shrink-0 border border-surface-200">
                   <tool.icon className="w-6 h-6 text-surface-900" />
@@ -94,17 +70,12 @@ export function DebugTools() {
                   </div>
                 </div>
               </div>
-            </motion.div>
+            </div>
           ))}
         </div>
 
         {/* CLI Demo */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.5 }}
-          className="bg-surface-900 rounded-lg overflow-hidden shadow-lg border border-surface-800"
-        >
+        <div className="animate-in delay-500 bg-surface-900 rounded-lg overflow-hidden shadow-lg border border-surface-800">
           <div className="flex items-center gap-2 px-6 py-4 bg-surface-800/50 border-b border-surface-700/50">
             <div className="flex gap-1.5">
               <div className="w-3 h-3 rounded-full bg-surface-600" />
@@ -155,7 +126,7 @@ export function DebugTools() {
               </div>
             </div>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
     Plus,
     Search,
@@ -50,6 +51,7 @@ import { cn, formatNumber, formatPercent, formatRelativeTime } from '@/lib/utils
 import { useCampaignsController } from './use-campaigns-controller';
 
 export default function CampaignsPage() {
+    const router = useRouter();
     const {
         page,
         setPage,
@@ -216,6 +218,7 @@ export default function CampaignsPage() {
                                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                                 <Input
                                     placeholder="Search campaigns..."
+                                    aria-label="Search campaigns"
                                     value={searchInput}
                                     onChange={(e) => setSearchInput(e.target.value)}
                                     className="w-full sm:w-64 pl-9 pr-10"
@@ -311,7 +314,7 @@ export default function CampaignsPage() {
                                             action={{
                                                 label: 'Create your first campaign',
                                                 onClick: () => {
-                                                    window.location.href = '/campaigns/new';
+                                                    router.push('/campaigns/new');
                                                 },
                                             }}
                                         />
@@ -391,7 +394,7 @@ export default function CampaignsPage() {
                                                     </DropdownMenuTrigger>
                                                     <DropdownMenuContent align="end">
                                                         <DropdownMenuItem
-                                                            onClick={() => window.location.href = `/campaigns/${campaign.id}`}
+                                                            onClick={() => router.push(`/campaigns/${campaign.id}`)}
                                                         >
                                                             <Eye className="mr-2 h-4 w-4" />
                                                             View Details
@@ -402,7 +405,7 @@ export default function CampaignsPage() {
                                                         </DropdownMenuItem>
                                                         {campaign.status === 'draft' && (
                                                             <DropdownMenuItem
-                                                                onClick={() => window.location.href = `/campaigns/${campaign.id}/edit`}
+                                                                onClick={() => router.push(`/campaigns/${campaign.id}/edit`)}
                                                             >
                                                                 <Pencil className="mr-2 h-4 w-4" />
                                                                 Edit

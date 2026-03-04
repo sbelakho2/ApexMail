@@ -1,8 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import Image from 'next/image';
 import { ChevronLeft, ChevronRight, Quote } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
@@ -56,7 +54,6 @@ const testimonials = [
 ];
 
 export function TestimonialsSection() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
  const [activeIndex, setActiveIndex] = useState(0);
 
  const nextTestimonial = () => {
@@ -74,7 +71,6 @@ export function TestimonialsSection() {
 
  return (
  <section
- ref={ref}
  className="py-20 lg:py-32 relative overflow-hidden bg-surface-50"
  role="region"
  aria-roledescription="carousel"
@@ -88,13 +84,9 @@ export function TestimonialsSection() {
  }}
  tabIndex={0}
  >
-      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  {/* Header */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="text-center mb-12"
- >
+ <div className="animate-in text-center mb-12">
  <h2 className="section-title mb-4">
             <span className="text-surface-900">Trusted by</span>{' '}
             <span className="text-brand-500">Developers Who Ship</span>
@@ -102,23 +94,11 @@ export function TestimonialsSection() {
  <p className="text-surface-600 text-[17px] max-w-2xl mx-auto leading-relaxed">
  Don&apos;t take our word for it. Here&apos;s what our customers have to say.
  </p>
- </motion.div>
+ </div>
 
  {/* Main Testimonial */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- className="p-8 lg:p-12 mb-10 bg-white rounded-lg border border-surface-200"
- >
- <AnimatePresence mode="wait">
- <motion.div
- key={activeIndex}
- initial={{ opacity: 0, x: 20 }}
- animate={{ opacity: 1, x: 0 }}
- exit={{ opacity: 0, x: -20 }}
- transition={{ duration: 0.3 }}
- >
+ <div className="animate-in delay-200 p-8 lg:p-12 mb-10 bg-white rounded-lg border border-surface-200">
+ <div key={activeIndex} className="animate-in">
  <div className="flex flex-col lg:flex-row gap-8 lg:gap-16">
  {/* Quote */}
  <div className="flex-1">
@@ -163,9 +143,9 @@ export function TestimonialsSection() {
  </div>
  </div>
  </div>
- </motion.div>
- </AnimatePresence>
- </motion.div>
+ </div>
+ 
+ </div>
 
  {/* Navigation */}
  <div className="flex items-center justify-between">

@@ -140,9 +140,15 @@ export default function ControlPlaneDashboard() {
         }
         loadStats();
         
-        // Auto-refresh every 30 seconds
-        const interval = setInterval(loadStats, 30000);
-        return () => clearInterval(interval);
+        // Auto-refresh every 2 minutes (middleware validates sessions per-request)
+        const interval = setInterval(loadStats, 120_000);
+        // Also refresh when user returns to tab
+        const handleFocus = () => loadStats();
+        window.addEventListener('focus', handleFocus);
+        return () => {
+            clearInterval(interval);
+            window.removeEventListener('focus', handleFocus);
+        };
     }, []);
 
     if (loading) {

@@ -6,6 +6,9 @@ import { SecurityIsolation } from '@/components/private-cloud/SecurityIsolation'
 import { DedicatedIPs } from '@/components/private-cloud/DedicatedIPs';
 import { PrivateCloudCTA } from '@/components/private-cloud/PrivateCloudCTA';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: 'Private Cloud | Your VPC, Your IP, Our Code',
   description:

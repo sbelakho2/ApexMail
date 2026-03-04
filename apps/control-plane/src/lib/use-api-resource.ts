@@ -31,6 +31,7 @@ export function useApiResource<T>(url: string, options: UseApiResourceOptions<T>
 
     const refetch = useCallback(async () => {
         try {
+            setLoading(true);
             setError(null);
             const response = await fetch(url, { credentials });
             if (!response.ok) {

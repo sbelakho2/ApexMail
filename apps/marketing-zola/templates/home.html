@@ -1,0 +1,33 @@
+{# Home page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/home/hero.html" %}
+{% include "partials/home/features.html" %}
+
+{# LiveAPIConsole island mount point #}
+<section class="py-24 bg-surface-900">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div data-island="api-console" class="min-h-[24rem] bg-surface-800 rounded-xl"></div>
+  </div>
+</section>
+
+{% include "partials/home/comparison.html" %}
+{% include "partials/home/security.html" %}
+
+{# PricingCalculator island mount point #}
+<section class="py-24">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div data-island="pricing-calculator" class="min-h-[20rem]"></div>
+  </div>
+</section>
+
+{# Testimonials island mount point #}
+<section class="py-24 bg-surface-50">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div data-island="testimonials" class="min-h-[16rem]"></div>
+  </div>
+</section>
+
+{% include "partials/home/cta.html" %}
+{% endblock content %}

@@ -1,5 +1,8 @@
 import type { Metadata } from 'next';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
     title: 'Terms of Service',
     description: 'ApexMail Terms of Service — the agreement governing your use of our platform.',

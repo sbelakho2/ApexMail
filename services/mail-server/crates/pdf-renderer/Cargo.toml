@@ -1,0 +1,51 @@
+[package]
+name = "pdf-renderer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "ApexMail PDF generation service — Typst-powered rendering for invoices, DPAs, reports"
+
+[[bin]]
+name = "pdf-renderer"
+path = "src/bin/server.rs"
+
+[dependencies]
+# Typst compiler + PDF backend
+typst = "0.12"
+typst-pdf = "0.12"
+typst-syntax = "0.12"
+typst-library = "0.12"
+comemo = "0.4"
+
+# Async runtime
+tokio.workspace = true
+
+# HTTP server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging & Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+# Utils
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
+
+# CLI / config
+clap.workspace = true
+dotenvy.workspace = true

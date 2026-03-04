@@ -262,7 +262,7 @@
 
     /* Button Variants */
     .btn {
-        @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-md font-medium text-sm transition-all duration-150 ease-out min-h-[44px];
+        @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-md font-semibold text-sm transition-premium min-h-[44px];
         @apply focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2;
         @apply disabled:opacity-50 disabled:cursor-not-allowed;
     }

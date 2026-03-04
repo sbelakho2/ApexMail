@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { formatDate, truncate, cn } from '../../lib/utils';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * CRM Pipeline — Kanban-style lead management with persisted stage changes
@@ -177,9 +179,13 @@ export default function CRMPipelinePage() {
         );
 
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/crm/leads', {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 credentials: 'include',
                 body: JSON.stringify({
                     leadId: draggedLead.id,
@@ -220,9 +226,13 @@ export default function CRMPipelinePage() {
     async function confirmDelete() {
         if (!pendingDelete) return;
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/crm/leads', {
                 method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 credentials: 'include',
                 body: JSON.stringify({ leadId: pendingDelete.id }),
             });
@@ -246,21 +256,30 @@ export default function CRMPipelinePage() {
     // Improvement #40: Edit lead + save to backend
     async function saveEdit() {
         if (!selectedLead) return;
+        const previousLead = { ...selectedLead };
+        const previousLeads = leads.map(l => ({ ...l }));
         const updated = { ...selectedLead, ...editForm };
         setLeads(prev => prev.map(l => l.id === updated.id ? updated as Lead : l));
         setSelectedLead(updated as Lead);
         setEditMode(false);
 
         try {
-            await fetch('/api/crm/leads', {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/api/crm/leads', {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 credentials: 'include',
                 body: JSON.stringify({ leadId: updated.id, ...editForm }),
             });
+            if (!res.ok) throw new Error(`Server returned ${res.status}`);
             addToast('success', `${updated.companyName} updated.`);
         } catch {
-            addToast('error', 'Failed to save changes.');
+            setLeads(previousLeads);
+            setSelectedLead(previousLead);
+            addToast('error', 'Failed to save changes. Changes have been reverted.');
         }
     }
 
@@ -268,9 +287,13 @@ export default function CRMPipelinePage() {
     async function handleAddLead() {
         if (!addForm.companyName || !addForm.domain) return;
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/crm/leads', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 credentials: 'include',
                 body: JSON.stringify(addForm),
             });
@@ -323,11 +346,7 @@ export default function CRMPipelinePage() {
     }
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading CRM data..." />;
     }
 
     const pipelineValue = leads

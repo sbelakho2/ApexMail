@@ -1,15 +1,23 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Bot, Loader2, Send, X } from '@/components/ui/icons';
+import { Loader2, Send, User, X } from '@/components/ui/icons';
+import { getCsrfToken } from '@/hooks/use-api';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const ASSISTANT_NAME = 'Ava';
+const ASSISTANT_FULL_NAME = 'Ava from ApexMail Support';
+const ASSISTANT_FACE = '👩‍💼';
 
 async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${endpoint}`, {
+  const csrfToken = await getCsrfToken();
+  const res = await fetch(endpoint, {
     ...options,
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+      ...options?.headers,
+    },
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
@@ -41,7 +49,7 @@ function findLocalAnswer(text: string): string | null {
 export function SupportChatbotWidget({ onCreateTicket }: { onCreateTicket: () => void }) {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<{ role: 'user' | 'bot'; content: string }[]>([
-    { role: 'bot', content: 'Hi! 👋 I\'m the ApexMail support bot. Ask me about domains, deliverability, billing, templates, and more!' },
+    { role: 'bot', content: `Hi! ${ASSISTANT_FACE} I\'m ${ASSISTANT_NAME}. I can help with domains, deliverability, billing, templates, and more.` },
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -53,13 +61,25 @@ export function SupportChatbotWidget({ onCreateTicket }: { onCreateTicket: () =>
     if (!input.trim() || loading) return;
     const question = input.trim();
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: question }]);
+    const updatedMessages = [...messages, { role: 'user' as const, content: question }];
+    setMessages(updatedMessages);
     setLoading(true);
 
     try {
+      // Send conversation history for context
+      const conversationHistory = updatedMessages.slice(-10).map(m => ({
+        role: m.role,
+        content: m.content,
+      }));
+
       const res = await apiCall<{ reply: string; escalated: boolean }>('/v1/support/tickets/chatbot-general', {
         method: 'POST',
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({
+          question,
+          conversationHistory,
+          assistantName: ASSISTANT_FULL_NAME,
+          channel: 'help_widget',
+        }),
       });
       setMessages(prev => [...prev, {
         role: 'bot',
@@ -69,7 +89,7 @@ export function SupportChatbotWidget({ onCreateTicket }: { onCreateTicket: () =>
       const answer = findLocalAnswer(question);
       setMessages(prev => [...prev, {
         role: 'bot',
-        content: answer || "I couldn't find an answer to that. Would you like to create a support ticket so our team can help?",
+        content: answer || `I couldn't find an exact answer right away. I can open a support ticket so a specialist can jump in.`,
       }]);
     } finally {
       setLoading(false);
@@ -83,16 +103,16 @@ export function SupportChatbotWidget({ onCreateTicket }: { onCreateTicket: () =>
         className="fixed bottom-6 right-6 z-50 h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-lg hover:bg-primary/90 transition-all flex items-center justify-center"
         aria-label="Toggle chat"
       >
-        {isOpen ? <X className="h-6 w-6" /> : <Bot className="h-6 w-6" />}
+        {isOpen ? <X className="h-6 w-6" /> : <User className="h-6 w-6" />}
       </button>
 
       {isOpen && (
         <div className="fixed bottom-24 right-6 z-50 w-96 max-w-[calc(100vw-3rem)] bg-card border border-border rounded-2xl shadow-2xl flex flex-col overflow-hidden h-[480px]">
           <div className="bg-primary text-primary-foreground px-4 py-3 flex items-center gap-3">
-            <Bot className="h-5 w-5" />
+            <span aria-hidden="true" className="text-base leading-none">{ASSISTANT_FACE}</span>
             <div>
-              <div className="font-semibold text-sm">ApexMail Support Bot</div>
-              <div className="text-xs opacity-80">Ask me anything</div>
+              <div className="font-semibold text-sm">{ASSISTANT_NAME} · Support Assistant</div>
+              <div className="text-xs opacity-80">Human-style help, powered by ApexMail AI</div>
             </div>
           </div>
 

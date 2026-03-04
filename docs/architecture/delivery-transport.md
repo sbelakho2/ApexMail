@@ -1,59 +1,86 @@
 # Delivery Transport Architecture
 
-> Last updated: 2026-02-27
+> Last updated: 2026-03-02
 
-This document describes how ApexMail delivers outbound email. The platform supports two transport modes, selected at startup via the `EMAIL_TRANSPORT_TYPE` environment variable.
+This document describes how ApexMail delivers outbound email using a **hybrid per-message routing** architecture. Both AWS SES (shared pool) and self-hosted SMTP (dedicated IPs via Hetzner) are always available — the `TransportRouter` decides per-message which path to use.
 
 ---
 
-## Transport Selection
+## Core Principle
 
-| Value | Transport | Description |
-|-------|-----------|-------------|
-| `ses` (default) | AWS SES v2 API | Emails are submitted to SES via the `SendEmail` API with raw MIME. SES handles TLS negotiation, retry, and IP management. |
-| `smtp` | Self-hosted SMTP | Emails are sent directly to recipient MX servers from the worker's outbound IP pool using `lettre`. |
+| Path | Provider | Transport | When Used |
+|------|----------|-----------|-----------|
+| **Shared sending** | AWS SES | SES API (`SendRawEmail`) | Default for all tenants without dedicated IPs |
+| **Dedicated IPs** | Hetzner Cloud | Self-hosted SMTP (outbound-queue) | When tenant has active/warming dedicated IPs |
+
+There is **no provider choice** for dedicated IPs. Dedicated IPs are **always** Hetzner floating IPs. Shared sending is **always** AWS SES. A tenant can use **both paths simultaneously** — shared for overflow/warmup and dedicated for primary sending.
+
+---
+
+## Architecture
 
 ```text
-                  ┌───────────────────┐
-                  │   Email Queue     │
-                  │  (Redis / PG)     │
-                  └────────┬──────────┘
-                           │
-                    ┌──────▼──────┐
-                    │  Worker     │
-                    │  Processor  │
-                    └──────┬──────┘
-                           │
-              ┌────────────┼────────────┐
-              │                         │
-     EMAIL_TRANSPORT_TYPE          EMAIL_TRANSPORT_TYPE
-          = ses                        = smtp
-              │                         │
-     ┌────────▼────────┐      ┌────────▼────────┐
-     │  SesTransport   │      │  SmtpTransport   │
-     │  (aws-sdk-sesv2)│      │  (lettre)        │
-     └────────┬────────┘      └────────┬─────────┘
-              │                        │
-     ┌────────▼────────┐      ┌────────▼─────────┐
-     │  AWS SES API    │      │  Direct-to-MX    │
-     │  (SendEmail)    │      │  via IpPool      │
-     └────────┬────────┘      └────────┬─────────┘
-              │                        │
-              ▼                        ▼
-       Recipient MX              Recipient MX
+                          ┌───────────────────────────┐
+                          │       ApexMail API         │
+                          │  POST /v1/email/send       │
+                          └──────────┬────────────────┘
+                                     │
+                          ┌──────────▼────────────────┐
+                          │    TransportRouter         │
+                          │    (per-message decision)  │
+                          └──┬────────────────────┬───┘
+                             │                    │
+            Tenant has       │                    │  Tenant has
+            no dedicated IPs │                    │  dedicated IPs
+                             │                    │
+                  ┌──────────▼──────┐   ┌────────▼──────────┐
+                  │  SES Transport  │   │  SMTP Transport    │
+                  │  (shared pool)  │   │  (Hetzner IPs)     │
+                  └──────┬──────────┘   └────────┬───────────┘
+                         │                       │
+              ┌──────────▼──────────┐ ┌──────────▼──────────┐
+              │  AWS SES            │ │  Hetzner MTA Server  │
+              │  Shared IP Pool     │ │  Floating IPs        │
+              │  Easy DKIM          │ │  Self-signed DKIM    │
+              │  SNS bounce/compl.  │ │  Direct bounce parse │
+              └─────────────────────┘ └──────────────────────┘
 ```
 
 ---
 
-## SES Transport (Default)
+## TransportRouter
+
+The `TransportRouter` makes a **per-message decision** based on a single question:
+
+> **Does this tenant have any active or warming dedicated IPs?**
+
+| Answer | Action |
+|--------|--------|
+| **Yes** | Route via self-hosted SMTP, bind to the best available dedicated IP |
+| **No**  | Route via SES shared IP pool |
+
+### Key Characteristics
+
+- **Both transports always initialized**: SES and SMTP transports are created at startup and remain available.
+- **No `EMAIL_TRANSPORT_TYPE` toggle for routing**: The presence of dedicated IPs is the sole determinant.
+- **Per-message, not per-tenant**: Each message is routed independently, allowing warmup overflow to SES.
+
+### Routing Cache
+
+The `transport_routing_cache` table is maintained by a PostgreSQL trigger (`trg_update_transport_routing`) that fires on every `INSERT`, `UPDATE`, or `DELETE` on the `dedicated_ips` table. The router reads this cache (refreshed every 30 seconds in-memory) so routing decisions are O(1).
+
+---
+
+## SES Transport (Shared Pool)
 
 ### How It Works
 
 1. Worker picks a queued message from the email queue.
-2. `SesTransport` calls `ses_client.send_email()` with `RawMessage` (full MIME envelope).
-3. SES validates the sender identity, signs with Easy DKIM (2048-bit RSA), and delivers to the recipient MX.
-4. Delivery events (bounce, complaint, delivery) are published to an SNS topic.
-5. The SNS topic posts to our webhook endpoint (`POST /v1/ses/notifications`).
+2. `TransportRouter` checks routing cache — tenant has no dedicated IPs.
+3. `SesTransport` calls `ses_client.send_email()` with `RawMessage` (full MIME envelope).
+4. SES validates the sender identity, signs with Easy DKIM (2048-bit RSA), and delivers to the recipient MX.
+5. Delivery events (bounce, complaint, delivery) are published to an SNS topic.
+6. The SNS topic posts to our webhook endpoint (`POST /v1/ses/notifications`).
 
 ### Key Configuration
 
@@ -64,71 +91,95 @@ This document describes how ApexMail delivers outbound email. The platform suppo
 | `AWS_DEFAULT_REGION` | SES region (e.g. `eu-west-1`) |
 | `SES_CONFIGURATION_SET` | Configuration set for tracking |
 
-### Dedicated IPs (SES)
-
-Dedicated IPs are provisioned through the SES API (`ses:CreateDedicatedIpPool`, `ses:PutDedicatedIpInPool`). Cost: $24.95/mo per IP, plan-gated (see [pricing](../pricing.md)). SES manages warmup automatically.
-
 ### Benefits
 
 - No port 25 egress required on infrastructure
-- AWS handles IP reputation, warmup, and TLS negotiation
+- AWS handles IP reputation and TLS negotiation
 - Built-in bounce/complaint feedback via SNS
 - Scales to millions of emails with no infrastructure changes
+- Zero warmup needed — immediate sending
 
 ---
 
-## Self-Hosted SMTP Transport (Opt-In)
+## SMTP Transport (Dedicated IPs via Hetzner)
 
 ### How It Works
 
 1. Worker picks a queued message from the email queue.
-2. `SmtpTransport` resolves recipient MX records via DNS.
-3. The outbound-queue's `SmtpSender` selects an IP from `IpPool` (round-robin, warmup-aware).
-4. Email is sent directly to the recipient MX with STARTTLS, binding to the selected source IP.
-5. Delivery confirmation (SMTP 250 OK) or DSN bounce is processed inline.
+2. `TransportRouter` checks routing cache — tenant has dedicated IPs.
+3. `SmtpTransport` resolves recipient MX records via DNS.
+4. The outbound-queue's `SmtpSender` selects a Hetzner floating IP (round-robin, warmup-aware).
+5. Email is sent directly to the recipient MX with STARTTLS, binding to the selected source IP.
+6. Delivery confirmation (SMTP 250 OK) or DSN bounce is processed inline.
 
 ### Key Configuration
 
-| Variable | Description |
-|----------|-------------|
-| `EMAIL_TRANSPORT_TYPE` | Must be `smtp` |
-| `OUTBOUND_IPS` | Comma-separated list of outbound IPs |
-| `SMTP_HOST` / `SMTP_PORT` | Relay host (if using a relay instead of direct-to-MX) |
-| `WARMUP_ENABLED` | Enable IP warmup engine |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `HETZNER_API_TOKEN` | Yes | Hetzner Cloud API token for IP management |
+| `HETZNER_DEFAULT_LOCATION` | No | Default datacenter (default: `fsn1`) |
+| `HETZNER_MTA_SERVER_ID` | No | Server ID for IP assignment (single-server mode) |
 
-### IP Warmup
+### Dedicated IP Lifecycle
 
-The built-in warmup engine gradually increases volume per IP:
+Dedicated IPs are provisioned automatically when a tenant upgrades to a plan with dedicated IPs:
 
-| Day Range | Max Emails/Day/IP |
-|-----------|-------------------|
-| 1–3 | 100 |
-| 4–7 | 500 |
-| 8–14 | 2,000 |
-| 15–30 | 10,000 |
-| 31+ | Unlimited |
+1. **Billing webhook** triggers `POST /v1/dedicated-ips`
+2. **DedicatedIpProvider** creates a Hetzner floating IP via Cloud API
+3. IP is assigned to an MTA server with reverse DNS set
+4. **DB trigger** updates `transport_routing_cache`
+5. **TransportRouter** picks up the change on next cache refresh
+6. Tenant email automatically routes via SMTP
+
+### IP Warmup (45-day schedule)
+
+New dedicated IPs start in `warming` status with graduated send volume:
+
+| Day | Daily limit |
+|-----|-------------|
+| 0-1 | 50 |
+| 2-3 | 100 |
+| 4-5 | 250 |
+| 6-7 | 500 |
+| 8-10 | 1,000 |
+| 11-14 | 2,500 |
+| 15-20 | 5,000 |
+| 21-28 | 10,000 |
+| 29-35 | 25,000 |
+| 36-44 | 50,000 |
+| 45+ | Unlimited |
+
+> **During warmup**, messages exceeding the daily limit overflow to SES shared sending. This ensures deliverability is never blocked.
 
 ### DNSBL Monitoring
 
-When self-hosted SMTP is active, the DNSBL background monitor checks all outbound IPs against 10 blocklist zones every 5 minutes. Blocked IPs are automatically removed from the rotation pool.
+The DNSBL background monitor checks all dedicated IPs against 10 blocklist zones every 15 minutes. Blocked IPs trigger an alert and can be automatically removed from rotation.
 
 ### Benefits
 
-- Full control over sending infrastructure
-- No dependency on external cloud services
-- Lower marginal cost at very high volumes (>1.5M emails/month)
+- Full control over sending IP reputation
+- Consistent sender identity for high-volume tenants
+- ~$4/month per IP (Hetzner floating IP) vs $24.95 (AWS SES dedicated IP)
+- Direct-to-MX delivery with custom DKIM signing
 
 ---
 
-## Switching Transports
+## Bounce & Complaint Handling
 
-To switch from SES to SMTP (or vice versa), change `EMAIL_TRANSPORT_TYPE` and restart the worker process. No database migration is required. Both transports write to the same event tables, so analytics and webhook delivery remain consistent.
+| Path | Bounce Source | Complaint Source |
+|------|---------------|------------------|
+| **SES** | SNS webhook → `/v1/ses/notifications` | SNS webhook (complaint feedback) |
+| **Hetzner SMTP** | SMTP DSN → `self_hosted_bounces` table | ARF reports → `self_hosted_complaints` table |
+
+Both paths update the same `email_events` table and trigger the same tenant webhooks — analytics remain consistent regardless of transport.
 
 ---
 
 ## Related Documents
 
+- [Hybrid Email Infrastructure](hybrid-email-infrastructure.md) — detailed architecture reference
 - [ADR 0011 — Dual Delivery: SES Primary](../adr/0011-dual-delivery-ses-primary.md)
-- [SES Tool Contract](../tool-contracts/ses.md)
-- [MTA Configuration](mta-configuration.md) (inbound only)
+- [Hetzner Tool Contract](../tool-contracts/hetzner.md) — dedicated IP management
+- [SES Tool Contract](../tool-contracts/ses.md) — shared pool configuration
+- [MTA Configuration](mta-configuration.md) — inbound only
 - [Configuration Reference](../deployment/configuration.md)

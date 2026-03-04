@@ -551,7 +551,7 @@ STRESS_TESTS = {
         {"q": "I'm on Pro. Can I set up inbound email parsing?",
          "checks": {"must_contain_any": ["Scale", "not available", "upgrade"]}},
         {"q": "How do I set up inbound email on my Scale account?",
-         "checks": {"must_contain_any": ["MX", "webhook", "inbound.apexmail.com"]}},
+         "checks": {"must_contain_any": ["MX", "webhook", "inbound.apexmail.ee"]}},
         {"q": "My inbound webhook is missing attachment data.",
          "checks": {"must_contain_any": ["size", "25 MB", "timeout", "encoding"]}},
     ],
@@ -645,7 +645,7 @@ STRESS_TESTS = {
     # ── 38. INCIDENT HANDLING (4 tests) ──────────────────────────────────
     "incident_handling": [
         {"q": "Is there an outage? My emails aren't going out.",
-         "checks": {"must_contain_any": ["status", "status.apexmail.com", "check", "diagnose"]}},
+         "checks": {"must_contain_any": ["status", "status.apexmail.ee", "check", "diagnose"]}},
         {"q": "The API has been slow all day. Is something wrong?",
          "checks": {"must_contain_any": ["status", "performance", "response time"]}},
         {"q": "I can't log in to the dashboard. Is it down?",

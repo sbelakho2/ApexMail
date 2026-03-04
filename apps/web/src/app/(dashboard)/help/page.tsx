@@ -4,14 +4,55 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   BookOpen, MessageSquare, Mail, Zap, Shield, Key, Plus,
   ChevronDown, ChevronRight, ArrowLeft, Clock,
-  AlertCircle, CheckCircle2, Loader2, Tag
+  AlertCircle, CheckCircle2, Loader2, Tag, Send, X
 } from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { formatDate } from '@/lib/utils';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { formatDate, sanitizeUserInput, getErrorMessage, reportClientError } from '@/lib/utils';
+import { getCsrfToken } from '@/hooks/use-api';
 import { SupportChatbotWidget } from './support-chatbot-widget';
+
+/* ------------------------------------------------------------------ */
+/*  API helper (with CSRF for mutations)                               */
+/* ------------------------------------------------------------------ */
+
+async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string> | undefined),
+  };
+
+  const method = (options?.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    const csrfToken = await getCsrfToken();
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken;
+    }
+  }
+
+  const res = await fetch(endpoint, {
+    ...options,
+    credentials: 'include',
+    headers,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(err.error?.message || err.message || 'API error');
+  }
+
+  return res.json();
+}
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -42,6 +83,10 @@ interface Ticket {
   messages: TicketMessage[];
 }
 
+const ASSISTANT_NAME = 'Ava';
+const ASSISTANT_LABEL = 'Ava from ApexMail Support';
+const ASSISTANT_FACE = '👩‍💼';
+
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
@@ -70,10 +115,10 @@ const PRIORITY_OPTIONS: { value: TicketPriority; label: string; color: string }[
 ];
 
 const resources = [
-  { icon: BookOpen, title: 'Documentation', description: 'Comprehensive guides for API integration and setup.', href: '/docs', color: 'text-primary bg-primary/10' },
-  { icon: Key, title: 'API Reference', description: 'Full REST API documentation with request/response examples.', href: '/docs/api', color: 'text-success bg-success/10' },
-  { icon: Zap, title: 'Quick Start Guide', description: 'Get up and running with ApexMail in under 5 minutes.', href: '/docs/quickstart', color: 'text-warning bg-warning/10' },
-  { icon: Shield, title: 'Security & Compliance', description: 'SPF, DKIM, DMARC setup and compliance best practices.', href: '/docs/security', color: 'text-info bg-info/10' },
+  { icon: BookOpen, title: 'Documentation', description: 'Comprehensive guides for API integration and setup.', href: 'https://docs.apexmail.ee', color: 'text-primary bg-primary/10' },
+  { icon: Key, title: 'API Reference', description: 'Full REST API documentation with request/response examples.', href: 'https://docs.apexmail.ee/api', color: 'text-success bg-success/10' },
+  { icon: Zap, title: 'Quick Start Guide', description: 'Get up and running with ApexMail in under 5 minutes.', href: 'https://docs.apexmail.ee/quickstart', color: 'text-warning bg-warning/10' },
+  { icon: Shield, title: 'Security & Compliance', description: 'SPF, DKIM, DMARC setup and compliance best practices.', href: 'https://docs.apexmail.ee/security', color: 'text-info bg-info/10' },
 ];
 
 const faqs = [
@@ -220,8 +265,8 @@ function CreateTicketDialog({
       const result = await apiCall<{ ticket: Ticket }>('/v1/support/tickets', {
         method: 'POST',
         body: JSON.stringify({
-          subject: subject.trim(),
-          description: description.trim(),
+          subject: sanitizeUserInput(subject.trim(), 200),
+          description: sanitizeUserInput(description.trim(), 5000),
           category,
           priority,
           attachments: attachments.map((file) => file.name),
@@ -236,7 +281,8 @@ function CreateTicketDialog({
       setUploadProgress(0);
       localStorage.removeItem(draftKey);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create ticket');
+      setError(getErrorMessage(err, 'Failed to create ticket'));
+      reportClientError(err, 'CreateTicketDialog.handleSubmit');
       setUploadProgress(0);
     } finally {
       setSubmitting(false);
@@ -397,6 +443,8 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
   const [closing, setClosing] = useState(false);
   const [reopening, setReopening] = useState(false);
   const [replyNotice, setReplyNotice] = useState('');
+  const [confirmAction, setConfirmAction] = useState<'close' | 'reopen' | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const latestMessageIdRef = useRef<string | null>(null);
 
@@ -435,17 +483,61 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
     if (!replyContent.trim() || sending) return;
     setSending(true);
     try {
+      const customerMessageContent = sanitizeUserInput(replyContent.trim(), 5000);
       const result = await apiCall<{ message: TicketMessage; botReply?: TicketMessage }>(
         `/v1/support/tickets/${ticket.id}/messages`,
-        { method: 'POST', body: JSON.stringify({ content: replyContent.trim() }) }
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            content: customerMessageContent,
+            requestBotReply: true,
+            assistantName: ASSISTANT_LABEL,
+            channel: 'support_ticket',
+          }),
+        }
       );
       const newMsgs = [result.message];
-      if (result.botReply) newMsgs.push(result.botReply);
+      if (result.botReply) {
+        newMsgs.push(result.botReply);
+      } else {
+        try {
+          const fallbackReply = await apiCall<{ reply: string; escalated?: boolean }>(
+            '/v1/support/tickets/chatbot-general',
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                question: customerMessageContent,
+                ticketId: ticket.id,
+                assistantName: ASSISTANT_LABEL,
+                channel: 'support_ticket_fallback',
+                conversationHistory: [...messages, result.message].slice(-10).map((entry) => ({
+                  role: entry.authorType === 'customer' ? 'user' : 'bot',
+                  content: entry.content,
+                })),
+              }),
+            }
+          );
+
+          if (fallbackReply.reply?.trim()) {
+            newMsgs.push({
+              id: `fallback-assistant-${Date.now()}`,
+              content: fallbackReply.reply,
+              author: ASSISTANT_LABEL,
+              authorType: 'bot',
+              createdAt: new Date().toISOString(),
+              attachments: [],
+            });
+            setReplyNotice(`${ASSISTANT_NAME} added an AI follow-up.`);
+          }
+        } catch {
+          // no-op: ticket message still succeeded
+        }
+      }
       setMessages(prev => [...prev, ...newMsgs]);
       setReplyContent('');
       onRefresh();
     } catch (err) {
-      console.error('Failed to send reply:', err);
+      setActionError('Failed to send reply. Please try again.');
     } finally {
       setSending(false);
     }
@@ -453,9 +545,10 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
 
   async function closeTicket() {
     if (ticketStatus === 'closed' || closing) return;
-    if (!window.confirm('Close this ticket? You can create a new ticket if you need more help.')) return;
 
     setClosing(true);
+    setConfirmAction(null);
+    setActionError(null);
     try {
       const result = await apiCall<{ ticket: Ticket }>(
         `/v1/support/tickets/${ticket.id}/close`,
@@ -465,7 +558,7 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
       setTicketStatus(result.ticket.status);
       onRefresh();
     } catch (err) {
-      console.error('Failed to close ticket:', err);
+      setActionError('Failed to close ticket. Please try again.');
     } finally {
       setClosing(false);
     }
@@ -473,9 +566,10 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
 
   async function reopenTicket() {
     if (ticketStatus !== 'closed' || reopening) return;
-    if (!window.confirm('Reopen this ticket?')) return;
 
     setReopening(true);
+    setConfirmAction(null);
+    setActionError(null);
     try {
       const result = await apiCall<{ ticket: Ticket }>(
         `/v1/support/tickets/${ticket.id}/reopen`,
@@ -485,7 +579,7 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
       setTicketStatus(result.ticket.status);
       onRefresh();
     } catch (err) {
-      console.error('Failed to reopen ticket:', err);
+      setActionError('Failed to reopen ticket. Please try again.');
     } finally {
       setReopening(false);
     }
@@ -502,12 +596,12 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
               <ArrowLeft className="h-4 w-4" />Back to tickets
             </button>
             {ticketStatus === 'closed' ? (
-              <Button variant="outline" onClick={reopenTicket} disabled={reopening}>
+              <Button variant="outline" onClick={() => setConfirmAction('reopen')} disabled={reopening}>
                 {reopening ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
                 Reopen Ticket
               </Button>
             ) : (
-              <Button variant="outline" onClick={closeTicket} disabled={closing}>
+              <Button variant="outline" onClick={() => setConfirmAction('close')} disabled={closing}>
                 {closing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
                 Close Ticket
               </Button>
@@ -546,7 +640,12 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
             }`}>
               <div className="flex items-center gap-2 mb-1">
                 <span className={`text-xs font-medium ${msg.authorType === 'customer' ? 'opacity-80' : 'text-muted-foreground'}`}>
-                  {msg.authorType === 'bot' && <Bot className="h-3 w-3 inline mr-1" />}{msg.author}
+                  {msg.authorType === 'bot' ? (
+                    <>
+                      <span aria-hidden="true" className="mr-1">{ASSISTANT_FACE}</span>
+                      {ASSISTANT_LABEL}
+                    </>
+                  ) : msg.author}
                 </span>
                 <span className={`text-xs ${msg.authorType === 'customer' ? 'opacity-60' : 'text-muted-foreground'}`}>{timeAgo(msg.createdAt)}</span>
               </div>
@@ -563,6 +662,13 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
             <div className="mb-3 rounded-md border border-primary/20 bg-primary/10 p-2 text-xs text-foreground flex items-center justify-between gap-2">
               <span>{replyNotice}</span>
               <button aria-label="Dismiss reply notice" className="text-primary hover:underline" onClick={() => setReplyNotice('')}>Dismiss</button>
+            </div>
+          ) : null}
+
+          {actionError ? (
+            <div className="mb-3 rounded-md border border-destructive/20 bg-destructive/10 p-2 text-xs text-destructive flex items-center justify-between gap-2">
+              <span>{actionError}</span>
+              <button aria-label="Dismiss error" className="text-destructive hover:underline" onClick={() => setActionError(null)}>Dismiss</button>
             </div>
           ) : null}
 
@@ -584,6 +690,25 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
           ) : null}
         </div>
       )}
+
+      <Dialog open={confirmAction !== null} onOpenChange={(open) => { if (!open) setConfirmAction(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{confirmAction === 'close' ? 'Close Ticket' : 'Reopen Ticket'}</DialogTitle>
+            <DialogDescription>
+              {confirmAction === 'close'
+                ? 'Are you sure you want to close this ticket? You can create a new ticket if you need more help.'
+                : 'Are you sure you want to reopen this ticket?'}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmAction(null)}>Cancel</Button>
+            <Button onClick={() => confirmAction === 'close' ? closeTicket() : reopenTicket()}>
+              {confirmAction === 'close' ? 'Close Ticket' : 'Reopen Ticket'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
@@ -638,7 +763,7 @@ export default function HelpPage() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Help & Support"
-        description="Get help, ask our bot, or create a support ticket."
+        description={`Get help from ${ASSISTANT_NAME}, or create a support ticket.`}
         breadcrumbs={[{ label: 'Help & Support' }]}
       />
 
@@ -671,12 +796,12 @@ export default function HelpPage() {
                 aria-label={r.title}
                 tabIndex={0}
                 onClick={() => {
-                  window.location.href = r.href;
+                  window.open(r.href, '_blank', 'noopener,noreferrer');
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    window.location.href = r.href;
+                    window.open(r.href, '_blank', 'noopener,noreferrer');
                   }
                 }}
               >
@@ -714,7 +839,7 @@ export default function HelpPage() {
                 <div className="rounded-lg bg-primary/10 p-3"><MessageSquare className="h-6 w-6 text-primary" /></div>
                 <div>
                   <h3 className="font-semibold">Need more help?</h3>
-                  <p className="text-sm text-muted-foreground">Create a ticket or chat with our support bot.</p>
+                  <p className="text-sm text-muted-foreground">Create a ticket or chat with {ASSISTANT_NAME}, your support assistant.</p>
                 </div>
               </div>
               <div className="flex gap-3">

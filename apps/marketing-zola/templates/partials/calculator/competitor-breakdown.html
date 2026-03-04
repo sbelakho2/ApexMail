@@ -1,0 +1,93 @@
+{# ── Competitor Breakdown ──────────────────────────────────────── #}
+{# Converted from calculator/CompetitorBreakdown.tsx              #}
+{# NOTE: was 'use client' — no runtime JS needed, pure data table #}
+
+<section class="py-20 lg:py-32 relative bg-white">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="text-center mb-16">
+      <h2 class="animate-in text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight">
+        Feature-by-Feature Comparison
+      </h2>
+      <p class="animate-in delay-100 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">
+        It&rsquo;s not just about price. See how ApexMail compares on features that matter.
+      </p>
+    </div>
+
+    <div class="animate-in delay-200 bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full table-fixed">
+          <thead>
+            <tr class="bg-surface-50 border-b border-surface-200">
+              <th class="text-left py-3 px-2 sm:px-4 text-[11px] sm:text-xs font-semibold text-surface-900">Feature</th>
+              <th class="text-center py-3 px-2 sm:px-3 text-[11px] sm:text-xs font-semibold text-primary-700 bg-primary-50/50">ApexMail</th>
+              <th class="text-center py-3 px-2 sm:px-3 text-[11px] sm:text-xs font-semibold text-surface-500">SendGrid</th>
+              <th class="text-center py-3 px-2 sm:px-3 text-[11px] sm:text-xs font-semibold text-surface-500">Mailchimp</th>
+              <th class="text-center py-3 px-2 sm:px-3 text-[11px] sm:text-xs font-semibold text-surface-500">AWS SES</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-surface-100">
+            {% set rows = [
+              {"feature": "Free tier", "apex": "3K/mo", "sg": "100/day", "mc": "500 contacts", "ses": "None (EC2 only)"},
+              {"feature": "Price per 100K emails", "apex": "$30", "sg": "$34.95", "mc": "~$100", "ses": "$10"},
+              {"feature": "Dedicated IPs", "apex": "Included (Pro+)", "sg": "$90/mo extra", "mc": "$29.95/mo extra", "ses": "$24.95/mo"},
+              {"feature": "Templates included", "apex": "yes", "sg": "yes", "mc": "yes", "ses": "no"},
+              {"feature": "A/B testing", "apex": "yes", "sg": "yes", "mc": "Paid plans", "ses": "no"},
+              {"feature": "Real-time analytics", "apex": "yes", "sg": "yes", "mc": "yes", "ses": "Basic only"},
+              {"feature": "Webhooks", "apex": "yes", "sg": "yes", "mc": "Paid plans", "ses": "yes"},
+              {"feature": "GDPR tools", "apex": "yes", "sg": "Manual", "mc": "yes", "ses": "no"},
+              {"feature": "Time-travel debugging", "apex": "yes", "sg": "no", "mc": "no", "ses": "no"},
+              {"feature": "Private cloud option", "apex": "Enterprise plan", "sg": "no", "mc": "no", "ses": "yes"},
+              {"feature": "Support", "apex": "Priority+ (Growth+)", "sg": "Email only", "mc": "Email only", "ses": "Paid support"},
+              {"feature": "Uptime SLA", "apex": "99.9% (Scale+)", "sg": "99.95%", "mc": "None", "ses": "99.9%"}
+            ] %}
+            {% for row in rows %}
+            <tr class="hover:bg-surface-50/50 transition-colors group">
+              <td class="py-3 px-2 sm:px-4 text-xs sm:text-sm font-medium text-surface-900 break-words">{{ row.feature }}</td>
+              <td class="py-3 px-2 sm:px-3 text-center bg-primary-50/20 group-hover:bg-primary-50/40 transition-colors">
+                {% if row.apex == "yes" %}
+                <svg class="w-5 h-5 text-emerald-600 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                {% elif row.apex == "no" %}
+                <div class="w-1.5 h-1.5 rounded-full bg-surface-200 mx-auto"></div>
+                {% else %}
+                <span class="text-surface-700 text-sm font-medium">{{ row.apex }}</span>
+                {% endif %}
+              </td>
+              {% for val in [row.sg, row.mc, row.ses] %}
+              <td class="py-3 px-2 sm:px-3 text-center">
+                {% if val == "yes" %}
+                <svg class="w-5 h-5 text-emerald-600 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                {% elif val == "no" %}
+                <div class="w-1.5 h-1.5 rounded-full bg-surface-200 mx-auto"></div>
+                {% elif val is containing("None") or val is containing("Manual") %}
+                <span class="text-surface-400 flex items-center justify-center gap-1.5 font-medium">
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                  <span class="text-xs">{{ val }}</span>
+                </span>
+                {% else %}
+                <span class="text-surface-700 text-sm font-medium">{{ val }}</span>
+                {% endif %}
+              </td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="animate-in delay-400 flex flex-wrap justify-center gap-8 mt-8">
+      <div class="flex items-center gap-2 text-xs font-medium text-surface-500">
+        <svg class="w-4 h-4 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        <span>Included</span>
+      </div>
+      <div class="flex items-center gap-2 text-xs font-medium text-surface-500">
+        <div class="w-1.5 h-1.5 rounded-full bg-surface-300"></div>
+        <span>Not included</span>
+      </div>
+      <div class="flex items-center gap-2 text-xs font-medium text-surface-500">
+        <svg class="w-4 h-4 text-surface-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span>Limited or Paid add-on</span>
+      </div>
+    </div>
+  </div>
+</section>

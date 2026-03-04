@@ -1,12 +1,8 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { History, Layers, GitBranch, Eye } from '@/components/ui/icons';
 
 export function RenderHistory() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   const historyFeatures = [
     {
       icon: Layers,
@@ -70,45 +66,25 @@ export function RenderHistory() {
   ];
 
   return (
-    <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+    <section className="py-20 lg:py-32 relative bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-16">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4"
-          >
+          <div className="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4">
             <History className="w-4 h-4 text-surface-500" />
             Render History
-          </motion.div>
-          <motion.h2
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.1 }}
-            className="text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight"
-          >
+          </div>
+          <h2 className="animate-in delay-100 text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight">
             90 Days of Perfect Memory
           </motion.h2>
-          <motion.p
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.2 }}
-            className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium"
-          >
+          <p className="animate-in delay-200 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium">
             Every email render is captured and stored. Query, compare, and analyze 
             across your entire sending history.
-          </motion.p>
+          </p>
         </div>
 
         <div className="space-y-8">
           {historyFeatures.map((feature, index) => (
-            <motion.div
-              key={feature.title}
-              initial={{ opacity: 0, y: 20 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: 0.1 * index }}
-              className="bg-white border border-surface-200 shadow-sm rounded-lg p-10"
-            >
+            <div key={feature.title} className="animate-in delay-100 bg-white border border-surface-200 shadow-sm rounded-lg p-10">
               <div className="grid lg:grid-cols-2 gap-12 items-start">
                 {/* Info */}
                 <div className={index % 2 === 1 ? 'lg:order-2' : ''}>
@@ -128,7 +104,7 @@ export function RenderHistory() {
                   </div>
                 </div>
               </div>
-            </motion.div>
+            </div>
           ))}
         </div>
       </div>

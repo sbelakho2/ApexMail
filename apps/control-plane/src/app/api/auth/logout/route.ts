@@ -1,21 +1,14 @@
 /**
  * Control Plane Logout API Route
+ *
+ * Proxied to Rust control-plane service — session invalidation
+ * and cookie clearing now handled server-side in Rust.
  */
 
-import { NextResponse } from 'next/server';
+import { proxyToRust } from '@/lib/rust-api';
 
-const CONTROL_PLANE_SESSION_COOKIE = 'cp_session';
-
-export async function POST() {
-    const response = NextResponse.json({ 
-        success: true,
-        message: 'Logged out successfully',
-    });
-    
-    // Clear the session cookie
-    response.cookies.delete(CONTROL_PLANE_SESSION_COOKIE);
-    
-    return response;
+export async function POST(request: Request) {
+    return proxyToRust(request, '/v1/admin/auth/logout');
 }
 
 // FIX-500-030: GET logout removed — enables CSRF via <img src="/api/auth/logout">.

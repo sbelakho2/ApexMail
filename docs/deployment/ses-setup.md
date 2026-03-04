@@ -1,8 +1,10 @@
 # AWS SES Setup Guide
 
-> Last updated: 2026-02-27
+> Last updated: 2026-03-02
 
-Step-by-step guide to configuring AWS SES as the outbound delivery transport for ApexMail.
+Step-by-step guide to configuring AWS SES for **shared-pool email delivery** in ApexMail.
+
+> **Note:** Dedicated IPs are provisioned via Hetzner Cloud, not SES. See [Hetzner Tool Contract](../tool-contracts/hetzner.md) for dedicated IP setup.
 
 ---
 
@@ -40,18 +42,6 @@ Create a dedicated IAM user (e.g. `apexmail-ses`) with the following policy:
       "Resource": "*"
     },
     {
-      "Sid": "ApexMailDedicatedIPs",
-      "Effect": "Allow",
-      "Action": [
-        "ses:CreateDedicatedIpPool",
-        "ses:DeleteDedicatedIpPool",
-        "ses:PutDedicatedIpInPool",
-        "ses:GetDedicatedIps",
-        "ses:PutAccountDedicatedIpWarmupAttributes"
-      ],
-      "Resource": "*"
-    },
-    {
       "Sid": "ApexMailSNS",
       "Effect": "Allow",
       "Action": [
@@ -63,6 +53,8 @@ Create a dedicated IAM user (e.g. `apexmail-ses`) with the following policy:
   ]
 }
 ```
+
+> **Note:** Dedicated IP permissions are no longer needed. Dedicated IPs are provisioned via Hetzner Cloud API.
 
 Save the access key and secret key.
 
@@ -158,17 +150,18 @@ For each sending domain, add:
 
 ---
 
-## 7. Dedicated IPs (Optional)
+## 7. Dedicated IPs
 
-Available from the **Pro** plan onwards. Dedicated IPs are auto-provisioned when a customer upgrades their plan (handled by the billing service's Stripe webhook).
+> **Dedicated IPs are no longer provisioned via SES.**
 
-To provision manually:
+Dedicated IPs are managed via Hetzner Cloud floating IPs for cost efficiency (~$4/mo vs $24.95/mo) and full control over rDNS.
 
-```bash
-aws sesv2 create-dedicated-ip-pool --pool-name tenant-TENANT_ID
-```
+See:
+- [Hetzner Tool Contract](../tool-contracts/hetzner.md) for Hetzner Cloud API configuration
+- [Hybrid Email Infrastructure](../architecture/hybrid-email-infrastructure.md) for architecture overview
+- [Delivery Transport](../architecture/delivery-transport.md) for routing details
 
-Cost: $24.95/month per IP (billed by AWS).
+Dedicated IPs are auto-provisioned when a customer upgrades their plan (handled by the billing service's Stripe webhook).
 
 ---
 

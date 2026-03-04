@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { cn, formatDate } from '../../lib/utils';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { useDialog } from '../../components/ui/confirm-dialog';
+import { PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * Lead Discovery — Real API-driven lead scraping and prospecting
@@ -59,6 +62,7 @@ const CATEGORIES = [
 ];
 
 export default function LeadDiscoveryPage() {
+    const dialog = useDialog();
     const [sources, setSources] = useState<DiscoverySource[]>([]);
     const [discoveredLeads, setDiscoveredLeads] = useState<DiscoveredLead[]>([]);
     const [selectedCategories, setSelectedCategories] = useState<string[]>(['Email Marketing', 'Newsletter Platforms']);
@@ -107,9 +111,13 @@ export default function LeadDiscoveryPage() {
         setDiscoveryProgress(`Scraping ${enabledSources.length} sources across ${selectedCategories.length} categories...`);
 
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/sales/discovery/run', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 credentials: 'include',
                 body: JSON.stringify({
                     sources: enabledSources.map(s => s.id),
@@ -181,9 +189,13 @@ export default function LeadDiscoveryPage() {
             const lead = discoveredLeads.find(l => l.id === leadId);
             if (!lead) return;
 
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/crm/leads', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 credentials: 'include',
                 body: JSON.stringify({
                     leadId: lead.id,
@@ -212,30 +224,51 @@ export default function LeadDiscoveryPage() {
 
     async function importAllLeads() {
         const unimported = discoveredLeads.filter(l => !l.imported);
-        let successCount = 0;
+        if (unimported.length === 0) return;
 
-        for (const lead of unimported) {
-            try {
-                const response = await fetch('/api/crm/leads', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'include',
-                    body: JSON.stringify({
-                        leadId: lead.id,
-                        companyName: lead.companyName,
-                        domain: lead.domain,
-                        source: lead.source,
-                        category: lead.category,
-                    }),
-                });
-                if (response.ok) {
+        const confirmed = await dialog.confirm({
+            title: 'Import All Leads',
+            message: `Import ${unimported.length} lead(s) to CRM? This will create new CRM records for each.`,
+            confirmLabel: 'Import All',
+            variant: 'default',
+        });
+        if (!confirmed) return;
+
+        let successCount = 0;
+        const BATCH_SIZE = 10;
+
+        for (let i = 0; i < unimported.length; i += BATCH_SIZE) {
+            const batch = unimported.slice(i, i + BATCH_SIZE);
+            const results = await Promise.allSettled(
+                batch.map(async (lead) => {
+                    const csrfToken = await getCsrfToken();
+                    const response = await fetch('/api/crm/leads', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                        },
+                        credentials: 'include',
+                        body: JSON.stringify({
+                            leadId: lead.id,
+                            companyName: lead.companyName,
+                            domain: lead.domain,
+                            source: lead.source,
+                            category: lead.category,
+                        }),
+                    });
+                    if (!response.ok) throw new Error(`Import failed: ${response.status}`);
+                    return lead.id;
+                }),
+            );
+            for (const result of results) {
+                if (result.status === 'fulfilled') {
                     successCount++;
+                    const id = result.value;
                     setDiscoveredLeads(prev => prev.map(l =>
-                        l.id === lead.id ? { ...l, imported: true } : l
+                        l.id === id ? { ...l, imported: true } : l
                     ));
                 }
-            } catch {
-                // Continue importing remaining leads
             }
         }
 
@@ -243,11 +276,7 @@ export default function LeadDiscoveryPage() {
     }
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading leads..." />;
     }
 
     const unimportedCount = discoveredLeads.filter(l => !l.imported).length;

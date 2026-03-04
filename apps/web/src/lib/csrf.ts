@@ -25,9 +25,11 @@ function getCsrfSecret(): string | null {
     return null;
 }
 
-export async function createCsrfToken(secret: string): Promise<{ token: string; signature: string }> {
+export async function createCsrfToken(secret: string, sessionBinding?: string): Promise<{ token: string; signature: string }> {
     const token = generateRandomBase64Url(32);
-    const signature = await hmacSha256Base64Url(secret, token);
+    // Bind CSRF token to the current session to prevent token fixation attacks
+    const signPayload = sessionBinding ? `${token}.${sessionBinding}` : token;
+    const signature = await hmacSha256Base64Url(secret, signPayload);
     return { token, signature };
 }
 
@@ -67,7 +69,10 @@ export async function validateCsrf(request: NextRequest): Promise<{ ok: boolean;
         };
     }
 
-    const expectedSig = await hmacSha256Base64Url(secret, cookieToken);
+    // Bind verification to session cookie (if present) to prevent token fixation
+    const sessionCookie = request.cookies.get('am_session')?.value;
+    const signPayload = sessionCookie ? `${cookieToken}.${sessionCookie}` : cookieToken;
+    const expectedSig = await hmacSha256Base64Url(secret, signPayload);
     if (!constantTimeEqual(expectedSig, cookieSig)) {
         return {
             ok: false,
@@ -81,7 +86,7 @@ export async function validateCsrf(request: NextRequest): Promise<{ ok: boolean;
     return { ok: true };
 }
 
-export async function buildCsrfResponse(): Promise<NextResponse> {
+export async function buildCsrfResponse(request?: NextRequest): Promise<NextResponse> {
     const secret = getCsrfSecret();
     if (!secret) {
         return NextResponse.json(
@@ -90,10 +95,13 @@ export async function buildCsrfResponse(): Promise<NextResponse> {
         );
     }
 
-    const { token, signature } = await createCsrfToken(secret);
+    // Bind CSRF token to current session (if authenticated)
+    const sessionBinding = request?.cookies.get('am_session')?.value;
+    const { token, signature } = await createCsrfToken(secret, sessionBinding);
 
-    // SEC-007 FIX: Add explicit domain to prevent subdomain cookie access
-    const cookieDomain = process.env.NODE_ENV === 'production' ? 'apexmail.ee' : undefined;
+    // SEC-007 FIX: Omit `domain` attribute so cookies are scoped to the exact
+    // hostname ("host-only" cookie).  Setting `domain: 'apexmail.ee'` would
+    // *enable* access from every subdomain — the opposite of what we want.
 
     const response = NextResponse.json({ token });
     response.cookies.set(CSRF_COOKIE, token, {
@@ -102,7 +110,6 @@ export async function buildCsrfResponse(): Promise<NextResponse> {
         sameSite: 'strict',
         path: '/',
         maxAge: 60 * 60 * 2,
-        domain: cookieDomain,
     });
     response.cookies.set(CSRF_SIG_COOKIE, signature, {
         httpOnly: true,
@@ -110,7 +117,6 @@ export async function buildCsrfResponse(): Promise<NextResponse> {
         sameSite: 'strict',
         path: '/',
         maxAge: 60 * 60 * 2,
-        domain: cookieDomain,
     });
 
     return response;

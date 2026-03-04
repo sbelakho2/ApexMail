@@ -2,6 +2,7 @@
 //!
 //! This module handles the email sending pipeline:
 //! - SMTP/SES transport abstraction
+//! - Hybrid routing: dedicated IPs → self-hosted, shared → SES
 //! - DKIM signing
 //! - Tracking pixel/link injection
 //! - IP warmup schedule enforcement
@@ -11,11 +12,13 @@
 mod processor;
 mod tracking;
 mod transport;
+mod transport_router;
 mod types;
 
 pub use processor::EmailProcessor;
 pub use tracking::{add_tracking_pixel, encode_tracking_id, rewrite_links, TrackingPayload};
 pub use transport::{create_transport, create_transport_from_config, EmailTransport, SesTransport, SmtpTransport};
+pub use transport_router::{OutboundQueueEvent, RoutingTransport, TransportRouter};
 pub use types::{
     Attachment, CachedSuppression, DkimConfig, Domain, EmailJob, PreparedEmail, RateLimitResult,
     SendOutcome, SendResult, Suppression, WarmupLimits,

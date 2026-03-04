@@ -1,6 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
 import { Search, Clock, Eye, Bug } from '@/components/ui/icons';
 import Link from 'next/link';
 
@@ -11,42 +8,23 @@ export function ForensicHero() {
         <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
           {/* Left - Copy */}
           <div>
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-6"
-            >
+            <div className="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-6">
               <Bug className="w-4 h-4 text-surface-500" />
               Forensic Debugging
-            </motion.div>
+            </div>
 
-            <motion.h1
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-              className="text-4xl lg:text-6xl font-semibold text-surface-900 mb-6 leading-tight tracking-tight"
-            >
+            <h1 className="animate-in delay-100 text-4xl lg:text-6xl font-semibold text-surface-900 mb-6 leading-tight tracking-tight">
               Time Travel
               <br />
               <span className="text-primary-600">for Email</span>
             </motion.h1>
 
-            <motion.p
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2 }}
-              className="text-xl text-surface-600 mb-10 leading-relaxed font-medium"
-            >
+            <p className="animate-in delay-200 text-xl text-surface-600 mb-10 leading-relaxed font-medium">
               See exactly what your recipient saw. Every render, every client, every version. 
               Debug rendering issues before they become support tickets.
-            </motion.p>
+            </p>
 
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.3 }}
-              className="flex flex-col sm:flex-row gap-4"
-            >
+            <div className="animate-in delay-300 flex flex-col sm:flex-row gap-4">
               <Link
                 href="/signup"
                 className="btn-primary text-lg px-8 py-4"
@@ -59,15 +37,10 @@ export function ForensicHero() {
               >
                 View Documentation
               </Link>
-            </motion.div>
+            </div>
 
             {/* Stats */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.4 }}
-              className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200"
-            >
+            <div className="animate-in delay-400 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200">
               {[
                 { value: '90 days', label: 'Render History' },
                 { value: '50+', label: 'Email Clients' },
@@ -78,16 +51,11 @@ export function ForensicHero() {
                   <div className="text-xs font-medium text-surface-500">{stat.label}</div>
                 </div>
               ))}
-            </motion.div>
+            </div>
           </div>
 
           {/* Right - Visual */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.2 }}
-            className="relative"
-          >
+          <div className="animate-in delay-200 relative">
             <div className="bg-white border border-surface-200 shadow-sm rounded-2xl p-8">
               {/* Timeline Header */}
               <div className="flex items-center justify-between mb-8 pb-4 border-b border-surface-100">
@@ -112,13 +80,7 @@ export function ForensicHero() {
                   { time: '14:33:02', client: 'Apple Mail', status: 'rendered', version: 'v1' },
                   { time: '15:01:23', client: 'Gmail Android', status: 'rendered', version: 'v1' },
                 ].map((event, index) => (
-                  <motion.div
-                    key={index}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: 0.5 + index * 0.1 }}
-                    className="relative"
-                  >
+                  <div key={index} className="animate-in relative">
                     <div className="absolute -left-[25px] w-3 h-3 rounded-full bg-primary-600 border-2 border-white z-10" />
                     <div className="bg-surface-50 border border-surface-200 rounded-lg p-4 transition-shadow hover:shadow-sm">
                       <div className="flex items-center justify-between mb-1">
@@ -137,7 +99,7 @@ export function ForensicHero() {
                         </div>
                       </div>
                     </div>
-                  </motion.div>
+                  </div>
                 ))}
               </div>
 
@@ -153,7 +115,7 @@ export function ForensicHero() {
                 </div>
               </div>
             </div>
-          </motion.div>
+          </div>
         </div>
       </div>
     </section>

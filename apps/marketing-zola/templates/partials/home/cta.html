@@ -1,0 +1,73 @@
+{# ── CTA Section ──────────────────────────────────────────────── #}
+{# Converted from home/CTASection.tsx                             #}
+
+<section class="py-20 lg:py-32 relative overflow-hidden bg-white">
+  <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="animate-in text-center">
+      <h2 class="mb-6">
+        <span class="text-surface-900">Ready to Ship</span>
+        <br />
+        <span class="text-brand-500">Better Email?</span>
+      </h2>
+
+      <p class="text-xl text-surface-600 max-w-2xl mx-auto mb-10 leading-relaxed font-medium">
+        Join thousands of developers who trust ApexMail for their
+        mission-critical email infrastructure. Start free, scale infinitely.
+      </p>
+
+      <div class="grid sm:grid-cols-2 gap-x-8 gap-y-4 max-w-2xl mx-auto mb-12">
+        {% set cta_features = [
+          {"icon": "zap", "text": "Send your first email in < 60 seconds"},
+          {"icon": "clock", "text": "3,000 free emails every month, forever"},
+          {"icon": "shield", "text": "No credit card required to start"},
+          {"icon": "headphones", "text": "Free migration assistance available"}
+        ] %}
+        {% for feat in cta_features %}
+        <div class="animate-in flex items-center gap-3 text-left">
+          <div class="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
+            {% if feat.icon == "zap" %}
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            {% elif feat.icon == "clock" %}
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            {% elif feat.icon == "shield" %}
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            {% elif feat.icon == "headphones" %}
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
+            {% endif %}
+          </div>
+          <span class="text-surface-600 text-[14px] font-bold uppercase tracking-wide">{{ feat.text }}</span>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="animate-in delay-400 flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
+        <a href="https://app.apexmail.ee/signup" class="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-white bg-brand-500 rounded-md border border-brand-500 hover:bg-brand-600 transition-colors w-full sm:w-auto">
+          Deploy to Production
+          <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </a>
+        <a href="/private-cloud" class="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors w-full sm:w-auto">
+          Book Architecture Review
+        </a>
+      </div>
+
+      <div class="animate-in delay-500 flex flex-wrap items-center justify-center gap-6 text-[14px] font-bold uppercase tracking-widest text-surface-600">
+        <span class="flex items-center gap-2">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"></span>
+          99.9% Uptime SLA (Scale+)
+        </span>
+        <span class="flex items-center gap-2">
+          <span class="w-1.5 h-1.5 rounded-full bg-brand-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
+          SOC 2 Controls (Enterprise)
+        </span>
+        <span class="flex items-center gap-2">
+          <span class="w-1.5 h-1.5 rounded-full bg-brand-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
+          GDPR Compliant
+        </span>
+        <span class="flex items-center gap-2">
+          <span class="w-1.5 h-1.5 rounded-full bg-surface-400"></span>
+          Priority Support (Growth+)
+        </span>
+      </div>
+    </div>
+  </div>
+</section>

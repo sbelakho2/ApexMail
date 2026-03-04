@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { APIError, useCampaigns, useDeleteCampaign, type Campaign } from '@/hooks/use-api';
+import { APIError, getCsrfToken, useCampaigns, useDeleteCampaign, useAPIMutation, type Campaign } from '@/hooks/use-api';
 
 export interface CampaignDisplay {
     id: string;
@@ -79,8 +79,12 @@ export function useCampaignsController() {
     const [resendDialogOpen, setResendDialogOpen] = React.useState(false);
     const [campaignToResend, setCampaignToResend] = React.useState<CampaignDisplay | null>(null);
 
-    const { data: campaignsData, error, isLoading, mutate } = useCampaigns(page, 100);
+    const { data: campaignsData, error, isLoading, mutate } = useCampaigns(page, 25);
     const deleteCampaign = useDeleteCampaign();
+    const cloneMutation = useAPIMutation<Campaign, { campaignId: string }>('/v1/campaigns/clone');
+    const resendMutation = useAPIMutation<Campaign, { campaignId: string }>('/v1/campaigns/resend');
+    const bulkDeleteMutation = useAPIMutation<{ success: boolean }, { ids: string[] }>('/v1/campaigns/bulk/delete');
+    const bulkPauseMutation = useAPIMutation<{ success: boolean }, { ids: string[] }>('/v1/campaigns/bulk/pause');
 
     const applyPreset = React.useCallback((preset: CampaignFilterPreset) => {
         setActivePreset(preset);
@@ -262,23 +266,18 @@ export function useCampaignsController() {
         setCloneError(null);
         setIsCloningId(campaign.id);
         try {
-            await new Promise((resolve) => window.setTimeout(resolve, 900));
-            const clone: CampaignDisplay = {
-                ...campaign,
-                id: `clone-${Date.now()}`,
-                name: `${campaign.name || 'Untitled Campaign'} (Copy)`,
-                status: 'draft',
-                sentAt: undefined,
-                scheduledAt: undefined,
-                stats: { sent: 0, openRate: 0, clickRate: 0, bounceRate: 0 },
-            };
-            setOptimisticCampaigns((prev) => [clone, ...prev]);
+            const cloned = await cloneMutation.trigger({ campaignId: campaign.id });
+            if (cloned) {
+                const cloneDisplay: CampaignDisplay = toCampaignDisplay(cloned);
+                setOptimisticCampaigns((prev) => [cloneDisplay, ...prev]);
+            }
+            mutate();
         } catch {
             setCloneError('Campaign cloning failed. Please retry.');
         } finally {
             setIsCloningId(null);
         }
-    }, []);
+    }, [cloneMutation, mutate]);
 
     const confirmDelete = React.useCallback(async () => {
         if (campaignToDelete) {
@@ -308,60 +307,91 @@ export function useCampaignsController() {
         setCampaignToDelete(null);
     }, [campaignToDelete, campaigns, deleteCampaign, mutate]);
 
-    const handleUndoDelete = React.useCallback(() => {
+    const handleUndoDelete = React.useCallback(async () => {
         if (!recentlyDeleted) return;
-        setOptimisticCampaigns((prev) => [recentlyDeleted, ...prev]);
+        try {
+            // Try to restore via API first
+            const csrfToken = await getCsrfToken();
+
+            const res = await fetch(`/v1/campaigns/${recentlyDeleted.id}/restore`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+            });
+
+            if (!res.ok) {
+                // If restore endpoint doesn't exist, show error
+                setActionError('Unable to undo deletion. The campaign may have been permanently removed.');
+            } else {
+                mutate();
+            }
+        } catch {
+            setActionError('Unable to undo deletion. Please try again.');
+        }
         setShowUndoDelete(false);
         setRecentlyDeleted(null);
-    }, [recentlyDeleted]);
+    }, [recentlyDeleted, mutate]);
 
-    const handleBulkDelete = React.useCallback(() => {
+    const handleBulkDelete = React.useCallback(async () => {
         if (selectedIds.length === 0) return;
         if (retryAfterSeconds > 0) {
             setActionError(`Rate limited. Try again in ${retryAfterSeconds}s.`);
             return;
         }
 
-        const removed = campaigns.filter((campaign) => selectedIds.includes(campaign.id));
-        setOptimisticCampaigns((prev) =>
-            prev.filter((campaign) => !selectedIds.includes(campaign.id))
-        );
-        if (removed.length > 0) {
-            setRecentlyDeleted(removed[0]);
-            setShowUndoDelete(true);
-            window.setTimeout(() => setShowUndoDelete(false), 8000);
+        try {
+            await bulkDeleteMutation.trigger({ ids: selectedIds });
+            const removed = campaigns.filter((campaign) => selectedIds.includes(campaign.id));
+            if (removed.length > 0) {
+                setRecentlyDeleted(removed[0]);
+                setShowUndoDelete(true);
+                window.setTimeout(() => setShowUndoDelete(false), 8000);
+            }
+            setSelectedIds([]);
+            setBulkDeleteDialogOpen(false);
+            mutate();
+        } catch (err) {
+            if (err instanceof APIError && err.status === 429) {
+                setRetryAfterSeconds(30);
+                setActionError('Rate limited while deleting campaigns. Please wait before retrying.');
+            } else {
+                setActionError('Bulk delete failed. Please try again.');
+            }
         }
-        setSelectedIds([]);
-        setBulkDeleteDialogOpen(false);
-    }, [campaigns, retryAfterSeconds, selectedIds]);
+    }, [bulkDeleteMutation, campaigns, mutate, retryAfterSeconds, selectedIds]);
 
-    const handleBulkPause = React.useCallback(() => {
+    const handleBulkPause = React.useCallback(async () => {
         if (selectedIds.length === 0) return;
-        setOptimisticCampaigns((prev) =>
-            prev.map((campaign) =>
-                selectedIds.includes(campaign.id) ? { ...campaign, status: 'paused' } : campaign
-            )
-        );
-        setSelectedIds([]);
-        setBulkPauseDialogOpen(false);
-    }, [selectedIds]);
+        try {
+            await bulkPauseMutation.trigger({ ids: selectedIds });
+            setSelectedIds([]);
+            setBulkPauseDialogOpen(false);
+            mutate();
+        } catch {
+            setActionError('Bulk pause failed. Please try again.');
+        }
+    }, [bulkPauseMutation, mutate, selectedIds]);
 
     const handleResend = React.useCallback((campaign: CampaignDisplay) => {
-        if (campaign.status === 'scheduled' || campaign.status === 'sent') {
-            setCampaignToResend(campaign);
-            setResendDialogOpen(true);
-            return;
-        }
-        window.alert(`Re-send queued for ${campaign.name}.`);
+        setCampaignToResend(campaign);
+        setResendDialogOpen(true);
     }, []);
 
-    const confirmResend = React.useCallback(() => {
+    const confirmResend = React.useCallback(async () => {
         if (campaignToResend) {
-            window.alert(`Re-send confirmed for ${campaignToResend.name}.`);
+            try {
+                await resendMutation.trigger({ campaignId: campaignToResend.id });
+                mutate();
+            } catch {
+                setActionError(`Failed to resend campaign "${campaignToResend.name}". Please try again.`);
+            }
         }
         setResendDialogOpen(false);
         setCampaignToResend(null);
-    }, [campaignToResend]);
+    }, [campaignToResend, mutate, resendMutation]);
 
     const handleSelectionKeyDown = React.useCallback(
         (event: React.KeyboardEvent<HTMLDivElement>) => {

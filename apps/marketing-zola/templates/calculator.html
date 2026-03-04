@@ -1,0 +1,12 @@
+{# Calculator page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/calculator/hero.html" %}
+
+{# InteractiveCalculator island mount #}
+<div data-island="pricing-calculator"></div>
+
+{% include "partials/calculator/competitor-breakdown.html" %}
+{% include "partials/calculator/cta.html" %}
+{% endblock content %}

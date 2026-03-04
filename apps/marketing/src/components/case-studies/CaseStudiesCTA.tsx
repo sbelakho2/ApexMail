@@ -1,21 +1,11 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import Link from 'next/link';
 import { ArrowRight, MessageCircle } from '@/components/ui/icons';
 
 export function CaseStudiesCTA() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   return (
-    <section ref={ref} className="py-20 lg:py-32 relative bg-surface-50">
+    <section className="py-20 lg:py-32 relative bg-surface-50">
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-12 text-center"
-        >
+        <div className="animate-in bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-12 text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-100/50 text-xs font-medium mb-6">
             <MessageCircle className="w-4 h-4" />
             <span>Your Story Next?</span>
@@ -49,7 +39,7 @@ export function CaseStudiesCTA() {
           <p className="text-surface-500 text-sm mt-8 font-medium">
             No credit card required • Free tier includes 3,000 emails/month
           </p>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

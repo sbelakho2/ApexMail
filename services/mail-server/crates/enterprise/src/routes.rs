@@ -467,6 +467,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/qbr/:id/feedback", post(qbr_feedback))
         .route("/qbr/:id/goals", put(qbr_update_goal))
         .route("/qbr/benchmarks", get(qbr_benchmarks))
+        // PDF generation (via pdf-renderer service)
+        .route("/dpa/:tenant_id/pdf", post(dpa_generate_pdf))
+        .route("/qbr/:id/pdf", get(qbr_generate_pdf))
+        .route("/compliance/report/:tenant_id/pdf", get(compliance_report_pdf))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state)
 }
@@ -958,6 +962,160 @@ async fn qbr_update_goal(State(state): State<S>, Path(id): Path<Uuid>, Json(body
 async fn qbr_benchmarks(State(state): State<S>, Query(q): Query<IndustryQuery>) -> impl IntoResponse {
     let industry = q.industry.as_deref().unwrap_or("saas");
     service_result(state.qbr.get_benchmarks(industry).await)
+}
+
+// ── PDF Generation Handlers (via pdf-renderer service) ─────────────────
+
+static PDF_RENDERER_URL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    std::env::var("PDF_RENDERER_URL").unwrap_or_else(|_| "http://pdf-renderer:3004".to_string())
+});
+
+/// POST /dpa/:tenant_id/pdf — Generate a GDPR Data Processing Agreement PDF
+async fn dpa_generate_pdf(
+    State(state): State<S>,
+    Path(tenant_id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Fetch compliance config for this tenant
+    let status = match state.compliance.get_status(tenant_id).await {
+        Ok(s) => s,
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get compliance status: {e}"))),
+    };
+
+    let data = serde_json::json!({
+        "company_name": body.get("company_name").and_then(|v| v.as_str()).unwrap_or("ApexMail OÜ"),
+        "processor_name": body.get("processor_name").and_then(|v| v.as_str()).unwrap_or(""),
+        "effective_date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        "data_categories": body.get("data_categories").cloned().unwrap_or(serde_json::json!(["Email addresses", "Names", "IP addresses", "Message content"])),
+        "processing_purposes": body.get("processing_purposes").cloned().unwrap_or(serde_json::json!(["Transactional email delivery", "Analytics and reporting"])),
+        "sub_processors": body.get("sub_processors").cloned().unwrap_or(serde_json::json!([])),
+        "retention_days": 90,
+        "tenant_id": tenant_id.to_string(),
+        "compliance_status": serde_json::to_value(&status).unwrap_or_default(),
+    });
+
+    let payload = serde_json::json!({
+        "template": "dpa",
+        "data": data,
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("pdf-renderer unreachable: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status_code = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, format!("pdf-renderer error {status_code}: {body}")));
+    }
+
+    let pdf_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("pdf-renderer read error: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/pdf"),
+            (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"dpa.pdf\""),
+        ],
+        pdf_bytes,
+    ))
+}
+
+/// GET /qbr/:id/pdf — Generate a QBR PDF for the given report
+async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+    // Fetch the QBR data
+    let qbr = match state.qbr.get(id).await {
+        Ok(q) => q,
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get QBR: {e}"))),
+    };
+
+    let qbr_json = serde_json::to_value(&qbr)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {e}")))?;
+
+    let payload = serde_json::json!({
+        "template": "qbr",
+        "data": qbr_json,
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("pdf-renderer unreachable: {e}")))?;
+
+    if !resp.status().is_success() {
+        let sc = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, format!("pdf-renderer error {sc}: {body}")));
+    }
+
+    let pdf_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("pdf-renderer read error: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/pdf"),
+            (axum::http::header::CONTENT_DISPOSITION, &format!("attachment; filename=\"qbr-{id}.pdf\"")),
+        ],
+        pdf_bytes,
+    ))
+}
+
+/// GET /compliance/report/:tenant_id/pdf — Generate a compliance report PDF
+async fn compliance_report_pdf(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+    // Fetch compliance report and status
+    let report = match state.compliance.generate_report(tenant_id).await {
+        Ok(r) => r,
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate report: {e}"))),
+    };
+
+    let report_json = serde_json::to_value(&report)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {e}")))?;
+
+    let payload = serde_json::json!({
+        "template": "compliance_report",
+        "data": report_json,
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("pdf-renderer unreachable: {e}")))?;
+
+    if !resp.status().is_success() {
+        let sc = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, format!("pdf-renderer error {sc}: {body}")));
+    }
+
+    let pdf_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("pdf-renderer read error: {e}")))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/pdf"),
+            (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"compliance-report.pdf\""),
+        ],
+        pdf_bytes,
+    ))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

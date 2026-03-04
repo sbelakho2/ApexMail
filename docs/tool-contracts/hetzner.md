@@ -148,8 +148,132 @@ The **Robot API** is used exclusively for hardware-level fencing during PostgreS
 | 5× CAX41 servers | €120 |
 | Hetzner S3 (500 GB) | €12 |
 | Bandwidth overages | €0 (within 20 TB) |
-| **Total infrastructure** | **~€132/mo** |
+| Dedicated IPs (floating) | ~€4 per IP |
+| **Total infrastructure** | **~€132/mo + IPs** |
 
 ---
 
-*Last updated: 2026-02-09*
+## 6. Dedicated IP Management (Floating IPs)
+
+ApexMail uses **Hetzner Cloud floating IPs** for all dedicated sending IPs. These are managed automatically by the `DedicatedIpProvider` when tenants upgrade their plan.
+
+### Why Hetzner Floating IPs?
+
+| Aspect | Hetzner Floating IP | AWS SES Dedicated IP |
+|--------|---------------------|---------------------|
+| Cost | ~€4/mo (~$4.50) | $24.95/mo |
+| Provisioning | Instant via Cloud API | Instant via SES API |
+| Warmup | Self-managed (45-day schedule) | AWS-managed |
+| rDNS | Full control via API | Limited |
+| Control | Full (assign to any server) | SES pool only |
+
+### Floating IP Lifecycle
+
+#### 1. Provisioning
+
+When a tenant upgrades to a plan with dedicated IPs:
+
+```
+Stripe webhook (plan change)
+  → stripe-integration.ts: autoProvisionDedicatedIps()
+  → POST /v1/dedicated-ips
+  → DedicatedIpProvider::allocate_ip()
+  → Hetzner Cloud API: POST /v1/floating_ips
+  → Assign to MTA server
+  → Set rDNS to mail.<tenant_domain>
+  → Insert dedicated_ips row (status='warming')
+  → DB trigger updates transport_routing_cache
+  → Next message routes via SMTP automatically
+```
+
+#### 2. Warmup (45-day schedule)
+
+| Day | Daily limit |
+|-----|-------------|
+| 0-1 | 50 |
+| 2-3 | 100 |
+| 4-5 | 250 |
+| 6-7 | 500 |
+| 8-10 | 1,000 |
+| 11-14 | 2,500 |
+| 15-20 | 5,000 |
+| 21-28 | 10,000 |
+| 29-35 | 25,000 |
+| 36-44 | 50,000 |
+| 45+ | Unlimited |
+
+During warmup, excess traffic overflows to SES shared sending automatically.
+
+#### 3. Steady State
+
+Once warmed (`status='active'`):
+- IP handles all tenant traffic via `SmtpTransport`
+- `ip_daily_usage` tracks send volume, bounces, complaints
+- DNSBL monitoring every 15 minutes
+- Alerts fire if IP is blacklisted
+
+#### 4. Release
+
+When a tenant downgrades or releases an IP:
+
+```
+DELETE /v1/dedicated-ips/{ip_id}
+  → DedicatedIpProvider::release_ip()
+  → Hetzner Cloud API: DELETE /v1/floating_ips/{hetzner_id}
+  → Update dedicated_ips row (status='retired')
+  → DB trigger updates transport_routing_cache
+  → If no remaining IPs, tenant reverts to SES shared
+```
+
+### API Configuration
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `HETZNER_API_TOKEN` | Yes | — | Hetzner Cloud API token |
+| `HETZNER_DEFAULT_LOCATION` | No | `fsn1` | Default datacenter for new IPs |
+| `HETZNER_MTA_SERVER_ID` | No | — | Single-server mode: assign all IPs here |
+
+### Hetzner Cloud API Endpoints Used
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/v1/floating_ips` | POST | Create new floating IP |
+| `/v1/floating_ips/{id}` | GET | Get IP details |
+| `/v1/floating_ips/{id}` | DELETE | Release IP |
+| `/v1/floating_ips/{id}/actions/assign` | POST | Assign IP to server |
+| `/v1/floating_ips/{id}/actions/change_dns_ptr` | POST | Set rDNS |
+
+### Database Tables
+
+| Table | Purpose |
+|-------|---------|
+| `dedicated_ips` | Hetzner floating IPs assigned to tenants |
+| `hetzner_mta_servers` | Available MTA servers for IP assignment |
+| `transport_routing_cache` | Precomputed routing decisions (trigger-maintained) |
+| `ip_daily_usage` | Per-IP daily send/bounce/complaint counts |
+
+### Key Columns on `dedicated_ips`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `hetzner_floating_ip_id` | BIGINT | Hetzner API floating IP ID |
+| `hetzner_server_id` | BIGINT | Which MTA server the IP is assigned to |
+| `ip_address` | INET | The actual IP address |
+| `rdns_hostname` | VARCHAR(255) | Reverse DNS (e.g., `mail.example.com`) |
+| `status` | VARCHAR(20) | `warming`, `active`, `cooldown`, `releasing`, `retired` |
+| `warmup_progress` | DOUBLE PRECISION | 0.0 → 1.0 over 45-day warmup |
+| `billing_status` | VARCHAR(30) | `included`, `pending_charge`, `active`, `pending_cancel` |
+
+### Monitoring
+
+| Metric | Description | Alert |
+|--------|-------------|-------|
+| `apexmail_dedicated_ips_total` | Gauge: total dedicated IPs | — |
+| `apexmail_dedicated_ip_warmup_progress` | Gauge: warmup progress per IP | — |
+| `apexmail_smtp_emails_sent_total` | Counter: emails sent via SMTP | — |
+| DNSBL status | Checked every 15 minutes | Critical if IP blacklisted |
+| Bounce rate per IP | Per-IP daily bounce % | Warning if > 2% |
+
+---
+
+*Last updated: 2026-03-02*

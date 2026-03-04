@@ -63,7 +63,9 @@ ApexMail uses a hybrid architecture with TypeScript frontends and a Rust backend
 |-----------|------------|---------|
 | Database | PostgreSQL 16 | Primary OLTP data store |
 | Analytics | ClickHouse 24.8 | OLAP analytics (billions of events) |
-| Cache | Redis 7 | Caching, rate limiting || Email Delivery | AWS SES v2 (primary) / Self-hosted SMTP (opt-in) | Outbound email transport || SMTP (dev) | Mailpit | Local email testing |
+| Cache | Redis 7 | Caching, rate limiting |
+| Email Delivery | AWS SES (shared) + Hetzner SMTP (dedicated IPs) | Hybrid per-message routing |
+| SMTP (dev) | Mailpit | Local email testing |
 
 ## Monorepo Structure
 

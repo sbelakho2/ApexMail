@@ -1,7 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Check, ArrowRight } from '@/components/ui/icons';
 import Link from 'next/link';
 import { CodeBlock } from '@/components/ui/CodeBlock';
@@ -105,35 +101,21 @@ console.log(events); // delivered, opened, clicked...`,
 ];
 
 export function FeatureDetails() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   return (
-    <section ref={ref} className="py-20 lg:py-32 bg-surface-50">
+    <section className="py-20 lg:py-32 bg-surface-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="text-center mb-20"
-        >
+        <div className="animate-in text-center mb-20">
           <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4">
             Deep Dive Into Key Features
           </h2>
           <p className="text-lg text-surface-600 max-w-2xl mx-auto">
             See how ApexMail makes complex email infrastructure simple.
           </p>
-        </motion.div>
+        </div>
 
         <div className="space-y-32">
           {detailedFeatures.map((feature, index) => (
-            <motion.div
-              key={feature.id}
-              initial={{ opacity: 0, y: 40 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: index * 0.2 }}
-              className={`grid lg:grid-cols-2 gap-12 lg:gap-16 items-center ${
-                index % 2 === 1 ? 'lg:flex-row-reverse' : ''
-              }`}
-            >
+            <div key={feature.id} className={`grid lg:grid-cols-2 gap-12 lg:gap-16 items-center ${ index % 2 === 1 ? 'lg:flex-row-reverse' : '' }`}>
               {/* Content */}
               <div className={index % 2 === 1 ? 'lg:order-2' : ''}>
                 <span className="text-sm font-bold text-primary-600 mb-2 block">
@@ -178,7 +160,7 @@ export function FeatureDetails() {
                   <CodeBlock code={feature.code} language="typescript" />
                 </div>
               </div>
-            </motion.div>
+            </div>
           ))}
         </div>
       </div>

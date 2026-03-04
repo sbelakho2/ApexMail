@@ -212,7 +212,7 @@
 
     /* Honest surfaces - Rams-grade minimalism */
     .honest-surface {
-        @apply bg-card border border-border rounded-md transition-premium;
+        @apply bg-card border border-border rounded-lg transition-premium;
     }
 
     /* Card with standard radius and honest border shift */

@@ -1,0 +1,50 @@
+{# ── Comparison Section ────────────────────────────────────────── #}
+{# Converted from ComparisonSection.tsx                           #}
+
+<section class="py-24 bg-white">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="text-center mb-16">
+      <span class="inline-block px-3 py-1 text-sm font-semibold text-brand-600 bg-brand-50 rounded-full mb-4">Compare</span>
+      <h2 class="text-surface-900 mb-4">Why teams switch to<br /><span class="text-brand-500">ApexMail</span></h2>
+      <p class="text-surface-600 max-w-2xl mx-auto">See how we compare to the legacy providers.</p>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-left border-collapse">
+        <thead>
+          <tr class="border-b-2 border-surface-200">
+            <th class="py-4 pr-4 text-sm font-semibold text-surface-900">Feature</th>
+            <th class="py-4 px-4 text-sm font-semibold text-brand-600">ApexMail</th>
+            <th class="py-4 px-4 text-sm font-semibold text-surface-500">SendGrid</th>
+            <th class="py-4 px-4 text-sm font-semibold text-surface-500">Postmark</th>
+            <th class="py-4 px-4 text-sm font-semibold text-surface-500">AWS SES</th>
+          </tr>
+        </thead>
+        <tbody class="text-sm">
+          {% set rows = [
+            {"feature": "Delivery Receipts", "apex": "Cryptographic", "sendgrid": "Basic", "postmark": "Basic", "ses": "None"},
+            {"feature": "GDPR Compliance", "apex": "Built-in", "sendgrid": "Add-on", "postmark": "Partial", "ses": "DIY"},
+            {"feature": "HIPAA Ready", "apex": "Yes + BAA", "sendgrid": "Enterprise only", "postmark": "No", "ses": "DIY"},
+            {"feature": "Private Cloud", "apex": "Available", "sendgrid": "No", "postmark": "No", "ses": "VPC"},
+            {"feature": "Audit Trail", "apex": "Tamper-proof", "sendgrid": "30 days", "postmark": "45 days", "ses": "CloudWatch"},
+            {"feature": "API Response Time", "apex": "<100ms", "sendgrid": "~200ms", "postmark": "~150ms", "ses": "~300ms"}
+          ] %}
+          {% for row in rows %}
+          <tr class="border-b border-surface-100">
+            <td class="py-4 pr-4 font-medium text-surface-900">{{ row.feature }}</td>
+            <td class="py-4 px-4 text-brand-600 font-semibold">{{ row.apex }}</td>
+            <td class="py-4 px-4 text-surface-500">{{ row.sendgrid }}</td>
+            <td class="py-4 px-4 text-surface-500">{{ row.postmark }}</td>
+            <td class="py-4 px-4 text-surface-500">{{ row.ses }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="text-center mt-12">
+      <a href="/compare" class="inline-flex items-center gap-2 text-brand-600 font-semibold hover:text-brand-700 transition-colors">
+        See full comparison
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </a>
+    </div>
+  </div>
+</section>

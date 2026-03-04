@@ -1,0 +1,15 @@
+{# Forensic debugging page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/forensic/hero.html" %}
+
+{# TimeTravelDemo island mount #}
+<div data-island="time-travel"></div>
+
+{# RenderHistory + DebugTools — static sections pending island implementation #}
+<div data-island="render-history"></div>
+<div data-island="debug-tools"></div>
+
+{% include "partials/forensic/cta.html" %}
+{% endblock content %}

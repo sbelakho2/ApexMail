@@ -1,6 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
 import Link from 'next/link';
 import { ArrowRight, Zap } from '@/components/ui/icons';
 
@@ -15,12 +12,7 @@ export function FeaturesHero() {
   return (
     <section className="pt-32 pb-20 lg:pb-32 bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="text-center max-w-4xl mx-auto"
-        >
+        <div className="animate-in text-center max-w-4xl mx-auto">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100 border border-surface-200 text-sm text-surface-700 mb-6 font-medium">
             <Zap className="w-4 h-4" />
             Complete Email Infrastructure
@@ -52,21 +44,15 @@ export function FeaturesHero() {
           {/* Stats Grid */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-8 pt-8 border-t border-surface-100">
             {stats.map((stat, index) => (
-              <motion.div
-                key={stat.label}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 + index * 0.1 }}
-                className="text-center"
-              >
+              <div key={stat.label} className="animate-in text-center">
                 <div className="text-3xl lg:text-4xl font-bold text-surface-900 mb-2 tracking-tight">
                   {stat.value}
                 </div>
                 <div className="text-sm text-surface-500 font-medium">{stat.label}</div>
-              </motion.div>
+              </div>
             ))}
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { formatDate, cn } from '../../lib/utils';
 import { PageLoadingState } from '../../components/ui/async-state';
 import { useApiResource } from '../../lib/use-api-resource';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { useDialog } from '../../components/ui/confirm-dialog';
 
 /**
  * Inbox Sentinel - AI-powered email reply management
@@ -48,32 +50,83 @@ export default function InboxPage() {
         data: messages,
         setData: setMessages,
         loading,
+        refetch,
     } = useApiResource<InboxMessage[]>('/api/inbox', {
         initialData: [],
         errorMessage: 'Failed to load inbox.',
     });
+    const dialog = useDialog();
     const [selectedMessage, setSelectedMessage] = useState<InboxMessage | null>(null);
     const [filterClassification, setFilterClassification] = useState<string>('');
+    const [syncing, setSyncing] = useState(false);
+    const [showConfigAI, setShowConfigAI] = useState(false);
 
     function toggleStar(messageId: string) {
+        const msg = messages.find(m => m.id === messageId);
+        if (!msg) return;
+        const newStarred = !msg.starred;
+        const previousMessages = [...messages];
         setMessages(prev => prev.map(m => 
-            m.id === messageId ? { ...m, starred: !m.starred } : m
+            m.id === messageId ? { ...m, starred: newStarred } : m
         ));
+        getCsrfToken().then(csrfToken => {
+            fetch('/api/inbox', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ id: messageId, starred: newStarred }),
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setMessages(previousMessages);
+                dialog.alert({ title: 'Action Failed', message: 'Could not update star status. Please try again.' });
+            });
+        });
     }
 
     function markAsRead(messageId: string) {
+        const previousMessages = [...messages];
         setMessages(prev => prev.map(m => 
             m.id === messageId ? { ...m, read: true } : m
         ));
+        getCsrfToken().then(csrfToken => {
+            fetch('/api/inbox', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ id: messageId, read: true }),
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setMessages(previousMessages);
+                dialog.alert({ title: 'Action Failed', message: 'Could not mark message as read. Please try again.' });
+            });
+        });
     }
 
     function reclassify(messageId: string, newClassification: InboxMessage['classification']) {
+        const previousMessages = [...messages];
+        const previousSelected = selectedMessage;
         setMessages(prev => prev.map(m => 
             m.id === messageId ? { ...m, classification: newClassification, confidence: 1.0 } : m
         ));
         if (selectedMessage?.id === messageId) {
             setSelectedMessage(prev => prev ? { ...prev, classification: newClassification, confidence: 1.0 } : null);
         }
+        getCsrfToken().then(csrfToken => {
+            fetch('/api/inbox', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                body: JSON.stringify({ id: messageId, classification: newClassification }),
+            }).then(res => {
+                if (!res.ok) throw new Error('Failed');
+            }).catch(() => {
+                setMessages(previousMessages);
+                setSelectedMessage(previousSelected);
+                dialog.alert({ title: 'Reclassify Failed', message: 'Could not save the classification change. Please try again.' });
+            });
+        });
     }
 
     const filteredMessages = filterClassification
@@ -97,10 +150,15 @@ export default function InboxPage() {
                     </p>
                 </div>
                 <div className="flex gap-2">
-                    <button aria-label="Sync inbox" className="px-4 py-2 bg-card border border-border rounded-lg text-sm hover:bg-muted/50 font-medium text-muted-foreground transition-colors">
-                        Sync Inbox
+                    <button
+                        aria-label="Sync inbox"
+                        onClick={async () => { setSyncing(true); await refetch(); setSyncing(false); }}
+                        disabled={syncing}
+                        className="px-4 py-2 bg-card border border-border rounded-lg text-sm hover:bg-muted/50 font-medium text-muted-foreground transition-colors disabled:opacity-50"
+                    >
+                        {syncing ? 'Syncing…' : 'Sync Inbox'}
                     </button>
-                    <button aria-label="Configure inbox AI" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
+                    <button aria-label="Configure inbox AI" onClick={() => setShowConfigAI(true)} className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
                         Configure AI
                     </button>
                 </div>
@@ -254,19 +312,75 @@ export default function InboxPage() {
                         {/* Actions */}
                         <div className="flex gap-2">
                             {selectedMessage.classification === 'interested' && (
-                                <button aria-label="Schedule demo for interested lead" className="flex-1 px-4 py-2 bg-success text-success-foreground rounded-lg hover:bg-success/90 font-medium transition-colors">
+                                <button
+                                    aria-label="Schedule demo for interested lead"
+                                    onClick={() => window.open(`/crm/leads/${selectedMessage.leadId ?? ''}?action=schedule`, '_blank')}
+                                    className="flex-1 px-4 py-2 bg-success text-success-foreground rounded-lg hover:bg-success/90 font-medium transition-colors"
+                                >
                                     Schedule Demo
                                 </button>
                             )}
-                            <button aria-label="Reply to this message" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 font-medium transition-colors">
+                            <button
+                                aria-label="Reply to this message"
+                                onClick={() => window.open(`mailto:${selectedMessage.from}?subject=Re: ${encodeURIComponent(selectedMessage.subject)}`, '_self')}
+                                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 font-medium transition-colors"
+                            >
                                 Reply
                             </button>
                             {selectedMessage.leadId && (
-                                <button aria-label="View associated lead" className="px-4 py-2 bg-muted text-muted-foreground rounded-lg hover:bg-muted/80 font-medium transition-colors">
+                                <button
+                                    aria-label="View associated lead"
+                                    onClick={() => window.open(`/crm/leads/${selectedMessage.leadId}`, '_blank')}
+                                    className="px-4 py-2 bg-muted text-muted-foreground rounded-lg hover:bg-muted/80 font-medium transition-colors"
+                                >
                                     View Lead
                                 </button>
                             )}
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Configure AI Modal */}
+            {showConfigAI && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowConfigAI(false)}>
+                    <div className="bg-card rounded-2xl shadow-xl border border-border w-full max-w-lg mx-4 p-6" onClick={e => e.stopPropagation()}>
+                        <h2 className="text-lg font-bold text-foreground mb-2">Configure Inbox AI</h2>
+                        <p className="text-sm text-muted-foreground mb-4">Adjust AI classification behavior and confidence thresholds.</p>
+                        <form onSubmit={async (e) => {
+                            e.preventDefault();
+                            const form = e.target as HTMLFormElement;
+                            const formData = new FormData(form);
+                            const minConfidence = Number(formData.get('minConfidence'));
+                            const autoArchiveSpam = formData.get('autoArchiveSpam') === 'on';
+                            try {
+                                const csrfToken = await getCsrfToken();
+                                const res = await fetch('/api/inbox/config', {
+                                    method: 'PUT',
+                                    credentials: 'include',
+                                    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                    body: JSON.stringify({ minConfidence, autoArchiveSpam }),
+                                });
+                                if (!res.ok) throw new Error(`Server returned ${res.status}`);
+                                setShowConfigAI(false);
+                            } catch (err) {
+                                await dialog.alert({ title: 'Configuration Error', message: err instanceof Error ? err.message : 'Failed to save AI config' });
+                            }
+                        }} className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-muted-foreground mb-1">Minimum Confidence Threshold (%)</label>
+                                <input name="minConfidence" type="number" min="0" max="100" defaultValue={70} className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground focus:ring-2 focus:ring-primary focus:border-primary outline-none" />
+                                <p className="text-xs text-muted-foreground mt-1">Messages below this confidence are marked "unclassified".</p>
+                            </div>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input name="autoArchiveSpam" type="checkbox" defaultChecked className="rounded border-border text-primary focus:ring-primary/20" />
+                                <span className="text-sm text-foreground">Auto-archive spam classifications</span>
+                            </label>
+                            <div className="flex justify-end gap-3 pt-2">
+                                <button type="button" onClick={() => setShowConfigAI(false)} className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">Cancel</button>
+                                <button type="submit" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">Save Configuration</button>
+                            </div>
+                        </form>
                     </div>
                 </div>
             )}

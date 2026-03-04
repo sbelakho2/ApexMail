@@ -92,8 +92,8 @@ function roleRank(role: ControlPlaneRole): number {
     }
 }
 
-const ADMIN_MUTATION_API_PREFIXES = ['/api/tenants', '/api/secrets', '/api/features'];
-const ADMIN_PAGE_PREFIXES = ['/secrets'];
+const ADMIN_MUTATION_API_PREFIXES = ['/api/tenants', '/api/secrets', '/api/features', '/api/impersonate', '/api/autopilot', '/api/gdpr'];
+const ADMIN_PAGE_PREFIXES = ['/secrets', '/settings', '/gdpr', '/compliance'];
 
 function hasRequiredRole(path: string, method: string, role: ControlPlaneRole): boolean {
     if (ADMIN_PAGE_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) {
@@ -127,10 +127,15 @@ function hasValidE2EBypass(request: NextRequest): boolean {
 
 function applySecurityHeaders(response: NextResponse): NextResponse {
     response.headers.set('X-Frame-Options', 'DENY');
-    response.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+    response.headers.set('X-Content-Type-Options', 'nosniff');
+    response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    response.headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'");
     response.headers.set('X-Control-Plane', 'authenticated');
     response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     response.headers.set('Pragma', 'no-cache');
+    if (process.env.NODE_ENV === 'production') {
+        response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
     return response;
 }
 
@@ -309,12 +314,25 @@ function isIpWhitelisted(clientIp: string): boolean {
 export async function middleware(request: NextRequest) {
     const path = request.nextUrl.pathname;
     const clientIp = getClientIp(request);
-    
-    // Log all access attempts for audit
-    
+
+    // Enforce IP whitelist before any route handling, including login/public endpoints.
+    if (!isIpWhitelisted(clientIp)) {
+        console.warn(`[SECURITY] Blocked access from non-whitelisted IP: ${clientIp}`);
+        return applySecurityHeaders(new NextResponse(
+            JSON.stringify({
+                error: 'Access Denied',
+                message: 'Your IP is not authorized to access the Control Plane',
+            }),
+            {
+                status: 403,
+                headers: { 'Content-Type': 'application/json' }
+            }
+        ));
+    }
+
     // Allow public paths
     if (PUBLIC_PATHS.includes(path) || PUBLIC_PREFIXES.some(prefix => path.startsWith(prefix))) {
-        return NextResponse.next();
+        return applySecurityHeaders(NextResponse.next());
     }
 
     // Test-only bypass for deterministic Chromium E2E coverage.
@@ -325,21 +343,6 @@ export async function middleware(request: NextRequest) {
         return response;
     }
     
-    // ==== SECURITY LAYER 1: IP Whitelist ====
-    if (!isIpWhitelisted(clientIp)) {
-        console.warn(`[SECURITY] Blocked access from non-whitelisted IP: ${clientIp}`);
-        return new NextResponse(
-            JSON.stringify({ 
-                error: 'Access Denied',
-                message: 'Your IP is not authorized to access the Control Plane',
-            }),
-            { 
-                status: 403, 
-                headers: { 'Content-Type': 'application/json' }
-            }
-        );
-    }
-    
     // ==== SECURITY LAYER 2: API Key (for API routes) ====
     if (path.startsWith('/api/')) {
         const apiKey = request.headers.get(CONTROL_PLANE_API_KEY_HEADER);
@@ -348,10 +351,10 @@ export async function middleware(request: NextRequest) {
                 return applySecurityHeaders(NextResponse.next());
             }
             console.warn(`[SECURITY] Invalid API key attempt from IP: ${clientIp}`);
-            return new NextResponse(
+            return applySecurityHeaders(new NextResponse(
                 JSON.stringify({ error: 'Invalid API Key' }),
                 { status: 401, headers: { 'Content-Type': 'application/json' } }
-            );
+            ));
         }
     }
     
@@ -361,7 +364,7 @@ export async function middleware(request: NextRequest) {
     if (!sessionToken) {
         // No session, redirect to login
         console.warn(`[CONTROL_PLANE] No session, redirecting to login from ${clientIp}`);
-        return NextResponse.redirect(new URL('/login', request.url));
+        return applySecurityHeaders(NextResponse.redirect(new URL('/login', request.url)));
     }
     
     const sessionResult = await validateSessionWithRefresh(sessionToken);
@@ -372,15 +375,15 @@ export async function middleware(request: NextRequest) {
         const response = NextResponse.redirect(new URL('/login', request.url));
         // Clear the invalid cookie
         response.cookies.delete(CONTROL_PLANE_SESSION_COOKIE);
-        return response;
+        return applySecurityHeaders(response);
     }
 
     const sessionRole = sessionResult.role ?? 'operator';
     if (!hasRequiredRole(path, request.method, sessionRole)) {
-        return new NextResponse(
+        return applySecurityHeaders(new NextResponse(
             JSON.stringify({ error: 'Forbidden: insufficient role for this operation' }),
             { status: 403, headers: { 'Content-Type': 'application/json' } }
-        );
+        ));
     }
 
     // ==== SECURITY LAYER 3.5: CSRF Protection for state-changing API requests ====
@@ -391,18 +394,18 @@ export async function middleware(request: NextRequest) {
             const csrfSig = request.cookies.get(CSRF_SIG_COOKIE)?.value;
 
             if (!csrfToken || !csrfCookie || !csrfSig || csrfToken !== csrfCookie) {
-                return new NextResponse(
+                return applySecurityHeaders(new NextResponse(
                     JSON.stringify({ error: 'CSRF token missing or invalid' }),
                     { status: 403, headers: { 'Content-Type': 'application/json' } }
-                );
+                ));
             }
 
             const secret = process.env.CSRF_SECRET;
             if (!secret) {
-                return new NextResponse(
+                return applySecurityHeaders(new NextResponse(
                     JSON.stringify({ error: 'Server configuration error' }),
                     { status: 500, headers: { 'Content-Type': 'application/json' } }
-                );
+                ));
             }
 
             // Web Crypto API — Edge Runtime compatible
@@ -410,10 +413,10 @@ export async function middleware(request: NextRequest) {
             const expectedSig = await _hmacSign(secret, `${csrfCookie}.${sessionBinding}`);
 
             if (!_constTimeEq(expectedSig, csrfSig)) {
-                return new NextResponse(
+                return applySecurityHeaders(new NextResponse(
                     JSON.stringify({ error: 'CSRF token invalid' }),
                     { status: 403, headers: { 'Content-Type': 'application/json' } }
-                );
+                ));
             }
         }
     }

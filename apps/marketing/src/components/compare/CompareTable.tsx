@@ -1,7 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Check, X, Minus, Trophy } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
@@ -49,8 +45,6 @@ function renderValue(value: string, isWinner: boolean) {
 }
 
 export function CompareTable({ categories, competitorName }: CompareTableProps) {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   // Count wins
   const wins = categories.reduce(
     (acc, category) => {
@@ -64,14 +58,10 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
   );
 
   return (
-    <section ref={ref} id="comparison" className="py-20 lg:py-32 bg-white">
+    <section id="comparison" className="py-20 lg:py-32 bg-white">
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Score Summary */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="flex justify-center gap-8 mb-12"
-        >
+        <div className="animate-in flex justify-center gap-8 mb-12">
           <div className="text-center">
             <div className="text-4xl font-bold text-primary-600">{wins.apexmail}</div>
             <div className="text-sm text-surface-600 font-medium">ApexMail Wins</div>
@@ -80,15 +70,10 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
             <div className="text-4xl font-bold text-surface-400">{wins.competitor}</div>
             <div className="text-sm text-surface-600 font-medium">{competitorName} Wins</div>
           </div>
-        </motion.div>
+        </div>
 
         {/* Comparison Table */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.2 }}
-          className="bg-white rounded-lg border border-surface-200 shadow-sm overflow-x-auto"
-        >
+        <div className="animate-in delay-200 bg-white rounded-lg border border-surface-200 shadow-sm overflow-x-auto">
           <div className="min-w-[760px]">
           {/* Table Header */}
           <div className="grid grid-cols-4 gap-4 p-6 border-b border-surface-200 bg-surface-50">
@@ -119,16 +104,7 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
 
               {/* Features */}
               {category.features.map((feature, featureIndex) => (
-                <motion.div
-                  key={feature.name}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={inView ? { opacity: 1, x: 0 } : {}}
-                  transition={{ delay: categoryIndex * 0.1 + featureIndex * 0.03 }}
-                  className={cn(
-                    'grid grid-cols-4 gap-4 px-6 py-4 items-center hover:bg-surface-50 transition-colors',
-                    featureIndex !== category.features.length - 1 && 'border-b border-surface-100'
-                  )}
-                >
+                <div key={feature.name} className={cn( 'grid grid-cols-4 gap-4 px-6 py-4 items-center hover:bg-surface-50 transition-colors', featureIndex !== category.features.length - 1 && 'border-b border-surface-100' )}>
                   <div className="text-sm font-medium text-surface-700">{feature.name}</div>
                   <div className="flex justify-center">
                     {renderValue(feature.apexmail, feature.winner === 'apexmail')}
@@ -154,12 +130,12 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
                       </span>
                     )}
                   </div>
-                </motion.div>
+                </div>
               ))}
             </div>
           ))}
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

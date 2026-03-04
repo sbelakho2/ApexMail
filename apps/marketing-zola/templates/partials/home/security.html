@@ -1,0 +1,56 @@
+{# ── Security Section ─────────────────────────────────────────── #}
+{# Converted from SecuritySection.tsx                             #}
+
+<section class="py-24 bg-surface-50">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="grid lg:grid-cols-2 gap-16 items-center">
+      <div>
+        <span class="inline-block px-3 py-1 text-sm font-semibold text-brand-600 bg-brand-50 rounded-full mb-4">Security</span>
+        <h2 class="text-surface-900 mb-6">Security that satisfies<br /><span class="text-brand-500">your compliance team.</span></h2>
+        <p class="text-surface-600 mb-8">Enterprise-grade security built into every layer. From encryption at rest to tamper-proof audit logs.</p>
+        <ul class="space-y-4">
+          {% set security_items = [
+            {"title": "SOC 2 Type II Certified", "desc": "Annual audits by independent third parties"},
+            {"title": "GDPR & HIPAA Ready", "desc": "Data processing agreements and BAAs available"},
+            {"title": "AES-256 Encryption", "desc": "All data encrypted at rest and in transit"},
+            {"title": "Cryptographic Audit Trail", "desc": "Tamper-proof delivery receipts for legal compliance"}
+          ] %}
+          {% for item in security_items %}
+          <li class="flex items-start gap-3">
+            <div class="w-6 h-6 rounded-full bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div>
+              <span class="font-semibold text-surface-900">{{ item.title }}</span>
+              <p class="text-sm text-surface-600">{{ item.desc }}</p>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      <div class="relative">
+        <div class="rounded-2xl bg-white border border-surface-200 p-8 shadow-premium">
+          <div class="text-center mb-8">
+            <div class="w-16 h-16 rounded-2xl bg-brand-50 flex items-center justify-center mx-auto mb-4">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <h3 class="text-lg font-semibold text-surface-900">Compliance Dashboard</h3>
+            <p class="text-sm text-surface-500">Real-time compliance status</p>
+          </div>
+          <div class="space-y-3">
+            {% set compliance_checks = ["GDPR Compliance", "HIPAA Ready", "SOC 2 Type II", "ISO 27001", "Data Residency (EU)"] %}
+            {% for check in compliance_checks %}
+            <div class="flex items-center justify-between p-3 rounded-lg bg-surface-50">
+              <span class="text-sm font-medium text-surface-700">{{ check }}</span>
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-xs font-semibold">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                Active
+              </span>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { formatNumber, formatDate, cn } from '../../lib/utils';
 import { PageLoadingState } from '../../components/ui/async-state';
 import { useApiResource } from '../../lib/use-api-resource';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { useDialog } from '../../components/ui/confirm-dialog';
 
 /**
  * Campaigns Management - Drip campaign automation
@@ -54,13 +56,77 @@ export default function CampaignsPage() {
         errorMessage: 'Failed to load campaigns.',
     });
     const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
+    const [showCreateModal, setShowCreateModal] = useState(false);
+    const dialog = useDialog();
 
-    function toggleCampaignStatus(campaignId: string) {
-        setCampaigns(prev => prev.map(c => {
-            if (c.id !== campaignId) return c;
-            const newStatus = c.status === 'active' ? 'paused' : c.status === 'paused' ? 'active' : c.status;
-            return { ...c, status: newStatus };
-        }));
+    async function toggleCampaignStatus(campaignId: string) {
+        const campaign = campaigns.find(c => c.id === campaignId);
+        if (!campaign) return;
+        const newStatus = campaign.status === 'active' ? 'paused' : campaign.status === 'paused' ? 'active' : campaign.status;
+        const isPausing = newStatus === 'paused';
+
+        const confirmed = await dialog.confirm({
+            title: isPausing ? 'Pause Campaign' : 'Resume Campaign',
+            message: isPausing
+                ? `Pause "${campaign.name}"? No further emails will be sent until you resume it.`
+                : `Resume "${campaign.name}"? Sending will continue from where it left off.`,
+            confirmLabel: isPausing ? 'Pause' : 'Resume',
+            variant: isPausing ? 'destructive' : 'default',
+        });
+        if (!confirmed) return;
+
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch(`/api/campaigns/${campaignId}`, {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ status: newStatus }),
+            });
+            if (res.ok) {
+                setCampaigns(prev => prev.map(c =>
+                    c.id === campaignId ? { ...c, status: newStatus } : c
+                ));
+            } else {
+                await dialog.alert({ title: 'Toggle Failed', message: `Failed to change campaign status (${res.status})` });
+            }
+        } catch (err) {
+            await dialog.alert({ title: 'Network Error', message: err instanceof Error ? err.message : 'Failed to toggle campaign status' });
+        }
+    }
+
+    async function startCampaign(campaignId: string) {
+        const confirmed = await dialog.confirm({
+            title: 'Start Campaign',
+            message: 'Start this campaign? It will begin sending emails to enrolled contacts.',
+            confirmLabel: 'Start',
+            variant: 'default',
+        });
+        if (!confirmed) return;
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch(`/api/campaigns/${campaignId}`, {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ status: 'active' }),
+            });
+            if (res.ok) {
+                setCampaigns(prev => prev.map(c =>
+                    c.id === campaignId ? { ...c, status: 'active' as const, startedAt: new Date().toISOString() } : c
+                ));
+            } else {
+                await dialog.alert({ title: 'Start Failed', message: `Failed to start campaign (${res.status})` });
+            }
+        } catch (err) {
+            await dialog.alert({ title: 'Network Error', message: err instanceof Error ? err.message : 'Failed to start campaign' });
+        }
     }
 
     function getOpenRate(campaign: Campaign): string {
@@ -86,7 +152,7 @@ export default function CampaignsPage() {
                         Manage automated email sequences for lead nurturing
                     </p>
                 </div>
-                <button aria-label="Create campaign" type="button" className="px-6 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md">
+                <button aria-label="Create campaign" type="button" onClick={() => setShowCreateModal(true)} className="px-6 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md">
                     + Create Campaign
                 </button>
             </div>
@@ -178,11 +244,11 @@ export default function CampaignsPage() {
                                         </button>
                                     )}
                                     {campaign.status === 'draft' && (
-                                        <button aria-label={`Start campaign ${campaign.name}`} type="button" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm">
+                                        <button aria-label={`Start campaign ${campaign.name}`} type="button" onClick={() => startCampaign(campaign.id)} className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm">
                                             Start
                                         </button>
                                     )}
-                                    <button aria-label={`Open settings for ${campaign.name}`} type="button" className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
+                                    <button aria-label={`Open settings for ${campaign.name}`} type="button" onClick={() => setSelectedCampaign(campaign)} className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
                                         Settings
                                     </button>
                                 </div>
@@ -296,6 +362,63 @@ export default function CampaignsPage() {
                                 <div className="font-medium text-foreground">{formatDate(selectedCampaign.createdAt)}</div>
                             </div>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Create Campaign Modal */}
+            {showCreateModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowCreateModal(false)}>
+                    <div className="bg-card rounded-2xl shadow-xl border border-border w-full max-w-lg mx-4 p-6" onClick={e => e.stopPropagation()}>
+                        <h2 className="text-lg font-bold text-foreground mb-4">Create New Campaign</h2>
+                        <form onSubmit={async (e) => {
+                            e.preventDefault();
+                            const form = e.target as HTMLFormElement;
+                            const formData = new FormData(form);
+                            const name = (formData.get('name') as string).trim();
+                            const description = (formData.get('description') as string).trim();
+                            const fromName = (formData.get('fromName') as string).trim();
+                            const fromEmail = (formData.get('fromEmail') as string).trim();
+                            if (!name || !fromEmail) return;
+                            try {
+                                const csrfToken = await getCsrfToken();
+                                const res = await fetch('/api/campaigns', {
+                                    method: 'POST',
+                                    credentials: 'include',
+                                    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                    body: JSON.stringify({ name, description, fromName, fromEmail }),
+                                });
+                                if (!res.ok) throw new Error('Failed to create campaign');
+                                const newCampaign = await res.json();
+                                setCampaigns(prev => [newCampaign, ...prev]);
+                                setShowCreateModal(false);
+                            } catch (err) {
+                                await dialog.alert({ title: 'Create Failed', message: err instanceof Error ? err.message : 'Failed to create campaign' });
+                            }
+                        }} className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-muted-foreground mb-1">Campaign Name</label>
+                                <input name="name" required className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground focus:ring-2 focus:ring-primary focus:border-primary outline-none" placeholder="My outreach campaign" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-muted-foreground mb-1">Description</label>
+                                <textarea name="description" rows={2} className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground focus:ring-2 focus:ring-primary focus:border-primary outline-none resize-none" placeholder="Brief description…" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-muted-foreground mb-1">From Name</label>
+                                    <input name="fromName" required className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground focus:ring-2 focus:ring-primary focus:border-primary outline-none" placeholder="John Doe" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-muted-foreground mb-1">From Email</label>
+                                    <input name="fromEmail" type="email" required className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground focus:ring-2 focus:ring-primary focus:border-primary outline-none" placeholder="john@company.com" />
+                                </div>
+                            </div>
+                            <div className="flex justify-end gap-3 pt-2">
+                                <button type="button" onClick={() => setShowCreateModal(false)} className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">Cancel</button>
+                                <button type="submit" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">Create Campaign</button>
+                            </div>
+                        </form>
                     </div>
                 </div>
             )}

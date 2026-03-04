@@ -3,8 +3,10 @@
 ## Status
 Accepted (supersedes operational aspects of ADR 0002)
 
+**Amendment (2026-03-02):** Updated to reflect hybrid per-message routing architecture with Hetzner-based dedicated IPs.
+
 ## Date
-2026-02-27
+2026-02-27 (Amended: 2026-03-02)
 
 ## Context
 
@@ -24,15 +26,18 @@ Meanwhile, AWS SES offers:
 
 ## Decision
 
-**AWS SES v2 is the default primary delivery transport.** Self-hosted SMTP (via the existing `SmtpSender` / `outbound-queue`) is retained as a fully-developed opt-in path for operators who need IP control.
+**AWS SES v2 is the default primary delivery transport for shared-pool sending.** Self-hosted SMTP (via the existing `SmtpSender` / `outbound-queue`) is used automatically for tenants with dedicated IPs.
 
-### Transport Selection
+### Transport Routing (Per-Message)
 
-| Environment Variable | Value | Effect |
-|---------------------|-------|--------|
-| `EMAIL_TRANSPORT_TYPE` | `ses` (default) | Worker uses `SesTransport` → SES v2 `SendEmail` API |
-| `EMAIL_TRANSPORT_TYPE` | `smtp` | Worker uses `SmtpTransport` → relay SMTP |
-| `OUTBOUND_IPS` | comma-separated IPs | Outbound-queue binds to these IPs for direct-to-MX |
+Routing is determined **per-message** by the `TransportRouter` based on dedicated IP ownership:
+
+| Tenant State | Transport | Provider |
+|--------------|-----------|----------|
+| No dedicated IPs | AWS SES | Shared IP pool (AWS-managed) |
+| Has dedicated IPs | Self-hosted SMTP | Hetzner floating IPs |
+
+> **Note:** There is no `EMAIL_TRANSPORT_TYPE` toggle for routing between SES and SMTP. The presence of dedicated IPs is the sole determinant. Both transports are always initialized.
 
 ### Architecture
 
@@ -42,19 +47,22 @@ Meanwhile, AWS SES offers:
                     │   (messages table)    │
                     └──────────┬───────────┘
                                │
-              ┌────────────────┴────────────────┐
-              │                                  │
-              ▼                                  ▼
-   ┌─────────────────────┐          ┌─────────────────────┐
-   │   Worker Processor  │          │   Outbound Queue    │
-   │   (SES default)     │          │   (SMTP opt-in)     │
-   │                     │          │                     │
-   │  SesTransport       │          │  SmtpSender         │
-   │  → SES v2 API       │          │  → Direct MX        │
-   │  → SNS events       │          │  → IpPool rotation  │
-   │  → Auto DKIM        │          │  → DKIM signing     │
-   │                     │          │  → DNSBL monitoring  │
-   └─────────────────────┘          └─────────────────────┘
+                    ┌──────────▼───────────┐
+                    │    TransportRouter    │
+                    │  (per-message decision)│
+                    └──────┬──────────┬──────┘
+                           │          │
+              No dedicated │          │ Has dedicated
+              IPs          │          │ IPs
+                           ▼          ▼
+             ┌─────────────────┐  ┌─────────────────┐
+             │   SesTransport   │  │  SmtpTransport   │
+             │   (shared pool)  │  │  (Hetzner IPs)   │
+             │                  │  │                  │
+             │  → SES v2 API    │  │  → Direct MX      │
+             │  → SNS events    │  │  → IpPool rotation│
+             │  → Auto DKIM     │  │  → DKIM signing   │
+             └─────────────────┘  └─────────────────┘
 ```
 
 ### Bounce/Complaint Handling
@@ -86,3 +94,40 @@ Meanwhile, AWS SES offers:
 ## Related ADRs
 - ADR 0002: MTA Stack (original self-hosted decision — amended by this ADR)
 - ADR 0001: Database Choice (queue storage)
+
+---
+
+## Amendment: Hybrid Per-Message Routing (2026-03-02)
+
+### Summary
+
+This amendment clarifies that **dedicated IPs are always provisioned via Hetzner Cloud**, not AWS SES. The `EMAIL_TRANSPORT_TYPE` environment variable no longer determines transport selection — routing is **per-message** based on tenant dedicated IP ownership.
+
+### Key Changes
+
+| Aspect | Original Decision | Amended Decision |
+|--------|-------------------|------------------|
+| Transport selection | `EMAIL_TRANSPORT_TYPE` env var toggle | Per-message via `TransportRouter` |
+| Dedicated IP provider | AWS SES ($24.95/IP/mo) | Hetzner Cloud floating IPs (~$4/IP/mo) |
+| Routing determinant | Startup env var | Tenant dedicated IP ownership |
+| Both transports running | Only one active per instance | Both always initialized |
+
+### Why the Change?
+
+1. **Cost:** Hetzner floating IPs cost ~$4/mo vs AWS SES dedicated IPs at $24.95/mo — **83% cost reduction** per IP.
+2. **Control:** Full rDNS and IP assignment control via Hetzner Cloud API.
+3. **Flexibility:** A tenant can use both SES (shared) and SMTP (dedicated) simultaneously, with warmup overflow to SES.
+4. **Simplicity:** No manual transport switching required — routing is automatic based on dedicated IP ownership.
+
+### Implementation Details
+
+- `DedicatedIpProvider` manages Hetzner floating IPs (create, assign, rDNS, release).
+- `transport_routing_cache` table is maintained by a PostgreSQL trigger.
+- `TransportRouter` reads the cache (30s refresh) and routes per-message.
+- Warmup schedule: 45 days, with excess traffic overflowing to SES.
+
+### Related Documents
+
+- [Hybrid Email Infrastructure](../architecture/hybrid-email-infrastructure.md)
+- [Delivery Transport Architecture](../architecture/delivery-transport.md)
+- [Hetzner Tool Contract](../tool-contracts/hetzner.md)

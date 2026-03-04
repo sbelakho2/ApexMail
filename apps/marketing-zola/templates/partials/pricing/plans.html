@@ -1,0 +1,107 @@
+{# ── Pricing Plans ────────────────────────────────────────────── #}
+{# Converted from pricing/PricingPlans.tsx                       #}
+{# NOTE: PricingPlans was 'use client' in React — converted to   #}
+{#       static Tera since no runtime interactivity is needed.    #}
+
+<section class="py-20 lg:py-32 bg-white">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    {# Plans Grid #}
+    {% set plans = [
+      {"name": "Free", "price": "$0", "period": "forever", "desc": "Perfect for development and testing.", "popular": false, "cta": "Start Free", "link": "https://app.apexmail.ee/signup", "features": ["3,000 emails/month", "RESTful API access", "1 sending domain", "7-day data retention", "Community support"]},
+      {"name": "Starter", "price": "$25", "period": "/month", "desc": "For growing apps with moderate needs.", "popular": false, "cta": "Start Trial", "link": "https://app.apexmail.ee/signup?plan=starter", "features": ["50,000 emails/month", "Webhooks & advanced analytics", "Custom templates", "5 sending domains", "5 team members", "Email support"]},
+      {"name": "Pro", "price": "$65", "period": "/month", "desc": "For scaling teams with A/B testing.", "popular": false, "cta": "Start Trial", "link": "https://app.apexmail.ee/signup?plan=pro", "features": ["150,000 emails/month", "A/B testing & send-time AI", "Custom tracking domain", "25 sending domains", "10 team members", "Dedicated IP add-on ($30/mo)"]},
+      {"name": "Growth", "price": "$150", "period": "/month", "desc": "For teams serious about deliverability.", "popular": true, "cta": "Start Trial", "link": "https://app.apexmail.ee/signup?plan=growth", "features": ["500,000 emails/month", "1 dedicated IP included", "Audit logs & priority support", "100 sending domains", "25 team members", "90-day data retention"]},
+      {"name": "Scale", "price": "$350", "period": "/month", "desc": "For high-volume enterprise senders.", "popular": false, "cta": "Contact Sales", "link": "/private-cloud", "features": ["2,000,000 emails/month", "3 dedicated IPs", "Unlimited domains", "SSO/SAML & 10 subaccounts", "SLA guarantee (99.9%, 10% credit cap)", "Phone support & dedicated CSM"]}
+    ] %}
+
+    <div class="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 lg:gap-5">
+      {% for plan in plans %}
+      <div class="relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200 {% if plan.popular %}border-primary-600 ring-1 ring-primary-600{% else %}border-surface-200 hover:border-surface-300{% endif %}">
+        {% if plan.popular %}
+        <div class="mb-4">
+          <span class="inline-block px-2 py-0.5 bg-primary-50 text-primary-700 text-xs font-medium rounded border border-primary-100">Most Popular</span>
+        </div>
+        {% endif %}
+
+        <div class="mb-5">
+          <h3 class="text-base font-semibold text-surface-900 mb-2">{{ plan.name }}</h3>
+          <div class="flex items-baseline gap-1">
+            <span class="text-3xl font-semibold text-surface-900 tabular-nums">{{ plan.price }}</span>
+            <span class="text-sm text-surface-500">{{ plan.period }}</span>
+          </div>
+          <p class="text-sm text-surface-500 mt-2 leading-relaxed">{{ plan.desc }}</p>
+        </div>
+
+        <ul class="space-y-2 mb-6 flex-1">
+          {% for feature in plan.features %}
+          <li class="flex items-start gap-2 text-sm text-surface-600">
+            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            <span>{{ feature }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+
+        <a href="{{ plan.link }}" aria-label="{{ plan.cta }} - {{ plan.name }} plan at {{ plan.price }}{{ plan.period }}" class="block w-full py-2.5 rounded-md text-sm font-medium text-center transition-colors {% if plan.popular %}bg-primary-600 text-white hover:bg-primary-700{% else %}bg-surface-100 text-surface-900 hover:bg-surface-200{% endif %}">
+          {{ plan.cta }}
+        </a>
+      </div>
+      {% endfor %}
+    </div>
+
+    {# Pay As You Go #}
+    <div class="animate-in delay-500 mt-10 rounded-lg border border-amber-200 bg-amber-50/50 overflow-hidden">
+      <div class="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+        <div class="flex-1">
+          <div class="inline-flex items-center gap-1.5 text-amber-700 mb-3">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            <span class="text-xs font-semibold">Pay As You Go</span>
+          </div>
+          <p class="text-surface-600 text-sm mb-4 max-w-lg">
+            No monthly commitment. Volume discounts from $0.001 to $0.0003 per email.
+          </p>
+          <div class="flex flex-wrap gap-2">
+            {% set payg_tiers = [
+              {"label": "0-10k", "price": "$0.001"},
+              {"label": "10k-100k", "price": "$0.0008"},
+              {"label": "100k-1M", "price": "$0.0005"},
+              {"label": "1M+", "price": "$0.0003"}
+            ] %}
+            {% for tier in payg_tiers %}
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white rounded-md border border-amber-200 text-xs">
+              <span class="text-surface-500">{{ tier.label }}:</span>
+              <span class="font-medium text-amber-700">{{ tier.price }}</span>
+            </span>
+            {% endfor %}
+          </div>
+        </div>
+        <a href="/signup?plan=payg" class="shrink-0 px-5 py-2.5 text-sm font-medium bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors">
+          Get Started
+        </a>
+      </div>
+    </div>
+
+    {# Enterprise #}
+    <div class="animate-in delay-500 mt-10 rounded-lg bg-surface-900 overflow-hidden">
+      <div class="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+        <div class="flex-1">
+          <h3 class="text-lg font-semibold text-white mb-2">Enterprise — from $800/mo</h3>
+          <p class="text-surface-400 text-sm mb-4 max-w-lg">
+            5,000,000+ emails/month, custom SLA, HIPAA/SOC 2 compliance, and dedicated support.
+          </p>
+          <div class="flex flex-wrap gap-x-4 gap-y-1">
+            {% set ent_features = ["10 dedicated IPs", "SSO/SAML & SCIM", "HIPAA & SOC 2", "White-label & BYOIP", "Custom SLA (99.9%, 25% credit cap)", "Dedicated account manager"] %}
+            {% for feat in ent_features %}
+            <span class="flex items-center gap-1.5 text-sm text-surface-300">
+              <svg class="w-4 h-4 text-primary-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              {{ feat }}
+            </span>
+            {% endfor %}
+          </div>
+        </div>
+        <a href="/private-cloud" class="shrink-0 px-5 py-2.5 text-sm font-medium bg-white text-surface-900 rounded-md hover:bg-surface-100 transition-colors">
+          Contact Sales
+        </a>
+      </div>
+    </div>
+  </div>
+</section>

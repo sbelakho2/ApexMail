@@ -22,6 +22,8 @@ pub fn router() -> Router<AppState> {
         .route("/api-keys/:id", delete(revoke_api_key))
         .route("/logout", post(logout))
         .route("/refresh", post(refresh_token))
+        .route("/change-password", post(change_password))
+        .route("/sessions/revoke", post(revoke_session))
 }
 
 // ─── Request / Response types ──────────────────────────────────
@@ -697,4 +699,90 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
         assert!(json["last_used_at"].is_null());
     }
+}
+
+// ─── Change Password / Session Revoke ──────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Validate new password strength
+    if body.new_password.len() < 12 {
+        return Err(ApiError::BadRequest("Password must be at least 12 characters".into()));
+    }
+
+    // Verify current password
+    let user = sqlx::query!(
+        "SELECT id, password_hash FROM users WHERE id = $1",
+        auth.user_id,
+    )
+    .fetch_optional(&*state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+
+    let valid = bcrypt::verify(&body.current_password, &user.password_hash)
+        .map_err(|_| ApiError::Unauthorized("Invalid current password".into()))?;
+
+    if !valid {
+        return Err(ApiError::Unauthorized("Invalid current password".into()));
+    }
+
+    // Hash and update
+    let new_hash = bcrypt::hash(&body.new_password, 12)
+        .map_err(|e| ApiError::Internal(format!("Password hashing failed: {e}")))?;
+
+    sqlx::query!(
+        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+        new_hash,
+        auth.user_id,
+    )
+    .execute(&*state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({ "changed": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeSessionRequest {
+    /// Optional: revoke a specific session ID. If omitted, revokes all other sessions.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+async fn revoke_session(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<RevokeSessionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let affected = if let Some(session_id) = &body.session_id {
+        // Revoke single session
+        sqlx::query!(
+            "DELETE FROM sessions WHERE id = $1 AND user_id = $2",
+            session_id,
+            auth.user_id,
+        )
+        .execute(&*state.db)
+        .await?
+        .rows_affected()
+    } else {
+        // Revoke all sessions except current
+        sqlx::query!(
+            "DELETE FROM sessions WHERE user_id = $1 AND id != $2",
+            auth.user_id,
+            auth.session_id,
+        )
+        .execute(&*state.db)
+        .await?
+        .rows_affected()
+    };
+
+    Ok(Json(serde_json::json!({ "revoked": affected })))
 }

@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { formatDate, formatTime, getLocalTimeZone, cn, getStatusChipClasses } from '../../lib/utils';
+import { getCsrfToken } from '../../lib/client-csrf';
 import { PageEmptyState, PageErrorState, PageLoadingState } from '../../components/ui/async-state';
+import { useDialog } from '../../components/ui/confirm-dialog';
 import { Button } from '../../components/ui/button';
 import {
     AvailabilitySlot,
@@ -37,12 +39,19 @@ export default function CalendarPage() {
     const [statusFilter, setStatusFilter] = useState<'all' | CalendarEvent['status']>('all');
     const [eventSearch, setEventSearch] = useState('');
     const [displayTimezone, setDisplayTimezone] = useState<'local' | 'UTC'>('local');
+    const [discoveryDuration, setDiscoveryDuration] = useState('30 minutes');
+    const [demoDuration, setDemoDuration] = useState('60 minutes');
+    const [meetingBuffer, setMeetingBuffer] = useState('15 minutes');
+    const [bookingNotice, setBookingNotice] = useState('4 hours');
     const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
     const [showNoShowCapture, setShowNoShowCapture] = useState(false);
     const [noShowReasonInput, setNoShowReasonInput] = useState('');
     const timezone = getLocalTimeZone();
     const modalRef = useRef<HTMLDivElement>(null);
     const lastFocusedElementRef = useRef<HTMLElement | null>(null);
+    const dialog = useDialog();
+    const isInitialMountRef = useRef(true);
+    const settingsSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
         loadData();
@@ -55,6 +64,10 @@ export default function CalendarPage() {
                 if (parsed.statusFilter) setStatusFilter(parsed.statusFilter);
                 if (parsed.eventSearch) setEventSearch(parsed.eventSearch);
                 if (parsed.displayTimezone) setDisplayTimezone(parsed.displayTimezone);
+                if (parsed.discoveryDuration) setDiscoveryDuration(parsed.discoveryDuration);
+                if (parsed.demoDuration) setDemoDuration(parsed.demoDuration);
+                if (parsed.meetingBuffer) setMeetingBuffer(parsed.meetingBuffer);
+                if (parsed.bookingNotice) setBookingNotice(parsed.bookingNotice);
             }
         } catch {
             // ignore invalid local storage payload
@@ -63,11 +76,45 @@ export default function CalendarPage() {
 
     useEffect(() => {
         try {
-            localStorage.setItem('calendar-page-preferences', JSON.stringify({ activeTab, statusFilter, eventSearch, displayTimezone }));
+            localStorage.setItem('calendar-page-preferences', JSON.stringify({
+                activeTab,
+                statusFilter,
+                eventSearch,
+                displayTimezone,
+                discoveryDuration,
+                demoDuration,
+                meetingBuffer,
+                bookingNotice,
+            }));
         } catch {
             // ignore local persistence failure
         }
-    }, [activeTab, statusFilter, eventSearch, displayTimezone]);
+
+        // Persist meeting settings to API (debounced, skip initial mount)
+        if (isInitialMountRef.current) {
+            isInitialMountRef.current = false;
+            return;
+        }
+        if (settingsSaveTimeoutRef.current) {
+            clearTimeout(settingsSaveTimeoutRef.current);
+        }
+        settingsSaveTimeoutRef.current = setTimeout(async () => {
+            try {
+                const csrfToken = await getCsrfToken();
+                await fetch('/api/calendar/settings', {
+                    method: 'PUT',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                    body: JSON.stringify({ discoveryDuration, demoDuration, meetingBuffer, bookingNotice }),
+                });
+            } catch (err) {
+                console.error('Failed to persist meeting settings:', err);
+            }
+        }, 1000);
+        return () => {
+            if (settingsSaveTimeoutRef.current) clearTimeout(settingsSaveTimeoutRef.current);
+        };
+    }, [activeTab, statusFilter, eventSearch, displayTimezone, discoveryDuration, demoDuration, meetingBuffer, bookingNotice]);
 
     async function loadData() {
         setLoading(true);
@@ -96,9 +143,10 @@ export default function CalendarPage() {
         ));
 
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch(`/api/calendar/availability/${slotId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({ enabled: nextEnabled }),
             });
@@ -123,9 +171,10 @@ export default function CalendarPage() {
         }
 
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch(`/api/calendar/events/${eventId}/status`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 credentials: 'include',
                 body: JSON.stringify({ status, noShowReason }),
             });
@@ -141,15 +190,6 @@ export default function CalendarPage() {
 
     const [now, setNow] = useState(() => new Date('2026-01-15T10:00:00Z'));
     useEffect(() => { setNow(new Date()); }, []);
-
-    function isValidMeetingLink(link: string): boolean {
-        try {
-            const parsed = new URL(link);
-            return parsed.protocol === 'https:';
-        } catch {
-            return false;
-        }
-    }
 
     function formatEventDate(iso: string): string {
         if (displayTimezone === 'UTC') {
@@ -256,10 +296,13 @@ export default function CalendarPage() {
                         <option value="local">Local Time</option>
                         <option value="UTC">UTC</option>
                     </select>
-                    <Button variant="outline" size="md">
+                    <Button variant="outline" size="md" onClick={() => window.open('https://calendar.google.com/calendar/r/settings', '_blank')}>
                         Connect Calendar
                     </Button>
-                    <Button variant="default" size="md">
+                    <Button variant="default" size="md" onClick={() => {
+                        const link = `${window.location.origin}/book`;
+                        navigator.clipboard.writeText(link).catch(() => {});
+                    }}>
                         Copy Booking Link
                     </Button>
                 </div>
@@ -470,7 +513,23 @@ export default function CalendarPage() {
                                                 {slot.startTime} - {slot.endTime}
                                             </button>
                                         ))}
-                                        <button aria-label={`Add availability slot for ${DAYS[day]}`} type="button" className="px-3 py-1.5 border border-dashed border-border rounded text-sm text-muted-foreground hover:border-foreground hover:text-foreground">
+                                        <button aria-label={`Add availability slot for ${DAYS[day]}`} type="button" onClick={async () => {
+                                            const newSlot: AvailabilitySlot = { id: `slot-${Date.now()}`, dayOfWeek: day, startTime: '09:00', endTime: '17:00', enabled: true };
+                                            setAvailability(prev => [...prev, newSlot]);
+                                            try {
+                                                const csrfToken = await getCsrfToken();
+                                                await fetch('/api/calendar/availability', {
+                                                    method: 'POST',
+                                                    credentials: 'include',
+                                                    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                                    body: JSON.stringify(newSlot),
+                                                });
+                                            } catch (err) {
+                                                console.error('Failed to add availability slot:', err);
+                                                setAvailability(prev => prev.filter(s => s.id !== newSlot.id));
+                                                await dialog.alert({ title: 'Add Slot Failed', message: 'Failed to add availability slot. Please try again.' });
+                                            }
+                                        }} className="px-3 py-1.5 border border-dashed border-border rounded text-sm text-muted-foreground hover:border-foreground hover:text-foreground">
                                             + Add
                                         </button>
                                     </div>
@@ -483,33 +542,33 @@ export default function CalendarPage() {
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
                                 <label className="text-sm text-muted-foreground">Discovery Call Duration</label>
-                                <select className="mt-1 w-full px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all">
+                                <select value={discoveryDuration} onChange={(e) => setDiscoveryDuration(e.target.value)} className="mt-1 w-full px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all">
                                     <option>15 minutes</option>
-                                    <option selected>30 minutes</option>
+                                    <option>30 minutes</option>
                                     <option>45 minutes</option>
                                 </select>
                             </div>
                             <div>
                                 <label className="text-sm text-muted-foreground">Demo Duration</label>
-                                <select className="mt-1 w-full px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all">
+                                <select value={demoDuration} onChange={(e) => setDemoDuration(e.target.value)} className="mt-1 w-full px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all">
                                     <option>30 minutes</option>
                                     <option>45 minutes</option>
-                                    <option selected>60 minutes</option>
+                                    <option>60 minutes</option>
                                 </select>
                             </div>
                             <div>
                                 <label className="text-sm text-muted-foreground">Buffer Between Meetings</label>
-                                <select className="mt-1 w-full px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all">
+                                <select value={meetingBuffer} onChange={(e) => setMeetingBuffer(e.target.value)} className="mt-1 w-full px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all">
                                     <option>No buffer</option>
-                                    <option selected>15 minutes</option>
+                                    <option>15 minutes</option>
                                     <option>30 minutes</option>
                                 </select>
                             </div>
                             <div>
                                 <label className="text-sm text-muted-foreground">Booking Notice</label>
-                                <select className="mt-1 w-full px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all">
+                                <select value={bookingNotice} onChange={(e) => setBookingNotice(e.target.value)} className="mt-1 w-full px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-all">
                                     <option>1 hour</option>
-                                    <option selected>4 hours</option>
+                                    <option>4 hours</option>
                                     <option>24 hours</option>
                                 </select>
                             </div>

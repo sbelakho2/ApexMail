@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://apexmail.ee/sitemap.xml
+Host: https://apexmail.ee

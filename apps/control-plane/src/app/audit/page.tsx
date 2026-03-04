@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import { formatDate, cn } from '../../lib/utils';
 import { useDialog } from '../../components/ui/confirm-dialog';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * Audit Logs - Complete audit trail viewer
@@ -47,6 +49,7 @@ export default function AuditLogsPage() {
     const [loading, setLoading] = useState(true);
     const [selectedLog, setSelectedLog] = useState<AuditEntry | null>(null);
     const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+    const [showAlertConfig, setShowAlertConfig] = useState(false);
     const [exportJob, setExportJob] = useState<{
         id: string;
         status: 'queued' | 'running' | 'completed' | 'failed';
@@ -73,7 +76,7 @@ export default function AuditLogsPage() {
             const data = await response.json();
             setLogs(data);
         } catch (err) {
-            console.error('Failed to load audit logs:', err);
+            await dialog.alert({ title: 'Load Failed', message: err instanceof Error ? err.message : 'Failed to load audit logs' });
         } finally {
             setLoading(false);
         }
@@ -94,10 +97,11 @@ export default function AuditLogsPage() {
 
     async function exportLogs() {
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/audit/export', {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
                 body: JSON.stringify({ filters }),
             });
             if (!response.ok) {
@@ -158,11 +162,7 @@ export default function AuditLogsPage() {
     const uniqueTenants = [...new Set(logs.map(l => l.tenantId).filter(Boolean))];
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading audit logs..." />;
     }
 
     return (
@@ -175,7 +175,7 @@ export default function AuditLogsPage() {
                     </p>
                 </div>
                 <div className="flex gap-3">
-                    <button aria-label="Configure audit alerts" type="button" className="px-4 py-2 bg-card border border-border rounded-lg text-sm font-medium text-foreground hover:bg-muted/50 hover:border-input shadow-sm transition-all">
+                    <button aria-label="Configure audit alerts" type="button" onClick={() => setShowAlertConfig(true)} className="px-4 py-2 bg-card border border-border rounded-lg text-sm font-medium text-foreground hover:bg-muted/50 hover:border-input shadow-sm transition-all">
                             Configure Alerts
                     </button>
                     <button
@@ -459,6 +459,61 @@ export default function AuditLogsPage() {
                                 </pre>
                             </div>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Alert Configuration Modal */}
+            {showAlertConfig && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowAlertConfig(false)}>
+                    <div className="bg-card rounded-2xl shadow-xl border border-border w-full max-w-lg mx-4 p-6" onClick={e => e.stopPropagation()}>
+                        <h2 className="text-lg font-bold text-foreground mb-2">Configure Audit Alerts</h2>
+                        <p className="text-sm text-muted-foreground mb-4">Get notified when specific audit events occur.</p>
+                        <form onSubmit={async (e) => {
+                            e.preventDefault();
+                            const form = e.target as HTMLFormElement;
+                            const formData = new FormData(form);
+                            const config = {
+                                failedLogins: formData.get('failedLogins') === 'on',
+                                gdprActions: formData.get('gdprActions') === 'on',
+                                rateLimits: formData.get('rateLimits') === 'on',
+                                apiKeyChanges: formData.get('apiKeyChanges') === 'on',
+                                notifyEmail: (formData.get('notifyEmail') as string).trim(),
+                            };
+                            try {
+                                const csrfToken = await getCsrfToken();
+                                const res = await fetch('/api/audit/alerts', {
+                                    method: 'PUT',
+                                    credentials: 'include',
+                                    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+                                    body: JSON.stringify(config),
+                                });
+                                if (!res.ok) throw new Error(`Server returned ${res.status}`);
+                                setShowAlertConfig(false);
+                            } catch (err) {
+                                await dialog.alert({ title: 'Save Failed', message: err instanceof Error ? err.message : 'Failed to save alert config' });
+                            }
+                        }} className="space-y-3">
+                            {[
+                                { name: 'failedLogins', label: 'Failed login attempts', defaultChecked: true },
+                                { name: 'gdprActions', label: 'GDPR data deletion requests', defaultChecked: true },
+                                { name: 'rateLimits', label: 'Rate limit violations', defaultChecked: false },
+                                { name: 'apiKeyChanges', label: 'API key create/revoke events', defaultChecked: true },
+                            ].map(opt => (
+                                <label key={opt.name} className="flex items-center gap-2 cursor-pointer">
+                                    <input name={opt.name} type="checkbox" defaultChecked={opt.defaultChecked} className="rounded border-border text-primary focus:ring-primary/20" />
+                                    <span className="text-sm text-foreground">{opt.label}</span>
+                                </label>
+                            ))}
+                            <div className="pt-2">
+                                <label className="block text-sm font-medium text-muted-foreground mb-1">Notification Email</label>
+                                <input name="notifyEmail" type="email" className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground focus:ring-2 focus:ring-primary focus:border-primary outline-none" placeholder="admin@company.com" />
+                            </div>
+                            <div className="flex justify-end gap-3 pt-2">
+                                <button type="button" onClick={() => setShowAlertConfig(false)} className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">Cancel</button>
+                                <button type="submit" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">Save Alerts</button>
+                            </div>
+                        </form>
                     </div>
                 </div>
             )}

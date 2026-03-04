@@ -34,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/:id", get(get_domain).delete(delete_domain))
         .route("/:id/verify", post(verify_domain))
         .route("/:id/dns-records", get(get_dns_records))
+        .route("/:id/auth-status", get(get_auth_status))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -545,6 +546,72 @@ mod tests {
         ];
         let json = serde_json::to_value(&records).unwrap();
         assert_eq!(json[0]["record_type"], "TXT");
+    }
+}
+
+// ─── Auth Status Handler ───────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct DomainAuthStatus {
+    pub domain: String,
+    pub spf: AuthCheckResult,
+    pub dkim: AuthCheckResult,
+    pub dmarc: AuthCheckResult,
+    pub mx: AuthCheckResult,
+    pub return_path: AuthCheckResult,
+    pub overall_status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthCheckResult {
+    pub status: String,
+    pub value: Option<String>,
+    pub expected: Option<String>,
+}
+
+async fn get_auth_status(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<DomainAuthStatus>, ApiError> {
+    require_scopes(&auth, &["domains:read"])?;
+
+    let domain = sqlx::query!(
+        "SELECT id, name, spf_verified, dkim_verified, dmarc_verified, mx_verified, return_path_verified
+         FROM domains WHERE id = $1 AND tenant_id = $2",
+        id,
+        auth.tenant_id,
+    )
+    .fetch_optional(&*state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
+
+    let check = |verified: bool| AuthCheckResult {
+        status: if verified { "pass".into() } else { "fail".into() },
+        value: None,
+        expected: None,
+    };
+
+    let all_pass = domain.spf_verified && domain.dkim_verified && domain.dmarc_verified
+        && domain.mx_verified && domain.return_path_verified;
+    let any_pass = domain.spf_verified || domain.dkim_verified;
+
+    Ok(Json(DomainAuthStatus {
+        domain: domain.name,
+        spf: check(domain.spf_verified),
+        dkim: check(domain.dkim_verified),
+        dmarc: check(domain.dmarc_verified),
+        mx: check(domain.mx_verified),
+        return_path: check(domain.return_path_verified),
+        overall_status: if all_pass {
+            "authenticated".into()
+        } else if any_pass {
+            "partial".into()
+        } else {
+            "unauthenticated".into()
+        },
+    }))
+}
     }
 
     #[test]

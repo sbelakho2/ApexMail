@@ -1,12 +1,6 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Shield, Lock, Eye, Database, Network, Key } from '@/components/ui/icons';
 
 export function SecurityIsolation() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  const securityFeatures = [
  {
  icon: Network,
@@ -53,45 +47,25 @@ export function SecurityIsolation() {
  ];
 
  return (
- <section ref={ref} className="py-24 relative bg-surface-50">
+ <section className="py-20 lg:py-32 relative bg-surface-50">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="text-center mb-16">
- <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100/50 text-xs font-medium mb-6"
-          >
+ <div className="animate-in inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100/50 text-xs font-medium mb-6">
             <Shield className="w-4 h-4" />
             Security Isolation
-          </motion.div>
- <motion.h2
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.1 }}
- className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight"
- >
+          </div>
+ <h2 className="animate-in delay-100 text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  Your Perimeter. Your Rules.
  </motion.h2>
- <motion.p
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed"
- >
+ <p className="animate-in delay-200 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">
  Private cloud means true isolation. No shared databases, no shared caches, 
  no shared anything. Your security team maintains full control.
- </motion.p>
+ </p>
  </div>
 
  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
  {securityFeatures.map((feature, index) => (
- <motion.div
- key={feature.title}
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.1 * index }}
- className="bg-white rounded-lg border border-surface-200 p-8 shadow-sm hover:border-surface-300 transition-colors"
- >
+ <div key={feature.title} className="animate-in delay-100 bg-white rounded-lg border border-surface-200 p-8 shadow-sm hover:border-surface-300 transition-colors">
  <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200 mb-6">
  <feature.icon className="w-5 h-5 text-surface-900" strokeWidth={1.5} />
  </div>
@@ -105,17 +79,12 @@ export function SecurityIsolation() {
  </div>
  ))}
  </div>
- </motion.div>
+ </div>
  ))}
  </div>
 
  {/* Security Comparison */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.5 }}
- className="mt-12 bg-white rounded-lg border border-surface-200 p-8 overflow-hidden shadow-sm"
- >
+ <div className="animate-in delay-500 mt-12 bg-white rounded-lg border border-surface-200 p-8 overflow-hidden shadow-sm">
  <h3 className="text-lg font-semibold text-surface-900 mb-8 text-center">
  Shared vs Private Cloud Security
  </h3>
@@ -147,7 +116,7 @@ export function SecurityIsolation() {
  </tbody>
  </table>
  </div>
- </motion.div>
+ </div>
  </div>
  </section>
  );

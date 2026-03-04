@@ -4,7 +4,9 @@
 > - **Rust tracking service** instead of TypeScript API
 > - **PostgreSQL-native queues** instead of BullMQ (see [queue-system.md](./queue-system.md))
 > - **Rust MTA crate** instead of Postfix (for inbound SMTP only)
-> - **AWS SES** as the default outbound delivery transport (self-hosted SMTP available as opt-in)
+> - **AWS SES** for shared-pool sending (default for tenants without dedicated IPs)
+> - **Hetzner SMTP** for dedicated IP sending (automatic for tenants with dedicated IPs)
+> - Routing is **per-message** via `TransportRouter` based on tenant dedicated IP ownership
 > - Code examples below are pseudo-code; actual implementation is in `services/mail-server/crates/`
 
 ## Email Sending Pipeline
@@ -149,9 +151,13 @@ messageQueue.process('send', async (job) => {
 
 #### 5. Delivery Transport
 
-**AWS SES (default — `EMAIL_TRANSPORT_TYPE=ses`):**
+Routing is **per-message** via `TransportRouter`:
+
+**Tenant without dedicated IPs → AWS SES (shared pool):**
 ```
 Worker builds RFC 5322 MIME message
+  → TransportRouter checks routing cache
+  → No dedicated IPs → SesTransport
   → SES v2 SendEmail API (RawMessage)
   → SES handles DKIM signing, MX delivery, retries
   → SNS publishes events (bounce/complaint/delivery)
@@ -159,11 +165,13 @@ Worker builds RFC 5322 MIME message
   → Database updated
 ```
 
-**Self-Hosted SMTP (opt-in — `EMAIL_TRANSPORT_TYPE=smtp`):**
+**Tenant with dedicated IPs → Hetzner SMTP:**
 ```
-Outbound-queue SmtpSender:
-  → Resolve MX records (cached, TTL-aware)
-  → IpPool selects source IP (round-robin, warmup-aware)
+Worker builds RFC 5322 MIME message
+  → TransportRouter checks routing cache
+  → Has dedicated IPs → SmtpTransport
+  → SmtpSender resolves MX records
+  → Select Hetzner floating IP (round-robin, warmup-aware)
   → TcpSocket::bind(source_ip) → STARTTLS → deliver
   → Custom DKIM signing (per-domain keys)
   → Bounce/complaint via DSN + FBL servers
@@ -171,6 +179,8 @@ Outbound-queue SmtpSender:
 # Permanent failure:
 incoming → active → bounce → notification
 ```
+
+> **During warmup**, messages exceeding the daily limit overflow to SES shared sending automatically.
 
 ---
 

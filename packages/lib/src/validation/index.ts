@@ -11,11 +11,50 @@
 
 import * as dns from 'dns';
 import { promisify } from 'util';
+import { createRequire } from 'node:module';
 import { createLogger } from '../logger/index.js';
 
 const logger = createLogger({ name: 'email-validation' });
 
 const resolveMx = promisify(dns.resolveMx);
+
+// ── Native addon acceleration ──────────────────────────────────────────────
+// When @apexmail/validator-native is compiled, hot-path functions delegate to
+// the Rust napi-rs addon (runs on the libuv thread-pool, off the main thread).
+// Falls back transparently to Node.js validation when the native binary is absent.
+interface NativeValidationResult {
+  valid: boolean;
+  email: string;
+  localPart: string;
+  domain: string;
+  isEai: boolean;
+  isDisposable: boolean;
+  hasMx: boolean | null;
+  errors: string[];
+  warnings: string[];
+}
+
+interface NativeValidator {
+  validateEmail(email: string): NativeValidationResult;
+  validateEmailWithMx(email: string): Promise<NativeValidationResult>;
+  isDisposableDomain(domain: string): boolean;
+  checkMx(domain: string): Promise<{ domain: string; hasMx: boolean; mxRecords: string[]; hasAFallback: boolean }>;
+  normalizeEmail(email: string): string;
+  initializeDnsResolver(): void;
+}
+
+const _cjsRequire = createRequire(import.meta.url);
+let _nativeValidator: NativeValidator | null = null;
+try {
+  _nativeValidator = _cjsRequire('@apexmail/validator-native') as NativeValidator;
+  // Initialize the DNS resolver on load so MX checks are ready
+  _nativeValidator.initializeDnsResolver();
+  logger.info('Native validator addon loaded — using Rust RFC 5321/6531 validation');
+} catch (error) {
+  logger.warn('Native validator addon unavailable, falling back to JS validation', {
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
 
 // ============================================================================
 // Types
@@ -197,8 +236,20 @@ const DOMAIN_TYPOS: Record<string, string> = {
 
 /**
  * Validate email syntax according to RFC 5322
+ * Native fast-path: delegates to Rust RFC 5321/6531 parser when available.
  */
 function validateSyntax(email: string): { valid: boolean; local: string; domain: string } {
+    // ── Native fast-path ──────────────────────────────────────────────────
+    if (_nativeValidator) {
+        const result = _nativeValidator.validateEmail(email);
+        return {
+            valid: result.valid && !result.isDisposable, // disposable handled separately
+            local: result.localPart,
+            domain: result.domain,
+        };
+    }
+
+    // ── JS fallback ── RFC 5322 regex validation ──────────────────────────
     // Basic regex for email validation
     // More permissive than RFC 5322 but catches most common issues
     const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
@@ -244,8 +295,33 @@ function validateSyntax(email: string): { valid: boolean; local: string; domain:
 
 /**
  * Check MX records for domain
+ * Native fast-path: delegates to Rust trust-dns-resolver when available.
  */
 async function checkMxRecords(domain: string, timeout: number): Promise<{ valid: boolean; records?: dns.MxRecord[] }> {
+    // ── Native fast-path ──────────────────────────────────────────────────
+    if (_nativeValidator) {
+        try {
+            const result = await _nativeValidator.checkMx(domain);
+            if (result.hasMx) {
+                const records: dns.MxRecord[] = result.mxRecords.map((r) => {
+                    const parts = r.split(' ');
+                    return {
+                        priority: parseInt(parts[0] ?? '10', 10),
+                        exchange: parts[1] ?? domain,
+                    };
+                });
+                return { valid: true, records };
+            }
+            if (result.hasAFallback) {
+                return { valid: true, records: [{ exchange: domain, priority: 10 }] };
+            }
+            return { valid: false };
+        } catch {
+            // Fall through to JS implementation on native failure
+        }
+    }
+
+    // ── JS fallback ── Node.js dns.resolveMx ──────────────────────────────
     try {
         const records = await withTimeout(resolveMx(domain), timeout, 'DNS timeout');
         
@@ -288,8 +364,12 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, timeoutM
 
 /**
  * Check if domain is a disposable email provider
+ * Native fast-path: uses compiled Rust HashSet when available.
  */
 function checkDisposable(domain: string): boolean {
+    if (_nativeValidator) {
+        return _nativeValidator.isDisposableDomain(domain);
+    }
     return DISPOSABLE_DOMAINS.has(domain.toLowerCase());
 }
 

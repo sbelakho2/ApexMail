@@ -29,6 +29,7 @@ members = [
     "crates/ops-service",
     "crates/sales-autopilot",
     "crates/ai-service",
+    # "crates/pdf-renderer",  # temporarily disabled: typst 0.12 not on crates.io
     "crates/apexmail-db",
     "crates/apexmail-lib",
     "crates/smoke-tests",

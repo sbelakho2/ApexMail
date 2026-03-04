@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { useState, useEffect } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Clock } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
@@ -46,7 +44,6 @@ const renderSnapshots: RenderSnapshot[] = [
 ];
 
 export function TimeTravelDemo() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
@@ -63,42 +60,23 @@ export function TimeTravelDemo() {
   const currentSnapshot = renderSnapshots[currentIndex];
 
   return (
-    <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+    <section className="py-20 lg:py-32 relative bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-16">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4"
-          >
+          <div className="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-4">
             <Clock className="w-4 h-4 text-surface-500" />
             Time Travel Demo
-          </motion.div>
-          <motion.h2
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.1 }}
-            className="text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight"
-          >
+          </div>
+          <h2 className="animate-in delay-100 text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight">
             Watch Your Email Through Time
           </motion.h2>
-          <motion.p
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.2 }}
-            className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium"
-          >
+          <p className="animate-in delay-200 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed font-medium">
             Scrub through every render event. See how your email looked in each client, 
             at each point in time.
-          </motion.p>
+          </p>
         </div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.3 }}
-          className="bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden"
-        >
+        <div className="animate-in delay-300 bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden">
           {/* Preview Area */}
           <div className="grid lg:grid-cols-3 gap-0">
             {/* Email Preview */}
@@ -110,12 +88,7 @@ export function TimeTravelDemo() {
                 </div>
                 <div className="text-xs font-medium text-surface-500 font-mono">{currentSnapshot.id}</div>
               </div>
-              <motion.div
-                key={currentSnapshot.id}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="bg-white border border-surface-200 rounded-lg p-8 min-h-[400px] shadow-sm"
-              >
+              <div key={currentSnapshot.id} className="animate-in bg-white border border-surface-200 rounded-lg p-8 min-h-[400px] shadow-sm">
                 {/* Mock Email Preview */}
                 <div className="max-w-md mx-auto">
                   <div className="text-center mb-8">
@@ -139,7 +112,7 @@ export function TimeTravelDemo() {
                     Get Started
                   </button>
                 </div>
-              </motion.div>
+              </div>
             </div>
 
             {/* Changes Panel */}
@@ -147,18 +120,12 @@ export function TimeTravelDemo() {
               <div className="text-xs font-medium text-surface-500 mb-6">Render Changes</div>
               <div className="space-y-4">
                 {currentSnapshot.changes.map((change, i) => (
-                  <motion.div
-                    key={change}
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: i * 0.1 }}
-                    className="flex items-center gap-3"
-                  >
+                  <div key={change} className="animate-in flex items-center gap-3">
                     <div className="w-5 h-5 rounded-full bg-primary-50 flex items-center justify-center border border-primary-100 shrink-0">
                       <div className="w-1.5 h-1.5 rounded-full bg-primary-600" />
                     </div>
                     <span className="text-sm text-surface-700 font-medium">{change}</span>
-                  </motion.div>
+                  </div>
                 ))}
               </div>
 
@@ -202,10 +169,7 @@ export function TimeTravelDemo() {
               {/* Timeline Scrubber */}
               <div className="flex-1 relative">
                 <div className="h-2 bg-surface-100 rounded-full overflow-hidden">
-                  <motion.div
-                    className="h-full bg-primary-500 rounded-full"
-                    animate={{ width: `${((currentIndex + 1) / renderSnapshots.length) * 100}%` }}
-                  />
+                  <div className="animate-in h-full bg-primary-500 rounded-full"} />
                 </div>
                 <div className="flex justify-between mt-4">
                   {renderSnapshots.map((snapshot, index) => (
@@ -225,7 +189,7 @@ export function TimeTravelDemo() {
               </div>
             </div>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

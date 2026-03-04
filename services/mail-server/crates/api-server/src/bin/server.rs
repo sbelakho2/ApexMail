@@ -11,6 +11,7 @@ use reqwest::Client;
 
 use api_server::app::build_app;
 use api_server::config::Config;
+use api_server::ip_provider::DedicatedIpProvider;
 use api_server::ses_provider::SesIpProvider;
 use api_server::state::AppStateInner;
 
@@ -64,14 +65,22 @@ async fn main() -> anyhow::Result<()> {
         config.ses_ip_pool_prefix.clone(),
         config.aws_region.clone(),
     );
-    tracing::info!(region = %config.aws_region, "AWS SES client initialized");
+    tracing::info!(region = %config.aws_region, "AWS SES client initialized (shared-pool sending only)");
+
+    // ── Hetzner dedicated IP provider ───────────────────────
+    let ip_provider = DedicatedIpProvider::from_env(db.clone());
+    if ip_provider.is_some() {
+        tracing::info!("Hetzner dedicated IP provider initialized");
+    } else {
+        tracing::warn!("HETZNER_API_TOKEN not set — dedicated IP provisioning disabled");
+    }
 
     // ── App state ───────────────────────────────────────────
     let http_client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider);
+    let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider, ip_provider);
 
     // ── Build & serve ───────────────────────────────────────
     let app = build_app(state);

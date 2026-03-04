@@ -2,14 +2,21 @@
 """
 ApexMail Agent Test Runner
 Tests the trained LoRA adapter against expected behaviors.
+
+Exports:
+  TEST_CASES — legacy list-of-dict test cases (used by run_tests below)
+  ALL_TESTS  — unified dict {category: [test, ...]} consumed by
+               run_test_agent.py and validate_pipeline.py (>= 180 tests)
 """
 import argparse
 import json
+import os
 import re
 import sys
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
+
+# torch / transformers / peft are imported lazily inside functions that need them
+# so that run_test_agent.py and validate_pipeline.py can import ALL_TESTS without
+# requiring a CUDA environment.
 
 # ── System prompt (must match training) ─────────────────────────
 SYSTEM_PROMPT = """You are ApexMail Agent — the AI support agent for the ApexMail email platform (Bel Consulting OÜ, Tallinn, Estonia, founded 2022).
@@ -32,6 +39,10 @@ Be helpful, accurate, and concise. For account-specific actions, use tool calls.
 
 def load_model(base_model_path: str, adapter_path: str = None, device_map: str = "auto"):
     """Load base model with optional LoRA adapter."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+
     print(f"Loading tokenizer from {base_model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(base_model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -55,6 +66,8 @@ def load_model(base_model_path: str, adapter_path: str = None, device_map: str =
 
 def generate_response(model, tokenizer, user_message: str, max_tokens: int = 512):
     """Generate a response from the model."""
+    import torch
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -169,6 +182,70 @@ TEST_CASES = [
         "forbidden": ["error", "cannot", "don't know"],
     },
 ]
+
+
+# ── Build ALL_TESTS (unified dict consumed by run_test_agent / validate_pipeline) ──
+def _build_all_tests() -> dict[str, list[dict]]:
+    """
+    Merge TEST_CASES (basic) + stress_test.STRESS_TESTS into one dict
+    keyed by category, with each entry normalized to:
+      {id, name, question, must_contain, must_not_contain, must_contain_any, ...}
+    """
+    # Import stress tests (sibling module)
+    sys.path.insert(0, os.path.dirname(__file__) or ".")
+    from stress_test import STRESS_TESTS
+
+    all_tests: dict[str, list[dict]] = {}
+
+    # 1. Convert legacy TEST_CASES → "basic" category
+    basic = []
+    for idx, tc in enumerate(TEST_CASES, start=1):
+        basic.append({
+            "id": f"basic_{idx:03d}",
+            "name": tc["name"],
+            "question": tc["input"],
+            "must_contain": tc.get("required", []),
+            "must_not_contain": tc.get("forbidden", []),
+        })
+    all_tests["basic"] = basic
+
+    # 2. Convert each STRESS_TESTS category
+    for category, tests in STRESS_TESTS.items():
+        converted = []
+        for idx, st in enumerate(tests, start=1):
+            checks = st.get("checks", {})
+            entry: dict = {
+                "id": f"{category}_{idx:03d}",
+                "name": f"{category}_{idx:03d}",
+                "question": st["q"],
+            }
+            # Flatten checks into top-level keys
+            if "must_contain" in checks:
+                entry["must_contain"] = checks["must_contain"]
+            if "must_not_contain" in checks:
+                entry["must_not_contain"] = checks["must_not_contain"]
+            if "must_contain_any" in checks:
+                entry["must_contain_any"] = checks["must_contain_any"]
+            # Pass through any extra check keys (regex, length, etc.)
+            for key in ("must_match_regex", "min_length", "max_length"):
+                if key in checks:
+                    entry[key] = checks[key]
+            # Forward optional stress-test fields
+            if "context" in st:
+                entry["context"] = st["context"]
+            if "conversation" in st:
+                entry["conversation"] = st["conversation"]
+            if "tool_call_check" in st:
+                entry["tool_call_check"] = st["tool_call_check"]
+            if "is_clarification" in st:
+                entry["is_clarification"] = st["is_clarification"]
+            converted.append(entry)
+        all_tests[category] = converted
+
+    return all_tests
+
+
+ALL_TESTS = _build_all_tests()
 
 
 def run_tests(model, tokenizer, verbose: bool = False):

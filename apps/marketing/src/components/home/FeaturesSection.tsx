@@ -1,6 +1,3 @@
-'use client';
-
-import { useInView } from 'react-intersection-observer';
 import {
  Shield,
  Zap,
@@ -95,14 +92,9 @@ const features = [
 ];
 
 export function FeaturesSection() {
- const [ref, inView] = useInView({
- triggerOnce: true,
- threshold: 0.1,
- });
-
  return (
- <section ref={ref} className="py-20 lg:py-32 relative bg-white" id="features">
-      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+ <section className="py-20 lg:py-32 relative bg-white" id="features">
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  {/* Section Header */}
  <div className="text-center mb-16">
  <h2 className="section-title mb-4">

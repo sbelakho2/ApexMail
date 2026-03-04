@@ -1,6 +1,3 @@
-'use client';
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import {
   Mail,
   Shield,
@@ -253,32 +250,21 @@ const featureCategories = [
 ];
 
 export function FeatureGrid() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   return (
-    <section ref={ref} className="py-20 lg:py-32 bg-white">
+    <section className="py-20 lg:py-32 bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="text-center mb-16"
-        >
+        <div className="animate-in text-center mb-16">
           <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4">
             Complete Feature Set
           </h2>
           <p className="text-lg text-surface-600 max-w-2xl mx-auto">
             Everything you need to send, track, and optimize transactional emails at scale.
           </p>
-        </motion.div>
+        </div>
 
         <div className="space-y-16">
           {featureCategories.map((category, categoryIndex) => (
-            <motion.div
-              key={category.title}
-              initial={{ opacity: 0, y: 20 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: categoryIndex * 0.1 }}
-            >
+            <div key={category.title} className="animate-in">
               <div className="flex items-center gap-3 mb-8">
                 <div className={cn('w-10 h-10 rounded-lg flex items-center justify-center', category.bgColor)}>
                   <category.icon className={cn('w-5 h-5', category.color)} />
@@ -288,22 +274,16 @@ export function FeatureGrid() {
 
               <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {category.features.map((feature, featureIndex) => (
-                  <motion.div
-                    key={feature.name}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={inView ? { opacity: 1, y: 0 } : {}}
-                    transition={{ delay: categoryIndex * 0.1 + featureIndex * 0.05 }}
-                    className="p-6 rounded-lg border border-surface-200 hover:border-surface-300 hover:shadow-sm transition-all bg-white"
-                  >
+                  <div key={feature.name} className="animate-in p-6 rounded-lg border border-surface-200 hover:border-surface-300 hover:shadow-sm transition-all bg-white">
                     <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center mb-4', category.bgColor)}>
                       <feature.icon className={cn('w-4 h-4', category.color)} />
                     </div>
                     <h4 className="font-semibold text-surface-900 mb-2">{feature.name}</h4>
                     <p className="text-sm text-surface-600">{feature.description}</p>
-                  </motion.div>
+                  </div>
                 ))}
               </div>
-            </motion.div>
+            </div>
           ))}
         </div>
       </div>

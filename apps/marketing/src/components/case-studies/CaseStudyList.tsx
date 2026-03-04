@@ -1,7 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Mail, TrendingUp, Shield, Clock, Building2, Users } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
@@ -141,20 +137,12 @@ const caseStudies = [
 ];
 
 export function CaseStudyList() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   return (
-    <section ref={ref} className="py-20 bg-surface-50">
+    <section className="py-20 bg-surface-50">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="space-y-16">
           {caseStudies.map((study, index) => (
-            <motion.article
-              key={study.slug}
-              initial={{ opacity: 0, y: 20 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: index * 0.1 }}
-              className="bg-white rounded-lg border border-surface-200 shadow-sm overflow-hidden"
-            >
+            <article key={study.slug} className="animate-in bg-white rounded-lg border border-surface-200 shadow-sm overflow-hidden">
               {/* Header */}
               <div className="border-b border-surface-100 flex flex-col md:flex-row md:items-center justify-between p-6 bg-white">
                 <div className="flex items-center gap-3 mb-4 md:mb-0">

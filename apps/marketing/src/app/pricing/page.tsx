@@ -4,6 +4,9 @@ import { PricingPlans } from '@/components/pricing/PricingPlans';
 import { PricingFAQ } from '@/components/pricing/PricingFAQ';
 import { PricingCTA } from '@/components/pricing/PricingCTA';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: 'Pricing | Simple, Transparent Pricing',
   description:

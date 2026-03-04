@@ -1,10 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { formatNumber, formatDate, formatCurrency, cn, getRiskColor, getStatusChipClasses } from '../../lib/utils';
 import { PageLoadingState } from '../../components/ui/async-state';
 import { useApiResource } from '../../lib/use-api-resource';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { useDialog } from '../../components/ui/confirm-dialog';
 
 /**
  * Tenants Overview - Platform-wide tenant management
@@ -65,12 +67,25 @@ export default function TenantsPage() {
         initialData: [],
         errorMessage: 'Failed to load tenants.',
     });
+    const dialog = useDialog();
     const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [filterPlan, setFilterPlan] = useState('');
     const [filterStatus, setFilterStatus] = useState('');
-    const [currentRole] = useState<'viewer' | 'operator' | 'admin' | 'owner'>('operator');
+    const [currentRole, setCurrentRole] = useState<'viewer' | 'operator' | 'admin' | 'owner'>('viewer');
     const [virtualStart, setVirtualStart] = useState(0);
+
+    // Fetch real role from session API
+    useEffect(() => {
+        fetch('/api/auth/session', { credentials: 'include' })
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data?.user?.role) {
+                    setCurrentRole(data.user.role);
+                }
+            })
+            .catch(() => { /* keep default viewer role for safety */ });
+    }, []);
 
     const canExecuteTenantActions = currentRole === 'owner' || currentRole === 'admin';
     const VIRTUAL_ROWS = 30;
@@ -80,10 +95,26 @@ export default function TenantsPage() {
         const tenant = tenants.find(t => t.id === tenantId);
         if (!tenant) return;
         const action = tenant.status === 'suspended' ? 'unsuspend' : 'suspend';
+
+        const confirmed = await dialog.confirm({
+            title: action === 'suspend' ? 'Suspend Tenant' : 'Unsuspend Tenant',
+            message: action === 'suspend'
+                ? `Suspend tenant ${tenant.name || tenantId}? This will immediately block all API access and email sending for this tenant.`
+                : `Unsuspend tenant ${tenant.name || tenantId}? This will restore full API and email access.`,
+            confirmLabel: action === 'suspend' ? 'Suspend' : 'Unsuspend',
+            variant: action === 'suspend' ? 'destructive' : 'default',
+        });
+        if (!confirmed) return;
+
         try {
+            const csrfToken = await getCsrfToken();
             const res = await fetch('/api/tenants', {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({ id: tenantId, action }),
             });
             if (res.ok) {
@@ -92,9 +123,11 @@ export default function TenantsPage() {
                         ? { ...t, status: action === 'suspend' ? 'suspended' : 'active' as Tenant['status'] }
                         : t
                 ));
+            } else {
+                await dialog.alert({ title: 'Action Failed', message: `Failed to ${action} tenant (${res.status})` });
             }
         } catch (err) {
-            console.error(`Failed to ${action} tenant:`, err);
+            await dialog.alert({ title: 'Network Error', message: err instanceof Error ? err.message : `Failed to ${action} tenant` });
         }
     }
 
@@ -355,11 +388,24 @@ export default function TenantsPage() {
                         <div className="flex gap-3 pt-6 border-t border-border">
                             <button
                                 onClick={async () => {
+                                    const confirmed = await dialog.confirm({
+                                        title: 'Impersonate Tenant',
+                                        message: `You are about to impersonate "${selectedTenant.name}". A new console tab will open with full access to this tenant's account. All actions will be logged. Proceed?`,
+                                        confirmLabel: 'Impersonate',
+                                        variant: 'destructive',
+                                    });
+                                    if (!confirmed) return;
+
                                     // Generate impersonation token via API
                                     try {
+                                        const csrfToken = await getCsrfToken();
                                         const response = await fetch('/api/impersonate', {
                                             method: 'POST',
-                                            headers: { 'Content-Type': 'application/json' },
+                                            credentials: 'include',
+                                            headers: {
+                                                'Content-Type': 'application/json',
+                                                ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                                            },
                                             body: JSON.stringify({
                                                 tenantId: selectedTenant.id,
                                                 tenantName: selectedTenant.name,
@@ -385,18 +431,13 @@ export default function TenantsPage() {
                                                 form.submit();
                                                 form.remove();
                                             } else {
-                                                console.error('Impersonation response missing token or postTarget');
+                                                await dialog.alert({ title: 'Impersonation Error', message: 'Server response missing expected token data.' });
                                             }
                                         } else {
-                                            console.error('Failed to generate impersonation token');
-                                            // Fallback to direct URL (dev mode)
-                                            const consoleUrl = process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000';
-                                            window.open(consoleUrl, '_blank');
+                                            await dialog.alert({ title: 'Impersonation Failed', message: `Server returned ${response.status}` });
                                         }
                                     } catch (error) {
-                                        console.error('Impersonation error:', error);
-                                        const consoleUrl = process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000';
-                                        window.open(consoleUrl, '_blank');
+                                        await dialog.alert({ title: 'Network Error', message: error instanceof Error ? error.message : 'Failed to generate impersonation token' });
                                     }
                                 }}
                                 className="flex-1 px-4 py-2 min-h-[44px] bg-warning text-warning-foreground rounded-sm text-center hover:bg-warning/90 font-medium transition-colors flex items-center justify-center gap-2"

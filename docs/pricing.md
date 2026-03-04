@@ -86,7 +86,7 @@ No monthly commitment. API calls: first 100K free, then $0.10/1K.
 Available from **Pro** plan and above. Requires average sending volume > 500 emails/day.
 Warmup, monitoring, and autoscaling included.
 
-> **Transport note:** With the default SES transport, dedicated IPs are provisioned through AWS SES ($24.95/mo provider cost per IP). With self-hosted SMTP, dedicated IPs are sourced from the hosting provider and managed by the built-in warmup engine.
+> **Transport note:** Dedicated IPs are provisioned via Hetzner Cloud floating IPs (~€4/mo per IP). Shared-pool sending uses AWS SES. Routing is automatic based on tenant dedicated IP ownership.
 
 ---
 
@@ -135,17 +135,17 @@ Warmup, monitoring, and autoscaling included.
 
 ## Margin Analysis (internal only — NEVER disclose)
 
-Infrastructure provider: AWS SES ($0.10 per 1,000 emails).
-Dedicated IP cost: $24.95/mo per IP (AWS SES standard dedicated IP).
+Infrastructure provider: AWS SES ($0.10 per 1,000 emails) for shared pool.
+Dedicated IP cost: ~€4/mo per IP (Hetzner Cloud floating IP).
 
-| Plan       | Revenue | SES COGS (max) | Gross Margin |
-|------------|---------|----------------|--------------|
+| Plan       | Revenue | COGS (max) | Gross Margin |
+|------------|---------|------------|--------------|
 | Free       | $0      | $0.30          | N/A (lead gen) |
 | Starter    | $25     | $5.00          | 80%          |
 | Pro        | $65     | $15.00         | 77%          |
-| Growth     | $150    | $50.00 + $24.95 (1 IP) | 50%  |
-| Scale      | $350    | $200 + $74.85 (3 IPs) | 21%  |
-| Enterprise | $800    | $500 + $249.50 (10 IPs) | 6%  |
+| Growth     | $150    | $50.00 + ~$4 (1 IP) | 64%  |
+| Scale      | $350    | $200 + ~$12 (3 IPs) | 39%  |
+| Enterprise | $800    | $500 + ~$40 (10 IPs) | 33%  |
 
 Scale and Enterprise margins improve significantly when customers use
 less than their email allocation (typical utilisation: 40–60%).

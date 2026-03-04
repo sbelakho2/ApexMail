@@ -1,8 +1,6 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Check, ArrowRight } from '@/components/ui/icons';
 import Link from 'next/link';
 import { formatNumber, formatCurrency } from '@/lib/utils';
@@ -130,7 +128,6 @@ const volumeMarks = [
 ];
 
 export function PricingCalculator() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
   const [volume, setVolume] = useState(100000);
   const [options, setOptions] = useState<PricingOption>({
     dedicatedIP: false,
@@ -147,20 +144,16 @@ export function PricingCalculator() {
   }), [volume, options]);
 
   return (
-    <section ref={ref} className="py-24 bg-surface-50 relative overflow-hidden" id="pricing">
+    <section className="py-20 lg:py-32 bg-surface-50 relative overflow-hidden" id="pricing">
       {/* Background Decorative Elements */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-[4%] left-[4%] w-[28%] h-[28%] bg-brand-500/5 blur-[120px] rounded-full" />
         <div className="absolute bottom-[4%] right-[4%] w-[28%] h-[28%] bg-brand-500/5 blur-[120px] rounded-full" />
       </div>
 
-      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Header */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="text-center mb-16"
-        >
+        <div className="animate-in text-center mb-16">
           <h2 className="section-title mb-4">
             <span className="text-surface-900">Pricing That</span>{' '}
             <span className="text-brand-500">Scales With You</span>
@@ -168,16 +161,11 @@ export function PricingCalculator() {
           <p className="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">
             Save up to 80% compared to legacy providers. No hidden fees, no enterprise tax.
           </p>
-        </motion.div>
+        </div>
 
         <div className="grid lg:grid-cols-12 gap-12 items-start">
           {/* Calculator Card */}
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            transition={{ delay: 0.2 }}
-            className="lg:col-span-7 bg-white rounded-2xl border border-surface-200 shadow-xl overflow-hidden"
-          >
+          <div className="animate-in delay-200 lg:col-span-7 bg-white rounded-2xl border border-surface-200 shadow-xl overflow-hidden">
             <div className="p-8 md:p-12">
               {/* Volume Slider */}
               <div className="mb-10">
@@ -267,7 +255,7 @@ export function PricingCalculator() {
                 </div>
               </div>
             </div>
-          </motion.div>
+          </div>
 
           {/* Comparison Side */}
           <div className="lg:col-span-5 space-y-8">

@@ -7,6 +7,7 @@ import { Header } from '@/components/layout/header';
 import { ImpersonationBanner } from '@/components/impersonation-banner';
 import { cn } from '@/lib/utils';
 import { useUserStore } from '@/stores';
+import { globalMutate } from '@/hooks/use-api';
 
 export default function DashboardLayout({
     children,
@@ -18,7 +19,21 @@ export default function DashboardLayout({
     const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
     const setUser = useUserStore((state) => state.setUser);
     const setLoading = useUserStore((state) => state.setLoading);
+    const currentUserId = useUserStore((state) => state.user?.id);
+    const previousUserIdRef = React.useRef<string | undefined>(currentUserId);
 
+    // Clear SWR cache when user identity changes (tenant isolation)
+    React.useEffect(() => {
+        if (previousUserIdRef.current && currentUserId && previousUserIdRef.current !== currentUserId) {
+            // User changed (e.g., impersonation started/stopped) — purge all cached data
+            globalMutate(() => true, undefined, { revalidate: true });
+        }
+        previousUserIdRef.current = currentUserId;
+    }, [currentUserId]);
+
+    // Verify session on mount only — middleware handles route protection,
+    // so periodic polling is unnecessary overhead. Re-verify on window focus
+    // for tab-return freshness without the 60s interval.
     React.useEffect(() => {
         let cancelled = false;
         let activeController: AbortController | null = null;
@@ -28,7 +43,7 @@ export default function DashboardLayout({
                 activeController?.abort();
                 activeController = new AbortController();
 
-                const response = await fetch('/api/auth/session', {
+                const response = await fetch('/v1/auth/session', {
                     cache: 'no-store',
                     signal: activeController.signal,
                 });
@@ -56,14 +71,18 @@ export default function DashboardLayout({
         };
 
         verifySession();
-        const interval = window.setInterval(verifySession, 60_000);
+
+        // Re-verify only when user returns to tab (replaces 60s polling)
+        const handleFocus = () => verifySession();
+        window.addEventListener('focus', handleFocus);
 
         return () => {
             cancelled = true;
             activeController?.abort();
-            window.clearInterval(interval);
+            window.removeEventListener('focus', handleFocus);
         };
-    }, [pathname, router, setLoading, setUser]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [router, setLoading, setUser]);
 
     return (
         <div className="flex h-screen overflow-hidden bg-surface-50">

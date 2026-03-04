@@ -2,7 +2,6 @@
 
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
 import { Menu, X, ChevronDown, Zap, Shield, Cloud, Code, BookOpen } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
@@ -59,7 +58,7 @@ export function Header() {
           : 'bg-transparent border-b border-transparent'
       )}
     >
-      <nav className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+      <nav className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 lg:h-20">
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2 group">
@@ -99,15 +98,8 @@ export function Header() {
                     {item.name}
                     <ChevronDown className={cn('w-4 h-4 transition-transform duration-150', activeDropdown === item.name && 'rotate-180')} />
                   </button>
-                  <AnimatePresence>
-                    {activeDropdown === item.name && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 8, scale: 0.98 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 8, scale: 0.98 }}
-                        transition={{ duration: 0.15, ease: "easeOut" }}
-                        className="absolute top-full left-0 mt-2 w-80 p-2 bg-white rounded-xl border border-surface-200 shadow-xl shadow-surface-900/5"
-                      >
+                  {activeDropdown === item.name && (
+                      <div className="animate-in absolute top-full left-0 mt-2 w-80 p-2 bg-white rounded-xl border border-surface-200 shadow-xl shadow-surface-900/5">
                         {item.items?.map((subItem) => (
                           <Link
                             key={subItem.name}
@@ -123,9 +115,9 @@ export function Header() {
                             </div>
                           </Link>
                         ))}
-                      </motion.div>
+                      </div>
                     )}
-                  </AnimatePresence>
+                  
                 </div>
               ) : (
                 <Link key={item.name} href={item.href} className="px-3 py-2.5 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-lg hover:bg-surface-50">
@@ -158,14 +150,8 @@ export function Header() {
       </nav>
 
       {/* Mobile Menu */}
-      <AnimatePresence>
-        {mobileMenuOpen && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="lg:hidden bg-white border-b border-surface-200 overflow-hidden"
-          >
+      {mobileMenuOpen && (
+          <div className="animate-in lg:hidden bg-white border-b border-surface-200 overflow-hidden">
             <div className="px-4 py-6 space-y-6">
               {navigation.map((item) => (
                 'items' in item ? (
@@ -205,9 +191,9 @@ export function Header() {
                 </Link>
               </div>
             </div>
-          </motion.div>
+          </div>
         )}
-      </AnimatePresence>
+      
     </header>
   );
 }

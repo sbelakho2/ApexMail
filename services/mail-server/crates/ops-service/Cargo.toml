@@ -46,6 +46,10 @@ parking_lot.workspace = true
 # HTTP client (for health checks)
 reqwest.workspace = true
 
+# AWS SES (monitoring)
+aws-config.workspace = true
+aws-sdk-sesv2.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tower.workspace = true

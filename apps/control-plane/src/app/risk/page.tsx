@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { formatNumber, formatDate, cn } from '../../lib/utils';
 import { getCsrfToken } from '../../lib/client-csrf';
+import { useDialog } from '../../components/ui/confirm-dialog';
 import { PageLoadingState } from '../../components/ui/async-state';
 
 /**
@@ -56,6 +57,7 @@ export default function RiskMonitoringPage() {
     const [savingThresholds, setSavingThresholds] = useState(false);
     const [runningAssessment, setRunningAssessment] = useState(false);
     const [actionMessage, setActionMessage] = useState<string | null>(null);
+    const dialog = useDialog();
     const [thresholds, setThresholds] = useState({
         bounceRateWarn: 5,
         bounceRateCritical: 10,
@@ -248,6 +250,15 @@ export default function RiskMonitoringPage() {
 
     async function suspendSelectedTenant() {
         if (!selectedTenant) return;
+
+        const confirmed = await dialog.confirm({
+            title: 'Suspend Tenant',
+            message: `Suspend "${selectedTenant.tenantName}"? All sending will be halted immediately and the tenant will lose API access until manually reinstated.`,
+            confirmLabel: 'Suspend',
+            variant: 'destructive',
+        });
+        if (!confirmed) return;
+
         setError(null);
         setActionMessage(null);
         try {

@@ -1,6 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
 import { Cloud, Server, Shield, Zap } from '@/components/ui/icons';
 import Link from 'next/link';
 
@@ -11,21 +8,12 @@ export function PrivateCloudHero() {
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Copy */}
  <div>
- <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6"
-        >
+ <div className="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
           <Cloud className="w-4 h-4" />
           Private Cloud
-        </motion.div>
+        </div>
 
- <motion.h1
- initial={{ opacity: 0, y: 20 }}
- animate={{ opacity: 1, y: 0 }}
- transition={{ delay: 0.1 }}
- className="text-3xl sm:text-4xl lg:text-6xl font-bold text-surface-900 mb-6 leading-tight tracking-tight break-words"
- >
+ <h1 className="animate-in delay-100 text-3xl sm:text-4xl lg:text-6xl font-bold text-surface-900 mb-6 leading-tight tracking-tight break-words">
  Your VPC.
  <br />
  Your IP.
@@ -33,22 +21,12 @@ export function PrivateCloudHero() {
  <span className="text-surface-500">Our Code.</span>
  </motion.h1>
 
- <motion.p
- initial={{ opacity: 0, y: 20 }}
- animate={{ opacity: 1, y: 0 }}
- transition={{ delay: 0.2 }}
- className="text-lg sm:text-xl text-surface-600 mb-8 leading-relaxed"
- >
+ <p className="animate-in delay-200 text-lg sm:text-xl text-surface-600 mb-8 leading-relaxed">
  Deploy the full ApexMail stack in your own AWS, GCP, or Azure VPC. 
  Complete data sovereignty with zero shared infrastructure.
- </motion.p>
+ </p>
 
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={{ opacity: 1, y: 0 }}
- transition={{ delay: 0.3 }}
- className="flex flex-col sm:flex-row gap-4"
- >
+ <div className="animate-in delay-300 flex flex-col sm:flex-row gap-4">
  <Link
  href="/pricing"
  className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors"
@@ -61,15 +39,10 @@ export function PrivateCloudHero() {
  >
  View Architecture
  </Link>
- </motion.div>
+ </div>
 
  {/* Stats */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={{ opacity: 1, y: 0 }}
- transition={{ delay: 0.4 }}
- className="grid grid-cols-1 sm:grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200"
- >
+ <div className="animate-in delay-400 grid grid-cols-1 sm:grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200">
  {[
  { value: '< 1ms', label: 'Internal Latency' },
  { value: '100%', label: 'Data Sovereignty' },
@@ -80,16 +53,11 @@ export function PrivateCloudHero() {
  <div className="text-xs font-medium text-surface-500">{stat.label}</div>
  </div>
  ))}
- </motion.div>
+ </div>
  </div>
 
  {/* Right - Visual */}
- <motion.div
- initial={{ opacity: 0, scale: 0.95 }}
- animate={{ opacity: 1, scale: 1 }}
- transition={{ delay: 0.2 }}
- className="relative"
- >
+ <div className="animate-in delay-200 relative">
  <div className="bg-white rounded-lg border border-surface-200 p-8 shadow-sm">
  {/* VPC Diagram */}
  <div className="text-xs font-semibold text-surface-500 mb-6 text-center">Cloud VPC Architecture</div>
@@ -144,7 +112,7 @@ export function PrivateCloudHero() {
  ))}
  </div>
  </div>
- </motion.div>
+ </div>
  </div>
  </div>
  </section>

@@ -1,21 +1,11 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { ArrowRight, MessageCircle, Calculator } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function PricingCTA() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-24 bg-surface-50">
+ <section className="py-20 lg:py-32 bg-surface-50">
  <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ duration: 0.4 }}
- >
+ <div className="animate-in">
  <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  Still have questions?
  </h2>
@@ -46,7 +36,7 @@ export function PricingCTA() {
  Talk to Sales
  </Link>
  </div>
- </motion.div>
+ </div>
  </div>
  </section>
  );

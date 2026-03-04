@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    optimizePackageImports: ['framer-motion'],
+    optimizePackageImports: [],
   },
   images: {
     remotePatterns: [
@@ -9,6 +9,11 @@ const nextConfig = {
       { protocol: 'https', hostname: 'cdn.apexmail.ee' },
     ],
     formats: ['image/avif', 'image/webp'],
+    deviceSizes: [640, 750, 828, 1080, 1200],
+    imageSizes: [16, 32, 48, 64, 96],
+  },
+  compiler: {
+    removeConsole: process.env.NODE_ENV === 'production',
   },
   headers: async () => [
     {
@@ -30,6 +35,12 @@ const nextConfig = {
         },
       ],
     },
+    {
+      source: '/_next/static/:path*',
+      headers: [
+        { key: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
+      ],
+    },
   ],
   redirects: async () => [
     {
@@ -38,8 +49,38 @@ const nextConfig = {
       permanent: true,
     },
     {
+      source: '/docs/:path*',
+      destination: 'https://docs.apexmail.ee/:path*',
+      permanent: true,
+    },
+    {
       source: '/app',
       destination: 'https://app.apexmail.ee',
+      permanent: false,
+    },
+    {
+      source: '/signup',
+      destination: 'https://app.apexmail.ee/signup',
+      permanent: false,
+    },
+    {
+      source: '/contact',
+      destination: '/pricing',
+      permanent: false,
+    },
+    {
+      source: '/contact/:path*',
+      destination: '/pricing',
+      permanent: false,
+    },
+    {
+      source: '/compare',
+      destination: '/compare/sendgrid',
+      permanent: false,
+    },
+    {
+      source: '/pricing/faq',
+      destination: '/pricing#faq',
       permanent: false,
     },
   ],

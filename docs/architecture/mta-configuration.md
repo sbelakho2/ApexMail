@@ -7,7 +7,7 @@
 
 This document covers the architecture, security controls, and authentication engine of the ApexMail Mail Transfer Agent (MTA). All **inbound** email processing, sender authentication, and feedback loop handling are managed by this subsystem.
 
-> **Scope:** This document covers the **inbound MTA** only. Outbound email delivery is handled by the transport layer (AWS SES by default, self-hosted SMTP opt-in). See [ADR 0011 — Dual Delivery](../adr/0011-dual-delivery-ses-primary.md) and [Delivery Transport](delivery-transport.md) for outbound architecture.
+> **Scope:** This document covers the **inbound MTA** only. Outbound email delivery uses a hybrid architecture: AWS SES for shared sending, Hetzner Cloud (self-hosted SMTP) for dedicated IPs. See [Delivery Transport](delivery-transport.md) and [Hybrid Email Infrastructure](hybrid-email-infrastructure.md) for outbound architecture.
 
 ---
 

@@ -170,6 +170,44 @@ services:
       - /tmp
 
   # ===========================================================================
+  # PDF RENDERER (Typst-based PDF generation)
+  # ===========================================================================
+  pdf-renderer:
+    build:
+      context: services/mail-server
+      dockerfile: crates/pdf-renderer/Dockerfile
+    restart: unless-stopped
+    environment:
+      PDF_HOST: 0.0.0.0
+      PDF_PORT: "3004"
+      RUST_LOG: ${PDF_LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - apexmail_backend
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # ===========================================================================
   # DEVELOPMENT SMTP (Mailpit)
   # ===========================================================================
   mailpit:

@@ -3,6 +3,9 @@ import { CaseStudiesHero } from '@/components/case-studies/CaseStudiesHero';
 import { CaseStudyList } from '@/components/case-studies/CaseStudyList';
 import { CaseStudiesCTA } from '@/components/case-studies/CaseStudiesCTA';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: 'Case Studies | Customer Success Stories',
   description:

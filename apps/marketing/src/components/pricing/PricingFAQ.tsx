@@ -1,7 +1,5 @@
 'use client';
 
-import { motion, AnimatePresence } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { useState } from 'react';
 import { ChevronDown } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
@@ -45,28 +43,18 @@ const faqs: FAQ[] = [
 ];
 
 export function PricingFAQ() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
  const [openIndex, setOpenIndex] = useState<number | null>(null);
 
  return (
- <section ref={ref} className="py-24 bg-white border-t border-surface-100">
+ <section className="py-20 lg:py-32 bg-white border-t border-surface-100">
  <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="text-center mb-16">
- <motion.h2
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="text-3xl font-bold text-surface-900 tracking-tight"
- >
+ <h2 className="animate-in text-3xl font-bold text-surface-900 tracking-tight">
  Frequently Asked Questions
  </motion.h2>
  </div>
 
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.1 }}
- className="space-y-4"
- >
+ <div className="animate-in delay-100 space-y-4">
  {faqs.map((faq, index) => (
  <div key={faq.question} className="border-b border-surface-100 last:border-0">
  <button
@@ -84,26 +72,17 @@ export function PricingFAQ() {
  )}
  />
  </button>
- <AnimatePresence>
  {openIndex === index && (
- <motion.div
- id={`faq-panel-${index}`}
- role="region"
- aria-labelledby={`faq-button-${index}`}
- initial={{ opacity: 0, height: 0 }}
- animate={{ opacity: 1, height: 'auto' }}
- exit={{ opacity: 0, height: 0 }}
- transition={{ duration: 0.2 }}
- >
+ <div id={`faq-panel-${index}`} role="region" aria-labelledby={`faq-button-${index}`} className="animate-in">
  <div className="pb-6 pr-12">
  <p className="text-surface-600 leading-relaxed">{faq.answer}</p>
  </div>
- </motion.div>
+ </div>
  )}
- </AnimatePresence>
+ 
  </div>
  ))}
- </motion.div>
+ </div>
  </div>
  </section>
  );

@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { CheckCircle, Zap } from '@/components/ui/icons';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
@@ -101,26 +99,13 @@ const plans: Plan[] = [
 ];
 
 export function PricingPlans() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-16 lg:py-24 bg-white">
+ <section className="py-20 lg:py-32 bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  {/* Plans Grid - Clean, minimal, functional */}
  <div className="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 lg:gap-5">
  {plans.map((plan, index) => (
-            <motion.div
-              key={plan.name}
-              initial={{ opacity: 0, y: 16 }}
-              animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: index * 0.08, duration: 0.4 }}
-              className={cn(
-                'relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200',
-                plan.popular 
-                  ? 'border-primary-600 ring-1 ring-primary-600' 
-                  : 'border-surface-200 hover:border-surface-300'
-              )}
-            >
+            <div key={plan.name} className={cn( 'relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200', plan.popular ? 'border-primary-600 ring-1 ring-primary-600' : 'border-surface-200 hover:border-surface-300' )}>
               {plan.popular && (
                 <div className="mb-4">
                   <span className="inline-block px-2 py-0.5 bg-primary-50 text-primary-700 text-xs font-medium rounded border border-primary-100">
@@ -159,17 +144,12 @@ export function PricingPlans() {
               >
                 {plan.cta}
               </Link>
-            </motion.div>
+            </div>
           ))}
         </div>
 
         {/* Pay As You Go - Distinct, honest */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.5, duration: 0.4 }}
-          className="mt-10 rounded-lg border border-amber-200 bg-amber-50/50 overflow-hidden"
-        >
+        <div className="animate-in delay-500 mt-10 rounded-lg border border-amber-200 bg-amber-50/50 overflow-hidden">
           <div className="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
             <div className="flex-1">
               <div className="inline-flex items-center gap-1.5 text-amber-700 mb-3">
@@ -200,15 +180,10 @@ export function PricingPlans() {
               Get Started
             </Link>
           </div>
-        </motion.div>
+        </div>
 
         {/* Enterprise - Clear, confident */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.6, duration: 0.4 }}
-          className="mt-10 rounded-lg bg-surface-900 overflow-hidden"
-        >
+        <div className="animate-in delay-500 mt-10 rounded-lg bg-surface-900 overflow-hidden">
           <div className="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
             <div className="flex-1">
               <h3 className="text-lg font-semibold text-white mb-2">Enterprise — from $800/mo</h3>
@@ -231,7 +206,7 @@ export function PricingPlans() {
               Contact Sales
             </Link>
           </div>
-        </motion.div>
+        </div>
  </div>
  </section>
  );

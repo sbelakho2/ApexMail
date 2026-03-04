@@ -32,6 +32,7 @@ interface NavItem {
     href: string;
     label: string;
     icon: React.ReactNode;
+    minRole?: 'viewer' | 'operator' | 'admin' | 'owner';
 }
 
 interface NavSection {
@@ -61,11 +62,11 @@ const navSections: NavSection[] = [
     {
         title: 'Platform Governance',
         items: [
-            { href: '/compliance', label: 'Compliance Admin', icon: <ShieldCheck className="w-4 h-4" /> },
+            { href: '/compliance', label: 'Compliance Admin', icon: <ShieldCheck className="w-4 h-4" />, minRole: 'admin' },
             { href: '/risk', label: 'Risk Monitoring', icon: <AlertTriangle className="w-4 h-4" /> },
             { href: '/audit', label: 'Audit Logs', icon: <History className="w-4 h-4" /> },
-            { href: '/gdpr', label: 'GDPR Requests', icon: <Euro className="w-4 h-4" /> },
-            { href: '/secrets', label: 'Secrets Vault', icon: <Key className="w-4 h-4" /> },
+            { href: '/gdpr', label: 'GDPR Requests', icon: <Euro className="w-4 h-4" />, minRole: 'admin' },
+            { href: '/secrets', label: 'Secrets Vault', icon: <Key className="w-4 h-4" />, minRole: 'admin' },
         ],
     },
     {
@@ -73,7 +74,7 @@ const navSections: NavSection[] = [
         items: [
             { href: '/system', label: 'System Health', icon: <Activity className="w-4 h-4" /> },
             { href: '/ip-warmer', label: 'IP Warmer', icon: <Flame className="w-4 h-4" /> },
-            { href: '/features', label: 'Feature Flags', icon: <Flag className="w-4 h-4" /> },
+            { href: '/features', label: 'Feature Flags', icon: <Flag className="w-4 h-4" />, minRole: 'admin' },
         ],
     },
     {
@@ -83,7 +84,7 @@ const navSections: NavSection[] = [
             { href: '/revenue', label: 'Revenue Metrics', icon: <Euro className="w-4 h-4" /> },
             { href: '/analytics', label: 'Analytics & Insights', icon: <BarChart3 className="w-4 h-4" /> },
             { href: '/content', label: 'Content & CMS', icon: <FileText className="w-4 h-4" /> },
-            { href: '/settings', label: 'Platform Settings', icon: <Settings className="w-4 h-4" /> },
+            { href: '/settings', label: 'Platform Settings', icon: <Settings className="w-4 h-4" />, minRole: 'admin' },
         ],
     },
 ];
@@ -91,9 +92,12 @@ const navSections: NavSection[] = [
 interface SidebarProps {
     onNavigate?: () => void;
     className?: string;
+    userRole?: 'viewer' | 'operator' | 'admin' | 'owner';
 }
 
-export function Sidebar({ onNavigate, className }: SidebarProps) {
+const ROLE_RANK: Record<string, number> = { viewer: 0, operator: 1, admin: 2, owner: 3 };
+
+export function Sidebar({ onNavigate, className, userRole = 'viewer' }: SidebarProps) {
     const pathname = usePathname();
     const router = useRouter();
 
@@ -105,7 +109,15 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
 
     const handleLogout = async () => {
         try {
-            await fetch('/api/auth/logout', { method: 'POST' });
+            const { getCsrfToken } = await import('../../lib/client-csrf');
+            const csrfToken = await getCsrfToken();
+            await fetch('/api/auth/logout', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+            });
         } catch {
             // proceed to login even if the request fails
         }
@@ -140,7 +152,9 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
                                 {section.title}
                             </h3>
                             <ul className="space-y-1">
-                                {section.items.map((item) => (
+                                {section.items
+                                    .filter((item) => !item.minRole || (ROLE_RANK[userRole] ?? 0) >= (ROLE_RANK[item.minRole] ?? 0))
+                                    .map((item) => (
                                     <li key={item.href}>
                                         <Link
                                             href={item.href}

@@ -4,6 +4,9 @@ import { FeatureGrid } from '@/components/features/FeatureGrid';
 import { FeatureDetails } from '@/components/features/FeatureDetails';
 import { FeatureCTA } from '@/components/features/FeatureCTA';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: 'Features | Enterprise-Grade Email Infrastructure',
   description:

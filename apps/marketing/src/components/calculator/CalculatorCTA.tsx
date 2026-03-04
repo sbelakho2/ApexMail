@@ -1,21 +1,11 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { ArrowRight, Calculator, MessageCircle } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function CalculatorCTA() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   return (
-    <section ref={ref} className="py-20 lg:py-32 relative bg-surface-50">
+    <section className="py-20 lg:py-32 relative bg-surface-50">
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-12 text-center"
-        >
+        <div className="animate-in bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-12 text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-100/50 text-xs font-medium mb-6">
             <Calculator className="w-4 h-4" />
             <span>Start saving today</span>
@@ -59,15 +49,10 @@ export function CalculatorCTA() {
               </div>
             ))}
           </div>
-        </motion.div>
+        </div>
 
         {/* FAQ Note */}
-        <motion.p
-          initial={{ opacity: 0 }}
-          animate={inView ? { opacity: 1 } : {}}
-          transition={{ delay: 0.3 }}
-          className="text-center text-sm font-medium text-surface-500 mt-10"
-        >
+        <p className="animate-in delay-300 text-center text-sm font-medium text-surface-500 mt-10">
           Have questions about pricing?{' '}
           <Link href="/pricing/faq" className="text-primary-600 font-semibold hover:text-primary-700 transition-colors">
             Check our FAQ
@@ -77,7 +62,7 @@ export function CalculatorCTA() {
             contact us
           </Link>
           .
-        </motion.p>
+        </p>
       </div>
     </section>
   );

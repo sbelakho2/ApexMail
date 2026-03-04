@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <meta name="theme-color" content="#2563EB" />
+
+  <title>{% block title %}{{ config.title }}{% endblock title %}</title>
+  <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}" />
+
+  {# ── Canonical & SEO ──────────────────────────────── #}
+  <link rel="canonical" href="{% block canonical %}{{ current_url | default(value=config.base_url) }}{% endblock canonical %}" />
+  <link rel="alternate" hreflang="en-US" href="{{ current_url | default(value=config.base_url) }}" />
+  <link rel="alternate" hreflang="x-default" href="{{ current_url | default(value=config.base_url) }}" />
+  <meta name="robots" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
+  <meta name="googlebot" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
+  <meta name="keywords" content="email API, transactional email, email infrastructure, GDPR compliant email, HIPAA-ready enterprise email, email deliverability, enterprise email, developer email API" />
+  <meta name="author" content="{{ config.extra.author }}" />
+  <meta name="publisher" content="{{ config.extra.author }}" />
+
+  {# ── Open Graph ────────────────────────────────────── #}
+  <meta property="og:type" content="website" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:url" content="{{ current_url | default(value=config.base_url) }}" />
+  <meta property="og:site_name" content="{{ config.extra.site_name }}" />
+  <meta property="og:title" content="{% block og_title %}{{ config.title }}{% endblock og_title %}" />
+  <meta property="og:description" content="{% block og_description %}{{ config.description }}{% endblock og_description %}" />
+  <meta property="og:image" content="{{ config.base_url }}{% block og_image %}{{ config.extra.og_image }}{% endblock og_image %}" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="{% block og_image_alt %}{{ config.extra.site_name }} — Enterprise Email API{% endblock og_image_alt %}" />
+
+  {# ── Twitter Card ──────────────────────────────────── #}
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="{% block twitter_title %}{{ config.title }}{% endblock twitter_title %}" />
+  <meta name="twitter:description" content="{% block twitter_description %}{{ config.description }}{% endblock twitter_description %}" />
+  <meta name="twitter:image" content="{{ config.base_url }}{{ config.extra.og_image }}" />
+  <meta name="twitter:creator" content="{{ config.extra.twitter_handle }}" />
+
+  {# ── Favicons ──────────────────────────────────────── #}
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/manifest.json" />
+
+  {# ── Font Preloads ────────────────────────────────── #}
+  <link rel="preload" href="/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/fonts/JetBrainsMono-Variable.ttf" as="font" type="font/ttf" crossorigin />
+
+  {# ── CSS ───────────────────────────────────────────── #}
+  <link rel="stylesheet" href="/css/styles.css" />
+
+  {# ── Organization JSON-LD ─────────────────────────── #}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "{{ config.extra.site_name }}",
+    "url": "{{ config.base_url }}",
+    "logo": "{{ config.base_url }}/icon.svg",
+    "sameAs": [
+      "{{ config.extra.github_url }}",
+      "https://linkedin.com/company/apexmail",
+      "https://twitter.com/apexmail"
+    ]
+  }
+  </script>
+
+  {# ── Page-Specific Head Blocks ────────────────────── #}
+  {% block head %}{% endblock head %}
+</head>
+<body class="font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom flex flex-col">
+  {# ── No-JS Fallback ─────────────────────────────────── #}
+  <noscript>
+    <div style="background:#1e40af;color:#fff;text-align:center;padding:12px 16px;font-size:14px;font-family:sans-serif">
+      ApexMail requires JavaScript for interactive features.
+      <a href="https://docs.apexmail.ee" style="color:#bfdbfe;text-decoration:underline">Browse documentation</a> or
+      <a href="mailto:{{ config.extra.support_email }}" style="color:#bfdbfe;text-decoration:underline">contact us</a> to learn more.
+    </div>
+  </noscript>
+
+  {# ── Header (Preact island with static fallback) ────── #}
+  <div data-island="header">
+    {% include "partials/header.html" %}
+  </div>
+
+  {# ── Main Content ──────────────────────────────────── #}
+  <main class="flex-1">
+    {% block content %}{% endblock content %}
+  </main>
+
+  {# ── Footer ────────────────────────────────────────── #}
+  {% include "partials/footer.html" %}
+
+  {# ── Cookie Consent (Preact island) ─────────────────── #}
+  <div data-island="cookie-consent"></div>
+
+  {# ── Back to Top (vanilla JS) ──────────────────────── #}
+  <button
+    id="back-to-top"
+    class="fixed bottom-6 right-6 z-50 hidden rounded-full bg-brand-600 p-3 text-white shadow-lg transition-opacity hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500"
+    aria-label="Back to top"
+  >
+    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+      <path fill-rule="evenodd" d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z" clip-rule="evenodd" />
+    </svg>
+  </button>
+
+  {# ── Island Hydration Scripts ──────────────────────── #}
+  <script type="module" src="/js/islands/hydrate.js"></script>
+  {% block islands %}{% endblock islands %}
+
+  {# ── Back to Top Script (15 lines) ────────────────── #}
+  <script>
+    (function(){
+      var btn = document.getElementById('back-to-top');
+      if (!btn) return;
+      var shown = false;
+      window.addEventListener('scroll', function() {
+        var shouldShow = window.scrollY > 400;
+        if (shouldShow !== shown) {
+          shown = shouldShow;
+          btn.classList.toggle('hidden', !shown);
+        }
+      }, { passive: true });
+      btn.addEventListener('click', function() {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+    })();
+  </script>
+
+  {# ── Analytics (Plausible self-hosted) ────────────── #}
+  {% block analytics %}
+  <script defer data-domain="apexmail.ee" src="/js/plausible.js"></script>
+  {% endblock analytics %}
+</body>
+</html>

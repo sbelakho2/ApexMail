@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
     Send,
     Mail,
@@ -59,7 +60,7 @@ interface DashboardData {
 }
 
 interface VolumePoint { date: string; sent: number; delivered: number; bounced: number }
-interface EngagementPoint { date: string; opens: number; clicks: number }
+interface EngagementPoint { date: string; opens: number; clicks: number; [key: string]: string | number }
 interface RecentMessageApiRow {
     id?: string;
     subject?: string;
@@ -86,7 +87,7 @@ function useDashboard(windowDays: number, refreshKey: number) {
 
     const requestConfig = React.useMemo(
         () => ({
-            refreshInterval: 60_000,
+            refreshInterval: 300_000, // 5 min — analytics don't need real-time polling
             keepPreviousData: true,
         }),
         []
@@ -198,6 +199,7 @@ function DashboardSkeleton() {
 }
 
 export default function DashboardPage() {
+    const router = useRouter();
     const [windowDays, setWindowDays] = React.useState<7 | 30 | 90>(30);
     const [refreshKey, setRefreshKey] = React.useState(0);
     const { data, volume, engagement, campaigns, loading, error, lastUpdated, sourcesStatus, loadingTimedOut } = useDashboard(windowDays, refreshKey);
@@ -232,7 +234,7 @@ export default function DashboardPage() {
                     <Button variant="outline" className="border-surface-200 shadow-sm" onClick={() => setRefreshKey((prev) => prev + 1)}>
                         <RefreshCw className="mr-2 h-4 w-4" />Refresh
                     </Button>
-                    <Button variant="success" className="shadow-lg shadow-success/20" onClick={() => { window.location.href = '/campaigns/new'; }}><Zap className="mr-2 h-4 w-4" />Quick Send</Button>
+                    <Button variant="success" className="shadow-lg shadow-success/20" onClick={() => { router.push('/campaigns/new'); }}><Zap className="mr-2 h-4 w-4" />Quick Send</Button>
                 </>}
             />
 
@@ -304,7 +306,7 @@ export default function DashboardPage() {
 
             {/* Charts */}
             <div className="grid gap-8 lg:grid-cols-2" data-testid="charts-section">
-                <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-engagement" aria-label="Engagement trends chart">
+                <Card className="border-none shadow-premium bg-card overflow-hidden" data-testid="chart-engagement" aria-label="Engagement trends chart">
                     <CardHeader className="border-b border-surface-50 pb-6">
                         <div className="flex items-center justify-between">
                             <div>
@@ -331,7 +333,7 @@ export default function DashboardPage() {
                         )}
                     </CardContent>
                 </Card>
-                <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-volume" aria-label="Sending volume chart">
+                <Card className="border-none shadow-premium bg-card overflow-hidden" data-testid="chart-volume" aria-label="Sending volume chart">
                     <CardHeader className="border-b border-surface-50 pb-6">
                         <div className="flex items-center justify-between">
                             <div>
@@ -368,7 +370,7 @@ export default function DashboardPage() {
                             <CardDescription>Latest transactional and marketing deliveries</CardDescription>
                             <p className="mt-1 text-xs text-muted-foreground">Last updated {lastUpdatedLabel}</p>
                         </div>
-                        <Button variant="ghost" size="sm" className="text-brand-600 font-bold hover:bg-brand-50">View Analytics</Button>
+                        <Button variant="ghost" size="sm" className="text-brand-600 font-bold hover:bg-brand-50" onClick={() => router.push('/reports')}>View Analytics</Button>
                     </CardHeader>
                     <CardContent className="p-0">
                         {sourcesStatus.campaigns === 'error' ? (
@@ -383,7 +385,7 @@ export default function DashboardPage() {
                                     description="Start by creating your first campaign to see sending analytics and performance metrics here."
                                     action={{
                                         label: 'Create Campaign',
-                                        onClick: () => window.location.href = '/campaigns/new'
+                                        onClick: () => router.push('/campaigns/new')
                                     }}
                                 />
                             </div>
@@ -420,7 +422,7 @@ export default function DashboardPage() {
                                                 <TableCell className="pr-6 text-right">
                                                     <DropdownMenu>
                                                         <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Campaign row actions" className="h-8 w-8 hover:bg-brand-50 hover:text-brand-600"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
-                                                        <DropdownMenuContent align="end" className="rounded-xl shadow-xl border-surface-100"><DropdownMenuItem className="font-medium">View Details</DropdownMenuItem><DropdownMenuItem className="font-medium text-brand-600">Re-send Message</DropdownMenuItem></DropdownMenuContent>
+                                                        <DropdownMenuContent align="end" className="rounded-xl shadow-xl border-surface-100"><DropdownMenuItem className="font-medium" onClick={() => router.push(`/campaigns/${c.id}`)}>View Details</DropdownMenuItem><DropdownMenuItem className="font-medium text-brand-600" onClick={() => router.push(`/campaigns/${c.id}?resend=1`)}>Re-send Message</DropdownMenuItem></DropdownMenuContent>
                                                     </DropdownMenu>
                                                 </TableCell>
                                             </TableRow>
@@ -432,7 +434,7 @@ export default function DashboardPage() {
                     </CardContent>
                 </Card>
 
-                <Card className="border-none shadow-premium bg-white overflow-hidden">
+                <Card className="border-none shadow-premium bg-card overflow-hidden">
                     <CardHeader className="border-b border-surface-50 pb-6">
                         <CardTitle className="text-lg font-bold">Sender Reputation</CardTitle>
                         <CardDescription>Global delivery health metrics</CardDescription>
@@ -479,7 +481,7 @@ export default function DashboardPage() {
             </div>
 
             {/* Quick Actions */}
-            <Card className="border-none shadow-premium bg-white overflow-hidden mt-8">
+            <Card className="border-none shadow-premium bg-card overflow-hidden mt-8">
                 <CardHeader className="border-b border-surface-50 pb-6">
                     <CardTitle className="text-lg font-bold">Quick Actions</CardTitle>
                     <CardDescription>Common tasks to help you get started</CardDescription>
@@ -490,13 +492,13 @@ export default function DashboardPage() {
                             title="Verify Domain"
                             description="Add DKIM and SPF records to your DNS provider."
                             icon={<Shield className="h-5 w-5 text-brand-600" />}
-                            href="/settings/domains"
+                            href="/domains"
                         />
                         <ActionCard
                             title="Create Template"
                             description="Build a reusable email layout with our visual editor."
                             icon={<FileText className="h-5 w-5 text-brand-600" />}
-                            href="/templates/new"
+                            href="/templates"
                         />
                         <ActionCard
                             title="API Documentation"
@@ -519,7 +521,7 @@ function ActionCard({ title, description, icon, href, external = false }: { titl
             target={external ? "_blank" : undefined}
             className="flex items-start gap-4 p-5 rounded-xl border border-surface-100 bg-surface-50/30 hover:bg-brand-50 hover:border-brand-100 transition-all duration-300 group"
         >
-            <div className="p-2.5 rounded-lg bg-white shadow-sm group-hover:bg-brand-100 transition-colors">
+            <div className="p-2.5 rounded-lg bg-card shadow-sm group-hover:bg-primary/10 transition-colors">
                 {icon}
             </div>
             <div>

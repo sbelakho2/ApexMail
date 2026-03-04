@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { motion } from 'framer-motion';
 import { CheckCircle2, AlertTriangle, XCircle, Activity } from '@/components/ui/icons';
 
 type SystemStatus = 'operational' | 'degraded' | 'outage' | 'maintenance';
@@ -108,28 +107,17 @@ export function StatusHero() {
   const config = statusConfig[overallStatus];
   const Icon = config.icon;
 
-
   return (
-    <section className="py-16 md:py-24 bg-white border-b border-surface-100">
+    <section className="py-20 lg:py-32 bg-white border-b border-surface-100">
       <div className="container mx-auto px-4">
-        <motion.div
-          className="max-w-2xl mx-auto text-center"
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
-        >
+        <div className="animate-in max-w-2xl mx-auto text-center">
           {/* Status Indicator - Minimal & Clear */}
-          <motion.div
-            className={`inline-flex items-center gap-2.5 px-4 py-2 rounded-full ${config.bg} mb-8`}
-            initial={{ scale: 0.95 }}
-            animate={{ scale: 1 }}
-            transition={{ delay: 0.2, type: 'spring', duration: 0.5 }}
-          >
+          <div className={`inline-flex items-center gap-2.5 px-4 py-2 rounded-full ${config.bg} mb-8`}>
             <Icon className={`w-5 h-5 ${config.color}`} strokeWidth={2.5} />
             <span className={`text-sm font-semibold ${config.color}`}>
               {config.label}
             </span>
-          </motion.div>
+          </div>
 
           <h1 className="text-3xl md:text-4xl font-bold text-surface-900 mb-3 tracking-tight">
             ApexMail System Status
@@ -155,7 +143,7 @@ export function StatusHero() {
               Auto-updating
             </div>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

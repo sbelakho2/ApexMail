@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Server, Cloud, Building, CheckCircle } from '@/components/ui/icons';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -84,49 +82,29 @@ const deploymentOptions: DeploymentOption[] = [
 ];
 
 export function DeploymentOptions() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
  const [selectedOption, setSelectedOption] = useState<string>('aws');
 
  const selected = deploymentOptions.find((o) => o.id === selectedOption) || deploymentOptions[0];
 
  return (
- <section ref={ref} className="py-24 relative bg-white">
+ <section className="py-20 lg:py-32 relative bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="text-center mb-16">
- <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6"
-          >
+ <div className="animate-in inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
             <Server className="w-4 h-4" />
             Deployment Options
-          </motion.div>
- <motion.h2
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.1 }}
- className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight"
- >
+          </div>
+ <h2 className="animate-in delay-100 text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  Deploy Anywhere
  </motion.h2>
- <motion.p
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed"
- >
+ <p className="animate-in delay-200 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">
  Same code, multiple deployment targets. Choose the infrastructure 
  that fits your security and compliance requirements.
- </motion.p>
+ </p>
  </div>
 
  {/* Selector Tabs */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.3 }}
- className="flex flex-wrap justify-center gap-2 mb-10"
- >
+ <div className="animate-in delay-300 flex flex-wrap justify-center gap-2 mb-10">
  {deploymentOptions.map((option) => (
  <button
  key={option.id}
@@ -142,15 +120,10 @@ export function DeploymentOptions() {
  {option.name}
  </button>
  ))}
- </motion.div>
+ </div>
 
  {/* Selected Option Details */}
- <motion.div
- key={selected.id}
- initial={{ opacity: 0, y: 20 }}
- animate={{ opacity: 1, y: 0 }}
- className="bg-white rounded-2xl border border-surface-200 p-8 shadow-sm"
- >
+ <div key={selected.id} className="animate-in bg-white rounded-2xl border border-surface-200 p-8 shadow-sm">
  <div className="grid lg:grid-cols-2 gap-12">
  {/* Left - Info */}
  <div>
@@ -213,7 +186,7 @@ export function DeploymentOptions() {
  </pre>
  </div>
  </div>
- </motion.div>
+ </div>
  </div>
  </section>
  );

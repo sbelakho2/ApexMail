@@ -12,10 +12,14 @@ pub mod support;
 pub mod scim;
 pub mod campaigns;
 pub mod contacts;
+pub mod lists;
+pub mod dashboard;
+pub mod client_errors;
 pub mod automations;
 pub mod ai_insights;
 pub mod dedicated_ips;
 pub mod ses_notifications;
+pub mod self_hosted_bounces;
 
 // Migrated from apps/web auth routes
 pub mod session;

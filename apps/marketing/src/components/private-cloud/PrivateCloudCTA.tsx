@@ -1,21 +1,11 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { ArrowRight, Calendar, Cloud, Phone } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function PrivateCloudCTA() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-24 relative bg-white">
+ <section className="py-20 lg:py-32 relative bg-white">
  <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative">
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="bg-surface-50/50 rounded-2xl border border-surface-200 p-8 md:p-12 text-center"
- >
+ <div className="animate-in bg-surface-50/50 rounded-2xl border border-surface-200 p-8 md:p-12 text-center">
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white border border-surface-200 text-xs font-medium text-surface-900 mb-6 shadow-sm">
             <Cloud className="w-4 h-4" />
             Enterprise Ready
@@ -61,15 +51,10 @@ export function PrivateCloudCTA() {
  </div>
  ))}
  </div>
- </motion.div>
+ </div>
 
  {/* Contact Options */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- className="grid md:grid-cols-2 gap-6 mt-8"
- >
+ <div className="animate-in delay-200 grid md:grid-cols-2 gap-6 mt-8">
  <div className="bg-white rounded-lg border border-surface-200 p-6 flex items-center gap-4 hover:border-surface-300 transition-colors cursor-pointer">
  <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center flex-shrink-0 border border-surface-200">
  <Phone className="w-5 h-5 text-surface-900" strokeWidth={1.5} />
@@ -92,15 +77,10 @@ export function PrivateCloudCTA() {
  </div>
  </div>
  </div>
- </motion.div>
+ </div>
 
  {/* Enterprise Customers */}
- <motion.div
- initial={{ opacity: 0 }}
- animate={inView ? { opacity: 1 } : {}}
- transition={{ delay: 0.4 }}
- className="text-center mt-12"
- >
+ <div className="animate-in delay-400 text-center mt-12">
  <p className="text-xs font-bold text-surface-600 mb-6">
  Trusted by security-conscious enterprises
  </p>
@@ -113,7 +93,7 @@ export function PrivateCloudCTA() {
  )
  )}
  </div>
- </motion.div>
+ </div>
  </div>
  </section>
  );

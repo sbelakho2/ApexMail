@@ -20,9 +20,30 @@ export default function ForgotPasswordPage() {
         setIsLoading(true);
 
         try {
-            await fetch('/api/auth/forgot-password', {
+            // Obtain CSRF token from cookie or endpoint
+            let csrfToken = '';
+            const csrfCookieMatch = document.cookie.match(/(?:^|; )csrf_token=([^;]*)/);
+            if (csrfCookieMatch) {
+                csrfToken = decodeURIComponent(csrfCookieMatch[1]);
+            } else {
+                try {
+                    const csrfRes = await fetch('/v1/auth/csrf', { credentials: 'include' });
+                    if (csrfRes.ok) {
+                        const csrfData = await csrfRes.json();
+                        csrfToken = csrfData.token || '';
+                    }
+                } catch {
+                    // proceed without CSRF - server may allow it for forgot-password
+                }
+            }
+
+            await fetch('/v1/auth/forgot-password', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                credentials: 'include',
                 body: JSON.stringify({ email }),
             });
             setSubmitted(true);

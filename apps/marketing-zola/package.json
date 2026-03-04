@@ -1,0 +1,19 @@
+{
+  "name": "@apexmail/marketing-zola",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:css && npm run build:islands && npm run build:zola",
+    "build:css": "npx tailwindcss -i static/css/input.css -o static/css/styles.css --minify",
+    "build:islands": "cd islands && node build.mjs",
+    "build:zola": "zola build",
+    "dev": "npm run build:css && concurrently \"npm run dev:css\" \"npm run dev:islands\" \"zola serve --port 1111\"",
+    "dev:css": "npx tailwindcss -i static/css/input.css -o static/css/styles.css --watch",
+    "dev:islands": "cd islands && node build.mjs --watch",
+    "typecheck": "cd islands && tsc --noEmit"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.0",
+    "concurrently": "^8.2.0"
+  }
+}

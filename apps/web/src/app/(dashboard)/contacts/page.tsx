@@ -1,5 +1,6 @@
 'use client';
 
+import * as React from 'react';
 import {
     Plus,
     Search,
@@ -59,6 +60,7 @@ import { cn, formatNumber, formatRelativeTime, getInitials } from '@/lib/utils';
 import { useContactsController } from './use-contacts-controller';
 
 export default function ContactsPage() {
+    const fileInputRef = React.useRef<HTMLInputElement>(null);
     const {
         page,
         setPage,
@@ -125,6 +127,8 @@ export default function ContactsPage() {
         setSelectedListAndResetPage,
         setImportOpen,
     } = useContactsController();
+
+    const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = React.useState(false);
 
     return (
         <div className="space-y-6">
@@ -228,6 +232,7 @@ export default function ContactsPage() {
                                     <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                                     <Input
                                         placeholder="Search contacts..."
+                                        aria-label="Search contacts"
                                         value={searchInput}
                                         onChange={(event) => setSearchInput(event.target.value)}
                                         className="w-full sm:w-64 pl-9 pr-10"
@@ -284,7 +289,7 @@ export default function ContactsPage() {
                                         <Mail className="mr-2 h-4 w-4" />
                                         Send Email
                                     </Button>
-                                    <Button variant="destructive" size="sm" onClick={handleBulkDelete}>
+                                    <Button variant="destructive" size="sm" onClick={() => setBulkDeleteConfirmOpen(true)}>
                                         <Trash2 className="mr-2 h-4 w-4" />
                                         Delete
                                     </Button>
@@ -564,6 +569,24 @@ export default function ContactsPage() {
                 </DialogContent>
             </Dialog>
 
+            {/* Bulk Delete Confirmation */}
+            <Dialog open={bulkDeleteConfirmOpen} onOpenChange={setBulkDeleteConfirmOpen}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Delete {selectedIds.length} Contacts</DialogTitle>
+                        <DialogDescription>
+                            Are you sure you want to delete {selectedIds.length} selected contact{selectedIds.length !== 1 ? 's' : ''}? You'll have 10 seconds to undo this action.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setBulkDeleteConfirmOpen(false)}>Cancel</Button>
+                        <Button variant="destructive" onClick={() => { setBulkDeleteConfirmOpen(false); handleBulkDelete(); }}>
+                            Delete {selectedIds.length} Contact{selectedIds.length !== 1 ? 's' : ''}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
             <Dialog open={importOpen} onOpenChange={setImportOpen}>
                 <DialogContent size="lg">
                     <DialogHeader>
@@ -575,10 +598,32 @@ export default function ContactsPage() {
                     <div className="grid gap-4 py-4">
                         {importDuplicates.length === 0 ? (
                             <>
-                                <div className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-8">
+                                <div
+                                    className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-8"
+                                    onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                    onDrop={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        const file = e.dataTransfer.files[0];
+                                        if (file && (file.type === 'text/csv' || file.name.endsWith('.csv'))) {
+                                            handleImportContacts(file);
+                                        }
+                                    }}
+                                >
                                     <Upload className="mb-4 h-10 w-10 text-muted-foreground" />
                                     <p className="mb-2 text-sm font-medium">Drag and drop your CSV file here</p>
-                                    <Button variant="outline" size="sm">Choose File</Button>
+                                    <input
+                                        ref={fileInputRef}
+                                        type="file"
+                                        accept=".csv,text/csv"
+                                        className="hidden"
+                                        onChange={(e) => {
+                                            const file = e.target.files?.[0];
+                                            if (file) handleImportContacts(file);
+                                            e.target.value = '';
+                                        }}
+                                    />
+                                    <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>Choose File</Button>
                                 </div>
                                 {importProgress > 0 && importProgress < 100 ? (
                                     <div className="space-y-1">
@@ -670,7 +715,7 @@ export default function ContactsPage() {
                                 {resolveLoading ? 'Applying…' : `Apply – ${duplicateStrategy}`}
                             </Button>
                         ) : (
-                            <Button onClick={handleImportContacts} disabled={importProgress > 0 && importProgress < 100}>
+                            <Button onClick={() => handleImportContacts()} disabled={importProgress > 0 && importProgress < 100}>
                                 Import Contacts
                             </Button>
                         )}

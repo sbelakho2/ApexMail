@@ -75,7 +75,7 @@ export function useLoginController() {
 
   const reportAuthTelemetry = async (reason: string, status?: number) => {
     try {
-      await fetch('/api/auth/telemetry', {
+      await fetch('/v1/auth/telemetry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -126,7 +126,7 @@ export function useLoginController() {
   const loadCsrfToken = async () => {
     setCsrfError('');
     try {
-      const res = await fetch('/api/csrf');
+      const res = await fetch('/v1/auth/csrf');
       const data = await res.json();
       setCsrfToken(data.token || null);
     } catch {
@@ -140,7 +140,7 @@ export function useLoginController() {
 
     const checkSession = async () => {
       try {
-        const res = await fetch('/api/auth/session', { cache: 'no-store' });
+        const res = await fetch('/v1/auth/session', { cache: 'no-store' });
         if (!res.ok) return;
         const data = await res.json();
         if (data?.authenticated) {
@@ -179,9 +179,25 @@ export function useLoginController() {
 
   useEffect(() => {
     const reason = searchParams.get('reason');
+    const errorParam = searchParams.get('error');
+    
     if (reason === 'session_expired') {
       setError('Your session expired. Please sign in again.');
       setAuthErrorKey('auth.error.session_expired');
+    }
+
+    if (errorParam === 'invalid_token') {
+      setError('The access link is invalid or has expired. Please sign in.');
+      setAuthErrorKey('auth.error.invalid_token');
+    } else if (errorParam === 'missing_token') {
+      setError('No access token provided. Please sign in normally.');
+      setAuthErrorKey('auth.error.missing_token');
+    } else if (errorParam === 'invalid_method') {
+      setError('Invalid access method. Please sign in normally.');
+      setAuthErrorKey('auth.error.invalid_method');
+    } else if (errorParam) {
+      setError('An authentication error occurred. Please try again.');
+      setAuthErrorKey('auth.error.generic');
     }
   }, [searchParams]);
 
@@ -205,6 +221,17 @@ export function useLoginController() {
       setError(`Too many attempts. Try again in ${retryAfterSeconds}s.`);
       setAuthErrorKey('auth.error.rate_limited');
       reportAuthTelemetry('rate_limited_active');
+      setIsLoading(false);
+      return;
+    }
+
+    // Client-side progressive throttle after repeated failures
+    if (failedAttempts >= 5) {
+      const backoffSeconds = Math.min(60, Math.pow(2, failedAttempts - 4));
+      setRetryAfterSeconds(backoffSeconds);
+      setError(`Too many failed attempts. Please wait ${backoffSeconds}s.`);
+      setAuthErrorKey('auth.error.client_throttle');
+      reportAuthTelemetry('client_throttle');
       setIsLoading(false);
       return;
     }
@@ -234,7 +261,7 @@ export function useLoginController() {
     }
 
     try {
-      const response = await fetch('/api/auth/login', {
+      const response = await fetch('/v1/auth/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

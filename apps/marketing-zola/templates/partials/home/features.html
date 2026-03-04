@@ -1,0 +1,32 @@
+{# ── Features Section ────────────────────────────────────────── #}
+{# Converted from FeaturesSection.tsx                           #}
+
+{% set features = [
+  {"title": "Lightning Fast API", "desc": "Sub-100ms API response times. Send millions of emails without breaking a sweat.", "icon": "zap"},
+  {"title": "Bank-Grade Security", "desc": "AES-256 encryption at rest, TLS 1.3 in transit. SOC 2 Type II certified.", "icon": "shield"},
+  {"title": "Cryptographic Receipts", "desc": "Every email gets a tamper-proof delivery receipt. Prove delivery in court.", "icon": "lock"},
+  {"title": "Real-Time Analytics", "desc": "Opens, clicks, bounces, complaints — all tracked in real-time with sub-second latency.", "icon": "chart"},
+  {"title": "Smart Routing", "desc": "Automatic ISP reputation management. We route your emails through the best path.", "icon": "route"},
+  {"title": "Developer First", "desc": "REST API, webhooks, SDKs for 7 languages. Ship email features in minutes, not days.", "icon": "code"}
+] %}
+
+<section class="py-24 bg-white">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="text-center mb-16">
+      <span class="inline-block px-3 py-1 text-sm font-semibold text-brand-600 bg-brand-50 rounded-full mb-4">Features</span>
+      <h2 class="text-surface-900 mb-4">Everything you need to send email.<br /><span class="text-brand-500">Nothing you don't.</span></h2>
+      <p class="text-surface-600 max-w-2xl mx-auto">Built for developers who need reliable email infrastructure without the enterprise sales call.</p>
+    </div>
+    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+      {% for feature in features %}
+      <div class="group p-6 rounded-xl border border-surface-200 hover:border-brand-200 hover:shadow-premium transition-all duration-300">
+        <div class="w-12 h-12 rounded-xl bg-brand-50 flex items-center justify-center text-brand-600 mb-4 group-hover:bg-brand-100 transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
+        <h3 class="text-lg font-semibold text-surface-900 mb-2">{{ feature.title }}</h3>
+        <p class="text-surface-600 text-sm leading-relaxed">{{ feature.desc }}</p>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>

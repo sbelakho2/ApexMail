@@ -1,0 +1,15 @@
+{# Private Cloud page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/private-cloud/hero.html" %}
+
+{% include "partials/private-cloud/latency-comparison.html" %}
+
+{# DeploymentOptions — Preact island for interactive selection #}
+<div data-island="deployment-options"></div>
+
+{% include "partials/private-cloud/security-isolation.html" %}
+{% include "partials/private-cloud/dedicated-ips.html" %}
+{% include "partials/private-cloud/cta.html" %}
+{% endblock content %}

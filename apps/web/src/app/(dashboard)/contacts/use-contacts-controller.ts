@@ -10,6 +10,7 @@ import {
     useDeleteContact,
     useAPIMutation,
     useAPI,
+    getCsrfToken,
     type Contact,
     type PaginatedResponse,
 } from '@/hooks/use-api';
@@ -136,10 +137,7 @@ export function useContactsController() {
     );
 
     const statusCountBaseQuery = React.useMemo(() => {
-        const params = new URLSearchParams({
-            page: '1',
-            pageSize: '1',
-        });
+        const params = new URLSearchParams();
 
         if (selectedList !== 'all') {
             params.set('listId', selectedList);
@@ -152,17 +150,14 @@ export function useContactsController() {
         return params.toString();
     }, [searchQuery, selectedList]);
 
-    const { data: subscribedCountData } = useAPI<PaginatedResponse<Contact>>(
-        `/v1/contacts?${statusCountBaseQuery}&status=subscribed`
-    );
-    const { data: unsubscribedCountData } = useAPI<PaginatedResponse<Contact>>(
-        `/v1/contacts?${statusCountBaseQuery}&status=unsubscribed`
-    );
-    const { data: bouncedCountData } = useAPI<PaginatedResponse<Contact>>(
-        `/v1/contacts?${statusCountBaseQuery}&status=bounced`
-    );
-    const { data: complainedCountData } = useAPI<PaginatedResponse<Contact>>(
-        `/v1/contacts?${statusCountBaseQuery}&status=complained`
+    const { data: statusCountsData } = useAPI<{
+        total: number;
+        subscribed: number;
+        unsubscribed: number;
+        bounced: number;
+        complained: number;
+    }>(
+        `/v1/contacts/counts?${statusCountBaseQuery}`
     );
 
     const { data: listsData, error: listsError } = useLists();
@@ -246,21 +241,16 @@ export function useContactsController() {
     }, [listsData, contactsData?.total]);
 
     const statusCounts = React.useMemo(() => {
-        const counts: Record<string, number> = {
+        return {
             all: contactsData?.total ?? 0,
-            subscribed: subscribedCountData?.total ?? 0,
-            unsubscribed: unsubscribedCountData?.total ?? 0,
-            bounced: bouncedCountData?.total ?? 0,
-            complained: complainedCountData?.total ?? 0,
+            subscribed: statusCountsData?.subscribed ?? 0,
+            unsubscribed: statusCountsData?.unsubscribed ?? 0,
+            bounced: statusCountsData?.bounced ?? 0,
+            complained: statusCountsData?.complained ?? 0,
         };
-
-        return counts;
     }, [
         contactsData?.total,
-        subscribedCountData?.total,
-        unsubscribedCountData?.total,
-        bouncedCountData?.total,
-        complainedCountData?.total,
+        statusCountsData,
     ]);
 
     const totalPages = contactsData?.totalPages ?? 1;
@@ -339,7 +329,8 @@ export function useContactsController() {
                 setNotice('');
             }, 10000);
 
-            return () => window.clearTimeout(undoTimer);
+            // Store cleanup so callers needing it can use it
+            void undoTimer;
         } catch (error) {
             setErrorNotice(mapContactsApiError(error, 'Bulk delete'));
         }
@@ -393,6 +384,13 @@ export function useContactsController() {
         resetNotices();
         if (!contactForm.email.trim()) {
             setErrorNotice('Email is required.');
+            return;
+        }
+
+        // Validate email format
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailPattern.test(contactForm.email.trim())) {
+            setErrorNotice('Please enter a valid email address.');
             return;
         }
 
@@ -468,25 +466,57 @@ export function useContactsController() {
         }
     };
 
-    const handleImportContacts = () => {
+    const handleImportContacts = async (file?: File) => {
         setImportProgress(5);
         setImportResult('');
         setImportDuplicates([]);
-        const timer = window.setInterval(() => {
-            setImportProgress((prev) => {
-                const next = Math.min(prev + 20, 100);
-                if (next >= 100) {
-                    window.clearInterval(timer);
-                    setImportDuplicates([
-                        { email: 'alice@example.com', existingName: 'Alice Smith', incomingName: 'Alice A. Smith' },
-                        { email: 'bob@example.com', existingName: 'Bob Jones', incomingName: 'Robert Jones' },
-                        { email: 'carol@example.com', existingName: 'Carol White', incomingName: 'Carol White-Brown' },
-                    ]);
-                    mutate();
-                }
-                return next;
+
+        if (!file) {
+            setImportResult('No file selected.');
+            setImportProgress(0);
+            return;
+        }
+
+        try {
+            const csrfToken = await getCsrfToken();
+
+            const formData = new FormData();
+            formData.append('file', file);
+            if (selectedList !== 'all') {
+                formData.append('listId', selectedList);
+            }
+
+            setImportProgress(30);
+
+            const res = await fetch('/v1/contacts/import', {
+                method: 'POST',
+                credentials: 'include',
+                headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : {},
+                body: formData,
             });
-        }, 300);
+
+            setImportProgress(80);
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error?.message || 'Import failed');
+            }
+
+            const data = await res.json().catch(() => ({}));
+            setImportProgress(100);
+
+            if (data.duplicates && data.duplicates.length > 0) {
+                setImportDuplicates(data.duplicates);
+            } else {
+                const imported = data.imported ?? 0;
+                setImportResult(`Import complete. ${imported} contact${imported !== 1 ? 's' : ''} imported successfully.`);
+            }
+
+            mutate();
+        } catch (err) {
+            setImportProgress(0);
+            setImportResult(err instanceof Error ? err.message : 'Import failed. Please try again.');
+        }
     };
 
     const handleResolveImport = async () => {

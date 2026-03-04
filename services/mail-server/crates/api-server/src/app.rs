@@ -39,6 +39,7 @@ pub fn build_app(state: AppState) -> Router {
             .collect();
         CorsLayer::new()
             .allow_origin(origins)
+            .allow_credentials(true)
             .allow_methods([
                 Method::GET,
                 Method::POST,
@@ -76,6 +77,9 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/scim", routes::scim::router())
         .nest("/v1/campaigns", routes::campaigns::router())
         .nest("/v1/contacts", routes::contacts::router())
+        .nest("/v1/lists", routes::lists::router())
+        .nest("/v1/dashboard", routes::dashboard::router())
+        .nest("/v1/client-errors", routes::client_errors::router())
         .nest("/v1/automations", routes::automations::router())
         .nest("/v1/ai", routes::ai_insights::router())
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())

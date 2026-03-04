@@ -8,6 +8,10 @@
 //! database layer.
 
 pub mod config;
+/// **DEPRECATED** — Dedicated IP provisioning now lives in `api-server::ip_provider`.
+/// This module is retained for backward compatibility only. All new code should
+/// use `api_server::ip_provider::DedicatedIpProvider`.
+pub mod hetzner_ip_provider;
 pub mod invoices;
 pub mod plans;
 pub mod routes;

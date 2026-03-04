@@ -33,7 +33,7 @@ export function HeroSection() {
  return (
  <section className="relative min-h-[90vh] flex items-center pt-24 pb-16 lg:pt-0 overflow-hidden bg-surface-50">
  
- <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+ <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
  {/* Left Column - Copy */}
  <div>

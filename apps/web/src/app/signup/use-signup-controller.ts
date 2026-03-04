@@ -53,7 +53,7 @@ export function useSignupController() {
     useEffect(() => {
         const loadCsrfToken = async () => {
             try {
-                const response = await fetch('/api/csrf');
+                const response = await fetch('/v1/auth/csrf');
                 if (response.ok) {
                     const data = await response.json();
                     setCsrfToken(data.token);
@@ -146,7 +146,7 @@ export function useSignupController() {
         setIsLoading(true);
         
         try {
-            const response = await fetch('/api/auth/register', {
+            const response = await fetch('/v1/auth/register', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -184,6 +184,10 @@ export function useSignupController() {
             
             // If it's a paid plan, redirect to Stripe checkout
             if (data.checkoutUrl) {
+                try {
+                    const u = new URL(data.checkoutUrl);
+                    if (!u.hostname.endsWith('.stripe.com')) throw new Error('Untrusted redirect');
+                } catch { setError('Invalid checkout URL'); return; }
                 window.location.href = data.checkoutUrl;
                 return;
             }

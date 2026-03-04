@@ -1,8 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Copy, Check, Terminal, ExternalLink } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 import { cn } from '@/lib/utils';
@@ -112,7 +110,6 @@ const languages = [
 ];
 
 export function LiveAPIConsole() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
   const [email, setEmail] = useState('');
   const [selectedLanguage, setSelectedLanguage] = useState('typescript');
   const [copied, setCopied] = useState<'idle' | 'ok' | 'err'>('idle');
@@ -137,14 +134,10 @@ export function LiveAPIConsole() {
   };
 
   return (
-    <section ref={ref} id="api-console" className="py-20 lg:py-32 relative bg-surface-50">
-      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+    <section id="api-console" className="py-20 lg:py-32 relative bg-surface-50">
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="text-center mb-12"
-        >
+        <div className="animate-in text-center mb-12">
           <h2 className="section-title mb-4">
             <span className="text-surface-900">The</span>{' '}
             <span className="text-brand-500">Developer API</span>
@@ -152,15 +145,10 @@ export function LiveAPIConsole() {
           <p className="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">
             A clean, idiomatic API with official SDKs for every major language. Create a free account to start sending.
           </p>
-        </motion.div>
+        </div>
 
         {/* Live Console */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.2 }}
-          className="grid lg:grid-cols-2 gap-8 mb-16"
-        >
+        <div className="animate-in delay-200 grid lg:grid-cols-2 gap-8 mb-16">
           {/* Left - cURL Preview + Sign-up CTA */}
           <div className="p-6 sm:p-8 bg-white rounded-lg border border-surface-200 shadow-sm">
             <div className="flex flex-wrap items-center gap-3 mb-8">
@@ -275,10 +263,7 @@ export function LiveAPIConsole() {
                 >
                   {lang.name}
                   {selectedLanguage === lang.id && (
-                    <motion.div
-                      layoutId="activeTab"
-                      className="absolute bottom-[-5px] left-0 right-0 h-0.5 bg-surface-900"
-                    />
+                    <div layoutId="activeTab" className="animate-in absolute bottom-[-5px] left-0 right-0 h-0.5 bg-surface-900" />
                   )}
                 </button>
               ))}
@@ -297,7 +282,7 @@ export function LiveAPIConsole() {
               </div>
             </div>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

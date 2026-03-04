@@ -1,0 +1,13 @@
+{# Compliance page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/compliance/hero.html" %}
+
+{# ComplianceDemo island mount (renders consent-ledger, right-to-forget, audit-trail sections) #}
+<div data-island="compliance-demo"></div>
+
+{% include "partials/compliance/auto-dpa.html" %}
+
+{% include "partials/compliance/cta.html" %}
+{% endblock content %}

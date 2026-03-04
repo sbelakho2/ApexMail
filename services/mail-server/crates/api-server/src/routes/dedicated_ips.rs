@@ -1,7 +1,7 @@
 //! Dedicated IP management routes.
 //!
 //! Provides full lifecycle management for dedicated sending IPs:
-//! allocation (via AWS SES), warmup, monitoring, and release.
+//! allocation (via Hetzner Cloud), warmup, monitoring, and release.
 //!
 //! ## Plan gating
 //!
@@ -10,11 +10,12 @@
 //! marked `included` (no charge); additional IPs are `pending_charge`
 //! and billed at $30/mo via the billing service.
 //!
-//! ## AWS SES integration
+//! ## Hetzner Cloud integration
 //!
-//! Each tenant gets a dedicated SES IP pool named `apexmail-{tid}`.
-//! IPs are drawn from a pre-provisioned `ses_ip_inventory` table
-//! and assigned to the tenant's pool via `PutDedicatedIpInPool`.
+//! Dedicated IPs are **always** Hetzner floating IPs. There is no
+//! SES dedicated IP path. SES handles shared-pool sending only.
+//! IPs are created via the Hetzner Cloud API, assigned to MTA
+//! servers, and configured with reverse DNS automatically.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -26,8 +27,8 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::error::ApiError;
+use crate::ip_provider::IpProviderError;
 use crate::middleware::auth::{require_scopes, AuthUser};
-use crate::ses_provider::SesProviderError;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -153,20 +154,22 @@ async fn allocate_ip(
 ) -> Result<(StatusCode, Json<DedicatedIpResponse>), ApiError> {
     require_scopes(&auth, &["dedicated_ips:write"])?;
 
-    let region = body
-        .and_then(|b| b.0.region)
-        .unwrap_or_else(|| state.config.aws_region.clone());
+    let region = body.and_then(|b| b.0.region);
 
-    // Delegate to SES provider (handles plan check, inventory pick, SES API call)
-    let allocated = state
-        .ses_provider
-        .allocate_ip(auth.tenant_id, Some(&region))
+    // Delegate to Hetzner IP provider (handles plan check, floating IP creation)
+    let ip_provider = state
+        .ip_provider
+        .as_ref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
+
+    let allocated = ip_provider
+        .allocate_ip(auth.tenant_id, region.as_deref())
         .await
-        .map_err(ses_to_api_error)?;
+        .map_err(ip_provider_to_api_error)?;
 
     // Fetch the just-created DB row for the full response
     let row = sqlx::query_as::<_, DedicatedIpRow>(
-        "SELECT id, ip_address, ptr_record, region, ses_pool_name, status,
+        "SELECT id, ip_address, rdns_hostname, region, status,
                 warmup_progress, warmup_started_at, warmup_completed_at,
                 billing_status, allocated_at, created_at, updated_at
          FROM dedicated_ips
@@ -180,9 +183,9 @@ async fn allocate_ip(
 
     info!(
         ip = %allocated.ip_address,
-        pool = %allocated.ses_pool_name,
+        hetzner_id = allocated.hetzner_floating_ip_id,
         tenant_id = %auth.tenant_id,
-        "Dedicated IP allocated via SES"
+        "Dedicated IP allocated via Hetzner"
     );
 
     Ok((StatusCode::CREATED, Json(row.into_response())))
@@ -212,7 +215,7 @@ async fn list_ips(
 
     // Fetch IPs (include retired for history, most recent first)
     let rows = sqlx::query_as::<_, DedicatedIpRow>(
-        "SELECT id, ip_address, ptr_record, region, ses_pool_name, status,
+        "SELECT id, ip_address, rdns_hostname, region, status,
                 warmup_progress, warmup_started_at, warmup_completed_at,
                 billing_status, allocated_at, created_at, updated_at
          FROM dedicated_ips
@@ -245,8 +248,9 @@ async fn list_ips(
 
 /// `DELETE /v1/dedicated-ips/:id` — Release a dedicated IP.
 ///
-/// Moves the IP out of the tenant's SES pool, marks billing as `pending_cancel`,
-/// and returns the IP to the available inventory.
+/// Deletes the Hetzner floating IP, marks billing as `pending_cancel`,
+/// and retires the DB record. If this was the tenant's last dedicated IP,
+/// the routing cache trigger reverts them to SES shared sending.
 async fn release_ip(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -254,16 +258,20 @@ async fn release_ip(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["dedicated_ips:write"])?;
 
-    state
-        .ses_provider
+    let ip_provider = state
+        .ip_provider
+        .as_ref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
+
+    ip_provider
         .release_ip(id, auth.tenant_id)
         .await
-        .map_err(ses_to_api_error)?;
+        .map_err(ip_provider_to_api_error)?;
 
     info!(
         id = %id,
         tenant_id = %auth.tenant_id,
-        "Dedicated IP released"
+        "Dedicated IP released (Hetzner floating IP deleted)"
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -271,7 +279,8 @@ async fn release_ip(
 
 /// `POST /v1/dedicated-ips/:id/warmup` — Start or resume IP warmup.
 ///
-/// Triggers SES warmup and updates local tracking.
+/// Updates the warmup tracking in the database. Warmup is enforced by
+/// the outbound-queue's IP rotation and warmup schedule.
 async fn start_warmup(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -279,20 +288,25 @@ async fn start_warmup(
 ) -> Result<Json<WarmupResponse>, ApiError> {
     require_scopes(&auth, &["dedicated_ips:write"])?;
 
-    let ses_status = state
-        .ses_provider
+    let ip_provider = state
+        .ip_provider
+        .as_ref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
+
+    let status = ip_provider
         .start_warmup(id, auth.tenant_id)
         .await
-        .map_err(ses_to_api_error)?;
+        .map_err(ip_provider_to_api_error)?;
 
-    let est_days: i64 = state.config.ses_default_warmup_days as i64;
-    let est_completion = Utc::now() + chrono::Duration::days(est_days);
+    use crate::ip_provider::warmup_schedule::FULL_WARMUP_DAYS;
+    let remaining_days = (FULL_WARMUP_DAYS as i32 - status.warmup_day).max(0) as i64;
+    let est_completion = Utc::now() + chrono::Duration::days(remaining_days);
 
     Ok(Json(WarmupResponse {
         id,
-        ip_address: ses_status.ip_address,
+        ip_address: status.ip_address,
         warmup_status: "warming".into(),
-        warmup_progress: ses_status.warmup_percentage as f64 / 100.0,
+        warmup_progress: status.warmup_progress,
         estimated_completion: est_completion.to_rfc3339(),
     }))
 }
@@ -342,30 +356,33 @@ async fn build_allocation_summary(
     }))
 }
 
-/// Convert SES provider errors to API errors.
-fn ses_to_api_error(e: SesProviderError) -> ApiError {
+/// Convert IP provider errors to API errors.
+fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
     match e {
-        SesProviderError::PlanNotEligible => {
+        IpProviderError::PlanNotEligible => {
             ApiError::Forbidden("your plan does not include dedicated IP access — please upgrade to Pro or above".into())
         }
-        SesProviderError::LimitReached { limit, .. } => {
+        IpProviderError::LimitReached { limit, .. } => {
             ApiError::BadRequest(format!(
                 "dedicated IP limit reached ({limit}). Contact support to increase your allocation."
             ))
         }
-        SesProviderError::NoAvailableIps { region } => {
+        IpProviderError::NoAvailableServers { region } => {
             ApiError::ServiceUnavailable(format!(
-                "no dedicated IPs currently available in {region}. Please try again shortly or contact support."
+                "no MTA servers available in {region}. Please try again shortly or contact support."
             ))
         }
-        SesProviderError::IpNotFound { .. } => {
+        IpProviderError::IpNotFound { .. } => {
             ApiError::NotFound("dedicated IP not found".into())
         }
-        SesProviderError::SesApi(msg) => {
-            tracing::error!(error = %msg, "SES API error during dedicated IP operation");
+        IpProviderError::HetznerApi(msg) => {
+            tracing::error!(error = %msg, "Hetzner API error during dedicated IP operation");
             ApiError::Internal("failed to communicate with IP provisioning service".into())
         }
-        SesProviderError::Database(err) => {
+        IpProviderError::NotConfigured => {
+            ApiError::ServiceUnavailable("dedicated IP provisioning is not configured — set HETZNER_API_TOKEN".into())
+        }
+        IpProviderError::Database(err) => {
             tracing::error!(error = %err, "database error in dedicated IP operation");
             ApiError::Internal("database error".into())
         }
@@ -378,11 +395,9 @@ fn ses_to_api_error(e: SesProviderError) -> ApiError {
 struct DedicatedIpRow {
     id: Uuid,
     ip_address: String,
-    ptr_record: Option<String>,
+    rdns_hostname: Option<String>,
     #[allow(dead_code)]
     region: String,
-    #[allow(dead_code)]
-    ses_pool_name: Option<String>,
     status: String,
     warmup_progress: f64,
     warmup_started_at: Option<DateTime<Utc>>,
@@ -400,7 +415,7 @@ impl DedicatedIpRow {
         DedicatedIpResponse {
             id: self.id,
             ip_address: self.ip_address,
-            ptr_record: self.ptr_record,
+            ptr_record: self.rdns_hostname,
             status: self.status.clone(),
             warmup: WarmupDetail {
                 started_at: self.warmup_started_at.map(|d| d.to_rfc3339()),
@@ -505,8 +520,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ses_to_api_error_plan_not_eligible() {
-        let err = ses_to_api_error(SesProviderError::PlanNotEligible);
+    fn test_ip_provider_to_api_error_plan_not_eligible() {
+        let err = ip_provider_to_api_error(IpProviderError::PlanNotEligible);
         match err {
             ApiError::Forbidden(msg) => assert!(msg.contains("upgrade")),
             other => panic!("expected Forbidden, got {other:?}"),
@@ -514,12 +529,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ses_to_api_error_no_ips() {
-        let err = ses_to_api_error(SesProviderError::NoAvailableIps {
-            region: "us-east-1".into(),
+    fn test_ip_provider_to_api_error_no_servers() {
+        let err = ip_provider_to_api_error(IpProviderError::NoAvailableServers {
+            region: "fsn1".into(),
         });
         match err {
-            ApiError::ServiceUnavailable(msg) => assert!(msg.contains("us-east-1")),
+            ApiError::ServiceUnavailable(msg) => assert!(msg.contains("fsn1")),
             other => panic!("expected ServiceUnavailable, got {other:?}"),
         }
     }

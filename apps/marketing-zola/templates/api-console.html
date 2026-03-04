@@ -1,0 +1,13 @@
+{# API Console page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/api-console/hero.html" %}
+
+{# InteractiveConsole island mount #}
+<div data-island="api-console"></div>
+
+{# EndpointExplorer — rendered within api-console island #}
+
+{% include "partials/api-console/cta.html" %}
+{% endblock content %}

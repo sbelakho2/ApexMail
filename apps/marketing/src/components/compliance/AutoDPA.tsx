@@ -1,21 +1,14 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { FileText, Download, CheckCircle } from '@/components/ui/icons';
 
 export function AutoDPA() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-24 relative bg-white">
+ <section className="py-20 lg:py-32 relative bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Copy */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- >
+ <div className="animate-in">
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-100/50 text-xs font-medium text-emerald-700 mb-6">
             <FileText className="w-4 h-4" />
             Auto-DPA
@@ -42,14 +35,10 @@ export function AutoDPA() {
  </li>
  ))}
  </ul>
- </motion.div>
+ </div>
 
  {/* Right - Visual */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- >
+ <div className="animate-in delay-200">
  <div className="bg-white rounded-lg border border-surface-200 p-6 sm:p-8 shadow-sm">
  {/* Document Preview */}
  <div className="bg-surface-50/50 rounded-lg p-6 mb-6 border border-surface-200">
@@ -90,7 +79,7 @@ export function AutoDPA() {
  </button>
  </div>
  </div>
- </motion.div>
+ </div>
  </div>
  </div>
  </section>

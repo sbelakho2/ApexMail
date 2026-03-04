@@ -1,0 +1,14 @@
+{# Status page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/status/hero.html" %}
+
+{# StatusOverview island mount — live data via Preact #}
+<div data-island="status-overview"></div>
+
+{# StatusHistory island mount #}
+<div data-island="status-history"></div>
+
+{% include "partials/status/subscribe.html" %}
+{% endblock content %}

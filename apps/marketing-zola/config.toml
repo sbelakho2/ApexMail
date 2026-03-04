@@ -1,0 +1,49 @@
+# ──────────────────────────────────────────────────────────────
+# ApexMail Marketing Site — Zola Configuration
+# ──────────────────────────────────────────────────────────────
+
+base_url = "https://apexmail.ee"
+title = "ApexMail - Enterprise Email API for Developers"
+description = "The email API that keeps you out of court. EU-compliant, cryptographically verified delivery, enterprise private cloud options, and developer-first experience."
+default_language = "en"
+theme = ""
+
+# ── Build Options ────────────────────────────────────────────
+
+compile_sass = false          # We use Tailwind CLI instead
+build_search_index = false    # Marketing site doesn't need search
+minify_html = true
+generate_feeds = false
+feed_filenames = []
+
+# ── Taxonomy (not used yet but ready) ────────────────────────
+
+taxonomies = []
+
+# ── Markdown Rendering ───────────────────────────────────────
+
+[markdown]
+highlight_code = true
+highlight_theme = "css"
+extra_syntaxes_and_themes = []
+smart_punctuation = true
+
+# ── Slugify ──────────────────────────────────────────────────
+
+[slugify]
+paths = "on"
+taxonomies = "on"
+anchors = "on"
+
+# ── Extra Site Variables ─────────────────────────────────────
+
+[extra]
+site_name = "ApexMail"
+author = "Bel Consulting OÜ"
+og_image = "/images/og-image.png"
+twitter_handle = "@apexmail"
+github_url = "https://github.com/Bel-Consulting-OU/ApexMail"
+docs_url = "https://docs.apexmail.ee"
+app_url = "https://app.apexmail.ee"
+api_url = "https://api.apexmail.ee"
+support_email = "hello@apexmail.ee"

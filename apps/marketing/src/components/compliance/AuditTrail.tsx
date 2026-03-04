@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { ScrollText, Search, Filter, Download, Clock, User, Shield, Database } from '@/components/ui/icons';
 import { useState } from 'react';
 import { cn, formatTime, getLocalTimeZone } from '@/lib/utils';
@@ -73,7 +71,6 @@ const demoAuditEvents: AuditEvent[] = [
 ];
 
 export function AuditTrail() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
  const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
  const [searchQuery, setSearchQuery] = useState('');
  const timezone = getLocalTimeZone();
@@ -86,15 +83,11 @@ export function AuditTrail() {
  );
 
  return (
- <section ref={ref} className="py-24 relative bg-white">
-      <div className="max-w-[1200px] mx-auto px-5 sm:px-6 lg:px-8">
+ <section className="py-20 lg:py-32 relative bg-white">
+      <div className="max-w-7xl mx-auto px-5 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-start">
  {/* Left - Copy */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="lg:sticky lg:top-32"
- >
+ <div className="animate-in lg:sticky lg:top-32">
  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-100/50 border border-surface-200 text-[14px] font-medium text-surface-700 mb-6">
  <ScrollText className="w-4 h-4" />
  Audit Trail
@@ -141,14 +134,10 @@ export function AuditTrail() {
  </div>
  ))}
  </div>
- </motion.div>
+ </div>
 
  {/* Right - Interactive Audit Log */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- >
+ <div className="animate-in delay-200">
  <div className="bg-white rounded-lg border border-surface-200 overflow-hidden shadow-sm">
  {/* Sample data banner */}
  <div className="px-6 py-2 bg-amber-50 border-b border-amber-100 flex items-center justify-between">
@@ -181,9 +170,7 @@ export function AuditTrail() {
  {/* Event List */}
  <div className="divide-y divide-surface-100">
  {filteredEvents.map((event) => (
- <motion.div
- key={event.id}
- onClick={() => setSelectedEvent(selectedEvent?.id === event.id ? null : event)}
+ <div key={event.id} onClick={() = className="animate-in"> setSelectedEvent(selectedEvent?.id === event.id ? null : event)}
  className={cn(
  'p-6 cursor-pointer transition-all',
  selectedEvent?.id === event.id ? 'bg-white shadow-inner' : 'hover:bg-surface-100'
@@ -217,11 +204,7 @@ export function AuditTrail() {
 
  {/* Expanded Details */}
  {selectedEvent?.id === event.id && (
- <motion.div
- initial={{ opacity: 0, height: 0 }}
- animate={{ opacity: 1, height: 'auto' }}
- className="mt-4 pt-4 border-t border-surface-100"
- >
+ <div className="animate-in mt-4 pt-4 border-t border-surface-100">
  <div className="bg-surface-950 rounded-lg p-4 font-mono text-xs shadow-sm">
  <div className="text-surface-500 mb-2 text-xs border-b border-surface-800 pb-2">// Full Event Payload</div>
  <pre className="text-surface-300 whitespace-pre-wrap overflow-auto max-h-64">
@@ -248,9 +231,9 @@ export function AuditTrail() {
 )}
  </pre>
  </div>
- </motion.div>
+ </div>
  )}
- </motion.div>
+ </div>
  ))}
  </div>
 
@@ -261,7 +244,7 @@ export function AuditTrail() {
                 </span>
               </div>
  </div>
- </motion.div>
+ </div>
  </div>
  </div>
  </section>

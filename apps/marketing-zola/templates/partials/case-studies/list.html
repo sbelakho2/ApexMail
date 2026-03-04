@@ -1,0 +1,170 @@
+{# ── Case Study List ──────────────────────────────────────────── #}
+{# Converted from case-studies/CaseStudyList.tsx                  #}
+
+{% set studies = [
+  {
+    "company": "FinanceFlow",
+    "industry": "FinTech",
+    "logo_initial": "F",
+    "color": "primary",
+    "stats": [
+      {"value": "99.8%", "label": "Delivery Rate"},
+      {"value": "60%", "label": "Cost Reduction"},
+      {"value": "2 hrs", "label": "Integration Time"}
+    ],
+    "challenge": "FinanceFlow needed to send millions of transactional emails per day for payment confirmations, statements, and security alerts&mdash;all requiring sub-second delivery and strict PCI-DSS compliance.",
+    "solution": "FinanceFlow integrated ApexMail&rsquo;s API with their existing Node.js microservices. Dedicated IP pools ensured transaction emails never competed with marketing sends, while built-in encryption satisfied their compliance requirements.",
+    "results": [
+      "Delivery rate improved from 94.2% to 99.8%",
+      "Average delivery time dropped from 4.2s to 0.8s",
+      "Monthly email costs reduced by 60% vs previous provider",
+      "Full PCI-DSS compliance achieved without additional tooling"
+    ],
+    "quote": "ApexMail&rsquo;s dedicated IP pools and real-time analytics gave us the deliverability and visibility we needed. Integration took our team just two hours.",
+    "author": "Sarah Chen",
+    "role": "VP Engineering, FinanceFlow"
+  },
+  {
+    "company": "MedConnect",
+    "industry": "Healthcare",
+    "logo_initial": "M",
+    "color": "emerald",
+    "stats": [
+      {"value": "100%", "label": "HIPAA Compliant"},
+      {"value": "45%", "label": "Open Rate Increase"},
+      {"value": "0", "label": "Compliance Incidents"}
+    ],
+    "challenge": "MedConnect sends patient appointment reminders, lab results, and healthcare communications that require HIPAA compliance with full audit trails and encryption at rest and in transit.",
+    "solution": "ApexMail&rsquo;s private cloud deployment with automatic DPA generation and built-in HIPAA controls eliminated the need for MedConnect to build compliance infrastructure from scratch.",
+    "results": [
+      "Full HIPAA compliance from day one",
+      "Patient communication open rates increased 45%",
+      "Zero compliance incidents in 18 months",
+      "Automated audit trail saved 20 hours/week of manual logging"
+    ],
+    "quote": "The built-in HIPAA compliance and auto-DPA saved us months of legal and engineering work. We went from evaluation to production in under a week.",
+    "author": "Dr. James Rodriguez",
+    "role": "CTO, MedConnect"
+  },
+  {
+    "company": "ShopScale",
+    "industry": "E-Commerce",
+    "logo_initial": "S",
+    "color": "amber",
+    "stats": [
+      {"value": "340%", "label": "ROI Increase"},
+      {"value": "12M+", "label": "Emails/Month"},
+      {"value": "0.3s", "label": "Avg Delivery"}
+    ],
+    "challenge": "ShopScale processes millions of order confirmations, shipping updates, and promotional campaigns. They needed to handle 10x traffic spikes during Black Friday and flash sales without degradation.",
+    "solution": "ApexMail&rsquo;s auto-scaling infrastructure with intelligent throttling handled ShopScale&rsquo;s peak loads seamlessly. AI-powered send-time optimization dramatically improved their promotional email performance.",
+    "results": [
+      "Successfully handled 12M+ emails during Black Friday",
+      "Promotional email ROI increased 340%",
+      "Average delivery time of 0.3 seconds even during peaks",
+      "Abandoned cart recovery rate improved by 28%"
+    ],
+    "quote": "Black Friday used to be our most stressful time for email. With ApexMail, we sent 12 million emails without a single hiccup. The AI send-time optimization was a game-changer for our campaigns.",
+    "author": "Maria Santos",
+    "role": "Head of Growth, ShopScale"
+  },
+  {
+    "company": "DevPipeline",
+    "industry": "Developer Tools",
+    "logo_initial": "D",
+    "color": "violet",
+    "stats": [
+      {"value": "15 min", "label": "Integration Time"},
+      {"value": "99.9%", "label": "Uptime"},
+      {"value": "4 SDKs", "label": "Languages Used"}
+    ],
+    "challenge": "DevPipeline needed a developer-first email API that could integrate with their polyglot microservices architecture spanning Go, Python, Node.js, and Ruby&mdash;with consistent behavior across all SDKs.",
+    "solution": "ApexMail&rsquo;s type-safe SDKs and interactive API console let DevPipeline&rsquo;s team test and integrate across all four languages in a single afternoon. Webhooks provided real-time delivery feedback to their monitoring stack.",
+    "results": [
+      "Full integration across 4 languages in one afternoon",
+      "Developer onboarding time reduced from 2 days to 15 minutes",
+      "99.9% uptime over 12 months",
+      "Webhook-driven monitoring eliminated blind spots"
+    ],
+    "quote": "As developers ourselves, we appreciate APIs that just work. ApexMail&rsquo;s SDKs are the best we&rsquo;ve used&mdash;type-safe, well-documented, and consistent across all languages.",
+    "author": "Alex Kim",
+    "role": "Lead Engineer, DevPipeline"
+  }
+] %}
+
+<section class="py-20 lg:py-32 relative bg-white">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="space-y-24">
+      {% for study in studies %}
+      <article class="animate-in relative bg-white border border-surface-200 rounded-2xl shadow-sm overflow-hidden">
+        {# Header #}
+        <div class="px-8 pt-8 pb-6 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+          <div class="w-12 h-12 rounded-xl bg-{{ study.color }}-100 flex items-center justify-center text-{{ study.color }}-700 font-bold text-lg">
+            {{ study.logo_initial }}
+          </div>
+          <div>
+            <h3 class="text-xl font-bold text-surface-900">{{ study.company }}</h3>
+            <span class="text-sm text-surface-500 font-medium">{{ study.industry }}</span>
+          </div>
+        </div>
+
+        {# Stats bar #}
+        <div class="grid grid-cols-3 divide-x divide-surface-100 border-b border-surface-100 bg-surface-50/50">
+          {% for stat in study.stats %}
+          <div class="px-4 py-4 text-center">
+            <div class="text-xl lg:text-2xl font-bold text-{{ study.color }}-600">{{ stat.value }}</div>
+            <div class="text-xs text-surface-500 font-medium mt-1">{{ stat.label }}</div>
+          </div>
+          {% endfor %}
+        </div>
+
+        {# Content #}
+        <div class="p-8 space-y-8">
+          {# Challenge #}
+          <div>
+            <h4 class="text-sm font-semibold text-surface-900 uppercase tracking-wider mb-3 flex items-center gap-2">
+              <svg class="w-4 h-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+              The Challenge
+            </h4>
+            <p class="text-surface-600 leading-relaxed">{{ study.challenge }}</p>
+          </div>
+
+          {# Solution #}
+          <div>
+            <h4 class="text-sm font-semibold text-surface-900 uppercase tracking-wider mb-3 flex items-center gap-2">
+              <svg class="w-4 h-4 text-primary-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              The Solution
+            </h4>
+            <p class="text-surface-600 leading-relaxed">{{ study.solution }}</p>
+          </div>
+
+          {# Results #}
+          <div>
+            <h4 class="text-sm font-semibold text-surface-900 uppercase tracking-wider mb-3 flex items-center gap-2">
+              <svg class="w-4 h-4 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+              Results
+            </h4>
+            <ul class="space-y-2">
+              {% for result in study.results %}
+              <li class="flex items-start gap-2 text-surface-600">
+                <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>{{ result }}</span>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+
+          {# Quote #}
+          <blockquote class="border-l-4 border-{{ study.color }}-200 pl-6 py-2">
+            <p class="text-surface-700 italic leading-relaxed">&ldquo;{{ study.quote }}&rdquo;</p>
+            <footer class="mt-3 text-sm">
+              <span class="font-semibold text-surface-900">{{ study.author }}</span>
+              <span class="text-surface-500"> &mdash; {{ study.role }}</span>
+            </footer>
+          </blockquote>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </div>
+</section>

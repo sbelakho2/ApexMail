@@ -1,6 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import { Trash2, Database, Server, Cloud, CheckCircle2 } from '@/components/ui/icons';
 import { useState, useEffect } from 'react';
@@ -77,42 +76,23 @@ export function RightToBeForgotten() {
  };
 
  return (
- <section ref={ref} className="py-24 relative bg-white">
+ <section ref={ref} className="py-20 lg:py-32 relative bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="text-center mb-16">
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-50 text-red-700 border border-red-100 text-xs font-medium mb-6"
- >
+ <div className="animate-in inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-50 text-red-700 border border-red-100 text-xs font-medium mb-6">
  <Trash2 className="w-4 h-4" />
  Right to Be Forgotten
- </motion.div>
- <motion.h2
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.1 }}
- className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight"
- >
+ </div>
+ <h2 className="animate-in delay-100 text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  One Click. Complete Erasure.
  </motion.h2>
- <motion.p
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- className="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed"
- >
+ <p className="animate-in delay-200 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">
  GDPR Article 17 compliance made simple. Our cascade deletion propagates through 
  every system—primary, replicas, backups, and logs—within 72 hours.
- </motion.p>
+ </p>
  </div>
 
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.3 }}
- className="bg-white border border-surface-200 rounded-2xl p-8 max-w-4xl mx-auto shadow-sm"
- >
+ <div className="animate-in delay-300 bg-white border border-surface-200 rounded-2xl p-8 max-w-4xl mx-auto shadow-sm">
  {/* Subject Request */}
  <div className="flex items-center justify-between mb-10 pb-8 border-b border-surface-200">
  <div>
@@ -142,20 +122,7 @@ export function RightToBeForgotten() {
  const Icon = step.icon;
 
  return (
- <motion.div
- key={step.id}
- initial={{ opacity: 0, x: -20 }}
- animate={{ opacity: 1, x: 0 }}
- transition={{ delay: index * 0.1 }}
- className={cn(
- 'flex items-center gap-4 p-4 rounded-lg border transition-all',
- status === 'active'
- ? 'bg-red-50/50 border-red-200'
- : status === 'complete'
- ? 'bg-emerald-50/50 border-emerald-200'
- : 'bg-white border-surface-200'
- )}
- >
+ <div key={step.id} className={cn( 'flex items-center gap-4 p-4 rounded-lg border transition-all', status === 'active' ? 'bg-red-50/50 border-red-200' : status === 'complete' ? 'bg-emerald-50/50 border-emerald-200' : 'bg-white border-surface-200' )}>
  <div
  className={cn(
  'w-10 h-10 rounded-lg flex items-center justify-center border',
@@ -169,12 +136,9 @@ export function RightToBeForgotten() {
  {status === 'complete' ? (
  <CheckCircle2 className="w-5 h-5" strokeWidth={2} />
  ) : status === 'active' ? (
- <motion.div
- animate={{ rotate: 360 }}
- transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
- >
+ <div className="animate-in">
  <Trash2 className="w-5 h-5" strokeWidth={2} />
- </motion.div>
+ </div>
  ) : (
  <Icon className="w-5 h-5" strokeWidth={1.5} />
  )}
@@ -211,34 +175,25 @@ export function RightToBeForgotten() {
  >
  {status === 'active' ? 'Deleting...' : status === 'complete' ? 'Erased' : 'Pending'}
  </div>
- </motion.div>
+ </div>
  );
  })}
  </div>
 
  {/* Completion Message */}
  {currentStage === 'complete' && (
- <motion.div
- initial={{ opacity: 0, scale: 0.9 }}
- animate={{ opacity: 1, scale: 1 }}
- className="mt-8 p-6 bg-emerald-50 border border-emerald-200 rounded-lg text-center "
- >
+ <div className="animate-in mt-8 p-6 bg-emerald-50 border border-emerald-200 rounded-lg text-center ">
  <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto mb-3" strokeWidth={3} />
  <div className="text-emerald-800 font-bold text-xs mb-1">Erasure Complete</div>
  <div className="text-sm text-emerald-700 font-medium">
  Certificate of deletion generated and logged to immutable audit trail
  </div>
- </motion.div>
+ </div>
  )}
- </motion.div>
+ </div>
 
  {/* Stats */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.4 }}
- className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8 max-w-3xl mx-auto mt-16 pt-12 border-t border-surface-100"
- >
+ <div className="animate-in delay-400 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8 max-w-3xl mx-auto mt-16 pt-12 border-t border-surface-100">
  {[
  { value: '< 72h', label: 'Complete Erasure' },
  { value: '100%', label: 'System Coverage' },
@@ -249,7 +204,7 @@ export function RightToBeForgotten() {
  <div className="text-xs font-bold text-surface-600">{stat.label}</div>
  </div>
  ))}
- </motion.div>
+ </div>
  </div>
  </section>
  );

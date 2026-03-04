@@ -1,0 +1,46 @@
+{# ── Forensic CTA ─────────────────────────────────────────────── #}
+{# Converted from forensic/ForensicCTA.tsx                       #}
+
+<section class="py-20 lg:py-32 relative bg-white">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
+    <div class="animate-in bg-white border border-surface-200 shadow-sm rounded-2xl p-8 lg:p-12 text-center">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 text-surface-900 border border-surface-200 text-xs font-medium mb-6">
+        <svg class="w-4 h-4 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        Never Debug Blind Again
+      </div>
+
+      <h2 class="text-3xl lg:text-4xl font-semibold text-surface-900 mb-4 tracking-tight">
+        Stop Guessing. Start Knowing.
+      </h2>
+      <p class="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed font-medium">
+        Every email you send with ApexMail includes full forensic debugging capabilities.
+        See what your customers see, instantly.
+      </p>
+
+      <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
+        <a href="/signup" class="btn-primary text-lg px-8 py-4 inline-flex items-center">
+          Start Free Trial
+          <svg class="w-5 h-5 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </a>
+        <a href="/api-console" class="btn-secondary text-lg px-8 py-4 bg-white inline-flex items-center">
+          <svg class="w-5 h-5 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          Try Live Demo
+        </a>
+      </div>
+
+      {% set forensic_highlights = [
+        {"value": "90 days", "label": "Render retention"},
+        {"value": "50+", "label": "Email clients"},
+        {"value": "Real-time", "label": "Render tracking"}
+      ] %}
+      <div class="grid md:grid-cols-3 gap-8 pt-10 border-t border-surface-100">
+        {% for item in forensic_highlights %}
+        <div>
+          <div class="text-2xl font-semibold text-surface-900 tabular-nums mb-1">{{ item.value }}</div>
+          <div class="text-xs font-medium text-surface-500">{{ item.label }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</section>

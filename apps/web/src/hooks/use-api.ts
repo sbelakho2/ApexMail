@@ -1,9 +1,11 @@
 import useSWR, { SWRConfiguration, mutate as globalMutate } from 'swr';
 import useSWRMutation from 'swr/mutation';
-import type { Campaign, CampaignStats, Contact } from '@/types/entities';
+import type { Campaign, CampaignStats, Contact, PaginatedResponse, List, Template, DashboardStats, SupportTicket, SupportTicketMessage, TicketsResponse } from '@/types/entities';
 
-// Always use same-origin relative paths; Next.js rewrites proxy /v1/* to API_URL server-side.
-const API_BASE_URL = '';
+// When NEXT_PUBLIC_API_URL is set, SWR fetches go directly to the Rust API server
+// (bypassing Next.js API routes). Otherwise, same-origin relative paths are used
+// and Next.js rewrites proxy /v1/* to API_URL server-side.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 const CSRF_HEADER = 'X-CSRF-Token';
 const CSRF_COOKIE = 'csrf_token';
 const CSRF_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -40,7 +42,7 @@ async function fetchCsrfToken(): Promise<string | null> {
         return null;
     }
 
-    const response = await fetch('/api/csrf', {
+    const response = await fetch('/v1/auth/csrf', {
         method: 'GET',
         credentials: 'include',
         cache: 'no-store',
@@ -202,7 +204,12 @@ async function putByIdFetcher<T, D>(
         throw new APIError('Resource ID is required', 400);
     }
 
-    return putFetcher<T, D>(`${baseUrl}/${arg.id}`, { arg: arg.data });
+    // Validate ID to prevent path traversal
+    if (/[\/\\]|\.\.\//.test(arg.id)) {
+        throw new APIError('Invalid resource ID', 400);
+    }
+
+    return putFetcher<T, D>(`${baseUrl}/${encodeURIComponent(arg.id)}`, { arg: arg.data });
 }
 
 async function deleteByIdFetcher<T>(
@@ -213,7 +220,13 @@ async function deleteByIdFetcher<T>(
         throw new APIError('Resource ID is required', 400);
     }
 
-    return deleteFetcher<T>(`${baseUrl}/${arg}`);
+    // Validate ID to prevent path traversal (no `g` flag — stateful regex
+    // would alternate between true/false on consecutive calls)
+    if (/[\/\\]|\.\.\//.test(arg)) {
+        throw new APIError('Invalid resource ID', 400);
+    }
+
+    return deleteFetcher<T>(`${baseUrl}/${encodeURIComponent(arg)}`);
 }
 
 // Default SWR configuration
@@ -222,7 +235,7 @@ const defaultConfig: SWRConfiguration = {
     revalidateOnReconnect: true,
     shouldRetryOnError: true,
     errorRetryCount: 3,
-    dedupingInterval: 2000,
+    dedupingInterval: 5000,
 };
 
 // Generic GET hook
@@ -283,48 +296,7 @@ export function useAPIDelete<T>(
 }
 
 // Type definitions for API responses
-export interface PaginatedResponse<T> {
-    data: T[];
-    total: number;
-    page: number;
-    pageSize: number;
-    totalPages: number;
-}
-
-export type { Campaign, CampaignStats, Contact };
-
-export interface List {
-    id: string;
-    name: string;
-    description?: string;
-    subscriberCount: number;
-    unsubscribedCount: number;
-    bouncedCount: number;
-    createdAt: string;
-    updatedAt: string;
-}
-
-export interface Template {
-    id: string;
-    name: string;
-    subject?: string;
-    content: string;
-    type: 'html' | 'mjml' | 'text';
-    thumbnail?: string;
-    createdAt: string;
-    updatedAt: string;
-}
-
-export interface DashboardStats {
-    totalContacts: number;
-    totalCampaigns: number;
-    totalSent: number;
-    avgOpenRate: number;
-    avgClickRate: number;
-    recentCampaigns: Campaign[];
-    sendingTrend: { date: string; sent: number }[];
-    engagementTrend: { date: string; opens: number; clicks: number }[];
-}
+export type { Campaign, CampaignStats, Contact, PaginatedResponse, List, Template, DashboardStats, SupportTicket, SupportTicketMessage, TicketsResponse };
 
 // Specific API hooks for campaigns
 export function useCampaigns(page = 1, pageSize = 20) {
@@ -456,33 +428,7 @@ export function useDashboardStats() {
     return useAPI<DashboardStats>('/v1/dashboard/stats');
 }
 
-// Support tickets types & hooks
-export interface SupportTicket {
-    id: string;
-    subject: string;
-    description: string;
-    status: 'open' | 'in_progress' | 'waiting_on_customer' | 'resolved' | 'closed';
-    priority: 'low' | 'medium' | 'high' | 'urgent';
-    category: 'billing' | 'technical' | 'feature_request' | 'bug' | 'general';
-    createdAt: string;
-    updatedAt: string;
-    messages: SupportTicketMessage[];
-}
-
-export interface SupportTicketMessage {
-    id: string;
-    content: string;
-    author: string;
-    authorType: 'customer' | 'support' | 'bot';
-    createdAt: string;
-    attachments: string[];
-}
-
-export interface TicketsResponse {
-    tickets: SupportTicket[];
-    pagination: { total: number; limit: number; offset: number; hasMore: boolean };
-}
-
+// Support tickets hooks
 export function useTickets(limit = 50, offset = 0) {
     return useAPI<TicketsResponse>(`/v1/support/tickets?limit=${limit}&offset=${offset}`);
 }
@@ -523,4 +469,5 @@ export {
     defaultConfig,
     API_BASE_URL,
     globalMutate,
+    getCsrfToken,
 };

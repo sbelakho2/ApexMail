@@ -1,21 +1,12 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Globe, Shield, TrendingUp, CheckCircle } from '@/components/ui/icons';
 
 export function DedicatedIPs() {
- const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
  return (
- <section ref={ref} className="py-24 relative bg-white">
+ <section className="py-20 lg:py-32 relative bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Copy */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- >
+ <div className="animate-in">
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
             <Globe className="w-4 h-4" />
             Dedicated IPs
@@ -57,14 +48,10 @@ export function DedicatedIPs() {
  </div>
  ))}
  </div>
- </motion.div>
+ </div>
 
  {/* Right - IP Pool Visual */}
- <motion.div
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.2 }}
- >
+ <div className="animate-in delay-200">
  <div className="bg-white rounded-lg border border-surface-200 p-8 shadow-sm">
  <div className="flex items-center justify-between mb-8">
  <div className="text-xs font-semibold text-surface-500">IP Pool Dashboard</div>
@@ -149,7 +136,7 @@ export function DedicatedIPs() {
  </div>
  </div>
  </div>
- </motion.div>
+ </div>
  </div>
  </div>
  </section>

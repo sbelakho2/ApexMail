@@ -1,5 +1,8 @@
 import type { Metadata } from 'next';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
     title: 'Acceptable Use Policy',
     description: 'ApexMail Acceptable Use Policy — rules governing how the service may be used.',

@@ -2,6 +2,9 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { formatNumber, formatPercentage, timeAgo, cn } from '@/lib/utils';
+import { getCsrfToken } from '@/lib/client-csrf';
+import { useDialog } from '@/components/ui/confirm-dialog';
+import { PageLoadingState } from '@/components/ui/async-state';
 
 /* ─── Types mirroring the backend shapes ─── */
 
@@ -108,18 +111,24 @@ interface SafetyReport {
 /* ─── Helper to fetch a section from the API route ─── */
 
 async function fetchSection<T>(section: string): Promise<T> {
-    const res = await fetch(`/api/autopilot?section=${section}`);
+    const res = await fetch(`/api/autopilot?section=${section}`, { credentials: 'include' });
     if (!res.ok) throw new Error(`Failed to fetch ${section}`);
     return res.json();
 }
 
 async function postAction(action: string, extra: Record<string, unknown> = {}) {
+    const csrfToken = await getCsrfToken();
     const res = await fetch('/api/autopilot', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
+        credentials: 'include',
         body: JSON.stringify({ action, ...extra }),
     });
-    return res.json();
+    if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(body || `Action failed with status ${res.status}`);
+    }
+    return res.json().catch(() => null);
 }
 
 /* ─── Status / verdict badge helpers ─── */
@@ -178,6 +187,7 @@ export default function AutopilotConsolePage() {
     const [tab, setTab] = useState<TabKey>('overview');
     const [loading, setLoading] = useState(true);
     const [acting, setActing] = useState(false);
+    const dialog = useDialog();
 
     const [overview, setOverview] = useState<Overview | null>(null);
     const [metrics, setMetrics] = useState<HourlyMetrics | null>(null);
@@ -191,7 +201,7 @@ export default function AutopilotConsolePage() {
     const loadAll = useCallback(async () => {
         setLoading(true);
         try {
-            const [ov, met, bl, cands, outs, pend, acts, safe] = await Promise.all([
+            const results = await Promise.allSettled([
                 fetchSection<Overview>('overview'),
                 fetchSection<HourlyMetrics>('metrics'),
                 fetchSection<BaselineData>('baseline'),
@@ -201,14 +211,20 @@ export default function AutopilotConsolePage() {
                 fetchSection<ActionEntry[]>('actions'),
                 fetchSection<SafetyReport>('safety'),
             ]);
-            setOverview(ov);
-            setMetrics(met);
-            setBaseline(bl);
-            setCandidates(cands);
-            setOutcomes(outs);
-            setPending(pend);
-            setActions(acts);
-            setSafety(safe);
+            if (results[0].status === 'fulfilled') setOverview(results[0].value);
+            if (results[1].status === 'fulfilled') setMetrics(results[1].value);
+            if (results[2].status === 'fulfilled') setBaseline(results[2].value);
+            if (results[3].status === 'fulfilled') setCandidates(results[3].value);
+            if (results[4].status === 'fulfilled') setOutcomes(results[4].value);
+            if (results[5].status === 'fulfilled') setPending(results[5].value);
+            if (results[6].status === 'fulfilled') setActions(results[6].value);
+            if (results[7].status === 'fulfilled') setSafety(results[7].value);
+            const failedCount = results.filter(r => r.status === 'rejected').length;
+            if (failedCount > 0 && failedCount < results.length) {
+                console.warn(`${failedCount} autopilot sections failed to load`);
+            } else if (failedCount === results.length) {
+                throw new Error('All autopilot sections failed to load');
+            }
         } catch (e) {
             console.error('Failed to load autopilot data:', e);
         } finally {
@@ -221,43 +237,96 @@ export default function AutopilotConsolePage() {
     /* ─ Power toggle ─ */
     async function toggleSystem() {
         if (!overview) return;
-        setActing(true);
         const action = overview.status === 'running' ? 'stop' : 'start';
-        await postAction(action);
-        await loadAll();
-        setActing(false);
+        const confirmed = await dialog.confirm({
+            title: action === 'stop' ? 'Stop Autopilot' : 'Start Autopilot',
+            message: action === 'stop'
+                ? 'Stop the autopilot loop? All in-flight optimization will pause and pending emails will not be sent until restarted.'
+                : 'Start the autopilot optimization loop? It will begin sending test variants and collecting metrics immediately.',
+            confirmLabel: action === 'stop' ? 'Stop Loop' : 'Start Loop',
+            variant: action === 'stop' ? 'destructive' : 'default',
+        });
+        if (!confirmed) return;
+        setActing(true);
+        try {
+            await postAction(action);
+            await loadAll();
+        } catch (err) {
+            await dialog.alert({ title: 'Action Failed', message: err instanceof Error ? err.message : `Failed to ${action} autopilot` });
+        } finally {
+            setActing(false);
+        }
     }
 
     /* ─ Email approval actions ─ */
     async function approveEmail(id: string) {
         setActing(true);
-        await postAction('approve', { id });
-        await loadAll();
-        setActing(false);
+        try {
+            await postAction('approve', { id });
+            await loadAll();
+        } catch (err) {
+            await dialog.alert({ title: 'Approve Failed', message: err instanceof Error ? err.message : 'Failed to approve email' });
+        } finally {
+            setActing(false);
+        }
     }
     async function rejectEmail(id: string) {
         setActing(true);
-        await postAction('reject', { id });
-        await loadAll();
-        setActing(false);
+        try {
+            await postAction('reject', { id });
+            await loadAll();
+        } catch (err) {
+            await dialog.alert({ title: 'Reject Failed', message: err instanceof Error ? err.message : 'Failed to reject email' });
+        } finally {
+            setActing(false);
+        }
     }
     async function approveAll() {
+        const confirmed = await dialog.confirm({
+            title: 'Approve All Pending Emails',
+            message: `Approve all ${pending.length} pending email(s)? They will be queued for delivery immediately.`,
+            confirmLabel: 'Approve All',
+            variant: 'destructive',
+        });
+        if (!confirmed) return;
         setActing(true);
-        await postAction('approve-all');
-        await loadAll();
-        setActing(false);
+        try {
+            await postAction('approve-all');
+            await loadAll();
+        } catch (err) {
+            await dialog.alert({ title: 'Approve All Failed', message: err instanceof Error ? err.message : 'Failed to approve all emails' });
+        } finally {
+            setActing(false);
+        }
     }
     async function exitSafeMode() {
+        const confirmed = await dialog.confirm({
+            title: 'Exit Safe Mode',
+            message: 'Exit safe mode and resume normal autopilot operation? Ensure the issue that triggered safe mode has been resolved.',
+            confirmLabel: 'Exit Safe Mode',
+            variant: 'destructive',
+        });
+        if (!confirmed) return;
         setActing(true);
-        await postAction('exit-safe-mode');
-        await loadAll();
-        setActing(false);
+        try {
+            await postAction('exit-safe-mode');
+            await loadAll();
+        } catch (err) {
+            await dialog.alert({ title: 'Exit Safe Mode Failed', message: err instanceof Error ? err.message : 'Failed to exit safe mode' });
+        } finally {
+            setActing(false);
+        }
     }
 
     if (loading) {
+        return <PageLoadingState label="Loading autopilot data..." />;
+    }
+
+    if (!overview) {
         return (
-            <div className="flex items-center justify-center h-[60vh]">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+            <div className="flex flex-col items-center justify-center h-[60vh] gap-4">
+                <p className="text-muted-foreground">Failed to load autopilot data.</p>
+                <button onClick={loadAll} className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90">Retry</button>
             </div>
         );
     }

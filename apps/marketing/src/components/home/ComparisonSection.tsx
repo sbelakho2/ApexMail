@@ -1,7 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { Check, ArrowRight, Minus } from '@/components/ui/icons';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
@@ -61,17 +57,11 @@ const renderValue = (value: boolean | string) => {
 };
 
 export function ComparisonSection() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-
   return (
-    <section ref={ref} className="py-20 lg:py-32 relative bg-surface-50">
-      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+    <section className="py-20 lg:py-32 relative bg-surface-50">
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Header */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="text-center mb-12"
-        >
+        <div className="animate-in text-center mb-12">
           <h2 className="section-title mb-4">
             <span className="text-surface-900">See How We</span>{' '}
             <span className="text-brand-500">Stack Up</span>
@@ -80,15 +70,10 @@ export function ComparisonSection() {
             We built ApexMail because we were tired of email providers that treat 
             compliance as an afterthought and developers as an inconvenience.
           </p>
-        </motion.div>
+        </div>
 
         {/* Comparison Table */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.2 }}
-          className="overflow-x-auto bg-white rounded-lg border border-surface-200 shadow-sm"
-        >
+        <div className="animate-in delay-200 overflow-x-auto bg-white rounded-lg border border-surface-200 shadow-sm">
           <table className="min-w-[760px] w-full border-collapse">
             <thead>
               <tr className="border-b border-surface-200 bg-surface-50/50">
@@ -136,15 +121,10 @@ export function ComparisonSection() {
               </tbody>
             ))}
           </table>
-        </motion.div>
+        </div>
 
         {/* Bottom CTA */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.4 }}
-          className="mt-12 text-center"
-        >
+        <div className="animate-in delay-400 mt-12 text-center">
           <p className="text-surface-600 mb-6 font-medium">
             Still not convinced? See the full feature comparison or talk to our team.
           </p>
@@ -158,7 +138,7 @@ export function ComparisonSection() {
               <ArrowRight className="w-4 h-4" />
             </Link>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

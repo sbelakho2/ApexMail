@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { PLANS } from '@/components/billing';
-import { useAPI } from '@/hooks/use-api';
+import { useAPI, getCsrfToken } from '@/hooks/use-api';
 
 export interface UserProfile {
     firstName: string;
@@ -98,10 +98,25 @@ export function useSettingsController() {
     const [pendingLocalProfile, setPendingLocalProfile] = React.useState<UserProfile | null>(null);
     const [pendingVerification, setPendingVerification] = React.useState(false);
     const [avatarUploadProgress, setAvatarUploadProgress] = React.useState(0);
+
+    // Notification preferences state
+    const [notifications, setNotifications] = React.useState({
+        campaignSent: true,
+        newSubscribers: true,
+        bounceAlerts: true,
+        weeklyReport: false,
+        marketingEmails: false,
+    });
+
+    const updateNotification = React.useCallback((key: keyof typeof notifications, value: boolean) => {
+        setNotifications(prev => ({ ...prev, [key]: value }));
+        setIsDirty(true);
+    }, []);
     const [newWebhookUrl, setNewWebhookUrl] = React.useState('');
     const [newWebhookEvents, setNewWebhookEvents] = React.useState('delivered, opened');
     const [settingsImportJson, setSettingsImportJson] = React.useState('');
     const [revealedApiKey, setRevealedApiKey] = React.useState(false);
+    const apiKeyRef = React.useRef<string>('');
     const [toasts, setToasts] = React.useState<Array<{ id: string; message: string; tone: ToastTone }>>([]);
     
     // Delete account state
@@ -111,6 +126,15 @@ export function useSettingsController() {
     const [deleteReason, setDeleteReason] = React.useState('');
     const [deleteLoading, setDeleteLoading] = React.useState(false);
     const [deleteError, setDeleteError] = React.useState<string | null>(null);
+
+    // Password change state
+    const [passwordForm, setPasswordForm] = React.useState({ current: '', new: '', confirm: '' });
+    const [passwordLoading, setPasswordLoading] = React.useState(false);
+    const [passwordError, setPasswordError] = React.useState<string | null>(null);
+
+    // Confirmation dialog state for reset defaults & unsaved changes
+    const [pendingResetSection, setPendingResetSection] = React.useState<string | null>(null);
+    const [pendingNavSection, setPendingNavSection] = React.useState<string | null>(null);
 
     const avatarInputRef = React.useRef<HTMLInputElement | null>(null);
     const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -122,10 +146,13 @@ export function useSettingsController() {
         revalidateOnFocus: false,
     });
 
-    const webhooksQuery = useAPI<WebhooksResponse>('/v1/webhooks', {
-        keepPreviousData: true,
-        revalidateOnFocus: false,
-    });
+    const webhooksQuery = useAPI<WebhooksResponse>(
+        activeSection === 'api' ? '/v1/webhooks' : null,
+        {
+            keepPreviousData: true,
+            revalidateOnFocus: false,
+        },
+    );
 
     const pushToast = React.useCallback((message: string, tone: ToastTone = 'info') => {
         setToasts((prev) => {
@@ -209,6 +236,7 @@ export function useSettingsController() {
 
     React.useEffect(() => {
         return () => {
+            apiKeyRef.current = '';
             if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
             if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
         };
@@ -227,14 +255,18 @@ export function useSettingsController() {
 
         setSaveStatus('saving');
         setSectionSaveStatus((prev) => ({ ...prev, [activeSection]: 'saving' }));
+        const previousProfileJson = localStorage.getItem('apexmail-user-settings');
         try {
             const profileChanged = Boolean(profile.email || profile.orgName);
 
-            localStorage.setItem('apexmail-user-settings', JSON.stringify(profile));
+            const csrfToken = await getCsrfToken();
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
 
             const res = await fetch('/v1/auth/profile', {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                headers,
                 body: JSON.stringify({
                     firstName: profile.firstName,
                     lastName: profile.lastName,
@@ -247,10 +279,13 @@ export function useSettingsController() {
                     address: profile.address,
                     timezone: profile.timezone,
                     language: profile.language,
+                    notifications,
                 }),
             });
 
-            if (!res.ok && res.status !== 404) throw new Error('Save failed');
+            if (!res.ok) throw new Error(`Save failed (${res.status})`);
+
+            localStorage.setItem('apexmail-user-settings', JSON.stringify(profile));
 
             saveTimerRef.current = setTimeout(() => {
                 setSaveStatus('saved');
@@ -264,24 +299,32 @@ export function useSettingsController() {
                 resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
             }, 300);
         } catch {
+            if (previousProfileJson !== null) localStorage.setItem('apexmail-user-settings', previousProfileJson);
+            else localStorage.removeItem('apexmail-user-settings');
             setSaveStatus('error');
             setSectionSaveStatus((prev) => ({ ...prev, [activeSection]: 'error' }));
             pushToast('Failed to save settings.', 'error');
             resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 3000);
         }
-    }, [activeSection, profile, pushToast, readOnlyMode]);
+    }, [activeSection, profile, notifications, pushToast, readOnlyMode]);
 
     const resetSectionDefaults = React.useCallback((section: string) => {
-        if (!window.confirm(`Reset ${section} settings to defaults?`)) return;
+        setPendingResetSection(section);
+    }, []);
+
+    const confirmResetDefaults = React.useCallback(() => {
+        const section = pendingResetSection;
+        setPendingResetSection(null);
+        if (!section) return;
 
         if (section === 'profile' || section === 'account' || section === 'email') {
             setProfile((prev) => ({ ...prev, ...DEFAULT_PROFILE, email: prev.email || DEFAULT_PROFILE.email }));
             setIsDirty(true);
             pushToast(`${section} settings reset to defaults.`, 'info');
         }
-    }, [pushToast]);
+    }, [pendingResetSection, pushToast]);
 
-    const addWebhook = React.useCallback(() => {
+    const addWebhook = React.useCallback(async () => {
         try {
             const parsed = new URL(newWebhookUrl);
             if (parsed.protocol !== 'https:') {
@@ -293,18 +336,32 @@ export function useSettingsController() {
             return;
         }
 
-        const entry: WebhookEntry = {
-            id: `wh_${Date.now()}`,
-            url: newWebhookUrl,
-            events: newWebhookEvents.split(',').map((event) => event.trim()).filter(Boolean),
-            status: 'active',
-            createdAt: new Date().toISOString(),
-        };
-        setWebhooks((prev) => [entry, ...prev]);
-        setNewWebhookUrl('');
-        setNewWebhookEvents('delivered, opened');
-        setIsDirty(true);
-        pushToast('Webhook added.', 'success');
+        try {
+            const csrfToken = await getCsrfToken();
+            const events = newWebhookEvents.split(',').map((event) => event.trim()).filter(Boolean);
+
+            const res = await fetch('/v1/webhooks', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ url: newWebhookUrl, events }),
+            });
+
+            if (!res.ok) throw new Error('Failed to create webhook');
+
+            const data = await res.json();
+            const entry: WebhookEntry = data.webhook ?? data;
+            setWebhooks((prev) => [entry, ...prev]);
+            setNewWebhookUrl('');
+            setNewWebhookEvents('delivered, opened');
+            setIsDirty(true);
+            pushToast('Webhook added.', 'success');
+        } catch {
+            pushToast('Failed to create webhook. Please try again.', 'error');
+        }
     }, [newWebhookEvents, newWebhookUrl, pushToast]);
 
     const exportSettingsJson = React.useCallback(() => {
@@ -336,7 +393,7 @@ export function useSettingsController() {
         }
     }, [settingsImportJson, pushToast]);
 
-    const handleAvatarUpload = React.useCallback((fileList: FileList | null) => {
+    const handleAvatarUpload = React.useCallback(async (fileList: FileList | null) => {
         if (!fileList || fileList.length === 0) return;
         const file = fileList[0];
         const allowed = ['image/jpeg', 'image/png', 'image/gif'];
@@ -350,23 +407,49 @@ export function useSettingsController() {
         }
 
         setAvatarUploadProgress(10);
-        const timer = window.setInterval(() => {
-            setAvatarUploadProgress((prev) => {
-                const next = Math.min(prev + 30, 100);
-                if (next >= 100) {
-                    window.clearInterval(timer);
-                    pushToast('Avatar uploaded successfully.', 'success');
-                }
-                return next;
+        try {
+            const csrfToken = await getCsrfToken();
+            const formData = new FormData();
+            formData.append('avatar', file);
+
+            const res = await fetch('/v1/auth/avatar', {
+                method: 'POST',
+                credentials: 'include',
+                headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : {},
+                body: formData,
             });
-        }, 200);
+
+            setAvatarUploadProgress(80);
+
+            if (!res.ok) {
+                throw new Error('Upload failed');
+            }
+
+            setAvatarUploadProgress(100);
+            pushToast('Avatar uploaded successfully.', 'success');
+        } catch {
+            setAvatarUploadProgress(0);
+            pushToast('Avatar upload failed. Please try again.', 'error');
+        }
     }, [pushToast]);
 
     const handleSectionChange = React.useCallback((nextSection: string) => {
         if (nextSection === activeSection) return;
-        if (isDirty && !window.confirm('You have unsaved changes. Leave this section anyway?')) return;
+        if (isDirty) {
+            setPendingNavSection(nextSection);
+            return;
+        }
         setActiveSection(nextSection);
     }, [activeSection, isDirty]);
+
+    const confirmSectionChange = React.useCallback(() => {
+        const next = pendingNavSection;
+        setPendingNavSection(null);
+        if (next) {
+            setIsDirty(false);
+            setActiveSection(next);
+        }
+    }, [pendingNavSection]);
 
     const handleKeepServerProfile = React.useCallback(() => {
         setLocalConflict(false);
@@ -385,19 +468,51 @@ export function useSettingsController() {
         pushToast('Verification code sent to your account email.', 'success');
     }, [pushToast]);
 
-    const handleApiKeyAction = React.useCallback(() => {
+    const handleApiKeyAction = React.useCallback(async () => {
         if (!revealedApiKey) {
-            setRevealedApiKey(true);
-            pushToast('Key revealed once for secure copy.', 'info');
+            try {
+                const res = await fetch('/v1/auth/api-key', {
+                    credentials: 'include',
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    const key = data.apiKey || data.key || '';
+                    setRevealedApiKey(true);
+                    apiKeyRef.current = key;
+                    pushToast('Key revealed once for secure copy.', 'info');
+                } else {
+                    pushToast('Failed to retrieve API key.', 'error');
+                }
+            } catch {
+                pushToast('Failed to retrieve API key.', 'error');
+            }
             return;
         }
-        navigator.clipboard.writeText('am_prod_abcd1234efgh5678ijkl9012mnop3456');
+        const key = apiKeyRef.current;
+        navigator.clipboard.writeText(key).catch(() => {});
         pushToast('API key copied.', 'success');
     }, [pushToast, revealedApiKey]);
 
     const handlePlanChange = React.useCallback(async (planId: string) => {
-        setCurrentPlan(planId);
-        setIsDirty(true);
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/v1/billing/plan', {
+                method: 'PUT',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ plan: planId }),
+            });
+
+            if (!res.ok) throw new Error('Plan change failed');
+
+            setCurrentPlan(planId);
+            setIsDirty(true);
+        } catch {
+            throw new Error('Failed to change plan. Please try again.');
+        }
     }, []);
 
     const openDeleteDialog = React.useCallback(() => {
@@ -434,9 +549,14 @@ export function useSettingsController() {
         setDeleteError(null);
 
         try {
-            const res = await fetch('/api/account', {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/v1/account', {
                 method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({
                     password: deletePassword,
                     confirmation: deleteConfirmation,
@@ -457,9 +577,9 @@ export function useSettingsController() {
             pushToast(data.message || 'Account deletion scheduled', 'success');
             closeDeleteDialog();
             
-            // Redirect to logout after a short delay
+            // Redirect to login after a short delay
             setTimeout(() => {
-                window.location.href = '/logout';
+                window.location.href = '/login';
             }, 2000);
         } catch (err) {
             setDeleteError(err instanceof Error ? err.message : 'Failed to delete account');
@@ -469,6 +589,148 @@ export function useSettingsController() {
     }, [deleteConfirmation, deletePassword, deleteReason, pushToast, closeDeleteDialog]);
 
     const activePlanData = React.useMemo(() => PLANS.find((plan) => plan.name === currentPlan), [currentPlan]);
+
+    // ─── 2FA placeholder ───
+    const handleEnable2FA = React.useCallback(async () => {
+        pushToast('Two-Factor Authentication setup is not yet available. We are working on it!', 'info');
+    }, [pushToast]);
+
+    // ─── Session revocation ───
+    const handleRevokeSession = React.useCallback(async (sessionId: string) => {
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/v1/auth/sessions/revoke', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ sessionId }),
+            });
+            if (!res.ok) throw new Error('Failed to revoke session');
+            pushToast('Session revoked successfully.', 'success');
+        } catch {
+            pushToast('Failed to revoke session. Please try again.', 'error');
+        }
+    }, [pushToast]);
+
+    // ─── Generate new API key ───
+    const handleGenerateApiKey = React.useCallback(async () => {
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/v1/auth/api-keys', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ name: 'Production Key', scopes: ['send', 'read', 'write'] }),
+            });
+            if (!res.ok) throw new Error('Failed to generate key');
+            const data = await res.json();
+            apiKeyRef.current = data.key || data.apiKey || '';
+            setRevealedApiKey(true);
+            pushToast('New API key generated. Copy it now — it won\'t be shown again.', 'success');
+        } catch {
+            pushToast('Failed to generate API key. Please try again.', 'error');
+        }
+    }, [pushToast]);
+
+    // ─── Revoke API key ───
+    const handleRevokeApiKey = React.useCallback(async (keyId?: string) => {
+        try {
+            const csrfToken = await getCsrfToken();
+            const endpoint = keyId ? `/v1/auth/api-keys/${encodeURIComponent(keyId)}` : '/v1/auth/api-keys/current';
+            const res = await fetch(endpoint, {
+                method: 'DELETE',
+                credentials: 'include',
+                headers: {
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+            });
+            if (!res.ok) throw new Error('Failed to revoke key');
+            setRevealedApiKey(false);
+            apiKeyRef.current = '';
+            pushToast('API key revoked.', 'success');
+        } catch {
+            pushToast('Failed to revoke API key. Please try again.', 'error');
+        }
+    }, [pushToast]);
+
+    // ─── Remove webhook ───
+    const handleRemoveWebhook = React.useCallback(async (webhookId: string) => {
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch(`/v1/webhooks/${encodeURIComponent(webhookId)}`, {
+                method: 'DELETE',
+                credentials: 'include',
+                headers: {
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+            });
+            if (!res.ok) throw new Error('Failed to remove webhook');
+            setWebhooks(prev => prev.filter(wh => wh.id !== webhookId));
+            pushToast('Webhook removed.', 'success');
+        } catch {
+            pushToast('Failed to remove webhook. Please try again.', 'error');
+        }
+    }, [pushToast]);
+
+    // ─── Connected app revoke ───
+    const handleRevokeConnectedApp = React.useCallback(async (appName: string) => {
+        pushToast(`${appName} integration revocation is not yet available.`, 'info');
+    }, [pushToast]);
+
+    const handlePasswordChange = React.useCallback(async () => {
+        setPasswordError(null);
+
+        if (!passwordForm.current) {
+            setPasswordError('Please enter your current password.');
+            return;
+        }
+        if (passwordForm.new.length < 12) {
+            setPasswordError('New password must be at least 12 characters.');
+            return;
+        }
+        if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>])/.test(passwordForm.new)) {
+            setPasswordError('Password must include uppercase, lowercase, number, and special character.');
+            return;
+        }
+        if (passwordForm.new !== passwordForm.confirm) {
+            setPasswordError('Passwords do not match.');
+            return;
+        }
+
+        setPasswordLoading(true);
+        try {
+            const csrfToken = await getCsrfToken();
+            const res = await fetch('/v1/auth/change-password', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
+                },
+                body: JSON.stringify({
+                    currentPassword: passwordForm.current,
+                    newPassword: passwordForm.new,
+                }),
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                setPasswordError(data.error || 'Failed to change password.');
+                return;
+            }
+            pushToast('Password updated successfully.', 'success');
+            setPasswordForm({ current: '', new: '', confirm: '' });
+        } catch {
+            setPasswordError('Network error. Please try again.');
+        } finally {
+            setPasswordLoading(false);
+        }
+    }, [passwordForm, pushToast]);
 
     return {
         state: {
@@ -490,6 +752,7 @@ export function useSettingsController() {
             newWebhookEvents,
             settingsImportJson,
             revealedApiKey,
+            apiKeyRef,
             toasts,
             activePlanData,
             deleteDialogOpen,
@@ -498,6 +761,12 @@ export function useSettingsController() {
             deleteReason,
             deleteLoading,
             deleteError,
+            pendingResetSection,
+            pendingNavSection,
+            passwordForm,
+            passwordLoading,
+            passwordError,
+            notifications,
         },
         refs: {
             avatarInputRef,
@@ -509,6 +778,10 @@ export function useSettingsController() {
             updateProfile,
             handleSave,
             resetSectionDefaults,
+            confirmResetDefaults,
+            confirmSectionChange,
+            setPendingResetSection,
+            setPendingNavSection,
             addWebhook,
             exportSettingsJson,
             importSettingsJson,
@@ -525,6 +798,16 @@ export function useSettingsController() {
             setDeleteConfirmation,
             setDeleteReason,
             handleDeleteAccount,
+            setPasswordForm,
+            handlePasswordChange,
+            updateNotification,
+            handleEnable2FA,
+            handleRevokeSession,
+            handleGenerateApiKey,
+            handleRevokeApiKey,
+            handleRemoveWebhook,
+            handleRevokeConnectedApp,
+            pushToast,
         },
         constants: {
             sectionIds: SETTINGS_SECTION_IDS,

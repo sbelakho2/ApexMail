@@ -35,6 +35,7 @@ const PRICING_TIERS = [
 export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
   const [usage, setUsage] = useState<PaygUsage | null>(initialData ?? null);
   const [isLoading, setIsLoading] = useState(!initialData);
+  const [fetchError, setFetchError] = useState(false);
 
   useEffect(() => {
     if (!initialData) {
@@ -43,13 +44,17 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
   }, [initialData]);
 
   const fetchUsage = async () => {
+    setFetchError(false);
     try {
-      const response = await fetch('/v1/billing/payg/usage');
+      const response = await fetch('/v1/billing/payg/usage', { credentials: 'include' });
       if (response.ok) {
         const data = await response.json();
         setUsage(data);
+      } else {
+        setFetchError(true);
       }
     } catch (error) {
+      setFetchError(true);
       if (process.env.NODE_ENV !== 'production') {
         console.error('Failed to fetch PAYG usage:', error);
       }
@@ -90,7 +95,19 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
     );
   }
 
-  if (!usage) return null;
+  if (!usage) {
+    if (fetchError) {
+      return (
+        <Card>
+          <CardContent className="p-6 flex flex-col items-center gap-3">
+            <p className="text-sm text-destructive">Failed to load usage data.</p>
+            <button onClick={fetchUsage} className="text-sm font-medium text-primary hover:underline">Retry</button>
+          </CardContent>
+        </Card>
+      );
+    }
+    return null;
+  }
 
   const currentTierIndex = getCurrentTierIndex(usage.usage.emailsSent);
   const currentTier = PRICING_TIERS[currentTierIndex];

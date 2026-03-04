@@ -1,7 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
-import { useInView } from 'react-intersection-observer';
 import { useState, useMemo } from 'react';
 import { Mail, CheckCircle } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
@@ -65,7 +63,6 @@ const volumeMarks = [
 ];
 
 export function InteractiveCalculator() {
-  const [ref] = useInView({ triggerOnce: true, threshold: 0.1 });
   const [emailVolume, setEmailVolume] = useState(100000);
 
   const prices = useMemo(() => {
@@ -95,8 +92,8 @@ export function InteractiveCalculator() {
   };
 
   return (
-    <section ref={ref} className="py-12 lg:py-20 relative bg-surface-50">
-      <div className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+    <section className="py-12 lg:py-20 relative bg-surface-50">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-10">
           {/* Volume Slider */}
           <div className="mb-12">
@@ -165,12 +162,7 @@ export function InteractiveCalculator() {
                       </span>
                     </div>
                     <div className="h-2.5 bg-surface-50 rounded-full overflow-hidden flex items-center">
-                      <motion.div
-                        initial={{ scaleX: 0 }}
-                        animate={{ scaleX: 1 }}
-                        transition={{ duration: 0.5, ease: "easeOut" }}
-                        className="h-full w-full origin-left"
-                      >
+                      <div className="animate-in h-full w-full origin-left">
                         <svg width="100%" height="100%" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">
                           <rect
                             x="0"
@@ -182,7 +174,7 @@ export function InteractiveCalculator() {
                             ry="999"
                           />
                         </svg>
-                      </motion.div>
+                      </div>
                     </div>
                   </div>
                 ))}

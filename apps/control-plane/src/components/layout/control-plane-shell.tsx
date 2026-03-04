@@ -5,6 +5,8 @@ import { usePathname } from 'next/navigation';
 import { Sidebar } from './sidebar';
 import { cn } from '../../lib/utils';
 
+type UserRole = 'viewer' | 'operator' | 'admin' | 'owner';
+
 interface ControlPlaneShellProps {
     children: React.ReactNode;
 }
@@ -18,6 +20,7 @@ interface ControlPlaneShellProps {
 export function ControlPlaneShell({ children }: ControlPlaneShellProps) {
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [showShortcutSheet, setShowShortcutSheet] = useState(false);
+    const [userRole, setUserRole] = useState<UserRole>('viewer');
     const [incident, setIncident] = useState<{ title: string; severity: 'info' | 'warning' | 'critical' } | null>(null);
     const [autopilotPaused, setAutopilotPaused] = useState(false);
     const [dependencyIssues, setDependencyIssues] = useState<Array<{ name: string; status: 'healthy' | 'degraded' | 'down' }>>([]);
@@ -25,14 +28,24 @@ export function ControlPlaneShell({ children }: ControlPlaneShellProps) {
     const pathname = usePathname();
     const isLoginPage = pathname === '/login';
 
+    // Fetch user role on mount
+    useEffect(() => {
+        fetch('/api/auth/session', { credentials: 'include' })
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data?.user?.role) setUserRole(data.user.role as UserRole);
+            })
+            .catch(() => {});
+    }, []);
+
     useEffect(() => {
         async function loadOperationalState() {
             const startedAt = performance.now();
             try {
                 const [incidentResponse, autopilotResponse, dependencyResponse] = await Promise.all([
-                    fetch('/api/system/incident', { credentials: 'include' }),
-                    fetch('/api/autopilot/status', { credentials: 'include' }),
-                    fetch('/api/system/dependencies', { credentials: 'include' }),
+                    fetch('/api/system/health', { credentials: 'include' }),
+                    fetch('/api/autopilot?section=overview', { credentials: 'include' }),
+                    fetch('/api/system/health', { credentials: 'include' }),
                 ]);
 
                 const elapsed = performance.now() - startedAt;
@@ -152,7 +165,7 @@ export function ControlPlaneShell({ children }: ControlPlaneShellProps) {
 
                         {/* Desktop Sidebar — fixed */}
                         <div className="hidden md:block">
-                            <Sidebar className="fixed left-0 top-0 h-screen w-64" />
+                            <Sidebar className="fixed left-0 top-0 h-screen w-64" userRole={userRole} />
                         </div>
 
                         {/* Mobile Sidebar — slide-in */}
@@ -163,6 +176,7 @@ export function ControlPlaneShell({ children }: ControlPlaneShellProps) {
                         >
                             <Sidebar 
                                 className="h-full w-64" 
+                                userRole={userRole}
                                 onNavigate={() => setMobileMenuOpen(false)} 
                             />
                         </div>

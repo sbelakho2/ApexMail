@@ -1,5 +1,8 @@
 import type { Metadata } from 'next';
 
+export const dynamic = 'force-static';
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
     title: 'Privacy Policy',
     description: 'ApexMail Privacy Policy — how we collect, use, and protect your data.',

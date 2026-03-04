@@ -3,7 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { formatNumber, cn, timeAgo } from '../../lib/utils';
 import { useDialog } from '../../components/ui/confirm-dialog';
-import { PageLoadingState } from '../../components/ui/async-state';
+import { PageLoadingState, PageErrorState } from '../../components/ui/async-state';
+import { getCsrfToken } from '../../lib/client-csrf';
 import { IPWarmupInfo, STATUS_CONFIG, WarmupPoolInfo, WarmupScheduleInfo } from './types';
 
 /**
@@ -35,6 +36,7 @@ export default function IPWarmerPage() {
     const [ipSearch, setIpSearch] = useState('');
     const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
     const [isStale, setIsStale] = useState(false);
+    const [loadError, setLoadError] = useState<string | null>(null);
 
     useEffect(() => {
         loadData();
@@ -75,8 +77,9 @@ export default function IPWarmerPage() {
             setSchedules(data.schedules);
             setLastRefreshedAt(new Date().toISOString());
             setIsStale(false);
+            setLoadError(null);
         } catch (err) {
-            void err;
+            setLoadError(err instanceof Error ? err.message : 'Failed to load warmup data');
         } finally {
             setLoading(false);
         }
@@ -92,8 +95,8 @@ export default function IPWarmerPage() {
             setLastRefreshedAt(new Date().toISOString());
             setIsStale(false);
         } catch (err) {
-            void err;
             setPoolIPs([]);
+            showToast(err instanceof Error ? err.message : 'Failed to load pool IPs', 'error');
         }
     }
 
@@ -102,10 +105,14 @@ export default function IPWarmerPage() {
     }, []);
 
     async function executeWarmupAction(endpoint: string, payload?: Record<string, unknown>) {
+        const csrfToken = await getCsrfToken();
         const response = await fetch(endpoint, {
             method: 'POST',
             credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+            },
             body: payload ? JSON.stringify(payload) : undefined,
         });
 
@@ -364,6 +371,10 @@ export default function IPWarmerPage() {
 
     if (loading) {
         return <PageLoadingState label="Loading IP warmup data..." />;
+    }
+
+    if (loadError) {
+        return <PageErrorState description={loadError} onRetry={() => { setLoading(true); setLoadError(null); loadData(); }} />;
     }
 
     return (

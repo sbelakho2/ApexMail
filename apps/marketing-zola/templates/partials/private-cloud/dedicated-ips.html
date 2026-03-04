@@ -1,0 +1,96 @@
+{# ── Dedicated IPs ────────────────────────────────────────────── #}
+{# Converted from private-cloud/DedicatedIPs.tsx                  #}
+
+<section class="py-20 lg:py-32 relative bg-white">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="grid lg:grid-cols-2 gap-16 items-center">
+      {# Left: Copy #}
+      <div>
+        <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-100 text-emerald-700 text-sm font-semibold mb-6 animate-in">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+          Dedicated Infrastructure
+        </div>
+        <h2 class="animate-in delay-100 text-3xl lg:text-4xl font-bold text-surface-900 tracking-tight mb-6">
+          Your IPs. Your<br />
+          <span class="text-emerald-600">Reputation.</span>
+        </h2>
+        <p class="animate-in delay-200 text-lg text-surface-600 leading-relaxed mb-8">
+          Dedicated IP addresses mean your sender reputation is entirely
+          in your hands. No shared risk, no noisy-neighbor problems,
+          full control over warm-up and throttling.
+        </p>
+
+        <div class="animate-in delay-300 space-y-4">
+          {% set features = [
+            {"title": "Automatic IP Warm-Up", "desc": "Gradual volume increase over 30 days to build reputation safely"},
+            {"title": "Pool Management", "desc": "Segment transactional and marketing traffic across separate IP pools"},
+            {"title": "Real-Time Reputation Monitoring", "desc": "Track sender scores, blacklist status, and feedback loops"}
+          ] %}
+          {% for feat in features %}
+          <div class="flex items-start gap-3">
+            <div class="w-6 h-6 rounded-full bg-emerald-100 flex items-center justify-center shrink-0 mt-0.5">
+              <svg class="w-4 h-4 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div>
+              <div class="font-semibold text-surface-900">{{ feat.title }}</div>
+              <div class="text-sm text-surface-500">{{ feat.desc }}</div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      {# Right: IP Pool Dashboard Mockup #}
+      <div class="animate-in delay-300 relative">
+        <div class="bg-white border border-surface-200 rounded-2xl shadow-sm overflow-hidden">
+          <div class="px-6 py-4 border-b border-surface-100 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <div class="w-2 h-2 rounded-full bg-emerald-500"></div>
+              <span class="text-sm font-semibold text-surface-900">IP Pool Dashboard</span>
+            </div>
+            <span class="text-xs text-surface-400">5 Dedicated IPs</span>
+          </div>
+
+          {% set ips = [
+            {"addr": "198.51.100.1", "score": "98", "status": "Active", "color": "emerald"},
+            {"addr": "198.51.100.2", "score": "96", "status": "Active", "color": "emerald"},
+            {"addr": "198.51.100.3", "score": "94", "status": "Active", "color": "emerald"},
+            {"addr": "198.51.100.4", "score": "87", "status": "Warming", "color": "amber"},
+            {"addr": "198.51.100.5", "score": "72", "status": "Warming", "color": "amber"}
+          ] %}
+
+          <div class="divide-y divide-surface-100">
+            {% for ip in ips %}
+            <div class="px-6 py-3 flex items-center justify-between hover:bg-surface-50/50 transition-colors">
+              <div class="flex items-center gap-3">
+                <span class="font-mono text-sm text-surface-700">{{ ip.addr }}</span>
+              </div>
+              <div class="flex items-center gap-4">
+                {# Reputation bar #}
+                <div class="flex items-center gap-2">
+                  <div class="w-24 h-2 bg-surface-100 rounded-full overflow-hidden">
+                    <div class="h-full bg-{{ ip.color }}-500 rounded-full" style="width: {{ ip.score }}%"></div>
+                  </div>
+                  <span class="text-xs font-semibold text-surface-600 w-8 text-right">{{ ip.score }}%</span>
+                </div>
+                {# Status badge #}
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-{{ ip.color }}-50 text-{{ ip.color }}-700">
+                  <div class="w-1.5 h-1.5 rounded-full bg-{{ ip.color }}-500"></div>
+                  {{ ip.status }}
+                </span>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+
+          <div class="px-6 py-3 bg-surface-50 border-t border-surface-100">
+            <div class="flex items-center justify-between text-xs text-surface-400">
+              <span>Pool: production-transactional</span>
+              <span>Avg reputation: 89.4%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

@@ -17,6 +17,12 @@ pub fn router() -> Router<AppState> {
         .route("/", post(create_contact).get(list_contacts))
         .route("/:id", get(get_contact).put(update_contact).delete(delete_contact))
         .route("/bulk", post(bulk_import))
+        .route("/counts", get(contact_counts))
+        .route("/bulk/delete", post(bulk_delete))
+        .route("/bulk/restore", post(bulk_restore))
+        .route("/bulk/tag", post(bulk_tag))
+        .route("/bulk/resolve-duplicates", post(bulk_resolve_duplicates))
+        .route("/import", post(import_contacts))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -362,6 +368,287 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["created"], 10);
     }
+
+}
+
+// ─── Additional Handlers (6B migration) ────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ContactCounts {
+    pub total: i64,
+    pub active: i64,
+    pub unsubscribed: i64,
+    pub bounced: i64,
+    pub complained: i64,
+}
+
+async fn contact_counts(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<ContactCounts>, ApiError> {
+    require_scopes(&auth, &["contacts:read"])?;
+
+    let counts = sqlx::query!(
+        r#"SELECT
+            COUNT(*)::bigint AS "total!",
+            COUNT(*) FILTER (WHERE status = 'active')::bigint AS "active!",
+            COUNT(*) FILTER (WHERE status = 'unsubscribed')::bigint AS "unsubscribed!",
+            COUNT(*) FILTER (WHERE status = 'bounced')::bigint AS "bounced!",
+            COUNT(*) FILTER (WHERE status = 'complained')::bigint AS "complained!"
+           FROM contacts WHERE tenant_id = $1"#,
+        auth.tenant_id,
+    )
+    .fetch_one(&*state.db)
+    .await?;
+
+    Ok(Json(ContactCounts {
+        total: counts.total,
+        active: counts.active,
+        unsubscribed: counts.unsubscribed,
+        bounced: counts.bounced,
+        complained: counts.complained,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkIdsRequest {
+    pub ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkActionResult {
+    pub affected: i64,
+}
+
+async fn bulk_delete(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<BulkIdsRequest>,
+) -> Result<Json<BulkActionResult>, ApiError> {
+    require_scopes(&auth, &["contacts:write"])?;
+
+    let affected = sqlx::query!(
+        "UPDATE contacts SET status = 'deleted', updated_at = NOW()
+         WHERE tenant_id = $1 AND id = ANY($2) AND status != 'deleted'",
+        auth.tenant_id,
+        &body.ids,
+    )
+    .execute(&*state.db)
+    .await?
+    .rows_affected() as i64;
+
+    Ok(Json(BulkActionResult { affected }))
+}
+
+async fn bulk_restore(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<BulkIdsRequest>,
+) -> Result<Json<BulkActionResult>, ApiError> {
+    require_scopes(&auth, &["contacts:write"])?;
+
+    let affected = sqlx::query!(
+        "UPDATE contacts SET status = 'active', updated_at = NOW()
+         WHERE tenant_id = $1 AND id = ANY($2) AND status = 'deleted'",
+        auth.tenant_id,
+        &body.ids,
+    )
+    .execute(&*state.db)
+    .await?
+    .rows_affected() as i64;
+
+    Ok(Json(BulkActionResult { affected }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkTagRequest {
+    pub ids: Vec<Uuid>,
+    pub tags: Vec<String>,
+}
+
+async fn bulk_tag(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<BulkTagRequest>,
+) -> Result<Json<BulkActionResult>, ApiError> {
+    require_scopes(&auth, &["contacts:write"])?;
+
+    let tags_json = serde_json::to_value(&body.tags).unwrap_or_default();
+    let affected = sqlx::query!(
+        r#"UPDATE contacts SET
+            tags = COALESCE(tags, '[]'::jsonb) || $3::jsonb,
+            updated_at = NOW()
+         WHERE tenant_id = $1 AND id = ANY($2)"#,
+        auth.tenant_id,
+        &body.ids,
+        tags_json,
+    )
+    .execute(&*state.db)
+    .await?
+    .rows_affected() as i64;
+
+    Ok(Json(BulkActionResult { affected }))
+}
+
+async fn bulk_resolve_duplicates(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<BulkActionResult>, ApiError> {
+    require_scopes(&auth, &["contacts:write"])?;
+
+    // Soft-delete duplicate contacts, keeping the oldest (lowest id) per email
+    let affected = sqlx::query!(
+        r#"WITH dupes AS (
+            SELECT id, ROW_NUMBER() OVER (PARTITION BY LOWER(email) ORDER BY created_at ASC) AS rn
+            FROM contacts
+            WHERE tenant_id = $1 AND status != 'deleted'
+        )
+        UPDATE contacts SET status = 'deleted', updated_at = NOW()
+        WHERE id IN (SELECT id FROM dupes WHERE rn > 1)"#,
+        auth.tenant_id,
+    )
+    .execute(&*state.db)
+    .await?
+    .rows_affected() as i64;
+
+    Ok(Json(BulkActionResult { affected }))
+}
+
+async fn import_contacts(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_scopes(&auth, &["contacts:write"])?;
+
+    // Detect file format from Content-Type header or file magic bytes
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("text/csv");
+
+    let is_xlsx = content_type.contains("spreadsheet")
+        || content_type.contains("xlsx")
+        || (body.len() >= 4 && &body[..4] == b"PK\x03\x04");  // ZIP magic bytes
+
+    let rows: Vec<(String, Option<String>)> = if is_xlsx {
+        parse_xlsx_rows(&body)?
+    } else {
+        parse_csv_rows(&body)?
+    };
+
+    let mut imported = 0i64;
+    let mut skipped = 0i64;
+    let mut errors = Vec::new();
+
+    for (idx, (email, name)) in rows.iter().enumerate() {
+        let email = email.trim();
+
+        if email.is_empty() || !email.contains('@') {
+            errors.push(format!("Row {}: invalid email", idx + 1));
+            skipped += 1;
+            continue;
+        }
+
+        let id = Uuid::now_v7();
+        let result = sqlx::query!(
+            "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 'active', NOW(), NOW())
+             ON CONFLICT (tenant_id, email) DO UPDATE SET
+                name = COALESCE(EXCLUDED.name, contacts.name),
+                updated_at = NOW()",
+            id,
+            auth.tenant_id,
+            email,
+            name.as_deref(),
+        )
+        .execute(&*state.db)
+        .await;
+
+        match result {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                errors.push(format!("Row {}: {}", idx + 1, e));
+                skipped += 1;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "imported": imported,
+        "skipped": skipped,
+        "errors": errors.len(),
+        "error_details": if errors.len() <= 50 { errors } else { errors[..50].to_vec() },
+        "format": if is_xlsx { "xlsx" } else { "csv" },
+    })))
+}
+
+/// Parse CSV bytes into (email, name) rows.
+fn parse_csv_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiError> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(data);
+
+    let mut rows = Vec::new();
+    for result in reader.records() {
+        let record = result.map_err(|e| ApiError::BadRequest(format!("CSV parse error: {e}")))?;
+        let email = record.get(0).unwrap_or("").to_string();
+        let name = record.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        rows.push((email, name));
+    }
+    Ok(rows)
+}
+
+/// Parse XLSX bytes into (email, name) rows using calamine.
+fn parse_xlsx_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiError> {
+    use calamine::{Reader, Xlsx, open_workbook_from_rs};
+    use std::io::Cursor;
+
+    let cursor = Cursor::new(data);
+    let mut workbook: Xlsx<_> = open_workbook_from_rs(cursor)
+        .map_err(|e| ApiError::BadRequest(format!("XLSX parse error: {e}")))?;
+
+    let sheet_name = workbook
+        .sheet_names()
+        .first()
+        .cloned()
+        .ok_or_else(|| ApiError::BadRequest("XLSX has no sheets".into()))?;
+
+    let range = workbook
+        .worksheet_range(&sheet_name)
+        .map_err(|e| ApiError::BadRequest(format!("XLSX sheet error: {e}")))?;
+
+    let mut rows = Vec::new();
+    let mut is_header = true;
+
+    for row in range.rows() {
+        // Skip header row
+        if is_header {
+            is_header = false;
+            continue;
+        }
+
+        let email = row.first()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let name = row.get(1)
+            .map(|c| c.to_string())
+            .filter(|s| !s.is_empty());
+
+        if !email.is_empty() {
+            rows.push((email, name));
+        }
+    }
+
+    Ok(rows)
+}
+}
+
+#[cfg(test)]
+mod tests_extra {
+    use super::*;
 
     #[test]
     fn test_contact_response_serialisation() {

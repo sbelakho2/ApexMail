@@ -1,0 +1,12 @@
+{# Pricing page template #}
+{% extends "base.html" %}
+
+{% block content %}
+{% include "partials/pricing/hero.html" %}
+{% include "partials/pricing/plans.html" %}
+
+{# PricingFAQ — Preact island with correct 6 questions from old app #}
+<div data-island="pricing-faq"></div>
+
+{% include "partials/pricing/cta.html" %}
+{% endblock content %}

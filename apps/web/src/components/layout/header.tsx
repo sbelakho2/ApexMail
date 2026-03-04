@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import {
  Bell,
  Search,
@@ -29,6 +30,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { SimpleTooltip } from '@/components/ui/tooltip';
 import { formatRelativeTime } from '@/lib/utils';
+import { getCsrfToken } from '@/hooks/use-api';
 import { useNotificationStore, useUIStore, useUserStore } from '@/stores';
 
 /** Resolve the effective theme ('light' | 'dark') from the store value */
@@ -44,7 +46,7 @@ interface HeaderProps {
  isMobileMenuOpen?: boolean;
 }
 
-export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps) {
+export const Header = React.memo(function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps) {
  const router = useRouter();
  // FIX-095: Use zustand UIStore for persisted theme preference
  const storeTheme = useUIStore((s) => s.theme);
@@ -103,9 +105,11 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
 
  const handleLogout = async () => {
    try {
-     await fetch('/api/auth/logout', {
+     const csrfToken = await getCsrfToken();
+     await fetch('/v1/auth/logout', {
        method: 'POST',
        credentials: 'include',
+       headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : {},
      });
    } catch {
      // fallback redirect below
@@ -204,15 +208,19 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
       <div className="flex items-center gap-2">
         {/* Quick action */}
         <SimpleTooltip content="Create Campaign">
-          <Button size="sm" className="hidden sm:flex" aria-label="Create Campaign">
-            <Plus className="h-4 w-4 mr-2" />
-            New Campaign
-          </Button>
+          <Link href="/campaigns/new">
+            <Button size="sm" className="hidden sm:flex" aria-label="Create Campaign">
+              <Plus className="h-4 w-4 mr-2" />
+              New Campaign
+            </Button>
+          </Link>
         </SimpleTooltip>
         <SimpleTooltip content="Create Campaign">
-          <Button size="icon" className="sm:hidden" aria-label="Create Campaign">
-            <Plus className="h-5 w-5" />
-          </Button>
+          <Link href="/campaigns/new">
+            <Button size="icon" className="sm:hidden" aria-label="Create Campaign">
+              <Plus className="h-5 w-5" />
+            </Button>
+          </Link>
         </SimpleTooltip>
 
         {/* Theme toggle */}
@@ -292,13 +300,17 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  </DropdownMenuLabel>
  <DropdownMenuSeparator />
  <DropdownMenuGroup>
- <DropdownMenuItem>
+ <DropdownMenuItem asChild>
+ <Link href="/settings">
  <User className="mr-2 h-4 w-4" />
  <span>Profile</span>
+ </Link>
  </DropdownMenuItem>
- <DropdownMenuItem>
+ <DropdownMenuItem asChild>
+ <Link href="/settings">
  <Settings className="mr-2 h-4 w-4" />
  <span>Settings</span>
+ </Link>
  </DropdownMenuItem>
  </DropdownMenuGroup>
  <DropdownMenuSeparator />
@@ -336,4 +348,6 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  )}
  </header>
  );
-}
+});
+
+Header.displayName = 'Header';

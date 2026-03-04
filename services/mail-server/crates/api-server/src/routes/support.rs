@@ -16,6 +16,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/tickets", post(create_ticket).get(list_tickets))
         .route("/tickets/:id", get(get_ticket).put(update_ticket))
+        .route("/tickets/:id/messages", get(list_ticket_messages).post(create_ticket_message))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -237,14 +238,140 @@ impl From<TicketRow> for TicketResponse {
     }
 }
 
-// ─── Tests ─────────────────────────────────────────────────────
+// ─── Ticket Message Handlers ───────────────────────────────────
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Deserialize)]
+pub struct CreateMessageRequest {
+    pub body: String,
+}
 
-    #[test]
-    fn test_create_ticket_request_deser() {
+#[derive(Debug, Serialize)]
+pub struct TicketMessageResponse {
+    pub id: Uuid,
+    pub ticket_id: Uuid,
+    pub sender_id: Uuid,
+    pub sender_type: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+async fn list_ticket_messages(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(ticket_id): Path<Uuid>,
+    Query(q): Query<ListTicketsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_scopes(&auth, &["support:read"])?;
+    let limit = q.limit.min(200).max(1);
+    let offset = q.offset.max(0);
+
+    // Verify ticket belongs to tenant
+    let exists = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1 AND tenant_id = $2)",
+        ticket_id,
+        auth.tenant_id,
+    )
+    .fetch_one(&*state.db)
+    .await?
+    .unwrap_or(false);
+
+    if !exists {
+        return Err(ApiError::NotFound);
+    }
+
+    let rows = sqlx::query!(
+        r#"SELECT id, ticket_id, sender_id, sender_type AS "sender_type!", body, created_at
+           FROM ticket_messages
+           WHERE ticket_id = $1
+           ORDER BY created_at ASC
+           LIMIT $2 OFFSET $3"#,
+        ticket_id,
+        limit,
+        offset,
+    )
+    .fetch_all(&*state.db)
+    .await?;
+
+    let messages: Vec<TicketMessageResponse> = rows
+        .into_iter()
+        .map(|r| TicketMessageResponse {
+            id: r.id,
+            ticket_id: r.ticket_id,
+            sender_id: r.sender_id,
+            sender_type: r.sender_type,
+            body: r.body,
+            created_at: r.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    let total = sqlx::query_scalar!(
+        "SELECT COUNT(*)::bigint FROM ticket_messages WHERE ticket_id = $1",
+        ticket_id,
+    )
+    .fetch_one(&*state.db)
+    .await?
+    .unwrap_or(0);
+
+    Ok(Json(serde_json::json!({
+        "data": messages,
+        "total": total,
+    })))
+}
+
+async fn create_ticket_message(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(ticket_id): Path<Uuid>,
+    Json(body): Json<CreateMessageRequest>,
+) -> Result<(StatusCode, Json<TicketMessageResponse>), ApiError> {
+    require_scopes(&auth, &["support:write"])?;
+
+    // Verify ticket belongs to tenant
+    let exists = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1 AND tenant_id = $2)",
+        ticket_id,
+        auth.tenant_id,
+    )
+    .fetch_one(&*state.db)
+    .await?
+    .unwrap_or(false);
+
+    if !exists {
+        return Err(ApiError::NotFound);
+    }
+
+    let id = Uuid::now_v7();
+    let now = chrono::Utc::now();
+
+    sqlx::query!(
+        "INSERT INTO ticket_messages (id, ticket_id, sender_id, sender_type, body, created_at)
+         VALUES ($1, $2, $3, 'user', $4, $5)",
+        id,
+        ticket_id,
+        auth.user_id,
+        body.body,
+        now,
+    )
+    .execute(&*state.db)
+    .await?;
+
+    // Update ticket updated_at
+    sqlx::query!(
+        "UPDATE support_tickets SET updated_at = NOW() WHERE id = $1",
+        ticket_id,
+    )
+    .execute(&*state.db)
+    .await?;
+
+    Ok((StatusCode::CREATED, Json(TicketMessageResponse {
+        id,
+        ticket_id,
+        sender_id: auth.user_id,
+        sender_type: "user".into(),
+        body: body.body,
+        created_at: now.to_rfc3339(),
+    })))
+}
         let json = r#"{"subject":"Help","description":"Need assistance"}"#;
         let req: CreateTicketRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.priority, "normal");
