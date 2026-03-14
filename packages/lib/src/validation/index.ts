@@ -7,12 +7,14 @@
  * - Disposable email detection
  * - Role-based email detection
  * - Common typo detection and suggestions
+ * - Rate limiting to prevent enumeration attacks (SEC-013)
  */
 
 import * as dns from 'dns';
 import { promisify } from 'util';
 import { createRequire } from 'node:module';
 import { createLogger } from '../logger/index.js';
+import type { Redis } from 'ioredis';
 
 const logger = createLogger({ name: 'email-validation' });
 
@@ -45,14 +47,29 @@ interface NativeValidator {
 
 const _cjsRequire = createRequire(import.meta.url);
 let _nativeValidator: NativeValidator | null = null;
+
+/**
+ * Export validation mode for monitoring/metrics.
+ * Applications can check this and emit metrics for native vs JS mode.
+ */
+export let validationMode: 'native' | 'js' = 'js';
+
 try {
   _nativeValidator = _cjsRequire('@apexmail/validator-native') as NativeValidator;
   // Initialize the DNS resolver on load so MX checks are ready
   _nativeValidator.initializeDnsResolver();
-  logger.info('Native validator addon loaded — using Rust RFC 5321/6531 validation');
+  validationMode = 'native';
+  logger.info('Native validator addon loaded — using Rust RFC 5321/6531 validation', {
+    validationMode: 'native',
+  });
 } catch (error) {
+  validationMode = 'js';
   logger.warn('Native validator addon unavailable, falling back to JS validation', {
     error: error instanceof Error ? error.message : String(error),
+    validationMode: 'js',
+    // Actionable info for alerting
+    alertLevel: 'warning',
+    performanceImpact: 'high',
   });
 }
 
@@ -413,9 +430,11 @@ function suggestCorrections(email: string, domain: string): string[] {
 /**
  * Calculate Levenshtein distance between two strings
  * FIX-500-095: Uses two-row rolling array instead of full O(n×m) matrix,
- * reducing memory from O(n×m) to O(min(n,m)). Also includes early
- * termination: if all values in the current row exceed a threshold of 2
- * (the only threshold used by callers), we can bail out early.
+ * reducing memory from O(n×m) to O(min(n,m)).
+ * 
+ * SEC-015: Removed early termination to prevent timing attacks that could
+ * leak information about string similarity. The function now always completes
+ * the full matrix calculation regardless of intermediate values.
  */
 function levenshteinDistance(a: string, b: string): number {
     // Ensure a is the shorter string so we allocate fewer columns
@@ -428,6 +447,8 @@ function levenshteinDistance(a: string, b: string): number {
 
     // The max threshold used by callers is 2 — if the length difference
     // alone exceeds it, we can return immediately.
+    // Note: This length check is safe as it only depends on string lengths,
+    // not character values, so it doesn't leak timing information.
     const MAX_THRESHOLD = 2;
     if (n - m > MAX_THRESHOLD) return n - m;
 
@@ -441,21 +462,14 @@ function levenshteinDistance(a: string, b: string): number {
 
     for (let i = 1; i <= n; i++) {
         curr[0] = i;
-        let rowMin = i; // Track minimum value in row for early termination
 
         for (let j = 1; j <= m; j++) {
             const cost = a[j - 1] === b[i - 1] ? 0 : 1;
             const del = (prev[j] ?? 0) + 1;
             const ins = (curr[j - 1] ?? 0) + 1;
             const sub = (prev[j - 1] ?? 0) + cost;
-            const val = Math.min(del, ins, sub);
-            curr[j] = val;
-            if (val < rowMin) rowMin = val;
+            curr[j] = Math.min(del, ins, sub);
         }
-
-        // FIX-500-095: Early termination — if every value in this row
-        // exceeds the threshold, the final distance will too.
-        if (rowMin > MAX_THRESHOLD) return rowMin;
 
         // Swap rows
         [prev, curr] = [curr, prev];
@@ -653,8 +667,154 @@ export function isRoleBasedEmail(email: string): boolean {
 }
 
 // ============================================================================
+// Rate Limiter (SEC-013)
+// ============================================================================
+
+export interface RateLimitConfig {
+    /** Maximum requests per window per identifier (default: 100) */
+    maxRequests: number;
+    /** Window size in milliseconds (default: 60000 = 1 minute) */
+    windowMs: number;
+    /** Redis client for distributed rate limiting (optional, falls back to in-memory) */
+    redis?: Redis;
+    /** Key prefix for Redis (default: 'emailval:ratelimit:') */
+    keyPrefix?: string;
+}
+
+export interface RateLimitResult {
+    allowed: boolean;
+    remaining: number;
+    resetAt: Date;
+    retryAfterMs?: number;
+}
+
+/**
+ * In-memory rate limiter fallback for single-instance deployments
+ */
+class InMemoryRateLimiter {
+    private requests: Map<string, { count: number; resetAt: number }> = new Map();
+    private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+    constructor(private config: RateLimitConfig) {
+        // Cleanup expired entries every 30 seconds
+        this.cleanupTimer = setInterval(() => this.cleanup(), 30000);
+        if (this.cleanupTimer.unref) this.cleanupTimer.unref();
+    }
+
+    async check(identifier: string): Promise<RateLimitResult> {
+        const now = Date.now();
+        const key = `${this.config.keyPrefix ?? 'ratelimit:'}${identifier}`;
+        const entry = this.requests.get(key);
+
+        if (!entry || now > entry.resetAt) {
+            // New window
+            const resetAt = now + this.config.windowMs;
+            this.requests.set(key, { count: 1, resetAt });
+            return {
+                allowed: true,
+                remaining: this.config.maxRequests - 1,
+                resetAt: new Date(resetAt),
+            };
+        }
+
+        if (entry.count >= this.config.maxRequests) {
+            return {
+                allowed: false,
+                remaining: 0,
+                resetAt: new Date(entry.resetAt),
+                retryAfterMs: entry.resetAt - now,
+            };
+        }
+
+        entry.count += 1;
+        return {
+            allowed: true,
+            remaining: this.config.maxRequests - entry.count,
+            resetAt: new Date(entry.resetAt),
+        };
+    }
+
+    private cleanup(): void {
+        const now = Date.now();
+        for (const [key, entry] of this.requests) {
+            if (now > entry.resetAt) {
+                this.requests.delete(key);
+            }
+        }
+    }
+
+    destroy(): void {
+        if (this.cleanupTimer) {
+            clearInterval(this.cleanupTimer);
+            this.cleanupTimer = null;
+        }
+        this.requests.clear();
+    }
+}
+
+/**
+ * Redis-based distributed rate limiter
+ */
+class RedisRateLimiter {
+    constructor(private config: RateLimitConfig) {}
+
+    async check(identifier: string): Promise<RateLimitResult> {
+        const redis = this.config.redis!;
+        const key = `${this.config.keyPrefix ?? 'emailval:ratelimit:'}${identifier}`;
+        const window = this.config.windowMs;
+        const max = this.config.maxRequests;
+
+        // Use Redis INCR with atomic expiry
+        const current = await redis.incr(key);
+        
+        if (current === 1) {
+            // First request in window - set expiry
+            await redis.pexpire(key, window);
+        }
+
+        const ttl = await redis.pttl(key);
+        const resetAt = new Date(Date.now() + (ttl > 0 ? ttl : window));
+        const remaining = Math.max(0, max - current);
+
+        if (current > max) {
+            return {
+                allowed: false,
+                remaining: 0,
+                resetAt,
+                retryAfterMs: ttl > 0 ? ttl : window,
+            };
+        }
+
+        return {
+            allowed: true,
+            remaining: remaining - 1,
+            resetAt,
+        };
+    }
+}
+
+/**
+ * Factory to create appropriate rate limiter
+ */
+function createRateLimiter(config: RateLimitConfig): { check: (id: string) => Promise<RateLimitResult>; destroy?: () => void } {
+    if (config.redis) {
+        return new RedisRateLimiter(config);
+    }
+    const inMemory = new InMemoryRateLimiter(config);
+    return { check: (id) => inMemory.check(id), destroy: () => inMemory.destroy() };
+}
+
+// ============================================================================
 // Email Validator Class
 // ============================================================================
+
+export interface EmailValidatorConfig {
+    validationOptions?: EmailValidationOptions;
+    cacheMaxAgeMs?: number;
+    maxCacheSize?: number;
+    /** Rate limit configuration (SEC-013). If provided, enables rate limiting */
+    rateLimit?: RateLimitConfig;
+}
 
 export class EmailValidator {
     private options: EmailValidationOptions;
@@ -662,19 +822,85 @@ export class EmailValidator {
     private cacheMaxAge: number;
     private maxCacheSize: number;
     private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+    private rateLimiter?: { check: (id: string) => Promise<RateLimitResult>; destroy?: () => void };
+    private rateLimitConfig?: RateLimitConfig;
     
-    constructor(options: EmailValidationOptions = {}, cacheMaxAgeMs = 3600000, maxCacheSize = 10000) {
+    constructor(
+        options: EmailValidationOptions = {},
+        cacheMaxAgeMs = 3600000,
+        maxCacheSize = 10000,
+        rateLimitConfig?: RateLimitConfig
+    ) {
         this.options = options;
         this.cache = new Map();
         this.cacheMaxAge = cacheMaxAgeMs;
         this.maxCacheSize = maxCacheSize;
+        this.rateLimitConfig = rateLimitConfig;
+
+        // SEC-013: Initialize rate limiter if configured
+        if (rateLimitConfig) {
+            this.rateLimiter = createRateLimiter(rateLimitConfig);
+        }
 
         // FIX-064: Periodic cleanup of expired entries (every 5 minutes)
         this.cleanupTimer = setInterval(() => this.evictExpired(), 5 * 60 * 1000);
         if (this.cleanupTimer.unref) this.cleanupTimer.unref();
     }
+
+    /**
+     * Alternate constructor accepting full config object
+     */
+    static withConfig(config: EmailValidatorConfig): EmailValidator {
+        return new EmailValidator(
+            config.validationOptions,
+            config.cacheMaxAgeMs,
+            config.maxCacheSize,
+            config.rateLimit
+        );
+    }
+
+    /**
+     * Check rate limit before validation (SEC-013)
+     * @param identifier - IP address or tenant ID to rate limit on
+     * @returns RateLimitResult indicating if request is allowed
+     */
+    async checkRateLimit(identifier: string): Promise<RateLimitResult> {
+        if (!this.rateLimiter) {
+            // No rate limiting configured - always allow
+            return {
+                allowed: true,
+                remaining: Infinity,
+                resetAt: new Date(Date.now() + 60000),
+            };
+        }
+        return this.rateLimiter.check(identifier);
+    }
     
-    async validate(email: string): Promise<EmailValidationResult> {
+    async validate(email: string, rateLimitIdentifier?: string): Promise<EmailValidationResult> {
+        // SEC-013: Check rate limit if identifier provided
+        if (rateLimitIdentifier && this.rateLimiter) {
+            const rateResult = await this.rateLimiter.check(rateLimitIdentifier);
+            if (!rateResult.allowed) {
+                logger.warn('Email validation rate limited', {
+                    identifier: rateLimitIdentifier,
+                    retryAfterMs: rateResult.retryAfterMs,
+                });
+                return {
+                    valid: false,
+                    email: email.trim(),
+                    normalized: email.trim().toLowerCase(),
+                    local: '',
+                    domain: '',
+                    checks: {
+                        syntax: false,
+                        mxRecord: false,
+                        notDisposable: true,
+                        notRoleBased: true,
+                    },
+                    errors: ['Rate limit exceeded. Please try again later.'],
+                };
+            }
+        }
         const normalizedEmail = email.toLowerCase().trim();
         
         // Check cache
@@ -694,10 +920,15 @@ export class EmailValidator {
         // Validate
         const result = await validateEmail(email, this.options);
         
-        // Evict oldest entry if at capacity (LRU)
-        if (this.cache.size >= this.maxCacheSize) {
-            const oldestKey = this.cache.keys().next().value;
-            if (oldestKey !== undefined) this.cache.delete(oldestKey);
+        // Check cache size and trigger immediate eviction if near capacity
+        // This prevents unbounded growth during validation bursts
+        if (this.cache.size >= this.maxCacheSize - 1) {
+            this.evictExpired();
+            // If still at capacity after evicting expired, remove oldest
+            while (this.cache.size >= this.maxCacheSize) {
+                const oldestKey = this.cache.keys().next().value;
+                if (oldestKey !== undefined) this.cache.delete(oldestKey);
+            }
         }
         
         // Cache result

@@ -1,16 +1,17 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{header::AUTHORIZATION, StatusCode},
     middleware,
-    http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put, delete},
     Json, Router,
 };
-use axum::http::header::AUTHORIZATION;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
 use crate::compliance::ComplianceService;
@@ -400,6 +401,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/compliance/data-deletion", post(compliance_data_deletion))
         .route("/compliance/report/:tenant_id", get(compliance_report))
         .route("/compliance/status/:tenant_id", get(compliance_status))
+        // Encryption (HIPAA field-level encryption management)
+        .route("/compliance/encryption/status/:tenant_id", get(encryption_status))
+        .route("/compliance/encryption/encrypt-field", post(encrypt_field))
+        .route("/compliance/encryption/decrypt-field", post(decrypt_field))
         // Log Streaming
         .route("/log-streams", post(log_stream_create))
         .route("/log-streams/:id", get(log_stream_get))
@@ -473,12 +478,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/compliance/report/:tenant_id/pdf", get(compliance_report_pdf))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
 fn ok_json<T: serde::Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::OK, Json(serde_json::to_value(data).unwrap_or_default()))
+    match serde_json::to_value(&data) {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => {
+            tracing::error!(error = %e, "JSON serialization failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal serialization error"})))
+        }
+    }
 }
 
 fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
@@ -495,7 +508,13 @@ fn clamp_offset(offset: i64) -> i64 {
 
 fn service_result<T: serde::Serialize>(result: Result<crate::types::ApiResult<T>, String>) -> (StatusCode, Json<serde_json::Value>) {
     match result {
-        Ok(r) => (StatusCode::OK, Json(serde_json::to_value(r).unwrap_or_default())),
+        Ok(r) => match serde_json::to_value(&r) {
+            Ok(v) => (StatusCode::OK, Json(v)),
+            Err(e) => {
+                tracing::error!(error = %e, "JSON serialization failed in service_result");
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal serialization error"})))
+            }
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))),
     }
 }
@@ -525,7 +544,7 @@ async fn sso_get_config(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> 
 
 async fn sso_get_config_by_domain(State(state): State<S>, Path(domain): Path<String>) -> impl IntoResponse {
     match state.sso.get_config_by_domain(&domain).await {
-        Ok(Some(c)) => ok_json(serde_json::to_value(c).unwrap_or_default()),
+        Ok(Some(c)) => ok_json(c),
         Ok(None) => err_json(StatusCode::NOT_FOUND, "SSO config not found for domain"),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
@@ -571,7 +590,7 @@ async fn sso_validate_session(
     }
     
     match state.sso.validate_session(&token).await {
-        Ok(Some(session)) => ok_json(serde_json::to_value(session).unwrap_or_default()),
+        Ok(Some(session)) => ok_json(session),
         Ok(None) => err_json(StatusCode::UNAUTHORIZED, "Invalid or expired session"),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
@@ -642,6 +661,114 @@ async fn compliance_report(State(state): State<S>, Path(tenant_id): Path<Uuid>) 
 
 async fn compliance_status(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
     service_result(state.compliance.get_status(tenant_id).await)
+}
+
+// ── Encryption Handlers ────────────────────────────────────────────────
+
+/// Get encryption status for a tenant (key info without revealing key material).
+async fn encryption_status(
+    State(state): State<S>,
+    Path(tenant_id): Path<Uuid>,
+) -> impl IntoResponse {
+    // Check if HIPAA compliance is configured with encryption_at_rest
+    let config = match state.compliance.get_config(tenant_id).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": { "code": "INTERNAL_ERROR", "message": e }
+        }))).into_response(),
+    };
+
+    let status = serde_json::json!({
+        "tenant_id": tenant_id,
+        "encryption_at_rest": config.data.as_ref().map(|c| c.encryption_at_rest).unwrap_or(false),
+        "encryption_in_transit": config.data.as_ref().map(|c| c.encryption_in_transit).unwrap_or(true),
+        "phi_fields": crate::field_encryption::PHI_FIELDS,
+        "envelope_version": 1,
+        "algorithm": "AES-256-GCM",
+        "key_wrapping": "AES-256-GCM (envelope encryption)",
+    });
+
+    (StatusCode::OK, Json(status)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct EncryptFieldBody {
+    pub tenant_id: Uuid,
+    pub field_name: String,
+    pub value: String,
+}
+
+/// Encrypt a single field value (for testing/migration tooling).
+///
+/// In production, encryption happens transparently at the data access layer.
+/// This endpoint exists for:
+///   - Verifying encryption is working correctly after setup.
+///   - Batch migration of existing unencrypted PHI data.
+async fn encrypt_field(
+    State(_state): State<S>,
+    Json(body): Json<EncryptFieldBody>,
+) -> impl IntoResponse {
+    // In a real deployment, the KEK would be loaded from a secure key store
+    // (AWS KMS, HashiCorp Vault, etc.) keyed by tenant_id.  For now, we
+    // demonstrate the encryption API works with a test key.
+    let kek = crate::field_encryption::Kek::generate();
+    let kek_id_hex = hex::encode(kek.id);
+    let kek_hex = hex::encode(&kek.key_bytes());
+    let encryptor = crate::field_encryption::FieldEncryptor::new(vec![kek]);
+
+    match encryptor.encrypt(&body.value) {
+        Ok(encrypted) => (StatusCode::OK, Json(serde_json::json!({
+            "tenant_id": body.tenant_id,
+            "field_name": body.field_name,
+            "encrypted": true,
+            "value": encrypted,
+            "is_phi": crate::field_encryption::PHI_FIELDS.contains(&body.field_name.as_str()),
+            "kek_id_hex": kek_id_hex,
+            "kek_hex": kek_hex,
+            "note": "Store the KEK material securely. You will need kek_id_hex and kek_hex to decrypt."
+        }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": { "code": "ENCRYPTION_FAILED", "message": format!("{e}") }
+        }))).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DecryptFieldBody {
+    #[allow(unused)]
+    pub tenant_id: Uuid,
+    #[allow(unused)]
+    pub field_name: String,
+    pub value: String,
+    /// Hex-encoded KEK ID (required for decryption).
+    kek_id_hex: String,
+    /// Hex-encoded KEK (required for decryption). In production, this would come from a key store.
+    kek_hex: String,
+}
+
+/// Decrypt a single field value (for testing/migration tooling).
+async fn decrypt_field(
+    State(_state): State<S>,
+    Json(body): Json<DecryptFieldBody>,
+) -> impl IntoResponse {
+    let kek = match crate::field_encryption::Kek::from_hex(&body.kek_id_hex, &body.kek_hex) {
+        Ok(k) => k,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": { "code": "INVALID_KEY", "message": format!("{e}") }
+        }))).into_response(),
+    };
+
+    let encryptor = crate::field_encryption::FieldEncryptor::new(vec![kek]);
+
+    match encryptor.decrypt(&body.value) {
+        Ok(decrypted) => (StatusCode::OK, Json(serde_json::json!({
+            "decrypted": true,
+            "value": decrypted,
+        }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": { "code": "DECRYPTION_FAILED", "message": format!("{e}") }
+        }))).into_response(),
+    }
 }
 
 // ── Log Streaming Handlers ─────────────────────────────────────────────
@@ -991,7 +1118,8 @@ async fn dpa_generate_pdf(
         "sub_processors": body.get("sub_processors").cloned().unwrap_or(serde_json::json!([])),
         "retention_days": 90,
         "tenant_id": tenant_id.to_string(),
-        "compliance_status": serde_json::to_value(&status).unwrap_or_default(),
+        "compliance_status": serde_json::to_value(&status)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
     });
 
     let payload = serde_json::json!({
@@ -999,7 +1127,10 @@ async fn dpa_generate_pdf(
         "data": data,
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("http client error: {e}")))?;
     let resp = client
         .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
         .json(&payload)
@@ -1044,7 +1175,10 @@ async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl 
         "data": qbr_json,
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("http client error: {e}")))?;
     let resp = client
         .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
         .json(&payload)
@@ -1063,11 +1197,13 @@ async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl 
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("pdf-renderer read error: {e}")))?;
 
+    let content_disposition = format!("attachment; filename=\"qbr-{id}.pdf\"");
+
     Ok((
         StatusCode::OK,
         [
-            (axum::http::header::CONTENT_TYPE, "application/pdf"),
-            (axum::http::header::CONTENT_DISPOSITION, &format!("attachment; filename=\"qbr-{id}.pdf\"")),
+            (axum::http::header::CONTENT_TYPE.to_string(), "application/pdf".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION.to_string(), content_disposition),
         ],
         pdf_bytes,
     ))
@@ -1089,7 +1225,10 @@ async fn compliance_report_pdf(State(state): State<S>, Path(tenant_id): Path<Uui
         "data": report_json,
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("http client error: {e}")))?;
     let resp = client
         .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
         .json(&payload)

@@ -2,9 +2,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
-    extract::{Json, Path, State},
+    extract::{DefaultBodyLimit, Json, Path, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -13,6 +14,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::services::{
     attachment::{Attachment, AttachmentService},
@@ -67,6 +69,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health/ready", get(health))
         .route("/health/live", get(health))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB — attachment validation accepts base64
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(middleware::from_fn_with_state(shared, require_api_key))
 }
 
@@ -259,17 +263,17 @@ async fn eai_parse(
         .parse_email_address(&req.email, req.display_name.as_deref())
         .await
     {
-        Ok(parsed) => Ok(Json(serde_json::to_value(&parsed).unwrap_or_default())),
+        Ok(parsed) => serialize_or_500(&parsed),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
 }
 
 async fn eai_normalize(
     Json(req): Json<EAINormalizeRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let result =
         crate::services::eai::normalize_content(&req.content, req.charset.as_deref());
-    Json(serde_json::to_value(&result).unwrap_or_default())
+    serialize_or_500(&result)
 }
 
 // ── Attachment handlers ────────────────────────────────────────────────────────
@@ -297,10 +301,10 @@ fn input_to_attachment(input: &AttachmentInput) -> Attachment {
 async fn attachments_validate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AttachmentsValidateRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let attachments: Vec<Attachment> = req.attachments.iter().map(input_to_attachment).collect();
     let result = state.attachment.validate_attachments(&attachments).await;
-    Json(serde_json::to_value(&result).unwrap_or_default())
+    serialize_or_500(&result)
 }
 
 async fn attachments_size_check(
@@ -317,10 +321,10 @@ async fn attachments_size_check(
 
 async fn attachments_stats(
     Json(req): Json<AttachmentStatsRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let attachments: Vec<Attachment> = req.attachments.iter().map(input_to_attachment).collect();
     let stats = AttachmentService::get_attachment_stats(&attachments);
-    Json(serde_json::to_value(&stats).unwrap_or_default())
+    serialize_or_500(&stats)
 }
 
 // ── Calendar handlers ──────────────────────────────────────────────────────────
@@ -379,7 +383,7 @@ async fn calendar_parse(
         .calendar
         .parse_ics(&req.ics)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(serde_json::to_value(&parsed).unwrap_or_default()))
+    serialize_or_500(&parsed)
 }
 
 async fn calendar_generate_ics(
@@ -437,56 +441,52 @@ async fn delivery_parse_response(
 async fn delivery_retry_schedule(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RetryScheduleRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match state
         .delivery
         .calculate_retry_schedule(&req.response, req.current_attempt)
     {
-        Some(schedule) => Json(serde_json::to_value(&schedule).unwrap_or_default()),
-        None => Json(serde_json::json!({"retry": false, "reason": "permanent failure or max retries reached"})),
+        Some(schedule) => serialize_or_500(&schedule),
+        None => Ok(Json(serde_json::json!({"retry": false, "reason": "permanent failure or max retries reached"}))),
     }
 }
 
 async fn delivery_detect_loop(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoopDetectRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let result = state.delivery.detect_loop(&req.received_headers);
-    Json(serde_json::to_value(&result).unwrap_or_default())
+    serialize_or_500(&result)
 }
 
 async fn delivery_detect_autoresponder(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AutoResponderRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let result = state
         .delivery
         .detect_auto_responder(&req.headers, &req.subject, req.body.as_deref());
-    Json(serde_json::to_value(&result).unwrap_or_default())
+    serialize_or_500(&result)
 }
 
 async fn delivery_mx(
     State(state): State<Arc<AppState>>,
     Path(domain): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    state
-        .delivery
-        .resolve_mx(&domain)
-        .await
-        .map(|records| Json(serde_json::to_value(&records).unwrap_or_default()))
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))
+    match state.delivery.resolve_mx(&domain).await {
+        Ok(records) => serialize_or_500(&records),
+        Err(e) => Err((StatusCode::NOT_FOUND, e.to_string())),
+    }
 }
 
 async fn delivery_history(
     State(state): State<Arc<AppState>>,
     Path(message_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    state
-        .delivery
-        .get_delivery_history(&message_id)
-        .await
-        .map(|history| Json(serde_json::to_value(&history).unwrap_or_default()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    match state.delivery.get_delivery_history(&message_id).await {
+        Ok(history) => serialize_or_500(&history),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
 }
 
 async fn delivery_greylist_check(
@@ -505,6 +505,15 @@ async fn delivery_greylist_check(
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/// Serialize `val` to a `Json<Value>`, returning `500` if serialization fails.
+fn serialize_or_500<T: serde::Serialize>(val: &T) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    serde_json::to_value(val)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))
 }
 
 // ── CalendarMethod parse from string ───────────────────────────────────────────

@@ -5,6 +5,9 @@
 pub mod config;
 pub mod error;
 pub mod hot_config;
+#[cfg(feature = "axum")]
+pub mod internal_auth;
+pub mod pii;
 pub mod security;
 
 pub use config::Config;

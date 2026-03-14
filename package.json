@@ -39,6 +39,7 @@
     "verify:rust:clippy": "cargo clippy --manifest-path services/mail-server/Cargo.toml --workspace --all-targets -- -D warnings",
     "verify:rust:no-unsafe": "node tools/check-rust-unsafe.mjs",
     "verify:rust:quality": "pnpm verify:rust:fmt && pnpm verify:rust:clippy && pnpm verify:rust:no-unsafe",
+    "verify:forbidden-patterns": "bash tools/check-forbidden-patterns.sh",
     "sbom:generate": "cyclonedx-node --output sbom.json",
     "chaos:run": "tsx tools/chaos/runner.ts",
     "reconcile": "tsx tools/reconcile.ts"
@@ -62,11 +63,6 @@
   },
   "packageManager": "pnpm@9.15.4",
   "browserslist": [
-    "last 2 Chrome versions",
-    "last 2 Firefox versions",
-    "last 2 Safari versions",
-    "last 2 Edge versions",
-    "not dead",
-    "not ie 11"
+    "defaults"
   ]
 }

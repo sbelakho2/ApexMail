@@ -61,7 +61,7 @@ async fn get_calendar(
         )
         .fetch_all(db)
         .await
-        .unwrap_or_default();
+        ?;
 
     let events: Vec<CalendarEvent> = event_rows
         .into_iter()
@@ -84,7 +84,7 @@ async fn get_calendar(
     )
     .fetch_all(db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let availability: Vec<AvailabilitySlot> = slot_rows
         .into_iter()

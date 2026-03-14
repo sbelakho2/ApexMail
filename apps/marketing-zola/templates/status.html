@@ -1,14 +1,18 @@
 {# Status page template #}
 {% extends "base.html" %}
 
+{% block head %}
+<meta http-equiv="refresh" content="60" />
+{% endblock head %}
+
 {% block content %}
 {% include "partials/status/hero.html" %}
 
-{# StatusOverview island mount — live data via Preact #}
-<div data-island="status-overview"></div>
+{# StatusOverview (server-rendered, auto-refreshes via meta tag) #}
+{% include "partials/generated/status-overview-island.html" %}
 
-{# StatusHistory island mount #}
-<div data-island="status-history"></div>
+{# StatusHistory (server-rendered) #}
+{% include "partials/generated/status-history-island.html" %}
 
 {% include "partials/status/subscribe.html" %}
 {% endblock content %}

@@ -13,29 +13,48 @@
       </p>
     </div>
 
-    {% set steps = [
-      {"num": "1", "title": "Architecture Review", "desc": "We assess your requirements, compliance needs, and preferred cloud provider.", "time": "Day 1-2"},
-      {"num": "2", "title": "VPC Provisioning", "desc": "Automated deployment of your dedicated ApexMail stack in your chosen region.", "time": "Day 3-5"},
-      {"num": "3", "title": "DNS & IP Setup", "desc": "Configure dedicated IPs, custom domains, DKIM/SPF/DMARC, and warm-up schedules.", "time": "Day 6-8"},
-      {"num": "4", "title": "Go Live", "desc": "Integration testing, traffic migration, and 24/7 monitoring activation.", "time": "Day 9-14"}
-    ] %}
-
     <div class="animate-in delay-200 grid md:grid-cols-4 gap-6 mb-20">
-      {% for step in steps %}
       <div class="relative bg-white border border-surface-200 rounded-xl p-6 text-center">
         <div class="w-10 h-10 rounded-full bg-primary-600 text-white font-bold text-lg flex items-center justify-center mx-auto mb-4">
-          {{ step.num }}
+          1
         </div>
-        <h3 class="font-semibold text-surface-900 mb-2">{{ step.title }}</h3>
-        <p class="text-sm text-surface-500 mb-3">{{ step.desc }}</p>
-        <span class="inline-block text-xs font-semibold text-primary-600 bg-primary-50 px-3 py-1 rounded-full">{{ step.time }}</span>
-        {% if not loop.last %}
+        <h3 class="font-semibold text-surface-900 mb-2">Architecture Review</h3>
+        <p class="text-sm text-surface-500 mb-3">We assess your requirements, compliance needs, and preferred cloud provider.</p>
+        <span class="inline-block text-xs font-semibold text-primary-600 bg-primary-50 px-3 py-1 rounded-full">Day 1-2</span>
         <div class="hidden md:block absolute top-1/2 -right-3 -translate-y-1/2 text-surface-300">
           <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
         </div>
-        {% endif %}
       </div>
-      {% endfor %}
+      <div class="relative bg-white border border-surface-200 rounded-xl p-6 text-center">
+        <div class="w-10 h-10 rounded-full bg-primary-600 text-white font-bold text-lg flex items-center justify-center mx-auto mb-4">
+          2
+        </div>
+        <h3 class="font-semibold text-surface-900 mb-2">VPC Provisioning</h3>
+        <p class="text-sm text-surface-500 mb-3">Automated deployment of your dedicated ApexMail stack in your chosen region.</p>
+        <span class="inline-block text-xs font-semibold text-primary-600 bg-primary-50 px-3 py-1 rounded-full">Day 3-5</span>
+        <div class="hidden md:block absolute top-1/2 -right-3 -translate-y-1/2 text-surface-300">
+          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+        </div>
+      </div>
+      <div class="relative bg-white border border-surface-200 rounded-xl p-6 text-center">
+        <div class="w-10 h-10 rounded-full bg-primary-600 text-white font-bold text-lg flex items-center justify-center mx-auto mb-4">
+          3
+        </div>
+        <h3 class="font-semibold text-surface-900 mb-2">DNS &amp; IP Setup</h3>
+        <p class="text-sm text-surface-500 mb-3">Configure dedicated IPs, custom domains, DKIM/SPF/DMARC, and warm-up schedules.</p>
+        <span class="inline-block text-xs font-semibold text-primary-600 bg-primary-50 px-3 py-1 rounded-full">Day 6-8</span>
+        <div class="hidden md:block absolute top-1/2 -right-3 -translate-y-1/2 text-surface-300">
+          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+        </div>
+      </div>
+      <div class="relative bg-white border border-surface-200 rounded-xl p-6 text-center">
+        <div class="w-10 h-10 rounded-full bg-primary-600 text-white font-bold text-lg flex items-center justify-center mx-auto mb-4">
+          4
+        </div>
+        <h3 class="font-semibold text-surface-900 mb-2">Go Live</h3>
+        <p class="text-sm text-surface-500 mb-3">Integration testing, traffic migration, and 24/7 monitoring activation.</p>
+        <span class="inline-block text-xs font-semibold text-primary-600 bg-primary-50 px-3 py-1 rounded-full">Day 9-14</span>
+      </div>
     </div>
 
     {# Contact Options #}
@@ -63,15 +82,9 @@
       </div>
     </div>
 
-    {# Enterprise Logos #}
+    {# Enterprise capabilities #}
     <div class="animate-in delay-400 text-center">
-      <p class="text-sm font-medium text-surface-400 mb-6">Trusted by enterprise teams worldwide</p>
-      <div class="flex flex-wrap items-center justify-center gap-8 opacity-40">
-        {% set logos = ["Fortune 500 Bank", "Global HealthTech", "EU FinTech", "US SaaS Leader"] %}
-        {% for logo in logos %}
-        <div class="h-8 px-6 bg-surface-200 rounded flex items-center justify-center text-xs font-medium text-surface-500">{{ logo }}</div>
-        {% endfor %}
-      </div>
+      <p class="text-sm font-medium text-surface-400 mb-6">Private cloud includes SSO/SAML, SCIM, dedicated IPs, HIPAA compliance, and custom SLA</p>
     </div>
   </div>
 </section>

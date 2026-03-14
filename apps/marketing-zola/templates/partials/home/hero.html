@@ -29,7 +29,7 @@
 
         {# Benefits List #}
         <ul class="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-8 mb-10">
-          {% set benefits = ["99.9% delivery rate", "GDPR & HIPAA compliant", "Cryptographic proof of delivery", "No credit card required"] %}
+          {% set benefits = ["High deliverability rates", "GDPR & HIPAA compliant", "Real-time delivery tracking", "No credit card required"] %}
           {% for benefit in benefits %}
           <li class="flex items-center gap-2.5 text-surface-600 text-[14px]">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
@@ -53,14 +53,14 @@
 
       {# Right Column - Code Block #}
       <div class="relative">
-        <div class="rounded-xl bg-surface-900 text-surface-100 p-6 font-mono text-sm overflow-x-auto shadow-premium">
+        <div class="rounded-xl bg-gray-900 text-gray-100 p-6 font-mono text-sm overflow-x-auto shadow-premium">
           <div class="flex items-center gap-2 mb-4">
             <span class="w-3 h-3 rounded-full bg-red-500"></span>
             <span class="w-3 h-3 rounded-full bg-yellow-500"></span>
             <span class="w-3 h-3 rounded-full bg-green-500"></span>
-            <span class="ml-auto text-xs text-surface-500">send-email.ts</span>
+            <span class="ml-auto text-xs text-gray-400">send-email.ts</span>
           </div>
-<pre class="whitespace-pre"><code><span class="text-surface-500">// Send your first email in 3 lines</span>
+<pre class="whitespace-pre"><code><span class="text-gray-400">// Send your first email in 3 lines</span>
 <span class="text-purple-400">const</span> response = <span class="text-purple-400">await</span> <span class="text-blue-400">fetch</span>(<span class="text-green-400">'https://api.apexmail.ee/v1/messages'</span>, {
   method: <span class="text-green-400">'POST'</span>,
   headers: {
@@ -76,7 +76,7 @@
   })
 });
 
-<span class="text-surface-500">// That's it. Email delivered with full tracking.</span>
+<span class="text-gray-400">// That's it. Email delivered with full tracking.</span>
 <span class="text-blue-400">console</span>.<span class="text-blue-400">log</span>(<span class="text-purple-400">await</span> response.<span class="text-blue-400">json</span>());
 <span class="text-surface-500">// { id: "msg_abc123", status: "queued" }</span></code></pre>
         </div>

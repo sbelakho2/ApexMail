@@ -1,6 +1,9 @@
 /**
  * Stripe Integration Service
  * Handles all Stripe operations with idempotency and webhook processing
+ * 
+ * SEC-016: Includes circuit breaker pattern to prevent cascading failures
+ * when Stripe API is unavailable or slow.
  */
 
 import Stripe from 'stripe';
@@ -8,8 +11,10 @@ import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 import type { DunningService } from './dunning.js';
+import { StripeCircuitBreaker } from './stripe-circuit-breaker.js';
 import { getStripe } from '../lib/stripe-client.js';
-import { getConfig } from '../config.js';
+import { config, getConfig } from '../config.js';
+import { STRIPE_WEBHOOK_TOLERANCE_SECONDS, MS_PER_SECOND } from '../lib/constants.js';
 
 const logger = createLogger();
 
@@ -84,12 +89,31 @@ type StripeSubscriptionRow = {
  */
 export class StripeService {
   private readonly stripe: Stripe;
+  private readonly circuitBreaker: StripeCircuitBreaker;
 
   constructor(
     private readonly db: DatabasePool,
     private readonly dunning?: DunningService,
   ) {
     this.stripe = getStripe();
+    this.circuitBreaker = new StripeCircuitBreaker();
+  }
+
+  private async executeStripeCall<T>(
+    operation: string,
+    metadata: Record<string, unknown>,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    try {
+      return await this.circuitBreaker.execute(fn);
+    } catch (error) {
+      logger.error(`Stripe operation failed: ${operation}`, {
+        ...metadata,
+        error: error instanceof Error ? error.message : String(error),
+        circuitState: this.circuitBreaker.getState(),
+      });
+      throw error;
+    }
   }
 
   /**
@@ -118,14 +142,18 @@ export class StripeService {
 
     // Create Stripe customer
     try {
-      const stripeCustomer = await this.stripe.customers.create({
-        email,
-        name,
-        metadata: {
-          tenant_id: tenantId,
-          ...metadata,
-        },
-      });
+      const stripeCustomer = await this.executeStripeCall(
+        'customers.create',
+        { tenantId, email },
+        () => this.stripe.customers.create({
+          email,
+          name,
+          metadata: {
+            tenant_id: tenantId,
+            ...metadata,
+          },
+        })
+      );
 
       // Store in database using ON CONFLICT to handle race conditions
       // CRITICAL: Another request may have created the customer between our SELECT and INSERT
@@ -146,18 +174,22 @@ export class StripeService {
 
       if (!insertResult.ok) return Result.err(insertResult.error);
 
-      if (insertResult.value.rows.length === 0) {
+      const row = insertResult.value.rows[0];
+      if (!row) {
         return Result.err(new Error('INSERT RETURNING produced no rows'));
-      }
-      const row = insertResult.value.rows[0]!;
+      };
       
       // If we hit ON CONFLICT, the returned stripe_customer_id is the existing one
       // We should delete the Stripe customer we just created if it was a duplicate
       if (row.stripe_customer_id !== stripeCustomer.id) {
         // Another request won the race - delete the duplicate Stripe customer
-        // BILL-004 FIX: Log detailed error information for debugging and billing reconciliation
+        // Log detailed error information for debugging and billing reconciliation
         try {
-          await this.stripe.customers.del(stripeCustomer.id);
+          await this.executeStripeCall(
+            'customers.delete-duplicate',
+            { tenantId, duplicateCustomerId: stripeCustomer.id },
+            () => this.stripe.customers.del(stripeCustomer.id)
+          );
           logger.info('Deleted duplicate Stripe customer', { 
             duplicateId: stripeCustomer.id, 
             existingId: row.stripe_customer_id,
@@ -165,7 +197,7 @@ export class StripeService {
             email 
           });
         } catch (deleteError) {
-          // BILL-004 FIX: Do NOT swallow this error - log with full context for billing ops to investigate
+          // Do NOT swallow this error - log with full context for billing ops to investigate
           // Orphaned Stripe customers can cause billing issues and need manual cleanup
           logger.error('CRITICAL: Failed to delete duplicate Stripe customer - manual cleanup required', { 
             error: deleteError instanceof Error ? deleteError.message : String(deleteError),
@@ -230,7 +262,8 @@ export class StripeService {
     let settings: { billingEmail?: string; defaultFromEmail?: string } = {};
     try {
       settings = JSON.parse(tenant.settings || '{}');
-    } catch {
+    } catch (error) {
+      logger.warn('Failed to parse tenant settings for Stripe sync', { tenantId, error: String(error) });
       settings = {};
     }
     const email = settings.billingEmail || settings.defaultFromEmail;
@@ -243,29 +276,33 @@ export class StripeService {
     if (!customerResult.ok) return Result.err(customerResult.error);
 
     try {
-      const session = await this.stripe.checkout.sessions.create({
-        customer: customerResult.value.stripeCustomerId,
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price: priceId,
-            quantity: 1,
+      const session = await this.executeStripeCall(
+        'checkout.sessions.create',
+        { tenantId, priceId },
+        () => this.stripe.checkout.sessions.create({
+          customer: customerResult.value.stripeCustomerId,
+          payment_method_types: ['card'],
+          line_items: [
+            {
+              price: priceId,
+              quantity: 1,
+            },
+          ],
+          mode: 'subscription',
+          success_url: successUrl,
+          cancel_url: cancelUrl,
+          subscription_data: {
+            metadata: {
+              tenant_id: tenantId,
+            },
           },
-        ],
-        mode: 'subscription',
-        success_url: successUrl,
-        cancel_url: cancelUrl,
-        subscription_data: {
-          metadata: {
-            tenant_id: tenantId,
+          allow_promotion_codes: true,
+          billing_address_collection: 'required',
+          tax_id_collection: {
+            enabled: true,
           },
-        },
-        allow_promotion_codes: true,
-        billing_address_collection: 'required',
-        tax_id_collection: {
-          enabled: true,
-        },
-      });
+        })
+      );
 
       // SECURITY FIX: Validate session URL exists before returning
       if (!session.url) {
@@ -303,10 +340,14 @@ export class StripeService {
     if (!row) return Result.err(new Error('No Stripe customer found'));
 
     try {
-      const session = await this.stripe.billingPortal.sessions.create({
-        customer: row.stripe_customer_id,
-        return_url: returnUrl,
-      });
+      const session = await this.executeStripeCall(
+        'billingPortal.sessions.create',
+        { tenantId },
+        () => this.stripe.billingPortal.sessions.create({
+          customer: row.stripe_customer_id,
+          return_url: returnUrl,
+        })
+      );
 
       return Result.ok({ url: session.url });
     } catch (error) {
@@ -333,7 +374,7 @@ export class StripeService {
        * older than 5 minutes, preventing replay attacks where an attacker
        * captures and re-sends a valid webhook payload after the fact.
        */
-      const WEBHOOK_TOLERANCE_SECONDS = 300; // 5 minutes
+      const WEBHOOK_TOLERANCE_SECONDS = STRIPE_WEBHOOK_TOLERANCE_SECONDS; // 5 minutes
       event = this.stripe.webhooks.constructEvent(
         payload,
         signature,
@@ -453,7 +494,7 @@ export class StripeService {
   }
 
   /**
-   * E-184: Valid subscription status transitions.
+   * Valid subscription status transitions.
    * Prevents invalid jumps (e.g. active → expired directly) by only
    * allowing transitions that match Stripe's subscription lifecycle.
    */
@@ -482,8 +523,27 @@ export class StripeService {
       [subscription.id]
     );
 
-    if (currentResult.ok && currentResult.value.rows.length > 0) {
-      const currentStatus = currentResult.value.rows[0]!.status as SubscriptionStatus;
+    // Explicit handling for new subscriptions vs existing ones
+    const isNewSubscription = !currentResult.ok || currentResult.value.rows.length === 0;
+    
+    if (isNewSubscription) {
+      // New subscription: Only allow valid initial states
+      const VALID_INITIAL_STATES: SubscriptionStatus[] = ['incomplete', 'trialing', 'active'];
+      if (!VALID_INITIAL_STATES.includes(newStatus)) {
+        logger.error('Invalid initial subscription state', {
+          tenantId,
+          subscriptionId: subscription.id,
+          newStatus,
+          validStates: VALID_INITIAL_STATES,
+        });
+        throw new Error(
+          `Invalid initial subscription state: ${newStatus} (expected one of: ${VALID_INITIAL_STATES.join(', ')})`
+        );
+      }
+      logger.info('New subscription created', { tenantId, subscriptionId: subscription.id, status: newStatus });
+    } else if (currentResult.ok && currentResult.value.rows.length > 0) {
+      const currentRow = currentResult.value.rows[0];
+      const currentStatus = (currentRow?.status ?? newStatus) as SubscriptionStatus;
       if (currentStatus !== newStatus) {
         const allowed = StripeService.VALID_STATUS_TRANSITIONS[currentStatus];
         if (allowed && !allowed.includes(newStatus)) {
@@ -550,8 +610,8 @@ export class StripeService {
         subscription.current_period_start,
         subscription.current_period_end,
         subscription.cancel_at_period_end,
-        subscription.canceled_at ? new Date(subscription.canceled_at * 1000) : null,
-        subscription.trial_end ? new Date(subscription.trial_end * 1000) : null,
+        subscription.canceled_at ? new Date(subscription.canceled_at * MS_PER_SECOND) : null,
+        subscription.trial_end ? new Date(subscription.trial_end * MS_PER_SECOND) : null,
       ]
     );
 
@@ -567,21 +627,26 @@ export class StripeService {
    * Auto-provision dedicated IPs when a tenant's plan includes them.
    * Queries the plan's `dedicated_ip_count` feature and allocates IPs
    * if the tenant doesn't already have enough.
+   * Tracks provisioning state and alerts on failures.
    */
   private async autoProvisionDedicatedIps(tenantId: string): Promise<void> {
     try {
       // Check how many IPs the plan includes
       const planResult = await this.db.query<{ included_count: number }>(
         `SELECT COALESCE((p.features->>'dedicated_ip_count')::int, 0) as included_count
-         FROM subscriptions s
-         JOIN plans p ON p.name = s.plan_name
+         FROM stripe_subscriptions s
+         JOIN plans p ON p.name = (
+           SELECT plan FROM tenants WHERE id = s.tenant_id
+         )
          WHERE s.tenant_id = $1 AND s.status = 'active'
          ORDER BY s.created_at DESC LIMIT 1`,
         [tenantId]
       );
 
-      if (!planResult.ok || planResult.value.rows.length === 0) return;
-      const includedCount = planResult.value.rows[0]!.included_count;
+      if (!planResult.ok) return;
+      const planRow = planResult.value.rows[0];
+      if (!planRow) return;
+      const includedCount = planRow.included_count;
       if (includedCount <= 0) return;
 
       // Check how many they already have
@@ -602,8 +667,20 @@ export class StripeService {
 
       logger.info('Auto-provisioning dedicated IPs', { tenantId, toAllocate, includedCount, activeCount });
 
+      // Track provisioning attempt
+      await this.db.query(
+        `INSERT INTO dedicated_ip_provisioning_requests 
+         (id, tenant_id, requested_count, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, 'pending', NOW(), NOW())
+         ON CONFLICT (tenant_id) WHERE status = 'pending' 
+         DO UPDATE SET requested_count = $2, updated_at = NOW()`,
+        [tenantId, toAllocate]
+      );
+
       // Call the internal API to allocate IPs
-      const apiBaseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+      const apiBaseUrl = config.apiBaseUrl;
+      let successCount = 0;
+      let failureCount = 0;
 
       for (let i = 0; i < toAllocate; i++) {
         try {
@@ -618,20 +695,51 @@ export class StripeService {
           });
 
           if (response.ok) {
+            successCount++;
             logger.info('Auto-provisioned dedicated IP', { tenantId, ipNumber: i + 1, total: toAllocate });
           } else {
+            failureCount++;
             const errorText = await response.text();
             logger.warn('Failed to auto-provision dedicated IP', {
               tenantId, ipNumber: i + 1, status: response.status, error: errorText,
             });
           }
         } catch (err) {
+          failureCount++;
           logger.error('Error auto-provisioning dedicated IP', { tenantId, ipNumber: i + 1, error: err });
         }
+      }
+
+      // Update provisioning request status
+      const finalStatus = failureCount === 0 ? 'completed' : (successCount > 0 ? 'partial' : 'failed');
+      await this.db.query(
+        `UPDATE dedicated_ip_provisioning_requests 
+         SET status = $2, success_count = $3, failure_count = $4, updated_at = NOW()
+         WHERE tenant_id = $1 AND status = 'pending'`,
+        [tenantId, finalStatus, successCount, failureCount]
+      );
+
+      // Log alert event if there were failures for ops team
+      if (failureCount > 0) {
+        logger.error('Dedicated IP provisioning had failures - ops action required', {
+          tenantId,
+          requestedCount: toAllocate,
+          successCount,
+          failureCount,
+          finalStatus,
+        });
       }
     } catch (err) {
       // Non-fatal — don't break the subscription flow
       logger.error('Auto-provision dedicated IPs failed', { tenantId, error: err });
+      
+      // Update provisioning request as failed
+      await this.db.query(
+        `UPDATE dedicated_ip_provisioning_requests 
+         SET status = 'failed', error_message = $2, updated_at = NOW()
+         WHERE tenant_id = $1 AND status = 'pending'`,
+        [tenantId, err instanceof Error ? err.message : String(err)]
+      ).catch(() => { /* ignore DB errors in error handler */ });
     }
   }
 
@@ -782,15 +890,19 @@ export class StripeService {
     try {
       const idempotencyKey = `refund_${paymentIntentId}_${amount ?? 'full'}_${reason ?? 'none'}`;
 
-      const refund = await this.stripe.refunds.create(
-        {
-          payment_intent: paymentIntentId,
-          amount,
-          reason: reason as Stripe.RefundCreateParams.Reason,
-        },
-        {
-          idempotencyKey,
-        }
+      const refund = await this.executeStripeCall(
+        'refunds.create',
+        { paymentIntentId, amount, reason },
+        () => this.stripe.refunds.create(
+          {
+            payment_intent: paymentIntentId,
+            amount,
+            reason: reason as Stripe.RefundCreateParams.Reason,
+          },
+          {
+            idempotencyKey,
+          }
+        )
       );
 
       return Result.ok(refund);
@@ -861,12 +973,20 @@ export class StripeService {
   ): Promise<Result<Stripe.Subscription, Error>> {
     try {
       if (options.cancelAtPeriodEnd) {
-        const subscription = await this.stripe.subscriptions.update(stripeSubscriptionId, {
-          cancel_at_period_end: true,
-        });
+        const subscription = await this.executeStripeCall(
+          'subscriptions.update.cancel-at-period-end',
+          { stripeSubscriptionId },
+          () => this.stripe.subscriptions.update(stripeSubscriptionId, {
+            cancel_at_period_end: true,
+          })
+        );
         return Result.ok(subscription);
       } else {
-        const subscription = await this.stripe.subscriptions.cancel(stripeSubscriptionId);
+        const subscription = await this.executeStripeCall(
+          'subscriptions.cancel',
+          { stripeSubscriptionId },
+          () => this.stripe.subscriptions.cancel(stripeSubscriptionId)
+        );
         return Result.ok(subscription);
       }
     } catch (error) {
@@ -890,6 +1010,7 @@ export class StripeService {
     if (!subscriptionResult.value) {
       return Result.err(new Error('No active subscription found'));
     }
+    const currentSubscription = subscriptionResult.value;
 
     // Get new plan price ID
     const planResult = await this.db.query<{
@@ -915,7 +1036,7 @@ export class StripeService {
 
     // Deterministic saga ID so retries of the same switch are idempotent
     // (ON CONFLICT (id) DO NOTHING prevents duplicate saga rows)
-    const fromPriceId = subscriptionResult.value.stripePriceId;
+    const fromPriceId = currentSubscription.stripePriceId;
     const sagaId = `saga_switch_${tenantId}_${fromPriceId}_${newPriceId}`;
     
     try {
@@ -931,10 +1052,10 @@ export class StripeService {
         [
           sagaId, 
           tenantId, 
-          subscriptionResult.value.id,
-          subscriptionResult.value.stripePriceId,
+          currentSubscription.id,
+          currentSubscription.stripePriceId,
           newPriceId,
-          subscriptionResult.value.billingInterval,
+          currentSubscription.billingInterval,
           billingInterval
         ]
       );
@@ -945,26 +1066,34 @@ export class StripeService {
       }
 
       // Step 2: Get the current subscription from Stripe
-      const stripeSubscription = await this.stripe.subscriptions.retrieve(
-        subscriptionResult.value.stripeSubscriptionId
+      const stripeSubscription = await this.executeStripeCall(
+        'subscriptions.retrieve',
+        { tenantId, stripeSubscriptionId: currentSubscription.stripeSubscriptionId },
+        () => this.stripe.subscriptions.retrieve(
+          currentSubscription.stripeSubscriptionId
+        )
       );
 
       // Step 3: Update the subscription with proration in Stripe
-      const updatedSubscription = await this.stripe.subscriptions.update(
-        subscriptionResult.value.stripeSubscriptionId,
-        {
-          items: [
-            {
-              id: stripeSubscription.items.data[0]?.id,
-              price: newPriceId,
+      const updatedSubscription = await this.executeStripeCall(
+        'subscriptions.update.switch-plan',
+        { tenantId, stripeSubscriptionId: currentSubscription.stripeSubscriptionId, newPriceId },
+        () => this.stripe.subscriptions.update(
+          currentSubscription.stripeSubscriptionId,
+          {
+            items: [
+              {
+                id: stripeSubscription.items.data[0]?.id,
+                price: newPriceId,
+              },
+            ],
+            proration_behavior: 'create_prorations',
+            metadata: {
+              ...stripeSubscription.metadata,
+              saga_id: sagaId, // Track saga for reconciliation
             },
-          ],
-          proration_behavior: 'create_prorations',
-          metadata: {
-            ...stripeSubscription.metadata,
-            saga_id: sagaId, // Track saga for reconciliation
-          },
-        }
+          }
+        )
       );
 
       // Step 4: Mark saga as stripe_completed
@@ -976,9 +1105,13 @@ export class StripeService {
       // Step 5: Calculate proration amount from upcoming invoice
       let prorationAmount = 0;
       try {
-        const upcomingInvoice = await this.stripe.invoices.retrieveUpcoming({
-          customer: subscriptionResult.value.stripeCustomerId,
-        });
+        const upcomingInvoice = await this.executeStripeCall(
+          'invoices.retrieveUpcoming',
+          { tenantId, customerId: currentSubscription.stripeCustomerId },
+          () => this.stripe.invoices.retrieveUpcoming({
+            customer: currentSubscription.stripeCustomerId,
+          })
+        );
         prorationAmount = upcomingInvoice.lines.data
           .filter(line => line.proration)
           .reduce((sum, line) => sum + line.amount, 0);
@@ -1009,7 +1142,7 @@ export class StripeService {
           EXISTS (SELECT 1 FROM update_subscription) as subscription_updated,
           EXISTS (SELECT 1 FROM update_tenant) as tenant_updated,
           EXISTS (SELECT 1 FROM complete_saga) as saga_completed`,
-        [newPriceId, billingInterval, subscriptionResult.value.id, planName, tenantId, prorationAmount, sagaId]
+        [newPriceId, billingInterval, currentSubscription.id, planName, tenantId, prorationAmount, sagaId]
       );
 
       if (!finalizeResult.ok) {
@@ -1050,6 +1183,8 @@ export class StripeService {
   }
 
   async cleanupStuckSubscriptionSagas(): Promise<Result<{ cleaned: number }, Error>> {
+    const timeoutMinutes = config.sagaTimeoutMinutes;
+    
     const result = await this.db.query<{ cleaned: string }>(
       `WITH updated AS (
          UPDATE subscription_change_saga
@@ -1057,7 +1192,7 @@ export class StripeService {
              error = COALESCE(error, 'Timed out waiting for completion'),
              updated_at = NOW()
          WHERE status IN ('pending', 'stripe_completed')
-           AND updated_at < NOW() - INTERVAL '1 hour'
+           AND updated_at < NOW() - INTERVAL '${timeoutMinutes} minutes'
          RETURNING id
        )
        SELECT COUNT(*)::text AS cleaned FROM updated`
@@ -1093,12 +1228,16 @@ export class StripeService {
       attempted += 1;
 
       try {
-        const invoices = await this.stripe.invoices.list({
-          customer: row.stripe_customer_id,
-          subscription: row.stripe_subscription_id,
-          status: 'open',
-          limit: 1,
-        });
+        const invoices = await this.executeStripeCall(
+          'invoices.list',
+          { tenantId: row.tenant_id, stripeCustomerId: row.stripe_customer_id },
+          () => this.stripe.invoices.list({
+            customer: row.stripe_customer_id,
+            subscription: row.stripe_subscription_id,
+            status: 'open',
+            limit: 1,
+          })
+        );
 
         const invoice = invoices.data[0];
         if (!invoice?.id) {
@@ -1111,7 +1250,11 @@ export class StripeService {
           continue;
         }
 
-        await this.stripe.invoices.pay(invoice.id);
+        await this.executeStripeCall(
+          'invoices.pay',
+          { tenantId: row.tenant_id, invoiceId: invoice.id },
+          () => this.stripe.invoices.pay(invoice.id)
+        );
         succeeded += 1;
 
         if (this.dunning) {

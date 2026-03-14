@@ -58,12 +58,16 @@ async fn get_csrf_token(
     );
 
     let mut headers = HeaderMap::new();
-    if let Ok(val) = cookie_value.parse() {
-        headers.insert("Set-Cookie", val);
-    }
+    let val = cookie_value.parse().map_err(|e| {
+        tracing::error!(error = %e, "failed to build CSRF cookie header");
+        ApiError::Internal("failed to set CSRF cookie".into())
+    })?;
+    headers.insert("Set-Cookie", val);
     headers.insert(
         "Cache-Control",
-        "no-store, no-cache, must-revalidate".parse().unwrap(),
+        "no-store, no-cache, must-revalidate"
+            .parse()
+            .expect("valid cache-control header"),
     );
 
     Ok((headers, Json(CsrfResponse { token })))

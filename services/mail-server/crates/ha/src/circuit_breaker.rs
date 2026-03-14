@@ -108,7 +108,9 @@ impl CircuitBreakerService {
             CircuitState::Closed => Ok(true),
             CircuitState::Open => {
                 // Check if timeout has elapsed → transition to HalfOpen
-                let elapsed = (Utc::now() - circuit.state_changed_at).num_milliseconds() as u64;
+                let elapsed = (Utc::now() - circuit.state_changed_at)
+                    .num_milliseconds()
+                    .max(0) as u64;
                 if elapsed >= circuit.config.timeout_ms {
                     circuit.state = CircuitState::HalfOpen;
                     circuit.half_open_calls = 0;

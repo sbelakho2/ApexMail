@@ -71,7 +71,7 @@ impl From<SecretRow> for SecretResponse {
 }
 
 async fn log_secret_audit(db: &sqlx::PgPool, action: &str, secret_id: &str, metadata: serde_json::Value) {
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
          VALUES (NOW(), $1, 'secret', $2, $3::jsonb)",
     )
@@ -79,7 +79,10 @@ async fn log_secret_audit(db: &sqlx::PgPool, action: &str, secret_id: &str, meta
     .bind(secret_id)
     .bind(metadata)
     .execute(db)
-    .await;
+    .await
+    {
+        tracing::warn!(secret_id = %secret_id, action = %action, error = %e, "Failed to write secret audit log");
+    }
 }
 
 async fn list_secrets(

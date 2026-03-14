@@ -457,7 +457,8 @@ impl SmtpConnectionProtection {
         // calculated rate and letting slowloris attacks at second boundaries pass.
         let elapsed_secs = elapsed.as_secs_f64();
         let rate_bps = if elapsed_secs > 0.0 {
-            (total_bytes as f64 / elapsed_secs) as u64
+            let raw = total_bytes as f64 / elapsed_secs;
+            if raw.is_finite() { raw as u64 } else { 0 }
         } else {
             0
         };

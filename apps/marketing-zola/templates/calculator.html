@@ -4,8 +4,8 @@
 {% block content %}
 {% include "partials/calculator/hero.html" %}
 
-{# InteractiveCalculator island mount #}
-<div data-island="pricing-calculator"></div>
+{# Pricing Calculator (static comparison table, zero JS) #}
+{% include "partials/generated/pricing-calculator-island.html" %}
 
 {% include "partials/calculator/competitor-breakdown.html" %}
 {% include "partials/calculator/cta.html" %}

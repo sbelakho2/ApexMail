@@ -4,12 +4,9 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+      "outputs": ["dist/**"],
       "env": [
         "NODE_ENV",
-        "NEXT_PUBLIC_API_URL",
-        "NEXT_PUBLIC_TRACKING_URL",
-        "NEXT_PUBLIC_APP_URL",
         "STRIPE_PUBLIC_KEY"
       ]
     },

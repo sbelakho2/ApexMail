@@ -115,9 +115,9 @@ impl MailstoreServiceImpl {
             attributes,
             uidvalidity,
             uidnext: mailbox.uidnext.max(1) as u64,
-            exists: mailbox.total_messages.max(0) as u32,
+            exists: mailbox.total_messages.clamp(0, u32::MAX as i64) as u32,
             recent: 0,
-            unseen: mailbox.unread_messages.max(0) as u32,
+            unseen: mailbox.unread_messages.clamp(0, u32::MAX as i64) as u32,
         }
     }
 
@@ -403,7 +403,9 @@ impl MailstoreService for MailstoreServiceImpl {
             .resolve_account_mailbox(&req.account_id, &req.mailbox)
             .await?;
 
-        let uids: Vec<i64> = req.uids.iter().map(|uid| *uid as i64).collect();
+        let uids: Vec<i64> = req.uids.iter().map(|uid| {
+            i64::try_from(*uid).map_err(|_| Status::invalid_argument("UID exceeds valid range"))
+        }).collect::<Result<_, _>>()?;
         if uids.is_empty() {
             return Ok(Response::new(SetFlagsResponse { updated_count: 0 }));
         }
@@ -426,7 +428,7 @@ impl MailstoreService for MailstoreServiceImpl {
                     .update_message_flags_by_uid(&account_id, &mailbox.id, *uid, &merged)
                     .await
                     .map_err(|e| Status::internal(format!("Failed to update flags: {}", e)))?;
-                updated += rows as u32;
+                updated = updated.saturating_add(rows.min(u32::MAX as u64) as u32);
             }
         }
 
@@ -459,7 +461,9 @@ impl MailstoreService for MailstoreServiceImpl {
             .resolve_account_mailbox(&req.account_id, &req.mailbox)
             .await?;
 
-        let uids: Vec<i64> = req.uids.iter().map(|uid| *uid as i64).collect();
+        let uids: Vec<i64> = req.uids.iter().map(|uid| {
+            i64::try_from(*uid).map_err(|_| Status::invalid_argument("UID exceeds valid range"))
+        }).collect::<Result<_, _>>()?;
         let flags = self
             .storage
             .get_message_flags_by_uids(&account_id, &mailbox.id, &uids)
@@ -496,7 +500,9 @@ impl MailstoreService for MailstoreServiceImpl {
             return Err(Status::invalid_argument("source and destination mailboxes are the same"));
         }
 
-        let uids: Vec<i64> = req.uids.iter().map(|uid| *uid as i64).collect();
+        let uids: Vec<i64> = req.uids.iter().map(|uid| {
+            i64::try_from(*uid).map_err(|_| Status::invalid_argument("UID exceeds valid range"))
+        }).collect::<Result<_, _>>()?;
         let messages = self
             .storage
             .get_messages_by_uids(&account_id, &source_mailbox.id, &uids)
@@ -539,7 +545,9 @@ impl MailstoreService for MailstoreServiceImpl {
             .resolve_account_mailbox(&req.account_id, &req.dest_mailbox)
             .await?;
 
-        let uids: Vec<i64> = req.uids.iter().map(|uid| *uid as i64).collect();
+        let uids: Vec<i64> = req.uids.iter().map(|uid| {
+            i64::try_from(*uid).map_err(|_| Status::invalid_argument("UID exceeds valid range"))
+        }).collect::<Result<_, _>>()?;
         let messages = self
             .storage
             .get_messages_by_uids(&account_id, &source_mailbox.id, &uids)
@@ -798,7 +806,7 @@ impl MailstoreService for MailstoreServiceImpl {
         
         info!(
             account_id = %account_id,
-            email = %req.email,
+            email = %mail_common::pii::redact_email(&req.email),
             "Account created"
         );
         
@@ -847,7 +855,7 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<AuthenticateRequest>,
     ) -> Result<Response<AuthenticateResponse>, Status> {
         let req = request.into_inner();
-        debug!(email = %req.email, "Authentication attempt");
+        debug!(email = %mail_common::pii::redact_email(&req.email), "Authentication attempt");
 
         if req.email.is_empty() || req.password.is_empty() {
             return Ok(Response::new(AuthenticateResponse {

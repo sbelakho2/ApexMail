@@ -1,5 +1,6 @@
 //! Event query routes.
 
+use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -32,21 +33,13 @@ pub struct ListEventsQuery {
     #[serde(default)]
     pub event_type: Option<String>,
     #[serde(default)]
-    pub message_id: Option<Uuid>,
-}
-
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct EventResponse {
-    pub id: Uuid,
-    pub message_id: Option<Uuid>,
+    pub id: String,
+    pub message_id: Option<String>,
     pub event_type: String,
     pub recipient: Option<String>,
     pub metadata: Option<serde_json::Value>,
@@ -111,7 +104,7 @@ async fn list_events(
     ));
 
     // Build query dynamically
-    let mut query = sqlx::query_as::<_, EventRow>(&sql).bind(auth.tenant_id);
+    let mut query = sqlx::query_as::<_, EventRow>(&sql).bind(&auth.tenant_id);
     if let Some(ref event_type) = params.event_type {
         query = query.bind(event_type);
     }
@@ -137,7 +130,7 @@ async fn get_event(
          FROM events WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("event not found".into()))?;
@@ -166,7 +159,7 @@ async fn event_stats(
          FROM events
          WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_one(&state.db)
@@ -199,7 +192,7 @@ async fn event_timeseries(
          GROUP BY bucket, event_type
          ORDER BY bucket",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_all(&state.db)
@@ -220,8 +213,8 @@ async fn event_timeseries(
 
 #[derive(sqlx::FromRow)]
 struct EventRow {
-    id: Uuid,
-    message_id: Option<Uuid>,
+    id: String,
+    message_id: Option<String>,
     event_type: String,
     recipient: Option<String>,
     metadata: Option<serde_json::Value>,
@@ -292,7 +285,7 @@ mod tests {
     #[test]
     fn test_event_response_serialisation() {
         let resp = EventResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             message_id: Some(Uuid::nil()),
             event_type: "opened".into(),
             recipient: Some("user@example.com".into()),

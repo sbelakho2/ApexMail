@@ -95,7 +95,7 @@ async fn list_gdpr_requests(
     .bind(offset)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let response: Vec<GdprRequestResponse> = rows
         .into_iter()

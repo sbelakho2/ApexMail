@@ -10,7 +10,6 @@ module.exports = {
   content: [
     './templates/**/*.html',
     './content/**/*.md',
-    './islands/**/*.{js,jsx,ts,tsx}',
   ],
   theme: {
     extend: {
@@ -50,6 +49,7 @@ module.exports = {
           700: 'rgb(var(--surface-700) / <alpha-value>)',
           800: 'rgb(var(--surface-800) / <alpha-value>)',
           900: 'rgb(var(--surface-900) / <alpha-value>)',
+          950: 'rgb(var(--surface-950) / <alpha-value>)',
         },
         accent: {
           50: 'rgb(var(--surface-50) / <alpha-value>)',

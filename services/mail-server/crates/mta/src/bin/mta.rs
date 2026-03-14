@@ -37,6 +37,9 @@ async fn main() -> anyhow::Result<()> {
     // Database pool
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(300))
+        .max_lifetime(std::time::Duration::from_secs(1800))
         .connect(&config.database.connection_string)
         .await?;
 
@@ -155,9 +158,24 @@ async fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
-    // Wait for shutdown signal
-    info!("MTA server running. Press Ctrl+C to stop.");
-    signal::ctrl_c().await?;
+    // Wait for shutdown signal (SIGINT or SIGTERM)
+    info!("MTA server running. Waiting for shutdown signal.");
+    {
+        let ctrl_c = async { let _ = signal::ctrl_c().await; };
+        #[cfg(unix)]
+        let terminate = async {
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            _ = ctrl_c => info!("received Ctrl+C"),
+            _ = terminate => info!("received SIGTERM"),
+        }
+    }
     info!("Shutting down...");
 
     // #151: Signal graceful shutdown on all servers before aborting

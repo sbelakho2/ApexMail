@@ -7,25 +7,44 @@
       <div>
         <span class="inline-block px-3 py-1 text-sm font-semibold text-brand-600 bg-brand-50 rounded-full mb-4">Security</span>
         <h2 class="text-surface-900 mb-6">Security that satisfies<br /><span class="text-brand-500">your compliance team.</span></h2>
-        <p class="text-surface-600 mb-8">Enterprise-grade security built into every layer. From encryption at rest to tamper-proof audit logs.</p>
+        <p class="text-surface-600 mb-8">Enterprise-grade security built into every layer. From encryption at rest to comprehensive audit logs.</p>
         <ul class="space-y-4">
-          {% set security_items = [
-            {"title": "SOC 2 Type II Certified", "desc": "Annual audits by independent third parties"},
-            {"title": "GDPR & HIPAA Ready", "desc": "Data processing agreements and BAAs available"},
-            {"title": "AES-256 Encryption", "desc": "All data encrypted at rest and in transit"},
-            {"title": "Cryptographic Audit Trail", "desc": "Tamper-proof delivery receipts for legal compliance"}
-          ] %}
-          {% for item in security_items %}
           <li class="flex items-start gap-3">
             <div class="w-6 h-6 rounded-full bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">
               <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
             <div>
-              <span class="font-semibold text-surface-900">{{ item.title }}</span>
-              <p class="text-sm text-surface-600">{{ item.desc }}</p>
+              <span class="font-semibold text-surface-900">Enterprise Security Controls</span>
+              <p class="text-sm text-surface-600">SOC 2-aligned controls available on Enterprise plans</p>
             </div>
           </li>
-          {% endfor %}
+          <li class="flex items-start gap-3">
+            <div class="w-6 h-6 rounded-full bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div>
+              <span class="font-semibold text-surface-900">GDPR &amp; HIPAA Ready</span>
+              <p class="text-sm text-surface-600">Data processing agreements and BAAs available</p>
+            </div>
+          </li>
+          <li class="flex items-start gap-3">
+            <div class="w-6 h-6 rounded-full bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div>
+              <span class="font-semibold text-surface-900">AES-256 Encryption</span>
+              <p class="text-sm text-surface-600">All data encrypted at rest and in transit</p>
+            </div>
+          </li>
+          <li class="flex items-start gap-3">
+            <div class="w-6 h-6 rounded-full bg-brand-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div>
+              <span class="font-semibold text-surface-900">Complete Audit Trail</span>
+              <p class="text-sm text-surface-600">Comprehensive delivery tracking and event logging</p>
+            </div>
+          </li>
         </ul>
       </div>
       <div class="relative">
@@ -38,7 +57,7 @@
             <p class="text-sm text-surface-500">Real-time compliance status</p>
           </div>
           <div class="space-y-3">
-            {% set compliance_checks = ["GDPR Compliance", "HIPAA Ready", "SOC 2 Type II", "ISO 27001", "Data Residency (EU)"] %}
+            {% set compliance_checks = ["GDPR Compliance", "HIPAA Ready", "Data Residency (EU)", "Encryption at Rest", "TLS 1.3 in Transit"] %}
             {% for check in compliance_checks %}
             <div class="flex items-center justify-between p-3 rounded-lg bg-surface-50">
               <span class="text-sm font-medium text-surface-700">{{ check }}</span>

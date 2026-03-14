@@ -31,6 +31,9 @@ rand.workspace = true
 arc-swap.workspace = true
 # Optional — enabled by crates that pull in sqlx
 sqlx = { workspace = true, optional = true }
+# Optional — enabled by crates that need internal auth middleware
+axum = { workspace = true, optional = true }
 
 [features]
 sqlx = ["dep:sqlx"]
+axum = ["dep:axum"]

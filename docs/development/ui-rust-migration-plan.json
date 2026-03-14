@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "selectedFramework": "leptos",
+  "serverArchitecture": "axum-leptos-ssr",
+  "surfaceModels": {
+    "web": "ssr-hydrated",
+    "controlPlane": "ssr-hydrated",
+    "marketingZola": "zola-leptos-islands",
+    "marketing": "retire-after-parity"
+  },
+  "routingStrategy": {
+    "publicRoutes": "preserve-exact-paths",
+    "authRoutes": "preserve-exact-paths-and-redirects",
+    "dashboardRoutes": "preserve-exact-paths-and-shell-state",
+    "adminRoutes": "preserve-exact-paths-and-guard-behavior"
+  },
+  "replacementStrategies": {
+    "next": "axum-plus-leptos-router",
+    "react": "remove-from-browser-ui-paths",
+    "reactDom": "remove-from-browser-ui-paths",
+    "radix": "replace-with-rust-native-primitives",
+    "zustand": "replace-with-leptos-signals",
+    "swr": "replace-with-leptos-resources",
+    "immer": "replace-with-typed-rust-state-transitions",
+    "recharts": "replace-with-rust-native-svg-charts",
+    "preactIslands": "replace-with-leptos-islands"
+  },
+  "marketingCanonicalSurface": "apps/marketing-zola",
+  "rollbackGates": [
+    "parity-evidence-attached",
+    "observability-enabled",
+    "support-runbooks-updated",
+    "cutover-burn-in-complete"
+  ],
+  "evidence": {
+    "architectureDecisionRecord": "docs/development/ui-rust-migration-architecture.md",
+    "checklist": "docs/development/ui-ts-js-rust-migration-audit-2026-03-10.md"
+  }
+}

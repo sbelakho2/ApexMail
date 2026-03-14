@@ -6,8 +6,8 @@
 
 {% include "partials/private-cloud/latency-comparison.html" %}
 
-{# DeploymentOptions — Preact island for interactive selection #}
-<div data-island="deployment-options"></div>
+{# Deployment Options (CSS radio tabs, zero JS) #}
+{% include "partials/generated/deployment-options-island.html" %}
 
 {% include "partials/private-cloud/security-isolation.html" %}
 {% include "partials/private-cloud/dedicated-ips.html" %}

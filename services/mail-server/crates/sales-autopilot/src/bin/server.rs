@@ -24,8 +24,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(port = cfg.port, max_campaigns = cfg.max_campaigns, "starting sales-autopilot");
 
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/apexmail".into());
-    let db = sqlx::PgPool::connect(&database_url)
+        .context("DATABASE_URL environment variable must be set")?;
+    let db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(300))
+        .max_lifetime(std::time::Duration::from_secs(1800))
+        .connect(&database_url)
         .await
         .context("Failed to connect to database")?;
 
@@ -36,6 +41,13 @@ async fn main() -> anyhow::Result<()> {
         campaigns: CampaignManager::new(cfg.max_campaigns),
         calendar: CalendarService::new(),
         inbox: InboxManager::new(),
+        service_token: {
+            let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
+            if token.is_empty() {
+                tracing::warn!("INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled");
+            }
+            token
+        },
     };
 
     let app = routes::router(state);
@@ -48,7 +60,26 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     tracing::info!(addr = %addr, "listening");
-    if let Err(err) = axum::serve(listener, app).await {
+    let shutdown = async {
+        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
+            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+        }
+    };
+    if let Err(err) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+    {
         tracing::error!(error = %err, "server error");
     }
 

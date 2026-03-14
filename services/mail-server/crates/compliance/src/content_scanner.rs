@@ -10,7 +10,7 @@
 
 use aho_corasick::AhoCorasick;
 use chrono::Utc;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -846,7 +846,13 @@ impl ContentScanner {
                     } else {
                         let compiled: Vec<(String, Regex)> = blocked_patterns
                             .iter()
-                            .filter_map(|pat| Regex::new(pat).ok().map(|re| (pat.clone(), re)))
+                            .filter_map(|pat| {
+                                RegexBuilder::new(pat)
+                                    .size_limit(1 << 20) // 1 MB compiled DFA limit — prevents ReDoS
+                                    .build()
+                                    .ok()
+                                    .map(|re| (pat.clone(), re))
+                            })
                             .collect();
                         let compiled = Arc::new(compiled);
                         let mut cache = self.policy_regex_cache.write().await;

@@ -29,9 +29,9 @@ commonLabels:
   app.kubernetes.io/part-of: apexmail
   app.kubernetes.io/managed-by: kustomize
 
-# Image tags are overridden in each environment overlay
+# Image tags — pin to release versions (override via kustomize overlays per environment)
 images:
-  - name: ghcr.io/apexmail/tracking-service
-    newTag: latest
-  - name: ghcr.io/apexmail/web
-    newTag: latest
+  - name: apexmail/tracking-service
+    newTag: v1.0.0
+  - name: apexmail/web
+    newTag: v1.0.0

@@ -28,10 +28,10 @@ pub async fn rate_limit_middleware(
     let tenant_id = req
         .extensions()
         .get::<AuthUser>()
-        .map(|u| u.tenant_id);
+        .map(|u| u.tenant_id.clone());
 
     let tenant_key = match tenant_id {
-        Some(id) => id.to_string(),
+        Some(id) => id,
         None => "anonymous".to_string(),
     };
 
@@ -155,6 +155,79 @@ async fn check_rate_limit(
     })
 }
 
+// ─── Public (IP-based) rate limiter for unauthenticated endpoints ────────
+
+/// Stricter rate limiter for public auth endpoints (login, register, SSO).
+///
+/// Keys by source IP (from `X-Forwarded-For` first hop, falling back to the
+/// path itself as a global rate-limiter).  Limits: 20 requests per 60-second
+/// window per IP — enough for legitimate users, tight enough to mitigate
+/// credential-stuffing and registration spam.
+pub async fn public_rate_limit_middleware(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let ip = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown-ip".to_string());
+
+    let window_ms: u64 = 60_000; // 1 minute
+    let max_requests: u64 = 20;
+    let redis_key = format!(
+        "apexmail:ratelimit:public:{}:{}",
+        ip,
+        current_window(window_ms)
+    );
+
+    match check_rate_limit(&state, &redis_key, max_requests, window_ms).await {
+        Ok(info) => {
+            let mut resp = next.run(req).await;
+            let headers = resp.headers_mut();
+            headers.insert("X-RateLimit-Limit", max_requests.into());
+            headers.insert("X-RateLimit-Remaining", info.remaining.into());
+            headers.insert("X-RateLimit-Reset", info.reset_at.into());
+            resp
+        }
+        Err(RateLimitOutcome::Exceeded { reset_at }) => {
+            let mut resp = (
+                StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": "RATE_LIMIT_EXCEEDED",
+                        "message": "too many requests — try again later"
+                    }
+                })),
+            )
+                .into_response();
+            resp.headers_mut()
+                .insert("Retry-After", (reset_at / 1000).into());
+            resp
+        }
+        Err(RateLimitOutcome::RedisDown) => {
+            if state.config.environment == Environment::Production {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({
+                        "error": {
+                            "code": "SERVICE_UNAVAILABLE",
+                            "message": "rate limiter unavailable"
+                        }
+                    })),
+                )
+                    .into_response()
+            } else {
+                tracing::warn!("public rate limiter Redis unavailable — failing open (dev mode)");
+                next.run(req).await
+            }
+        }
+    }
+}
+
 // ─── Sliding-window approximation ──────────────────────────────
 
 /// A sliding-window rate limiter that interpolates between the current and
@@ -174,10 +247,16 @@ pub async fn sliding_window_count(
     let curr_key = format!("apexmail:ratelimit:{}:{}", tenant_id, current);
     let prev_key = format!("apexmail:ratelimit:{}:{}", tenant_id, previous);
 
-    let mut conn = state.redis.get().await.map_err(|_| ())?;
+    let mut conn = state.redis.get().await.map_err(|e| {
+        tracing::warn!(error = %e, "redis pool error in sliding window count");
+    })?;
 
-    let curr_count: Option<u64> = conn.get(&curr_key).await.map_err(|_| ())?;
-    let prev_count: Option<u64> = conn.get(&prev_key).await.map_err(|_| ())?;
+    let curr_count: Option<u64> = conn.get(&curr_key).await.map_err(|e| {
+        tracing::warn!(error = %e, key = %curr_key, "redis GET error in sliding window");
+    })?;
+    let prev_count: Option<u64> = conn.get(&prev_key).await.map_err(|e| {
+        tracing::warn!(error = %e, key = %prev_key, "redis GET error in sliding window");
+    })?;
     let curr_count = curr_count.unwrap_or(0);
     let prev_count = prev_count.unwrap_or(0);
 

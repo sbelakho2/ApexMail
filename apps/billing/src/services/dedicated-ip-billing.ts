@@ -24,6 +24,8 @@ import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 import { getStripe } from '../lib/stripe-client.js';
 import { config } from '../config.js';
+import { DEDICATED_IP_ADDON_PRICE_CENTS } from '../lib/constants.js';
+import { StripeCircuitBreaker } from './stripe-circuit-breaker.js';
 
 const logger = createLogger();
 
@@ -36,8 +38,7 @@ function getDedicatedIpPriceId(): Result<string, Error> {
   return Result.ok(priceId);
 }
 
-/** $30/mo in cents — must match the Stripe price and the API service constant */
-const DEDICATED_IP_ADDON_PRICE_CENTS = 3000;
+// DEDICATED_IP_ADDON_PRICE_CENTS imported from ../lib/constants.js
 
 interface PendingIpRow {
   [key: string]: unknown;
@@ -56,10 +57,29 @@ interface TenantSubscription {
 
 export class DedicatedIpBillingService {
   private readonly stripe: Stripe;
+  private readonly circuitBreaker: StripeCircuitBreaker;
   private syncTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly db: DatabasePool) {
     this.stripe = getStripe();
+    this.circuitBreaker = new StripeCircuitBreaker();
+  }
+
+  private async executeStripeCall<T>(
+    operation: string,
+    metadata: Record<string, unknown>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.circuitBreaker.execute(fn);
+    } catch (error) {
+      logger.error(`Dedicated IP Stripe operation failed: ${operation}`, {
+        ...metadata,
+        error: error instanceof Error ? error.message : String(error),
+        circuitState: this.circuitBreaker.getState(),
+      });
+      throw error;
+    }
   }
 
   /**
@@ -190,19 +210,23 @@ export class DedicatedIpBillingService {
       }
 
       // Create a new subscription item for this dedicated IP
-      const subscriptionItem = await this.stripe.subscriptionItems.create(
-        {
-          subscription: sub.stripe_subscription_id,
-          price: priceIdResult.value,
-          quantity: 1,
-          proration_behavior: 'create_prorations',
-          metadata: {
-            apexmail_ip_id: ip.id,
-            apexmail_tenant_id: ip.tenant_id,
-            type: 'dedicated_ip_addon',
+      const subscriptionItem = await this.executeStripeCall(
+        'subscriptionItems.create',
+        { tenantId: ip.tenant_id, ipId: ip.id },
+        () => this.stripe.subscriptionItems.create(
+          {
+            subscription: sub.stripe_subscription_id,
+            price: priceIdResult.value,
+            quantity: 1,
+            proration_behavior: 'create_prorations',
+            metadata: {
+              apexmail_ip_id: ip.id,
+              apexmail_tenant_id: ip.tenant_id,
+              type: 'dedicated_ip_addon',
+            },
           },
-        },
-        { idempotencyKey: `apexmail_ip_charge_${ip.id}` },
+          { idempotencyKey: `apexmail_ip_charge_${ip.id}` },
+        ),
       );
 
       // Update the IP record with the subscription item ID
@@ -282,9 +306,17 @@ export class DedicatedIpBillingService {
     if (ip.stripe_subscription_item_id) {
       try {
         // Delete the subscription item with proration (customer gets credit for unused time)
-        await this.stripe.subscriptionItems.del(ip.stripe_subscription_item_id, {
-          proration_behavior: 'create_prorations',
-        });
+        await this.executeStripeCall(
+          'subscriptionItems.delete',
+          {
+            tenantId: ip.tenant_id,
+            ipId: ip.id,
+            subscriptionItemId: ip.stripe_subscription_item_id,
+          },
+          () => this.stripe.subscriptionItems.del(ip.stripe_subscription_item_id, {
+            proration_behavior: 'create_prorations',
+          }),
+        );
 
         logger.info('Stripe subscription item removed for dedicated IP', {
           tenantId: ip.tenant_id,

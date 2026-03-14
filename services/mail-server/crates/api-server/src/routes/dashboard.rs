@@ -56,55 +56,55 @@ async fn dashboard_stats(
            FROM messages
            WHERE tenant_id = $1
              AND created_at >= NOW() - INTERVAL '30 days'"#,
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
+    .fetch_one(&state.db)
     .await?;
 
-    let total = msg_stats.total.max(1) as f64;
-    let delivery_rate = msg_stats.delivered as f64 / total;
-    let bounce_rate = msg_stats.bounced as f64 / total;
-    let open_rate = msg_stats.opened as f64 / total;
-    let click_rate = msg_stats.clicked as f64 / total;
+    let total = msg_stats.total as f64;
+    let delivery_rate = if msg_stats.total > 0 { msg_stats.delivered as f64 / total } else { 0.0 };
+    let bounce_rate = if msg_stats.total > 0 { msg_stats.bounced as f64 / total } else { 0.0 };
+    let open_rate = if msg_stats.total > 0 { msg_stats.opened as f64 / total } else { 0.0 };
+    let click_rate = if msg_stats.total > 0 { msg_stats.clicked as f64 / total } else { 0.0 };
 
     // Resource counts
-    let contacts = sqlx::query_scalar!(
+    let contacts: i64 = sqlx::query_scalar!(
         "SELECT COUNT(*)::bigint FROM contacts WHERE tenant_id = $1",
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
+    .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
 
-    let lists = sqlx::query_scalar!(
+    let lists: i64 = sqlx::query_scalar!(
         "SELECT COUNT(*)::bigint FROM lists WHERE tenant_id = $1",
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
+    .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
 
-    let campaigns = sqlx::query_scalar!(
+    let campaigns: i64 = sqlx::query_scalar!(
         "SELECT COUNT(*)::bigint FROM campaigns WHERE tenant_id = $1",
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
+    .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
 
-    let templates = sqlx::query_scalar!(
+    let templates: i64 = sqlx::query_scalar!(
         "SELECT COUNT(*)::bigint FROM templates WHERE tenant_id = $1",
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
+    .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
 
-    let domains = sqlx::query_scalar!(
+    let domains: i64 = sqlx::query_scalar!(
         "SELECT COUNT(*)::bigint FROM domains WHERE tenant_id = $1 AND status = 'verified'",
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
+    .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
 

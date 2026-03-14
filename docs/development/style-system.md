@@ -15,6 +15,13 @@ This guide applies to:
 - `apps/web`
 - `apps/control-plane`
 - `apps/marketing`
+- `apps/marketing-zola` (must follow the same token and interaction contracts)
+
+## Companion Specs
+
+- `docs/development/premium-experience-spec.md`
+- `docs/development/interactive-state-matrix.md`
+- `docs/development/premium-performance-budgets.md`
 
 ## Goals
 
@@ -66,6 +73,18 @@ Every Apex surface should rely on these families:
 2. New tokens must be defined in the canonical token source before Tailwind exposure.
 3. Component APIs should consume semantic tokens, not app-specific one-off color names.
 4. New semantic tokens require both light and dark values in the same change.
+
+### Token Anti-Patterns
+
+- `transition-property: all` in shared/global classes.
+- Component-local hard-coded semantic colors (`#ef4444`, raw `rgb(...)`) for shared primitives.
+- Unmapped one-off spacing/radius values that bypass `--space-*` / `--radius-*`.
+
+### Do-Not-Use Token/Style List
+
+- Unscoped shadow literals in feature code for shared components.
+- New ad-hoc semantic aliases not declared in canonical token source.
+- Direct icon library imports in app source (`lucide-react`) instead of local icon modules.
 
 ## Apex Visual Language
 

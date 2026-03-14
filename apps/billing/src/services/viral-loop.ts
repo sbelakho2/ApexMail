@@ -8,8 +8,20 @@ import { createHash } from 'node:crypto';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
+import { TTL_30_DAYS, TTL_35_DAYS } from '../lib/constants.js';
 
 const logger = createLogger();
+const PENDING_COUNTER_QUEUE_KEY = 'viral:pending:counters';
+const PROCESSING_COUNTER_QUEUE_KEY = 'viral:processing:counters';
+const DEAD_LETTER_COUNTER_QUEUE_KEY = 'viral:dead-letter:counters';
+const MAX_PENDING_COUNTER_RETRIES = 10;
+
+interface PendingCounterEvent {
+  tenantId: string;
+  metric: 'impressions' | 'clicks' | 'conversions';
+  retries: number;
+  queuedAt: string;
+}
 
 export interface Attribution {
   id: string;
@@ -45,10 +57,11 @@ export class ViralLoopService {
   constructor(
     private readonly db: DatabasePool,
     private readonly redis: Redis,
-    baseUrl?: string
+    baseUrl?: string,
+    telemetryHashSalt?: string
   ) {
     this.baseUrl = baseUrl ?? 'https://apexmail.ee';
-    this.telemetryHashSalt = process.env['VIRAL_TELEMETRY_HASH_SALT'] ?? 'apexmail-telemetry';
+    this.telemetryHashSalt = telemetryHashSalt ?? 'apexmail-telemetry';
   }
 
   private anonymizeIpAddress(ipAddress: string): string {
@@ -143,21 +156,21 @@ export class ViralLoopService {
 
     if (!result.ok) return Result.err(result.error);
 
-    if (result.value.rows.length === 0) {
+    const row = result.value.rows[0];
+    if (!row) {
       return Result.err(new Error('INSERT RETURNING produced no rows'));
     }
-    const attributionId = result.value.rows[0]!.id;
+    const attributionId = row.id;
 
     // Cache attribution for 30 days
     const cookieValue = `atr_${attributionId}`;
     await this.redis.setex(
       `viral:attr:${attributionId}`,
-      30 * 24 * 60 * 60,
+      TTL_30_DAYS,
       JSON.stringify({ sourceTenantId, messageRef, clickedAt: new Date() })
     );
 
-    // Update click count
-    await this.incrementCounter(sourceTenantId, 'clicks');
+    await this.incrementCounterReliably(sourceTenantId, 'clicks');
 
     logger.info('Footer click recorded', { sourceTenantId, attributionId });
 
@@ -190,8 +203,7 @@ export class ViralLoopService {
       return Result.err(new Error('Attribution not found'));
     }
 
-    // Update Redis counter (non-critical, can be eventually consistent)
-    await this.incrementCounter(result.value.rows[0].source_tenant_id, 'conversions');
+    await this.incrementCounterReliably(result.value.rows[0].source_tenant_id, 'conversions');
 
     logger.info('Viral conversion recorded', { attributionId, newTenantId });
 
@@ -202,12 +214,59 @@ export class ViralLoopService {
    * Record footer impression (for emails sent)
    */
   async recordImpression(tenantId: string): Promise<void> {
-    try {
-      await this.incrementCounter(tenantId, 'impressions');
-    } catch (error) {
-      logger.error('Failed to record impression', { tenantId, error: String(error) });
-      // Don't throw - analytics failures shouldn't block email delivery
+    await this.incrementCounterReliably(tenantId, 'impressions');
+  }
+
+  async flushPendingCounters(limit: number = 100): Promise<number> {
+    let flushed = 0;
+
+    for (let index = 0; index < limit; index += 1) {
+      const payload = await this.redis.rpoplpush(PENDING_COUNTER_QUEUE_KEY, PROCESSING_COUNTER_QUEUE_KEY);
+      if (!payload) {
+        break;
+      }
+
+      let event: PendingCounterEvent | null = null;
+      try {
+        event = JSON.parse(payload) as PendingCounterEvent;
+      } catch (error) {
+        logger.error('Failed to parse queued viral counter event', { payload, error: String(error) });
+        await this.redis.lrem(PROCESSING_COUNTER_QUEUE_KEY, 1, payload);
+        continue;
+      }
+
+      try {
+        await this.incrementCounter(event.tenantId, event.metric);
+        await this.redis.lrem(PROCESSING_COUNTER_QUEUE_KEY, 1, payload);
+        flushed += 1;
+      } catch (error) {
+        await this.redis.lrem(PROCESSING_COUNTER_QUEUE_KEY, 1, payload);
+
+        const nextEvent: PendingCounterEvent = {
+          ...event,
+          retries: event.retries + 1,
+        };
+
+        if (nextEvent.retries >= MAX_PENDING_COUNTER_RETRIES) {
+          await this.redis.lpush(DEAD_LETTER_COUNTER_QUEUE_KEY, JSON.stringify(nextEvent));
+          await this.redis.expire(DEAD_LETTER_COUNTER_QUEUE_KEY, TTL_35_DAYS);
+          logger.error('Dropped viral counter event after repeated failures', nextEvent);
+          continue;
+        }
+
+        await this.redis.lpush(PENDING_COUNTER_QUEUE_KEY, JSON.stringify(nextEvent));
+        await this.redis.expire(PENDING_COUNTER_QUEUE_KEY, TTL_35_DAYS);
+        logger.warn('Failed to replay queued viral counter event', {
+          tenantId: event.tenantId,
+          metric: event.metric,
+          retries: nextEvent.retries,
+          error: String(error),
+        });
+        break;
+      }
     }
+
+    return flushed;
   }
 
   /**
@@ -303,8 +362,8 @@ export class ViralLoopService {
     let features: Record<string, unknown> = {};
     try {
       features = JSON.parse(row.features || '{}') as Record<string, unknown>;
-    } catch {
-      logger.warn('Failed to parse plan features for tenant', { tenantId });
+    } catch (error) {
+      logger.warn('Failed to parse plan features for tenant', { tenantId, error });
       return Result.ok(true); // Default to showing footer on parse error
     }
     
@@ -361,7 +420,38 @@ export class ViralLoopService {
     const periodKey = this.getPeriodKey(new Date());
     const key = `viral:${metric}:${tenantId}:${periodKey}`;
     await this.redis.incr(key);
-    await this.redis.expire(key, 35 * 24 * 60 * 60); // 35 days
+    await this.redis.expire(key, TTL_35_DAYS); // 35 days
+  }
+
+  private async incrementCounterReliably(
+    tenantId: string,
+    metric: 'impressions' | 'clicks' | 'conversions'
+  ): Promise<void> {
+    try {
+      await this.incrementCounter(tenantId, metric);
+      await this.flushPendingCounters(10);
+    } catch (error) {
+      const event: PendingCounterEvent = {
+        tenantId,
+        metric,
+        retries: 0,
+        queuedAt: new Date().toISOString(),
+      };
+
+      try {
+        await this.redis.lpush(PENDING_COUNTER_QUEUE_KEY, JSON.stringify(event));
+        await this.redis.ltrim(PENDING_COUNTER_QUEUE_KEY, 0, 4_999);
+        await this.redis.expire(PENDING_COUNTER_QUEUE_KEY, TTL_35_DAYS);
+        logger.error('Queued viral counter event after Redis failure', { tenantId, metric, error: String(error) });
+      } catch (queueError) {
+        logger.error('Failed to queue viral counter event', {
+          tenantId,
+          metric,
+          error: String(error),
+          queueError: String(queueError),
+        });
+      }
+    }
   }
 
   private getPeriodKey(date: Date): string {

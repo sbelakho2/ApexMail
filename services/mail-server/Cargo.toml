@@ -27,9 +27,10 @@ members = [
     "crates/devex-service",
     "crates/observability-service",
     "crates/ops-service",
+    "crates/ui-foundation",
     "crates/sales-autopilot",
     "crates/ai-service",
-    # "crates/pdf-renderer",  # temporarily disabled: typst 0.12 not on crates.io
+    "crates/pdf-renderer",
     "crates/apexmail-db",
     "crates/apexmail-lib",
     "crates/smoke-tests",
@@ -63,6 +64,8 @@ repository = "https://github.com/sbelakho2/ApexMail"
 tokio = { version = "1.44", features = ["full"] }
 async-trait = "0.1"
 futures = "0.3"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # gRPC & Protobuf
 tonic = "0.12"
@@ -132,6 +135,15 @@ tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip", "request-id", "timeout"] }
 hyper = { version = "1.0", features = ["full"] }
 hyper-util = { version = "0.1" }
+
+# Leptos UI framework (SSR + islands hydration)
+leptos = { version = "0.6", features = ["csr", "ssr", "nightly"] }
+leptos_axum = { version = "0.6" }
+leptos_router = { version = "0.6", features = ["ssr"] }
+leptos_meta = { version = "0.6", features = ["ssr"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["HtmlElement", "Element", "Document", "Window", "DomRect", "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry", "KeyboardEvent", "MouseEvent", "FocusEvent", "ResizeObserver", "ResizeObserverEntry", "MutationObserver", "MutationObserverInit", "MutationRecord", "CssStyleDeclaration", "MediaQueryList"] }
+js-sys = "0.3"
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "visual": {
+    "boundingBoxes": true,
+    "computedStyles": true,
+    "pixelDiff": true,
+    "opticalTextChecks": true,
+    "chartSnapshotCoverage": true
+  },
+  "semantic": {
+    "accessibilityTreeDiff": true,
+    "headingStructureDiff": true,
+    "labelRoleDiff": true,
+    "nameDescriptionDiff": true,
+    "tabOrderDiff": true
+  },
+  "interaction": {
+    "pointerTracing": true,
+    "keyboardTracing": true,
+    "touchTracing": true,
+    "timingDiff": true,
+    "dataStateDiff": true
+  },
+  "performance": {
+    "lcp": true,
+    "cls": true,
+    "inp": true,
+    "ttfb": true,
+    "memory": true,
+    "bundleLikeResourceCount": true
+  },
+  "artifacts": {
+    "helper": "apps/testing/src/visual/ui-diff-infra.ts",
+    "visualSpec": "apps/testing/src/visual/ui-visual-diff.fail-first.spec.ts",
+    "semanticSpec": "apps/testing/src/visual/ui-semantic-diff.fail-first.spec.ts",
+    "interactionSpec": "apps/testing/src/visual/ui-interaction-diff.fail-first.spec.ts",
+    "performanceSpec": "apps/testing/src/visual/ui-performance-diff.fail-first.spec.ts"
+  }
+}

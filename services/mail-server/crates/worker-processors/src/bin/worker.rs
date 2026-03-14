@@ -1,10 +1,12 @@
 //! Worker entry point — runs all processors.
 
 use std::env;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::{routing::get, Router};
 use deadpool_redis::{Config as RedisConfig, Runtime};
 use sqlx::postgres::PgPoolOptions;
 use tracing::{error, info, warn};
@@ -33,12 +35,15 @@ async fn main() -> Result<()> {
     // Fix #61: Return proper error instead of panicking.
     let database_url = env::var("DATABASE_URL")
         .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable must be set"))?;
-    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_url = env::var("REDIS_URL")
+        .map_err(|_| anyhow::anyhow!("REDIS_URL environment variable must be set"))?;
 
     // Create database pool
     let db = PgPoolOptions::new()
         .max_connections(30)
         .acquire_timeout(Duration::from_secs(10))
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(1800))
         .connect(&database_url)
         .await?;
 
@@ -111,7 +116,8 @@ async fn main() -> Result<()> {
     // Start email processor
     if run_email {
         let smtp_config = SmtpConfig {
-            host: env::var("SMTP_HOST").unwrap_or_else(|_| "localhost".to_string()),
+            host: env::var("SMTP_HOST")
+                .map_err(|_| anyhow::anyhow!("SMTP_HOST environment variable must be set for email processing"))?,
             port: env::var("SMTP_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -217,8 +223,39 @@ async fn main() -> Result<()> {
 
     info!("All processors running. Press Ctrl+C to stop.");
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
+    // Start health check server for Kubernetes probes
+    let health_port: u16 = env::var("HEALTH_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9090);
+
+    let health_app = Router::new().route("/health", get(|| async { "OK" }));
+    let health_addr = SocketAddr::from(([0, 0, 0, 0], health_port));
+    let health_listener = tokio::net::TcpListener::bind(health_addr).await?;
+    info!(port = health_port, "Health check server listening");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(health_listener, health_app).await {
+            error!(error = %e, "Health check server failed");
+        }
+    });
+
+    // Wait for shutdown signal (SIGINT or SIGTERM)
+    {
+        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            _ = ctrl_c => info!("received Ctrl+C"),
+            _ = terminate => info!("received SIGTERM"),
+        }
+    }
 
     info!("Shutting down...");
 

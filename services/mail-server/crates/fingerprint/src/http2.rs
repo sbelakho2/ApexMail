@@ -234,18 +234,26 @@ impl Http2Fingerprint {
     }
     
     fn has_chrome_pattern(&self) -> bool {
-        // Chrome sends specific window update (15663105)
-        self.fingerprint.contains("chrome") // placeholder
+        // Chrome SETTINGS: HEADER_TABLE_SIZE=65536, ENABLE_PUSH=0,
+        // INITIAL_WINDOW_SIZE=6291456, MAX_HEADER_LIST_SIZE=262144
+        // Settings fingerprint uses ordered "id:value" pairs hashed via SHA-256.
+        let chrome_settings = "1:65536,2:0,4:6291456,6:262144";
+        self.settings_fingerprint == truncated_sha256(chrome_settings, 12)
     }
     
     fn has_firefox_pattern(&self) -> bool {
-        // Firefox has different initial window size
-        false
+        // Firefox SETTINGS: HEADER_TABLE_SIZE=65536,
+        // INITIAL_WINDOW_SIZE=131072, MAX_FRAME_SIZE=16384
+        let firefox_settings = "1:65536,4:131072,5:16384";
+        self.settings_fingerprint == truncated_sha256(firefox_settings, 12)
     }
     
     fn has_safari_pattern(&self) -> bool {
-        // Safari sends frames in specific order
-        false
+        // Safari/WebKit SETTINGS: HEADER_TABLE_SIZE=4096, ENABLE_PUSH=0,
+        // MAX_CONCURRENT_STREAMS=100, INITIAL_WINDOW_SIZE=2097152,
+        // MAX_HEADER_LIST_SIZE=196608
+        let safari_settings = "1:4096,2:0,3:100,4:2097152,6:196608";
+        self.settings_fingerprint == truncated_sha256(safari_settings, 12)
     }
 }
 

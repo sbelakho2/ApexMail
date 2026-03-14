@@ -150,6 +150,7 @@ export function verifyHMAC(
   try {
     return timingSafeEqual(expectedBuffer, signatureBuffer);
   } catch {
+    // timingSafeEqual can throw on invalid buffer arguments; treat as mismatch
     return false;
   }
 }
@@ -322,6 +323,7 @@ export function verifyHashChainEntry(entry: HashChainEntry): boolean {
     }
     return timingSafeEqual(hashBuffer, expectedBuffer);
   } catch {
+    // timingSafeEqual can throw on invalid buffer arguments; treat as mismatch
     return false;
   }
 }
@@ -338,7 +340,8 @@ export function verifyHashChain(entries: HashChainEntry[]): Result<boolean, { in
   const sorted = [...entries].sort((a, b) => a.index - b.index);
   
   for (let i = 0; i < sorted.length; i++) {
-    const entry = sorted[i]!;
+    const entry = sorted[i];
+    if (!entry) continue;
     
     // Verify individual entry hash
     if (!verifyHashChainEntry(entry)) {
@@ -347,8 +350,8 @@ export function verifyHashChain(entries: HashChainEntry[]): Result<boolean, { in
     
     // Verify chain linkage (except for first entry)
     if (i > 0) {
-      const prevEntry = sorted[i - 1]!;
-      if (entry.previousHash !== prevEntry.hash) {
+      const prevEntry = sorted[i - 1];
+      if (!prevEntry || entry.previousHash !== prevEntry.hash) {
         return Result.err({ index: entry.index, reason: 'Chain broken - previous hash mismatch' });
       }
     }

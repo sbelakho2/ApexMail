@@ -1,5 +1,6 @@
 //! Automation / workflow routes.
 
+use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -45,7 +46,7 @@ pub struct UpdateAutomationRequest {
 
 #[derive(Debug, Serialize)]
 pub struct AutomationResponse {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub trigger: serde_json::Value,
     pub actions: serde_json::Value,
@@ -63,14 +64,6 @@ pub struct ListAutomationsQuery {
     pub offset: i64,
     #[serde(default)]
     pub cursor: Option<i64>,
-}
-
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -96,7 +89,7 @@ async fn create_automation(
          VALUES ($1,$2,$3,$4,$5,$6,'disabled',$7,$7)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.name)
     .bind(&body.trigger)
     .bind(serde_json::json!(body.actions))
@@ -108,7 +101,7 @@ async fn create_automation(
     Ok((
         StatusCode::CREATED,
         Json(AutomationResponse {
-            id,
+            id: id.to_string(),
             name: body.name,
             trigger: body.trigger,
             actions: serde_json::json!(body.actions),
@@ -132,7 +125,7 @@ async fn list_automations(
         "SELECT id, name, trigger_config, actions, conditions, status, created_at, updated_at
          FROM automations WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 100))
     // Fix #58: Clamp offset to valid range to prevent DB scan issues.
     .bind(offset)
@@ -145,22 +138,22 @@ async fn list_automations(
 async fn get_automation(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<AutomationResponse>, ApiError> {
     require_scopes(&auth, &["automations:read"])?;
-    let row = fetch_automation(&state, auth.tenant_id, id).await?;
+    let row = fetch_automation(&state, &auth.tenant_id, id).await?;
     Ok(Json(row.into()))
 }
 
 async fn update_automation(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(body): Json<UpdateAutomationRequest>,
 ) -> Result<Json<AutomationResponse>, ApiError> {
     require_scopes(&auth, &["automations:write"])?;
 
-    let existing = fetch_automation(&state, auth.tenant_id, id).await?;
+    let existing = fetch_automation(&state, &auth.tenant_id, id.clone()).await?;;
 
     let name = body.name.unwrap_or(existing.name);
     let trigger = body.trigger.unwrap_or(existing.trigger_config);
@@ -175,8 +168,8 @@ async fn update_automation(
     .bind(&trigger)
     .bind(&actions)
     .bind(&conditions)
-    .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&id)
+    .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -195,13 +188,13 @@ async fn update_automation(
 async fn delete_automation(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["automations:write"])?;
 
     let result = sqlx::query("DELETE FROM automations WHERE id = $1 AND tenant_id = $2")
         .bind(id)
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -214,32 +207,32 @@ async fn delete_automation(
 async fn enable_automation(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<AutomationResponse>, ApiError> {
     require_scopes(&auth, &["automations:write"])?;
-    set_automation_status(&state, auth.tenant_id, id, "enabled").await
+    set_automation_status(&state, &auth.tenant_id, id, "enabled").await
 }
 
 async fn disable_automation(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<AutomationResponse>, ApiError> {
     require_scopes(&auth, &["automations:write"])?;
-    set_automation_status(&state, auth.tenant_id, id, "disabled").await
+    set_automation_status(&state, &auth.tenant_id, id, "disabled").await
 }
 
 async fn set_automation_status(
     state: &AppState,
-    tenant_id: Uuid,
-    id: Uuid,
+    tenant_id: &str,
+    id: String,
     new_status: &str,
 ) -> Result<Json<AutomationResponse>, ApiError> {
     let result = sqlx::query(
         "UPDATE automations SET status = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
     )
     .bind(new_status)
-    .bind(id)
+    .bind(&id)
     .bind(tenant_id)
     .execute(&state.db)
     .await?;
@@ -256,7 +249,7 @@ async fn set_automation_status(
 
 #[derive(sqlx::FromRow)]
 struct AutomationRow {
-    id: Uuid,
+    id: String,
     name: String,
     trigger_config: serde_json::Value,
     actions: serde_json::Value,
@@ -281,7 +274,7 @@ impl From<AutomationRow> for AutomationResponse {
     }
 }
 
-async fn fetch_automation(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<AutomationRow, ApiError> {
+async fn fetch_automation(state: &AppState, tenant_id: &str, id: String) -> Result<AutomationRow, ApiError> {
     sqlx::query_as::<_, AutomationRow>(
         "SELECT id, name, trigger_config, actions, conditions, status, created_at, updated_at
          FROM automations WHERE id = $1 AND tenant_id = $2",
@@ -314,7 +307,7 @@ mod tests {
     #[test]
     fn test_automation_response_serialisation() {
         let resp = AutomationResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             name: "Follow-up".into(),
             trigger: serde_json::json!({"type": "event"}),
             actions: serde_json::json!([]),

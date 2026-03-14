@@ -31,6 +31,9 @@ async fn main() -> anyhow::Result<()> {
     // Connect to PostgreSQL
     let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(config.db.max_connections)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(300))
+        .max_lifetime(std::time::Duration::from_secs(1800))
         .connect_lazy(&config.db.url())
         .map_err(|e| anyhow::anyhow!("Database pool: {e}"))?;
 

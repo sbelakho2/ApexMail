@@ -91,7 +91,7 @@ export const Header = React.memo(function Header({ className, onMenuClick, isMob
  const cycleTheme = () => {
    const order: Array<'light' | 'dark' | 'system'> = ['light', 'dark', 'system'];
    const idx = order.indexOf(storeTheme);
-   setStoreTheme(order[(idx + 1) % order.length]!);
+   setStoreTheme(order[(idx + 1) % order.length] ?? 'system');
  };
 
  const displayName = user?.name?.trim() || 'Account';

@@ -7,7 +7,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use chrono::{DateTime, Utc};
-use deadpool_redis::redis::AsyncCommands;
+use deadpool_redis::redis::{self, AsyncCommands};
 use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -18,11 +18,15 @@ use crate::state::AppState;
 // ─── AuthUser ──────────────────────────────────────────────────
 
 /// Authenticated identity extracted from the request.
+///
+/// IDs are stored as strings (VARCHAR(26) in the database, prefixed format:
+/// `usr_*`, `ten_*`, `key_*`).  The Uuid import is retained only for the
+/// API-key row struct that the DB layer still returns as Uuid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthUser {
-    pub tenant_id: Uuid,
-    pub user_id: Option<Uuid>,
-    pub api_key_id: Option<Uuid>,
+    pub tenant_id: String,
+    pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
     pub scopes: Vec<String>,
 }
 
@@ -98,7 +102,7 @@ async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, A
         if mac2.verify(&expected).is_ok() {
             tracing::debug!("authenticated via control-plane static API key");
             return Ok(AuthUser {
-                tenant_id: Uuid::nil(), // sentinel: system-level admin
+                tenant_id: "system".into(), // sentinel: system-level admin
                 user_id: None,
                 api_key_id: None,
                 scopes: vec!["*".into()],
@@ -160,9 +164,9 @@ async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, A
     })?;
 
     let auth_user = AuthUser {
-        tenant_id: row.tenant_id,
+        tenant_id: row.tenant_id.to_string(),
         user_id: None,
-        api_key_id: Some(row.id),
+        api_key_id: Some(row.id.to_string()),
         scopes,
     };
 
@@ -192,10 +196,26 @@ struct ApiKeyRow {
 
 async fn lookup_cached_api_key(key_hash: &str, state: &AppState) -> Result<AuthUser, ()> {
     let cache_key = format!("{API_KEY_CACHE_PREFIX}{key_hash}");
-    let mut conn = state.redis.get().await.map_err(|_| ())?;
-    let cached: Option<String> = conn.get(&cache_key).await.map_err(|_| ())?;
+    let mut conn = state.redis.get().await.map_err(|e| {
+        tracing::warn!(error = %e, "redis pool error in API key cache lookup");
+    })?;
+    let cached: Option<String> = conn.get(&cache_key).await.map_err(|e| {
+        tracing::warn!(error = %e, "redis GET error in API key cache lookup");
+    })?;
     match cached {
-        Some(json) => serde_json::from_str(&json).map_err(|_| ()),
+        Some(json) => serde_json::from_str(&json).map_err(|e| {
+            tracing::warn!(error = %e, cache_key, "corrupted JSON in API key cache — evicting");
+            // Best-effort eviction of poisoned cache entry
+            tokio::spawn({
+                let pool = state.redis.clone();
+                let key = cache_key.clone();
+                async move {
+                    if let Ok(mut conn) = pool.get().await {
+                        let _: Result<(), _> = redis::AsyncCommands::del(&mut *conn, &key).await;
+                    }
+                }
+            });
+        }),
         None => Err(()),
     }
 }
@@ -227,17 +247,22 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
 
     let claims = token_data.claims;
 
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| ApiError::Unauthorized("invalid user ID in token".into()))?;
-    let tenant_id = Uuid::parse_str(&claims.tenant_id)
-        .map_err(|_| ApiError::Unauthorized("invalid tenant ID in token".into()))?;
+    let user_id = claims.sub.clone();
+    let tenant_id = claims.tenant_id.clone();
+
+    if user_id.is_empty() {
+        return Err(ApiError::Unauthorized("missing user ID in token".into()));
+    }
+    if tenant_id.is_empty() {
+        return Err(ApiError::Unauthorized("missing tenant ID in token".into()));
+    }
 
     // Fix #12: Verify the user still exists and is active in the database.
     let user_active: Option<(String,)> = sqlx::query_as(
         "SELECT status FROM users WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(user_id)
-    .bind(tenant_id)
+    .bind(&user_id)
+    .bind(&tenant_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| {
@@ -338,8 +363,8 @@ mod tests {
     #[test]
     fn test_require_scopes_wildcard() {
         let user = AuthUser {
-            tenant_id: Uuid::new_v4(),
-            user_id: Some(Uuid::new_v4()),
+            tenant_id: "ten_test_001".into(),
+            user_id: Some("usr_test_001".into()),
             api_key_id: None,
             scopes: vec!["*".into()],
         };
@@ -349,9 +374,9 @@ mod tests {
     #[test]
     fn test_require_scopes_missing() {
         let user = AuthUser {
-            tenant_id: Uuid::new_v4(),
+            tenant_id: "ten_test_001".into(),
             user_id: None,
-            api_key_id: Some(Uuid::new_v4()),
+            api_key_id: Some("key_test_001".into()),
             scopes: vec!["messages:read".into()],
         };
         assert!(require_scopes(&user, &["messages:send"]).is_err());
@@ -360,9 +385,9 @@ mod tests {
     #[test]
     fn test_require_scopes_present() {
         let user = AuthUser {
-            tenant_id: Uuid::new_v4(),
+            tenant_id: "ten_test_001".into(),
             user_id: None,
-            api_key_id: Some(Uuid::new_v4()),
+            api_key_id: Some("key_test_001".into()),
             scopes: vec!["messages:send".into(), "messages:read".into()],
         };
         assert!(require_scopes(&user, &["messages:send"]).is_ok());

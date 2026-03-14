@@ -10,6 +10,7 @@
 //!   POST   /:id/subscribers → add subscriber(s) to a list
 //!   DELETE /:id/subscribers → remove subscriber(s) from a list
 
+use super::helpers::default_limit;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
@@ -61,7 +62,7 @@ pub struct UpdateListRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ListResponse {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub description: Option<String>,
     pub opt_in_mode: String,
@@ -80,10 +81,6 @@ pub struct ListQuery {
     pub search: Option<String>,
 }
 
-fn default_limit() -> i64 {
-    50
-}
-
 #[derive(Debug, Serialize)]
 pub struct ListsPageResponse {
     pub data: Vec<ListResponse>,
@@ -94,7 +91,7 @@ pub struct ListsPageResponse {
 
 #[derive(Debug, Serialize)]
 pub struct SubscriberResponse {
-    pub id: Uuid,
+    pub id: String,
     pub email: String,
     pub name: Option<String>,
     pub status: String,
@@ -139,19 +136,19 @@ async fn list_lists(
            GROUP BY l.id
            ORDER BY l.created_at DESC
            LIMIT $2 OFFSET $3"#,
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
         limit,
         offset,
         q.search.as_deref(),
     )
-    .fetch_all(&*state.db)
+    .fetch_all(&state.db)
     .await?;
 
-    let total = sqlx::query_scalar!(
+    let total: i64 = sqlx::query_scalar!(
         "SELECT COUNT(*)::bigint FROM lists WHERE tenant_id = $1",
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
+    .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
 
@@ -170,7 +167,7 @@ async fn list_lists(
 
 #[derive(sqlx::FromRow)]
 struct ListRow {
-    id: Uuid,
+    id: String,
     name: String,
     description: Option<String>,
     opt_in_mode: String,
@@ -186,20 +183,20 @@ async fn create_list(
 ) -> Result<(StatusCode, Json<ListResponse>), ApiError> {
     require_scopes(&auth, &["lists:write"])?;
 
-    let id = Uuid::now_v7();
+    let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now();
 
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO lists (id, tenant_id, name, description, opt_in_mode, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $6)",
-        id,
-        auth.tenant_id,
-        body.name,
-        body.description,
-        body.opt_in_mode,
-        now,
     )
-    .execute(&*state.db)
+    .bind(&id)
+    .bind(&auth.tenant_id)
+    .bind(&body.name)
+    .bind(&body.description)
+    .bind(&body.opt_in_mode)
+    .bind(now)
+    .execute(&state.db)
     .await?;
 
     Ok((StatusCode::CREATED, Json(ListResponse {
@@ -216,25 +213,24 @@ async fn create_list(
 async fn get_list(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<ListResponse>, ApiError> {
     require_scopes(&auth, &["lists:read"])?;
 
-    let row = sqlx::query_as!(
-        ListRow,
+    let row = sqlx::query_as::<_, ListRow>(
         r#"SELECT l.id, l.name, l.description, l.opt_in_mode,
-                  COUNT(ls.contact_id)::bigint AS "subscriber_count!",
+                  COUNT(ls.contact_id)::bigint AS subscriber_count,
                   l.created_at, l.updated_at
            FROM lists l
            LEFT JOIN list_subscribers ls ON ls.list_id = l.id
            WHERE l.id = $1 AND l.tenant_id = $2
            GROUP BY l.id"#,
-        id,
-        auth.tenant_id,
     )
-    .fetch_optional(&*state.db)
+    .bind(&id)
+    .bind(&auth.tenant_id)
+    .fetch_optional(&state.db)
     .await?
-    .ok_or(ApiError::NotFound)?;
+    .ok_or(ApiError::NotFound("list not found".into()))?;
 
     Ok(Json(ListResponse {
         id: row.id,
@@ -250,29 +246,29 @@ async fn get_list(
 async fn update_list(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(body): Json<UpdateListRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["lists:write"])?;
 
-    let result = sqlx::query!(
+    let result = sqlx::query(
         "UPDATE lists SET
             name = COALESCE($3, name),
             description = COALESCE($4, description),
             opt_in_mode = COALESCE($5, opt_in_mode),
             updated_at = NOW()
          WHERE id = $1 AND tenant_id = $2",
-        id,
-        auth.tenant_id,
-        body.name,
-        body.description,
-        body.opt_in_mode,
     )
-    .execute(&*state.db)
+    .bind(&id)
+    .bind(&auth.tenant_id)
+    .bind(&body.name)
+    .bind(&body.description)
+    .bind(&body.opt_in_mode)
+    .execute(&state.db)
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound);
+        return Err(ApiError::NotFound("list not found".into()));
     }
 
     Ok(Json(serde_json::json!({ "updated": true })))
@@ -281,20 +277,20 @@ async fn update_list(
 async fn delete_list(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["lists:write"])?;
 
-    let result = sqlx::query!(
+    let result = sqlx::query(
         "DELETE FROM lists WHERE id = $1 AND tenant_id = $2",
-        id,
-        auth.tenant_id,
     )
-    .execute(&*state.db)
+    .bind(&id)
+    .bind(&auth.tenant_id)
+    .execute(&state.db)
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound);
+        return Err(ApiError::NotFound("list not found".into()));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -303,7 +299,7 @@ async fn delete_list(
 async fn list_subscribers(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(list_id): Path<Uuid>,
+    Path(list_id): Path<String>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["lists:read"])?;
@@ -311,39 +307,47 @@ async fn list_subscribers(
     let offset = q.offset.max(0);
 
     // Verify list belongs to tenant
-    let exists = sqlx::query_scalar!(
+    let exists: Option<bool> = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM lists WHERE id = $1 AND tenant_id = $2)",
-        list_id,
-        auth.tenant_id,
     )
-    .fetch_one(&*state.db)
-    .await?
-    .unwrap_or(false);
+    .bind(&list_id)
+    .bind(&auth.tenant_id)
+    .fetch_one(&state.db)
+    .await?;
 
-    if !exists {
-        return Err(ApiError::NotFound);
+    if !exists.unwrap_or(false) {
+        return Err(ApiError::NotFound("list not found".into()));
     }
 
-    let rows = sqlx::query!(
-        r#"SELECT c.id, c.email, c.name, ls.status AS "status!",
-                  ls.created_at AS "subscribed_at!"
+    #[derive(sqlx::FromRow)]
+    struct SubscriberRow {
+        id: String,
+        email: String,
+        name: Option<String>,
+        status: String,
+        subscribed_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let rows = sqlx::query_as::<_, SubscriberRow>(
+        r#"SELECT c.id, c.email, c.name, ls.status,
+                  ls.created_at AS subscribed_at
            FROM list_subscribers ls
            JOIN contacts c ON c.id = ls.contact_id
            WHERE ls.list_id = $1
            ORDER BY ls.created_at DESC
            LIMIT $2 OFFSET $3"#,
-        list_id,
-        limit,
-        offset,
     )
-    .fetch_all(&*state.db)
+    .bind(&list_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.db)
     .await?;
 
-    let total = sqlx::query_scalar!(
+    let total: i64 = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT COUNT(*)::bigint FROM list_subscribers WHERE list_id = $1",
-        list_id,
     )
-    .fetch_one(&*state.db)
+    .bind(&list_id)
+    .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
 
@@ -369,35 +373,34 @@ async fn list_subscribers(
 async fn add_subscribers(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(list_id): Path<Uuid>,
+    Path(list_id): Path<String>,
     Json(body): Json<AddSubscribersRequest>,
 ) -> Result<Json<BulkResult>, ApiError> {
     require_scopes(&auth, &["lists:write"])?;
 
     // Verify list belongs to tenant
-    let exists = sqlx::query_scalar!(
+    let exists: Option<bool> = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM lists WHERE id = $1 AND tenant_id = $2)",
-        list_id,
-        auth.tenant_id,
     )
-    .fetch_one(&*state.db)
-    .await?
-    .unwrap_or(false);
+    .bind(&list_id)
+    .bind(&auth.tenant_id)
+    .fetch_one(&state.db)
+    .await?;
 
-    if !exists {
-        return Err(ApiError::NotFound);
+    if !exists.unwrap_or(false) {
+        return Err(ApiError::NotFound("list not found".into()));
     }
 
     let mut affected = 0i64;
     for contact_id in &body.contact_ids {
-        let result = sqlx::query!(
+        let result = sqlx::query(
             "INSERT INTO list_subscribers (list_id, contact_id, status, created_at)
              VALUES ($1, $2, 'active', NOW())
              ON CONFLICT (list_id, contact_id) DO NOTHING",
-            list_id,
-            contact_id,
         )
-        .execute(&*state.db)
+        .bind(&list_id)
+        .bind(contact_id.to_string())
+        .execute(&state.db)
         .await?;
         affected += result.rows_affected() as i64;
     }
@@ -408,17 +411,18 @@ async fn add_subscribers(
 async fn remove_subscribers(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(list_id): Path<Uuid>,
+    Path(list_id): Path<String>,
     Json(body): Json<RemoveSubscribersRequest>,
 ) -> Result<Json<BulkResult>, ApiError> {
     require_scopes(&auth, &["lists:write"])?;
 
-    let affected = sqlx::query!(
+    let contact_ids: Vec<String> = body.contact_ids.iter().map(|id| id.to_string()).collect();
+    let affected = sqlx::query(
         "DELETE FROM list_subscribers WHERE list_id = $1 AND contact_id = ANY($2)",
-        list_id,
-        &body.contact_ids,
     )
-    .execute(&*state.db)
+    .bind(&list_id)
+    .bind(&contact_ids)
+    .execute(&state.db)
     .await?
     .rows_affected() as i64;
 

@@ -10,13 +10,14 @@
 pub mod click;
 pub mod health;
 pub mod pixel;
+pub mod sse;
 pub mod unsubscribe;
 
 use std::net::SocketAddr;
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::Response,
@@ -64,6 +65,8 @@ pub fn build_router(state: AppState) -> Router {
         // Preferences center
         .route(&format!("{prefs_path}/:token"), get(unsubscribe::handle_prefs_get))
         .route(&format!("{prefs_path}/:token"), post(unsubscribe::handle_prefs_post))
+        // Real-time event streaming (SSE)
+        .route("/v1/stream", get(sse::handle_stream))
         // Health checks
         .route("/health", get(health::handle_health))
         .route("/ready", get(health::handle_ready))
@@ -75,7 +78,8 @@ pub fn build_router(state: AppState) -> Router {
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
-        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)));
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
+        .layer(DefaultBodyLimit::max(64 * 1024)); // 64 KB — tracking payloads are tiny
 
     // Rate-limit middleware (Redis sliding window) — wraps entire router
     if cfg.rate_limit.enabled {

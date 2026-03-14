@@ -210,8 +210,7 @@ export class MailServerClient {
         logger.info('Connecting to mail server via gRPC...');
         
         const grpcObj = getGrpcObject();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const mailProto = (grpcObj as any).apexmail;
+        const mailProto = (grpcObj as Record<string, Record<string, unknown>>).apexmail;
         if (!mailProto) {
             throw new Error('Failed to load apexmail gRPC package from proto definition');
         }
@@ -233,7 +232,11 @@ export class MailServerClient {
         // Wait for the outbound channel to be ready
         await new Promise<void>((resolve, reject) => {
             const deadline = new Date(Date.now() + this.config.timeout);
-            this.outboundClient!.waitForReady(deadline, (err: Error | undefined) => {
+            if (!this.outboundClient) {
+                reject(new Error('outboundClient not initialized'));
+                return;
+            }
+            this.outboundClient.waitForReady(deadline, (err: Error | undefined) => {
                 if (err) reject(new Error(`gRPC connect timeout: ${err.message}`));
                 else resolve();
             });

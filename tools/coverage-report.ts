@@ -150,7 +150,7 @@ function parseCoverage(filePath: string): PackageCoverage | null {
           functions: totalFunctions > 0 ? (coveredFunctions / totalFunctions) * 100 : 0,
           branches: totalBranches > 0 ? (coveredBranches / totalBranches) * 100 : 0,
         },
-        files: Object.keys(data).length,
+        files: Object.keys(data).filter(k => k !== 'total').length,
         uncoveredFiles,
       };
     }
@@ -305,7 +305,7 @@ async function main() {
   if (coverageFiles.length === 0) {
     console.log(`${colors.yellow}No coverage reports found.${colors.reset}`);
     console.log('Run "pnpm test:coverage" first to generate coverage data.\n');
-    process.exit(0);
+    process.exit(1);
   }
 
   console.log(`Found ${coverageFiles.length} coverage reports.\n`);

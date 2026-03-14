@@ -1,0 +1,35 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.prometheus.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "apexmail.fullname" . }}-api-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "api-server" "context" .) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "api-server" "context" .) | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.prometheus.serviceMonitor.interval }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "apexmail.fullname" . }}-tracking-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "tracking-service" "context" .) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "tracking-service" "context" .) | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.prometheus.serviceMonitor.interval }}
+{{- end }}

@@ -1,7 +1,7 @@
 //! HTTP routes for the HA service — 40+ endpoints under /api/v1.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{delete, get, post, put},
@@ -9,6 +9,8 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
 use crate::backup::BackupService;
@@ -20,6 +22,16 @@ use crate::health_check::HealthCheckService;
 use crate::multi_region::MultiRegionService;
 use crate::replication::ReplicationService;
 use crate::types::*;
+
+// ── Error helper ───────────────────────────────────────────
+
+/// Log the error and return a 500 status code.
+/// This ensures HA failures are visible in logs during split-brain, failover,
+/// or replication issues — previously all error context was silently discarded.
+fn internal_err(e: impl std::fmt::Display) -> StatusCode {
+    tracing::error!(error = %e, "HA endpoint failed");
+    StatusCode::INTERNAL_SERVER_ERROR
+}
 
 // ── Shared App State ───────────────────────────────────────
 
@@ -117,6 +129,8 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/chaos/experiments/:id", get(chaos_get))
         .route("/api/v1/chaos/experiments/:id", delete(chaos_delete))
         .route("/api/v1/chaos/experiments/:id/abort", post(chaos_abort))
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
 }
 
@@ -142,7 +156,7 @@ async fn cluster_status(
     check_api_key(&headers, &state.config)?;
     state.health.get_cluster_status().await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 // ── Failover Handlers ──────────────────────────────────────
@@ -172,7 +186,7 @@ async fn failover_initiate(
         body.reason,
     ).await
         .map(|e| (StatusCode::OK, Json(e)))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn failover_failback(
@@ -182,7 +196,7 @@ async fn failover_failback(
     check_api_key(&headers, &state.config)?;
     state.failover.initiate_failback().await
         .map(|e| Json(e))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -209,7 +223,7 @@ async fn failover_history(
     check_api_key(&headers, &state.config)?;
     state.failover.get_history(q.limit).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn split_brain_check(
@@ -219,7 +233,7 @@ async fn split_brain_check(
     check_api_key(&headers, &state.config)?;
     state.failover.detect_split_brain().await
         .map(|detected| Json(serde_json::json!({ "split_brain": detected })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -235,7 +249,7 @@ async fn split_brain_resolve(
     check_api_key(&headers, &state.config)?;
     state.failover.resolve_split_brain(&body.winner_node).await
         .map(|_| Json(serde_json::json!({ "resolved": true })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 // ── Backup Handlers ────────────────────────────────────────
@@ -255,7 +269,7 @@ async fn backup_create(
     let bt = body.backup_type.as_deref().map(BackupType::parse).unwrap_or(BackupType::Full);
     state.backup.create_backup(bt, body.tables).await
         .map(|b| (StatusCode::CREATED, Json(b)))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -274,7 +288,7 @@ async fn backup_list(
     check_api_key(&headers, &state.config)?;
     state.backup.list_backups(q.backup_type.as_deref(), q.status.as_deref(), q.limit).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn backup_get(
@@ -284,7 +298,7 @@ async fn backup_get(
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
     state.backup.get_backup(id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(internal_err)?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -297,7 +311,7 @@ async fn backup_delete(
     check_api_key(&headers, &state.config)?;
     state.backup.delete_backup(id).await
         .map(|deleted| Json(serde_json::json!({ "deleted": deleted })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn backup_restore(
@@ -308,7 +322,7 @@ async fn backup_restore(
     check_api_key(&headers, &state.config)?;
     state.backup.restore(body).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -324,7 +338,7 @@ async fn backup_pitr(
     check_api_key(&headers, &state.config)?;
     state.backup.pitr(body.target_time).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn backup_schedule(
@@ -342,7 +356,7 @@ async fn backup_retention_cleanup(
     check_api_key(&headers, &state.config)?;
     state.backup.enforce_retention().await
         .map(|deleted| Json(serde_json::json!({ "deleted": deleted })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 // ── Replication Handlers ───────────────────────────────────
@@ -354,7 +368,7 @@ async fn replication_status(
     check_api_key(&headers, &state.config)?;
     state.replication.get_stats().await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn replication_replicas(
@@ -364,7 +378,7 @@ async fn replication_replicas(
     check_api_key(&headers, &state.config)?;
     state.replication.get_replicas().await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn replication_slots(
@@ -374,7 +388,7 @@ async fn replication_slots(
     check_api_key(&headers, &state.config)?;
     state.replication.get_slots().await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -392,7 +406,7 @@ async fn replication_create_slot(
     let st = body.slot_type.as_deref().unwrap_or("physical");
     state.replication.create_slot(&body.name, st).await
         .map(|_| (StatusCode::CREATED, Json(serde_json::json!({ "created": true, "name": body.name }))))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn replication_delete_slot(
@@ -403,7 +417,7 @@ async fn replication_delete_slot(
     check_api_key(&headers, &state.config)?;
     state.replication.drop_slot(&name).await
         .map(|_| Json(serde_json::json!({ "dropped": true })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn replication_promote(
@@ -413,7 +427,7 @@ async fn replication_promote(
     check_api_key(&headers, &state.config)?;
     state.replication.promote_standby().await
         .map(|promoted| Json(serde_json::json!({ "promoted": promoted })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -429,7 +443,7 @@ async fn replication_sync_mode(
     check_api_key(&headers, &state.config)?;
     state.replication.set_sync_mode(body.synchronous).await
         .map(|_| Json(serde_json::json!({ "synchronous": body.synchronous })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -447,7 +461,7 @@ async fn replication_lag_history(
     check_api_key(&headers, &state.config)?;
     state.replication.get_lag_history(q.minutes).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 // ── Multi-Region Handlers ──────────────────────────────────
@@ -462,7 +476,7 @@ async fn regions_list(
     let offset = q.offset.max(0);
     state.multi_region.list_regions(limit, offset).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -482,7 +496,7 @@ async fn regions_register(
     let role = RegionRole::parse(&body.role);
     state.multi_region.register_region(&body.name, &body.endpoint, &role, body.availability_zone.as_deref()).await
         .map(|r| (StatusCode::CREATED, Json(r)))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn regions_get(
@@ -492,7 +506,7 @@ async fn regions_get(
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
     state.multi_region.get_region(&name).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(internal_err)?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -505,7 +519,7 @@ async fn regions_remove(
     check_api_key(&headers, &state.config)?;
     state.multi_region.remove_region(&name).await
         .map(|removed| Json(serde_json::json!({ "removed": removed })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -524,7 +538,7 @@ async fn regions_update_health(
     check_api_key(&headers, &state.config)?;
     state.multi_region.update_health(&name, body.health_score, body.latency_ms, body.replication_lag_ms).await
         .map(|_| Json(serde_json::json!({ "updated": true })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -541,7 +555,7 @@ async fn regions_set_weight(
     check_api_key(&headers, &state.config)?;
     state.multi_region.set_weight(&name, body.weight).await
         .map(|_| Json(serde_json::json!({ "updated": true })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -559,7 +573,7 @@ async fn regions_fence(
     let reason = body.reason.as_deref().unwrap_or("Manual fence");
     state.multi_region.fence_region(&name, reason).await
         .map(|_| Json(serde_json::json!({ "fenced": true })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn regions_unfence(
@@ -570,7 +584,7 @@ async fn regions_unfence(
     check_api_key(&headers, &state.config)?;
     state.multi_region.unfence_region(&name).await
         .map(|_| Json(serde_json::json!({ "unfenced": true })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -586,7 +600,7 @@ async fn regions_route(
     check_api_key(&headers, &state.config)?;
     state.multi_region.route_request(q.source_region.as_deref()).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn regions_traffic(
@@ -596,7 +610,7 @@ async fn regions_traffic(
     check_api_key(&headers, &state.config)?;
     state.multi_region.get_traffic_distribution().await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn geo_rules_list(
@@ -609,7 +623,7 @@ async fn geo_rules_list(
     let offset = q.offset.max(0);
     state.multi_region.list_geo_rules(limit, offset).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -628,7 +642,7 @@ async fn geo_rules_add(
     check_api_key(&headers, &state.config)?;
     state.multi_region.add_geo_rule(&body.name, &body.source_region, &body.target_region, body.priority.unwrap_or(0)).await
         .map(|r| (StatusCode::CREATED, Json(r)))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn geo_rules_delete(
@@ -639,7 +653,7 @@ async fn geo_rules_delete(
     check_api_key(&headers, &state.config)?;
     state.multi_region.delete_geo_rule(id).await
         .map(|deleted| Json(serde_json::json!({ "deleted": deleted })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 // ── Circuit Breaker Handlers ───────────────────────────────
@@ -672,7 +686,7 @@ async fn circuits_reset(
     check_api_key(&headers, &state.config)?;
     state.circuit_breaker.reset(&name).await
         .map(|_| Json(serde_json::json!({ "reset": true })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn circuits_configure(
@@ -683,7 +697,7 @@ async fn circuits_configure(
     check_api_key(&headers, &state.config)?;
     state.circuit_breaker.configure(body).await
         .map(|_| (StatusCode::CREATED, Json(serde_json::json!({ "configured": true }))))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn circuits_remove(
@@ -694,7 +708,7 @@ async fn circuits_remove(
     check_api_key(&headers, &state.config)?;
     state.circuit_breaker.remove(&name).await
         .map(|removed| Json(serde_json::json!({ "removed": removed })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 // ── Chaos Engineering Handlers ─────────────────────────────
@@ -714,7 +728,7 @@ async fn chaos_list(
     check_api_key(&headers, &state.config)?;
     state.chaos.list_experiments(q.status.as_deref(), q.limit).await
         .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 #[derive(Deserialize)]
@@ -732,7 +746,7 @@ async fn chaos_start(
     check_api_key(&headers, &state.config)?;
     state.chaos.start_experiment(&body.name, body.config).await
         .map(|e| (StatusCode::CREATED, Json(e)))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn chaos_get(
@@ -742,7 +756,7 @@ async fn chaos_get(
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
     state.chaos.get_experiment(id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(internal_err)?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -755,7 +769,7 @@ async fn chaos_delete(
     check_api_key(&headers, &state.config)?;
     state.chaos.delete_experiment(id).await
         .map(|deleted| Json(serde_json::json!({ "deleted": deleted })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 async fn chaos_abort(
@@ -766,7 +780,7 @@ async fn chaos_abort(
     check_api_key(&headers, &state.config)?;
     state.chaos.abort_experiment(id).await
         .map(|_| Json(serde_json::json!({ "aborted": true })))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(internal_err)
 }
 
 // ── Tests ──────────────────────────────────────────────────
@@ -798,7 +812,8 @@ mod tests {
         Arc::new(AppState {
             health: HealthCheckService::new(pool.clone(), Arc::clone(&config_for_services)),
             failover: FailoverService::new(pool.clone(), Arc::clone(&config_for_services)),
-            backup: BackupService::new(pool.clone(), Arc::clone(&config_for_services)),
+            backup: BackupService::new(pool.clone(), Arc::clone(&config_for_services))
+                .expect("test config should have valid encryption key"),
             replication: ReplicationService::new(pool.clone(), Arc::clone(&config_for_services)),
             multi_region: MultiRegionService::new(pool.clone(), Arc::clone(&config_for_services)),
             circuit_breaker: CircuitBreakerService::new(Arc::clone(&config_for_services)),

@@ -164,16 +164,18 @@ impl MultiRegionService {
             }
         }
 
+        // Safety: `active` is guaranteed non-empty — we returned early above.
+        // We still propagate errors defensively rather than panicking.
         let selected = match &self.config.multi_region.routing_mode {
             RoutingMode::ActivePassive => {
                 active.iter().find(|r| r.is_primary)
                     .or(active.first())
-                    .unwrap()
+                    .ok_or_else(|| "no primary or fallback region found".to_string())?
             }
             RoutingMode::RoundRobin => {
-                // Use a simple time-based round-robin
                 let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % active.len();
-                active[idx]
+                active.get(idx)
+                    .ok_or_else(|| "round-robin index out of bounds".to_string())?
             }
             RoutingMode::LatencyBased => {
                 active.iter()
@@ -182,22 +184,23 @@ impl MultiRegionService {
                             .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
-                    .unwrap()
+                    .ok_or_else(|| "no region with latency data available".to_string())?
             }
             RoutingMode::Weighted => {
-                // Weighted random selection
                 let total_weight: i32 = active.iter().map(|r| r.weight.max(1)).sum();
                 let pick = (Utc::now().timestamp_millis() as i32).rem_euclid(total_weight);
                 let mut cumulative = 0;
-                let mut chosen = active[0];
+                let mut chosen: Option<&&RegionInfo> = None;
                 for r in &active {
                     cumulative += r.weight.max(1);
                     if pick < cumulative {
-                        chosen = r;
+                        chosen = Some(r);
                         break;
                     }
                 }
                 chosen
+                    .or(active.first().as_ref())
+                    .ok_or_else(|| "weighted selection failed".to_string())?
             }
             RoutingMode::GeoProximity => {
                 // Fall back to latency-based when geo info not directly applicable
@@ -207,14 +210,13 @@ impl MultiRegionService {
                             .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
-                    .unwrap()
+                    .ok_or_else(|| "no region with latency data available".to_string())?
             }
             RoutingMode::ActiveActive => {
-                // Distribute across all active by health score
                 active.iter()
                     .max_by(|a, b| a.health_score.partial_cmp(&b.health_score)
                         .unwrap_or(std::cmp::Ordering::Equal))
-                    .unwrap()
+                    .ok_or_else(|| "no region with health score available".to_string())?
             }
         };
 

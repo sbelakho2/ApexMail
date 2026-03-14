@@ -120,14 +120,14 @@ async fn list_users(
     let total = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM users WHERE tenant_id = $1",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
     let rows = sqlx::query_as::<_, UserScimRow>(
         "SELECT id, email, name, status FROM users WHERE tenant_id = $1 ORDER BY email LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(count)
     .bind(offset)
     .fetch_all(&state.db)
@@ -176,7 +176,7 @@ async fn create_user(
          VALUES ($1,$2,$3,$4,$5,'member','active',$6,$6)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&email)
     .bind(&name)
     .bind(SCIM_DISABLED_HASH)
@@ -208,7 +208,7 @@ async fn get_user(
         "SELECT id, email, name, status FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
@@ -242,7 +242,7 @@ async fn update_user(
     .bind(&name)
     .bind(status)
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -271,7 +271,7 @@ async fn delete_user(
         "UPDATE users SET status = 'deactivated', updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -295,7 +295,7 @@ async fn list_groups(
     let total = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1",
     )
-    .bind(auth.tenant_id)  // Fix #50: Use UUID directly
+    .bind(&auth.tenant_id)  // Fix #50: Use UUID directly
     .fetch_one(&state.db)
     .await?;
 
@@ -303,14 +303,14 @@ async fn list_groups(
         "SELECT id, scim_id, display_name, created_at FROM scim_groups 
          WHERE tenant_id = $1 ORDER BY display_name LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)  // Fix #50: Use UUID directly
+    .bind(&auth.tenant_id)  // Fix #50: Use UUID directly
     .bind(count)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
     // Fix #48: Batch fetch all group members in a single query to avoid N+1.
-    let group_ids: Vec<Uuid> = group_rows.iter().map(|r| r.id).collect();
+    let group_ids: Vec<String> = group_rows.iter().map(|r| r.id.clone()).collect();
     let all_members = if group_ids.is_empty() {
         Vec::new()
     } else {
@@ -326,11 +326,11 @@ async fn list_groups(
     };
 
     // Group members by group_id for efficient lookup.
-    let mut members_by_group: std::collections::HashMap<Uuid, Vec<ScimMember>> = 
+    let mut members_by_group: std::collections::HashMap<String, Vec<ScimMember>> = 
         std::collections::HashMap::new();
     for m in all_members {
         members_by_group
-            .entry(m.group_id)
+            .entry(m.group_id.clone())
             .or_default()
             .push(ScimMember {
                 value: m.user_id.to_string(),
@@ -469,13 +469,13 @@ async fn update_group(
         "UPDATE scim_groups SET display_name = $1, updated_at = NOW() WHERE id = $2",
     )
     .bind(&body.display_name)
-    .bind(row.id)
+    .bind(&row.id)
     .execute(&state.db)
     .await?;
 
     // Replace members entirely
     sqlx::query("DELETE FROM scim_group_members WHERE group_id = $1")
-        .bind(row.id)
+        .bind(&row.id)
         .execute(&state.db)
         .await?;
 
@@ -486,7 +486,7 @@ async fn update_group(
                 "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
                  VALUES ($1, $2, $3, $4, $5)",
             )
-            .bind(row.id)
+            .bind(&row.id)
             .bind(user_id)
             .bind(auth.tenant_id.to_string())
             .bind(&member.display)
@@ -546,7 +546,7 @@ async fn patch_group(
                         display_name = val;
                         sqlx::query("UPDATE scim_groups SET display_name = $1, updated_at = NOW() WHERE id = $2")
                             .bind(&display_name)
-                            .bind(row.id)
+                            .bind(&row.id)
                             .execute(&state.db)
                             .await?;
                     }
@@ -563,7 +563,7 @@ async fn patch_group(
                                         "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
                                          VALUES ($1, $2, $3, $4, $5) ON CONFLICT (group_id, user_id) DO NOTHING",
                                     )
-                                    .bind(row.id)
+                                    .bind(&row.id)
                                     .bind(user_id)
                                     .bind(auth.tenant_id.to_string())
                                     .bind(&display)
@@ -583,7 +583,7 @@ async fn patch_group(
                         let user_id_str = path.trim_start_matches("members[value eq \"").trim_end_matches("\"]");
                         if let Ok(user_id) = Uuid::parse_str(user_id_str) {
                             sqlx::query("DELETE FROM scim_group_members WHERE group_id = $1 AND user_id = $2")
-                                .bind(row.id)
+                                .bind(&row.id)
                                 .bind(user_id)
                                 .execute(&state.db)
                                 .await?;
@@ -602,7 +602,7 @@ async fn patch_group(
          LEFT JOIN users u ON u.id = m.user_id
          WHERE m.group_id = $1",
     )
-    .bind(row.id)
+    .bind(&row.id)
     .fetch_all(&state.db)
     .await?;
 
@@ -642,7 +642,7 @@ async fn delete_group(
 
 #[derive(sqlx::FromRow)]
 struct UserScimRow {
-    id: Uuid,
+    id: String,
     email: String,
     name: Option<String>,
     status: String,
@@ -650,7 +650,7 @@ struct UserScimRow {
 
 #[derive(sqlx::FromRow)]
 struct GroupScimRow {
-    id: Uuid,
+    id: String,
     scim_id: String,
     display_name: String,
     #[allow(unused)]
@@ -659,7 +659,7 @@ struct GroupScimRow {
 
 #[derive(sqlx::FromRow)]
 struct GroupMemberRow {
-    user_id: Uuid,
+    user_id: String,
     display: Option<String>,
     email: Option<String>,
 }
@@ -667,8 +667,8 @@ struct GroupMemberRow {
 /// Fix #48: Row type for batch member fetch including group_id.
 #[derive(sqlx::FromRow)]
 struct GroupMemberWithGroupRow {
-    group_id: Uuid,
-    user_id: Uuid,
+    group_id: String,
+    user_id: String,
     display: Option<String>,
     email: Option<String>,
 }
@@ -683,7 +683,7 @@ mod tests {
     fn test_scim_user_serialisation() {
         let user = ScimUser {
             schemas: vec![SCIM_USER_SCHEMA.into()],
-            id: Uuid::nil().to_string(),
+            id: String::nil().to_string(),
             user_name: "alice@example.com".into(),
             name: Some(ScimName { given_name: Some("Alice".into()), family_name: None }),
             emails: vec![ScimEmail { value: "alice@example.com".into(), primary: true }],

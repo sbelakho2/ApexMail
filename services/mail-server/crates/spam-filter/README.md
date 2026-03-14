@@ -1,0 +1,22 @@
+# spam-filter
+
+Multi-layer spam & phishing detection: Bayesian classifier, URL reputation, header analysis, content scoring.
+
+## Overview
+
+The `spam-filter` crate provides ApexMail's multi-layer spam and phishing detection pipeline. It combines a Bayesian classifier, URL reputation checks, header anomaly analysis, and content-based scoring to assign threat levels to incoming messages and protect recipients from unwanted or dangerous email.
+
+## Usage
+
+This crate is an internal workspace member of the ApexMail mail-server. Add it as a dependency:
+
+```toml
+spam-filter = { path = "../spam-filter" }
+```
+
+## Development
+
+```sh
+cargo test -p spam-filter
+cargo clippy -p spam-filter
+```

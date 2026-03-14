@@ -1,0 +1,151 @@
+{# ── Testimonials (CSS scroll-snap, zero JS) ─────────────────── #}
+{# All testimonials visible in horizontal scroll container.        #}
+{# Uses CSS scroll-snap for smooth swiping on mobile/desktop.     #}
+
+<section class="py-20 lg:py-32 relative overflow-hidden bg-surface-50" role="region" aria-label="Customer testimonials">
+  <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="text-center mb-12">
+      <h2 class="section-title mb-4">
+        <span class="text-surface-900">Trusted by</span>
+        <span class="text-brand-500"> Developers Who Ship</span>
+      </h2>
+      <p class="text-surface-600 text-[17px] max-w-2xl mx-auto leading-relaxed">
+        Don&apos;t take our word for it. Here&apos;s what our customers have to say.
+      </p>
+    </div>
+
+    <div class="testimonials-track pb-4">
+
+      {# ── Testimonial 1: FastMail Corp ──────────────── #}
+      <div class="testimonial-card p-8 lg:p-12 bg-white rounded-lg border border-surface-200">
+        <div class="flex flex-col lg:flex-row gap-8 lg:gap-16">
+          <div class="flex-1">
+            <svg class="w-8 h-8 text-surface-200 mb-6" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+              <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
+              <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>
+            </svg>
+            <blockquote class="text-xl lg:text-2xl text-surface-900 font-medium leading-relaxed mb-8">
+              &ldquo;Switched from SendGrid and cut our email costs by 73%. Deliverability actually improved. The API is exactly what you'd expect — clean, fast, well-documented.&rdquo;
+            </blockquote>
+            <div class="flex items-center gap-4">
+              <div class="w-12 h-12 rounded-full bg-brand-100 flex items-center justify-center border border-surface-200">
+                <span class="text-brand-700 font-bold">SM</span>
+              </div>
+              <div>
+                <div class="font-semibold text-surface-900">Sarah Martinez</div>
+                <div class="text-sm text-surface-500">CTO, FastMail Corp</div>
+              </div>
+            </div>
+          </div>
+          <div class="lg:w-64 flex-shrink-0">
+            <div class="bg-surface-50 rounded-lg p-6 border border-surface-200">
+              <div class="text-[14px] font-semibold text-surface-500 mb-4">Email Infrastructure Cost</div>
+              <div class="space-y-4">
+                <div>
+                  <div class="text-[14px] text-surface-400 mb-1 font-medium">Before</div>
+                  <div class="text-lg font-mono text-surface-700 font-semibold tabular-nums line-through decoration-surface-400/50">$4,200/mo</div>
+                </div>
+                <div>
+                  <div class="text-[14px] text-surface-400 mb-1 font-medium">After</div>
+                  <div class="text-2xl font-mono text-brand-500 font-bold tabular-nums">$1,134/mo</div>
+                </div>
+              </div>
+              <div class="mt-6 pt-4 border-t border-surface-200 text-[14px] text-surface-500 font-medium">Industry: SaaS</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# ── Testimonial 2: MedSecure ──────────────────── #}
+      <div class="testimonial-card p-8 lg:p-12 bg-white rounded-lg border border-surface-200">
+        <div class="flex flex-col lg:flex-row gap-8 lg:gap-16">
+          <div class="flex-1">
+            <svg class="w-8 h-8 text-surface-200 mb-6" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+              <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
+              <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>
+            </svg>
+            <blockquote class="text-xl lg:text-2xl text-surface-900 font-medium leading-relaxed mb-8">
+              &ldquo;HIPAA compliance out of the box was the deciding factor. We had our BAA signed in 24 hours and were sending patient notifications the same week.&rdquo;
+            </blockquote>
+            <div class="flex items-center gap-4">
+              <div class="w-12 h-12 rounded-full bg-emerald-100 flex items-center justify-center border border-surface-200">
+                <span class="text-emerald-700 font-bold">JC</span>
+              </div>
+              <div>
+                <div class="font-semibold text-surface-900">James Chen</div>
+                <div class="text-sm text-surface-500">VP Engineering, MedSecure</div>
+              </div>
+            </div>
+          </div>
+          <div class="lg:w-64 flex-shrink-0">
+            <div class="bg-surface-50 rounded-lg p-6 border border-surface-200">
+              <div class="text-[14px] font-semibold text-surface-500 mb-4">Integration Time</div>
+              <div class="space-y-4">
+                <div>
+                  <div class="text-[14px] text-surface-400 mb-1 font-medium">Before</div>
+                  <div class="text-lg font-mono text-surface-700 font-semibold tabular-nums line-through decoration-surface-400/50">6 weeks</div>
+                </div>
+                <div>
+                  <div class="text-[14px] text-surface-400 mb-1 font-medium">After</div>
+                  <div class="text-2xl font-mono text-brand-500 font-bold tabular-nums">3 days</div>
+                </div>
+              </div>
+              <div class="mt-6 pt-4 border-t border-surface-200 text-[14px] text-surface-500 font-medium">Industry: Healthcare</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# ── Testimonial 3: ShipFast ────────────────────── #}
+      <div class="testimonial-card p-8 lg:p-12 bg-white rounded-lg border border-surface-200">
+        <div class="flex flex-col lg:flex-row gap-8 lg:gap-16">
+          <div class="flex-1">
+            <svg class="w-8 h-8 text-surface-200 mb-6" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+              <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
+              <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>
+            </svg>
+            <blockquote class="text-xl lg:text-2xl text-surface-900 font-medium leading-relaxed mb-8">
+              &ldquo;The render history feature alone is worth the switch. Being able to see exactly how every email looked in every client saves us hours of QA every sprint.&rdquo;
+            </blockquote>
+            <div class="flex items-center gap-4">
+              <div class="w-12 h-12 rounded-full bg-amber-100 flex items-center justify-center border border-surface-200">
+                <span class="text-amber-700 font-bold">AP</span>
+              </div>
+              <div>
+                <div class="font-semibold text-surface-900">Alex Park</div>
+                <div class="text-sm text-surface-500">Lead Developer, ShipFast</div>
+              </div>
+            </div>
+          </div>
+          <div class="lg:w-64 flex-shrink-0">
+            <div class="bg-surface-50 rounded-lg p-6 border border-surface-200">
+              <div class="text-[14px] font-semibold text-surface-500 mb-4">QA Time per Sprint</div>
+              <div class="space-y-4">
+                <div>
+                  <div class="text-[14px] text-surface-400 mb-1 font-medium">Before</div>
+                  <div class="text-lg font-mono text-surface-700 font-semibold tabular-nums line-through decoration-surface-400/50">16 hours</div>
+                </div>
+                <div>
+                  <div class="text-[14px] text-surface-400 mb-1 font-medium">After</div>
+                  <div class="text-2xl font-mono text-brand-500 font-bold tabular-nums">2 hours</div>
+                </div>
+              </div>
+              <div class="mt-6 pt-4 border-t border-surface-200 text-[14px] text-surface-500 font-medium">Industry: E-commerce</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="mt-8 text-center">
+      <p class="text-sm font-medium text-surface-500">Scroll to see more testimonials →</p>
+    </div>
+
+    <div class="mt-12 pt-12 border-t border-surface-200 text-center">
+      <p class="text-sm font-medium text-surface-600">
+        Customer stories shown above are from production teams across fintech, healthcare, SaaS, developer tools, and e-commerce.
+      </p>
+    </div>
+  </div>
+</section>

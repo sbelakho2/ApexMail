@@ -1,13 +1,18 @@
 //! HTTP routes for the AI embeddings service.
 
 use axum::{
-    extract::{Json, State},
-    http::StatusCode,
+    body::Body,
+    extract::{DefaultBodyLimit, Json, State},
+    http::{header::AUTHORIZATION, Request, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Router,
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::config::EmbeddingsConfig;
 use crate::embeddings::EmbeddingService;
@@ -17,6 +22,7 @@ pub struct AppState {
     pub embedding_service: EmbeddingService,
     pub vector_store: VectorStore,
     pub config: EmbeddingsConfig,
+    pub service_token: String,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -26,7 +32,38 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/search", post(search_handler))
         .route("/stats", get(stats_handler))
         .route("/health", get(health_handler))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5 MB — embedding batches / vectors
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
+}
+
+async fn require_service_token(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if req.uri().path() == "/health" {
+        return Ok(next.run(req).await);
+    }
+    if state.service_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let provided = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok().map(String::from))
+        .or_else(|| {
+            req.headers()
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
+        });
+    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 // ─── Request / Response types ──────────────────────────────────

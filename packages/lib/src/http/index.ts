@@ -156,6 +156,7 @@ export class HttpClient {
       const parsed = new URL(inputUrl);
       return `${parsed.origin}${parsed.pathname}`;
     } catch {
+      // Malformed URL; strip query params manually as fallback
       return inputUrl.split('?')[0] ?? inputUrl;
     }
   }

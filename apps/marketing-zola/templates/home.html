@@ -5,29 +5,23 @@
 {% include "partials/home/hero.html" %}
 {% include "partials/home/features.html" %}
 
-{# LiveAPIConsole island mount point #}
-<section class="py-24 bg-surface-900">
+{# API Console (static showcase) #}
+<section class="py-24 bg-gray-900">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div data-island="api-console" class="min-h-[24rem] bg-surface-800 rounded-xl"></div>
+    <div class="min-h-[24rem] bg-gray-800 rounded-xl">
+      {% include "partials/generated/api-console-island.html" %}
+    </div>
   </div>
 </section>
 
 {% include "partials/home/comparison.html" %}
 {% include "partials/home/security.html" %}
 
-{# PricingCalculator island mount point #}
-<section class="py-24">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div data-island="pricing-calculator" class="min-h-[20rem]"></div>
-  </div>
-</section>
+{# Pricing Calculator (static comparison table) #}
+{% include "partials/generated/pricing-calculator-island.html" %}
 
-{# Testimonials island mount point #}
-<section class="py-24 bg-surface-50">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div data-island="testimonials" class="min-h-[16rem]"></div>
-  </div>
-</section>
+{# Testimonials (CSS scroll-snap) #}
+{% include "partials/generated/testimonials-island.html" %}
 
 {% include "partials/home/cta.html" %}
 {% endblock content %}

@@ -1,7 +1,7 @@
 {# ── Header Partial ──────────────────────────────────────────── #}
-{# Converted from React Header.tsx to Tera template.           #}
-{# Interactive behavior (scroll-aware, mobile menu, dropdowns)  #}
-{# is handled by the header Preact island.                      #}
+{# Pure HTML + CSS header. Dropdowns use :focus-within, mobile   #}
+{# menu uses the #mobile-menu-state checkbox defined in base.html. #}
+{# Zero JavaScript required.                                      #}
 
 <header
   id="site-header"
@@ -107,16 +107,18 @@
         </a>
       </div>
 
-      {# ── Mobile Menu Button ──────────────────────── #}
-      <button
+      {# ── Mobile Menu Button (CSS checkbox hack) ───── #}
+      <label
+        for="mobile-menu-state"
         id="mobile-menu-toggle"
-        class="lg:hidden p-2 text-surface-600 hover:text-surface-900 rounded-lg hover:bg-surface-50 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center"
-        aria-label="Open menu"
-        aria-expanded="false"
+        class="lg:hidden p-2 text-surface-600 hover:text-surface-900 rounded-lg hover:bg-surface-50 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
+        aria-label="Toggle menu"
+        role="button"
+        tabindex="0"
       >
         <svg id="menu-icon-open" xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
         <svg id="menu-icon-close" xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
+      </label>
     </div>
   </nav>
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" id="top">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
@@ -49,6 +49,7 @@
 
   {# ── CSS ───────────────────────────────────────────── #}
   <link rel="stylesheet" href="/css/styles.css" />
+  <link rel="stylesheet" href="/css/no-js.css" />
 
   {# ── Organization JSON-LD ─────────────────────────── #}
   <script type="application/ld+json">
@@ -70,19 +71,12 @@
   {% block head %}{% endblock head %}
 </head>
 <body class="font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom flex flex-col">
-  {# ── No-JS Fallback ─────────────────────────────────── #}
-  <noscript>
-    <div style="background:#1e40af;color:#fff;text-align:center;padding:12px 16px;font-size:14px;font-family:sans-serif">
-      ApexMail requires JavaScript for interactive features.
-      <a href="https://docs.apexmail.ee" style="color:#bfdbfe;text-decoration:underline">Browse documentation</a> or
-      <a href="mailto:{{ config.extra.support_email }}" style="color:#bfdbfe;text-decoration:underline">contact us</a> to learn more.
-    </div>
-  </noscript>
+  {# ── Hidden state inputs for CSS-only interactivity ──── #}
+  <input type="checkbox" id="mobile-menu-state" class="sr-only" aria-hidden="true" />
+  <input type="checkbox" id="cookie-consent-state" class="sr-only" aria-hidden="true" />
 
-  {# ── Header (Preact island with static fallback) ────── #}
-  <div data-island="header">
-    {% include "partials/header.html" %}
-  </div>
+  {# ── Header (pure CSS interactivity) ─────────────────── #}
+  {% include "partials/header.html" %}
 
   {# ── Main Content ──────────────────────────────────── #}
   <main class="flex-1">
@@ -92,46 +86,23 @@
   {# ── Footer ────────────────────────────────────────── #}
   {% include "partials/footer.html" %}
 
-  {# ── Cookie Consent (Preact island) ─────────────────── #}
-  <div data-island="cookie-consent"></div>
+  {# ── Cookie Consent (CSS-only dismiss) ──────────────── #}
+  {% include "partials/generated/cookie-consent-island.html" %}
 
-  {# ── Back to Top (vanilla JS) ──────────────────────── #}
-  <button
+  {# ── Back to Top (pure CSS, smooth scroll via anchor) ── #}
+  <a
+    href="#top"
     id="back-to-top"
-    class="fixed bottom-6 right-6 z-50 hidden rounded-full bg-brand-600 p-3 text-white shadow-lg transition-opacity hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500"
+    class="fixed bottom-6 right-6 z-50 rounded-full bg-brand-600 p-3 text-white shadow-lg transition-opacity hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500"
     aria-label="Back to top"
   >
     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
       <path fill-rule="evenodd" d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z" clip-rule="evenodd" />
     </svg>
-  </button>
+  </a>
 
-  {# ── Island Hydration Scripts ──────────────────────── #}
-  <script type="module" src="/js/islands/hydrate.js"></script>
-  {% block islands %}{% endblock islands %}
-
-  {# ── Back to Top Script (15 lines) ────────────────── #}
-  <script>
-    (function(){
-      var btn = document.getElementById('back-to-top');
-      if (!btn) return;
-      var shown = false;
-      window.addEventListener('scroll', function() {
-        var shouldShow = window.scrollY > 400;
-        if (shouldShow !== shown) {
-          shown = shouldShow;
-          btn.classList.toggle('hidden', !shown);
-        }
-      }, { passive: true });
-      btn.addEventListener('click', function() {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      });
-    })();
-  </script>
-
-  {# ── Analytics (Plausible self-hosted) ────────────── #}
-  {% block analytics %}
-  <script defer data-domain="apexmail.ee" src="/js/plausible.js"></script>
-  {% endblock analytics %}
+  {# ── Analytics: server-side tracking pixel (no JS) ──── #}
+  <noscript><img src="https://plausible.apexmail.ee/api/event?name=pageview" alt="" width="1" height="1" style="position:absolute;left:-9999px" /></noscript>
+  <img src="https://plausible.apexmail.ee/api/event?name=pageview" alt="" width="1" height="1" referrerpolicy="no-referrer-when-downgrade" style="position:absolute;left:-9999px" />
 </body>
 </html>

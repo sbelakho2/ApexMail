@@ -2,6 +2,7 @@ pub mod config;
 pub mod types;
 pub mod sso;
 pub mod compliance;
+pub mod field_encryption;
 pub mod log_streaming;
 pub mod private_deploy;
 pub mod sub_accounts;

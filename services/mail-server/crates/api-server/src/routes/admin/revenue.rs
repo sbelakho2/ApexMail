@@ -122,7 +122,7 @@ async fn get_revenue(
     )
     .fetch_all(db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let total_mrr_by_plan: f64 = plan_rows
         .iter()
@@ -162,7 +162,7 @@ async fn get_revenue(
     )
     .fetch_all(db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let monthly_data: Vec<MonthlyData> = monthly_rows
         .into_iter()

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { withTransaction } from '@apexmail/db';
 import { randomUUID } from 'node:crypto';
 import type { BillingEnv, BillingContext } from '../app.js';
+import { logger } from '../lib/logger.js';
 
 export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
@@ -87,7 +88,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.db.query(query, params);
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'listTenants' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ tenants: result.value.rows, limit, offset });
@@ -150,7 +151,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'applyCredit' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value, 201);
@@ -261,7 +262,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     });
 
     if (!txResult.ok) {
-      console.error("Admin operation failed:", txResult.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(txResult.error), operation: 'subscriptionStatusOverride' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ success: true, message: 'Subscription status updated' });
@@ -287,7 +288,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.dunning.recordSuccessfulPayment(tenantId);
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'dunningReset' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     await ctx.db.query(
@@ -374,7 +375,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
     if (!result.ok) {
       // E-181: Log with context so operators can triage and retry
-      console.error('E-181: Invoice generation failed', {
+      logger.error('E-181: Invoice generation failed', {
         tenantId,
         periodStart: parsed.periodStart,
         periodEnd: parsed.periodEnd,
@@ -424,7 +425,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'revenueReport' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -451,7 +452,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     `);
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'mrrReport' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -497,7 +498,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     `);
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'churnReport' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -516,7 +517,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     `);
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'dunningReport' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -555,7 +556,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'costReport' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -628,7 +629,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.db.query(query, params);
 
     if (!result.ok) {
-      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Admin operation failed', { error: String(result.error), operation: 'export' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     if (format === 'json') {

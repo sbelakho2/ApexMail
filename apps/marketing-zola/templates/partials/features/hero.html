@@ -30,19 +30,23 @@
       </div>
 
       {# Stats Grid #}
-      {% set stats = [
-        {"value": "99.9%", "label": "Delivery Rate"},
-        {"value": "<1.2s", "label": "Avg. Delivery"},
-        {"value": "100%", "label": "GDPR Compliant"},
-        {"value": "0", "label": "Paid AI APIs"}
-      ] %}
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-8 pt-8 border-t border-surface-100">
-        {% for stat in stats %}
         <div class="animate-in text-center">
-          <div class="text-3xl lg:text-4xl font-bold text-surface-900 mb-2 tracking-tight">{{ stat.value }}</div>
-          <div class="text-sm text-surface-500 font-medium">{{ stat.label }}</div>
+          <div class="text-3xl lg:text-4xl font-bold text-surface-900 mb-2 tracking-tight">99.9%</div>
+          <div class="text-sm text-surface-500 font-medium">Delivery Rate</div>
         </div>
-        {% endfor %}
+        <div class="animate-in text-center">
+          <div class="text-3xl lg:text-4xl font-bold text-surface-900 mb-2 tracking-tight">&lt;1.2s</div>
+          <div class="text-sm text-surface-500 font-medium">Avg. Delivery</div>
+        </div>
+        <div class="animate-in text-center">
+          <div class="text-3xl lg:text-4xl font-bold text-surface-900 mb-2 tracking-tight">100%</div>
+          <div class="text-sm text-surface-500 font-medium">GDPR Compliant</div>
+        </div>
+        <div class="animate-in text-center">
+          <div class="text-3xl lg:text-4xl font-bold text-surface-900 mb-2 tracking-tight">0</div>
+          <div class="text-sm text-surface-500 font-medium">Paid AI APIs</div>
+        </div>
       </div>
     </div>
   </div>

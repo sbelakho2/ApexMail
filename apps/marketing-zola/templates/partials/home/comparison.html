@@ -16,27 +16,45 @@
             <th class="py-4 px-4 text-sm font-semibold text-brand-600">ApexMail</th>
             <th class="py-4 px-4 text-sm font-semibold text-surface-500">SendGrid</th>
             <th class="py-4 px-4 text-sm font-semibold text-surface-500">Postmark</th>
-            <th class="py-4 px-4 text-sm font-semibold text-surface-500">AWS SES</th>
           </tr>
         </thead>
         <tbody class="text-sm">
-          {% set rows = [
-            {"feature": "Delivery Receipts", "apex": "Cryptographic", "sendgrid": "Basic", "postmark": "Basic", "ses": "None"},
-            {"feature": "GDPR Compliance", "apex": "Built-in", "sendgrid": "Add-on", "postmark": "Partial", "ses": "DIY"},
-            {"feature": "HIPAA Ready", "apex": "Yes + BAA", "sendgrid": "Enterprise only", "postmark": "No", "ses": "DIY"},
-            {"feature": "Private Cloud", "apex": "Available", "sendgrid": "No", "postmark": "No", "ses": "VPC"},
-            {"feature": "Audit Trail", "apex": "Tamper-proof", "sendgrid": "30 days", "postmark": "45 days", "ses": "CloudWatch"},
-            {"feature": "API Response Time", "apex": "<100ms", "sendgrid": "~200ms", "postmark": "~150ms", "ses": "~300ms"}
-          ] %}
-          {% for row in rows %}
           <tr class="border-b border-surface-100">
-            <td class="py-4 pr-4 font-medium text-surface-900">{{ row.feature }}</td>
-            <td class="py-4 px-4 text-brand-600 font-semibold">{{ row.apex }}</td>
-            <td class="py-4 px-4 text-surface-500">{{ row.sendgrid }}</td>
-            <td class="py-4 px-4 text-surface-500">{{ row.postmark }}</td>
-            <td class="py-4 px-4 text-surface-500">{{ row.ses }}</td>
+            <td class="py-4 pr-4 font-medium text-surface-900">Delivery Tracking</td>
+            <td class="py-4 px-4 text-brand-600 font-semibold">Real-time</td>
+            <td class="py-4 px-4 text-surface-500">Basic</td>
+            <td class="py-4 px-4 text-surface-500">Basic</td>
           </tr>
-          {% endfor %}
+          <tr class="border-b border-surface-100">
+            <td class="py-4 pr-4 font-medium text-surface-900">GDPR Compliance</td>
+            <td class="py-4 px-4 text-brand-600 font-semibold">Built-in</td>
+            <td class="py-4 px-4 text-surface-500">Add-on</td>
+            <td class="py-4 px-4 text-surface-500">Partial</td>
+          </tr>
+          <tr class="border-b border-surface-100">
+            <td class="py-4 pr-4 font-medium text-surface-900">HIPAA Ready</td>
+            <td class="py-4 px-4 text-brand-600 font-semibold">Yes + BAA</td>
+            <td class="py-4 px-4 text-surface-500">Enterprise only</td>
+            <td class="py-4 px-4 text-surface-500">No</td>
+          </tr>
+          <tr class="border-b border-surface-100">
+            <td class="py-4 pr-4 font-medium text-surface-900">Private Cloud</td>
+            <td class="py-4 px-4 text-brand-600 font-semibold">Available</td>
+            <td class="py-4 px-4 text-surface-500">No</td>
+            <td class="py-4 px-4 text-surface-500">No</td>
+          </tr>
+          <tr class="border-b border-surface-100">
+            <td class="py-4 pr-4 font-medium text-surface-900">Audit Trail</td>
+            <td class="py-4 px-4 text-brand-600 font-semibold">Comprehensive</td>
+            <td class="py-4 px-4 text-surface-500">30 days</td>
+            <td class="py-4 px-4 text-surface-500">45 days</td>
+          </tr>
+          <tr class="border-b border-surface-100">
+            <td class="py-4 pr-4 font-medium text-surface-900">API Response Time</td>
+            <td class="py-4 px-4 text-brand-600 font-semibold">Low latency</td>
+            <td class="py-4 px-4 text-surface-500">Varies</td>
+            <td class="py-4 px-4 text-surface-500">Varies</td>
+          </tr>
         </tbody>
       </table>
     </div>

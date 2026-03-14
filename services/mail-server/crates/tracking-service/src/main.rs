@@ -59,6 +59,9 @@ async fn main() -> Result<()> {
     // ── PostgreSQL ────────────────────────────────────────────────────
     let db = PgPoolOptions::new()
         .max_connections(cfg.database.max_connections)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(300))
+        .max_lifetime(std::time::Duration::from_secs(1800))
         .connect(&cfg.database.url)
         .await
         .context("Failed to connect to PostgreSQL")?;

@@ -7,12 +7,13 @@ import { z } from 'zod';
 import { withTransaction } from '@apexmail/db';
 import type { BillingEnv, BillingContext } from '../app.js';
 import { calculateOverageCost, calculatePaygCost, PAYG_PRICING } from '../services/plans.js';
+import { logger } from '../lib/logger.js';
 
 export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
 
   const operationFailed = (c: Parameters<typeof router.get>[1] extends (arg: infer C) => unknown ? C : never, error: Error, label = 'Billing operation failed') => {
-    console.error(`${label}:`, error);
+    logger.error(label, { error: error instanceof Error ? error.message : String(error) });
     return c.json({ error: 'Operation failed' }, 500);
   };
 
@@ -321,7 +322,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.dunning.getFullState(tenantId);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Billing operation failed', { error: String(result.error), operation: 'getDunning' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value ?? { status: 'healthy' });
@@ -336,7 +337,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.costCircuit.getCostReport(tenantId, periodStart, now);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Billing operation failed', { error: String(result.error), operation: 'getCosts' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -351,7 +352,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.viralLoop.getStats(tenantId, periodStart, now);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Billing operation failed', { error: String(result.error), operation: 'getViralStats' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -506,7 +507,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
       });
 
       if (!localUpdateResult.ok) {
-        console.error("Update failed:", localUpdateResult.error); return c.json({ error: "Operation failed" }, 500);
+        logger.error('Update failed', { error: String(localUpdateResult.error), operation: 'switchToPAYG' }); return c.json({ error: "Operation failed" }, 500);
       }
 
       return c.json({
@@ -520,7 +521,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const previewResult = await ctx.proration.previewProration(tenantId, parsed.planName);
 
     if (!previewResult.ok) {
-      console.error("Preview failed:", previewResult.error); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Preview failed', { error: String(previewResult.error), operation: 'switchPlan' }); return c.json({ error: "Operation failed" }, 500);
     }
 
     // Apply the plan change
@@ -551,7 +552,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!auditResult.ok || auditResult.value.rowCount !== 1) {
-      console.error("Audit insert failed:", auditResult.ok ? new Error('No audit row inserted') : auditResult.error);
+      logger.error('Audit insert failed', { error: String(auditResult.ok ? 'No audit row inserted' : auditResult.error), operation: 'switchPlan' });
       return c.json({ error: 'Failed to persist audit log' }, 500);
     }
 
@@ -612,7 +613,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
       );
 
       if (!updateResult.ok || updateResult.value.rowCount !== 1) {
-        console.error('Failed to update tenant plan after cancellation');
+        logger.error('Failed to update tenant plan after cancellation', { tenantId });
       }
     }
 
@@ -634,7 +635,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!auditResult.ok || auditResult.value.rowCount !== 1) {
-      console.error('Failed to write cancellation audit log');
+      logger.error('Failed to write cancellation audit log', { tenantId });
     }
 
     return c.json({

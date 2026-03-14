@@ -5,6 +5,7 @@
 use chrono::Utc;
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::types::{HealthCheck, ServiceStatus};
 
@@ -23,7 +24,10 @@ impl HealthChecker {
         Self {
             history: Arc::new(DashMap::new()),
             max_history,
-            http_client: reqwest::Client::new(),
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
 

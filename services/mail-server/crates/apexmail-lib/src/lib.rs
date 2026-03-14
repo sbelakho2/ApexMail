@@ -5,6 +5,7 @@ pub mod id;
 pub mod error_codes;
 pub mod cache;
 pub mod http_client;
+pub mod pii;
 pub mod validation;
 pub mod time;
 pub mod result;

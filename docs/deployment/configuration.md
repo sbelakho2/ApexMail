@@ -117,6 +117,23 @@ Important: keep `MCAPTCHA_ENABLED` and `NEXT_PUBLIC_MCAPTCHA_ENABLED` aligned to
 ENCRYPTION_KEY="base64-encoded-32-byte-key"
 ```
 
+### Tracking / SSE Streaming
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TRACKING_SECRET_KEY` | ✓ (prod) | dev default | Shared HMAC-SHA256 secret for SSE stream tokens (min 32 chars in prod) |
+
+Both the API server and tracking service must share the same `TRACKING_SECRET_KEY`.
+See [Streaming API](../api/streaming.md) for details.
+
+### Metrics
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `METRICS_PORT` | | `9090` | Prometheus metrics HTTP port (API server). Set to `0` to disable. |
+
+The tracking service exposes metrics on port 9092 (configured via `METRICS_PORT` in its own config).
+
 ### Email Delivery Transport
 
 ApexMail uses a **hybrid per-message routing** architecture. Both AWS SES (shared pool) and self-hosted SMTP (dedicated IPs via Hetzner) are always available — the `TransportRouter` decides per-message which path to use based on tenant dedicated IP ownership.

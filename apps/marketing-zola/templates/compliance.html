@@ -4,8 +4,8 @@
 {% block content %}
 {% include "partials/compliance/hero.html" %}
 
-{# ComplianceDemo island mount (renders consent-ledger, right-to-forget, audit-trail sections) #}
-<div data-island="compliance-demo"></div>
+{# Compliance Demo (static showcase, zero JS) #}
+{% include "partials/generated/compliance-demo-island.html" %}
 
 {% include "partials/compliance/auto-dpa.html" %}
 

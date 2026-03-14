@@ -8,6 +8,7 @@
 //!    so that SES can send on behalf of the customer's domain.
 //! 5. GET /v1/domains/:id/dns-records shows required DNS records.
 
+use super::helpers::{clamp_limit, default_limit};
 use aws_sdk_sesv2::types::DkimSigningKeyLength;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -46,7 +47,7 @@ pub struct CreateDomainRequest {
 
 #[derive(Debug, Serialize)]
 pub struct DomainResponse {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub status: String,
     pub spf_verified: bool,
@@ -90,14 +91,6 @@ pub struct ListDomainsQuery {
     pub cursor: Option<i64>,
 }
 
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
-}
-
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn create_domain(
@@ -118,7 +111,7 @@ async fn create_domain(
     let existing = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM domains WHERE tenant_id = $1 AND name = $2",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.name)
     .fetch_one(&state.db)
     .await?;
@@ -137,7 +130,7 @@ async fn create_domain(
          VALUES ($1,$2,$3,'pending',false,false,false,false,false,false,false,$4,$5,$5)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.name)
     .bind(&dkim_selector)
     .bind(now)
@@ -147,7 +140,7 @@ async fn create_domain(
     Ok((
         StatusCode::CREATED,
         Json(DomainResponse {
-            id,
+            id: id.to_string(),
             name: body.name,
             status: "pending".into(),
             spf_verified: false,
@@ -171,7 +164,7 @@ async fn list_domains(
         "SELECT id, name, status, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
          FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 200))
     .bind(offset)
     .fetch_all(&state.db)
@@ -192,7 +185,7 @@ async fn get_domain(
          FROM domains WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
@@ -212,13 +205,13 @@ async fn delete_domain(
         "SELECT name FROM domains WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?;
 
     let result = sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
         .bind(id)
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -250,7 +243,7 @@ async fn verify_domain(
         "SELECT id, name, dkim_selector FROM domains WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
@@ -358,7 +351,7 @@ async fn get_dns_records(
         "SELECT id, name, dkim_selector FROM domains WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
@@ -488,7 +481,7 @@ async fn delete_ses_domain_identity(state: &AppState, domain: &str) {
 
 #[derive(sqlx::FromRow)]
 struct DomainRow {
-    id: Uuid,
+    id: String,
     name: String,
     status: String,
     spf_verified: bool,
@@ -516,7 +509,7 @@ impl From<DomainRow> for DomainResponse {
 #[derive(sqlx::FromRow)]
 #[allow(unused)]
 struct DomainFullRow {
-    id: Uuid,
+    id: String,
     name: String,
     dkim_selector: Option<String>,
 }
@@ -579,10 +572,10 @@ async fn get_auth_status(
     let domain = sqlx::query!(
         "SELECT id, name, spf_verified, dkim_verified, dmarc_verified, mx_verified, return_path_verified
          FROM domains WHERE id = $1 AND tenant_id = $2",
-        id,
-        auth.tenant_id,
+        id.to_string(),
+        auth.tenant_id.to_string(),
     )
-    .fetch_optional(&*state.db)
+    .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
 
@@ -592,17 +585,22 @@ async fn get_auth_status(
         expected: None,
     };
 
-    let all_pass = domain.spf_verified && domain.dkim_verified && domain.dmarc_verified
-        && domain.mx_verified && domain.return_path_verified;
-    let any_pass = domain.spf_verified || domain.dkim_verified;
+    let spf = domain.spf_verified.unwrap_or(false);
+    let dkim = domain.dkim_verified.unwrap_or(false);
+    let dmarc = domain.dmarc_verified.unwrap_or(false);
+    let mx = domain.mx_verified.unwrap_or(false);
+    let return_path = domain.return_path_verified.unwrap_or(false);
+    
+    let all_pass = spf && dkim && dmarc && mx && return_path;
+    let any_pass = spf || dkim;
 
     Ok(Json(DomainAuthStatus {
-        domain: domain.name,
-        spf: check(domain.spf_verified),
-        dkim: check(domain.dkim_verified),
-        dmarc: check(domain.dmarc_verified),
-        mx: check(domain.mx_verified),
-        return_path: check(domain.return_path_verified),
+        domain: domain.name.unwrap_or_else(|| domain.id.clone()),
+        spf: check(spf),
+        dkim: check(dkim),
+        dmarc: check(dmarc),
+        mx: check(mx),
+        return_path: check(return_path),
         overall_status: if all_pass {
             "authenticated".into()
         } else if any_pass {
@@ -612,12 +610,15 @@ async fn get_auth_status(
         },
     }))
 }
-    }
+
+#[cfg(test)]
+mod tests_auth {
+    use super::*;
 
     #[test]
     fn test_domain_response_serialisation() {
         let resp = DomainResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             name: "example.com".into(),
             status: "verified".into(),
             spf_verified: true,

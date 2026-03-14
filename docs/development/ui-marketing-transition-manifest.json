@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "canonicalSurface": "apps/marketing-zola",
+  "transitionalSurface": "none",
+  "featureFreeze": true,
+  "sharedRoutes": [
+    "/",
+    "/acceptable-use",
+    "/api-console",
+    "/case-studies",
+    "/compare/postmark",
+    "/compare/resend",
+    "/compare/sendgrid",
+    "/compliance",
+    "/cookies",
+    "/dpa",
+    "/features",
+    "/forensic",
+    "/pricing",
+    "/pricing/calculator",
+    "/privacy",
+    "/private-cloud",
+    "/sla",
+    "/status",
+    "/terms"
+  ],
+  "canonicalOnlyRoutes": [
+    "/compare"
+  ],
+  "transitionalOnlyRoutes": [],
+  "routeOwners": [
+    { "path": "/", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/acceptable-use", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/api-console", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/case-studies", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/compare", "owner": "apps/marketing-zola", "status": "canonical-only" },
+    { "path": "/compare/postmark", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/compare/resend", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/compare/sendgrid", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/compliance", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/cookies", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/dpa", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/features", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/forensic", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/pricing", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/pricing/calculator", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/privacy", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/private-cloud", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/sla", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/status", "owner": "dual-maintained", "status": "shared" },
+    { "path": "/terms", "owner": "dual-maintained", "status": "shared" }
+  ],
+  "shutdownCriteria": [
+    "full route parity",
+    "full SEO parity",
+    "full analytics parity",
+    "full content parity",
+    "full UI/UX parity"
+  ]
+}

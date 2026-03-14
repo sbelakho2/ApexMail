@@ -34,7 +34,14 @@ docs/
 │   ├── getting-started.md          ✅
 │   ├── contributing.md             ✅
 │   ├── style-system.md             ✅ (NEW)
-│   └── control-plane-ui-ux.md      ✅ (NEW)
+│   ├── control-plane-ui-ux.md      ✅ (NEW)
+│   ├── premium-experience-spec.md  ✅ (NEW)
+│   ├── interactive-state-matrix.md ✅ (NEW)
+│   ├── premium-performance-budgets.md ✅ (NEW)
+│   ├── navigation-taxonomy.md ✅ (NEW)
+│   ├── jtbd-nav-mapping.md ✅ (NEW)
+│   ├── setup-migration-checklists.md ✅ (NEW)
+│   └── premium-ui-ux-master-audit-2026-03-05.md ✅ (NEW)
 ├── enterprise/             # Enterprise Features
 │   ├── README.md                   ✅
 │   ├── sso.md                      ✅
@@ -139,6 +146,13 @@ docs/
 - [Contributing Guide](development/contributing.md)
 - [Apex Style System (Premium UI + Apex Icons)](development/style-system.md) (NEW)
 - [Control Plane UI/UX Standards](development/control-plane-ui-ux.md) (NEW)
+- [Premium Experience Spec](development/premium-experience-spec.md) (NEW)
+- [Interactive State Matrix](development/interactive-state-matrix.md) (NEW)
+- [Premium Performance Budgets](development/premium-performance-budgets.md) (NEW)
+- [Global Navigation Taxonomy](development/navigation-taxonomy.md) (NEW)
+- [JTBD Navigation Mapping](development/jtbd-nav-mapping.md) (NEW)
+- [Setup & Migration Checklists](development/setup-migration-checklists.md) (NEW)
+- [Premium UI/UX Master Audit (2026-03-05)](development/premium-ui-ux-master-audit-2026-03-05.md) (NEW)
 
 ## Version
 

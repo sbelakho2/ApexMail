@@ -1,0 +1,365 @@
+# =============================================================================
+# ApexMail Helm Chart — Default Values
+#
+# This chart deploys the full ApexMail stack for private/dedicated cloud
+# environments.  Override values per cloud provider using:
+#   helm install apexmail ./deploy/helm/apexmail -f values-aws.yaml
+# =============================================================================
+
+# ── Global settings ──────────────────────────────────────────────────────────
+
+global:
+  # Container image registry — set to your own registry before deploying.
+  # Example: your-registry.example.com/apexmail
+  imageRegistry: ""
+  # Pull policy: Always for production, IfNotPresent for dev
+  imagePullPolicy: IfNotPresent
+  # Image pull secrets (for private registries)
+  imagePullSecrets: []
+  # Storage class for persistent volumes (override per cloud provider)
+  storageClass: ""
+
+# ── Namespace ────────────────────────────────────────────────────────────────
+
+namespace: apexmail
+
+# ── API Server ───────────────────────────────────────────────────────────────
+
+apiServer:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: api-server
+    tag: ""  # defaults to Chart.appVersion
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  port: 3000
+  service:
+    type: ClusterIP
+    port: 3000
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    minAvailable: 1
+  env: {}
+  # Extra environment variables from secrets
+  envFrom: []
+
+# ── Tracking Service ────────────────────────────────────────────────────────
+
+trackingService:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: tracking-service
+    tag: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  port: 3001
+  service:
+    type: ClusterIP
+    port: 3001
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    minAvailable: 1
+  env: {}
+  envFrom: []
+
+# ── MTA (Mail Transfer Agent) ───────────────────────────────────────────────
+
+mta:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: mail-server
+    tag: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  ports:
+    smtp: 25
+    submission: 587
+    smtps: 465
+  service:
+    type: LoadBalancer
+    # Annotations for cloud provider LB (override per provider)
+    annotations: {}
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    minAvailable: 1
+  env: {}
+  envFrom: []
+
+# ── Worker ───────────────────────────────────────────────────────────────────
+
+worker:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: worker
+    tag: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  healthPort: 9090
+  podDisruptionBudget:
+    minAvailable: 1
+  env: {}
+  envFrom: []
+
+# ── Enterprise Service ──────────────────────────────────────────────────────
+
+enterprise:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: enterprise-server
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  port: 3002
+  service:
+    type: ClusterIP
+    port: 3002
+  env: {}
+  envFrom: []
+
+# ── Web Frontend ─────────────────────────────────────────────────────────────
+
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: web
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  port: 3000
+  service:
+    type: ClusterIP
+    port: 3000
+  securityContext:
+    runAsUser: 1001
+    runAsGroup: 1001
+    fsGroup: 1001
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    minAvailable: 1
+
+# ── Ingress ──────────────────────────────────────────────────────────────────
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: mail.example.com
+      paths:
+        - path: /v1
+          pathType: Prefix
+          service: api-server
+        - path: /t
+          pathType: Prefix
+          service: tracking-service
+        - path: /
+          pathType: Prefix
+          service: web
+  tls:
+    - secretName: apexmail-tls
+      hosts:
+        - mail.example.com
+
+# ── PostgreSQL (Bitnami subchart) ────────────────────────────────────────────
+
+postgresql:
+  enabled: true
+  auth:
+    database: apexmail
+    username: apexmail
+    existingSecret: apexmail-db-credentials
+  primary:
+    persistence:
+      size: 50Gi
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+  # For production: use an external managed database (RDS, Cloud SQL, etc.)
+  # and set postgresql.enabled=false with externalDatabase settings below.
+
+# ── External Database (when postgresql.enabled=false) ────────────────────────
+
+externalDatabase:
+  host: ""
+  port: 5432
+  database: apexmail
+  user: apexmail
+  existingSecret: apexmail-db-credentials
+  existingSecretPasswordKey: password
+  sslMode: require
+
+# ── Redis (Bitnami subchart) ────────────────────────────────────────────────
+
+redis:
+  enabled: true
+  auth:
+    existingSecret: apexmail-redis-credentials
+  master:
+    persistence:
+      size: 10Gi
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+# ── External Redis (when redis.enabled=false) ───────────────────────────────
+
+externalRedis:
+  host: ""
+  port: 6379
+  existingSecret: apexmail-redis-credentials
+  existingSecretPasswordKey: password
+
+# ── ClickHouse (analytics) ──────────────────────────────────────────────────
+
+clickhouse:
+  enabled: false
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# All secrets should be provided via Kubernetes Secret resources.
+# This section documents the required secret keys.
+
+secrets:
+  # Name of the Kubernetes Secret containing all application secrets
+  existingSecret: apexmail-secrets
+  # Required keys in the secret:
+  #   JWT_PRIVATE_KEY_PEM
+  #   JWT_PUBLIC_KEY_PEM
+  #   API_KEY_HASH_SECRET
+  #   WEBHOOK_SIGNING_SECRET
+  #   TRACKING_SECRET_KEY
+  #   SESSION_SECRET
+  #   CSRF_SECRET
+
+# ── HIPAA Compliance ─────────────────────────────────────────────────────────
+
+hipaa:
+  enabled: false
+  # When true:
+  #   - Field-level AES-256-GCM encryption is enabled for PHI columns
+  #   - Audit logging retention is set to 7 years (2555 days)
+  #   - Access logging is verbose
+  #   - TLS 1.2+ is enforced everywhere
+  encryption:
+    # KEK (Key Encryption Key) must be provided via secret
+    kekSecret: apexmail-kek
+    kekSecretIdKey: kek_id
+    kekSecretKeyKey: kek_material
+
+# ── Monitoring ───────────────────────────────────────────────────────────────
+
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+  grafana:
+    enabled: false
+    dashboards: true
+
+# ── Network Policies ─────────────────────────────────────────────────────────
+
+networkPolicies:
+  enabled: true
+
+# ── Pod Security ─────────────────────────────────────────────────────────────
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ── Service Account ─────────────────────────────────────────────────────────
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ── Tolerations, Affinity, Node Selectors ────────────────────────────────────
+
+tolerations: []
+nodeSelector: {}
+affinity: {}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: apexmail

@@ -9,8 +9,8 @@ competitor_slug = "sendgrid"
 competitor_name = "SendGrid"
 competitor_description = "Twilio SendGrid is a popular email delivery platform owned by Twilio."
 og_image = "/images/og-compare-sendgrid.png"
-apexmail_wins = 20
-competitor_wins = 0
+apexmail_wins = 14
+competitor_wins = 3
 verdict_title = "Why Choose ApexMail Over SendGrid?"
 verdict_points = [
   "Better deliverability with automatic IP warming and reputation protection",
@@ -27,9 +27,9 @@ verdict_points = [
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Delivery Rate</div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">99.9%</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">97%</span></div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">ApexMail</span></div>
+  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">High</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">High</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Dedicated IP</div>
@@ -45,7 +45,7 @@ verdict_points = [
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">DKIM Rotation</div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">Weekly automatic</span></div>
+  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">Configurable automatic</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Manual</span></div>
   <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">ApexMail</span></div>
 </div>

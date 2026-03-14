@@ -211,7 +211,7 @@ impl SesMonitor {
         }
 
         // Store in database for historical tracking
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO ses_account_metrics 
              (id, region, max_24h_send, sent_24h, max_send_rate, utilization_pct, 
               sending_enabled, enforcement_status, production_access, recorded_at)
@@ -226,7 +226,10 @@ impl SesMonitor {
         .bind(&enforcement_status)
         .bind(production_access)
         .execute(&self.db)
-        .await;
+        .await
+        {
+            warn!(region = %self.region, error = %e, "Failed to store SES account metrics");
+        }
 
         // Alert if quota utilization is high
         if utilization > 80.0 {
@@ -271,7 +274,7 @@ impl SesMonitor {
             match self.fetch_domain_stats(&domain, start_date, end_date).await {
                 Ok(domain_stats) => {
                     // Store stats
-                    let _ = sqlx::query(
+                    if let Err(e) = sqlx::query(
                         "INSERT INTO ses_domain_stats 
                          (id, domain, start_date, end_date, inbox_count, spam_count,
                           read_rate, inbox_placement_rate, recorded_at)
@@ -289,7 +292,10 @@ impl SesMonitor {
                     .bind(domain_stats.read_rate_percent)
                     .bind(domain_stats.inbox_placement_rate)
                     .execute(&self.db)
-                    .await;
+                    .await
+                    {
+                        warn!(domain = %domain, error = %e, "Failed to store domain stats");
+                    }
 
                     stats.push(domain_stats);
                 }
@@ -412,7 +418,7 @@ impl SesMonitor {
             };
 
             // Store in database
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 "INSERT INTO tenant_deliverability_metrics
                  (id, tenant_id, period_start, period_end, emails_sent, emails_delivered,
                   emails_bounced, emails_complained, bounce_rate, complaint_rate, delivery_rate)
@@ -429,7 +435,10 @@ impl SesMonitor {
             .bind(complaint_rate)
             .bind(delivery_rate)
             .execute(&self.db)
-            .await;
+            .await
+            {
+                warn!(tenant_id = %tenant_id, error = %e, "Failed to store tenant metrics");
+            }
 
             // Alert on high bounce/complaint rates
             if bounce_rate > 5.0 {
@@ -478,20 +487,23 @@ impl SesMonitor {
 
     /// Trigger a system-level alert.
     async fn trigger_alert(&self, alert_type: &str, message: &str) {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO system_alerts (id, alert_type, message, severity, created_at)
              VALUES (gen_random_uuid(), $1, $2, 'warning', NOW())",
         )
         .bind(alert_type)
         .bind(message)
         .execute(&self.db)
-        .await;
+        .await
+        {
+            warn!(alert_type = %alert_type, error = %e, "Failed to store system alert");
+        }
     }
 
     /// Trigger a tenant-specific alert.
     async fn trigger_tenant_alert(&self, tenant_id: &str, alert_type: &str, message: &str) {
         // Insert alert record
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO tenant_alerts (id, tenant_id, alert_type, message, severity, created_at)
              VALUES (gen_random_uuid(), $1::uuid, $2, $3, 'warning', NOW())",
         )
@@ -499,10 +511,13 @@ impl SesMonitor {
         .bind(alert_type)
         .bind(message)
         .execute(&self.db)
-        .await;
+        .await
+        {
+            warn!(tenant_id = %tenant_id, alert_type = %alert_type, error = %e, "Failed to store tenant alert");
+        }
 
         // Notify via alert webhooks
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO alert_webhook_queue (id, tenant_id, alert_type, payload, created_at)
              VALUES (gen_random_uuid(), $1, $2, $3, NOW())",
         )
@@ -514,7 +529,10 @@ impl SesMonitor {
             "timestamp": Utc::now().to_rfc3339(),
         }))
         .execute(&self.db)
-        .await;
+        .await
+        {
+            warn!(tenant_id = %tenant_id, alert_type = %alert_type, error = %e, "Failed to queue alert webhook");
+        }
     }
 }
 

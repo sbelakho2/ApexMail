@@ -51,6 +51,7 @@ function sanitizeUrl(url: string): string {
         }
         return trimmed;
     } catch {
+        // Invalid URL; return safe placeholder
         return '#';
     }
 }
@@ -249,9 +250,10 @@ function createHandlebarsInstance(options?: TemplateRenderOptions): typeof Handl
     // Override lookupProperty on the Handlebars runtime so that any
     // property traversal through blocked names (even nested paths like
     // {{a.__proto__.b}}) returns undefined.
-    const originalLookup = (hbs.Utils as any).lookupProperty;
+    const utils = hbs.Utils as { lookupProperty?: (parent: unknown, propertyName: string) => unknown };
+    const originalLookup = utils.lookupProperty;
     if (typeof originalLookup === 'function') {
-        (hbs.Utils as any).lookupProperty = function (parent: any, propertyName: string) {
+        utils.lookupProperty = function (parent: unknown, propertyName: string): unknown {
             if (BLOCKED_PROPERTIES.has(propertyName)) {
                 return undefined;
             }

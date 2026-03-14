@@ -122,6 +122,10 @@ class DatabasePool {
   }
 
   private getPoolConfig(): PoolConfig {
+    // Set statement timeout via connection options so it's active
+    // from the very first query, not after connection is established
+    const timeoutMs = Math.floor(this.config.statementTimeoutMs);
+    
     return {
       host: this.config.host,
       port: this.config.port,
@@ -134,6 +138,9 @@ class DatabasePool {
       ssl: this.config.ssl,
       // Set application name for pg_stat_activity
       application_name: process.env['SERVICE_NAME'] ?? 'apexmail',
+      // statement_timeout via options parameter is applied during connection
+      // This ensures timeout is in effect before any user queries run
+      options: `-c statement_timeout=${timeoutMs}`,
     };
   }
 
@@ -145,23 +152,9 @@ class DatabasePool {
     this.pool = new Pool(this.getPoolConfig());
 
     // Set up event handlers
-    this.pool.on('connect', (client) => {
-      // Set statement timeout on each new connection
-      // SECURITY: Use parameterized query to prevent SQL injection
-      // Note: SET statement_timeout accepts an integer (milliseconds) directly
-      // The value is validated as number in config, so this is safe
-      const timeoutMs = Math.floor(this.config.statementTimeoutMs);
-      if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 2147483647) {
-        this.logger.error('Invalid statement timeout value', { timeoutMs });
-        return;
-      }
-      // Postgres does not accept parameters for SET statements; value is validated as int.
-      void client.query(`SET statement_timeout = ${timeoutMs}`).catch((error) => {
-        this.logger.error('Failed to set statement_timeout', {
-          error: error instanceof Error ? error.message : String(error),
-          timeoutMs,
-        });
-      });
+    this.pool.on('connect', (_client) => {
+      // statement_timeout is now set via options parameter in getPoolConfig()
+      // This commented out code is kept for reference but no longer needed
       if (process.env['DB_POOL_DEBUG'] === 'true') {
         this.logger.debug('New database connection established');
       }
@@ -171,12 +164,9 @@ class DatabasePool {
       this.logger.error('Database pool error', { error: err.message });
     });
 
-    // G-210: Clean up leak tracking when clients are released back to the pool.
-    this.pool.on('release', (client) => {
+    // G-210: clean up leak tracking when client is removed from the pool
+    this.pool.on('remove', (client) => {
       this.checkedOutClients.delete(client);
-    });
-
-    this.pool.on('remove', () => {
       if (process.env['DB_POOL_DEBUG'] === 'true') {
         this.logger.debug('Database connection removed from pool');
       }
@@ -361,6 +351,13 @@ class DatabasePool {
     const stack = new Error('Connection acquired here').stack ?? '';
     this.checkedOutClients.set(client, { acquiredAt: Date.now(), stack });
 
+    // Wrap the release method to automatically remove from tracking
+    const originalRelease = client.release.bind(client);
+    client.release = (err?: Error | boolean) => {
+      this.checkedOutClients.delete(client);
+      return originalRelease(err);
+    };
+
     return client;
   }
 
@@ -376,6 +373,85 @@ class DatabasePool {
       totalCount: this.pool.totalCount,
       idleCount: this.pool.idleCount,
       waitingCount: this.pool.waitingCount,
+    };
+  }
+
+  /**
+   * FIX-POOL-MONITOR: Export pool metrics in Prometheus format.
+   * Returns a string suitable for /metrics endpoint.
+   */
+  getPrometheusMetrics(serviceName: string = 'apexmail'): string {
+    const stats = this.getStats();
+    const checkedOutCount = this.checkedOutClients.size;
+    const maxConnections = this.config.maxConnections;
+    const utilizationPct = stats.totalCount > 0 
+      ? ((stats.totalCount - stats.idleCount) / maxConnections * 100).toFixed(2)
+      : '0.00';
+
+    const lines: string[] = [
+      '# HELP db_pool_connections_total Total number of connections in the pool',
+      '# TYPE db_pool_connections_total gauge',
+      `db_pool_connections_total{service="${serviceName}"} ${stats.totalCount}`,
+      '',
+      '# HELP db_pool_connections_idle Number of idle connections',
+      '# TYPE db_pool_connections_idle gauge',
+      `db_pool_connections_idle{service="${serviceName}"} ${stats.idleCount}`,
+      '',
+      '# HELP db_pool_connections_waiting Number of queries waiting for a connection',
+      '# TYPE db_pool_connections_waiting gauge',
+      `db_pool_connections_waiting{service="${serviceName}"} ${stats.waitingCount}`,
+      '',
+      '# HELP db_pool_connections_checked_out Number of connections currently checked out',
+      '# TYPE db_pool_connections_checked_out gauge',
+      `db_pool_connections_checked_out{service="${serviceName}"} ${checkedOutCount}`,
+      '',
+      '# HELP db_pool_connections_max Maximum configured connections',
+      '# TYPE db_pool_connections_max gauge',
+      `db_pool_connections_max{service="${serviceName}"} ${maxConnections}`,
+      '',
+      '# HELP db_pool_utilization_percent Pool utilization percentage',
+      '# TYPE db_pool_utilization_percent gauge',
+      `db_pool_utilization_percent{service="${serviceName}"} ${utilizationPct}`,
+    ];
+
+    return lines.join('\n');
+  }
+
+  /**
+   * FIX-POOL-MONITOR: Check pool health and return alerts.
+   * Returns array of warning messages if thresholds are exceeded.
+   */
+  checkPoolHealth(): { healthy: boolean; warnings: string[] } {
+    const stats = this.getStats();
+    const warnings: string[] = [];
+    const maxConnections = this.config.maxConnections;
+
+    // Alert if utilization > 80%
+    const utilization = (stats.totalCount - stats.idleCount) / maxConnections;
+    if (utilization > 0.8) {
+      warnings.push(
+        `High pool utilization: ${(utilization * 100).toFixed(1)}% ` +
+        `(${stats.totalCount - stats.idleCount}/${maxConnections} connections in use)`
+      );
+    }
+
+    // Alert if queries are waiting
+    if (stats.waitingCount > 0) {
+      warnings.push(
+        `${stats.waitingCount} queries waiting for connections - consider increasing pool size`
+      );
+    }
+
+    // Alert if potential leaks detected
+    if (this.checkedOutClients.size > maxConnections * 0.5) {
+      warnings.push(
+        `${this.checkedOutClients.size} connections checked out - possible connection leak`
+      );
+    }
+
+    return {
+      healthy: warnings.length === 0,
+      warnings,
     };
   }
 }

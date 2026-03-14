@@ -122,7 +122,7 @@ async fn dashboard(
          FROM messages
          WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_one(&state.db)
@@ -135,7 +135,7 @@ async fn dashboard(
          FROM events
          WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_one(&state.db)
@@ -189,7 +189,7 @@ async fn volume(
     );
 
     let rows = sqlx::query_as::<_, VolumeRow>(&query)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_all(&state.db)
@@ -225,7 +225,7 @@ async fn engagement(
          FROM events
          WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_one(&state.db)
@@ -234,12 +234,11 @@ async fn engagement(
     let total_delivered = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND event_type = 'delivered' AND timestamp >= $2 AND timestamp <= $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_one(&state.db)
-    .await?
-    .max(1);
+    .await?;
 
     let timeseries = sqlx::query_as::<_, EngagementTimeseriesRow>(
         "SELECT date_trunc('day', timestamp) as day,
@@ -249,16 +248,16 @@ async fn engagement(
          WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3
          GROUP BY day ORDER BY day",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_all(&state.db)
     .await?;
 
     Ok(Json(EngagementResponse {
-        open_rate: totals.opens as f64 / total_delivered as f64,
-        click_rate: totals.clicks as f64 / total_delivered as f64,
-        unsubscribe_rate: totals.unsubs as f64 / total_delivered as f64,
+        open_rate: if total_delivered > 0 { totals.opens as f64 / total_delivered as f64 } else { 0.0 },
+        click_rate: if total_delivered > 0 { totals.clicks as f64 / total_delivered as f64 } else { 0.0 },
+        unsubscribe_rate: if total_delivered > 0 { totals.unsubs as f64 / total_delivered as f64 } else { 0.0 },
         timeseries: timeseries
             .into_iter()
             .map(|r| EngagementPoint {
@@ -289,19 +288,19 @@ async fn deliverability(
          FROM events
          WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
     .fetch_one(&state.db)
     .await?;
 
-    let total = row.total.max(1) as f64;
+    let total = row.total as f64;
 
     Ok(Json(DeliverabilityResponse {
-        delivery_rate: row.delivered as f64 / total,
-        bounce_rate: row.bounced as f64 / total,
-        complaint_rate: row.complained as f64 / total,
-        inbox_rate: (row.delivered as f64 - row.complained as f64).max(0.0) / total,
+        delivery_rate: if row.total > 0 { row.delivered as f64 / total } else { 0.0 },
+        bounce_rate: if row.total > 0 { row.bounced as f64 / total } else { 0.0 },
+        complaint_rate: if row.total > 0 { row.complained as f64 / total } else { 0.0 },
+        inbox_rate: if row.total > 0 { (row.delivered as f64 - row.complained as f64).max(0.0) / total } else { 0.0 },
     }))
 }
 
@@ -323,17 +322,17 @@ async fn export(
          VALUES ($1, $2, 'analytics', 'pending', $3, $4, $5, $6)"
     )
         .bind(job_id)
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .bind(&format)
         .bind(from)
         .bind(to)
-        .bind(auth.user_id)
+        .bind(&auth.user_id)
         .execute(&state.db)
         .await?;
 
     // Fix #44: Spawn background task with catch_unwind to handle panics properly.
     let db = state.db.clone();
-    let tenant_id = auth.tenant_id;
+    let tenant_id = auth.tenant_id.clone();
     tokio::spawn(async move {
         let result = std::panic::AssertUnwindSafe(
             process_analytics_export(db.clone(), job_id, tenant_id, from, to, format)
@@ -344,23 +343,29 @@ async fn export(
                 let err_msg = e.to_string();
                 tracing::error!(job_id = %job_id, error = %err_msg, "Export job failed");
                 // Mark job as failed
-                let _ = sqlx::query(
+                if let Err(db_err) = sqlx::query(
                     "UPDATE export_jobs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2"
                 )
                 .bind(&err_msg)
                 .bind(job_id)
                 .execute(&db)
-                .await;
+                .await
+                {
+                    tracing::error!(job_id = %job_id, error = %db_err, "Failed to mark export job as failed — job will be stuck");
+                }
             },
             Err(_panic) => {
                 tracing::error!(job_id = %job_id, "Export job panicked");
                 // Mark job as failed due to panic
-                let _ = sqlx::query(
+                if let Err(db_err) = sqlx::query(
                     "UPDATE export_jobs SET status = 'failed', error_message = 'internal error (panic)', completed_at = NOW() WHERE id = $1"
                 )
                 .bind(job_id)
                 .execute(&db)
-                .await;
+                .await
+                {
+                    tracing::error!(job_id = %job_id, error = %db_err, "Failed to mark panicked export job as failed — job will be stuck");
+                }
             }
         }
     });
@@ -375,7 +380,7 @@ async fn export(
 async fn process_analytics_export(
     db: sqlx::PgPool,
     job_id: uuid::Uuid,
-    tenant_id: uuid::Uuid,
+    tenant_id: String,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     format: String,
@@ -404,9 +409,10 @@ async fn process_analytics_export(
              LIMIT 1
          ) e ON true
          WHERE m.tenant_id = $1 AND m.sent_at >= $2 AND m.sent_at < $3
-         ORDER BY m.sent_at DESC"
+         ORDER BY m.sent_at DESC
+         LIMIT 100000"
     )
-        .bind(tenant_id)
+        .bind(&tenant_id)
         .bind(from)
         .bind(to)
         .fetch_all(&db)
@@ -546,7 +552,7 @@ async fn get_export_job(
          FROM export_jobs WHERE id = $1 AND tenant_id = $2"
     )
         .bind(job_id)
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .fetch_optional(&state.db)
         .await?;
 
@@ -570,7 +576,7 @@ async fn get_export_job(
 
 #[derive(sqlx::FromRow)]
 struct ExportJobRow {
-    id: Uuid,
+    id: String,
     status: String,
     total_rows: Option<i64>,
     processed_rows: i64,
@@ -596,6 +602,8 @@ struct DashboardRow {
     total_sent: i64,
     total_delivered: i64,
     total_bounced: i64,
+    total_opened: i64,
+    total_clicked: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -663,7 +671,7 @@ async fn export_pdf(
          FROM messages
          WHERE tenant_id = $1 AND sent_at >= $2 AND sent_at < $3"
     )
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .bind(from)
         .bind(to)
         .fetch_optional(&state.db)
@@ -677,7 +685,15 @@ async fn export_pdf(
         total_clicked: 0,
     });
 
-    let total = s.total_sent.max(1) as f64;
+    let total = s.total_sent as f64;
+
+    let safe_rate = |numerator: i64| -> f64 {
+        if s.total_sent > 0 {
+            (numerator as f64 / total * 100.0 * 10.0).round() / 10.0
+        } else {
+            0.0
+        }
+    };
 
     let pdf_data = serde_json::json!({
         "tenant_name": auth.tenant_id.to_string(),
@@ -694,10 +710,10 @@ async fn export_pdf(
             "total_clicked": s.total_clicked,
             "total_unsubscribed": 0,
             "total_complaints": 0,
-            "delivery_rate": (s.total_delivered as f64 / total * 100.0 * 10.0).round() / 10.0,
-            "open_rate": (s.total_opened as f64 / total * 100.0 * 10.0).round() / 10.0,
-            "click_rate": (s.total_clicked as f64 / total * 100.0 * 10.0).round() / 10.0,
-            "bounce_rate": (s.total_bounced as f64 / total * 100.0 * 10.0).round() / 10.0,
+            "delivery_rate": safe_rate(s.total_delivered),
+            "open_rate": safe_rate(s.total_opened),
+            "click_rate": safe_rate(s.total_clicked),
+            "bounce_rate": safe_rate(s.total_bounced),
             "complaint_rate": 0.0,
         },
         "daily_stats": [],
@@ -713,11 +729,13 @@ async fn export_pdf(
     let pdf_renderer_url = std::env::var("PDF_RENDERER_URL")
         .unwrap_or_else(|_| "http://pdf-renderer:3004".into());
 
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| ApiError::Internal(format!("http client error: {e}")))?;
     let resp = http_client
         .post(format!("{pdf_renderer_url}/v1/pdf/render"))
         .json(&render_request)
-        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| ApiError::Internal(format!("PDF renderer error: {e}")))?;
@@ -736,15 +754,13 @@ async fn export_pdf(
         to.format("%Y%m%d")
     );
 
-    Ok((
-        axum::http::StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/pdf".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")),
-            (header::CACHE_CONTROL, "no-store".to_string()),
-        ],
-        pdf_bytes.to_vec(),
-    ).into())
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/pdf")
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(pdf_bytes.to_vec()))
+        .map_err(|e| ApiError::Internal(format!("Failed to build PDF response: {e}")))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────

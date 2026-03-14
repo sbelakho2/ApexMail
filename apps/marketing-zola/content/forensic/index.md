@@ -1,6 +1,6 @@
 +++
-title = "Forensic Debugging | Time Travel for Email"
-description = "Debug email delivery issues with full-stack forensic tracing. Replay any email through the pipeline, inspect every hop, every header."
+title = "Email Debugging | Full Visibility Into Every Email"
+description = "Debug email delivery issues with real-time event tracking. Inspect every step of the pipeline — from API acceptance to final delivery."
 template = "forensic.html"
 
 [extra]

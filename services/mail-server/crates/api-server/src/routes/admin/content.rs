@@ -71,7 +71,7 @@ async fn list_content(
     .bind(offset)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let items: Vec<ContentItem> = rows
         .into_iter()

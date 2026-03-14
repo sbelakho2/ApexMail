@@ -51,6 +51,9 @@ async fn main() -> anyhow::Result<()> {
     );
     let db = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(300))
+        .max_lifetime(std::time::Duration::from_secs(1800))
         .connect(&db_url)
         .await?;
 
@@ -83,14 +86,26 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Build router with middleware
+    let cors = if config.cors.origins.iter().any(|o| o == "*") {
+        tower_http::cors::CorsLayer::permissive()
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = config.cors.origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers(tower_http::cors::Any)
+    };
     let app = create_router(state.clone())
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        );
+        .layer(cors);
 
     // Start background cron jobs
     let cron_state = state.clone();

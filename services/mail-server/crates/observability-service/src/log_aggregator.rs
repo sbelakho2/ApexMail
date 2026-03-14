@@ -16,22 +16,38 @@ use crate::types::{LogEntry, LogLevel};
 // ---------------------------------------------------------------------------
 
 /// Thread-safe in-memory structured log store.
+///
+/// Caps total stored entries at `max_entries`; when full, the oldest entries
+/// are evicted on each insert to prevent unbounded memory growth.
 #[derive(Debug)]
 pub struct LogAggregator {
     entries: RwLock<Vec<LogEntry>>,
+    max_entries: usize,
 }
 
 impl LogAggregator {
-    /// Create a new, empty aggregator.
+    /// Create a new, empty aggregator with a default 500 000 entry cap.
     pub fn new() -> Self {
+        Self::with_capacity(500_000)
+    }
+
+    /// Create an aggregator that retains at most `max_entries` entries.
+    pub fn with_capacity(max_entries: usize) -> Self {
         Self {
             entries: RwLock::new(Vec::new()),
+            max_entries,
         }
     }
 
     /// Ingest a single log entry.
+    ///
+    /// If the store is at capacity, the oldest 10% of entries are evicted.
     pub fn ingest(&self, entry: LogEntry) {
-        self.entries.write().push(entry);
+        let mut guard = self.entries.write();
+        if guard.len() >= self.max_entries {
+            guard.drain(..guard.len() / 10);
+        }
+        guard.push(entry);
     }
 
     /// Query logs with optional level and service filters, returning at most

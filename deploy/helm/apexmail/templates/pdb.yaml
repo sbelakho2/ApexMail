@@ -1,0 +1,83 @@
+{{/*
+Pod Disruption Budgets for HA-critical services.
+*/}}
+
+{{- if and .Values.apiServer.enabled .Values.apiServer.podDisruptionBudget }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "apexmail.fullname" . }}-api-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "api-server" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.apiServer.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "api-server" "context" .) | nindent 6 }}
+{{- end }}
+---
+{{- if and .Values.trackingService.enabled .Values.trackingService.podDisruptionBudget }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "apexmail.fullname" . }}-tracking-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "tracking-service" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.trackingService.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "tracking-service" "context" .) | nindent 6 }}
+{{- end }}
+---
+{{- if and .Values.mta.enabled .Values.mta.podDisruptionBudget }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "apexmail.fullname" . }}-mta
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "mta" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.mta.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "mta" "context" .) | nindent 6 }}
+{{- end }}
+---
+{{- if and .Values.worker.enabled .Values.worker.podDisruptionBudget }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "apexmail.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "worker" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.worker.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "worker" "context" .) | nindent 6 }}
+{{- end }}
+---
+{{- if and .Values.web.enabled .Values.web.podDisruptionBudget }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "apexmail.fullname" . }}-web
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "web" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.web.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "web" "context" .) | nindent 6 }}
+{{- end }}

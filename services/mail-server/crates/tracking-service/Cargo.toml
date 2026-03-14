@@ -16,6 +16,8 @@ mail-common = { path = "../mail-common", features = ["sqlx"] }
 # Async runtime
 tokio.workspace = true
 futures.workspace = true
+async-stream.workspace = true
+tokio-stream.workspace = true
 
 # HTTP server
 axum.workspace = true

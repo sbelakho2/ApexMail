@@ -106,14 +106,17 @@ impl PaygPricing {
             }
             let tier_width = tier.up_to.saturating_sub(prev_up_to);
             let applicable = remaining.min(tier_width);
-            email_cost_millicents += (applicable as i64) * tier.price_per_email_millicents;
+            let applicable_i64 = i64::try_from(applicable).unwrap_or(i64::MAX);
+            email_cost_millicents = email_cost_millicents
+                .saturating_add(applicable_i64.saturating_mul(tier.price_per_email_millicents));
             remaining -= applicable;
             prev_up_to = tier.up_to;
         }
 
         let billable_api = api_calls.saturating_sub(self.free_api_calls_per_month);
-        let api_cost_cents = ((billable_api + 999) / 1000) as i64
-            * self.price_per_thousand_api_calls as i64;
+        let billable_thousands = i64::try_from((billable_api + 999) / 1000).unwrap_or(i64::MAX);
+        let api_cost_cents = billable_thousands
+            .saturating_mul(self.price_per_thousand_api_calls as i64);
 
         let email_cost_cents = (email_cost_millicents + 500) / 1000;
         let total = email_cost_cents + api_cost_cents;

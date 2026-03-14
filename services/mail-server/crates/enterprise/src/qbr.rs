@@ -90,8 +90,10 @@ impl QBRService {
         let insights = generate_insights(&metrics);
 
         // Update QBR with generated data
-        let metrics_json = serde_json::to_value(&metrics).unwrap_or_default();
-        let insights_json = serde_json::to_value(&insights).unwrap_or_default();
+        let metrics_json = serde_json::to_value(&metrics)
+            .map_err(|e| format!("failed to serialize QBR metrics: {e}"))?;
+        let insights_json = serde_json::to_value(&insights)
+            .map_err(|e| format!("failed to serialize QBR insights: {e}"))?;
 
         let _updated = sqlx::query(
             "UPDATE ent_qbrs SET status = 'generating', metrics = $2, insights = $3, updated_at = NOW() WHERE id = $1"

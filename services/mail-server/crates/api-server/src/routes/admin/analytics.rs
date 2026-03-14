@@ -140,8 +140,7 @@ async fn get_analytics(
 
     let ts_rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(&ts_sql)
         .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
+        .await?;
 
     let time_series: Vec<TimeSeriesPoint> = ts_rows
         .into_iter()
@@ -165,8 +164,7 @@ async fn get_analytics(
 
     let prov_rows = sqlx::query_as::<_, (String, i64)>(&prov_sql)
         .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
+        .await?;
 
     let providers: Vec<ProviderBreakdown> = prov_rows
         .into_iter()

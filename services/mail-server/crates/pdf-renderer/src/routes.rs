@@ -5,28 +5,74 @@
 //! - `POST /v1/pdf/render/json` — render template → JSON with base64 PDF
 //! - `GET  /health` — health check
 
+use std::time::Duration;
+
 use axum::{
-    extract::Json,
-    http::{header, StatusCode},
+    body::Body,
+    extract::{DefaultBodyLimit, Json, State},
+    http::{header, header::AUTHORIZATION, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
 use serde_json::json;
+use std::sync::Arc;
+use tower_http::timeout::TimeoutLayer;
 use tracing::{error, info};
 
 use crate::compiler::{self, RenderError, RenderRequest, RenderResponse};
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+struct ServiceAuth {
+    service_token: String,
+}
+
+async fn require_service_token(
+    State(state): State<Arc<ServiceAuth>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if req.uri().path() == "/health" {
+        return Ok(next.run(req).await);
+    }
+    if state.service_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let provided = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok().map(String::from))
+        .or_else(|| {
+            req.headers()
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
+        });
+    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
 /// Build the PDF renderer Axum router.
-pub fn pdf_router() -> Router {
+pub fn pdf_router(service_token: String) -> Router {
+    let auth = Arc::new(ServiceAuth { service_token });
     Router::new()
         .route("/health", get(health))
         .route("/v1/pdf/render", post(render_pdf_stream))
         .route("/v1/pdf/render/json", post(render_pdf_json))
+        .route_layer(middleware::from_fn_with_state(auth, require_service_token))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
 }
 
 // ---------------------------------------------------------------------------

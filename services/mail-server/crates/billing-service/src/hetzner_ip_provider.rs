@@ -214,19 +214,19 @@ impl HetznerIpProvider {
         db: PgPool,
         default_location: String,
         mta_server_id: Option<u64>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-        Self {
+        Ok(Self {
             client,
             api_token,
             db,
             default_location,
             mta_server_id,
-        }
+        })
     }
 
     /// Create from environment variables.

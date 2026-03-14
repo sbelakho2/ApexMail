@@ -64,7 +64,9 @@ impl SecretManager {
         let rotation_json = input
             .rotation_schedule
             .as_ref()
-            .map(|rs| serde_json::to_value(rs).unwrap_or_default());
+            .map(|rs| serde_json::to_value(rs))
+            .transpose()
+            .map_err(|e| format!("failed to serialize rotation schedule: {e}"))?;
 
         sqlx::query(
             "INSERT INTO secrets

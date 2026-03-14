@@ -4,7 +4,7 @@
 //! Bearer token auth using constant-time comparison. Health check at GET /health.
 
 use axum::{
-    extract::{Json, Path, Query, State},
+    extract::{DefaultBodyLimit, Json, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -12,6 +12,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::audit::AuditService;
 use crate::config::{Config, IsolationLevel};
@@ -99,6 +101,8 @@ pub fn create_router(state: S) -> Router {
         .route("/audit/query", get(audit_query))
         .route("/audit/stats/:org_id", get(audit_stats))
         .route("/audit/export/:org_id", get(audit_export))
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
 }
 

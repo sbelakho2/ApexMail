@@ -4,6 +4,7 @@
 
 import Stripe from 'stripe';
 import { getConfig } from '../config.js';
+import { STRIPE_TIMEOUT_MS } from './constants.js';
 
 let stripeClient: Stripe | null = null;
 
@@ -19,7 +20,7 @@ export function getStripe(): Stripe {
         url: 'https://apexmail.ee',
       },
       maxNetworkRetries: 3,
-      timeout: 30000,
+      timeout: STRIPE_TIMEOUT_MS,
     });
   }
   return stripeClient;

@@ -98,11 +98,10 @@ async fn send_time_optimization(
              GROUP BY hour
              ORDER BY opens DESC"
         )
-            .bind(auth.tenant_id)
+            .bind(&auth.tenant_id)
             .bind(email)
             .fetch_all(&state.db)
-            .await
-            .unwrap_or_default()
+            .await?
     } else {
         // For tenant-wide, analyze all open patterns
         sqlx::query_as(
@@ -112,10 +111,9 @@ async fn send_time_optimization(
              GROUP BY hour
              ORDER BY opens DESC"
         )
-            .bind(auth.tenant_id)
+            .bind(&auth.tenant_id)
             .fetch_all(&state.db)
-            .await
-            .unwrap_or_default()
+            .await?
     };
 
     // Fix #54: Include timezone in cache key to avoid returning wrong cached results.
@@ -131,9 +129,9 @@ async fn send_time_optimization(
         .flatten();
 
     let (recommended_hour, confidence, reasoning) = if let Some((hour, conf)) = cached {
-        (hour as u8, conf, "Based on cached engagement analysis.".into())
+        (hour.clamp(0, 23) as u8, conf, "Based on cached engagement analysis.".into())
     } else if !hour_data.is_empty() {
-        let best_hour = hour_data[0].0 as u8;
+        let best_hour = hour_data[0].0.clamp(0, 23) as u8;
         let total_opens: i64 = hour_data.iter().map(|(_, c)| c).sum();
         let best_opens = hour_data[0].1;
         let confidence = if total_opens > 100 {
@@ -146,18 +144,21 @@ async fn send_time_optimization(
         let confidence = confidence.min(0.95);
 
         // Cache the result
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO ai_send_time_cache (cache_key, tenant_id, recipient_email, recommended_hour, confidence, expires_at)
              VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '24 hours')
              ON CONFLICT (cache_key) DO UPDATE SET recommended_hour = $4, confidence = $5, expires_at = NOW() + INTERVAL '24 hours'"
         )
             .bind(&cache_key)
-            .bind(auth.tenant_id)
+            .bind(&auth.tenant_id)
             .bind(recipient)
             .bind(best_hour as i32)
             .bind(confidence)
             .execute(&state.db)
-            .await;
+            .await
+        {
+            tracing::warn!(error = %e, cache_key = %cache_key, "Failed to cache send-time prediction");
+        }
 
         let reasoning = format!(
             "Based on {} opens analyzed. Peak engagement at {}:00 UTC with {} opens.",
@@ -260,7 +261,7 @@ async fn churn_prediction(
             AND e.timestamp > NOW() - INTERVAL '90 days'
          WHERE c.tenant_id = $1 AND c.status = 'active' AND e.id IS NULL",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| ApiError::Internal(format!("churn prediction query failed: {e}")))?;
@@ -268,7 +269,7 @@ async fn churn_prediction(
     let total = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM contacts WHERE tenant_id = $1 AND status = 'active'",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| ApiError::Internal(format!("churn prediction total query failed: {e}")))?
@@ -316,7 +317,7 @@ async fn bot_detection(
              FROM events
              WHERE tenant_id = $1 AND ip_address = $2 AND timestamp > NOW() - INTERVAL '1 hour'"
         )
-            .bind(auth.tenant_id)
+            .bind(&auth.tenant_id)
             .bind(ip)
             .fetch_optional(&state.db)
             .await
@@ -343,7 +344,7 @@ async fn bot_detection(
             "SELECT user_agent, ip_address, timestamp FROM events WHERE id = $1 AND tenant_id = $2"
         )
             .bind(event_id)
-            .bind(auth.tenant_id)
+            .bind(&auth.tenant_id)
             .fetch_optional(&state.db)
             .await
             .ok()

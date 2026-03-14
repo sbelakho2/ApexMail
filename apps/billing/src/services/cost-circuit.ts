@@ -7,6 +7,7 @@ import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
+import { COST_CHECK_INTERVAL_MINUTES, BYTES_PER_GIB } from '../lib/constants.js';
 
 const logger = createLogger();
 
@@ -56,7 +57,7 @@ const DEFAULT_CONFIG: CostCircuitConfig = {
   marginWarningThreshold: 20,  // 20% margin
   marginCriticalThreshold: 10, // 10% margin
   costSpikeThreshold: 50,      // 50% increase
-  checkIntervalMinutes: 60,
+  checkIntervalMinutes: COST_CHECK_INTERVAL_MINUTES,
 };
 
 // Default cost rates (in cents per unit)
@@ -155,12 +156,12 @@ export class CostCircuitService {
     ]);
 
     const storageGb = storageResult.ok
-      ? parseInt(storageResult.value.rows[0]?.total_bytes ?? '0', 10) / (1024 * 1024 * 1024)
+      ? parseInt(storageResult.value.rows[0]?.total_bytes ?? '0', 10) / BYTES_PER_GIB
       : 0;
     const storageCost = Math.round(storageGb * this.costRates.storagePerGbMonth);
 
     const bandwidthGb = bandwidthResult.ok
-      ? parseInt(bandwidthResult.value.rows[0]?.total_bytes ?? '0', 10) / (1024 * 1024 * 1024)
+      ? parseInt(bandwidthResult.value.rows[0]?.total_bytes ?? '0', 10) / BYTES_PER_GIB
       : 0;
     const bandwidthCost = Math.round(bandwidthGb * this.costRates.bandwidthPerGb);
 
@@ -343,8 +344,8 @@ export class CostCircuitService {
         margin: data.margin,
         lastChecked: new Date(data.checkedAt),
       });
-    } catch {
-      // Invalid cached data, return default
+    } catch (error) {
+      logger.warn('Invalid cached cost status, purging', { tenantId, error: String(error) });
       await this.redis.del(`cost:status:${tenantId}`);
       return Result.ok({
         status: 'closed',
@@ -388,7 +389,7 @@ export class CostCircuitService {
     ];
 
     // Get daily trend
-    const computeRatePerMessage = COST_RATES.computePerHour / 100;
+    const computeRatePerMessage = this.costRates.computePerHour / 100;
     const trendResult = await this.db.query<{
       date: Date;
       cost: number;

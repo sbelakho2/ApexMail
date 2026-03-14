@@ -116,7 +116,7 @@ services:
       # ── Redis (individual vars; Rust service builds its own URL) ───────────
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
       REDIS_POOL_SIZE: ${REDIS_POOL_SIZE:-16}
       # ── Server bind ───────────────────────────────────────────────────────
       TRACKING_HOST: 0.0.0.0
@@ -379,6 +379,10 @@ services:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     container_name: apexmail-postgres-exporter
     restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
     environment:
       DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apexmail}?sslmode=disable
     networks:
@@ -394,9 +398,13 @@ services:
     image: oliver006/redis_exporter:v1.62.0
     container_name: apexmail-redis-exporter
     restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
     environment:
       REDIS_ADDR: redis://redis:6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-apexmail_dev_redis}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     networks:
       - apexmail_monitoring
       - apexmail_data
@@ -410,6 +418,10 @@ services:
     image: f1yegor/clickhouse-exporter:v0.4.4
     container_name: apexmail-clickhouse-exporter
     restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
     environment:
       CLICKHOUSE_SERVER: http://clickhouse:8123
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
@@ -427,6 +439,10 @@ services:
     image: prom/node-exporter:v1.8.2
     container_name: apexmail-node-exporter
     restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
     command:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
@@ -448,6 +464,10 @@ services:
     image: prom/blackbox-exporter:v0.25.0
     container_name: apexmail-blackbox-exporter
     restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
     volumes:
       - ./deploy/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
     command:

@@ -17,6 +17,7 @@
 //! IPs are created via the Hetzner Cloud API, assigned to MTA
 //! servers, and configured with reverse DNS automatically.
 
+use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
@@ -50,7 +51,7 @@ pub struct AllocateIpRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DedicatedIpResponse {
-    pub id: Uuid,
+    pub id: String,
     pub ip_address: String,
     pub ptr_record: Option<String>,
     pub status: String,
@@ -115,7 +116,7 @@ pub struct PaginationMeta {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WarmupResponse {
-    pub id: Uuid,
+    pub id: String,
     pub ip_address: String,
     pub warmup_status: String,
     pub warmup_progress: f64,
@@ -128,14 +129,6 @@ pub struct ListIpsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-}
-
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
 }
 
 /// Dedicated IP add-on price in cents/month (matches billing service constant).
@@ -163,7 +156,7 @@ async fn allocate_ip(
         .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
 
     let allocated = ip_provider
-        .allocate_ip(auth.tenant_id, region.as_deref())
+        .allocate_ip(&auth.tenant_id, region.as_deref())
         .await
         .map_err(ip_provider_to_api_error)?;
 
@@ -176,7 +169,7 @@ async fn allocate_ip(
          WHERE tenant_id = $1 AND ip_address = $2
          ORDER BY created_at DESC LIMIT 1",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&allocated.ip_address)
     .fetch_one(&state.db)
     .await?;
@@ -209,7 +202,7 @@ async fn list_ips(
         "SELECT COUNT(*) FROM dedicated_ips
          WHERE tenant_id = $1 AND status != 'retired'",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -223,14 +216,14 @@ async fn list_ips(
          ORDER BY created_at DESC
          LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
     // Build allocation summary from the tenant's plan
-    let allocation = build_allocation_summary(&state, auth.tenant_id).await?;
+    let allocation = build_allocation_summary(&state, &auth.tenant_id).await?;
 
     let ips: Vec<DedicatedIpResponse> = rows.into_iter().map(|r| r.into_response()).collect();
 
@@ -264,7 +257,7 @@ async fn release_ip(
         .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
 
     ip_provider
-        .release_ip(id, auth.tenant_id)
+        .release_ip(id, &auth.tenant_id)
         .await
         .map_err(ip_provider_to_api_error)?;
 
@@ -294,7 +287,7 @@ async fn start_warmup(
         .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
 
     let status = ip_provider
-        .start_warmup(id, auth.tenant_id)
+        .start_warmup(id, &auth.tenant_id)
         .await
         .map_err(ip_provider_to_api_error)?;
 
@@ -303,7 +296,7 @@ async fn start_warmup(
     let est_completion = Utc::now() + chrono::Duration::days(remaining_days);
 
     Ok(Json(WarmupResponse {
-        id,
+        id: id.to_string(),
         ip_address: status.ip_address,
         warmup_status: "warming".into(),
         warmup_progress: status.warmup_progress,
@@ -316,7 +309,7 @@ async fn start_warmup(
 /// Build the `AllocationResponse` for a tenant from their active plan.
 async fn build_allocation_summary(
     state: &AppState,
-    tenant_id: Uuid,
+    tenant_id: &str,
 ) -> Result<Option<AllocationResponse>, ApiError> {
     let plan_row: Option<(bool, i32)> = sqlx::query_as(
         "SELECT
@@ -393,7 +386,7 @@ fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
 
 #[derive(sqlx::FromRow)]
 struct DedicatedIpRow {
-    id: Uuid,
+    id: String,
     ip_address: String,
     rdns_hostname: Option<String>,
     #[allow(dead_code)]
@@ -454,7 +447,7 @@ mod tests {
     #[test]
     fn test_ip_response_serialisation() {
         let resp = DedicatedIpResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             ip_address: "1.2.3.4".into(),
             ptr_record: Some("mail.example.com".into()),
             status: "active".into(),
@@ -486,7 +479,7 @@ mod tests {
     #[test]
     fn test_warmup_response_serialisation() {
         let resp = WarmupResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             ip_address: "1.2.3.4".into(),
             warmup_status: "warming".into(),
             warmup_progress: 0.5,

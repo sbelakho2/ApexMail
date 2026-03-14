@@ -5,7 +5,7 @@
 //! All endpoints under axum with shared AppState.
 
 use axum::{
-    extract::{Json, Path, Query, State},
+    extract::{DefaultBodyLimit, Json, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -13,6 +13,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 use chrono::Utc;
 
 use crate::audit_logger::AuditLogger;
@@ -83,6 +85,8 @@ pub fn create_router(state: S) -> Router {
         .route("/gdpr/double-opt-in", post(gdpr_initiate_doi))
         .route("/gdpr/double-opt-in/confirm", post(gdpr_confirm_doi))
         .route("/gdpr/stats/:tenant_id", get(gdpr_stats))
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
 }
 
@@ -131,6 +135,30 @@ fn err_json(msg: &str) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "error": msg }))
 }
 
+/// Serialize a value as JSON and wrap in a `200 OK` response.
+/// Returns `500 Internal Server Error` if serialization fails.
+fn ok_json<T: serde::Serialize>(val: &T) -> axum::response::Response {
+    match serde_json::to_value(val) {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "JSON serialization failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, err_json("internal serialization error")).into_response()
+        }
+    }
+}
+
+/// Serialize a value as JSON and wrap in a `201 Created` response.
+/// Returns `500 Internal Server Error` if serialization fails.
+fn created_json<T: serde::Serialize>(val: &T) -> axum::response::Response {
+    match serde_json::to_value(val) {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "JSON serialization failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, err_json("internal serialization error")).into_response()
+        }
+    }
+}
+
 fn clamp_limit(limit: i64, max: i64) -> i64 {
     limit.clamp(1, max)
 }
@@ -160,7 +188,7 @@ async fn risk_assess(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.risk_engine.assess_tenant(&tenant_id).await {
-        Ok(profile) => (StatusCode::OK, Json(serde_json::to_value(&profile).unwrap())).into_response(),
+        Ok(profile) => ok_json(&profile),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -174,7 +202,7 @@ async fn risk_profile(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.risk_engine.get_profile(&tenant_id).await {
-        Ok(Some(profile)) => (StatusCode::OK, Json(serde_json::to_value(&profile).unwrap())).into_response(),
+        Ok(Some(profile)) => ok_json(&profile),
         Ok(None) => (StatusCode::NOT_FOUND, err_json("Profile not found")).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
@@ -189,7 +217,7 @@ async fn risk_force_reassess(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.risk_engine.force_reassessment(&tenant_id).await {
-        Ok(profile) => (StatusCode::OK, Json(serde_json::to_value(&profile).unwrap())).into_response(),
+        Ok(profile) => ok_json(&profile),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -268,7 +296,7 @@ async fn risk_critical_tenants(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.risk_engine.get_critical_risk_tenants().await {
-        Ok(tenants) => (StatusCode::OK, Json(serde_json::to_value(&tenants).unwrap())).into_response(),
+        Ok(tenants) => ok_json(&tenants),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -301,7 +329,7 @@ async fn scan_content(
         .scan_email(&body.content)
         .await
     {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response(),
+        Ok(result) => ok_json(&result),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -315,7 +343,7 @@ async fn scan_spam(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.content_scanner.scan_email(&body.content).await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result.spam).unwrap())).into_response(),
+        Ok(result) => ok_json(&result.spam),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -329,7 +357,7 @@ async fn scan_phishing(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.content_scanner.scan_email(&body.content).await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result.phishing).unwrap())).into_response(),
+        Ok(result) => ok_json(&result.phishing),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -343,7 +371,7 @@ async fn scan_malware(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.content_scanner.scan_email(&body.content).await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result.malware).unwrap())).into_response(),
+        Ok(result) => ok_json(&result.malware),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -361,7 +389,7 @@ async fn scan_policy(
     let mut scoped = body.content.clone();
     scoped.tenant_id = tenant_id;
     match state.content_scanner.scan_email(&scoped).await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result.policy).unwrap())).into_response(),
+        Ok(result) => ok_json(&result.policy),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -425,7 +453,7 @@ async fn audit_create(
         )
         .await
     {
-        Ok(entry) => (StatusCode::CREATED, Json(serde_json::to_value(&entry).unwrap())).into_response(),
+        Ok(entry) => created_json(&entry),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -495,7 +523,7 @@ async fn audit_verify_chain(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.audit_logger.verify_chain(Some(&tenant_id), None, None).await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result).unwrap())).into_response(),
+        Ok(result) => ok_json(&result),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -1038,7 +1066,7 @@ async fn gdpr_get_consents(
         return (e.0, err_json(e.1)).into_response();
     }
     match state.gdpr.get_consent_records(&tenant_id, &subscriber_id).await {
-        Ok(records) => (StatusCode::OK, Json(serde_json::to_value(&records).unwrap())).into_response(),
+        Ok(records) => ok_json(&records),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }

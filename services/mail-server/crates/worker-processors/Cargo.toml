@@ -35,6 +35,9 @@ rand.workspace = true
 # HTTP client (webhook delivery)
 reqwest.workspace = true
 
+# Health check server
+axum.workspace = true
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true

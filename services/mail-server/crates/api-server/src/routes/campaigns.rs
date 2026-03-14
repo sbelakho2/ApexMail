@@ -1,5 +1,6 @@
 //! Campaign management routes.
 
+use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -28,17 +29,17 @@ pub struct CreateCampaignRequest {
     pub name: String,
     pub subject: String,
     #[serde(default)]
-    pub template_id: Option<Uuid>,
+    pub template_id: Option<String>,
     #[serde(default)]
     pub scheduled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CampaignResponse {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub subject: String,
-    pub template_id: Option<Uuid>,
+    pub template_id: Option<String>,
     pub status: String,
     pub scheduled_at: Option<String>,
     pub sent_count: i64,
@@ -54,14 +55,6 @@ pub struct ListCampaignsQuery {
     pub offset: i64,
     #[serde(default)]
     pub cursor: Option<i64>,
-}
-
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -82,16 +75,17 @@ async fn create_campaign(
     let id = Uuid::new_v4();
     let now = Utc::now();
     let status = if body.scheduled_at.is_some() { "scheduled" } else { "draft" };
+    let template_id = body.template_id.clone();
 
     sqlx::query(
         "INSERT INTO campaigns (id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$8)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.name)
     .bind(&body.subject)
-    .bind(body.template_id)
+    .bind(&template_id)
     .bind(status)
     .bind(body.scheduled_at)
     .bind(now)
@@ -101,10 +95,10 @@ async fn create_campaign(
     Ok((
         StatusCode::CREATED,
         Json(CampaignResponse {
-            id,
+            id: id.to_string(),
             name: body.name,
             subject: body.subject,
-            template_id: body.template_id,
+            template_id,
             status: status.into(),
             scheduled_at: body.scheduled_at.map(|t| t.to_rfc3339()),
             sent_count: 0,
@@ -126,7 +120,7 @@ async fn list_campaigns(
         "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
          FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 100))
     // Fix #58: Clamp offset to valid range.
     .bind(offset)
@@ -139,23 +133,23 @@ async fn list_campaigns(
 async fn get_campaign(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:read"])?;
-    let row = fetch_campaign(&state, auth.tenant_id, id).await?;
+    let row = fetch_campaign(&state, &auth.tenant_id, id).await?;
     Ok(Json(row.into()))
 }
 
 async fn delete_campaign(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
 
     let result = sqlx::query("DELETE FROM campaigns WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
+        .bind(&id)
+        .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -168,33 +162,33 @@ async fn delete_campaign(
 async fn resume_campaign(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
     // Fix #51: Validate current state before resume - only paused/draft can be resumed.
-    update_campaign_status_validated(&state, auth.tenant_id, id, "sending", &["paused", "draft"]).await
+    update_campaign_status_validated(&state, &auth.tenant_id, id, "sending", &["paused", "draft"]).await
 }
 
 async fn pause_campaign(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
     // Fix #51: Validate current state before pause - only sending/scheduled can be paused.
-    update_campaign_status_validated(&state, auth.tenant_id, id, "paused", &["sending", "scheduled"]).await
+    update_campaign_status_validated(&state, &auth.tenant_id, id, "paused", &["sending", "scheduled"]).await
 }
 
 /// Fix #51: Update campaign status with validation of current state.
 async fn update_campaign_status_validated(
     state: &AppState,
-    tenant_id: Uuid,
-    id: Uuid,
+    tenant_id: &str,
+    id: String,
     new_status: &str,
     valid_current_states: &[&str],
 ) -> Result<Json<CampaignResponse>, ApiError> {
     // Fetch current campaign to validate state transition.
-    let current = fetch_campaign(state, tenant_id, id).await?;
+    let current = fetch_campaign(state, tenant_id, id.clone()).await?;
     
     if !valid_current_states.contains(&current.status.as_str()) {
         return Err(ApiError::Validation(vec![
@@ -206,7 +200,7 @@ async fn update_campaign_status_validated(
         "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
     )
     .bind(new_status)
-    .bind(id)
+    .bind(&id)
     .bind(tenant_id)
     .execute(&state.db)
     .await?;
@@ -223,10 +217,10 @@ async fn update_campaign_status_validated(
 
 #[derive(sqlx::FromRow)]
 struct CampaignRow {
-    id: Uuid,
+    id: String,
     name: String,
     subject: String,
-    template_id: Option<Uuid>,
+    template_id: Option<String>,
     status: String,
     scheduled_at: Option<DateTime<Utc>>,
     sent_count: i64,
@@ -250,7 +244,7 @@ impl From<CampaignRow> for CampaignResponse {
     }
 }
 
-async fn fetch_campaign(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<CampaignRow, ApiError> {
+async fn fetch_campaign(state: &AppState, tenant_id: &str, id: String) -> Result<CampaignRow, ApiError> {
     sqlx::query_as::<_, CampaignRow>(
         "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
          FROM campaigns WHERE id = $1 AND tenant_id = $2",
@@ -275,9 +269,9 @@ async fn resend_campaign(
     let campaign = sqlx::query!(
         "SELECT id, status FROM campaigns WHERE id = $1 AND tenant_id = $2",
         id,
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_optional(&*state.db)
+    .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("campaign not found".into()))?;
 
@@ -289,15 +283,15 @@ async fn resend_campaign(
     }
 
     // Create a new send job for failed/unsent recipients
-    let new_id = Uuid::now_v7();
+    let new_id = Uuid::new_v4();
     sqlx::query!(
         "INSERT INTO campaign_jobs (id, campaign_id, tenant_id, status, created_at)
          VALUES ($1, $2, $3, 'queued', NOW())",
         new_id,
         id,
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .execute(&*state.db)
+    .execute(&state.db)
     .await?;
 
     // Update campaign status
@@ -305,7 +299,7 @@ async fn resend_campaign(
         "UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1",
         id,
     )
-    .execute(&*state.db)
+    .execute(&state.db)
     .await?;
 
     Ok(Json(serde_json::json!({
@@ -332,7 +326,7 @@ mod tests {
     #[test]
     fn test_campaign_response_serialisation() {
         let resp = CampaignResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             name: "Test".into(),
             subject: "Sub".into(),
             template_id: None,

@@ -293,8 +293,8 @@ impl AttachmentService {
         .bind(result.virus_scanned)
         .bind(result.virus_detected)
         .bind(&result.virus_name)
-        .bind(serde_json::to_value(&result.errors).unwrap_or_default())
-        .bind(serde_json::to_value(&result.warnings).unwrap_or_default())
+        .bind(serde_json::to_value(&result.errors).map_err(|e| sqlx::Error::Protocol(format!("serialization: {e}")))?)
+        .bind(serde_json::to_value(&result.warnings).map_err(|e| sqlx::Error::Protocol(format!("serialization: {e}")))?)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -435,7 +435,9 @@ fn check_double_extension(filename: &str) -> bool {
     if parts.len() < 3 {
         return false;
     }
-    let last = parts.last().unwrap().to_lowercase();
+    // Safety: parts.len() >= 3 guaranteed by guard above
+    let Some(last) = parts.last() else { return false };
+    let last = last.to_lowercase();
     let dangerous = ["exe", "bat", "cmd", "com", "dll", "scr", "pif", "vbs", "js", "jar", "msi", "ps1", "sh"];
     dangerous.contains(&last.as_str())
 }

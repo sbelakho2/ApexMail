@@ -1,5 +1,6 @@
 //! Suppression list management routes.
 
+use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
@@ -36,7 +37,7 @@ fn default_source() -> String {
 
 #[derive(Debug, Serialize)]
 pub struct SuppressionResponse {
-    pub id: Uuid,
+    pub id: String,
     pub email: String,
     pub reason: String,
     pub source: String,
@@ -53,14 +54,6 @@ pub struct ListSuppressionsQuery {
     pub cursor: Option<i64>,
     #[serde(default)]
     pub reason: Option<String>,
-}
-
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
 }
 
 #[derive(Debug, Serialize)]
@@ -109,7 +102,7 @@ async fn create_suppression(
     let exists = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.email)
     .fetch_one(&state.db)
     .await?;
@@ -126,7 +119,7 @@ async fn create_suppression(
          VALUES ($1,$2,$3,$4,$5,$6)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.email)
     .bind(&body.reason)
     .bind(&body.source)
@@ -137,7 +130,7 @@ async fn create_suppression(
     Ok((
         StatusCode::CREATED,
         Json(SuppressionResponse {
-            id,
+            id: id.to_string(),
             email: body.email,
             reason: body.reason,
             source: body.source,
@@ -157,7 +150,7 @@ async fn list_suppressions(
         "SELECT id, email, reason, source, created_at
          FROM suppressions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 100))
     .bind(offset)
     .fetch_all(&state.db)
@@ -175,7 +168,7 @@ async fn delete_suppression(
 
     let result = sqlx::query("DELETE FROM suppressions WHERE id = $1 AND tenant_id = $2")
         .bind(id)
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -195,7 +188,7 @@ async fn check_suppression(
     let row = sqlx::query_as::<_, SuppressionReasonRow>(
         "SELECT reason FROM suppressions WHERE tenant_id = $1 AND email = $2",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&email)
     .fetch_optional(&state.db)
     .await?;
@@ -244,11 +237,10 @@ async fn bulk_suppress(
         let existing: Vec<(String,)> = sqlx::query_as(
             "SELECT email FROM suppressions WHERE tenant_id = $1 AND email = ANY($2)",
         )
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .bind(&emails)
         .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
+        .await?;
 
         let existing_set: std::collections::HashSet<&str> =
             existing.iter().map(|(e,)| e.as_str()).collect();
@@ -267,7 +259,7 @@ async fn bulk_suppress(
                  ON CONFLICT (tenant_id, email) DO NOTHING",
             )
             .bind(Uuid::new_v4())
-            .bind(auth.tenant_id)
+            .bind(&auth.tenant_id)
             .bind(&entry.email)
             .bind(&entry.reason)
             .bind(now)
@@ -277,7 +269,7 @@ async fn bulk_suppress(
                 Ok(r) if r.rows_affected() > 0 => created += 1,
                 Ok(_) => duplicates += 1, // ON CONFLICT hit
                 Err(e) => {
-                    tracing::error!(email = %entry.email, error = %e, "bulk suppress insert failed");
+                    tracing::error!(email = %apexmail_lib::pii::redact_email(&entry.email), error = %e, "bulk suppress insert failed");
                 }
             }
         }
@@ -290,7 +282,7 @@ async fn bulk_suppress(
 
 #[derive(sqlx::FromRow)]
 struct SuppressionRow {
-    id: Uuid,
+    id: String,
     email: String,
     reason: String,
     source: String,

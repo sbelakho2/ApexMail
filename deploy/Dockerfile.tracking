@@ -78,7 +78,7 @@ WORKDIR /
 
 LABEL org.opencontainers.image.title="apexmail-tracking" \
     org.opencontainers.image.description="ApexMail tracking service" \
-    org.opencontainers.image.source="https://github.com/apexmail/apexmail" \
+    org.opencontainers.image.source="https://github.com/apexmail" \
     org.opencontainers.image.licenses="PROPRIETARY"
 
 EXPOSE 3001 9092

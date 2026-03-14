@@ -4,6 +4,8 @@
 //! 0 % for non-EU).
 
 use chrono::{DateTime, Datelike, Utc};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -18,6 +20,43 @@ use std::sync::LazyLock;
 /// Base URL for the pdf-renderer service.
 static PDF_RENDERER_URL: LazyLock<String> = LazyLock::new(|| {
     std::env::var("PDF_RENDERER_URL").unwrap_or_else(|_| "http://pdf-renderer:3004".into())
+});
+
+// ---------------------------------------------------------------------------
+// S3/R2 object storage config
+// ---------------------------------------------------------------------------
+
+/// S3-compatible endpoint (e.g. `https://s3.eu-central-1.amazonaws.com` or R2 endpoint).
+static S3_ENDPOINT: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "https://s3.eu-central-1.amazonaws.com".into())
+});
+
+/// S3 bucket for invoice PDFs.
+static S3_BUCKET: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("S3_BUCKET").unwrap_or_else(|_| "apexmail-invoices".into())
+});
+
+/// AWS region for Sig V4 signing.
+static S3_REGION: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("S3_REGION").unwrap_or_else(|_| "eu-central-1".into())
+});
+
+/// S3 access key ID — panics at first access if not set.
+static S3_ACCESS_KEY_ID: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("S3_ACCESS_KEY_ID")
+        .expect("S3_ACCESS_KEY_ID must be set for invoice PDF storage")
+});
+
+/// S3 secret access key — panics at first access if not set.
+static S3_SECRET_ACCESS_KEY: LazyLock<String> = LazyLock::new(|| {
+    std::env::var("S3_SECRET_ACCESS_KEY")
+        .expect("S3_SECRET_ACCESS_KEY must be set for invoice PDF storage")
+});
+
+/// Optional public URL prefix for the bucket (e.g. `https://storage.apexmail.ee`).
+/// When set, returned URLs use this base instead of the raw S3 endpoint.
+static S3_PUBLIC_URL: LazyLock<Option<String>> = LazyLock::new(|| {
+    std::env::var("S3_PUBLIC_URL").ok()
 });
 
 // ---------------------------------------------------------------------------
@@ -157,7 +196,7 @@ pub async fn create_invoice(
     });
     let currency = input.currency.unwrap_or_else(|| "eur".into());
     let id = Uuid::new_v4();
-    let items_json = serde_json::to_value(&line_items).unwrap_or_default();
+    let items_json = serde_json::to_value(&line_items)?;
 
     sqlx::query(
         r#"
@@ -271,9 +310,8 @@ pub async fn generate_invoice_pdf(
         invoice.tenant_id, invoice.invoice_number
     );
 
-    // TODO: Upload to S3/R2 object storage
-    // For now, store the URL pattern that will be used once object storage is wired.
-    let pdf_url = format!("https://storage.apexmail.ee/{pdf_key}");
+    // Upload to S3/R2 object storage
+    let pdf_url = s3_put_object(http_client, &pdf_key, &pdf_bytes, "application/pdf").await?;
 
     // Update the invoice record with the PDF URL
     sqlx::query("UPDATE invoices SET pdf_url = $1, updated_at = NOW() WHERE id = $2")
@@ -432,6 +470,138 @@ pub enum InvoiceError {
     NoBillingAddress,
     #[error("PDF generation error: {0}")]
     PdfGeneration(String),
+    #[error("serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+// ---------------------------------------------------------------------------
+// S3-compatible upload (AWS Signature V4)
+// ---------------------------------------------------------------------------
+
+/// Upload bytes to S3-compatible object storage using AWS Signature V4.
+async fn s3_put_object(
+    http_client: &reqwest::Client,
+    key: &str,
+    body: &[u8],
+    content_type: &str,
+) -> Result<String, InvoiceError> {
+    type HmacSha256 = Hmac<Sha256>;
+
+    let endpoint = &*S3_ENDPOINT;
+    let bucket = &*S3_BUCKET;
+    let region = &*S3_REGION;
+    let access_key = &*S3_ACCESS_KEY_ID;
+    let secret_key = &*S3_SECRET_ACCESS_KEY;
+
+    if access_key.is_empty() || secret_key.is_empty() {
+        return Err(InvoiceError::PdfGeneration(
+            "S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set for invoice PDF upload".into(),
+        ));
+    }
+
+    let now = Utc::now();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+    // SHA-256 of request body
+    let payload_hash = hex_encode(&Sha256::digest(body));
+
+    // Host: virtual-hosted style for broad S3 compatibility
+    let raw_host = endpoint
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = format!("{bucket}.{raw_host}");
+    let canonical_uri = format!("/{key}");
+
+    // Canonical headers (must be sorted)
+    let canonical_headers = format!(
+        "content-type:{content_type}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
+    );
+    let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
+
+    // Canonical request
+    let canonical_request = format!(
+        "PUT\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    );
+
+    // String to sign
+    let credential_scope = format!("{date_stamp}/{region}/s3/aws4_request");
+    let canonical_hash = hex_encode(&Sha256::digest(canonical_request.as_bytes()));
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}"
+    );
+
+    // Derive signing key: HMAC chain date → region → service → aws4_request
+    let k_date = HmacSha256::new_from_slice(format!("AWS4{secret_key}").as_bytes())
+        .expect("HMAC key length")
+        .chain_update(date_stamp.as_bytes())
+        .finalize()
+        .into_bytes();
+    let k_region = HmacSha256::new_from_slice(&k_date)
+        .expect("HMAC key length")
+        .chain_update(region.as_bytes())
+        .finalize()
+        .into_bytes();
+    let k_service = HmacSha256::new_from_slice(&k_region)
+        .expect("HMAC key length")
+        .chain_update(b"s3")
+        .finalize()
+        .into_bytes();
+    let k_signing = HmacSha256::new_from_slice(&k_service)
+        .expect("HMAC key length")
+        .chain_update(b"aws4_request")
+        .finalize()
+        .into_bytes();
+
+    // Final signature
+    let signature = hex_encode(
+        &HmacSha256::new_from_slice(&k_signing)
+            .expect("HMAC key length")
+            .chain_update(string_to_sign.as_bytes())
+            .finalize()
+            .into_bytes(),
+    );
+
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, \
+         SignedHeaders={signed_headers}, Signature={signature}"
+    );
+
+    let url = format!("https://{host}{canonical_uri}");
+
+    let resp = http_client
+        .put(&url)
+        .header("Host", &host)
+        .header("Content-Type", content_type)
+        .header("x-amz-date", &amz_date)
+        .header("x-amz-content-sha256", &payload_hash)
+        .header("Authorization", &authorization)
+        .body(body.to_vec())
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| InvoiceError::PdfGeneration(format!("S3 upload failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(InvoiceError::PdfGeneration(format!(
+            "S3 upload returned {status}: {err_body}"
+        )));
+    }
+
+    // Return public URL
+    let public_url = match &*S3_PUBLIC_URL {
+        Some(base) => format!("{}/{key}", base.trim_end_matches('/')),
+        None => url,
+    };
+
+    Ok(public_url)
+}
+
+/// Hex-encode a byte slice to a lowercase hex string.
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -493,5 +663,12 @@ mod tests {
         };
         let inv = row.into_invoice();
         assert_eq!(inv.status, InvoiceStatus::Paid);
+    }
+
+    #[test]
+    fn hex_encode_works() {
+        assert_eq!(hex_encode(&[0x00, 0xff, 0xab]), "00ffab");
+        assert_eq!(hex_encode(&[]), "");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 }

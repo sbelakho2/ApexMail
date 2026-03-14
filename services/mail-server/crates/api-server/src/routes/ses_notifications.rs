@@ -149,6 +149,23 @@ async fn handle_sns_notification(
         ApiError::Validation(vec![format!("Invalid SNS message: {e}")])
     })?;
 
+    // ── Topic ARN validation ────────────────────────────────
+    // Only process messages from configured SNS topic ARNs.
+    let allowed_arns_raw = std::env::var("SNS_ALLOWED_TOPIC_ARNS").unwrap_or_default();
+    let allowed_arns: Vec<&str> = allowed_arns_raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if !allowed_arns.is_empty() {
+        let msg_arn = sns_msg.topic_arn.as_deref().unwrap_or("");
+        if !allowed_arns.iter().any(|a| *a == msg_arn) {
+            warn!(topic_arn = %msg_arn, "Rejected SNS message from unknown topic ARN");
+            return Err(ApiError::Validation(vec!["Unknown SNS topic ARN".into()]));
+        }
+    }
+
     match sns_msg.message_type.as_str() {
         "SubscriptionConfirmation" => {
             handle_subscription_confirmation(&state, &sns_msg).await
@@ -168,6 +185,8 @@ async fn handle_sns_notification(
 }
 
 /// Auto-confirm SNS subscription by fetching the subscribe URL.
+///
+/// Validates the URL is from a legitimate AWS SNS domain to prevent SSRF.
 async fn handle_subscription_confirmation(
     state: &AppState,
     msg: &SnsMessage,
@@ -175,6 +194,22 @@ async fn handle_subscription_confirmation(
     let url = msg.subscribe_url.as_deref().ok_or_else(|| {
         ApiError::Validation(vec!["Missing SubscribeURL in confirmation".into()])
     })?;
+
+    // SSRF defence: only allow URLs from official AWS SNS endpoints.
+    // Legitimate SubscribeURLs look like:
+    //   https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&...
+    let parsed = url::Url::parse(url).map_err(|_| {
+        ApiError::Validation(vec!["Invalid SubscribeURL".into()])
+    })?;
+    let host = parsed.host_str().unwrap_or("");
+    let is_aws_sns = parsed.scheme() == "https"
+        && (host.ends_with(".amazonaws.com") || host.ends_with(".amazonaws.com.cn"));
+    if !is_aws_sns {
+        warn!(url = %url, host = %host, "Rejected non-AWS SubscribeURL — possible SSRF attempt");
+        return Err(ApiError::Validation(vec![
+            "SubscribeURL must be an AWS SNS endpoint".into(),
+        ]));
+    }
 
     info!(topic = ?msg.topic_arn, "Auto-confirming SNS subscription");
 
@@ -273,15 +308,15 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     .bind(&reason)
                     .execute(&state.db)
                     .await
-                    .map_err(|e| warn!(email = %email, error = %e, "Failed to suppress bounced address"));
+                    .map_err(|e| warn!(email = %apexmail_lib::pii::redact_email(&email), error = %e, "Failed to suppress bounced address"));
 
-                    info!(email = %email, reason = %reason, "Auto-suppressed hard-bounced address");
+                    info!(email = %apexmail_lib::pii::redact_email(&email), reason = %reason, "Auto-suppressed hard-bounced address");
                 }
 
                 // Update message status if we have the internal ID
                 if let Some(ref msg_id) = apexmail_message_id {
                     let status = if is_permanent { "bounced" } else { "deferred" };
-                    let _ = sqlx::query(
+                    if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = $1, bounce_type = $2, updated_at = NOW()
                          WHERE id = $3::uuid",
                     )
@@ -289,7 +324,10 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     .bind(&reason)
                     .bind(msg_id)
                     .execute(&state.db)
-                    .await;
+                    .await
+                    {
+                        warn!(message_id = %msg_id, error = %e, "Failed to update bounce status");
+                    }
                 }
 
                 // Queue webhook event for the tenant
@@ -349,19 +387,22 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                 .bind(&reason)
                 .execute(&state.db)
                 .await
-                .map_err(|e| warn!(email = %email, error = %e, "Failed to suppress complained address"));
+                .map_err(|e| warn!(email = %apexmail_lib::pii::redact_email(&email), error = %e, "Failed to suppress complained address"));
 
-                info!(email = %email, reason = %reason, "Auto-suppressed complained address");
+                info!(email = %apexmail_lib::pii::redact_email(&email), reason = %reason, "Auto-suppressed complained address");
 
                 // Update message status
                 if let Some(ref msg_id) = apexmail_message_id {
-                    let _ = sqlx::query(
+                    if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = 'complained', updated_at = NOW()
                          WHERE id = $1::uuid",
                     )
                     .bind(msg_id)
                     .execute(&state.db)
-                    .await;
+                    .await
+                    {
+                        warn!(message_id = %msg_id, error = %e, "Failed to update complaint status");
+                    }
                 }
 
                 // Queue webhook
@@ -402,13 +443,16 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
 
     // Update message status to 'delivered'
     if let Some(ref msg_id) = apexmail_message_id {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "UPDATE messages SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
              WHERE id = $1::uuid AND status != 'delivered'",
         )
         .bind(msg_id)
         .execute(&state.db)
-        .await;
+        .await
+        {
+            warn!(message_id = %msg_id, error = %e, "Failed to update delivery status");
+        }
     }
 
     // Queue webhook

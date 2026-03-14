@@ -214,17 +214,18 @@ impl EventProcessor {
             return Ok(());
         }
 
+        let OpenData { tenant_id, message_id, recipient, user_agent, ip_address } = data;
         let event = TrackingEvent {
             id: new_id("evt"),
             event_type: EventType::Opened,
-            tenant_id: data.tenant_id.clone(),
-            message_id: data.message_id.clone(),
-            recipient: data.recipient.clone(),
+            tenant_id,
+            message_id,
+            recipient,
             link_id: None,
             link_url: None,
             unsubscribe_reason: None,
-            user_agent: data.user_agent,
-            ip_address: data.ip_address,
+            user_agent,
+            ip_address,
             timestamp: Utc::now(),
             metadata: None,
         };
@@ -235,7 +236,7 @@ impl EventProcessor {
         let now = Utc::now();
         let date = now.format("%Y-%m-%d").to_string();
         let hour = now.format("%H").to_string();
-        self.incr_counters(&data.tenant_id, &date, &hour, "opens").await;
+        self.incr_counters(&event.tenant_id, &date, &hour, "opens").await;
 
         Ok(())
     }
@@ -249,17 +250,18 @@ impl EventProcessor {
             return Ok(());
         }
 
+        let ClickData { tenant_id, message_id, recipient, link_id, link_url, user_agent, ip_address } = data;
         let event = TrackingEvent {
             id: new_id("evt"),
             event_type: EventType::Clicked,
-            tenant_id: data.tenant_id.clone(),
-            message_id: data.message_id.clone(),
-            recipient: data.recipient.clone(),
-            link_id: Some(data.link_id.clone()),
-            link_url: Some(data.link_url.clone()),
+            tenant_id,
+            message_id,
+            recipient,
+            link_id: Some(link_id),
+            link_url: Some(link_url),
             unsubscribe_reason: None,
-            user_agent: data.user_agent,
-            ip_address: data.ip_address,
+            user_agent,
+            ip_address,
             timestamp: Utc::now(),
             metadata: None,
         };
@@ -270,7 +272,7 @@ impl EventProcessor {
         let now = Utc::now();
         let date = now.format("%Y-%m-%d").to_string();
         let hour = now.format("%H").to_string();
-        self.incr_counters(&data.tenant_id, &date, &hour, "clicks").await;
+        self.incr_counters(&event.tenant_id, &date, &hour, "clicks").await;
 
         Ok(())
     }
@@ -278,25 +280,28 @@ impl EventProcessor {
     /// Record an unsubscribe event into the Redis WAL and immediately add the
     /// recipient to the suppression list (GDPR / CAN-SPAM requirement).
     pub async fn record_unsubscribe(&self, data: UnsubscribeData) -> Result<()> {
+        let metadata = data.category.as_deref().map(|cat| {
+            serde_json::json!({ "category": cat })
+        });
+        let category = data.category;
+        let UnsubscribeData { tenant_id, message_id, recipient, reason, user_agent, ip_address, .. } = data;
         let event = TrackingEvent {
             id: new_id("evt"),
             event_type: EventType::Unsubscribed,
-            tenant_id: data.tenant_id.clone(),
-            message_id: data.message_id.clone(),
-            recipient: data.recipient.clone(),
+            tenant_id,
+            message_id,
+            recipient,
             link_id: None,
             link_url: None,
-            unsubscribe_reason: Some(data.reason.clone().unwrap_or_else(|| "one-click".into())),
-            user_agent: data.user_agent,
-            ip_address: data.ip_address,
+            unsubscribe_reason: Some(reason.unwrap_or_else(|| "one-click".into())),
+            user_agent,
+            ip_address,
             timestamp: Utc::now(),
-            metadata: data.category.as_deref().map(|cat| {
-                serde_json::json!({ "category": cat })
-            }),
+            metadata,
         };
 
         self.enqueue_event(&event).await?;
-        self.add_to_suppression_list(&data.tenant_id, &data.recipient, data.category.as_deref()).await;
+        self.add_to_suppression_list(&event.tenant_id, &event.recipient, category.as_deref()).await;
 
         Ok(())
     }
@@ -491,6 +496,32 @@ impl EventProcessor {
         }
 
         tx.commit().await.context("commit transaction")?;
+
+        // ── Publish events to Redis Pub/Sub for real-time SSE streaming ──
+        // Fire-and-forget: SSE is best-effort; Postgres is the source of truth.
+        let redis = self.redis.clone();
+        let events_for_pubsub: Vec<(String, String)> = events
+            .iter()
+            .filter_map(|ev| {
+                serde_json::to_string(ev)
+                    .ok()
+                    .map(|json| (ev.tenant_id.clone(), json))
+            })
+            .collect();
+
+        tokio::spawn(async move {
+            if let Ok(mut conn) = redis.get().await {
+                for (tenant_id, payload) in events_for_pubsub {
+                    let channel = format!("events:{tenant_id}");
+                    let _: Result<(), _> = redis::cmd("PUBLISH")
+                        .arg(&channel)
+                        .arg(&payload)
+                        .query_async(&mut *conn)
+                        .await;
+                }
+            }
+        });
+
         Ok(())
     }
 

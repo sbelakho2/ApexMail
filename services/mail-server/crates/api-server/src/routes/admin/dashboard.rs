@@ -2,6 +2,7 @@
 //!
 //! Migrated from: apps/control-plane/src/app/api/dashboard/stats/route.ts
 
+use super::super::helpers::table_exists;
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -74,15 +75,6 @@ pub struct DashboardStats {
     pub platform: PlatformStats,
     pub recent_activity: Vec<ActivityEntry>,
     pub pipeline: PipelineStats,
-}
-
-async fn table_exists(db: &sqlx::PgPool, name: &str) -> bool {
-    let table_ref = format!("public.{name}");
-    sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
-        .bind(&table_ref)
-        .fetch_one(db)
-        .await
-        .unwrap_or(false)
 }
 
 fn parse_count(val: Option<String>) -> i64 {
@@ -189,7 +181,7 @@ async fn get_dashboard_stats(
     if has_system_alerts {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT severity, COUNT(*)::text FROM system_alerts WHERE acknowledged = false AND severity IN ('high', 'critical') GROUP BY severity",
-        ).fetch_all(db).await.unwrap_or_default();
+        ).fetch_all(db).await?;
 
         for (severity, count_str) in &rows {
             let count: i64 = count_str.parse().unwrap_or(0);
@@ -224,7 +216,7 @@ async fn get_dashboard_stats(
     if has_sales_leads {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT status, COUNT(*)::text FROM sales_leads GROUP BY status",
-        ).fetch_all(db).await.unwrap_or_default();
+        ).fetch_all(db).await?;
 
         for (status, count_str) in &rows {
             let count: i64 = count_str.parse().unwrap_or(0);
@@ -245,7 +237,7 @@ async fn get_dashboard_stats(
     if has_sales_leads {
         let leads: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT id, company_name, created_at FROM sales_leads ORDER BY created_at DESC LIMIT 5",
-        ).fetch_all(db).await.unwrap_or_default();
+        ).fetch_all(db).await?;
 
         for (id, name, ts) in leads {
             recent_activity.push(ActivityEntry {

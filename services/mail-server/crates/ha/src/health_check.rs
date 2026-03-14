@@ -207,7 +207,8 @@ impl HealthCheckService {
         overall: &HealthStatus,
         components: &[ComponentHealth],
     ) -> Result<(), sqlx::Error> {
-        let comp_json = serde_json::to_value(components).unwrap_or_default();
+        let comp_json = serde_json::to_value(components)
+            .map_err(|e| sqlx::Error::Protocol(format!("serialization: {e}")))?;
         sqlx::query(
             "INSERT INTO ha_health_checks (node_id, region, status, components, checked_at)
              VALUES ($1, $2, $3, $4, NOW())

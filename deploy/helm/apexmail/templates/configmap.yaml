@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "apexmail.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+data:
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis-host: {{ include "apexmail.redisHost" . | quote }}
+  redis-port: {{ include "apexmail.redisPort" . | quote }}
+
+  # ── ClickHouse ─────────────────────────────────────────────────────────────
+  {{- if .Values.clickhouse.enabled }}
+  clickhouse-url: "http://{{ include "apexmail.fullname" . }}-clickhouse:8123"
+  clickhouse-database: "apexmail"
+  clickhouse-user: "apexmail"
+  {{- end }}
+
+  # ── Tracking service ───────────────────────────────────────────────────────
+  {{- with (index .Values.ingress.hosts 0) }}
+  tracking-base-url: "https://{{ .host }}"
+  web-base-url: "https://{{ .host }}"
+  {{- end }}
+  trusted-proxies: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  rate-limit-enabled: "true"
+  rate-limit-max-per-minute: "1000"

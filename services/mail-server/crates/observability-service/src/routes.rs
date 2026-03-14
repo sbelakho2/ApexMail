@@ -4,12 +4,17 @@
 //! endpoint via a shared [`AppState`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
-    extract::{Query, State},
+    extract::{DefaultBodyLimit, Query, State},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::get,
     Json, Router,
 };
+use tower_http::timeout::TimeoutLayer;
 use serde::{Deserialize, Serialize};
 
 use crate::alerting::AlertManager;
@@ -31,6 +36,7 @@ pub struct AppState {
     pub logs: Arc<LogAggregator>,
     pub alerts: Arc<AlertManager>,
     pub slos: Arc<SloMonitor>,
+    pub service_token: String,
 }
 
 impl AppState {
@@ -47,6 +53,7 @@ impl AppState {
             logs,
             alerts,
             slos,
+            service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
         }
     }
 }
@@ -58,13 +65,45 @@ impl AppState {
 /// Build the observability HTTP router.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/health", get(health))
         .route("/metrics/summary", get(metrics_summary))
         .route("/traces", get(traces_list))
         .route("/logs", get(logs_query))
         .route("/alerts", get(alerts_list))
         .route("/slos", get(slos_list))
-        .route("/health", get(health))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
+}
+
+// ---------------------------------------------------------------------------
+// Auth middleware
+// ---------------------------------------------------------------------------
+
+async fn require_service_token(
+    State(state): State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if req.uri().path() == "/health" {
+        return Ok(next.run(req).await);
+    }
+    if state.service_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let provided = req.headers().get("x-api-key")
+        .and_then(|v| v.to_str().ok().map(String::from))
+        .or_else(|| {
+            req.headers().get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
+        });
+    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 // ---------------------------------------------------------------------------

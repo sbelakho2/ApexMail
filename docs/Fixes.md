@@ -29,6 +29,14 @@
 
 ---
 
+## Incremental Updates (2026-03-05)
+
+- [x] 🟠 **WEB-RBAC-2026-03-05-01** — Dedicated IP feature exposure was only partially gated; navigation affordances and route access were still reachable for non-entitled users
+	- Evidence (2026-03-05): Added centralized entitlement helper in `apps/web/src/lib/dedicated-ip-access.ts` combining role + plan checks, updated sidebar and billing links to hide Dedicated IP entry points (`apps/web/src/components/layout/sidebar.tsx`, `apps/web/src/app/(dashboard)/settings/billing/page.tsx`), added dedicated IP page entitlement redirect (`apps/web/src/app/(dashboard)/settings/dedicated-ips/page.tsx`), and added middleware-level hard route guard for `/settings/dedicated-ips` (`apps/web/src/middleware.ts`).
+	- Evidence (2026-03-05): RBAC normalization updated to treat `owner` as privileged with `admin` for this feature (`apps/web/src/stores/index.ts`, `apps/web/src/lib/dedicated-ip-access.ts`, `apps/web/src/middleware.ts`).
+
+---
+
 ## A. Web App (`apps/web`)
 
 ### A.1 Security

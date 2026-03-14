@@ -13,9 +13,10 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -24,6 +25,7 @@ use axum::{
 };
 use chrono::Datelike;
 use serde::Deserialize;
+use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -40,6 +42,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Usage
         .route("/usage", get(get_usage))
         .route("/usage/record", post(record_usage))
+        .route("/usage/record-checked", post(record_usage_checked))
         // Invoices
         .route("/invoices", get(list_invoices))
         .route("/invoices/{id}", get(get_invoice))
@@ -51,6 +54,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .with_state(state)
         .layer(middleware::from_fn_with_state(shared, require_service_auth))
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +147,32 @@ async fn record_usage(
         StatusCode::CREATED,
         Json(serde_json::json!({ "recorded": recorded })),
     ))
+}
+
+/// POST /usage/record-checked
+///
+/// Atomically check quota and record a metering event in a single operation.
+/// Avoids the TOCTOU window of separate `GET /quota` + `POST /usage/record`.
+async fn record_usage_checked(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RecordUsageBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let result = usage::record_with_quota_check(
+        &state.db,
+        &state.redis,
+        body.tenant_id,
+        body.event_type,
+        body.quantity,
+        body.event_id,
+        body.metadata,
+    )
+    .await?;
+    let status = if result.allowed {
+        StatusCode::CREATED
+    } else {
+        StatusCode::TOO_MANY_REQUESTS
+    };
+    Ok((status, Json(serde_json::to_value(&result).unwrap_or_default())))
 }
 
 /// Query params for invoice listing.

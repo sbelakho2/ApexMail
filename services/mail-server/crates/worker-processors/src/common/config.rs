@@ -140,9 +140,10 @@ pub struct SmtpConfig {
 }
 
 impl Default for SmtpConfig {
+    /// Defaults — host is intentionally invalid to force explicit configuration.
     fn default() -> Self {
         Self {
-            host: "localhost".to_string(),
+            host: "smtp.unset.invalid".to_string(),
             port: 25,
             secure: false,
             username: None,

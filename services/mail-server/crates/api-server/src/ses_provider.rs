@@ -66,7 +66,7 @@ pub enum SesProviderError {
     Database(#[from] sqlx::Error),
 
     #[error("tenant {tenant_id} has reached dedicated IP limit ({limit})")]
-    LimitReached { tenant_id: Uuid, limit: i32 },
+    LimitReached { tenant_id: String, limit: i32 },
 
     #[error("plan does not include dedicated IP access")]
     PlanNotEligible,
@@ -79,9 +79,10 @@ impl SesIpProvider {
     }
 
     /// Build the SES pool name for a tenant.
-    fn pool_name_for_tenant(&self, tenant_id: Uuid) -> String {
-        let short = tenant_id.simple().to_string();
-        format!("{}-{}", self.pool_prefix, &short[..12])
+    fn pool_name_for_tenant(&self, tenant_id: &str) -> String {
+        let short = tenant_id.replace('-', "");
+        let truncated = if short.len() >= 12 { &short[..12] } else { &short };
+        format!("{}-{}", self.pool_prefix, truncated)
     }
 
     // ── Plan gating ────────────────────────────────────────────
@@ -90,7 +91,7 @@ impl SesIpProvider {
     /// they're entitled to. Returns `(allowed: bool, included_count: i32)`.
     pub async fn check_plan_eligibility(
         &self,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<(bool, i32), SesProviderError> {
         let row = sqlx::query_as::<_, (bool, i32)>(
             "SELECT
@@ -113,7 +114,7 @@ impl SesIpProvider {
     }
 
     /// Count how many active (non-retired, non-releasing) dedicated IPs the tenant has.
-    pub async fn count_active_ips(&self, tenant_id: Uuid) -> Result<i64, SesProviderError> {
+    pub async fn count_active_ips(&self, tenant_id: &str) -> Result<i64, SesProviderError> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM dedicated_ips
              WHERE tenant_id = $1 AND status NOT IN ('retired', 'releasing')",
@@ -127,7 +128,7 @@ impl SesIpProvider {
     // ── Pool management ────────────────────────────────────────
 
     /// Ensure the tenant's SES IP pool exists, creating it if necessary.
-    async fn ensure_tenant_pool(&self, tenant_id: Uuid) -> Result<String, SesProviderError> {
+    async fn ensure_tenant_pool(&self, tenant_id: &str) -> Result<String, SesProviderError> {
         let pool_name = self.pool_name_for_tenant(tenant_id);
 
         // Check if pool already exists
@@ -173,7 +174,7 @@ impl SesIpProvider {
     /// 5. Sets `billing_status` to `included` or `pending_charge` based on plan limits.
     pub async fn allocate_ip(
         &self,
-        tenant_id: Uuid,
+        tenant_id: &str,
         region: Option<&str>,
     ) -> Result<AllocatedIp, SesProviderError> {
         let target_region = region.unwrap_or(&self.region);
@@ -191,7 +192,7 @@ impl SesIpProvider {
         let hard_cap = if included_count >= 10 { 25 } else { included_count.max(5) };
         if active_count >= hard_cap as i64 {
             return Err(SesProviderError::LimitReached {
-                tenant_id,
+                tenant_id: tenant_id.to_string(),
                 limit: hard_cap,
             });
         }
@@ -309,7 +310,7 @@ impl SesIpProvider {
     pub async fn release_ip(
         &self,
         dedicated_ip_id: Uuid,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<(), SesProviderError> {
         // Fetch the record
         let row: Option<(String, String)> = sqlx::query_as(
@@ -386,7 +387,7 @@ impl SesIpProvider {
     pub async fn start_warmup(
         &self,
         dedicated_ip_id: Uuid,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<SesIpStatus, SesProviderError> {
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT ip_address FROM dedicated_ips

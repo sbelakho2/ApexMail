@@ -22,8 +22,8 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
-    pub user_id: Uuid,
-    pub tenant_id: Uuid,
+    pub user_id: String,
+    pub tenant_id: String,
     pub email: String,
     pub name: Option<String>,
     pub role: String,
@@ -53,12 +53,12 @@ async fn get_profile(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<ProfileResponse>, ApiError> {
-    let row: Option<(Uuid, Uuid, String, Option<String>, String, chrono::DateTime<Utc>)> =
+    let row: Option<(String, String, String, Option<String>, String, chrono::DateTime<Utc>)> =
         sqlx::query_as(
             "SELECT id, tenant_id, email, name, role, created_at 
              FROM users WHERE id = $1",
         )
-        .bind(auth.user_id)
+        .bind(&auth.user_id)
         .fetch_optional(&state.db)
         .await?;
 
@@ -94,7 +94,7 @@ async fn delete_account(
 
     // Verify password
     let user: Option<(String,)> = sqlx::query_as("SELECT password_hash FROM users WHERE id = $1")
-        .bind(auth.user_id)
+        .bind(&auth.user_id)
         .fetch_optional(&state.db)
         .await?;
 
@@ -123,14 +123,14 @@ async fn delete_account(
             updated_at = NOW()
          WHERE id = $1",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(deletion_at.to_rfc3339())
     .execute(&state.db)
     .await?;
 
     // Deactivate all users in tenant
     sqlx::query("UPDATE users SET status = 'disabled', updated_at = NOW() WHERE tenant_id = $1")
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -139,8 +139,8 @@ async fn delete_account(
         "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource_type, metadata, created_at)
          VALUES (gen_random_uuid(), $1, $2, 'account.deletion_scheduled', 'account', $3::jsonb, NOW())",
     )
-    .bind(auth.tenant_id)
-    .bind(auth.user_id)
+    .bind(&auth.tenant_id)
+    .bind(&auth.user_id)
     .bind(serde_json::json!({
         "reason": body.reason,
         "deletion_scheduled_at": deletion_at.to_rfc3339(),

@@ -4,9 +4,9 @@
 
 base_url = "https://apexmail.ee"
 title = "ApexMail - Enterprise Email API for Developers"
-description = "The email API that keeps you out of court. EU-compliant, cryptographically verified delivery, enterprise private cloud options, and developer-first experience."
+description = "Enterprise email API with built-in compliance, real-time delivery tracking, and developer-first experience. EU-hosted, GDPR-ready, private cloud options."
 default_language = "en"
-theme = ""
+# theme = ""  # No external theme; templates are in ./templates/
 
 # ── Build Options ────────────────────────────────────────────
 

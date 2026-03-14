@@ -5,7 +5,8 @@
 import { Hono } from 'hono';
 import { ZodError } from 'zod';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
+import { logger as honoLogger } from 'hono/logger';
+import { logger } from './lib/logger.js';
 import { secureHeaders } from 'hono/secure-headers';
 import { timing } from 'hono/timing';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -73,7 +74,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
 
   // C-078: Handle Redis connection errors to prevent uncaught exceptions
   redis.on('error', (err: Error) => {
-    console.error('Redis connection error', err.message);
+    logger.error('Redis connection error', { error: err.message });
   });
 
   // Initialize services
@@ -87,7 +88,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   const slaCredits = new SlaCreditsService(db);
   const contracts = new EnterpriseContractService(db);
   const wallet = new WalletService(db, redis);
-  const viralLoop = new ViralLoopService(db, redis);
+  const viralLoop = new ViralLoopService(db, redis, config.apiBaseUrl, config.viralTelemetryHashSalt);
   const costCircuit = new CostCircuitService(db, redis);
   const dedicatedIpBilling = new DedicatedIpBillingService(db);
 
@@ -116,7 +117,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   const app = new Hono<BillingEnv>();
 
   // Global middleware
-  app.use('*', logger());
+  app.use('*', honoLogger());
   app.use('*', timing());
   app.use('*', secureHeaders());
   app.use('*', async (c, next) => {
@@ -146,7 +147,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
       await redis.ping();
       return c.json({ status: 'ready' });
     } catch (error) {
-      console.error('Readiness check failed:', error);
+      logger.error('Readiness check failed', { error: error instanceof Error ? error.message : String(error) });
       return c.json({ status: 'not_ready' }, 503);
     }
   });
@@ -210,8 +211,10 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   app.use('/api/*', async (c, next) => {
     const tenantId = c.get('tenantId');
     const clientIp = getClientIp(c.req.header('x-forwarded-for'), c.req.header('x-real-ip'));
-    const windowSeconds = 60;
-    const maxRequestsPerWindow = 300;
+    
+    const windowSeconds = config.rateLimitWindowSeconds;
+    const maxRequestsPerWindow = config.rateLimitMaxRequests;
+    
     const windowBucket = Math.floor(Date.now() / (windowSeconds * 1000));
     const key = `billing:rate:${tenantId}:${clientIp}:${windowBucket}`;
 
@@ -229,7 +232,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
         return c.json({ error: 'Too many requests' }, 429);
       }
     } catch (error) {
-      console.error('Rate limit check failed:', error);
+      logger.error('Rate limit check failed', { error: error instanceof Error ? error.message : String(error) });
     }
 
     return next();
@@ -244,7 +247,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   // Error handler
   app.onError((err, c) => {
     const requestId = c.get('requestId');
-    console.error('Billing API Error:', { requestId, error: err });
+    logger.error('Billing API Error', { requestId, error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
 
     if (err instanceof ZodError) {
       return c.json({ requestId, error: 'Validation error', fields: err.issues.map((i) => ({ path: i.path, message: i.message })) }, 400);
@@ -345,14 +348,14 @@ function verifyJwt(token: string): JwtPayload | null {
     // Decode and validate header - prevent algorithm confusion attack
     const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8'));
     if (header.alg !== 'HS256') {
-      console.error('[JWT] Invalid algorithm:', header.alg);
+      logger.error('Invalid algorithm', { component: 'jwt', algorithm: header.alg });
       return null;
     }
 
     // Get JWT secret from config - MUST be set in production
     const jwtSecret = config.jwtSecret;
     if (!jwtSecret) {
-      console.error('[JWT] JWT_SECRET not configured');
+      logger.error('JWT_SECRET not configured', { component: 'jwt' });
       return null;
     }
 
@@ -367,7 +370,7 @@ function verifyJwt(token: string): JwtPayload | null {
     
     if (sigBuffer.length !== expectedBuffer.length || 
         !timingSafeEqual(sigBuffer, expectedBuffer)) {
-      console.error('[JWT] Signature verification failed');
+      logger.error('Signature verification failed', { component: 'jwt' });
       return null;
     }
 
@@ -381,7 +384,7 @@ function verifyJwt(token: string): JwtPayload | null {
 
     return payload as JwtPayload;
   } catch (error) {
-    console.error('[JWT] Verification error:', error instanceof Error ? error.message : 'Unknown');
+    logger.error('Verification error', { component: 'jwt', error: error instanceof Error ? error.message : 'Unknown' });
     return null;
   }
 }

@@ -190,7 +190,7 @@ impl GdprAutomation {
                 .bind(request_id)
                 .execute(&self.db)
                 .await
-                .map_err(|_| "DB error updating status")?;
+                .map_err(|e| format!("DB error updating GDPR status to rejected: {e}"))?;
             }
         }
 
@@ -542,7 +542,7 @@ impl GdprAutomation {
                     tracing::error!(
                         error = %e,
                         tenant_id = %tenant_id,
-                        email = %email,
+                        email = %mail_common::pii::redact_email(&email),
                         cascade_type = %cascade_type,
                         "GDPR VIOLATION: Failed to cascade consent withdrawal — manual intervention required"
                     );

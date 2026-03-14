@@ -110,7 +110,7 @@ async fn list_leads(
     .bind(offset)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let leads: Vec<LeadEntry> = rows
         .into_iter()
@@ -139,14 +139,14 @@ async fn list_leads(
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let source_stats: Vec<(String, String)> = sqlx::query_as(
         "SELECT status, COUNT(*)::text FROM sales_leads GROUP BY status",
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let stats_by_provider: serde_json::Value = provider_stats
         .into_iter()
@@ -301,7 +301,8 @@ async fn enrich_leads(
             ApiError::Internal("Enrichment service unavailable".into())
         })?;
 
-    let result: serde_json::Value = response.json().await.unwrap_or(serde_json::json!({ "success": true }));
+    let result: serde_json::Value = response.json().await
+        .map_err(|e| ApiError::Internal(format!("failed to parse enrichment response: {e}")))?;
     Ok(Json(result))
 }
 
@@ -350,7 +351,7 @@ async fn list_campaigns(
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let campaigns: Vec<Campaign> = rows
         .into_iter()
@@ -451,7 +452,8 @@ async fn run_discovery(
             ApiError::Internal("Discovery service unavailable".into())
         })?;
 
-    let result: serde_json::Value = response.json().await.unwrap_or(serde_json::json!({ "success": true }));
+    let result: serde_json::Value = response.json().await
+        .map_err(|e| ApiError::Internal(format!("failed to parse discovery response: {e}")))?;
     Ok(Json(result))
 }
 
@@ -521,7 +523,8 @@ async fn start_outreach(
             ApiError::Internal("Outreach service unavailable".into())
         })?;
 
-    let result: serde_json::Value = response.json().await.unwrap_or(serde_json::json!({ "success": true }));
+    let result: serde_json::Value = response.json().await
+        .map_err(|e| ApiError::Internal(format!("failed to parse outreach response: {e}")))?;
     Ok(Json(result))
 }
 
@@ -578,7 +581,7 @@ async fn save_settings(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
     // Ensure table exists
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "CREATE TABLE IF NOT EXISTS sales_settings (
             id SERIAL PRIMARY KEY,
             scoring_weights JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -588,7 +591,10 @@ async fn save_settings(
          )",
     )
     .execute(&state.db)
-    .await;
+    .await
+    {
+        tracing::warn!(error = %e, "Failed to ensure sales_settings table exists");
+    }
 
     // Upsert settings (single row)
     sqlx::query(

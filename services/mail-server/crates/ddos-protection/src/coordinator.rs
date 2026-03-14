@@ -765,7 +765,7 @@ fn generate_unique_tag(node_id: &str) -> String {
 }
 
 /// Threat intelligence service for cross-region IP block sharing.
-/// This is a placeholder stub for the async Redis-based implementation.
+/// Uses the coordinator hub to propagate block events across all nodes.
 pub struct ThreatIntelService {
     /// Coordinator hub
     hub: Arc<CoordinatorHub>,

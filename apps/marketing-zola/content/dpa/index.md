@@ -50,7 +50,7 @@ All processing occurs within the EEA (Estonia). No transfers outside the EEA wit
 - TLS 1.3 in transit
 - Argon2id password hashing
 - Audit logging with hash-chain integrity
-- SOC 2 Type II certified infrastructure
+- SOC 2-aligned security controls
 
 ## 8. Breach Notification
 

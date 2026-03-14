@@ -5,7 +5,12 @@
 
 import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
+import { DEFAULT_BILLING_CURRENCY, resolveTenantBillingCurrency } from '../lib/billing-currency.js';
+import { WALLET_CACHE_TTL_SECONDS } from '../lib/constants.js';
+
+const logger = createLogger();
 
 export interface WalletBalance {
   tenantId: string;
@@ -30,6 +35,17 @@ export interface WalletTransaction {
 
 /**
  * Wallet ledger service for prepaid accounts
+ * 
+ * Includes comprehensive JSDoc for public API methods.
+ * 
+ * @example
+ * ```typescript
+ * const wallet = new WalletService(db, redis);
+ * const balance = await wallet.getBalance('tenant-123');
+ * if (balance.ok) {
+ *   console.log(`Available: ${balance.value.availableBalance} cents`);
+ * }
+ * ```
  */
 export class WalletService {
   constructor(
@@ -38,7 +54,16 @@ export class WalletService {
   ) {}
 
   /**
-   * Get wallet balance
+   * Get wallet balance for a tenant.
+   * Creates wallet automatically if it doesn't exist.
+   * 
+   * @param tenantId - The tenant UUID
+   * @returns Result containing WalletBalance or Error
+   * 
+   * @remarks
+   * - Balances are stored in cents (integer) to avoid floating point issues
+   * - Uses Redis caching with 5-minute TTL for read performance
+   * - Creates wallet atomically on first access
    */
   async getBalance(tenantId: string): Promise<Result<WalletBalance, Error>> {
     // Query database
@@ -69,7 +94,10 @@ export class WalletService {
         updatedAt: row.updated_at,
       };
     } else {
-      // Create wallet if doesn't exist
+      const tenantCurrency = await resolveTenantBillingCurrency(this.db, tenantId);
+
+      // Create wallet if doesn't exist, using ON CONFLICT DO UPDATE to avoid race condition
+      // ON CONFLICT DO NOTHING can return no rows when concurrent inserts occur
       const createResult = await this.db.query<{
         tenant_id: string;
         balance: number;
@@ -78,28 +106,42 @@ export class WalletService {
         updated_at: Date;
       }>(
         `INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
-         VALUES ($1, 0, 0, 'EUR', NOW(), NOW())
-         ON CONFLICT (tenant_id) DO NOTHING
-         RETURNING *`,
-        [tenantId]
+         VALUES ($1, 0, 0, $2, NOW(), NOW())
+         ON CONFLICT (tenant_id) DO UPDATE SET updated_at = wallets.updated_at
+         RETURNING tenant_id, balance, reserved, currency, updated_at`,
+        [tenantId, tenantCurrency]
       );
 
       if (!createResult.ok) return Result.err(createResult.error);
 
-      balance = {
-        tenantId,
-        balance: 0,
-        reservedBalance: 0,
-        availableBalance: 0,
-        currency: 'EUR',
-        updatedAt: new Date(),
-      };
+      // Use returned row data instead of assuming defaults
+      const row = createResult.value.rows[0];
+      if (row) {
+        balance = {
+          tenantId: row.tenant_id,
+          balance: row.balance,
+          reservedBalance: row.reserved,
+          availableBalance: row.balance - row.reserved,
+          currency: row.currency,
+          updatedAt: row.updated_at,
+        };
+      } else {
+        // Fallback should never happen with DO UPDATE RETURNING, but be defensive
+        balance = {
+          tenantId,
+          balance: 0,
+          reservedBalance: 0,
+          availableBalance: 0,
+          currency: tenantCurrency ?? DEFAULT_BILLING_CURRENCY,
+          updatedAt: new Date(),
+        };
+      }
     }
 
     // Cache for 5 minutes
     await this.redis.setex(
       `wallet:balance:${tenantId}`,
-      300,
+      WALLET_CACHE_TTL_SECONDS,
       JSON.stringify({
         balance: balance.balance,
         reserved: balance.reservedBalance,
@@ -145,42 +187,87 @@ export class WalletService {
     // Atomic check-and-debit in a single query to prevent race conditions
     // Uses a conditional update that only succeeds if sufficient funds exist
     const updateResult = await this.db.query<{
+      tx_id: string;
+      tenant_id: string;
+      type: WalletTransaction['type'];
+      amount: number;
       balance: number;
-      updated: boolean;
+      description: string;
+      reference: string | null;
+      metadata: string;
+      created_at: Date;
     }>(
-      `WITH balance_check AS (
-        SELECT tenant_id, balance, reserved,
-               (balance - reserved) >= $1 AS has_funds
-        FROM wallets
-        WHERE tenant_id = $2
-        FOR UPDATE
-      ),
-      do_update AS (
+      `WITH updated_wallet AS (
         UPDATE wallets
         SET balance = balance - $1, updated_at = NOW()
         WHERE tenant_id = $2
-          AND EXISTS (SELECT 1 FROM balance_check WHERE has_funds = true)
-        RETURNING balance
+          AND (balance - reserved) >= $1
+        RETURNING id AS wallet_id, tenant_id, balance
+      ),
+      new_transaction AS (
+        INSERT INTO wallet_transactions (
+          id, tenant_id, wallet_id, type, amount, balance_after, description, reference, metadata, created_at
+        )
+        SELECT
+          gen_random_uuid(),
+          tenant_id,
+          wallet_id,
+          'debit',
+          -$1,
+          balance,
+          $3,
+          $4,
+          $5::jsonb,
+          NOW()
+        FROM updated_wallet
+        RETURNING id, tenant_id, type, amount, balance_after AS balance, description, reference, metadata, created_at
+      ),
+      audit_log AS (
+        INSERT INTO audit_logs (id, tenant_id, action, resource_type, resource_id, metadata, created_at)
+        SELECT
+          gen_random_uuid(),
+          nt.tenant_id,
+          'wallet.debited',
+          'wallet',
+          nt.id,
+          jsonb_build_object('amount', $1, 'description', $3, 'reference', $4, 'balanceAfter', nt.balance),
+          NOW()
+        FROM new_transaction nt
+        RETURNING id
       )
-      SELECT 
-        COALESCE((SELECT balance FROM do_update), 0) as balance,
-        EXISTS (SELECT 1 FROM do_update) as updated`,
-      [amount, tenantId]
+      SELECT id AS tx_id, tenant_id, type, amount, balance, description, reference, metadata, created_at
+      FROM new_transaction`,
+      [amount, tenantId, description, reference ?? null, JSON.stringify(metadata)]
     );
 
     if (!updateResult.ok) return Result.err(updateResult.error);
 
     const row = updateResult.value.rows[0];
-    if (!row || !row.updated) {
+    if (!row) {
       return Result.err(new Error('Insufficient balance'));
     }
-
-    const newBalance = row.balance;
 
     // Invalidate cache
     await this.redis.del(`wallet:balance:${tenantId}`);
 
-    return this.recordTransaction(tenantId, 'debit', -amount, description, reference, metadata, newBalance);
+    let parsedMetadata: Record<string, unknown> = {};
+    try {
+      parsedMetadata = JSON.parse(row.metadata || '{}');
+    } catch (error) {
+      logger.warn('Failed to parse wallet transaction metadata', { txId: row.tx_id, error: String(error) });
+    }
+
+    return Result.ok({
+      id: row.tx_id,
+      tenantId: row.tenant_id,
+      type: row.type,
+      amount: row.amount,
+      balance: row.balance,
+      description: row.description,
+      reference: row.reference,
+      metadata: parsedMetadata,
+      createdAt: row.created_at,
+    });
   }
 
   /**
@@ -204,22 +291,24 @@ export class WalletService {
       success: boolean;
     }>(
       `WITH locked_wallet AS (
-        SELECT tenant_id, balance, reserved 
+        SELECT id AS wallet_id, tenant_id, balance, reserved 
         FROM wallets 
         WHERE tenant_id = $1 
         FOR UPDATE
       ),
       balance_check AS (
         SELECT 
+          wallet_id,
           tenant_id,
           (balance - reserved) >= $2 AS has_funds
         FROM locked_wallet
       ),
       new_reservation AS (
-        INSERT INTO wallet_reservations (id, tenant_id, amount, description, reference, status, created_at, expires_at)
+        INSERT INTO wallet_reservations (id, tenant_id, wallet_id, amount, description, reference, status, created_at, expires_at)
         SELECT 
           gen_random_uuid(), 
           $1, 
+          wallet_id,
           $2, 
           $3, 
           $4, 
@@ -228,19 +317,52 @@ export class WalletService {
           NOW() + INTERVAL '24 hours'
         FROM balance_check
         WHERE has_funds = true
-        RETURNING id
+        RETURNING id, wallet_id
       ),
       wallet_update AS (
         UPDATE wallets 
         SET reserved = reserved + $2, updated_at = NOW() 
         WHERE tenant_id = $1 
           AND EXISTS (SELECT 1 FROM new_reservation)
-        RETURNING tenant_id
+        RETURNING id AS wallet_id, balance
+      ),
+      log_transaction AS (
+        INSERT INTO wallet_transactions (
+          id, tenant_id, wallet_id, type, amount, balance_after, description, reference, metadata, created_at
+        )
+        SELECT
+          gen_random_uuid(),
+          $1,
+          wu.wallet_id,
+          'reserve',
+          0,
+          wu.balance,
+          $5,
+          nr.id::text,
+          jsonb_build_object('reservationId', nr.id, 'amount', $2),
+          NOW()
+        FROM wallet_update wu
+        JOIN new_reservation nr ON nr.wallet_id = wu.wallet_id
+        RETURNING id
+      ),
+      audit_log AS (
+        INSERT INTO audit_logs (id, tenant_id, action, resource_type, resource_id, metadata, created_at)
+        SELECT
+          gen_random_uuid(),
+          $1,
+          'wallet.reserved',
+          'wallet',
+          nr.id,
+          jsonb_build_object('amount', $2, 'description', $3, 'reference', $4),
+          NOW()
+        FROM wallet_update wu
+        JOIN new_reservation nr ON nr.wallet_id = wu.wallet_id
+        RETURNING id
       )
       SELECT 
-        (SELECT id FROM new_reservation) as reservation_id,
+        (SELECT id::text FROM new_reservation) as reservation_id,
         EXISTS (SELECT 1 FROM new_reservation) as success`,
-      [tenantId, amount, description, reference ?? null]
+      [tenantId, amount, description, reference ?? null, `Reserved: ${description}`]
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -255,8 +377,6 @@ export class WalletService {
     // Invalidate cache
     await this.redis.del(`wallet:balance:${tenantId}`);
 
-    await this.recordTransaction(tenantId, 'reserve', 0, `Reserved: ${description}`, reservationId, { reservationId, amount });
-
     return Result.ok({ reservationId });
   }
 
@@ -268,15 +388,18 @@ export class WalletService {
     // Use a single atomic query with CTE to capture reservation
     // This ensures both the reservation update and wallet deduction happen atomically
     const result = await this.db.query<{
+      tx_id: string;
       tenant_id: string;
+      type: WalletTransaction['type'];
       amount: number;
+      balance: number;
       description: string;
       reference: string | null;
-      new_balance: number;
-      success: boolean;
+      metadata: string;
+      created_at: Date;
     }>(
       `WITH reservation_check AS (
-        SELECT tenant_id, amount, description, reference, status
+        SELECT tenant_id, wallet_id, amount, description, reference, status
         FROM wallet_reservations
         WHERE id = $1
         FOR UPDATE
@@ -297,15 +420,42 @@ export class WalletService {
             updated_at = NOW()
         WHERE tenant_id = (SELECT tenant_id FROM valid_reservation)
           AND EXISTS (SELECT 1 FROM update_reservation)
-        RETURNING balance
+        RETURNING id AS wallet_id, tenant_id, balance
+      ),
+      new_transaction AS (
+        INSERT INTO wallet_transactions (
+          id, tenant_id, wallet_id, type, amount, balance_after, description, reference, metadata, created_at
+        )
+        SELECT
+          gen_random_uuid(),
+          tenant_id,
+          wallet_id,
+          'debit',
+          -(SELECT amount FROM valid_reservation),
+          balance,
+          CONCAT('Captured: ', (SELECT description FROM valid_reservation)),
+          $1,
+          jsonb_build_object('reservationId', $1),
+          NOW()
+        FROM update_wallet
+        RETURNING id, tenant_id, type, amount, balance_after AS balance, description, reference, metadata, created_at
+      ),
+      audit_log AS (
+        INSERT INTO audit_logs (id, tenant_id, action, resource_type, resource_id, metadata, created_at)
+        SELECT
+          gen_random_uuid(),
+          nt.tenant_id,
+          'wallet.capture',
+          'wallet',
+          nt.id,
+          jsonb_build_object('reservationId', $1, 'amount', (SELECT amount FROM valid_reservation), 'balanceAfter', nt.balance),
+          NOW()
+        FROM new_transaction nt
+        RETURNING id
       )
       SELECT 
-        (SELECT tenant_id FROM valid_reservation) as tenant_id,
-        (SELECT amount FROM valid_reservation) as amount,
-        (SELECT description FROM valid_reservation) as description,
-        (SELECT reference FROM valid_reservation) as reference,
-        (SELECT balance FROM update_wallet) as new_balance,
-        EXISTS (SELECT 1 FROM update_wallet) as success`,
+        id AS tx_id, tenant_id, type, amount, balance, description, reference, metadata, created_at
+      FROM new_transaction`,
       [reservationId]
     );
 
@@ -313,25 +463,30 @@ export class WalletService {
 
     const row = result.value.rows[0];
     if (!row) {
-      return Result.err(new Error('Reservation not found'));
-    }
-    
-    if (!row.success) {
       return Result.err(new Error('Reservation already processed or invalid'));
     }
 
     // Invalidate cache
     await this.redis.del(`wallet:balance:${row.tenant_id}`);
 
-    return this.recordTransaction(
-      row.tenant_id,
-      'debit',
-      -row.amount,
-      `Captured: ${row.description}`,
-      reservationId,
-      { reservationId },
-      row.new_balance
-    );
+    let parsedMetadata: Record<string, unknown> = {};
+    try {
+      parsedMetadata = JSON.parse(row.metadata || '{}');
+    } catch (error) {
+      logger.warn('Failed to parse wallet transaction metadata', { txId: row.tx_id, error: String(error) });
+    }
+
+    return Result.ok({
+      id: row.tx_id,
+      tenantId: row.tenant_id,
+      type: row.type,
+      amount: row.amount,
+      balance: row.balance,
+      description: row.description,
+      reference: row.reference,
+      metadata: parsedMetadata,
+      createdAt: row.created_at,
+    });
   }
 
   /**
@@ -346,7 +501,7 @@ export class WalletService {
       success: boolean;
     }>(
       `WITH reservation_check AS (
-        SELECT tenant_id, amount, status
+        SELECT tenant_id, wallet_id, amount, status
         FROM wallet_reservations
         WHERE id = $1
         FOR UPDATE
@@ -366,7 +521,38 @@ export class WalletService {
             updated_at = NOW()
         WHERE tenant_id = (SELECT tenant_id FROM valid_reservation)
           AND EXISTS (SELECT 1 FROM update_reservation)
-        RETURNING tenant_id
+        RETURNING id AS wallet_id, tenant_id, balance
+      ),
+      log_transaction AS (
+        INSERT INTO wallet_transactions (
+          id, tenant_id, wallet_id, type, amount, balance_after, description, reference, metadata, created_at
+        )
+        SELECT
+          gen_random_uuid(),
+          tenant_id,
+          wallet_id,
+          'release',
+          0,
+          balance,
+          'Released reservation',
+          $1,
+          jsonb_build_object('reservationId', $1, 'amount', (SELECT amount FROM valid_reservation)),
+          NOW()
+        FROM update_wallet
+        RETURNING id
+      ),
+      audit_log AS (
+        INSERT INTO audit_logs (id, tenant_id, action, resource_type, resource_id, metadata, created_at)
+        SELECT
+          gen_random_uuid(),
+          tenant_id,
+          'wallet.release',
+          'wallet',
+          $1::uuid,
+          jsonb_build_object('reservationId', $1, 'amount', (SELECT amount FROM valid_reservation), 'balanceAfter', balance),
+          NOW()
+        FROM update_wallet
+        RETURNING id
       )
       SELECT 
         (SELECT tenant_id FROM valid_reservation) as tenant_id,
@@ -388,15 +574,6 @@ export class WalletService {
 
     // Invalidate cache
     await this.redis.del(`wallet:balance:${row.tenant_id}`);
-
-    await this.recordTransaction(
-      row.tenant_id,
-      'release',
-      0,
-      'Released reservation',
-      reservationId,
-      { reservationId, amount: row.amount }
-    );
 
     return Result.ok(undefined);
   }
@@ -458,7 +635,8 @@ export class WalletService {
       let metadata: Record<string, unknown> = {};
       try {
         metadata = JSON.parse(row.metadata || '{}');
-      } catch {
+      } catch (error) {
+        logger.warn('Failed to parse wallet transaction metadata', { txId: row.id, error: String(error) });
         metadata = {};
       }
       return {
@@ -520,8 +698,10 @@ export class WalletService {
     const releasedCount = parseInt(result.value.rows[0]?.released_count ?? '0', 10);
 
     const tenantIds = new Set(result.value.rows.map(row => row.tenant_id));
-    for (const tenantId of tenantIds) {
-      await this.redis.del(`wallet:balance:${tenantId}`);
+    // FIX-N+1: Batch Redis delete instead of loop
+    if (tenantIds.size > 0) {
+      const keysToDelete = Array.from(tenantIds).map(id => `wallet:balance:${id}`);
+      await this.redis.del(...keysToDelete);
     }
 
     return Result.ok({ releasedCount });
@@ -550,32 +730,46 @@ export class WalletService {
     }>(
       `WITH ensure_wallet AS (
         INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
-        VALUES ($2, 0, 0, 'EUR', NOW(), NOW())
-        ON CONFLICT (tenant_id) DO NOTHING
-        RETURNING tenant_id
+        VALUES ($2, 0, 0, DEFAULT, NOW(), NOW())
+        ON CONFLICT (tenant_id) DO UPDATE SET updated_at = wallets.updated_at
+        RETURNING id AS wallet_id, tenant_id
       ),
       updated_wallet AS (
         UPDATE wallets
         SET balance = balance + $1, updated_at = NOW()
         WHERE tenant_id = $2
-        RETURNING balance
+        RETURNING id AS wallet_id, tenant_id, balance
       ),
       new_transaction AS (
         INSERT INTO wallet_transactions (
-          id, tenant_id, type, amount, balance, description, reference, metadata, created_at
+          id, tenant_id, wallet_id, type, amount, balance_after, description, reference, metadata, created_at
         )
         SELECT 
           gen_random_uuid(), 
-          $2, 
+          tenant_id,
+          wallet_id,
           $3, 
           $1, 
-          (SELECT balance FROM updated_wallet), 
+          balance, 
           $4, 
           $5, 
-          $6, 
+          $6::jsonb, 
           NOW()
-        WHERE EXISTS (SELECT 1 FROM updated_wallet)
-        RETURNING id, tenant_id, type, amount, balance, description, reference, metadata, created_at
+        FROM updated_wallet
+        RETURNING id, tenant_id, type, amount, balance_after AS balance, description, reference, metadata, created_at
+      ),
+      audit_log AS (
+        INSERT INTO audit_logs (id, tenant_id, action, resource_type, resource_id, metadata, created_at)
+        SELECT
+          gen_random_uuid(),
+          nt.tenant_id,
+          CONCAT('wallet.', $3),
+          'wallet',
+          nt.id,
+          jsonb_build_object('amount', $1, 'description', $4, 'reference', $5, 'balanceAfter', nt.balance),
+          NOW()
+        FROM new_transaction nt
+        RETURNING id
       )
       SELECT 
         id as tx_id, tenant_id, type, amount, balance, description, reference, metadata, created_at
@@ -596,72 +790,13 @@ export class WalletService {
     let parsedMetadata: Record<string, unknown> = {};
     try {
       parsedMetadata = JSON.parse(row.metadata || '{}');
-    } catch {
+    } catch (error) {
+      logger.warn('Failed to parse wallet transaction metadata', { txId: row.tx_id, error: String(error) });
       parsedMetadata = {};
     }
 
     return Result.ok({
       id: row.tx_id,
-      tenantId: row.tenant_id,
-      type: row.type,
-      amount: row.amount,
-      balance: row.balance,
-      description: row.description,
-      reference: row.reference,
-      metadata: parsedMetadata,
-      createdAt: row.created_at,
-    });
-  }
-
-  private async recordTransaction(
-    tenantId: string,
-    type: WalletTransaction['type'],
-    amount: number,
-    description: string,
-    reference?: string,
-    metadata: Record<string, unknown> = {},
-    newBalance?: number
-  ): Promise<Result<WalletTransaction, Error>> {
-    // Get current balance if not provided
-    if (newBalance === undefined) {
-      const balanceResult = await this.getBalance(tenantId);
-      newBalance = balanceResult.ok ? balanceResult.value.balance : 0;
-    }
-
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      type: WalletTransaction['type'];
-      amount: number;
-      balance: number;
-      description: string;
-      reference: string | null;
-      metadata: string;
-      created_at: Date;
-    }>(
-      `INSERT INTO wallet_transactions (
-        id, tenant_id, type, amount, balance, description, reference, metadata, created_at
-      )
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
-      RETURNING *`,
-      [tenantId, type, amount, newBalance, description, reference ?? null, JSON.stringify(metadata)]
-    );
-
-    if (!result.ok) return Result.err(result.error);
-
-    if (result.value.rows.length === 0) {
-      return Result.err(new Error('INSERT RETURNING produced no rows'));
-    }
-    const row = result.value.rows[0]!;
-    let parsedMetadata: Record<string, unknown> = {};
-    try {
-      parsedMetadata = JSON.parse(row.metadata || '{}');
-    } catch {
-      parsedMetadata = {};
-    }
-    
-    return Result.ok({
-      id: row.id,
       tenantId: row.tenant_id,
       type: row.type,
       amount: row.amount,

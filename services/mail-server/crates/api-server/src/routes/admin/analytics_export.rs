@@ -82,8 +82,7 @@ async fn export_analytics(
 
     let rows = sqlx::query_as::<_, (String, i64, i64, i64, i64, i64, i64)>(&sql)
         .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
+        .await?;
 
     let data: Vec<ExportRow> = rows
         .into_iter()

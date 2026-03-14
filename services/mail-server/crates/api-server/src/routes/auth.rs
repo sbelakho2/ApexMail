@@ -1,7 +1,8 @@
 //! Authentication routes: login, logout, refresh, register, API key management.
 
+use super::helpers::{extract_cookie, clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, post, get};
 use axum::{Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -43,10 +44,10 @@ pub struct LoginResponse {
 
 #[derive(Debug, Serialize)]
 pub struct UserInfo {
-    pub id: Uuid,
+    pub id: String,
     pub email: String,
     pub name: Option<String>,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub role: String,
 }
 
@@ -60,7 +61,7 @@ pub struct CreateApiKeyRequest {
 
 #[derive(Debug, Serialize)]
 pub struct CreateApiKeyResponse {
-    pub id: Uuid,
+    pub id: String,
     pub key: String,
     pub key_prefix: String,
     pub name: String,
@@ -70,7 +71,7 @@ pub struct CreateApiKeyResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ApiKeyInfo {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub key_prefix: String,
     pub scopes: serde_json::Value,
@@ -88,12 +89,30 @@ pub struct ListApiKeysQuery {
     pub cursor: Option<i64>,
 }
 
-fn default_limit() -> i64 {
-    50
+fn build_session_cookie(token: &str, max_age_secs: i64, secure: bool) -> String {
+    format!(
+        "am_session={token}; HttpOnly; Path=/; Max-Age={max_age_secs}; SameSite=Lax{}",
+        if secure { "; Secure" } else { "" }
+    )
 }
 
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
+fn build_clear_session_cookie(secure: bool) -> String {
+    format!(
+        "am_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    let auth = headers.get("authorization")?.to_str().ok()?;
+    let mut parts = auth.splitn(2, ' ');
+    let scheme = parts.next()?.trim();
+    let token = parts.next().unwrap_or("").trim();
+    if scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() {
+        Some(token.to_string())
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,7 +125,7 @@ pub struct RefreshRequest {
 async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, ApiError> {
+) -> Result<(HeaderMap, Json<LoginResponse>), ApiError> {
     if body.email.is_empty() || body.password.is_empty() {
         return Err(ApiError::Validation(vec![
             "email and password are required".into(),
@@ -179,7 +198,19 @@ async fn login(
     )
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
-    Ok(Json(LoginResponse {
+    let mut headers = HeaderMap::new();
+    let cookie = build_session_cookie(
+        &token,
+        expiry_secs,
+        state.config.environment.is_production(),
+    );
+    let value = cookie.parse().map_err(|e| {
+        tracing::error!(error = %e, "failed to build session cookie header");
+        ApiError::Internal("failed to set session cookie".into())
+    })?;
+    headers.insert("Set-Cookie", value);
+
+    Ok((headers, Json(LoginResponse {
         token,
         expires_at: exp.to_rfc3339(),
         user: UserInfo {
@@ -189,13 +220,13 @@ async fn login(
             tenant_id: user.tenant_id,
             role: user.role,
         },
-    }))
+    })))
 }
 
 #[derive(sqlx::FromRow)]
 struct UserRow {
-    id: Uuid,
-    tenant_id: Uuid,
+    id: String,
+    tenant_id: String,
     email: String,
     name: Option<String>,
     password_hash: String,
@@ -221,8 +252,8 @@ fn default_plan() -> String {
 
 #[derive(Debug, Serialize)]
 pub struct RegisterResponse {
-    pub tenant_id: Uuid,
-    pub user_id: Uuid,
+    pub tenant_id: String,
+    pub user_id: String,
     pub verification_token: String,
     pub message: String,
 }
@@ -290,8 +321,8 @@ async fn register(
     }
 
     // Generate IDs and slug
-    let tenant_id = Uuid::new_v4();
-    let user_id = Uuid::new_v4();
+    let tenant_id = apexmail_lib::id::generate_id("", 26);
+    let user_id = apexmail_lib::id::generate_id("", 26);
     let slug = generate_slug(&body.company_name);
     let now = Utc::now();
 
@@ -308,7 +339,7 @@ async fn register(
         "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
     )
-    .bind(tenant_id)
+    .bind(&tenant_id)
     .bind(&body.company_name)
     .bind(&slug)
     .bind(&body.plan)
@@ -326,8 +357,8 @@ async fn register(
                            email_verified, mfa_enabled, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
     )
-    .bind(user_id)
-    .bind(tenant_id)
+    .bind(&user_id)
+    .bind(&tenant_id)
     .bind(&email_lower)
     .bind(&body.name)
     .bind(&password_hash)
@@ -336,7 +367,7 @@ async fn register(
     .bind(false) // email_verified = false until verified
     .bind(false) // mfa_enabled
     .bind(serde_json::json!({
-        "verification_token": verification_token,
+        "verification_token": &verification_token,
         "verification_expires": verification_expires.to_rfc3339(),
     }))
     .bind(now)
@@ -480,7 +511,7 @@ async fn create_api_key(
     Ok((
         StatusCode::CREATED,
         Json(CreateApiKeyResponse {
-            id,
+            id: id.to_string(),
             key: raw_key,
             key_prefix,
             name: body.name,
@@ -523,7 +554,7 @@ async fn list_api_keys(
 
 #[derive(sqlx::FromRow)]
 struct ApiKeyInfoRow {
-    id: Uuid,
+    id: String,
     name: String,
     key_prefix: String,
     scopes: serde_json::Value,
@@ -553,27 +584,39 @@ async fn revoke_api_key(
 
 async fn logout(
     State(state): State<AppState>,
-    _auth: AuthUser,
-    Json(body): Json<RefreshRequest>,
-) -> Result<StatusCode, ApiError> {
-    // Blacklist the token in Redis using full-token hash to avoid collisions
-    use sha2::{Sha256, Digest};
-    let hash = hex::encode(Sha256::digest(body.token.as_bytes()));
-    let key = format!("apexmail:token_blacklist:{hash}");
-    if let Ok(mut conn) = state.redis.get().await {
-        let ttl = state.config.jwt_expiry.as_secs();
-        let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
-            &mut *conn, &key, "1", ttl,
-        )
-        .await;
+    headers: HeaderMap,
+    _auth: Option<AuthUser>,
+) -> Result<(HeaderMap, StatusCode), ApiError> {
+    let token_to_blacklist = extract_cookie(&headers, "am_session")
+        .or_else(|| extract_bearer_token(&headers));
+
+    if let Some(token) = token_to_blacklist {
+        use sha2::{Sha256, Digest};
+        let hash = hex::encode(Sha256::digest(token.as_bytes()));
+        let key = format!("apexmail:token_blacklist:{hash}");
+        if let Ok(mut conn) = state.redis.get().await {
+            let ttl = state.config.jwt_expiry.as_secs();
+            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
+                &mut *conn, &key, "1", ttl,
+            )
+            .await;
+        }
     }
-    Ok(StatusCode::NO_CONTENT)
+    let mut headers = HeaderMap::new();
+    let clear_cookie = build_clear_session_cookie(state.config.environment.is_production());
+    let value = clear_cookie.parse().map_err(|e| {
+        tracing::error!(error = %e, "failed to build clear-session cookie header");
+        ApiError::Internal("failed to clear session cookie".into())
+    })?;
+    headers.insert("Set-Cookie", value);
+
+    Ok((headers, StatusCode::NO_CONTENT))
 }
 
 async fn refresh_token(
     State(state): State<AppState>,
     Json(body): Json<RefreshRequest>,
-) -> Result<Json<LoginResponse>, ApiError> {
+) -> Result<(HeaderMap, Json<LoginResponse>), ApiError> {
     // Decode existing token to get claims
     let key = jsonwebtoken::DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes())
         .map_err(|e| ApiError::Internal(format!("invalid JWT public key configuration: {e}")))?;
@@ -583,15 +626,13 @@ async fn refresh_token(
     let token_data = jsonwebtoken::decode::<JwtClaims>(&body.token, &key, &validation)?;
     let old_claims = token_data.claims;
 
-    let user_id = Uuid::parse_str(&old_claims.sub)
-        .map_err(|_| ApiError::BadRequest("invalid user ID".into()))?;
-    let _tenant_id = Uuid::parse_str(&old_claims.tenant_id)
-        .map_err(|_| ApiError::BadRequest("invalid tenant ID".into()))?;
+    let user_id = old_claims.sub.clone();
+    let _tenant_id = old_claims.tenant_id.clone();
 
     let user = sqlx::query_as::<_, UserRow>(
         "SELECT id, tenant_id, email, name, password_hash, role, status FROM users WHERE id = $1",
     )
-    .bind(user_id)
+    .bind(&user_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
@@ -635,7 +676,19 @@ async fn refresh_token(
     )
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
-    Ok(Json(LoginResponse {
+    let mut headers = HeaderMap::new();
+    let cookie = build_session_cookie(
+        &token,
+        expiry_secs,
+        state.config.environment.is_production(),
+    );
+    let value = cookie.parse().map_err(|e| {
+        tracing::error!(error = %e, "failed to build session cookie header on refresh");
+        ApiError::Internal("failed to set session cookie".into())
+    })?;
+    headers.insert("Set-Cookie", value);
+
+    Ok((headers, Json(LoginResponse {
         token,
         expires_at: exp.to_rfc3339(),
         user: UserInfo {
@@ -645,7 +698,7 @@ async fn refresh_token(
             tenant_id: user.tenant_id,
             role: user.role,
         },
-    }))
+    })))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -667,10 +720,10 @@ mod tests {
             token: "jwt.token.here".into(),
             expires_at: "2026-01-01T00:00:00Z".into(),
             user: UserInfo {
-                id: Uuid::nil(),
+                id: String::nil(),
                 email: "a@b.com".into(),
                 name: None,
-                tenant_id: Uuid::nil(),
+                tenant_id: String::nil(),
                 role: "admin".into(),
             },
         };
@@ -689,7 +742,7 @@ mod tests {
     #[test]
     fn test_api_key_info_serialisation() {
         let info = ApiKeyInfo {
-            id: Uuid::nil(),
+            id: String::nil(),
             name: "test".into(),
             key_prefix: "am_live_abc".into(),
             scopes: serde_json::json!(["*"]),
@@ -720,15 +773,18 @@ async fn change_password(
     }
 
     // Verify current password
+    let user_id_str = auth.user_id.as_ref().map(|id| id.to_string());
     let user = sqlx::query!(
         "SELECT id, password_hash FROM users WHERE id = $1",
-        auth.user_id,
+        user_id_str,
     )
-    .fetch_optional(&*state.db)
+    .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
 
-    let valid = bcrypt::verify(&body.current_password, &user.password_hash)
+    let password_hash = user.password_hash.as_deref()
+        .ok_or_else(|| ApiError::Unauthorized("No password set".into()))?;
+    let valid = bcrypt::verify(&body.current_password, password_hash)
         .map_err(|_| ApiError::Unauthorized("Invalid current password".into()))?;
 
     if !valid {
@@ -739,12 +795,13 @@ async fn change_password(
     let new_hash = bcrypt::hash(&body.new_password, 12)
         .map_err(|e| ApiError::Internal(format!("Password hashing failed: {e}")))?;
 
+    let user_id_str = auth.user_id.as_ref().map(|id| id.to_string());
     sqlx::query!(
         "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
         new_hash,
-        auth.user_id,
+        user_id_str,
     )
-    .execute(&*state.db)
+    .execute(&state.db)
     .await?;
 
     Ok(Json(serde_json::json!({ "changed": true })))
@@ -762,24 +819,25 @@ async fn revoke_session(
     auth: AuthUser,
     Json(body): Json<RevokeSessionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id_str = auth.user_id.map(|id| id.to_string());
     let affected = if let Some(session_id) = &body.session_id {
         // Revoke single session
         sqlx::query!(
             "DELETE FROM sessions WHERE id = $1 AND user_id = $2",
             session_id,
-            auth.user_id,
+            user_id_str,
         )
-        .execute(&*state.db)
+        .execute(&state.db)
         .await?
         .rows_affected()
     } else {
-        // Revoke all sessions except current
+        // Revoke all sessions except current - if no specific session provided,
+        // revoke all other sessions (we don't have session_id in auth context)
         sqlx::query!(
-            "DELETE FROM sessions WHERE user_id = $1 AND id != $2",
-            auth.user_id,
-            auth.session_id,
+            "DELETE FROM sessions WHERE user_id = $1",
+            user_id_str,
         )
-        .execute(&*state.db)
+        .execute(&state.db)
         .await?
         .rows_affected()
     };

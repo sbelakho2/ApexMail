@@ -77,7 +77,7 @@ async fn list_campaigns(
     .bind(offset)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let campaigns: Vec<CampaignRow> = rows
         .into_iter()

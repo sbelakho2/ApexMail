@@ -143,12 +143,15 @@ impl SupportService {
 
         // Mark first response time if this is an agent reply
         if author_type == "agent" {
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 "UPDATE ent_support_tickets SET first_response_at = COALESCE(first_response_at, NOW()), updated_at = NOW() WHERE id = $1"
             )
             .bind(ticket_id)
             .execute(&self.db)
-            .await;
+            .await
+            {
+                tracing::warn!(ticket_id = %ticket_id, error = %e, "Failed to update first_response_at");
+            }
         }
 
         Ok(ApiResult::ok(row))

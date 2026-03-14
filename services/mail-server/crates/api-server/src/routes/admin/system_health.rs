@@ -80,7 +80,7 @@ async fn system_health(
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let queues: Vec<QueueStatus> = queue_rows
         .into_iter()
@@ -98,7 +98,7 @@ async fn system_health(
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let workers: Vec<WorkerStatus> = worker_rows
         .into_iter()
@@ -125,7 +125,7 @@ async fn system_health(
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let mta_nodes: Vec<MtaNode> = mta_rows
         .into_iter()
@@ -144,7 +144,7 @@ async fn system_health(
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let alerts: Vec<SystemAlert> = alert_rows
         .into_iter()

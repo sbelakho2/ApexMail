@@ -222,7 +222,8 @@ impl AdaptiveRateLimiter {
                 self.under_attack_flag.store(true, Ordering::Relaxed);
 
                 // Tighten threshold to attack_factor * baseline
-                let new_threshold = (rps_mean * self.config.attack_factor) as u64;
+                let raw = rps_mean * self.config.attack_factor;
+                let new_threshold = if raw.is_finite() { raw as u64 } else { self.config.min_threshold };
                 self.threshold.store(
                     new_threshold.clamp(self.config.min_threshold, self.config.max_threshold),
                     Ordering::Relaxed,
@@ -240,7 +241,8 @@ impl AdaptiveRateLimiter {
                     self.under_attack_flag.store(false, Ordering::Relaxed);
 
                     // Gradually restore threshold
-                    let new_threshold = (rps_mean * self.config.headroom_factor) as u64;
+                    let raw = rps_mean * self.config.headroom_factor;
+                    let new_threshold = if raw.is_finite() { raw as u64 } else { self.config.min_threshold };
                     self.threshold.store(
                         new_threshold.clamp(self.config.min_threshold, self.config.max_threshold),
                         Ordering::Relaxed,
@@ -258,8 +260,9 @@ impl AdaptiveRateLimiter {
             let new_threshold =
                 current_threshold * (1.0 - self.config.ema_alpha) + ideal_threshold * self.config.ema_alpha;
 
+            let rounded = if new_threshold.is_finite() { new_threshold.round() as u64 } else { self.config.min_threshold };
             self.threshold.store(
-                (new_threshold.round() as u64).clamp(self.config.min_threshold, self.config.max_threshold),
+                rounded.clamp(self.config.min_threshold, self.config.max_threshold),
                 Ordering::Relaxed,
             );
         }

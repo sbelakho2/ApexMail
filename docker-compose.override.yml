@@ -8,12 +8,12 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.8-alpine
     container_name: apexmail-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-apexmail}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpass123}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-apexmail}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -30,13 +30,13 @@ services:
     security_opt: !override []
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: apexmail-redis
     restart: unless-stopped
     command: >
       sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$${REDIS_PASSWORD}\""
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-devredis123}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
     volumes:
       - redis_data:/data
     ports:
@@ -49,3 +49,11 @@ services:
     networks:
       - apexmail_data
     security_opt: !override []
+
+networks:
+  apexmail_data:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:

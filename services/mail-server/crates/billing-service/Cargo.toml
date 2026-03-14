@@ -48,6 +48,10 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 
+# Crypto (S3 Signature V4 signing)
+hmac.workspace = true
+sha2.workspace = true
+
 # Error handling
 anyhow.workspace = true
 thiserror.workspace = true

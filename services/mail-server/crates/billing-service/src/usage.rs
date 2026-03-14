@@ -258,6 +258,151 @@ pub async fn reset_monthly_counters(
 // Supporting types
 // ---------------------------------------------------------------------------
 
+/// Lua script for atomic quota check-and-increment in Redis.
+///
+/// KEYS[1] = counter key (e.g. "meter:rt:<tenant>:emails_sent:2026-03")
+/// ARGV[1] = plan limit  (-1 = unlimited)
+/// ARGV[2] = quantity to increment
+/// ARGV[3] = TTL in seconds for the counter key
+///
+/// Returns:  new counter value on success, -1 if quota exceeded.
+const QUOTA_CHECK_AND_INCR_LUA: &str = r#"
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local lim     = tonumber(ARGV[1])
+local qty     = tonumber(ARGV[2])
+local ttl     = tonumber(ARGV[3])
+if lim >= 0 and current + qty > lim then
+    return -1
+end
+local new_val = redis.call('INCRBY', KEYS[1], qty)
+redis.call('EXPIRE', KEYS[1], ttl)
+return new_val
+"#;
+
+/// Atomically check the quota and record a metering event in a single
+/// operation.  Unlike the separate `check_quota` → `record_usage` workflow,
+/// this avoids the TOCTOU window between the quota look-up and the counter
+/// increment by executing a Lua script inside Redis.
+///
+/// Returns `Ok(QuotaRecordResult)` with `allowed = true` and the new counter
+/// value when the event is recorded, or `allowed = false` when the quota
+/// would be exceeded (counter is NOT incremented in that case).
+///
+/// Duplicates (same `event_id`) are silently de-duplicated and return
+/// `QuotaRecordResult { allowed: true, current: <unchanged>, duplicate: true }`.
+pub async fn record_with_quota_check(
+    pool: &PgPool,
+    redis: &RedisPool,
+    tenant_id: Uuid,
+    event_type: MeterEventType,
+    quantity: i64,
+    event_id: Option<Uuid>,
+    metadata: Option<serde_json::Value>,
+) -> Result<QuotaRecordResult, UsageError> {
+    let id = event_id.unwrap_or_else(Uuid::new_v4);
+    let now = Utc::now();
+    let meta = metadata.unwrap_or_else(|| json!({}));
+
+    // 1. Dedup check (same as record_usage).
+    let dedup_key = format!("meter:dedup:{id}");
+    let mut conn = redis.get().await.map_err(UsageError::Redis)?;
+    let was_set: bool = redis::cmd("SET")
+        .arg(&dedup_key)
+        .arg("1")
+        .arg("EX")
+        .arg(86_400i64)
+        .arg("NX")
+        .query_async(&mut conn)
+        .await
+        .map_err(UsageError::RedisCmd)?;
+
+    if !was_set {
+        // Already processed — read current counter for informational purposes.
+        let counter_key = format!(
+            "meter:rt:{}:{}:{}-{:02}",
+            tenant_id,
+            event_type_to_str(event_type),
+            now.year(),
+            now.month()
+        );
+        let current: i64 = conn.get(&counter_key).await.unwrap_or(0);
+        return Ok(QuotaRecordResult {
+            allowed: true,
+            current,
+            duplicate: true,
+        });
+    }
+
+    // 2. Fetch plan limit from Postgres.
+    let limit_row: Option<EmailLimitRow> = sqlx::query_as(
+        r#"
+        SELECT COALESCE(p.email_limit, 0) as email_limit
+        FROM tenants t JOIN plans p ON t.plan = p.name
+        WHERE t.id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(UsageError::Db)?;
+
+    let limit = limit_row.map(|l| l.email_limit).unwrap_or(0);
+
+    // 3. Atomic check-and-increment via Lua.
+    let counter_key = format!(
+        "meter:rt:{}:{}:{}-{:02}",
+        tenant_id,
+        event_type_to_str(event_type),
+        now.year(),
+        now.month()
+    );
+    let ttl_seconds: i64 = 40 * 86_400; // 40 days
+
+    let new_val: i64 = redis::Script::new(QUOTA_CHECK_AND_INCR_LUA)
+        .key(&counter_key)
+        .arg(limit)
+        .arg(quantity)
+        .arg(ttl_seconds)
+        .invoke_async(&mut conn)
+        .await
+        .map_err(UsageError::RedisCmd)?;
+
+    if new_val < 0 {
+        // Quota exceeded — roll back the dedup key so a retry after a plan
+        // upgrade can succeed.
+        let _: () = conn.del(&dedup_key).await.unwrap_or(());
+        return Ok(QuotaRecordResult {
+            allowed: false,
+            current: new_val,
+            duplicate: false,
+        });
+    }
+
+    // 4. Persist to DB.
+    sqlx::query(
+        r#"
+        INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
+        VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .bind(event_type_to_str(event_type))
+    .bind(quantity)
+    .bind(now)
+    .bind(&meta)
+    .execute(pool)
+    .await
+    .map_err(UsageError::Db)?;
+
+    Ok(QuotaRecordResult {
+        allowed: true,
+        current: new_val,
+        duplicate: false,
+    })
+}
+
 #[derive(sqlx::FromRow)]
 struct UsageAggRow {
     event_type: String,
@@ -281,6 +426,17 @@ pub struct QuotaStatus {
     pub current: i64,
     pub limit: i64,
     pub percent_used: f64,
+}
+
+/// Result of an atomic quota-check + record operation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QuotaRecordResult {
+    /// Whether the event was allowed (quota not exceeded).
+    pub allowed: bool,
+    /// Current counter value after the operation.
+    pub current: i64,
+    /// Whether this was a duplicate event (already idempotently processed).
+    pub duplicate: bool,
 }
 
 fn event_type_to_str(et: MeterEventType) -> &'static str {

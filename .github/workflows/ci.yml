@@ -9,6 +9,12 @@ on:
   pull_request:
     branches: [main]
 
+permissions: {}  # Least-privilege: no permissions by default
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   PNPM_VERSION: 9
   NODE_VERSION: 20
@@ -17,16 +23,19 @@ jobs:
   lint:
     name: Lint & Type Check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       
       - name: Setup pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@90f659ecb4e9337ce0ccede6ef8e59e5bb6d4724 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
           
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'pnpm'
@@ -52,25 +61,61 @@ jobs:
       - name: Enforce billing TS Stripe boundary
         run: pnpm verify:billing:boundary
 
+      - name: Enforce design token usage
+        run: pnpm verify:design:tokens
+
+      - name: Verify UI Rust migration architecture plan
+        run: pnpm verify:ui-rust:plan
+
+      - name: Verify UI baseline manifest
+        run: pnpm verify:ui-baseline:manifest
+
+      - name: Verify UI behavior baseline manifest
+        run: pnpm verify:ui-behavior-baseline:manifest
+
+      - name: Verify UI parity harness manifest
+        run: pnpm verify:ui-parity:harness
+
+      - name: Verify UI diff infrastructure manifest
+        run: pnpm verify:ui-diff:infra
+
+      - name: Verify UI Rust foundation manifest
+        run: pnpm verify:ui-rust:foundation
+
+      - name: Verify UI baseline artifacts
+        run: pnpm verify:ui-baseline:artifacts
+
+      - name: Verify UI behavior baseline artifacts
+        run: pnpm verify:ui-behavior-baseline:artifacts
+
+      - name: Verify UI design token baseline
+        run: pnpm verify:ui-design-tokens
+
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Enforce Rust quality gates (fmt/clippy/no-unsafe)
         run: pnpm verify:rust:quality
 
+      - name: Enforce forbidden patterns (regressions)
+        run: pnpm verify:forbidden-patterns
+
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       
       - name: Setup pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@90f659ecb4e9337ce0ccede6ef8e59e5bb6d4724 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
           
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'pnpm'
@@ -84,16 +129,19 @@ jobs:
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@90f659ecb4e9337ce0ccede6ef8e59e5bb6d4724 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'pnpm'
@@ -107,14 +155,20 @@ jobs:
       - name: Run E2E tests
         run: pnpm --filter @apexmail/testing test:e2e
 
+      - name: Run visual snapshot verification
+        run: pnpm --filter @apexmail/testing test:screenshot:verify
+
   rust-tests:
     name: Rust Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Test mail server
         run: cargo test --manifest-path services/mail-server/Cargo.toml --locked
@@ -128,16 +182,19 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       
       - name: Setup pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@90f659ecb4e9337ce0ccede6ef8e59e5bb6d4724 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
           
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'pnpm'
@@ -153,7 +210,7 @@ jobs:
         continue-on-error: true
         
       - name: Upload SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom
           path: sbom.json
@@ -164,16 +221,19 @@ jobs:
     name: Verify Reproducible Build
     runs-on: ubuntu-latest
     needs: build
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       
       - name: Setup pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@90f659ecb4e9337ce0ccede6ef8e59e5bb6d4724 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
           
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'pnpm'
@@ -200,11 +260,14 @@ jobs:
           cat /tmp/build1.sha
           echo "Build 2 hashes:"
           cat /tmp/build2.sha
-          diff /tmp/build1.sha /tmp/build2.sha || echo "Builds may differ - investigate"
+          diff /tmp/build1.sha /tmp/build2.sha
 
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       matrix:
         image:
@@ -215,13 +278,13 @@ jobs:
             context: .
             file: deploy/Dockerfile.tracking
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: ${{ matrix.image.context }}
           file: ${{ matrix.image.file }}
@@ -231,16 +294,19 @@ jobs:
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@90f659ecb4e9337ce0ccede6ef8e59e5bb6d4724 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'pnpm'
@@ -252,7 +318,7 @@ jobs:
         run: pnpm audit --prod --audit-level high
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked

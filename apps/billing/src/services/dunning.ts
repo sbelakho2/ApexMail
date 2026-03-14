@@ -7,6 +7,7 @@ import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
+import { MS_PER_DAY, TTL_FIVE_MINUTES } from '../lib/constants.js';
 
 const logger = createLogger();
 
@@ -44,6 +45,8 @@ const DEFAULT_CONFIG: DunningConfig = {
  */
 export class DunningService {
   private readonly config: DunningConfig;
+  /** Track whether config table has been ensured to avoid repeated DDL */
+  private configTableEnsured = false;
 
   constructor(
     private readonly db: DatabasePool,
@@ -82,7 +85,7 @@ export class DunningService {
 
     const existing = existingResult.value.rows[0];
     const isFirstFailure = !existing || existing.status === 'healthy';
-    const firstFailedAt = isFirstFailure ? now : existing.first_failed_at!;
+    const firstFailedAt = isFirstFailure ? now : (existing.first_failed_at ?? now);
     const failedCount = isFirstFailure ? 1 : existing.failed_payment_count + 1;
 
     // Calculate next retry date
@@ -90,7 +93,7 @@ export class DunningService {
 
     // Calculate status based on days since first failure
     const daysSinceFirstFailure = Math.floor(
-      (now.getTime() - firstFailedAt.getTime()) / (1000 * 60 * 60 * 24)
+      (now.getTime() - firstFailedAt.getTime()) / MS_PER_DAY
     );
 
     let newStatus: DunningState['status'] = 'warning';
@@ -100,7 +103,7 @@ export class DunningService {
     if (daysSinceFirstFailure >= tenantConfig.hardSuspendAfterDays) {
       newStatus = 'hard_suspended';
       suspendedAt = existing?.status === 'hard_suspended' ? null : now;
-      gracePeriodEndsAt = new Date(now.getTime() + tenantConfig.gracePeriodDays * 24 * 60 * 60 * 1000);
+      gracePeriodEndsAt = new Date(now.getTime() + tenantConfig.gracePeriodDays * MS_PER_DAY);
     } else if (daysSinceFirstFailure >= tenantConfig.softSuspendAfterDays) {
       newStatus = 'soft_suspended';
       suspendedAt = existing?.status.includes('suspended') ? null : now;
@@ -174,10 +177,10 @@ export class DunningService {
       nextRetryAt,
     });
 
-    // Cache status in Redis for fast checks
+    // Cache status in Redis with shorter TTL to reduce inconsistency
     await this.redis.setex(
       `dunning:status:${tenantId}`,
-      3600,
+      TTL_FIVE_MINUTES,
       newStatus
     );
 
@@ -274,7 +277,8 @@ export class DunningService {
     const status = result.value.rows[0]?.status ?? 'healthy';
 
     // Cache for 1 hour
-    await this.redis.setex(`dunning:status:${tenantId}`, 3600, status);
+    // Use shorter TTL for dunning cache
+    await this.redis.setex(`dunning:status:${tenantId}`, TTL_FIVE_MINUTES, status);
 
     return Result.ok(status);
   }
@@ -314,71 +318,94 @@ export class DunningService {
    * Process grace period expirations (run daily)
    * CRITICAL: Uses atomic CTE to ensure consistency
    */
-  async processGracePeriodExpirations(): Promise<Result<{
+  /**
+   * Process grace period expirations with pagination
+   * FIX-DUNNING-PAGINATION: Process expired tenants in batches to avoid locks on large datasets
+   */
+  async processGracePeriodExpirations(batchSize: number = 100): Promise<Result<{
     processedCount: number;
     purgedMessagesCount: number;
   }, Error>> {
     const now = new Date();
+    let totalProcessed = 0;
+    let totalPurged = 0;
 
-    // Use atomic CTE to: find expired, delete messages, queue notifications, update records
-    const result = await this.db.query<{
-      tenant_id: string;
-      purged_count: number;
-    }>(
-      `WITH expired_tenants AS (
-        SELECT tenant_id FROM dunning_records
-        WHERE status = 'hard_suspended'
-          AND grace_period_ends_at IS NOT NULL
-          AND grace_period_ends_at < $1
-        FOR UPDATE
-      ),
-      purge_messages AS (
-        DELETE FROM messages 
-        WHERE tenant_id IN (SELECT tenant_id FROM expired_tenants) 
-          AND status = 'dunning_queued'
-        RETURNING tenant_id
-      ),
-      purge_counts AS (
-        SELECT tenant_id, COUNT(*) as purged_count
-        FROM purge_messages
-        GROUP BY tenant_id
-      ),
-      queue_notifications AS (
-        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-        SELECT gen_random_uuid(), et.tenant_id, 'messages_purged', 
-               jsonb_build_object('purgedCount', COALESCE(pc.purged_count, 0)), 
-               'pending', NOW()
+    // FIX-DUNNING-PAGINATION: Process in batches until no more expired tenants
+    while (true) {
+      // Use atomic CTE to: find expired (limited batch), delete messages, queue notifications, update records
+      const result = await this.db.query<{
+        tenant_id: string;
+        purged_count: number;
+      }>(
+        `WITH expired_tenants AS (
+          SELECT tenant_id FROM dunning_records
+          WHERE status = 'hard_suspended'
+            AND grace_period_ends_at IS NOT NULL
+            AND grace_period_ends_at < $1
+          ORDER BY grace_period_ends_at ASC
+          LIMIT $2
+          FOR UPDATE SKIP LOCKED
+        ),
+        purge_messages AS (
+          DELETE FROM messages 
+          WHERE tenant_id IN (SELECT tenant_id FROM expired_tenants) 
+            AND status = 'dunning_queued'
+          RETURNING tenant_id
+        ),
+        purge_counts AS (
+          SELECT tenant_id, COUNT(*) as purged_count
+          FROM purge_messages
+          GROUP BY tenant_id
+        ),
+        queue_notifications AS (
+          INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+          SELECT gen_random_uuid(), et.tenant_id, 'messages_purged', 
+                 jsonb_build_object('purgedCount', COALESCE(pc.purged_count, 0)), 
+                 'pending', NOW()
+          FROM expired_tenants et
+          LEFT JOIN purge_counts pc ON et.tenant_id = pc.tenant_id
+          RETURNING tenant_id
+        ),
+        update_dunning AS (
+          UPDATE dunning_records
+          SET grace_period_ends_at = NULL, updated_at = NOW()
+          WHERE tenant_id IN (SELECT tenant_id FROM expired_tenants)
+          RETURNING tenant_id
+        )
+        SELECT et.tenant_id, COALESCE(pc.purged_count, 0)::int as purged_count
         FROM expired_tenants et
-        LEFT JOIN purge_counts pc ON et.tenant_id = pc.tenant_id
-        RETURNING tenant_id
-      ),
-      update_dunning AS (
-        UPDATE dunning_records
-        SET grace_period_ends_at = NULL, updated_at = NOW()
-        WHERE tenant_id IN (SELECT tenant_id FROM expired_tenants)
-        RETURNING tenant_id
-      )
-      SELECT et.tenant_id, COALESCE(pc.purged_count, 0)::int as purged_count
-      FROM expired_tenants et
-      LEFT JOIN purge_counts pc ON et.tenant_id = pc.tenant_id`,
-      [now]
-    );
+        LEFT JOIN purge_counts pc ON et.tenant_id = pc.tenant_id`,
+        [now, batchSize]
+      );
 
-    if (!result.ok) return Result.err(result.error);
+      if (!result.ok) return Result.err(result.error);
 
-    const processedCount = result.value.rows.length;
-    const purgedMessagesCount = result.value.rows.reduce((sum, r) => sum + r.purged_count, 0);
+      const batchCount = result.value.rows.length;
+      if (batchCount === 0) {
+        // No more expired tenants
+        break;
+      }
 
-    for (const row of result.value.rows) {
-      logger.info('Purged queued messages after grace period', { 
-        tenantId: row.tenant_id, 
-        purgedCount: row.purged_count 
-      });
+      const batchPurged = result.value.rows.reduce((sum, r) => sum + r.purged_count, 0);
+      totalProcessed += batchCount;
+      totalPurged += batchPurged;
+
+      for (const row of result.value.rows) {
+        logger.info('Purged queued messages after grace period', { 
+          tenantId: row.tenant_id, 
+          purgedCount: row.purged_count 
+        });
+      }
+
+      // If we got fewer than the batch size, we're done
+      if (batchCount < batchSize) {
+        break;
+      }
     }
 
     return Result.ok({
-      processedCount,
-      purgedMessagesCount,
+      processedCount: totalProcessed,
+      purgedMessagesCount: totalPurged,
     });
   }
 
@@ -431,7 +458,7 @@ export class DunningService {
     if (daysToAdd === undefined) {
       return null;
     }
-    return new Date(firstFailedAt.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
+    return new Date(firstFailedAt.getTime() + daysToAdd * MS_PER_DAY);
   }
 
   private async ensureConfigTable(): Promise<void> {
@@ -484,7 +511,8 @@ export class DunningService {
         hardSuspendAfterDays: row.hard_suspend_after_days,
         gracePeriodDays: row.grace_period_days,
       };
-    } catch {
+    } catch (error) {
+      logger.warn('Failed to load dunning config for tenant, using defaults', { tenantId, error: String(error) });
       return this.config;
     }
   }

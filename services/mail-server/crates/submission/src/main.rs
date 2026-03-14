@@ -160,28 +160,41 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(address = %addr, max_connections = args.max_connections, "Submission server listening");
     
-    // Accept connections
+    // Accept connections with graceful shutdown
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutdown signal received — stopping submission server");
+    };
+    tokio::pin!(shutdown);
     loop {
-        match listener.accept().await {
-            Ok((stream, peer_addr)) => {
-                let permit = match conn_semaphore.clone().try_acquire_owned() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!(peer = %peer_addr, "Connection rejected: max connections reached");
-                        drop(stream);
-                        continue;
-                    }
-                };
-                let state = Arc::clone(&state);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, peer_addr, state).await {
-                        error!(peer = %peer_addr, error = %e, "Connection error");
-                    }
-                    drop(permit);
-                });
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!("submission server shutting down gracefully");
+                break;
             }
-            Err(e) => {
-                error!(error = %e, "Failed to accept connection");
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, peer_addr)) => {
+                        let permit = match conn_semaphore.clone().try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                warn!(peer = %peer_addr, "Connection rejected: max connections reached");
+                                drop(stream);
+                                continue;
+                            }
+                        };
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, peer_addr, state).await {
+                                error!(peer = %peer_addr, error = %e, "Connection error");
+                            }
+                            drop(permit);
+                        });
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to accept connection");
+                    }
+                }
             }
         }
     }

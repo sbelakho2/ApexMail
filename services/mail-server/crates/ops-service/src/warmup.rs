@@ -67,7 +67,7 @@ impl IpWarmupManager {
         .bind(format!("warmup_{}", ip.replace('.', "_")))
         .bind(&ip)
         .bind(schedule.day as i32)
-        .bind(current_volume as i32)
+        .bind(i32::try_from(current_volume).unwrap_or(i32::MAX))
         .execute(&self.db)
         .await?;
 
@@ -165,7 +165,7 @@ impl IpWarmupManager {
         )
         .bind(ip)
         .bind(new_day as i32)
-        .bind(new_volume as i32)
+        .bind(i32::try_from(new_volume).unwrap_or(i32::MAX))
         .execute(&self.db)
         .await?;
 

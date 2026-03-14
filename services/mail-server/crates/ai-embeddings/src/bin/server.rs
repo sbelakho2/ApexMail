@@ -65,6 +65,13 @@ async fn main() -> anyhow::Result<()> {
             config.store.eviction_threshold,
         ),
         config,
+        service_token: {
+            let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
+            if token.is_empty() {
+                tracing::warn!("INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled");
+            }
+            token
+        },
     });
 
     let app = routes::router(state);
@@ -72,7 +79,26 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("AI embeddings service listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+
+    let shutdown = async {
+        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
+            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+        }
+    };
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
 
     Ok(())
 }

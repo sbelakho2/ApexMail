@@ -26,6 +26,9 @@ async fn main() -> anyhow::Result<()> {
     // Database pool
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(300))
+        .max_lifetime(std::time::Duration::from_secs(1800))
         .connect(&config.database_url)
         .await?;
 
@@ -75,7 +78,26 @@ async fn main() -> anyhow::Result<()> {
     info!(%addr, "Listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+
+    let shutdown = async {
+        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
+            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+        }
+    };
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
 
     Ok(())
 }

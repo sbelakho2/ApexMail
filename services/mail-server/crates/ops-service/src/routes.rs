@@ -1,7 +1,7 @@
 //! Axum HTTP routes for the operations service.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::Response,
@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use std::sync::Arc;
 use uuid::Uuid;
 use dashmap::DashMap;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::health::HealthChecker;
 use crate::incidents::IncidentManager;
@@ -55,6 +56,8 @@ pub fn router(state: AppState) -> Router {
         .route("/warmup/{ip}", get(get_warmup))
         .route("/trust/{tenant_id}", get(get_trust))
         .with_state(shared.clone())
+        .layer(DefaultBodyLimit::max(256 * 1024)) // 256 KB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(middleware::from_fn_with_state(shared, require_api_key))
 }
 

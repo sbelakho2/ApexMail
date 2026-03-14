@@ -9,8 +9,8 @@ competitor_slug = "resend"
 competitor_name = "Resend"
 competitor_description = "Resend is a modern email API for developers with React Email support."
 og_image = "/images/og-compare-resend.png"
-apexmail_wins = 22
-competitor_wins = 0
+apexmail_wins = 15
+competitor_wins = 2
 verdict_title = "Why Choose ApexMail Over Resend?"
 verdict_points = [
   "Full enterprise features: SSO, white-label, sub-accounts",
@@ -29,9 +29,9 @@ verdict_points = [
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Delivery Rate</div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">99.9%</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">99%</span></div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">ApexMail</span></div>
+  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">High</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">High</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Dedicated IP</div>
@@ -189,7 +189,7 @@ verdict_points = [
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">Advanced Analytics</div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">DuckDB-powered</span></div>
+  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">ClickHouse-powered</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Basic</span></div>
   <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">ApexMail</span></div>
 </div>

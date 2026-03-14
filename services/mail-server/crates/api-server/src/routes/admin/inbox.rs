@@ -99,7 +99,7 @@ async fn list_inbox(
     }
     query = query.bind(limit).bind(offset);
 
-    let rows = query.fetch_all(&state.db).await.unwrap_or_default();
+    let rows = query.fetch_all(&state.db).await?;
 
     let messages: Vec<InboxMessage> = rows
         .into_iter()

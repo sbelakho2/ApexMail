@@ -7,7 +7,9 @@ import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 import { randomBytes } from 'node:crypto';
-import { COMPANY_INFO } from '../config.js';
+import { COMPANY_INFO, config } from '../config.js';
+import { resolveTenantBillingCurrency } from '../lib/billing-currency.js';
+import { DEFAULT_NET_DAYS, MS_PER_DAY } from '../lib/constants.js';
 
 const logger = createLogger();
 
@@ -290,7 +292,8 @@ export class InvoiceService {
     const total = subtotal + vatTotal;
 
     const now = new Date();
-    const dueAt = input.dueAt ?? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // Default: Net 30
+    const currency = await resolveTenantBillingCurrency(this.db, input.tenantId);
+    const dueAt = input.dueAt ?? new Date(now.getTime() + DEFAULT_NET_DAYS * MS_PER_DAY); // Default: Net 30
 
     // Insert invoice
     const insertResult = await this.db.query<{
@@ -305,14 +308,15 @@ export class InvoiceService {
         purchase_order_number, notes, created_at, updated_at
       )
       VALUES (
-        gen_random_uuid(), $1, $2, $3, 'draft', 'EUR', $4, $5, $6, $7, $8,
-        $9, $10, $11, $12, $13, $14, NOW(), NOW()
+        gen_random_uuid(), $1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $13, $14, $15, NOW(), NOW()
       )
       RETURNING id, created_at, updated_at`,
       [
         input.tenantId,
         input.stripeInvoiceId ?? null,
         numberResult.value,
+        currency,
         subtotal,
         vatTotal,
         total,
@@ -338,7 +342,7 @@ export class InvoiceService {
       stripeInvoiceId: input.stripeInvoiceId ?? null,
       invoiceNumber: numberResult.value,
       status: 'draft',
-      currency: 'EUR',
+      currency,
       subtotal,
       vatTotal,
       total,
@@ -366,7 +370,7 @@ export class InvoiceService {
    * @returns PDF bytes as a Buffer
    */
   async generateInvoicePdf(invoice: Invoice): Promise<Buffer> {
-    const pdfRendererUrl = process.env.PDF_RENDERER_URL ?? 'http://pdf-renderer:3004';
+    const pdfRendererUrl = config.pdfRendererUrl;
 
     const templateData = {
       invoice_number: invoice.invoiceNumber,
@@ -470,7 +474,7 @@ export class InvoiceService {
 
     const paymentTermsDays = Math.max(
       0,
-      Math.ceil((invoice.dueAt.getTime() - invoice.issuedAt.getTime()) / (1000 * 60 * 60 * 24))
+      Math.ceil((invoice.dueAt.getTime() - invoice.issuedAt.getTime()) / MS_PER_DAY)
     );
     const vatRates = [...new Set(invoice.lineItems.map(item => item.vatRate))].sort((a, b) => a - b);
     const vatLabel = vatRates.length <= 1
@@ -627,7 +631,7 @@ export class InvoiceService {
             <PostalCode>10141</PostalCode>
             <Country>EE</Country>
           </LegalAddress>
-            <PhoneNumber>${this.escapeXml(process.env['BILLING_COMPANY_PHONE'] ?? '+37200000000')}</PhoneNumber>
+            <PhoneNumber>${this.escapeXml(config.billingCompanyPhone)}</PhoneNumber>
           <E-mailAddress>billing@apexmail.ee</E-mailAddress>
         </ContactData>
         <AccountInfo>
@@ -796,8 +800,8 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
   private parseLineItems(raw: string, invoiceId: string): InvoiceLineItem[] {
     try {
       return JSON.parse(raw || '[]') as InvoiceLineItem[];
-    } catch {
-      logger.warn('Failed to parse invoice line items', { invoiceId });
+    } catch (error) {
+      logger.warn('Failed to parse invoice line items', { invoiceId, error });
       return [];
     }
   }
@@ -805,8 +809,8 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
   private parseBillingAddress(raw: string, invoiceId: string): BillingAddress {
     try {
       return JSON.parse(raw || '{}') as BillingAddress;
-    } catch {
-      logger.warn('Failed to parse invoice billing address', { invoiceId });
+    } catch (error) {
+      logger.warn('Failed to parse invoice billing address', { invoiceId, error });
       return this.emptyBillingAddress();
     }
   }

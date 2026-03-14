@@ -184,8 +184,8 @@ impl SessionBehavior {
         let variance =
             times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n as f64;
 
-        if variance <= 0.0 {
-            return 1.0; // Zero variance = perfectly periodic
+        if variance <= f64::EPSILON {
+            return 1.0; // Zero/near-zero variance = perfectly periodic
         }
 
         let mut max_corr = 0.0f64;
@@ -294,6 +294,9 @@ impl SessionBehavior {
         }
 
         let total: u32 = transitions.values().sum();
+        if total == 0 {
+            return 4.0; // No transitions to analyze
+        }
         transitions
             .values()
             .map(|&count| {

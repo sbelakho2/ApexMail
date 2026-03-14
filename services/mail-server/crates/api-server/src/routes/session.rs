@@ -3,6 +3,7 @@
 //! Migrated from: apps/web/src/app/api/auth/session/route.ts
 //! Provides current session state including impersonation status.
 
+use super::helpers::extract_cookie;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::get;
@@ -115,14 +116,14 @@ async fn get_session(
                     &token, &key, &validation,
                 ) {
                     let claims = token_data.claims;
-                    let user_id = uuid::Uuid::parse_str(&claims.sub);
-                    if let Ok(uid) = user_id {
+                    let user_id = claims.sub.clone();
+                    if !user_id.is_empty() {
                         // Check user still exists and is active
-                        let user: Option<(uuid::Uuid, String, Option<String>, String)> =
+                        let user: Option<(String, String, Option<String>, String)> =
                             sqlx::query_as(
                                 "SELECT id, email, name, role FROM users WHERE id = $1 AND status = 'active'",
                             )
-                            .bind(uid)
+                            .bind(&user_id)
                             .fetch_optional(&state.db)
                             .await?;
 
@@ -146,23 +147,6 @@ async fn get_session(
 }
 
 // ─── Helpers ───────────────────────────────────────────────────
-
-fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get_all("cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|s| s.split(';'))
-        .map(|pair| pair.trim())
-        .find_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            if k.trim() == name {
-                Some(v.trim().to_string())
-            } else {
-                None
-            }
-        })
-}
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {

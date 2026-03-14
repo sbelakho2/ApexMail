@@ -99,8 +99,8 @@ export function parseDbJson<T>(
   try {
     return JSON.parse(value) as T;
   } catch {
-    // Log warning but don't crash
-    console.warn(`[parseDbJson] Failed to parse JSON value, using default`);
+    // Silently fall back — callers opt into parseDbJson knowing data may be
+    // malformed. Logging here would be noisy in bulk DB reads.
     return defaultValue;
   }
 }

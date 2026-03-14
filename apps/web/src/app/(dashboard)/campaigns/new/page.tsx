@@ -37,7 +37,7 @@ export default function NewCampaignPage() {
             .then(data => {
                 const lists = Array.isArray(data) ? data : (data.lists ?? data.data ?? []);
                 if (lists.length > 0) {
-                    setAudienceLists(lists.map((l: any) => ({ id: l.id ?? l.slug ?? l.name, name: l.name, count: l.subscriberCount ?? l.count ?? 0 })));
+                    setAudienceLists(lists.map((l: Record<string, string | number | undefined>) => ({ id: String(l.id ?? l.slug ?? l.name ?? ''), name: String(l.name ?? ''), count: Number(l.subscriberCount ?? l.count ?? 0) })));
                 }
             })
             .catch((err) => { if (!controller.signal.aborted) setListsError(true); })

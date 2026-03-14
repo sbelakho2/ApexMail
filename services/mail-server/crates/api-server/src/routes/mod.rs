@@ -1,3 +1,4 @@
+pub mod helpers;
 pub mod health;
 pub mod auth;
 pub mod account;
@@ -31,3 +32,6 @@ pub mod telemetry;
 
 // Migrated from apps/control-plane
 pub mod admin;
+
+// Real-time SSE stream token issuance
+pub mod stream_tokens;

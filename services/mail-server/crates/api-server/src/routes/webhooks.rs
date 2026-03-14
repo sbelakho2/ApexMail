@@ -1,5 +1,6 @@
 //! Webhook management routes.
 
+use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -40,7 +41,7 @@ pub struct UpdateWebhookRequest {
 
 #[derive(Debug, Serialize)]
 pub struct WebhookResponse {
-    pub id: Uuid,
+    pub id: String,
     pub url: String,
     pub events: serde_json::Value,
     // Fix #35: Never expose secrets in API responses.
@@ -69,14 +70,6 @@ pub struct ListWebhooksQuery {
     pub offset: i64,
     #[serde(default)]
     pub cursor: Option<i64>,
-}
-
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
 }
 
 // ─── Validation ────────────────────────────────────────────────
@@ -194,7 +187,7 @@ async fn create_webhook(
          VALUES ($1,$2,$3,$4,$5,'active',$6,$6)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.url)
     .bind(serde_json::json!(body.events))
     .bind(&secret)
@@ -205,7 +198,7 @@ async fn create_webhook(
     Ok((
         StatusCode::CREATED,
         Json(WebhookResponse {
-            id,
+            id: id.to_string(),
             url: body.url,
             events: serde_json::json!(body.events),
             // Only return secret at creation time
@@ -229,7 +222,7 @@ async fn list_webhooks(
         "SELECT id, url, events, secret, status, created_at, updated_at
          FROM webhooks WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 200))
     .bind(offset)
     .fetch_all(&state.db)
@@ -241,17 +234,17 @@ async fn list_webhooks(
 async fn get_webhook(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     require_scopes(&auth, &["webhooks:read"])?;
-    let row = fetch_webhook(&state, auth.tenant_id, id).await?;
+    let row = fetch_webhook(&state, &auth.tenant_id, id).await?;
     Ok(Json(row.into()))
 }
 
 async fn update_webhook(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(body): Json<UpdateWebhookRequest>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     require_scopes(&auth, &["webhooks:write"])?;
@@ -263,7 +256,7 @@ async fn update_webhook(
         }
     }
 
-    let existing = fetch_webhook(&state, auth.tenant_id, id).await?;
+    let existing = fetch_webhook(&state, &auth.tenant_id, id.clone()).await?;;
     let url = body.url.unwrap_or(existing.url);
     let events = body.events.map(|e| serde_json::json!(e)).unwrap_or(existing.events);
     
@@ -283,8 +276,8 @@ async fn update_webhook(
     .bind(&url)
     .bind(&events)
     .bind(&status)
-    .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&id)
+    .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -302,13 +295,13 @@ async fn update_webhook(
 async fn delete_webhook(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["webhooks:write"])?;
 
     let result = sqlx::query("DELETE FROM webhooks WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
+        .bind(&id)
+        .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -321,11 +314,11 @@ async fn delete_webhook(
 async fn test_webhook(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<TestWebhookResponse>, ApiError> {
     require_scopes(&auth, &["webhooks:write"])?;
 
-    let wh = fetch_webhook(&state, auth.tenant_id, id).await?;
+    let wh = fetch_webhook(&state, &auth.tenant_id, id).await?;
     
     // Fix #34: Validate URL at request time to prevent SSRF via DNS rebinding.
     if let Err(e) = validate_webhook_url(&wh.url) {
@@ -397,7 +390,7 @@ async fn test_webhook(
 
 #[derive(sqlx::FromRow)]
 struct WebhookRow {
-    id: Uuid,
+    id: String,
     url: String,
     events: serde_json::Value,
     secret: String,
@@ -420,7 +413,7 @@ impl From<WebhookRow> for WebhookResponse {
     }
 }
 
-async fn fetch_webhook(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<WebhookRow, ApiError> {
+async fn fetch_webhook(state: &AppState, tenant_id: &str, id: String) -> Result<WebhookRow, ApiError> {
     sqlx::query_as::<_, WebhookRow>(
         "SELECT id, url, events, secret, status, created_at, updated_at
          FROM webhooks WHERE id = $1 AND tenant_id = $2",
@@ -448,7 +441,7 @@ mod tests {
     #[test]
     fn test_webhook_response_serialisation() {
         let resp = WebhookResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             url: "https://example.com".into(),
             events: serde_json::json!(["delivered"]),
             secret: Some("whsec_abc".into()),

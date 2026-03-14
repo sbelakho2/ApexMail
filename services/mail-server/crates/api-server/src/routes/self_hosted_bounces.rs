@@ -296,8 +296,12 @@ impl SelfHostedBounceHandler {
         let captures = self.return_path_regex.captures(to)
             .ok_or(BounceError::InvalidReturnPath)?;
 
-        let tenant_id = captures.get(1).unwrap().as_str();
-        let message_id = captures.get(2).unwrap().as_str();
+        let tenant_id = captures.get(1)
+            .ok_or(BounceError::InvalidReturnPath)?
+            .as_str();
+        let message_id = captures.get(2)
+            .ok_or(BounceError::InvalidReturnPath)?
+            .as_str();
 
         // Parse the DSN email to extract bounce details
         let (recipient, bounce_type, category, diagnostic) = 
@@ -330,7 +334,7 @@ impl SelfHostedBounceHandler {
         info!(
             tenant_id = %tenant_id,
             message_id = %message_id,
-            recipient = %event.recipient,
+            recipient = %apexmail_lib::pii::redact_email(&event.recipient),
             bounce_type = ?bounce_type,
             "Processed inbound bounce"
         );
@@ -394,7 +398,7 @@ impl SelfHostedBounceHandler {
 
         warn!(
             tenant_id = %tenant_id,
-            recipient = %recipient,
+            recipient = %apexmail_lib::pii::redact_email(&recipient),
             feedback_type = %feedback_type,
             "Processed FBL complaint"
         );
@@ -451,7 +455,7 @@ impl SelfHostedBounceHandler {
         debug!(
             tenant_id = %event.tenant_id,
             message_id = %event.message_id,
-            recipient = %event.recipient,
+            recipient = %apexmail_lib::pii::redact_email(&event.recipient),
             bounce_type = ?event.bounce_type,
             category = ?event.category,
             "Recorded bounce event"
@@ -481,7 +485,7 @@ impl SelfHostedBounceHandler {
         .await
         .map_err(|e| BounceError::Database(e.to_string()))?;
 
-        info!(tenant_id = %tenant_id, email = %email, reason = %reason, "Added to suppression list");
+        info!(tenant_id = %tenant_id, email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Added to suppression list");
 
         Ok(())
     }

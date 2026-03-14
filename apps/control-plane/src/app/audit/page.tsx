@@ -295,7 +295,7 @@ export default function AuditLogsPage() {
                             >
                                 <option value="">All Tenants</option>
                                 {uniqueTenants.map(tenant => (
-                                    <option key={tenant} value={tenant!}>{tenant}</option>
+                                    <option key={tenant} value={tenant ?? ''}>{tenant}</option>
                                 ))}
                             </select>
                         </div>

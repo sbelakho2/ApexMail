@@ -13,6 +13,7 @@ import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import { generateId } from '@apexmail/lib/id';
 import type { DatabasePool } from '@apexmail/db';
+import { DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_MAX_BUFFER_SIZE, TTL_ONE_HOUR, TTL_ONE_DAY, DEFAULT_EMAIL_LIMIT, TTL_35_DAYS } from '../lib/constants.js';
 
 const logger = createLogger();
 
@@ -76,8 +77,8 @@ export class MeteringService {
   ) {
     this.config = {
       batchSize: config?.batchSize ?? 100,
-      flushIntervalMs: config?.flushIntervalMs ?? 10000,
-      maxBufferSize: config?.maxBufferSize ?? 5000,
+      flushIntervalMs: config?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS,
+      maxBufferSize: config?.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE,
     };
     this.startFlushTimer();
   }
@@ -107,12 +108,12 @@ export class MeteringService {
     // SECURITY FIX: Persist to Redis FIRST for crash recovery
     // This ensures events survive process crashes
     const pendingKey = `meter:pending:${id}`;
-    await this.redis.setex(pendingKey, 3600, JSON.stringify(event)); // 1 hour TTL
+    await this.redis.setex(pendingKey, TTL_ONE_HOUR, JSON.stringify(event)); // 1 hour TTL
     
     // Now check/set idempotency key AFTER persistence
     // If this fails, event is still in pending queue for recovery
     const dedupKey = `meter:dedup:${id}`;
-    const wasSet = await this.redis.set(dedupKey, '1', 'EX', 86400, 'NX');
+    const wasSet = await this.redis.set(dedupKey, '1', 'EX', TTL_ONE_DAY, 'NX');
     
     if (!wasSet) {
       // Event already processed - clean up pending key and return idempotent success
@@ -189,6 +190,9 @@ export class MeteringService {
 
   /**
    * Get current usage for a tenant in the billing period
+   * 
+   * Note: This query benefits from a composite index on metering_events(tenant_id, timestamp).
+   * Add via migration: CREATE INDEX idx_metering_events_tenant_time ON metering_events(tenant_id, timestamp);
    */
   async getUsage(
     tenantId: string,
@@ -235,7 +239,7 @@ export class MeteringService {
     // IMP-003 FIX: Use ?? instead of || so that limit=0 (suspended tenant) is respected.
     // Previously: `planResult.ok && planResult.value.rows[0]?.email_limit || 10000`
     // When email_limit is 0, `0 || 10000` evaluated to 10000 — bypassing suspension.
-    const emailsLimit = (planResult.ok ? planResult.value.rows[0]?.email_limit : undefined) ?? 10000;
+    const emailsLimit = (planResult.ok ? planResult.value.rows[0]?.email_limit : undefined) ?? DEFAULT_EMAIL_LIMIT;
     const apiCallsLimit = (planResult.ok ? planResult.value.rows[0]?.api_limit : undefined) ?? 100000;
 
     return Result.ok({
@@ -353,7 +357,7 @@ export class MeteringService {
       for (const event of eventsToFlush) {
         const counterKey = `meter:counter:${event.tenantId}:${event.eventType}:${periodKey}`;
         pipeline.incrby(counterKey, event.quantity);
-        pipeline.expire(counterKey, 86400 * 35); // 35 days TTL
+        pipeline.expire(counterKey, TTL_35_DAYS); // 35 days TTL
       }
 
       await pipeline.exec();
@@ -481,10 +485,9 @@ export class MeteringService {
 
     const values = await this.redis.mget(...keysToLoad);
     const invalidKeys: string[] = [];
+    const loadedEvents: MeterEvent[] = [];
 
     for (let i = 0; i < keysToLoad.length; i += 1) {
-      if (this.buffer.length >= this.config.maxBufferSize) break;
-
       const key = keysToLoad[i] ?? '';
       const raw = values[i];
 
@@ -493,10 +496,21 @@ export class MeteringService {
       try {
         const event = JSON.parse(raw) as MeterEvent;
         event.timestamp = new Date(event.timestamp);
-        this.buffer.push(event);
-      } catch {
+        loadedEvents.push(event);
+      } catch (error) {
+        logger.warn('Failed to parse meter event from Redis, discarding', { key, error: String(error) });
         invalidKeys.push(key);
       }
+    }
+
+    // FIX-METERING-ORDER: Sort loaded events by timestamp to ensure proper ordering
+    // SCAN doesn't guarantee order, so we must sort after loading
+    loadedEvents.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+    // Add sorted events to buffer (respecting max size)
+    for (const event of loadedEvents) {
+      if (this.buffer.length >= this.config.maxBufferSize) break;
+      this.buffer.push(event);
     }
 
     if (invalidKeys.length > 0) {
@@ -507,7 +521,7 @@ export class MeteringService {
   private startFlushTimer(): void {
     this.flushTimer = setInterval(() => {
       this.flush().catch(err => {
-        console.error('[Metering] Flush failed:', err instanceof Error ? err.message : err);
+        logger.error('Flush failed', { component: 'metering', error: err instanceof Error ? err.message : String(err) });
       });
     }, this.config.flushIntervalMs);
   }
@@ -515,10 +529,15 @@ export class MeteringService {
   /**
    * Recover pending events from Redis after crash/restart
    * CRITICAL: Call this on startup to prevent data loss
+   * Uses maximum recovery limit to prevent OOM
    */
   async recoverPendingEvents(): Promise<Result<number, Error>> {
+    // Maximum events to recover to prevent OOM during extended outages
+    const MAX_RECOVERY_EVENTS = 100_000;
+    const BATCH_PROCESS_SIZE = 1000;
+    
     try {
-      // Scan for all pending events
+      // Scan for all pending events with limit
       const pendingKeys: string[] = [];
       let cursor = '0';
       
@@ -530,45 +549,67 @@ export class MeteringService {
         );
         cursor = newCursor;
         pendingKeys.push(...keys);
+        
+        // Stop scanning if we hit the recovery limit
+        if (pendingKeys.length >= MAX_RECOVERY_EVENTS) {
+          logger.warn('Hit recovery limit, some events may remain pending', {
+            component: 'metering',
+            recoveredCount: pendingKeys.length,
+            limit: MAX_RECOVERY_EVENTS,
+          });
+          break;
+        }
       } while (cursor !== '0');
 
       if (pendingKeys.length === 0) {
         return Result.ok(0);
       }
 
-      // Recover events in bulk to avoid O(N) Redis roundtrips
-      const events: MeterEvent[] = [];
-      const values = await this.redis.mget(...pendingKeys);
-      const invalidKeys: string[] = [];
+      // Process in batches to limit memory usage
+      let totalRecovered = 0;
+      
+      for (let i = 0; i < pendingKeys.length; i += BATCH_PROCESS_SIZE) {
+        const batchKeys = pendingKeys.slice(i, i + BATCH_PROCESS_SIZE);
+        const values = await this.redis.mget(...batchKeys);
+        const invalidKeys: string[] = [];
+        const events: MeterEvent[] = [];
 
-      for (let i = 0; i < pendingKeys.length; i += 1) {
-        const key = pendingKeys[i] ?? '';
-        const data = values[i];
-        if (data) {
-          try {
-            const event = JSON.parse(data) as MeterEvent;
-            event.timestamp = new Date(event.timestamp); // Restore Date object
-            events.push(event);
-          } catch {
-            invalidKeys.push(key);
+        for (let j = 0; j < batchKeys.length; j += 1) {
+          const key = batchKeys[j] ?? '';
+          const data = values[j];
+          if (data) {
+            try {
+              const event = JSON.parse(data) as MeterEvent;
+              event.timestamp = new Date(event.timestamp); // Restore Date object
+              events.push(event);
+            } catch (error) {
+              logger.warn('Failed to parse pending meter event, discarding', { key, error: String(error) });
+              invalidKeys.push(key);
+            }
           }
+        }
+
+        if (invalidKeys.length > 0) {
+          await this.redis.del(...invalidKeys);
+        }
+
+        if (events.length > 0) {
+          // Add recovered events to buffer and flush immediately
+          this.buffer.push(...events);
+          logger.info('Recovered batch of pending events from Redis', { 
+            component: 'metering', 
+            batchCount: events.length,
+            batchIndex: Math.floor(i / BATCH_PROCESS_SIZE) + 1,
+          });
+          await this.flush();
+          totalRecovered += events.length;
         }
       }
 
-      if (invalidKeys.length > 0) {
-        await this.redis.del(...invalidKeys);
-      }
-
-      if (events.length > 0) {
-        // Add recovered events to buffer and flush immediately
-        this.buffer.push(...events);
-        console.error(`[Metering] Recovered ${events.length} pending events from Redis`);
-        await this.flush();
-      }
-
-      return Result.ok(events.length);
+      logger.info('Completed recovery of pending events', { component: 'metering', totalRecovered });
+      return Result.ok(totalRecovered);
     } catch (error) {
-      console.error('[Metering] Failed to recover pending events:', error);
+      logger.error('Failed to recover pending events', { component: 'metering', error: error instanceof Error ? error.message : String(error) });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
   }

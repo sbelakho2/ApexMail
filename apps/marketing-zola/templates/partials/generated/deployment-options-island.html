@@ -1,0 +1,188 @@
+{# ── Deployment Options (CSS radio tabs, zero JS) ────────────── #}
+{# Uses radio inputs + :checked CSS selector to show/hide panels. #}
+
+<section class="py-20 lg:py-32 relative bg-white">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="text-center mb-16">
+      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+        Deployment Options
+      </div>
+      <h2 class="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">Deploy Anywhere</h2>
+      <p class="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">Same code, multiple deployment targets. Choose the infrastructure that fits your security and compliance requirements.</p>
+    </div>
+
+    {# Radio inputs (hidden, control tabs via CSS) #}
+    <input type="radio" name="deploy" id="deploy-shared" class="deploy-radio" checked />
+    <input type="radio" name="deploy" id="deploy-dedicated" class="deploy-radio" />
+    <input type="radio" name="deploy" id="deploy-private" class="deploy-radio" />
+    <input type="radio" name="deploy" id="deploy-byoc" class="deploy-radio" />
+
+    {# Tab buttons #}
+    <div class="deploy-tabs flex flex-wrap justify-center gap-2 mb-10">
+      <label for="deploy-shared" class="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold transition-all cursor-pointer bg-surface-50 text-surface-600 hover:text-surface-900 hover:bg-surface-100 border border-transparent hover:border-surface-200">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+        Shared Cloud
+      </label>
+      <label for="deploy-dedicated" class="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold transition-all cursor-pointer bg-surface-50 text-surface-600 hover:text-surface-900 hover:bg-surface-100 border border-transparent hover:border-surface-200">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+        Dedicated
+      </label>
+      <label for="deploy-private" class="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold transition-all cursor-pointer bg-surface-50 text-surface-600 hover:text-surface-900 hover:bg-surface-100 border border-transparent hover:border-surface-200">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+        Private Cloud
+      </label>
+      <label for="deploy-byoc" class="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold transition-all cursor-pointer bg-surface-50 text-surface-600 hover:text-surface-900 hover:bg-surface-100 border border-transparent hover:border-surface-200">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+        BYOC
+      </label>
+    </div>
+
+    {# Panels #}
+    <div class="deploy-panels">
+      {# Shared Cloud #}
+      <div id="panel-shared" class="deploy-panel bg-white rounded-2xl border border-surface-200 p-8 shadow-sm">
+        <div class="grid lg:grid-cols-2 gap-12">
+          <div>
+            <h3 class="text-xl font-bold text-surface-900 mb-2">Shared Cloud</h3>
+            <span class="text-xs font-medium text-emerald-600">99.99% SLA</span>
+            <p class="text-surface-600 mt-4 mb-8 leading-relaxed">Multi-tenant infrastructure on our global edge network. Best for startups and growing companies that need reliable email delivery without managing infrastructure.</p>
+            <div class="bg-surface-50 border border-surface-200 rounded-lg p-5">
+              <div class="text-xs font-medium text-surface-500 mb-1.5">Best For</div>
+              <div class="text-surface-900 font-semibold text-sm">Startups, SMBs, and growing SaaS companies</div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs font-semibold text-surface-900 mb-6">Included Components</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Shared SMTP &amp; API</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Global edge delivery</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>DKIM/SPF/DMARC</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Webhooks &amp; analytics</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# Dedicated #}
+      <div id="panel-dedicated" class="deploy-panel bg-white rounded-2xl border border-surface-200 p-8 shadow-sm">
+        <div class="grid lg:grid-cols-2 gap-12">
+          <div>
+            <h3 class="text-xl font-bold text-surface-900 mb-2">Dedicated Infrastructure</h3>
+            <span class="text-xs font-medium text-emerald-600">99.995% SLA</span>
+            <p class="text-surface-600 mt-4 mb-8 leading-relaxed">Single-tenant compute with dedicated IPs and isolated queues. Full control over sending reputation with guaranteed throughput.</p>
+            <div class="bg-surface-50 border border-surface-200 rounded-lg p-5">
+              <div class="text-xs font-medium text-surface-500 mb-1.5">Best For</div>
+              <div class="text-surface-900 font-semibold text-sm">High-volume senders needing IP reputation control</div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs font-semibold text-surface-900 mb-6">Included Components</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Dedicated IPs</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Isolated queues</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Custom DKIM signing</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Priority support</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# Private Cloud #}
+      <div id="panel-private" class="deploy-panel bg-white rounded-2xl border border-surface-200 p-8 shadow-sm">
+        <div class="grid lg:grid-cols-2 gap-12">
+          <div>
+            <h3 class="text-xl font-bold text-surface-900 mb-2">Private Cloud</h3>
+            <span class="text-xs font-medium text-emerald-600">99.999% SLA</span>
+            <p class="text-surface-600 mt-4 mb-8 leading-relaxed">Fully isolated single-tenant deployment in your preferred region. Complete data sovereignty with HIPAA, SOC 2, and GDPR compliance built in.</p>
+            <div class="bg-surface-50 border border-surface-200 rounded-lg p-5">
+              <div class="text-xs font-medium text-surface-500 mb-1.5">Best For</div>
+              <div class="text-surface-900 font-semibold text-sm">Healthcare, finance, and regulated industries</div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs font-semibold text-surface-900 mb-6">Included Components</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Isolated VPC</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Encryption at rest</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>BAA included</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Dedicated account team</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# BYOC #}
+      <div id="panel-byoc" class="deploy-panel bg-white rounded-2xl border border-surface-200 p-8 shadow-sm">
+        <div class="grid lg:grid-cols-2 gap-12">
+          <div>
+            <h3 class="text-xl font-bold text-surface-900 mb-2">Bring Your Own Cloud</h3>
+            <span class="text-xs font-medium text-emerald-600">Custom SLA</span>
+            <p class="text-surface-600 mt-4 mb-8 leading-relaxed">Deploy ApexMail on your own AWS, GCP, or Azure infrastructure. We provide the containers, you manage the environment. Full air-gapped option available.</p>
+            <div class="bg-surface-50 border border-surface-200 rounded-lg p-5">
+              <div class="text-xs font-medium text-surface-500 mb-1.5">Best For</div>
+              <div class="text-surface-900 font-semibold text-sm">Government, defense, and maximum-security requirements</div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs font-semibold text-surface-900 mb-6">Included Components</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Helm charts</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Air-gapped support</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>Your KMS integration</span>
+              </div>
+              <div class="flex items-center gap-3 text-surface-700 text-sm">
+                <svg class="w-5 h-5 text-surface-900 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <span>24/7 engineering support</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

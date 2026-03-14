@@ -3,15 +3,19 @@
 //! Mirrors the Hono routes defined in `apps/devex/src/routes/devex.ts`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    body::Body,
+    extract::{DefaultBodyLimit, Query, State},
+    http::{header::AUTHORIZATION, HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use serde::Serialize;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::config::DevExConfig;
 use crate::onboarding::OnboardingService;
@@ -31,6 +35,7 @@ pub struct AppState {
     pub openapi: Arc<OpenApiGenerator>,
     pub onboarding: Arc<OnboardingService>,
     pub webhook_tester: Arc<WebhookTester>,
+    pub service_token: String,
 }
 
 impl AppState {
@@ -45,6 +50,7 @@ impl AppState {
             openapi: Arc::new(openapi),
             onboarding: Arc::new(OnboardingService::new()),
             webhook_tester: Arc::new(webhook_tester),
+            service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
         })
     }
 }
@@ -60,7 +66,38 @@ pub fn build_router(state: AppState) -> Router {
         .route("/openapi.json", get(handle_openapi))
         .route("/onboarding/checklist", get(handle_onboarding_checklist))
         .route("/health", get(handle_health))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
+        .layer(DefaultBodyLimit::max(256 * 1024)) // 256 KB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
+}
+
+async fn require_service_token(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if req.uri().path() == "/health" {
+        return Ok(next.run(req).await);
+    }
+    if state.service_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let provided = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok().map(String::from))
+        .or_else(|| {
+            req.headers()
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
+        });
+    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────

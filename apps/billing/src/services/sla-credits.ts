@@ -155,8 +155,8 @@ export class SlaCreditsService {
     let features: Record<string, unknown> = {};
     try {
       features = JSON.parse(row.features || '{}') as Record<string, unknown>;
-    } catch {
-      logger.warn('Failed to parse plan features for tenant', { tenantId });
+    } catch (error) {
+      logger.warn('Failed to parse plan features for tenant', { tenantId, error });
       return Result.ok(null);
     }
     

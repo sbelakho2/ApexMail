@@ -657,8 +657,8 @@ async fn handle_data_mode(
                             config.metrics.record_delivery_ok();
                             info!(
                                 peer = %peer,
-                                from = ?state.mail_from,
-                                to = ?state.rcpt_to,
+                                from = %mail_common::pii::redact_email_opt(&state.mail_from),
+                                to = %mail_common::pii::redact_email_list(&state.rcpt_to),
                                 size = state.data_buffer.len(),
                                 "Message accepted"
                             );
@@ -1165,7 +1165,7 @@ async fn process_message(
             };
             info!(
                 peer = %peer_addr,
-                from = %from_addr,
+                from = %mail_common::pii::redact_email(&from_addr),
                 spf = %spf_status,
                 "SPF verification result"
             );
@@ -1207,7 +1207,7 @@ async fn process_message(
                     }
                     info!(
                         peer = %peer_addr,
-                        from = %from_addr,
+                        from = %mail_common::pii::redact_email(&from_addr),
                         dkim = %overall,
                         "DKIM verification result"
                     );
@@ -1261,7 +1261,7 @@ async fn process_message(
 
     info!(
         peer = %peer_addr,
-        from = %from_addr,
+        from = %mail_common::pii::redact_email(&from_addr),
         spf = %spf_result,
         dkim = %dkim_result,
         dmarc = %dmarc_result,
@@ -1277,7 +1277,7 @@ async fn process_message(
             "reject" => {
                 warn!(
                     peer = %peer_addr,
-                    from = %from_addr,
+                    from = %mail_common::pii::redact_email(&from_addr),
                     dmarc_policy = "reject",
                     "DMARC reject — SPF and DKIM both failed, domain policy demands rejection"
                 );
@@ -1289,7 +1289,7 @@ async fn process_message(
             "quarantine" => {
                 warn!(
                     peer = %peer_addr,
-                    from = %from_addr,
+                    from = %mail_common::pii::redact_email(&from_addr),
                     dmarc_policy = "quarantine",
                     "DMARC quarantine — SPF and DKIM both failed, marking suspicious"
                 );
@@ -1299,7 +1299,7 @@ async fn process_message(
                 // p=none or no policy — accept the message
                 info!(
                     peer = %peer_addr,
-                    from = %from_addr,
+                    from = %mail_common::pii::redact_email(&from_addr),
                     dmarc_policy = %dmarc_policy.policy,
                     "DMARC fail but policy is none/missing — accepting message"
                 );
@@ -1308,7 +1308,7 @@ async fn process_message(
     } else if dmarc_result == "temperror" {
         warn!(
             peer = %peer_addr,
-            from = %from_addr,
+            from = %mail_common::pii::redact_email(&from_addr),
             dmarc_policy = %dmarc_policy.policy,
             "DMARC temp error — deferring enforcement"
         );
@@ -1384,7 +1384,7 @@ async fn process_message(
                 .into_inner();
 
             debug!(
-                recipient = %recipient,
+                recipient = %mail_common::pii::redact_email(&recipient),
                 message_id = %response.message_id,
                 uid = response.uid,
                 blob_hash = %response.blob_hash,
@@ -1403,8 +1403,8 @@ async fn process_message(
     
     info!(
         peer = %peer_addr,
-        from = %from_addr,
-        to = ?state.rcpt_to,
+        from = %mail_common::pii::redact_email(&from_addr),
+        to = %mail_common::pii::redact_email_list(&state.rcpt_to),
         subject = ?parsed_subject,
         size = final_message.len(),
         spf = %spf_result,

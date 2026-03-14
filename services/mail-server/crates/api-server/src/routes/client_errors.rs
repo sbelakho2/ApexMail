@@ -80,7 +80,7 @@ async fn report_client_error(
     sqlx::query!(
         "INSERT INTO client_errors (tenant_id, message, stack, url, source, user_agent, severity, context, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())",
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
         message,
         stack,
         url,
@@ -89,7 +89,7 @@ async fn report_client_error(
         body.severity,
         body.context,
     )
-    .execute(&*state.db)
+    .execute(&state.db)
     .await?;
 
     Ok((StatusCode::ACCEPTED, Json(ClientErrorAck { accepted: true })))

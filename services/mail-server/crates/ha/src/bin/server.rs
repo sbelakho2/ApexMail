@@ -27,15 +27,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .max_connections(config.database.pool_max)
         .idle_timeout(std::time::Duration::from_millis(config.database.idle_timeout_ms))
         .acquire_timeout(std::time::Duration::from_millis(config.database.connection_timeout_ms))
+        .max_lifetime(std::time::Duration::from_secs(1800))
         .connect(&config.database.primary_url())
         .await?;
 
     // Build shared state
     let config_for_services = Arc::clone(&config);
+    // BackupService::new() returns Result to validate encryption key at startup
+    let backup_service = BackupService::new(pool.clone(), Arc::clone(&config_for_services))
+        .map_err(|e| anyhow::anyhow!("Failed to initialize backup service: {}", e))?;
     let state = Arc::new(AppState {
         health: HealthCheckService::new(pool.clone(), Arc::clone(&config_for_services)),
         failover: FailoverService::new(pool.clone(), Arc::clone(&config_for_services)),
-        backup: BackupService::new(pool.clone(), Arc::clone(&config_for_services)),
+        backup: backup_service,
         replication: ReplicationService::new(pool.clone(), Arc::clone(&config_for_services)),
         multi_region: MultiRegionService::new(pool.clone(), Arc::clone(&config_for_services)),
         circuit_breaker: CircuitBreakerService::new(Arc::clone(&config_for_services)),
@@ -51,7 +55,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval));
             loop {
                 tick.tick().await;
-                let _ = s.health.check_all().await;
+                let _ = s.health.check_all().await
+                    .map_err(|e| tracing::warn!(error = %e, "Health check failed"));
             }
         });
     }
@@ -96,7 +101,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
             loop {
                 tick.tick().await;
-                let _ = s.replication.cleanup_lag_history(72).await;
+                if let Err(e) = s.replication.cleanup_lag_history(72).await {
+                    tracing::warn!(error = %e, "Replication lag history cleanup failed");
+                }
             }
         });
     }
@@ -106,6 +113,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = TcpListener::bind(&addr).await?;
     info!(addr, "HA service listening");
-    axum::serve(listener, app).await?;
+
+    let shutdown = async {
+        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            _ = ctrl_c => info!("received Ctrl+C — shutting down"),
+            _ = terminate => info!("received SIGTERM — shutting down"),
+        }
+    };
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }

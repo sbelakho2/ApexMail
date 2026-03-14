@@ -24,6 +24,17 @@ const envSchema = z.object({
 
   // Company banking details
   BILLING_COMPANY_IBAN: z.string().min(15).optional(),
+  BILLING_COMPANY_PHONE: z.string().min(7).optional(),
+
+  // Internal URLs and salts
+  API_BASE_URL: z.string().url().optional(),
+  PDF_RENDERER_URL: z.string().url().optional(),
+  VIRAL_TELEMETRY_HASH_SALT: z.string().min(16).optional(),
+
+  // Billing safeguards
+  MAX_PRORATION_CHARGE_CENTS: z.string().regex(/^\d+$/).optional(),
+  MAX_PRORATION_CREDIT_CENTS: z.string().regex(/^\d+$/).optional(),
+  WARN_PRORATION_CHARGE_CENTS: z.string().regex(/^\d+$/).optional(),
   
   // Internal service auth
   SERVICE_AUTH_TOKEN: z.string().min(32),
@@ -37,6 +48,11 @@ const envSchema = z.object({
   // Metering
   METERING_BATCH_SIZE: z.string().default('100'),
   METERING_FLUSH_INTERVAL_MS: z.string().default('10000'),
+
+  // Runtime controls
+  RATE_LIMIT_WINDOW_SECONDS: z.string().default('60'),
+  RATE_LIMIT_MAX_REQUESTS: z.string().default('300'),
+  SAGA_TIMEOUT_MINUTES: z.string().default('60'),
 });
 
 export type Config = z.infer<typeof envSchema>;
@@ -56,6 +72,35 @@ export function loadConfig(): Config {
     throw new Error(
       `Missing or invalid environment variables:\n${missing.join('\n')}\n\n` +
       `Validation errors:\n${JSON.stringify(result.error.format(), null, 2)}`
+    );
+  }
+  
+  // Validate IBAN is configured in production to prevent unprofessional invoices
+  if (result.data.NODE_ENV === 'production' && !result.data.BILLING_COMPANY_IBAN) {
+    throw new Error(
+      'BILLING_COMPANY_IBAN must be configured in production environment. ' +
+      'This IBAN appears on customer invoices.'
+    );
+  }
+
+  if (result.data.NODE_ENV === 'production' && !result.data.API_BASE_URL) {
+    throw new Error(
+      'API_BASE_URL must be configured in production environment. ' +
+      'Dedicated IP provisioning depends on a valid internal API base URL.'
+    );
+  }
+
+  if (result.data.NODE_ENV === 'production' && !result.data.PDF_RENDERER_URL) {
+    throw new Error(
+      'PDF_RENDERER_URL must be configured in production environment. ' +
+      'Invoice PDF generation depends on a valid internal PDF renderer URL.'
+    );
+  }
+
+  if (result.data.NODE_ENV === 'production' && !result.data.VIRAL_TELEMETRY_HASH_SALT) {
+    throw new Error(
+      'VIRAL_TELEMETRY_HASH_SALT must be configured in production environment. ' +
+      'Telemetry pseudonymization must not rely on a shared default salt.'
     );
   }
   
@@ -111,6 +156,36 @@ export const config = {
   },
   get meteringFlushIntervalMs(): number {
     return parseInt(getConfig().METERING_FLUSH_INTERVAL_MS, 10) || 10000;
+  },
+  get rateLimitWindowSeconds(): number {
+    return parseInt(getConfig().RATE_LIMIT_WINDOW_SECONDS, 10) || 60;
+  },
+  get rateLimitMaxRequests(): number {
+    return parseInt(getConfig().RATE_LIMIT_MAX_REQUESTS, 10) || 300;
+  },
+  get sagaTimeoutMinutes(): number {
+    return parseInt(getConfig().SAGA_TIMEOUT_MINUTES, 10) || 60;
+  },
+  get apiBaseUrl(): string {
+    return getConfig().API_BASE_URL ?? 'http://localhost:3001';
+  },
+  get pdfRendererUrl(): string {
+    return getConfig().PDF_RENDERER_URL ?? 'http://pdf-renderer:3004';
+  },
+  get viralTelemetryHashSalt(): string {
+    return getConfig().VIRAL_TELEMETRY_HASH_SALT ?? 'apexmail-telemetry';
+  },
+  get billingCompanyPhone(): string {
+    return getConfig().BILLING_COMPANY_PHONE ?? '+37200000000';
+  },
+  get maxProrationChargeCents(): number {
+    return parseInt(getConfig().MAX_PRORATION_CHARGE_CENTS ?? '100000', 10);
+  },
+  get maxProrationCreditCents(): number {
+    return parseInt(getConfig().MAX_PRORATION_CREDIT_CENTS ?? '50000', 10);
+  },
+  get warnProrationChargeCents(): number {
+    return parseInt(getConfig().WARN_PRORATION_CHARGE_CENTS ?? '25000', 10);
   },
   get stripeDedicatedIpPriceId(): string | undefined {
     return getConfig().STRIPE_DEDICATED_IP_PRICE_ID;

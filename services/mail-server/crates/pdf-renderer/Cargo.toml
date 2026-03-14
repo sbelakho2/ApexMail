@@ -12,10 +12,10 @@ path = "src/bin/server.rs"
 
 [dependencies]
 # Typst compiler + PDF backend
-typst = "0.12"
-typst-pdf = "0.12"
-typst-syntax = "0.12"
-typst-library = "0.12"
+typst = "0.14"
+typst-pdf = "0.14"
+typst-syntax = "0.14"
+typst-library = "0.14"
 comemo = "0.4"
 
 # Async runtime
@@ -23,6 +23,7 @@ tokio.workspace = true
 
 # HTTP server
 axum.workspace = true
+apexmail-lib = { path = "../apexmail-lib" }
 tower.workspace = true
 tower-http.workspace = true
 hyper.workspace = true

@@ -71,7 +71,7 @@ impl MessageStorage {
         // Create default mailboxes
         self.create_default_mailboxes(&account.id).await?;
         
-        info!(account_id = %account.id, email = %email, "Account created");
+        info!(account_id = %account.id, email = %mail_common::pii::redact_email(&email), "Account created");
         Ok(account)
     }
     

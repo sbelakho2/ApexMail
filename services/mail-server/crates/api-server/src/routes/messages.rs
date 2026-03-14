@@ -1,5 +1,6 @@
 //! Message sending and management routes.
 
+use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -65,14 +66,14 @@ pub struct SendMessageRequest {
 
 #[derive(Debug, Serialize)]
 pub struct MessageResponse {
-    pub id: Uuid,
+    pub id: String,
     pub status: String,
     pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MessageDetail {
-    pub id: Uuid,
+    pub id: String,
     pub from: String,
     pub to: serde_json::Value,
     pub subject: String,
@@ -94,14 +95,6 @@ pub struct ListMessagesQuery {
     pub cursor: Option<i64>,
     #[serde(default)]
     pub status: Option<String>,
-}
-
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,7 +127,7 @@ async fn send_message(
     Json(body): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
     require_scopes(&auth, &["messages:send"])?;
-    validate_send(&body, &state, auth.tenant_id).await?;
+    validate_send(&body, &state, &auth.tenant_id).await?;
 
     let id = Uuid::new_v4();
     let now = Utc::now();
@@ -150,7 +143,7 @@ async fn send_message(
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.from)
     .bind(serde_json::json!(body.to))
     .bind(body.cc.as_ref().map(|v| serde_json::json!(v)))
@@ -169,7 +162,7 @@ async fn send_message(
     Ok((
         StatusCode::ACCEPTED,
         Json(MessageResponse {
-            id,
+            id: id.to_string(),
             status: status.into(),
             created_at: now.to_rfc3339(),
         }),
@@ -197,7 +190,7 @@ async fn send_batch(
     let mut results = Vec::with_capacity(body.messages.len());
 
     for (i, msg) in body.messages.iter().enumerate() {
-        if let Err(e) = validate_send(msg, &state, auth.tenant_id).await {
+        if let Err(e) = validate_send(msg, &state, &auth.tenant_id).await {
             rejected += 1;
             results.push(BatchResult {
                 index: i,
@@ -216,7 +209,7 @@ async fn send_batch(
              VALUES ($1,$2,$3,$4,$5,$6,$7,'queued',$8)",
         )
         .bind(id)
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .bind(&msg.from)
         .bind(serde_json::json!(msg.to))
         .bind(&msg.subject)
@@ -274,7 +267,7 @@ async fn list_messages(
             "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
              FROM messages WHERE tenant_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
         )
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .bind(status)
         .bind(clamp_limit(params.limit, 100))
         .bind(offset)
@@ -285,7 +278,7 @@ async fn list_messages(
             "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
              FROM messages WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
         )
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .bind(clamp_limit(params.limit, 100))
         .bind(offset)
         .fetch_all(&state.db)
@@ -307,7 +300,7 @@ async fn get_message(
          FROM messages WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("message not found".into()))?;
@@ -326,7 +319,7 @@ async fn cancel_message(
         "UPDATE messages SET status = 'cancelled' WHERE id = $1 AND tenant_id = $2 AND status IN ('queued', 'scheduled')",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -337,7 +330,7 @@ async fn cancel_message(
     }
 
     Ok(Json(MessageResponse {
-        id,
+        id: id.to_string(),
         status: "cancelled".into(),
         created_at: Utc::now().to_rfc3339(),
     }))
@@ -347,7 +340,7 @@ async fn cancel_message(
 
 #[derive(sqlx::FromRow)]
 struct MessageRow {
-    id: Uuid,
+    id: String,
     from_email: String,
     to_emails: serde_json::Value,
     subject: String,
@@ -381,7 +374,7 @@ fn row_to_detail(r: MessageRow) -> MessageDetail {
 async fn validate_send(
     body: &SendMessageRequest,
     state: &AppState,
-    tenant_id: Uuid,
+    tenant_id: &str,
 ) -> Result<(), ApiError> {
     let mut errors = Vec::new();
     if body.from.is_empty() {

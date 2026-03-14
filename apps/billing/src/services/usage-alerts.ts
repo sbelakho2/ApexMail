@@ -8,6 +8,7 @@ import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 import { MeteringService } from './metering.js';
+import { DEFAULT_ALERT_COOLDOWN_MINUTES, SECONDS_PER_MINUTE } from '../lib/constants.js';
 
 const logger = createLogger();
 
@@ -40,7 +41,7 @@ export class UsageAlertsService {
   ) {
     this.config = {
       defaultThresholds: config?.defaultThresholds ?? [50, 80, 100],
-      cooldownMinutes: config?.cooldownMinutes ?? 60,
+      cooldownMinutes: config?.cooldownMinutes ?? DEFAULT_ALERT_COOLDOWN_MINUTES,
     };
   }
 
@@ -173,7 +174,7 @@ export class UsageAlertsService {
         });
 
         // Set cooldown
-        await this.redis.setex(cooldownKey, this.config.cooldownMinutes * 60, '1');
+        await this.redis.setex(cooldownKey, this.config.cooldownMinutes * SECONDS_PER_MINUTE, '1');
 
         // Update last triggered
         await this.db.query(
@@ -228,7 +229,8 @@ export class UsageAlertsService {
       let settings: { webhookUrl?: string } = {};
       try {
         settings = JSON.parse(tenant.settings || '{}');
-      } catch {
+      } catch (error) {
+        logger.warn('Failed to parse tenant settings for usage alert', { error: String(error) });
         settings = {};
       }
       const webhookUrl = settings.webhookUrl;
@@ -288,12 +290,14 @@ export class UsageAlertsService {
   /**
    * Run batch check for all tenants (cron job)
    * Processes in batches to prevent memory exhaustion
+   * Now processes tenants in parallel with concurrency limit
    */
   async checkAllTenants(): Promise<Result<{
     tenantsChecked: number;
     totalAlerts: number;
   }, Error>> {
     const BATCH_SIZE = 100;
+    const CONCURRENCY_LIMIT = 10; // Process up to 10 tenants in parallel
     let offset = 0;
     let totalChecked = 0;
     let totalAlerts = 0;
@@ -316,12 +320,19 @@ export class UsageAlertsService {
         continue;
       }
 
-      for (const row of rows) {
-        const result = await this.checkAndAlert(row.id);
-        if (result.ok) {
-          totalAlerts += result.value.alertsTriggered;
+      // Process tenants in parallel with concurrency limit
+      for (let i = 0; i < rows.length; i += CONCURRENCY_LIMIT) {
+        const chunk = rows.slice(i, i + CONCURRENCY_LIMIT);
+        const results = await Promise.all(
+          chunk.map(row => this.checkAndAlert(row.id))
+        );
+        
+        for (const result of results) {
+          if (result.ok) {
+            totalAlerts += result.value.alertsTriggered;
+          }
+          totalChecked++;
         }
-        totalChecked++;
       }
 
       if (rows.length < BATCH_SIZE) {

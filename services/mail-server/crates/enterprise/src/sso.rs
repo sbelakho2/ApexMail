@@ -289,7 +289,7 @@ impl SSOService {
 
         let group_list = groups.and_then(|g| serde_json::from_value::<Vec<String>>(g).ok());
 
-        info!(tenant_id = %tenant_id, email = email, is_new_user = is_new_user, "SSO session created");
+        info!(tenant_id = %tenant_id, email = %mail_common::pii::redact_email(email), is_new_user = is_new_user, "SSO session created");
         Ok(ApiResult::ok(SSOCallbackResult {
             session: SSOSessionInfo {
                 session_token,

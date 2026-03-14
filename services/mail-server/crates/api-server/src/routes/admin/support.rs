@@ -123,7 +123,7 @@ async fn list_tickets(
         query = query.bind(s);
     }
 
-    let ticket_rows = query.fetch_all(&state.db).await.unwrap_or_default();
+    let ticket_rows = query.fetch_all(&state.db).await?;
 
     let mut tickets: Vec<Ticket> = Vec::with_capacity(ticket_rows.len());
     for (id, subj, desc, tid, tname, temail, status, priority, cat, assignee, ca, ua) in ticket_rows {
@@ -138,7 +138,7 @@ async fn list_tickets(
         .bind(&id)
         .fetch_all(&state.db)
         .await
-        .unwrap_or_default();
+        ?;
 
         let messages: Vec<TicketMessage> = msgs
             .into_iter()

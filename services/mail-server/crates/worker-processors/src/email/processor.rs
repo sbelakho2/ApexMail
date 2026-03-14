@@ -764,7 +764,8 @@ impl EmailProcessor {
             "#,
         )
         .bind(retry_at)
-        .bind(serde_json::to_value(reason).unwrap_or_default())
+        .bind(serde_json::to_value(reason)
+            .map_err(|e| sqlx::Error::Protocol(format!("serialization: {e}")))?)
         .bind(&job.id)
         .execute(&self.db)
         .await?;

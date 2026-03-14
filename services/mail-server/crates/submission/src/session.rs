@@ -249,7 +249,7 @@ impl SubmissionSession {
             self.auth_email = result.email.clone();
             info!(
                 peer = %self.peer_addr, 
-                email = ?result.email,
+                email = %mail_common::pii::redact_email(result.email.as_deref().unwrap_or("")),
                 "Authentication successful"
             );
             self.send_response(235, "Authentication successful").await
@@ -292,8 +292,8 @@ impl SubmissionSession {
                 if from != auth_email.as_str() && !from.ends_with(&format!("@{}", self.state.hostname)) {
                     warn!(
                         peer = %self.peer_addr,
-                        from = %from,
-                        auth_email = %auth_email,
+                        from = %mail_common::pii::redact_email(from),
+                        auth_email = %mail_common::pii::redact_email(auth_email),
                         "Sender mismatch"
                     );
                     // Allow it but log - could be sending on behalf of
@@ -434,8 +434,8 @@ impl SubmissionSession {
         
         info!(
             peer = %self.peer_addr,
-            from = %from,
-            to = ?to,
+            from = %mail_common::pii::redact_email(from),
+            to = %mail_common::pii::redact_email_list(&to),
             size = self.data_buffer.len(),
             "Submitting message"
         );
@@ -468,8 +468,8 @@ impl SubmissionSession {
         
         info!(
             message_id = %message_id,
-            from = %from,
-            to = ?to,
+            from = %mail_common::pii::redact_email(from),
+            to = %mail_common::pii::redact_email_list(&to),
             "Message queued"
         );
         

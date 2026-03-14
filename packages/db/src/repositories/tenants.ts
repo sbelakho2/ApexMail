@@ -22,6 +22,7 @@ export interface Tenant {
 export interface TenantSettings {
   defaultFromEmail?: string;
   defaultFromName?: string;
+  billingCurrency?: string;
   webhookUrl?: string;
   webhookSecret?: string;
   customTrackingDomain?: string;

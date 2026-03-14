@@ -130,8 +130,7 @@ async fn get_support_analytics(
         ),
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let mut cat_map = serde_json::Map::new();
     for (k, v) in &cat_rows {
@@ -147,8 +146,7 @@ async fn get_support_analytics(
         ),
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let mut pri_map = serde_json::Map::new();
     for (k, v) in &pri_rows {
@@ -164,8 +162,7 @@ async fn get_support_analytics(
         ),
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     // Top tenants
     let top = sqlx::query_as::<_, (Option<String>, i64)>(
@@ -176,8 +173,7 @@ async fn get_support_analytics(
         ),
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     // Recent tickets
     let recent = sqlx::query_as::<_, (String, String, Option<String>, String, String, Option<String>, chrono::DateTime<chrono::Utc>)>(
@@ -185,8 +181,7 @@ async fn get_support_analytics(
          FROM support_tickets ORDER BY created_at DESC LIMIT 10",
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     // Response time buckets
     let buckets = sqlx::query_as::<_, (Option<String>, i64)>(
@@ -204,8 +199,7 @@ async fn get_support_analytics(
          GROUP BY bucket",
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let mut bucket_map = serde_json::Map::new();
     for (k, v) in &buckets {

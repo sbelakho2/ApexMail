@@ -79,8 +79,7 @@ async fn list_crm_leads(
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let leads: Vec<CrmLead> = rows
         .into_iter()

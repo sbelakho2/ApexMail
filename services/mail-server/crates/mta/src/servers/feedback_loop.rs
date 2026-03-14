@@ -532,7 +532,7 @@ impl FeedbackLoopServer {
                 Err(e) => (false, None, Some(e.to_string())),
             };
 
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 "INSERT INTO alert_webhook_deliveries (webhook_id, alert_type, payload, success, status_code, error_message, delivered_at)
                  VALUES ($1, 'complaint_rate', $2, $3, $4, $5, NOW())"
             )
@@ -542,7 +542,10 @@ impl FeedbackLoopServer {
                 .bind(status_code)
                 .bind(error_msg)
                 .execute(&self.pool)
-                .await;
+                .await
+            {
+                warn!(webhook_id = %webhook_id, error = %e, "Failed to record webhook delivery");
+            }
 
             if success {
                 debug!(webhook_id = %webhook_id, url = %url, "Alert webhook delivered");

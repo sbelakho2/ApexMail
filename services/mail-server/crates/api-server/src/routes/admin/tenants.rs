@@ -158,12 +158,15 @@ async fn delete_tenant(
 }
 
 async fn log_tenant_audit(state: &AppState, action: &str, tenant_id: Uuid) {
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
          VALUES (NOW(), $1, 'tenant', $2, $2, '{}'::jsonb)",
     )
     .bind(action)
     .bind(tenant_id.to_string())
     .execute(&state.db)
-    .await;
+    .await
+    {
+        tracing::warn!(tenant_id = %tenant_id, action = %action, error = %e, "Failed to write tenant audit log");
+    }
 }

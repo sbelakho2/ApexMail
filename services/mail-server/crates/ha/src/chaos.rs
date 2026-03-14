@@ -262,7 +262,8 @@ impl ChaosEngineeringService {
             observations: vec![],
             recommendations: vec![],
         };
-        let results_json = serde_json::to_value(&results).unwrap_or_default();
+        let results_json = serde_json::to_value(&results)
+            .map_err(|e| format!("failed to serialize experiment results: {e}"))?;
 
         sqlx::query(
             "UPDATE ha_chaos_experiments SET status=$2, completed_at=NOW(),

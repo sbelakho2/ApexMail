@@ -3,9 +3,66 @@
  * Manages pricing tiers with feature flags
  */
 
+import { z } from 'zod';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
+
+/**
+ * FIX-PLANS-SCHEMA: Zod schema for PlanFeatures validation.
+ * Ensures features JSON from database conforms to expected structure.
+ */
+const PlanFeaturesSchema = z.object({
+  // Infrastructure
+  dedicatedIp: z.boolean(),
+  dedicatedIpCount: z.number().int().min(0),
+  maxSendingDomains: z.number().int().min(1),
+
+  // Authentication & Security
+  ssoEnabled: z.boolean(),
+  auditLogs: z.boolean(),
+
+  // API & Integrations
+  apiAccess: z.boolean(),
+  webhooksEnabled: z.boolean(),
+  inboundEmail: z.boolean(),
+
+  // Analytics & Data
+  advancedAnalytics: z.boolean(),
+  sendTimeOptimization: z.boolean(),
+  abTesting: z.boolean(),
+  timeTravelDebugging: z.boolean(),
+  dataExport: z.boolean(),
+
+  // Customization
+  customTrackingDomain: z.boolean(),
+  customTemplates: z.boolean(),
+  templateApprovalWorkflow: z.boolean(),
+  whiteLabel: z.boolean(),
+  poweredByFooter: z.boolean(),
+
+  // Retention
+  customRetention: z.boolean(),
+  maxRetentionDays: z.number().int().min(0),
+
+  // Team & Organization
+  maxTeamMembers: z.number().int().min(-1), // -1 = unlimited
+  subaccounts: z.boolean(),
+  maxSubaccounts: z.number().int().min(0),
+
+  // Support
+  supportLevel: z.enum(['community', 'email', 'priority', 'phone', 'dedicated']),
+  dedicatedCsm: z.boolean(),
+  priorityOnboarding: z.boolean(),
+
+  // Enterprise
+  byoip: z.boolean(),
+  slaGuarantee: z.boolean(),
+  slaCreditPercentage: z.number().min(0).max(100),
+  hipaaCompliance: z.boolean(),
+  soc2Compliance: z.boolean(),
+  privateCloud: z.boolean(),
+}).strict();
 
 const logger = createLogger();
 
@@ -173,7 +230,8 @@ export function calculatePaygCost(emailsSent: number, apiCalls: number): {
   let remaining = emailsSent;
 
   for (let i = 0; i < PAYG_PRICING.emailPricing.length; i += 1) {
-    const tier = PAYG_PRICING.emailPricing[i]!;
+    const tier = PAYG_PRICING.emailPricing[i];
+    if (!tier) continue;
     if (remaining <= 0) break;
     const previousUpTo = PAYG_PRICING.emailPricing[i - 1]?.upTo ?? 0;
     const tierEmails = Math.min(remaining, tier.upTo - previousUpTo);
@@ -215,14 +273,27 @@ export const OVERAGE_RATE_PER_EMAIL_MILLICENTS = 40; // $0.40/1K = 0.04 cents/em
  * @returns Overage cost in cents
  */
 export function calculateOverageCost(emailsSent: number, emailLimit: number): number {
+  // Validate inputs
+  if (typeof emailsSent !== 'number' || emailsSent < 0) {
+    throw new Error('Invalid emailsSent: must be a non-negative number');
+  }
+  if (typeof emailLimit !== 'number') {
+    throw new Error('Invalid emailLimit: must be a number');
+  }
+  
   // Unlimited plans (-1) have no overage
   if (emailLimit === -1) return 0;
+  
+  // Also handle 0 limit (suspended/disabled)
+  if (emailLimit <= 0) return 0;
+  
   // No overage if within limit
   if (emailsSent <= emailLimit) return 0;
   
   const overageEmails = emailsSent - emailLimit;
-  // Round up to nearest cent
-  return Math.floor((overageEmails * OVERAGE_RATE_PER_EMAIL_MILLICENTS + 999) / 1000);
+  // Changed from Math.floor to Math.ceil to correctly round up to nearest cent
+  // This ensures we always charge at least the minimum and properly round fractional cents
+  return Math.ceil((overageEmails * OVERAGE_RATE_PER_EMAIL_MILLICENTS) / 1000);
 }
 
 export interface CreatePlanInput {
@@ -569,10 +640,36 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
 ];
 
 /**
+ * FIX-PLANS-CACHE: In-memory cache for plans with TTL.
+ * Reduces database load for frequently accessed plan data.
+ */
+interface PlanCache {
+  plans: Map<string, { plan: Plan; expiresAt: number }>;
+  allPlans: { plans: Plan[]; expiresAt: number } | null;
+}
+
+const PLAN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
  * Plans management service
  */
 export class PlansService {
+  private readonly cache: PlanCache = {
+    plans: new Map(),
+    allPlans: null,
+  };
+
   constructor(private readonly db: DatabasePool) {}
+
+  /**
+   * FIX-PLANS-CACHE: Invalidate all cached plan data.
+   * Call this when plans are modified.
+   */
+  invalidateCache(): void {
+    this.cache.plans.clear();
+    this.cache.allPlans = null;
+    logger.debug('Plan cache invalidated');
+  }
 
   /**
    * Initialize default plans
@@ -592,6 +689,9 @@ export class PlansService {
    * Create or update a plan
    */
   async createOrUpdatePlan(input: CreatePlanInput): Promise<Result<Plan, Error>> {
+    // Invalidate cache when plans are modified
+    this.invalidateCache();
+    
     const result = await this.db.query<PlanRow>(
       `INSERT INTO plans (
         id, name, display_name, description, price_monthly, price_yearly,
@@ -655,8 +755,16 @@ export class PlansService {
 
   /**
    * Get plan by name
+   * FIX-PLANS-CACHE: Uses in-memory cache to reduce database load
    */
   async getPlanByName(name: string): Promise<Result<Plan | null, Error>> {
+    // Check cache first
+    const cached = this.cache.plans.get(name);
+    if (cached && cached.expiresAt > Date.now()) {
+      logger.debug('Plan cache hit', { planName: name });
+      return Result.ok(cached.plan);
+    }
+
     const result = await this.db.query<PlanRow>(
       `SELECT id, name, display_name, description, price_monthly, price_yearly,
               email_limit, api_call_limit, features, stripe_price_id_monthly,
@@ -670,7 +778,15 @@ export class PlansService {
     const row = result.value.rows[0];
     if (!row) return Result.ok(null);
 
-    return Result.ok(this.mapRow(row));
+    const plan = this.mapRow(row);
+
+    // Cache the plan
+    this.cache.plans.set(name, {
+      plan,
+      expiresAt: Date.now() + PLAN_CACHE_TTL_MS,
+    });
+
+    return Result.ok(plan);
   }
 
   /**
@@ -695,8 +811,8 @@ export class PlansService {
     try {
       const features = JSON.parse(row.features) as PlanFeatures;
       return Result.ok(Boolean(features[feature]));
-    } catch {
-      return Result.err(new Error('Invalid plan features data'));
+    } catch (error) {
+      return Result.err(new Error(`Invalid plan features data: ${error}`));
     }
   }
 
@@ -728,8 +844,8 @@ export class PlansService {
     let features: PlanFeatures;
     try {
       features = JSON.parse(row.features) as PlanFeatures;
-    } catch {
-      return Result.err(new Error('Invalid plan features data'));
+    } catch (error) {
+      return Result.err(new Error(`Invalid plan features data: ${error}`));
     }
     
     return Result.ok({
@@ -776,15 +892,40 @@ export class PlansService {
     return this.getPlanByName(row.plan);
   }
 
-  private mapRow(row: PlanRow): Plan {
-    let features: PlanFeatures = { ...DEFAULT_PLAN_FEATURES };
+  /**
+   * FIX-PLANS-EXPLICIT-FAILURE: Parse and validate plan features with explicit error handling.
+   * Throws if features JSON is invalid or doesn't match schema.
+   */
+  private parseFeatures(featuresJson: string, planId: string): PlanFeatures {
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(row.features);
-      features = { ...DEFAULT_PLAN_FEATURES, ...parsed };
-    } catch {
-      logger.error('Invalid plan features JSON for plan', { planId: row.id });
+      parsed = JSON.parse(featuresJson);
+    } catch (error) {
+      throw new Error(
+        `Invalid JSON in plan features for plan ${planId}: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
-    
+
+    // FIX-PLANS-SCHEMA: Validate against Zod schema with defaults
+    // Ensure parsed is an object before spreading
+    const parsedObj = (typeof parsed === 'object' && parsed !== null) ? parsed as Record<string, unknown> : {};
+    const withDefaults = { ...DEFAULT_PLAN_FEATURES, ...parsedObj };
+    const result = PlanFeaturesSchema.safeParse(withDefaults);
+
+    if (!result.success) {
+      const issues = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
+      throw new Error(
+        `Invalid plan features for plan ${planId}: ${issues}`
+      );
+    }
+
+    return result.data;
+  }
+
+  private mapRow(row: PlanRow): Plan {
+    // FIX-PLANS-EXPLICIT-FAILURE: Throw on parse error instead of silently falling back
+    const features = this.parseFeatures(row.features, row.id);
+
     return {
       id: row.id,
       name: row.name,

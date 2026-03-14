@@ -14,27 +14,28 @@
         </div>
 
         <h1 class="text-3xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6 leading-tight text-surface-900 break-words">
-          The Email API That <br />
-          <span class="text-surface-500">Keeps You Out of Court.</span>
+          The Email API With <br />
+          <span class="text-surface-500">Compliance Built In.</span>
         </h1>
 
         <p class="text-lg text-surface-600 mb-10 leading-relaxed max-w-lg">
           Stop treating compliance as an afterthought. ApexMail bakes GDPR requirements into
-          the platform and provides HIPAA/SOC 2 controls for Enterprise plans.
+          the platform and provides HIPAA controls for Enterprise plans.
         </p>
 
         <ul class="space-y-4 mb-10">
-          {% set points = [
-            "Immutable consent ledger with cryptographic proofs",
-            "Auto-generated DPAs that satisfy EU regulators",
-            "One-click \"Right-to-be-Forgotten\" cascade deletion"
-          ] %}
-          {% for point in points %}
           <li class="flex items-start gap-3">
             <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span class="text-surface-700 font-medium text-[14px] leading-relaxed">{{ point }}</span>
+            <span class="text-surface-700 font-medium text-[14px] leading-relaxed">Consent tracking and management across 6 consent types</span>
           </li>
-          {% endfor %}
+          <li class="flex items-start gap-3">
+            <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <span class="text-surface-700 font-medium text-[14px] leading-relaxed">Auto-generated DPAs via integrated PDF generation</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <span class="text-surface-700 font-medium text-[14px] leading-relaxed">One-click &quot;Right-to-be-Forgotten&quot; cascade deletion</span>
+          </li>
         </ul>
 
         <div class="flex flex-wrap gap-4">
@@ -52,7 +53,7 @@
       <div class="animate-in delay-200 relative">
         <div class="p-6 sm:p-8 bg-white rounded-lg border border-surface-200">
           <h3 class="text-[14px] font-semibold text-surface-500 mb-8 text-center">Compliance Certifications</h3>
-          {% set badges = ["GDPR", "HIPAA (Enterprise)", "SOC 2 (Enterprise)", "CCPA", "ISO 27001"] %}
+          {% set badges = ["GDPR", "HIPAA (Enterprise)", "CCPA", "Data Residency"] %}
           <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
             {% for badge in badges %}
             <div class="animate-in aspect-square rounded-sm bg-surface-50 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors">

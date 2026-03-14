@@ -10,7 +10,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::middleware::{auth, idempotency, rate_limiter, request_logger};
+use crate::middleware::{auth, idempotency, metrics, rate_limiter, request_logger};
 use crate::routes;
 use crate::state::AppState;
 
@@ -53,14 +53,23 @@ pub fn build_app(state: AppState) -> Router {
     };
 
     // ── Public routes (no auth) ─────────────────────────────
-    let public = Router::new()
-        .nest("/health", routes::health::router())
+    // Fix #56: Rate-limited auth routes — IP-based throttle to prevent
+    // credential stuffing and registration spam.
+    let rate_limited_public = Router::new()
         .nest("/v1/auth", routes::auth::router())
         .nest("/v1/auth/session", routes::session::router())
         .nest("/v1/auth/forgot-password", routes::forgot_password::router())
         .nest("/v1/auth/sso", routes::sso::router())
         .nest("/v1/auth/csrf", routes::csrf::router())
-        .nest("/v1/ses", routes::ses_notifications::router());
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limiter::public_rate_limit_middleware,
+        ));
+
+    let public = Router::new()
+        .nest("/health", routes::health::router())
+        .nest("/v1/ses", routes::ses_notifications::router())
+        .merge(rate_limited_public);
 
     // ── Authenticated v1 routes ─────────────────────────────
     //  Fix #6: Wrap with auth middleware so every route requires authentication.
@@ -84,6 +93,7 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/ai", routes::ai_insights::router())
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
         .nest("/v1/account", routes::account::router())
+        .nest("/v1/stream", routes::stream_tokens::router())
         // Migrated auth routes (require session/auth)
         .nest("/v1/auth/impersonate", routes::impersonate::router())
         .nest("/v1/auth/telemetry", routes::telemetry::router())
@@ -133,6 +143,10 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(null_byte_check))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn(request_logger::request_logger))
+        // Prometheus request metrics — placed after the router so MatchedPath is
+        // available from extensions, but before compression/timeout so the
+        // recorded duration is accurate end-to-end.
+        .layer(axum::middleware::from_fn(metrics::metrics_middleware))
         .layer(CompressionLayer::new())
         // Fix #8: Limit request body to 10 MiB to prevent memory exhaustion.
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
@@ -154,6 +168,10 @@ static HDR_REFERRER_POLICY: HeaderValue =
     HeaderValue::from_static("strict-origin-when-cross-origin");
 static HDR_CACHE_CONTROL: HeaderValue =
     HeaderValue::from_static("no-store, no-cache, must-revalidate");
+static HDR_CSP: HeaderValue =
+    HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'");
+static HDR_PERMISSIONS_POLICY: HeaderValue =
+    HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=()");
 
 async fn security_headers(
     req: axum::extract::Request,
@@ -168,6 +186,8 @@ async fn security_headers(
     headers.insert("X-XSS-Protection", HDR_XSS_PROTECTION.clone());
     headers.insert("Referrer-Policy", HDR_REFERRER_POLICY.clone());
     headers.insert("Cache-Control", HDR_CACHE_CONTROL.clone());
+    headers.insert("Content-Security-Policy", HDR_CSP.clone());
+    headers.insert("Permissions-Policy", HDR_PERMISSIONS_POLICY.clone());
     resp
 }
 

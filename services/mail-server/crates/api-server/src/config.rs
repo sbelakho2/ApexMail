@@ -75,6 +75,16 @@ pub struct Config {
     /// internal requests. If set, X-API-Key matching this value bypasses
     /// the normal api_keys DB lookup and returns a super-admin identity.
     pub control_plane_api_key: Option<String>,
+
+    // ── Tracking / SSE ──────────────────────────────────────
+    /// Shared HMAC secret with the tracking-service, used to issue short-lived
+    /// SSE stream tokens.  Must match the tracking-service `TRACKING_SECRET_KEY`.
+    pub tracking_secret_key: String,
+
+    // ── Metrics ──────────────────────────────────────────────
+    /// Port for the dedicated Prometheus metrics HTTP endpoint (default: 9090).
+    /// Set to 0 to disable the metrics server.
+    pub metrics_port: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +274,10 @@ impl Config {
             csrf_secret: env_or("CSRF_SECRET", "dev-csrf-secret-change-me"),
 
             control_plane_api_key: env::var("CONTROL_PLANE_API_KEY").ok().filter(|s| !s.is_empty()),
+
+            tracking_secret_key: env_or("TRACKING_SECRET_KEY", "dev-tracking-secret-change-me-32chars!!"),
+
+            metrics_port: parse_u16("METRICS_PORT", &env_or("METRICS_PORT", "9090"))?,
         };
 
         // Production security checks
@@ -356,6 +370,11 @@ impl Config {
                 ));
             }
         }
+        if self.tracking_secret_key.len() < 32 {
+            return Err(ConfigError::SecurityCheck(
+                "TRACKING_SECRET_KEY must be at least 32 characters in production".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -429,6 +448,8 @@ mod tests {
             impersonation_secret: "test-impersonation-secret-12345".into(),
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
             control_plane_api_key: None,
+            tracking_secret_key: "test-tracking-secret-123456789012".into(),
+            metrics_port: 9090,
         };
         assert!(config.validate_production().is_err());
     }

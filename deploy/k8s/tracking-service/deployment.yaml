@@ -60,7 +60,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: tracking-service
-          image: ghcr.io/apexmail/tracking-service:latest
+          image: apexmail/tracking-service:latest
           imagePullPolicy: Always
           ports:
             - name: http
@@ -165,6 +165,13 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 20
             failureThreshold: 4
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
           volumeMounts:
             - name: tmp
               mountPath: /tmp

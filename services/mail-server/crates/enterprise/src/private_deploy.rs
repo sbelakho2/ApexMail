@@ -502,7 +502,10 @@ fn health_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "Failed to build health check client, using default");
+                reqwest::Client::new()
+            })
     })
 }
 

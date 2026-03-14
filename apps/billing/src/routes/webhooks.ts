@@ -4,6 +4,7 @@
 
 import { Hono } from 'hono';
 import type { BillingEnv, BillingContext } from '../app.js';
+import { logger } from '../lib/logger.js';
 
 export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
@@ -31,9 +32,10 @@ export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
     try {
       const parsed = JSON.parse(rawBody) as { id?: string };
       eventId = parsed.id;
-    } catch {
+    } catch (error) {
       await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
         reason: 'invalid_json_payload',
+        error: String(error),
         occurredAt: new Date().toISOString(),
         payloadPreview: rawBody.slice(0, 1024),
       }));
@@ -56,8 +58,8 @@ export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const wasSet = await ctx.redis.set(dedupKey, '1', 'EX', 86400, 'NX');
     
     if (!wasSet) {
-      // Event already processed - return success (idempotent)
-      return c.json({ received: true, deduplicated: true });
+      // Event already processed - return simple response (Stripe ignores body anyway)
+      return c.json({ received: true });
     }
     
     const result = await ctx.stripe.processWebhook(rawBody, signature);
@@ -72,7 +74,7 @@ export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
       await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
       // On processing failure, remove dedup key to allow retry
       await ctx.redis.del(dedupKey);
-      console.error('Stripe webhook error:', result.error);
+      logger.error('Stripe webhook error', { error: result.error instanceof Error ? result.error.message : String(result.error) });
       return c.json({ error: 'Webhook processing failed' }, 400);
     }
 

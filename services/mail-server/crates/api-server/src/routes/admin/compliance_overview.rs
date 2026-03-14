@@ -2,6 +2,7 @@
 //!
 //! Migrated from: apps/control-plane/src/app/api/compliance/overview/route.ts
 
+use super::super::helpers::table_exists;
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -69,15 +70,6 @@ pub struct ComplianceOverview {
     pub recent_alerts: Vec<AlertEntry>,
 }
 
-async fn table_exists(db: &sqlx::PgPool, name: &str) -> bool {
-    let table_ref = format!("public.{name}");
-    sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
-        .bind(&table_ref)
-        .fetch_one(db)
-        .await
-        .unwrap_or(false)
-}
-
 async fn get_compliance_overview(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -106,7 +98,7 @@ async fn get_compliance_overview(
         )
         .fetch_all(db)
         .await
-        .unwrap_or_default();
+        ?;
 
         for (level, count_str) in &rows {
             let count: i64 = count_str.parse().unwrap_or(0);
@@ -128,7 +120,7 @@ async fn get_compliance_overview(
         )
         .fetch_all(db)
         .await
-        .unwrap_or_default();
+        ?;
 
         for (status, count_str) in &rows {
             let count: i64 = count_str.parse().unwrap_or(0);
@@ -206,7 +198,7 @@ async fn get_compliance_overview(
             )
             .fetch_all(db)
             .await
-            .unwrap_or_default();
+            ?;
 
         rows.into_iter()
             .map(|(id, alert_type, message, severity, metadata, created_at)| {

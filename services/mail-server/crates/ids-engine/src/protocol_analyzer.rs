@@ -163,8 +163,8 @@ pub fn analyze_dns(payload: &[u8]) -> Vec<ProtocolAnomaly> {
                 break;
             }
             i += label_len + 1;
-            // Safety: prevent infinite loop on malformed data
-            if i > payload.len() + 1 { break; }
+            // Safety: prevent OOB on next iteration
+            if i >= payload.len() { break; }
         }
     }
 

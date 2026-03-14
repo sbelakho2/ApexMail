@@ -7,6 +7,7 @@ Shared pre-release UX checklist for `web`, `control-plane`, and `marketing` surf
 - Keep card/table dimensions stable while loading to avoid layout shift.
 - Provide retry actions on failed fetch/mutation states.
 - Show `Last updated` metadata on analytics and operational cards.
+- Prefer staged skeletons over blocking spinners for waits > 600ms.
 
 ## 2) Inputs and Forms
 - Add inline field-level validation before submit.
@@ -20,6 +21,21 @@ Shared pre-release UX checklist for `web`, `control-plane`, and `marketing` surf
 - Trap focus in custom dialogs and restore focus on close.
 - Ensure icon-only actions have accessible labels.
 - Add `aria-live` where status/toast/validation updates are announced.
+- Verify light/dark parity for every changed component state.
+
+### 3.1) High-Contrast QA Cases
+- Validate all status chips remain distinguishable using text + icon (not color alone).
+- Verify focus rings remain clearly visible on dark surfaces and gradient backgrounds.
+- Confirm warning/destructive banners pass contrast with body text and links.
+- Test keyboard navigation order and visible focus in high-contrast theme settings.
+
+## 3.2) Motion QA
+- Do not use `transition-property: all` in shared/global classes.
+- Use canonical motion durations (`120/180/240/320ms`) and approved easing curves.
+- Keep hover/active transitions limited to color/background/border/shadow/transform/opacity.
+- Enforce hover transform budget: max `translateY(-2px)` and max `scale(1.01)`.
+- Verify route transition policy: no layout-level animated route transitions on `web`/`control-plane`.
+- Verify skeleton/shimmer behavior uses shared classes and reduced-motion alternatives.
 
 ## 4) Tables and Lists
 - Use consistent pagination controls with first/previous/next/last.
@@ -38,3 +54,4 @@ Shared pre-release UX checklist for `web`, `control-plane`, and `marketing` surf
 - Record each completed UX fix in `UI_Fixes.md` with file evidence links.
 - Run diagnostics on touched files before checkoff.
 - Keep changes minimal and aligned to existing design tokens/components.
+- Validate against `docs/development/premium-experience-spec.md` and `docs/development/premium-performance-budgets.md`.

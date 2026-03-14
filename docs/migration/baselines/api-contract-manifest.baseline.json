@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "canonicalCustomerPrefix": "/v1",
+  "gatewayCompatibilityPrefixes": [
+    "/v1",
+    "/api/v1"
+  ],
+  "frontendRequiredEndpoints": [
+    "/v1/campaigns",
+    "/v1/contacts",
+    "/v1/templates",
+    "/v1/lists",
+    "/v1/dashboard/stats",
+    "/v1/billing/payg/usage",
+    "/v1/auth/forgot-password",
+    "/v1/auth/me",
+    "/v1/auth/profile",
+    "/v1/events/lists",
+    "/v1/analytics/ai/insights",
+    "/api/v1/operator/*",
+    "/api/v1/discovery/run",
+    "/api/v1/campaigns/create"
+  ],
+  "backendRoutePatterns": [
+    "/v1/campaigns*",
+    "/v1/contacts*",
+    "/v1/templates*",
+    "/v1/lists*",
+    "/v1/dashboard/stats",
+    "/v1/billing/payg/usage",
+    "/v1/auth/forgot-password",
+    "/v1/auth/me",
+    "/v1/auth/profile",
+    "/v1/events/lists",
+    "/v1/analytics/ai/insights",
+    "/api/v1/operator/*",
+    "/api/v1/discovery/run",
+    "/api/v1/campaigns/create"
+  ]
+}

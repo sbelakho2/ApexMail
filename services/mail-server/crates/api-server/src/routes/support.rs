@@ -1,5 +1,6 @@
 //! Support ticket routes.
 
+use super::helpers::{clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -40,17 +41,17 @@ pub struct UpdateTicketRequest {
     #[serde(default)]
     pub priority: Option<String>,
     #[serde(default)]
-    pub assigned_to: Option<Uuid>,
+    pub assigned_to: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TicketResponse {
-    pub id: Uuid,
+    pub id: String,
     pub subject: String,
     pub description: String,
     pub priority: String,
     pub status: String,
-    pub assigned_to: Option<Uuid>,
+    pub assigned_to: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -65,14 +66,6 @@ pub struct ListTicketsQuery {
     pub cursor: Option<i64>,
     #[serde(default)]
     pub status: Option<String>,
-}
-
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -98,7 +91,7 @@ async fn create_ticket(
          VALUES ($1,$2,$3,$4,$5,'open',$6,$6)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.subject)
     .bind(&body.description)
     .bind(&body.priority)
@@ -109,7 +102,7 @@ async fn create_ticket(
     Ok((
         StatusCode::CREATED,
         Json(TicketResponse {
-            id,
+            id: id.to_string(),
             subject: body.subject,
             description: body.description,
             priority: body.priority,
@@ -133,7 +126,7 @@ async fn list_tickets(
         "SELECT id, subject, description, priority, status, assigned_to, created_at, updated_at
          FROM support_tickets WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 100))
     // Fix #58: Clamp offset to valid range.
     .bind(offset)
@@ -155,7 +148,7 @@ async fn get_ticket(
          FROM support_tickets WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("ticket not found".into()))?;
@@ -166,7 +159,7 @@ async fn get_ticket(
 async fn update_ticket(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(body): Json<UpdateTicketRequest>,
 ) -> Result<Json<TicketResponse>, ApiError> {
     require_scopes(&auth, &["support:write"])?;
@@ -175,11 +168,11 @@ async fn update_ticket(
         "SELECT id, subject, description, priority, status, assigned_to, created_at, updated_at
          FROM support_tickets WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&id)
+    .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| ApiError::NotFound("ticket not found".into()))?;
+    .ok_or_else(|| ApiError::NotFound("ticket not found".into()))?;;
 
     let status = body.status.unwrap_or(existing.status);
     let priority = body.priority.unwrap_or(existing.priority);
@@ -191,9 +184,9 @@ async fn update_ticket(
     )
     .bind(&status)
     .bind(&priority)
-    .bind(assigned_to)
-    .bind(id)
-    .bind(auth.tenant_id)
+    .bind(assigned_to.clone())
+    .bind(&id)
+    .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -213,12 +206,12 @@ async fn update_ticket(
 
 #[derive(sqlx::FromRow)]
 struct TicketRow {
-    id: Uuid,
+    id: String,
     subject: String,
     description: String,
     priority: String,
     status: String,
-    assigned_to: Option<Uuid>,
+    assigned_to: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -247,18 +240,28 @@ pub struct CreateMessageRequest {
 
 #[derive(Debug, Serialize)]
 pub struct TicketMessageResponse {
-    pub id: Uuid,
-    pub ticket_id: Uuid,
-    pub sender_id: Uuid,
+    pub id: String,
+    pub ticket_id: String,
+    pub sender_id: String,
     pub sender_type: String,
     pub body: String,
     pub created_at: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct TicketMessageRow {
+    id: String,
+    ticket_id: String,
+    sender_id: Option<String>,
+    sender_type: String,
+    body: String,
+    created_at: DateTime<Utc>,
+}
+
 async fn list_ticket_messages(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(ticket_id): Path<Uuid>,
+    Path(ticket_id): Path<String>,
     Query(q): Query<ListTicketsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["support:read"])?;
@@ -266,49 +269,50 @@ async fn list_ticket_messages(
     let offset = q.offset.max(0);
 
     // Verify ticket belongs to tenant
-    let exists = sqlx::query_scalar!(
+    let exists: Option<bool> = sqlx::query_scalar!(
         "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1 AND tenant_id = $2)",
         ticket_id,
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
-    .await?
-    .unwrap_or(false);
+    .fetch_one(&state.db)
+    .await?;
 
-    if !exists {
-        return Err(ApiError::NotFound);
+    if !exists.unwrap_or(false) {
+        return Err(ApiError::NotFound("ticket not found".into()));
     }
 
-    let rows = sqlx::query!(
-        r#"SELECT id, ticket_id, sender_id, sender_type AS "sender_type!", body, created_at
+    let rows: Vec<TicketMessageRow> = sqlx::query_as(
+        r#"SELECT id, ticket_id, sender_id, sender_type, body, created_at
            FROM ticket_messages
            WHERE ticket_id = $1
            ORDER BY created_at ASC
            LIMIT $2 OFFSET $3"#,
-        ticket_id,
-        limit,
-        offset,
     )
-    .fetch_all(&*state.db)
+    .bind(&ticket_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.db)
     .await?;
 
     let messages: Vec<TicketMessageResponse> = rows
         .into_iter()
-        .map(|r| TicketMessageResponse {
-            id: r.id,
-            ticket_id: r.ticket_id,
-            sender_id: r.sender_id,
-            sender_type: r.sender_type,
-            body: r.body,
-            created_at: r.created_at.to_rfc3339(),
+        .map(|r| {
+            TicketMessageResponse {
+                id: r.id,
+                ticket_id: r.ticket_id,
+                sender_id: r.sender_id.unwrap_or_default(),
+                sender_type: r.sender_type,
+                body: r.body,
+                created_at: r.created_at.to_rfc3339(),
+            }
         })
         .collect();
 
-    let total = sqlx::query_scalar!(
+    let total: i64 = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT COUNT(*)::bigint FROM ticket_messages WHERE ticket_id = $1",
-        ticket_id,
     )
-    .fetch_one(&*state.db)
+    .bind(&ticket_id)
+    .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
 
@@ -321,57 +325,64 @@ async fn list_ticket_messages(
 async fn create_ticket_message(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(ticket_id): Path<Uuid>,
+    Path(ticket_id): Path<String>,
     Json(body): Json<CreateMessageRequest>,
 ) -> Result<(StatusCode, Json<TicketMessageResponse>), ApiError> {
     require_scopes(&auth, &["support:write"])?;
 
     // Verify ticket belongs to tenant
-    let exists = sqlx::query_scalar!(
+    let exists: Option<bool> = sqlx::query_scalar!(
         "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1 AND tenant_id = $2)",
         ticket_id,
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .fetch_one(&*state.db)
-    .await?
-    .unwrap_or(false);
+    .fetch_one(&state.db)
+    .await?;
 
-    if !exists {
-        return Err(ApiError::NotFound);
+    if !exists.unwrap_or(false) {
+        return Err(ApiError::NotFound("ticket not found".into()));
     }
 
-    let id = Uuid::now_v7();
+    let id = Uuid::new_v4();
     let now = chrono::Utc::now();
+    let user_id_str = auth.user_id.as_ref().map(|id| id.to_string());
 
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO ticket_messages (id, ticket_id, sender_id, sender_type, body, created_at)
          VALUES ($1, $2, $3, 'user', $4, $5)",
-        id,
-        ticket_id,
-        auth.user_id,
-        body.body,
-        now,
     )
-    .execute(&*state.db)
+    .bind(id.to_string())
+    .bind(&ticket_id)
+    .bind(&user_id_str)
+    .bind(&body.body)
+    .bind(now)
+    .execute(&state.db)
     .await?;
 
     // Update ticket updated_at
-    sqlx::query!(
+    sqlx::query(
         "UPDATE support_tickets SET updated_at = NOW() WHERE id = $1",
-        ticket_id,
     )
-    .execute(&*state.db)
+    .bind(&ticket_id)
+    .execute(&state.db)
     .await?;
 
     Ok((StatusCode::CREATED, Json(TicketMessageResponse {
-        id,
-        ticket_id,
-        sender_id: auth.user_id,
+        id: id.to_string(),
+        ticket_id: ticket_id,
+        sender_id: auth.user_id.unwrap_or_default(),
         sender_type: "user".into(),
         body: body.body,
         created_at: now.to_rfc3339(),
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_ticket_request_deser() {
         let json = r#"{"subject":"Help","description":"Need assistance"}"#;
         let req: CreateTicketRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.priority, "normal");
@@ -380,7 +391,7 @@ async fn create_ticket_message(
     #[test]
     fn test_ticket_response_serialisation() {
         let resp = TicketResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             subject: "Test".into(),
             description: "desc".into(),
             priority: "high".into(),

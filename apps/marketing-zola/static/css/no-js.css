@@ -1,0 +1,122 @@
+/* ── CSS-only interactivity (zero JavaScript) ──────────────── */
+/* All interactive patterns use native HTML + CSS only:
+   - Desktop dropdowns: :focus-within
+   - Mobile menu: checkbox hack
+   - FAQ accordions: <details>/<summary>
+   - Deployment tabs: radio buttons + :checked
+   - Testimonials: scroll-snap
+   - Cookie consent: checkbox dismiss
+   - Back-to-top: anchor + scroll-behavior
+*/
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+/* ── Header Dropdowns (CSS :focus-within) ──────────────────── */
+[data-dropdown] [data-dropdown-menu] {
+  display: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 150ms ease, transform 150ms ease;
+  pointer-events: none;
+}
+[data-dropdown]:hover [data-dropdown-menu],
+[data-dropdown]:focus-within [data-dropdown-menu] {
+  display: block;
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* ── Mobile Menu (checkbox hack) ────────────────────────────── */
+#mobile-menu-state { display: none; }
+#mobile-menu-state:checked ~ header #mobile-menu,
+#mobile-menu-state:checked ~ * header #mobile-menu {
+  display: block;
+}
+#mobile-menu-state:checked ~ header #menu-icon-open,
+#mobile-menu-state:checked ~ * header #menu-icon-open {
+  display: none;
+}
+#mobile-menu-state:checked ~ header #menu-icon-close,
+#mobile-menu-state:checked ~ * header #menu-icon-close {
+  display: block;
+}
+/* Ensure close icon is hidden by default (overrides header partial) */
+#menu-icon-close { display: none; }
+
+/* ── Cookie Consent (checkbox dismiss) ──────────────────────── */
+#cookie-consent-state { display: none; }
+#cookie-consent-state:checked ~ #cookie-consent-banner,
+#cookie-consent-state:checked ~ * #cookie-consent-banner {
+  display: none;
+}
+
+/* ── FAQ Accordion (<details>/<summary>) ────────────────────── */
+details.faq-item summary {
+  cursor: pointer;
+  list-style: none;
+}
+details.faq-item summary::-webkit-details-marker { display: none; }
+details.faq-item summary::marker { display: none; }
+details.faq-item .faq-icon {
+  transition: transform 200ms ease;
+}
+details.faq-item[open] .faq-icon {
+  transform: rotate(180deg);
+  color: rgb(var(--primary-600));
+}
+
+/* ── Deployment Options (radio tabs) ────────────────────────── */
+.deploy-radio { display: none; }
+.deploy-panel { display: none; }
+#deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
+#deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
+#deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
+#deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
+  background-color: rgb(var(--surface-900));
+  color: white;
+  box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
+}
+#deploy-shared:checked ~ .deploy-panels #panel-shared,
+#deploy-dedicated:checked ~ .deploy-panels #panel-dedicated,
+#deploy-private:checked ~ .deploy-panels #panel-private,
+#deploy-byoc:checked ~ .deploy-panels #panel-byoc {
+  display: block;
+}
+
+/* ── Testimonials (scroll-snap) ─────────────────────────────── */
+.testimonials-track {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  gap: 1.5rem;
+}
+.testimonials-track::-webkit-scrollbar { display: none; }
+.testimonials-track > .testimonial-card {
+  scroll-snap-align: start;
+  flex: 0 0 100%;
+  min-width: 0;
+}
+
+/* ── Back-to-Top (CSS-only visibility via :target or fixed) ── */
+#back-to-top {
+  /* Always visible as a simple anchor link — no JS scroll detection needed */
+  opacity: 0.7;
+  transition: opacity 200ms;
+}
+#back-to-top:hover {
+  opacity: 1;
+}
+
+/* ── Status page auto-refresh indicator ──────────────────────── */
+.status-refresh-notice {
+  font-size: 0.75rem;
+  color: rgb(var(--surface-500));
+  text-align: center;
+  padding: 0.5rem;
+}

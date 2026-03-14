@@ -1,7 +1,6 @@
-{# ── Generic Page Template ──────────────────────────────────── #}
-{# Extends base.html, renders page content from Markdown #}
-
 {% extends "base.html" %}
+{# Generic Page Template #}
+{# Extends base.html, renders page content from Markdown #}
 
 {% block title %}
   {% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}

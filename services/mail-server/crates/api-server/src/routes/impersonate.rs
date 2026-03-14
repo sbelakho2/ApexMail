@@ -7,6 +7,7 @@
 //! Allows platform operators to impersonate tenant accounts.
 //! All impersonation events are audit-logged.
 
+use super::helpers::extract_cookie;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -83,7 +84,7 @@ async fn start_impersonation(
     let jti = payload.jti.as_deref().unwrap_or_default();
 
     // Audit log the impersonation start
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
          VALUES (NOW(), 'impersonation_session_started', 'session', $1, $2, $3::jsonb)",
     )
@@ -95,7 +96,10 @@ async fn start_impersonation(
         "token_id": jti,
     }))
     .execute(&state.db)
-    .await;
+    .await
+    {
+        tracing::error!(error = %e, operator_id = %operator_id, tenant_id = %tenant_id, "Failed to write impersonation audit log — compliance risk");
+    }
 
     tracing::info!(
         operator_id = %operator_id,
@@ -129,9 +133,11 @@ async fn start_impersonation(
         "impersonation_session={session_token}; HttpOnly; Path=/; Max-Age={max_age_secs}; SameSite=Strict{}",
         if state.config.environment.is_production() { "; Secure" } else { "" }
     );
-    if let Ok(val) = cookie.parse() {
-        response.headers_mut().insert("Set-Cookie", val);
-    }
+    let val = cookie.parse().map_err(|e| {
+        tracing::error!(error = %e, "failed to build impersonation cookie header");
+        ApiError::Internal("failed to set impersonation cookie".into())
+    })?;
+    response.headers_mut().insert("Set-Cookie", val);
 
     Ok(response)
 }
@@ -147,7 +153,7 @@ async fn end_impersonation(
     if let Some(token) = imp_token {
         if let Ok(payload) = verify_session_token_soft(&token, &state.config.session_secret) {
             // Audit log the end
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
                  VALUES (NOW(), 'impersonation_session_ended', 'session', $1, $2, $3::jsonb)",
             )
@@ -155,7 +161,10 @@ async fn end_impersonation(
             .bind(payload.get("tenantId").and_then(|v| v.as_str()).unwrap_or(""))
             .bind(&payload)
             .execute(&state.db)
-            .await;
+            .await
+            {
+                tracing::error!(error = %e, "Failed to write impersonation end audit log — compliance risk");
+            }
 
             tracing::info!(
                 operator_id = payload.get("operatorId").and_then(|v| v.as_str()).unwrap_or("unknown"),
@@ -176,9 +185,11 @@ async fn end_impersonation(
         "impersonation_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict{}",
         if state.config.environment.is_production() { "; Secure" } else { "" }
     );
-    if let Ok(val) = clear_cookie.parse() {
-        response.headers_mut().insert("Set-Cookie", val);
-    }
+    let val = clear_cookie.parse().map_err(|e| {
+        tracing::error!(error = %e, "failed to build clear-impersonation cookie header");
+        ApiError::Internal("failed to clear impersonation cookie".into())
+    })?;
+    response.headers_mut().insert("Set-Cookie", val);
 
     Ok(response)
 }
@@ -252,23 +263,6 @@ fn create_signed_token(payload: &serde_json::Value, secret: &str) -> Result<Stri
     );
 
     Ok(format!("{payload_b64}.{sig_b64}"))
-}
-
-fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get_all("cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|s| s.split(';'))
-        .map(|pair| pair.trim())
-        .find_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            if k.trim() == name {
-                Some(v.trim().to_string())
-            } else {
-                None
-            }
-        })
 }
 
 fn verify_session_token_soft(

@@ -23,3 +23,7 @@ console.log('Missing handlers:', missing.length);
 if (missing.length > 0) console.log('  ->', missing.join(', '));
 console.log('Extra handlers:', extra.length);
 if (extra.length > 0) console.log('  ->', extra.join(', '));
+
+if (missing.length > 0 || extra.length > 0) {
+  process.exit(1);
+}

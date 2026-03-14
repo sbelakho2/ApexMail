@@ -5,8 +5,8 @@
 {% include "partials/pricing/hero.html" %}
 {% include "partials/pricing/plans.html" %}
 
-{# PricingFAQ — Preact island with correct 6 questions from old app #}
-<div data-island="pricing-faq"></div>
+{# Pricing FAQ (native HTML details/summary, zero JS) #}
+{% include "partials/generated/pricing-faq-island.html" %}
 
 {% include "partials/pricing/cta.html" %}
 {% endblock content %}

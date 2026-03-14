@@ -2,6 +2,7 @@
 //!
 //! Migrated from: apps/control-plane/src/app/api/risk/route.ts
 
+use super::super::helpers::table_exists;
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -80,15 +81,6 @@ pub struct RiskMetrics {
     pub complaint_rate: f64,
     pub daily_volume: i64,
     pub monthly_volume: i64,
-}
-
-async fn table_exists(db: &sqlx::PgPool, name: &str) -> bool {
-    let table_ref = format!("public.{name}");
-    sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
-        .bind(&table_ref)
-        .fetch_one(db)
-        .await
-        .unwrap_or(false)
 }
 
 async fn get_risk_tenants(
@@ -218,7 +210,9 @@ async fn get_risk_tenants(
         })
         .collect();
 
-    Ok(Json(serde_json::to_value(tenants).unwrap_or_default()))
+    let json_val = serde_json::to_value(&tenants)
+        .map_err(|e| ApiError::Internal(format!("serialization error: {e}")))?;
+    Ok(Json(json_val))
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,7 +257,7 @@ async fn update_risk(
             }
 
             // Best-effort persist to DB
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 "UPDATE tenants
                  SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
                      'riskLimits',
@@ -276,19 +270,25 @@ async fn update_risk(
             .bind(&limit_type)
             .bind(value)
             .execute(&state.db)
-            .await;
+            .await
+            {
+                tracing::warn!(tenant_id = %tenant_id, error = %e, "Failed to persist risk limits");
+            }
 
             Ok(Json(serde_json::json!({ "success": true })))
         }
         RiskMutation::ResolveFlag { tenant_id, flag_id } => {
             if table_exists(&state.db, "reputation_alerts").await {
-                let _ = sqlx::query(
+                if let Err(e) = sqlx::query(
                     "UPDATE reputation_alerts SET acknowledged = true WHERE tenant_id = $1 AND id = $2",
                 )
                 .bind(&tenant_id)
                 .bind(&flag_id)
                 .execute(&state.db)
-                .await;
+                .await
+                {
+                    tracing::warn!(tenant_id = %tenant_id, flag_id = %flag_id, error = %e, "Failed to resolve reputation flag");
+                }
             }
             Ok(Json(serde_json::json!({ "success": true })))
         }

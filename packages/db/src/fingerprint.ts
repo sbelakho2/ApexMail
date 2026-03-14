@@ -222,7 +222,7 @@ export async function calculateSchemaFingerprint(
       version = versionResult.rows[0].version;
     }
   } catch {
-    // Table might not exist yet
+    // schema_migrations table may not exist on fresh databases
   }
 
   const counts = objects.reduce<Record<string, number>>(

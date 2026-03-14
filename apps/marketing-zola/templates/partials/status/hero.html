@@ -1,10 +1,9 @@
 {# ── Status Hero ──────────────────────────────────────────────── #}
 {# Converted from status/StatusHero.tsx                           #}
-{# NOTE: Original is 'use client' with useState/useEffect         #}
-{#   - Fetches live status from status.apexmail.ee API            #}
-{#   - Auto-refreshes every 60s                                   #}
-{#   → Static shell rendered here; Preact island mounts into      #}
-{#     #status-island for live status updates (see 6A.3.6)        #}
+{# NOTE: Original was 'use client' with useState/useEffect        #}
+{#   - Fetched live status from status.apexmail.ee API            #}
+{#   - Auto-refreshed every 60s                                   #}
+{#   → Now pure CSS/HTML static shell (JS eliminated)             #}
 
 <section class="relative overflow-hidden bg-gradient-to-b from-primary-50 via-white to-white pt-32 lg:pt-40 pb-20">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -23,10 +22,9 @@
       </p>
     </div>
 
-    {# ── Live Status Island Mount Point ──────────────────── #}
-    {# Preact island will hydrate this element with live data  #}
+    {# ── Live Status Display ─────────────────────────────── #}
     <div id="status-island" class="animate-in delay-300">
-      {# Static fallback shown before JS hydrates #}
+      {# Static status display #}
       <div class="max-w-3xl mx-auto">
         {# Overall status banner #}
         <div class="flex items-center justify-center gap-3 p-6 bg-emerald-50 border border-emerald-200 rounded-xl mb-8">

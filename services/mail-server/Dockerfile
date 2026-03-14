@@ -49,7 +49,7 @@ RUN useradd -m -u 10001 -s /sbin/nologin apexmail
 
 LABEL org.opencontainers.image.title="apexmail-mail-server" \
     org.opencontainers.image.description="ApexMail mail server services" \
-    org.opencontainers.image.source="https://github.com/apexmail/apexmail" \
+    org.opencontainers.image.source="https://github.com/apexmail" \
     org.opencontainers.image.licenses="PROPRIETARY"
 
 # =============================================================================
@@ -129,3 +129,273 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["sh", "-c", "/usr/local/bin/send-email --help > /dev/null 2>&1"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "send-email"]
+
+# =============================================================================
+# API Server
+# =============================================================================
+FROM runtime-base AS api-server
+
+COPY --from=builder /app/target/release/api-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3000
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3000"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "api-server"]
+CMD ["--listen", "0.0.0.0:3000"]
+
+# =============================================================================
+# Billing Service
+# =============================================================================
+FROM runtime-base AS billing-service
+
+COPY --from=builder /app/target/release/billing-service /usr/local/bin/
+
+USER apexmail
+EXPOSE 3001
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3001"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "billing-service"]
+CMD ["--listen", "0.0.0.0:3001"]
+
+# =============================================================================
+# Analytics Worker
+# =============================================================================
+FROM runtime-base AS analytics
+
+COPY --from=builder /app/target/release/analytics-worker /usr/local/bin/
+
+USER apexmail
+EXPOSE 3002
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3002"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "analytics-worker"]
+
+# =============================================================================
+# MTA Server
+# =============================================================================
+FROM runtime-base AS mta
+
+COPY --from=builder /app/target/release/mta-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3003
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3003"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "mta-server"]
+CMD ["--listen", "0.0.0.0:3003"]
+
+# =============================================================================
+# Template Renderer
+# =============================================================================
+FROM runtime-base AS template-renderer
+
+COPY --from=builder /app/target/release/template-renderer /usr/local/bin/
+
+USER apexmail
+EXPOSE 3005
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3005"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "template-renderer"]
+CMD ["--listen", "0.0.0.0:3005"]
+
+# =============================================================================
+# Worker Processors
+# =============================================================================
+FROM runtime-base AS worker
+
+COPY --from=builder /app/target/release/worker /usr/local/bin/
+
+USER apexmail
+EXPOSE 3006
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3006"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "worker"]
+
+# =============================================================================
+# Compliance Server
+# =============================================================================
+FROM runtime-base AS compliance
+
+COPY --from=builder /app/target/release/compliance-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3007
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3007"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "compliance-server"]
+CMD ["--listen", "0.0.0.0:3007"]
+
+# =============================================================================
+# Enterprise Server
+# =============================================================================
+FROM runtime-base AS enterprise
+
+COPY --from=builder /app/target/release/enterprise-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3008
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3008"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "enterprise-server"]
+CMD ["--listen", "0.0.0.0:3008"]
+
+# =============================================================================
+# DevEx Service
+# =============================================================================
+FROM runtime-base AS devex
+
+COPY --from=builder /app/target/release/devex-service /usr/local/bin/
+
+USER apexmail
+EXPOSE 3009
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3009"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "devex-service"]
+CMD ["--listen", "0.0.0.0:3009"]
+
+# =============================================================================
+# Observability Service
+# =============================================================================
+FROM runtime-base AS observability
+
+COPY --from=builder /app/target/release/observability-service /usr/local/bin/
+
+USER apexmail
+EXPOSE 3010
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3010"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "observability-service"]
+CMD ["--listen", "0.0.0.0:3010"]
+
+# =============================================================================
+# Ops Service
+# =============================================================================
+FROM runtime-base AS ops
+
+COPY --from=builder /app/target/release/ops-service /usr/local/bin/
+
+USER apexmail
+EXPOSE 3011
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3011"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "ops-service"]
+CMD ["--listen", "0.0.0.0:3011"]
+
+# =============================================================================
+# HA Server
+# =============================================================================
+FROM runtime-base AS ha
+
+COPY --from=builder /app/target/release/ha-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3012
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3012"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "ha-server"]
+CMD ["--listen", "0.0.0.0:3012"]
+
+# =============================================================================
+# Isolation Server
+# =============================================================================
+FROM runtime-base AS isolation
+
+COPY --from=builder /app/target/release/isolation-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3013
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3013"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "isolation-server"]
+CMD ["--listen", "0.0.0.0:3013"]
+
+# =============================================================================
+# Edge Cases Server
+# =============================================================================
+FROM runtime-base AS edge-cases
+
+COPY --from=builder /app/target/release/edge-cases-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3014
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3014"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "edge-cases-server"]
+CMD ["--listen", "0.0.0.0:3014"]
+
+# =============================================================================
+# AI Service
+# =============================================================================
+FROM runtime-base AS ai-service
+
+COPY --from=builder /app/target/release/ai-service /usr/local/bin/
+
+USER apexmail
+EXPOSE 3015
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3015"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "ai-service"]
+CMD ["--listen", "0.0.0.0:3015"]
+
+# =============================================================================
+# AI Embeddings
+# =============================================================================
+FROM runtime-base AS ai-embeddings
+
+COPY --from=builder /app/target/release/ai-embeddings /usr/local/bin/
+
+USER apexmail
+EXPOSE 3016
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3016"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "ai-embeddings"]
+CMD ["--listen", "0.0.0.0:3016"]
+
+# =============================================================================
+# Sales Autopilot
+# =============================================================================
+FROM runtime-base AS sales-autopilot
+
+COPY --from=builder /app/target/release/sales-autopilot /usr/local/bin/
+
+USER apexmail
+EXPOSE 3017
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3017"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "sales-autopilot"]
+CMD ["--listen", "0.0.0.0:3017"]

@@ -4,10 +4,12 @@
 {% block content %}
 {% include "partials/api-console/hero.html" %}
 
-{# InteractiveConsole island mount #}
-<div data-island="api-console"></div>
+{# API Console (static showcase, zero JS) #}
+<div>
+	{% include "partials/generated/api-console-island.html" %}
+</div>
 
-{# EndpointExplorer — rendered within api-console island #}
+{# EndpointExplorer — content rendered statically above #}
 
 {% include "partials/api-console/cta.html" %}
 {% endblock content %}

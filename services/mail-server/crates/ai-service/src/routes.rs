@@ -1,14 +1,18 @@
 //! Axum HTTP routes for the AI service.
 
 use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
+    body::Body,
+    extract::{DefaultBodyLimit, State},
+    http::{header::AUTHORIZATION, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::{
     analytics::AnalyticsPredictor,
@@ -33,6 +37,7 @@ pub struct AppState {
     pub inference: InferenceEngine,
     pub sto: SendTimeOptimizer,
     pub training: TrainingManager,
+    pub service_token: String,
 }
 
 impl AppState {
@@ -46,6 +51,7 @@ impl AppState {
             inference: InferenceEngine::new(),
             sto: SendTimeOptimizer::new(),
             training: TrainingManager::new(),
+            service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
         }
     }
 }
@@ -225,7 +231,38 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/bandits", get(bandits_handler))
         .route("/bandits/reward", post(bandit_reward_handler))
         .route("/content/score", post(content_score_handler))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
+}
+
+async fn require_service_token(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if req.uri().path() == "/health" {
+        return Ok(next.run(req).await);
+    }
+    if state.service_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let provided = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok().map(String::from))
+        .or_else(|| {
+            req.headers()
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
+        });
+    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 /// Build `AppState` with default config (convenience for tests / quick starts).

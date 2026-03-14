@@ -210,7 +210,7 @@ pub async fn handle_prefs_get(
     ) {
         Ok(result) => result,
         Err(e) => {
-            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %email_lc, "Failed to load preferences data");
+            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email_lc), "Failed to load preferences data");
             return Html(render_error_page("Unable to load preferences. Please try again.")).into_response();
         }
     };
@@ -298,7 +298,7 @@ pub async fn handle_prefs_post(
         "#)
         .bind(&sup_id).bind(&data.tenant_id).bind(&email)
         .execute(&state.db).await {
-            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %email, "CRITICAL: Failed to insert suppression record for unsubscribe");
+            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "CRITICAL: Failed to insert suppression record for unsubscribe");
             return axum::http::Response::builder()
                 .status(500)
                 .header("content-type", "application/json")
@@ -318,7 +318,7 @@ pub async fn handle_prefs_post(
         )
         .bind(&data.tenant_id).bind(&email)
         .execute(&state.db).await {
-            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %email, "Failed to delete suppression record for resubscribe");
+            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "Failed to delete suppression record for resubscribe");
             return axum::http::Response::builder()
                 .status(500)
                 .header("content-type", "application/json")
@@ -379,7 +379,7 @@ pub async fn handle_prefs_post(
         }
 
         if let Err(e) = tx.commit().await {
-            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %email, "CRITICAL: Failed to commit subscription preference transaction — changes rolled back");
+            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "CRITICAL: Failed to commit subscription preference transaction \u{2014} changes rolled back");
             return axum::http::Response::builder()
                 .status(500)
                 .header("content-type", "application/json")

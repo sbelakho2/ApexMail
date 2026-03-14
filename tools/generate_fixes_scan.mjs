@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const root = '/Users/sabelakhoua/IdeaProjects/ApexMail';
+const root = process.cwd();
 const scanRoots = ['apps', 'packages', 'services', 'tools'].map((p) => path.join(root, p));
 
 const excludeParts = new Set([

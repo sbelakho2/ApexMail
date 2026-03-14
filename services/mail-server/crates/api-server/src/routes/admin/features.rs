@@ -64,14 +64,14 @@ async fn list_features(
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     let overrides: Vec<serde_json::Value> = sqlx::query_scalar(
         "SELECT row_to_json(fo) FROM feature_flag_overrides fo ORDER BY created_at DESC",
     )
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    ?;
 
     Ok(Json(FeaturesResponse { flags, overrides }))
 }

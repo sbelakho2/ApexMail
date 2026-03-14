@@ -59,6 +59,10 @@ tags:
     description: Manage API keys for authentication
   - name: Analytics
     description: Email delivery and engagement analytics
+  - name: Billing
+    description: Billing usage, subscriptions, and invoices
+  - name: Billing Admin
+    description: Administrative billing operations for tenant support workflows
 
 security:
   - ApiKeyAuth: []
@@ -625,6 +629,179 @@ paths:
         '401':
           $ref: '#/components/responses/AuthenticationError'
 
+  /api/billing/usage:
+    get:
+      operationId: getBillingUsage
+      summary: Get billing usage summary
+      description: Retrieve the current billing period usage summary for the authenticated tenant.
+      tags:
+        - Billing
+      responses:
+        '200':
+          description: Billing usage summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingUsageSummary'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+  /api/billing/subscription:
+    get:
+      operationId: getBillingSubscription
+      summary: Get subscription details
+      description: Return the current Stripe-backed subscription details for the authenticated tenant.
+      tags:
+        - Billing
+      responses:
+        '200':
+          description: Subscription details or empty state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingSubscriptionResponse'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+  /api/billing/invoices:
+    get:
+      operationId: listBillingInvoices
+      summary: List invoices
+      description: List invoices for the authenticated tenant with pagination.
+      tags:
+        - Billing
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of invoices to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          description: Number of invoices to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Paginated invoice list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingInvoiceListResponse'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+  /webhooks/stripe:
+    post:
+      operationId: receiveStripeWebhook
+      summary: Receive Stripe webhook
+      description: Stripe webhook endpoint with signature verification, event deduplication, and dead-letter handling for malformed or failed events.
+      tags:
+        - Webhooks
+        - Billing
+      parameters:
+        - name: stripe-signature
+          in: header
+          required: true
+          description: Stripe webhook signature header
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Webhook accepted or duplicate ignored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StripeWebhookAck'
+        '400':
+          description: Missing signature, invalid payload, or processing failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/admin/tenants:
+    get:
+      operationId: listBillingTenants
+      summary: List tenants with billing state
+      description: Administrative endpoint that lists tenant billing state, subscription status, dunning status, and wallet balance.
+      tags:
+        - Billing Admin
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of tenants to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          description: Number of tenants to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: status
+          in: query
+          description: Optional subscription status filter
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated tenant billing summary list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminTenantListResponse'
+        '403':
+          description: Admin access required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/admin/tenants/{tenantId}:
+    get:
+      operationId: getBillingTenantDetails
+      summary: Get tenant billing details
+      description: Administrative endpoint that aggregates subscription, plan, dunning, wallet, and recent invoice details for a single tenant.
+      tags:
+        - Billing Admin
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          description: Tenant identifier
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant billing details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminTenantBillingDetails'
+        '403':
+          description: Admin access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -1169,6 +1346,110 @@ components:
                 type: integer
               complained:
                 type: integer
+
+    BillingUsageSummary:
+      type: object
+      additionalProperties: true
+      description: Service-calculated usage summary for the current billing period.
+
+    BillingSubscriptionResponse:
+      type: object
+      properties:
+        subscription:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        message:
+          type: string
+      required:
+        - subscription
+
+    BillingInvoiceSummary:
+      type: object
+      additionalProperties: true
+      description: Invoice summary as returned by the billing service.
+
+    BillingInvoiceListResponse:
+      type: object
+      required:
+        - invoices
+        - totalCount
+        - limit
+        - offset
+      properties:
+        invoices:
+          type: array
+          items:
+            $ref: '#/components/schemas/BillingInvoiceSummary'
+        totalCount:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    StripeWebhookAck:
+      type: object
+      properties:
+        received:
+          type: boolean
+          example: true
+      required:
+        - received
+
+    AdminTenantSummary:
+      type: object
+      additionalProperties: true
+      description: Tenant row returned by the admin tenant billing listing.
+
+    AdminTenantListResponse:
+      type: object
+      required:
+        - tenants
+        - limit
+        - offset
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminTenantSummary'
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    AdminTenantBillingDetails:
+      type: object
+      required:
+        - tenantId
+      properties:
+        tenantId:
+          type: string
+        subscription:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        plan:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        dunning:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        wallet:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        recentInvoices:
+          type: array
+          items:
+            $ref: '#/components/schemas/BillingInvoiceSummary'
 
     Error:
       type: object

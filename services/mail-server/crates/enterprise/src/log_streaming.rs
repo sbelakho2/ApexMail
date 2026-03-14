@@ -270,7 +270,10 @@ fn http_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "Failed to build log streaming client, using default");
+                reqwest::Client::new()
+            })
     })
 }
 

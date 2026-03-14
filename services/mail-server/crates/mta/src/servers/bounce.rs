@@ -257,7 +257,7 @@ impl BounceServer {
                 .bind(recip)
                 .execute(&self.pool)
                 .await?;
-                info!(email = recip, "Added to suppression list (hard bounce)");
+                info!(email = %mail_common::pii::redact_email(recip), "Added to suppression list (hard bounce)");
             }
         }
 

@@ -23,6 +23,9 @@ import { Alert, AlertTitle, AlertDescription as AlertDesc } from '@/components/u
 import { cn } from '@/lib/utils';
 import { useAPI, useAPIMutation, getCsrfToken, globalMutate, APIError } from '@/hooks/use-api';
 import { useUserStore } from '@/stores';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { canManageDedicatedIps, type DedicatedIpPlanLike } from '@/lib/dedicated-ip-access';
 
 // ---------- Constants ----------
 
@@ -100,7 +103,9 @@ function StatusBadge({ status }: { status: string }) {
 // ---------- Component ----------
 
 export default function DedicatedIpsPage() {
+  const router = useRouter();
   const canAccess = useUserStore((s) => s.canAccess);
+  const userRole = useUserStore((s) => s.user?.role);
   const [error, setError] = React.useState<string | null>(null);
   const [provisioning, setProvisioning] = React.useState(false);
   const [showProvisionDialog, setShowProvisionDialog] = React.useState(false);
@@ -108,6 +113,8 @@ export default function DedicatedIpsPage() {
   const [releasing, setReleasing] = React.useState(false);
   const [successMessage, setSuccessMessage] = React.useState<string | null>(null);
   const [offset, setOffset] = React.useState(0);
+  const { data: billing } = useAPI<{ plan?: DedicatedIpPlanLike }>('/api/billing');
+  const hasDedicatedIpsAccess = canManageDedicatedIps(userRole, billing?.plan ?? null);
 
   // Fetch IPs via useAPI (includes credentials + deduping)
   const { data, isLoading: loading, error: fetchError, mutate: revalidate } = useAPI<ListResponse>(
@@ -143,6 +150,16 @@ export default function DedicatedIpsPage() {
     const t = setTimeout(() => setSuccessMessage(null), 5000);
     return () => clearTimeout(t);
   }, [successMessage]);
+
+  React.useEffect(() => {
+    if (billing && !hasDedicatedIpsAccess) {
+      router.replace('/settings/billing?reason=dedicated_ip_unavailable');
+    }
+  }, [billing, hasDedicatedIpsAccess, router]);
+
+  if (billing && !hasDedicatedIpsAccess) {
+    return null;
+  }
 
   // Provision new IP (POST with CSRF)
   async function handleProvision() {
@@ -273,6 +290,18 @@ export default function DedicatedIpsPage() {
           ) : null
         }
       />
+
+      <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <span>Dedicated IP setup runs over multiple days; return to nearby workflows and come back anytime.</span>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" asChild>
+            <Link href="/settings/billing">Back to Billing</Link>
+          </Button>
+          <Button variant="ghost" size="sm" asChild>
+            <Link href="/domains">Back to Domains</Link>
+          </Button>
+        </div>
+      </div>
 
       {/* Success message */}
       {successMessage && (
@@ -518,10 +547,9 @@ function IpCard({
                   aria-label="Warmup progress"
                 >
                   <div
-                    className="h-full rounded-full transition-all duration-500"
+                    className="h-full rounded-full transition-all duration-500 bg-primary"
                     style={{
                       width: `${Math.max(0, Math.min(100, ip.warmup.progressPercent))}%`,
-                      backgroundColor: 'rgb(var(--brand-500))',
                     }}
                   />
                 </div>

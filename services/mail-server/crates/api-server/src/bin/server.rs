@@ -82,6 +82,17 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider, ip_provider);
 
+    // ── Prometheus metrics recorder ─────────────────────────
+    if config.metrics_port > 0 {
+        let metrics_addr: std::net::SocketAddr =
+            format!("0.0.0.0:{}", config.metrics_port).parse()?;
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .with_http_listener(metrics_addr)
+            .install_recorder()
+            .map_err(|e| anyhow::anyhow!("failed to install Prometheus recorder: {e}"))?;
+        tracing::info!(port = config.metrics_port, "Prometheus metrics server ready");
+    }
+
     // ── Build & serve ───────────────────────────────────────
     let app = build_app(state);
 

@@ -1,12 +1,17 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
 use crate::{
@@ -30,26 +35,27 @@ pub struct AppState {
     pub campaigns: CampaignManager,
     pub calendar: CalendarService,
     pub inbox: InboxManager,
+    pub service_token: String,
 }
 
 /// Build the axum `Router` with all sales-autopilot routes.
 pub fn router(state: AppState) -> Router {
+    let shared = Arc::new(state);
     Router::new()
-        // Health
+        // Health (unauthenticated for k8s probes)
         .route("/health", get(health))
-        // Leads
+        // Authenticated routes
         .route("/leads", get(list_leads).post(create_lead))
         .route("/leads/{id}", get(get_lead))
-        // Companies (enrichment)
         .route("/companies", get(list_companies))
         .route("/enrich", post(enrich))
-        // Campaigns
         .route("/campaigns", get(list_campaigns).post(create_campaign))
-        // Calendar
         .route("/calendar", get(list_calendar))
-        // Inbox
         .route("/inbox", get(list_inbox))
-        .with_state(Arc::new(state))
+        .with_state(shared.clone())
+        .layer(DefaultBodyLimit::max(256 * 1024)) // 256 KB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        .layer(middleware::from_fn_with_state(shared, require_service_token))
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +64,32 @@ pub fn router(state: AppState) -> Router {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "healthy", "service": "sales-autopilot" }))
+}
+
+async fn require_service_token(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // Skip auth for health checks
+    if req.uri().path() == "/health" {
+        return Ok(next.run(req).await);
+    }
+    if state.service_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let provided = req.headers().get("x-api-key")
+        .and_then(|v| v.to_str().ok().map(String::from))
+        .or_else(|| {
+            req.headers().get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
+        });
+    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 // -- Leads ------------------------------------------------------------------

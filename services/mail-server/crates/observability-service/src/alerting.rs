@@ -37,18 +37,28 @@ pub struct AlertRule {
 
 /// Manages alert rules, evaluates them against metric summaries, and stores
 /// fired alerts.
+///
+/// Caps stored alerts at `max_alerts`; when full, resolved/acknowledged alerts
+/// are evicted first, then the oldest firing alerts.
 #[derive(Debug)]
 pub struct AlertManager {
     rules: RwLock<Vec<AlertRule>>,
     alerts: RwLock<Vec<Alert>>,
+    max_alerts: usize,
 }
 
 impl AlertManager {
-    /// Create a new, empty manager.
+    /// Create a new, empty manager with a default 10 000 alert cap.
     pub fn new() -> Self {
+        Self::with_capacity(10_000)
+    }
+
+    /// Create a manager that retains at most `max_alerts` alerts.
+    pub fn with_capacity(max_alerts: usize) -> Self {
         Self {
             rules: RwLock::new(Vec::new()),
             alerts: RwLock::new(Vec::new()),
+            max_alerts,
         }
     }
 
@@ -117,6 +127,16 @@ impl AlertManager {
 
             new_alerts.push(alert.clone());
             alerts_guard.push(alert);
+        }
+
+        // Evict if over capacity: remove resolved/acknowledged first, then oldest
+        if alerts_guard.len() > self.max_alerts {
+            // Partition: keep firing alerts, evict resolved/acknowledged
+            alerts_guard.retain(|a| a.status == AlertStatus::Firing);
+        }
+        if alerts_guard.len() > self.max_alerts {
+            let excess = alerts_guard.len() - self.max_alerts;
+            alerts_guard.drain(..excess);
         }
 
         new_alerts

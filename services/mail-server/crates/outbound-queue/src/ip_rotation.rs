@@ -285,8 +285,7 @@ impl IpPool {
         }
 
         let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % candidates.len();
-        let addr = candidates[idx];
-        self.ips.get(addr).cloned()
+        candidates.get(idx).and_then(|addr| self.ips.get(addr).cloned())
     }
 
     /// Create a TCP socket bound to the selected outbound IP and connect to

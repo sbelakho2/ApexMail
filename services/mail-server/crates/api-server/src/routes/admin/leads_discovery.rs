@@ -71,8 +71,7 @@ async fn get_discovery(
         "SELECT source, COUNT(*) as cnt FROM sales_leads GROUP BY source ORDER BY cnt DESC",
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let icon_for = |name: &str| -> &str {
         match name.to_lowercase().as_str() {
@@ -110,8 +109,7 @@ async fn get_discovery(
          FROM sales_leads ORDER BY created_at DESC LIMIT 100",
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let leads: Vec<DiscoveredLead> = lead_rows
         .into_iter()

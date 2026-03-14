@@ -16,7 +16,7 @@ use mail_proto::generated::{SendEmailRequest, QueueEmailRequest, GetQueueStatsRe
 #[command(about = "Send emails via ApexMail")]
 struct Cli {
     /// Outbound service gRPC address
-    #[arg(long, default_value = "http://localhost:50052")]
+    #[arg(long, env = "OUTBOUND_GRPC_URL", default_value = "http://localhost:50052")]
     server: String,
     
     #[command(subcommand)]
@@ -123,8 +123,8 @@ async fn main() -> Result<()> {
                 info!(
                     message_id = %result.message_id,
                     email_id = %result.email_id,
-                    from = %from,
-                    to = ?to,
+                    from = %mail_common::pii::redact_email(&from),
+                    to = %mail_common::pii::redact_email_list(&to),
                     subject = %subject,
                     "Email sent successfully"
                 );
@@ -159,8 +159,8 @@ async fn main() -> Result<()> {
             if !result.email_id.is_empty() {
                 info!(
                     email_id = %result.email_id,
-                    from = %from,
-                    to = ?to,
+                    from = %mail_common::pii::redact_email(&from),
+                    to = %mail_common::pii::redact_email_list(&to),
                     "Email queued"
                 );
                 println!("✓ Email queued: {}", result.email_id);

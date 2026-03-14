@@ -46,6 +46,34 @@ export const CSRF_MISSING_HEADER  = 'CSRF_MISSING_HEADER';
 // ── Idempotency ─────────────────────────────────────────────────────────────
 export const IDEMPOTENCY_CONFLICT = 'IDEMPOTENCY_CONFLICT';
 
+// ── Billing ─────────────────────────────────────────────────────────────────
+// FIX-ERROR-CODES: Added centralized billing error codes
+export const PLAN_NOT_FOUND         = 'PLAN_NOT_FOUND';
+export const PLAN_FEATURES_INVALID  = 'PLAN_FEATURES_INVALID';
+export const SUBSCRIPTION_INACTIVE  = 'SUBSCRIPTION_INACTIVE';
+export const PRORATION_LIMIT_EXCEEDED = 'PRORATION_LIMIT_EXCEEDED';
+export const PRORATION_RACE_CONDITION = 'PRORATION_RACE_CONDITION';
+export const PAYMENT_FAILED         = 'PAYMENT_FAILED';
+export const STRIPE_ERROR           = 'STRIPE_ERROR';
+export const STRIPE_CIRCUIT_OPEN    = 'STRIPE_CIRCUIT_OPEN';
+export const WALLET_INSUFFICIENT    = 'WALLET_INSUFFICIENT';
+export const DUNNING_SUSPENDED      = 'DUNNING_SUSPENDED';
+export const METERING_BACKPRESSURE  = 'METERING_BACKPRESSURE';
+
+// ── Database ────────────────────────────────────────────────────────────────
+export const DB_CONNECTION_FAILED   = 'DB_CONNECTION_FAILED';
+export const DB_QUERY_FAILED        = 'DB_QUERY_FAILED';
+export const DB_POOL_EXHAUSTED      = 'DB_POOL_EXHAUSTED';
+
+// ── Configuration ───────────────────────────────────────────────────────────
+export const CONFIG_INVALID         = 'CONFIG_INVALID';
+export const CONFIG_MISSING_VAR     = 'CONFIG_MISSING_VAR';
+
+// ── External Services ───────────────────────────────────────────────────────
+export const DNS_TIMEOUT            = 'DNS_TIMEOUT';
+export const EXTERNAL_SERVICE_DOWN  = 'EXTERNAL_SERVICE_DOWN';
+export const WEBHOOK_REPLAY_ATTACK  = 'WEBHOOK_REPLAY_ATTACK';
+
 /**
  * Convenience lookup – the full set as a plain object so consumers can
  * iterate or validate against it:
@@ -77,6 +105,29 @@ export const ErrorCodes = {
   CSRF_ORIGIN_MISMATCH,
   CSRF_MISSING_HEADER,
   IDEMPOTENCY_CONFLICT,
+  // Billing
+  PLAN_NOT_FOUND,
+  PLAN_FEATURES_INVALID,
+  SUBSCRIPTION_INACTIVE,
+  PRORATION_LIMIT_EXCEEDED,
+  PRORATION_RACE_CONDITION,
+  PAYMENT_FAILED,
+  STRIPE_ERROR,
+  STRIPE_CIRCUIT_OPEN,
+  WALLET_INSUFFICIENT,
+  DUNNING_SUSPENDED,
+  METERING_BACKPRESSURE,
+  // Database
+  DB_CONNECTION_FAILED,
+  DB_QUERY_FAILED,
+  DB_POOL_EXHAUSTED,
+  // Configuration
+  CONFIG_INVALID,
+  CONFIG_MISSING_VAR,
+  // External services
+  DNS_TIMEOUT,
+  EXTERNAL_SERVICE_DOWN,
+  WEBHOOK_REPLAY_ATTACK,
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

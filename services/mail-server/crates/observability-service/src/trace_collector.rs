@@ -12,22 +12,38 @@ use crate::types::TraceSpan;
 // ---------------------------------------------------------------------------
 
 /// Thread-safe in-memory trace span store.
+///
+/// Caps total stored spans at `max_spans`; when full, the oldest spans are
+/// evicted on each insert to prevent unbounded memory growth.
 #[derive(Debug)]
 pub struct TraceCollector {
     spans: RwLock<Vec<TraceSpan>>,
+    max_spans: usize,
 }
 
 impl TraceCollector {
-    /// Create a new, empty collector.
+    /// Create a new, empty collector with the given capacity limit.
     pub fn new() -> Self {
+        Self::with_capacity(500_000)
+    }
+
+    /// Create a collector that retains at most `max_spans` spans.
+    pub fn with_capacity(max_spans: usize) -> Self {
         Self {
             spans: RwLock::new(Vec::new()),
+            max_spans,
         }
     }
 
     /// Record a span into the store.
+    ///
+    /// If the store is at capacity, the oldest span is dropped first.
     pub fn record_span(&self, span: TraceSpan) {
-        self.spans.write().push(span);
+        let mut guard = self.spans.write();
+        if guard.len() >= self.max_spans {
+            guard.drain(..guard.len() / 10); // evict oldest 10%
+        }
+        guard.push(span);
     }
 
     /// Return all spans belonging to the given `trace_id`.

@@ -559,8 +559,8 @@ export class EnterpriseContractService {
     let additionalFees: Contract['additionalFees'] = [];
     try {
       additionalFees = JSON.parse(row.additional_fees || '[]') as Contract['additionalFees'];
-    } catch {
-      logger.warn('Failed to parse contract additional fees', { contractId: row.id });
+    } catch (error) {
+      logger.warn('Failed to parse contract additional fees', { contractId: row.id, error });
     }
     
     return {

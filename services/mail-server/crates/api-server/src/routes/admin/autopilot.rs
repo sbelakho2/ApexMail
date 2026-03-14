@@ -98,6 +98,7 @@ async fn post_autopilot(
         return Err(ApiError::Internal("Autopilot action failed".into()));
     }
 
-    let result: serde_json::Value = response.json().await.unwrap_or(serde_json::json!({ "success": true }));
+    let result: serde_json::Value = response.json().await
+        .map_err(|e| ApiError::Internal(format!("failed to parse autopilot response: {e}")))?;
     Ok(Json(result))
 }

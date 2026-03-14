@@ -8,6 +8,7 @@
 //! and redirect to the OAuth provider authorization URLs.
 
 use axum::extract::{Query, State};
+use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
@@ -84,7 +85,7 @@ async fn sso_google(
 
     // Set state cookie and redirect
     let mut response = Redirect::to(&auth_url).into_response();
-    set_state_cookie(&mut response, "am_sso_state_google", &oauth_state, state.config.environment.is_production());
+    set_state_cookie(&mut response, "am_sso_state_google", &oauth_state, state.config.environment.is_production())?;
     Ok(response)
 }
 
@@ -117,7 +118,7 @@ async fn sso_github(
     );
 
     let mut response = Redirect::to(&auth_url).into_response();
-    set_state_cookie(&mut response, "am_sso_state_github", &oauth_state, state.config.environment.is_production());
+    set_state_cookie(&mut response, "am_sso_state_github", &oauth_state, state.config.environment.is_production())?;
     Ok(response)
 }
 
@@ -287,7 +288,10 @@ async fn sso_github_callback(
         let emails: Vec<serde_json::Value> = emails_resp
             .json()
             .await
-            .unwrap_or_default();
+            .map_err(|e| {
+                tracing::warn!(error = %e, "failed to parse GitHub /user/emails response");
+                ApiError::Internal(format!("GitHub emails parse failed: {e}"))
+            })?;
 
         emails
             .iter()
@@ -455,7 +459,10 @@ async fn complete_sso_login(
     );
     response.headers_mut().insert(
         "Set-Cookie",
-        cookie_value.parse().unwrap_or_else(|_| "".parse().unwrap()),
+        cookie_value.parse().map_err(|e| {
+            tracing::error!(error = %e, "failed to parse session cookie header value");
+            ApiError::Internal("failed to set session cookie".into())
+        })?,
     );
 
     Ok(response)
@@ -476,20 +483,9 @@ fn generate_oauth_state(next: &str) -> String {
 }
 
 fn rand_bytes() -> [u8; 32] {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
+    use rand::RngCore;
     let mut buf = [0u8; 32];
-    for chunk in buf.chunks_mut(8) {
-        let s = RandomState::new();
-        let mut h = s.build_hasher();
-        h.write_u64(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64);
-        let val = h.finish().to_ne_bytes();
-        let len = chunk.len().min(8);
-        chunk[..len].copy_from_slice(&val[..len]);
-    }
+    rand::thread_rng().fill_bytes(&mut buf);
     buf
 }
 
@@ -502,14 +498,17 @@ fn sanitize_redirect(next: &str) -> String {
     }
 }
 
-fn set_state_cookie(response: &mut Response, name: &str, value: &str, secure: bool) {
+fn set_state_cookie(response: &mut Response, name: &str, value: &str, secure: bool) -> Result<(), ApiError> {
     let cookie = format!(
         "{name}={value}; HttpOnly; Path=/; Max-Age=600; SameSite=Lax{}",
         if secure { "; Secure" } else { "" }
     );
-    if let Ok(val) = cookie.parse() {
-        response.headers_mut().append("Set-Cookie", val);
-    }
+    let val = cookie.parse().map_err(|e| {
+        tracing::error!(error = %e, cookie_name = name, "failed to build SSO state cookie header");
+        ApiError::Internal("failed to set SSO state cookie".into())
+    })?;
+    response.headers_mut().append("Set-Cookie", val);
+    Ok(())
 }
 
 #[cfg(test)]

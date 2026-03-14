@@ -13,8 +13,8 @@
         Ready to cut your email costs?
       </h2>
       <p class="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed">
-        Join thousands of companies saving money with ApexMail.
-        Start free with 3,000 emails per month—no credit card required.
+        Start free with 3,000 emails per month &mdash; no credit card required.
+        Scale up with transparent, predictable pricing.
       </p>
 
       <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
@@ -28,18 +28,19 @@
         </a>
       </div>
 
-      {% set calc_signals = [
-        {"value": "10K", "label": "Free emails/month"},
-        {"value": "$0", "label": "Setup fees"},
-        {"value": "60%", "label": "Average savings"}
-      ] %}
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-10 border-t border-surface-100">
-        {% for item in calc_signals %}
         <div>
-          <div class="text-2xl font-bold text-surface-900 tabular-nums mb-1">{{ item.value }}</div>
-          <div class="text-xs font-medium text-surface-500">{{ item.label }}</div>
+          <div class="text-2xl font-bold text-surface-900 tabular-nums mb-1">3K</div>
+          <div class="text-xs font-medium text-surface-500">Free emails/month</div>
         </div>
-        {% endfor %}
+        <div>
+          <div class="text-2xl font-bold text-surface-900 tabular-nums mb-1">$0</div>
+          <div class="text-xs font-medium text-surface-500">Setup fees</div>
+        </div>
+        <div>
+          <div class="text-2xl font-bold text-surface-900 tabular-nums mb-1">6</div>
+          <div class="text-xs font-medium text-surface-500">Official SDKs</div>
+        </div>
       </div>
     </div>
 

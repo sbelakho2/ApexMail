@@ -21,22 +21,33 @@
         </p>
 
         <div class="animate-in delay-300 space-y-4">
-          {% set features = [
-            {"title": "Single-Tenant Isolation", "desc": "Your data never touches shared infrastructure"},
-            {"title": "Data Sovereignty", "desc": "Choose your region — EU, US, APAC, or custom"},
-            {"title": "Custom Domain & IPs", "desc": "Dedicated sending IPs with full reputation control"}
-          ] %}
-          {% for feat in features %}
           <div class="flex items-start gap-3">
             <div class="w-6 h-6 rounded-full bg-primary-100 flex items-center justify-center shrink-0 mt-0.5">
               <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
             <div>
-              <div class="font-semibold text-surface-900">{{ feat.title }}</div>
-              <div class="text-sm text-surface-500">{{ feat.desc }}</div>
+              <div class="font-semibold text-surface-900">Single-Tenant Isolation</div>
+              <div class="text-sm text-surface-500">Your data never touches shared infrastructure</div>
             </div>
           </div>
-          {% endfor %}
+          <div class="flex items-start gap-3">
+            <div class="w-6 h-6 rounded-full bg-primary-100 flex items-center justify-center shrink-0 mt-0.5">
+              <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div>
+              <div class="font-semibold text-surface-900">Data Sovereignty</div>
+              <div class="text-sm text-surface-500">Choose your region — EU, US, APAC, or custom</div>
+            </div>
+          </div>
+          <div class="flex items-start gap-3">
+            <div class="w-6 h-6 rounded-full bg-primary-100 flex items-center justify-center shrink-0 mt-0.5">
+              <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div>
+              <div class="font-semibold text-surface-900">Custom Domain &amp; IPs</div>
+              <div class="text-sm text-surface-500">Dedicated sending IPs with full reputation control</div>
+            </div>
+          </div>
         </div>
       </div>
 

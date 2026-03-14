@@ -273,7 +273,7 @@ impl TenantService {
         let billing_email = billing_email.unwrap_or(&existing.billing_email);
         let plan = plan.unwrap_or(&existing.plan);
         let settings_val = settings
-            .unwrap_or_else(|| serde_json::to_value(&existing.settings).unwrap_or_default());
+            .unwrap_or_else(|| serde_json::to_value(&existing.settings).expect("existing settings must serialize"));
 
         sqlx::query(
             "UPDATE iso_organizations SET name=$1, billing_email=$2, plan=$3, settings=$4, updated_at=$5 WHERE id=$6"
@@ -436,7 +436,7 @@ impl TenantService {
         let existing = self.get_workspace(id).await?;
         let name = name.unwrap_or(&existing.name);
         let settings_val = settings
-            .unwrap_or_else(|| serde_json::to_value(&existing.settings).unwrap_or_default());
+            .unwrap_or_else(|| serde_json::to_value(&existing.settings).expect("existing settings must serialize"));
 
         sqlx::query(
             "UPDATE iso_workspaces SET name=$1, settings=$2, updated_at=$3 WHERE id=$4"

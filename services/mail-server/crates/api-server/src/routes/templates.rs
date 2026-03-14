@@ -1,5 +1,6 @@
 //! Email template CRUD routes.
 
+use super::helpers::{html_escape, clamp_limit, default_limit};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -46,7 +47,7 @@ pub struct UpdateTemplateRequest {
 
 #[derive(Debug, Serialize)]
 pub struct TemplateResponse {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub subject: String,
     pub html_body: String,
@@ -79,14 +80,6 @@ pub struct ListTemplatesQuery {
     pub cursor: Option<i64>,
 }
 
-fn default_limit() -> i64 {
-    50
-}
-
-fn clamp_limit(limit: i64, max: i64) -> i64 {
-    limit.clamp(1, max)
-}
-
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn create_template(
@@ -110,7 +103,7 @@ async fn create_template(
          VALUES ($1,$2,$3,$4,$5,$6,1,'active',$7,$7)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(&body.name)
     .bind(&body.subject)
     .bind(&body.html_body)
@@ -122,7 +115,7 @@ async fn create_template(
     Ok((
         StatusCode::CREATED,
         Json(TemplateResponse {
-            id,
+            id: id.to_string(),
             name: body.name,
             subject: body.subject,
             html_body: body.html_body,
@@ -147,7 +140,7 @@ async fn list_templates(
         "SELECT id, name, subject, html_body, text_body, version, status, created_at, updated_at
          FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id)
+    .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 200))
     .bind(offset)
     .fetch_all(&state.db)
@@ -159,22 +152,22 @@ async fn list_templates(
 async fn get_template(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:read"])?;
-    let row = fetch_template(&state, auth.tenant_id, id).await?;
+    let row = fetch_template(&state, &auth.tenant_id, id).await?;
     Ok(Json(row.into()))
 }
 
 async fn update_template(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(body): Json<UpdateTemplateRequest>,
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
-    let existing = fetch_template(&state, auth.tenant_id, id).await?;
+    let existing = fetch_template(&state, &auth.tenant_id, id.clone()).await?;;
 
     let name = body.name.unwrap_or(existing.name);
     let subject = body.subject.unwrap_or(existing.subject);
@@ -191,8 +184,8 @@ async fn update_template(
     .bind(&html_body)
     .bind(&text_body)
     .bind(new_version)
-    .bind(id)
-    .bind(auth.tenant_id)
+    .bind(&id)
+    .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -212,13 +205,13 @@ async fn update_template(
 async fn delete_template(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
     let result = sqlx::query("DELETE FROM templates WHERE id = $1 AND tenant_id = $2")
         .bind(id)
-        .bind(auth.tenant_id)
+        .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -231,12 +224,12 @@ async fn delete_template(
 async fn render_template(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(body): Json<RenderRequest>,
 ) -> Result<Json<RenderResponse>, ApiError> {
     require_scopes(&auth, &["templates:read"])?;
 
-    let tpl = fetch_template(&state, auth.tenant_id, id).await?;
+    let tpl = fetch_template(&state, &auth.tenant_id, id).await?;;
 
     // Simple Handlebars-style variable substitution: {{var_name}}
     let vars = body.variables.as_object().unwrap_or(&serde_json::Map::new()).clone();
@@ -311,27 +304,11 @@ fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>)
     result
 }
 
-/// HTML-escape a string to prevent XSS.
-fn html_escape(s: &str) -> String {
-    let mut escaped = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#x27;"),
-            _ => escaped.push(c),
-        }
-    }
-    escaped
-}
-
 // ─── Row types ─────────────────────────────────────────────────
 
 #[derive(sqlx::FromRow)]
 struct TemplateRow {
-    id: Uuid,
+    id: String,
     name: String,
     subject: String,
     html_body: String,
@@ -358,7 +335,7 @@ impl From<TemplateRow> for TemplateResponse {
     }
 }
 
-async fn fetch_template(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<TemplateRow, ApiError> {
+async fn fetch_template(state: &AppState, tenant_id: &str, id: String) -> Result<TemplateRow, ApiError> {
     sqlx::query_as::<_, TemplateRow>(
         "SELECT id, name, subject, html_body, text_body, version, status, created_at, updated_at
          FROM templates WHERE id = $1 AND tenant_id = $2",
@@ -375,14 +352,14 @@ async fn fetch_template(state: &AppState, tenant_id: Uuid, id: Uuid) -> Result<T
 async fn duplicate_template(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<TemplateResponse>), ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
     // Fetch original
-    let original = find_template(&state, id, auth.tenant_id).await?;
+    let original = fetch_template(&state, &auth.tenant_id, id.clone()).await?;
 
-    let new_id = Uuid::now_v7();
+    let new_id = Uuid::new_v4();
     let now = chrono::Utc::now();
     let new_name = format!("{} (copy)", original.name);
 
@@ -390,17 +367,17 @@ async fn duplicate_template(
         "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at)
          SELECT $1, tenant_id, $3, subject, html_body, text_body, 1, 'draft', $4, $4
          FROM templates WHERE id = $2 AND tenant_id = $5",
-        new_id,
+        new_id.to_string(),
         id,
         new_name,
         now,
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
     )
-    .execute(&*state.db)
+    .execute(&state.db)
     .await?;
 
-    let row = find_template(&state, new_id, auth.tenant_id).await?;
-    Ok((StatusCode::CREATED, Json(row)))
+    let row = fetch_template(&state, &auth.tenant_id, new_id.to_string()).await?;
+    Ok((StatusCode::CREATED, Json(row.into())))
 }
 
 #[derive(Debug, Deserialize)]
@@ -411,7 +388,7 @@ pub struct RollbackRequest {
 async fn rollback_template(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(body): Json<RollbackRequest>,
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
@@ -428,18 +405,18 @@ async fn rollback_template(
          WHERE templates.id = $1 AND templates.tenant_id = $2
            AND tv.template_id = $1 AND tv.version = $3",
         id,
-        auth.tenant_id,
+        auth.tenant_id.to_string(),
         body.version,
     )
-    .execute(&*state.db)
+    .execute(&state.db)
     .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("template or version not found".into()));
     }
 
-    let row = find_template(&state, id, auth.tenant_id).await?;
-    Ok(Json(row))
+    let row = fetch_template(&state, &auth.tenant_id, id).await?;
+    Ok(Json(row.into()))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -468,7 +445,7 @@ mod tests {
     #[test]
     fn test_template_response_serialisation() {
         let resp = TemplateResponse {
-            id: Uuid::nil(),
+            id: String::nil(),
             name: "welcome".into(),
             subject: "Welcome!".into(),
             html_body: "<p>Hi</p>".into(),

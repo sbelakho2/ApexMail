@@ -309,24 +309,30 @@ impl Config {
             jwt_secret,
             db: DatabaseConfig::from_env(),
             redis: RedisConfig::from_env(),
-            sso: SSOConfig {
-                saml: SamlConfig {
-                    enabled: env::var("SAML_ENABLED").map(|v| v == "true").unwrap_or(false),
-                    entity_id: env::var("SAML_ENTITY_ID").unwrap_or_else(|_| "urn:apexmail:enterprise".into()),
-                    acs_url: env::var("SAML_ACS_URL").unwrap_or_else(|_| "http://localhost:3000/api/sso/saml/callback".into()),
-                    slo_url: env::var("SAML_SLO_URL").unwrap_or_else(|_| "http://localhost:3000/api/sso/saml/logout".into()),
-                    certificate: env::var("SAML_CERTIFICATE").unwrap_or_default(),
-                    private_key: SecretString::new(env::var("SAML_PRIVATE_KEY").unwrap_or_default()),
-                    allow_sha1: env::var("SAML_ALLOW_SHA1").map(|v| v == "true").unwrap_or(false),
-                },
-                oidc: OidcConfig {
-                    enabled: env::var("OIDC_ENABLED").map(|v| v == "true").unwrap_or(false),
-                    client_id: env::var("OIDC_CLIENT_ID").unwrap_or_default(),
-                    client_secret: env::var("OIDC_CLIENT_SECRET").unwrap_or_default(),
-                    issuer: env::var("OIDC_ISSUER").unwrap_or_default(),
-                    redirect_uri: env::var("OIDC_REDIRECT_URI").unwrap_or_else(|_| "http://localhost:3000/api/sso/oidc/callback".into()),
-                    scopes: env::var("OIDC_SCOPES").unwrap_or_else(|_| "openid profile email".into()),
-                },
+            sso: {
+                let base_url = env::var("BASE_URL").unwrap_or_else(|_| format!("http://{}:{}", 
+                    env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
+                    env::var("PORT").ok().and_then(|v| v.parse::<u16>().ok()).unwrap_or(3000)
+                ));
+                SSOConfig {
+                    saml: SamlConfig {
+                        enabled: env::var("SAML_ENABLED").map(|v| v == "true").unwrap_or(false),
+                        entity_id: env::var("SAML_ENTITY_ID").unwrap_or_else(|_| "urn:apexmail:enterprise".into()),
+                        acs_url: env::var("SAML_ACS_URL").unwrap_or_else(|_| format!("{base_url}/api/sso/saml/callback")),
+                        slo_url: env::var("SAML_SLO_URL").unwrap_or_else(|_| format!("{base_url}/api/sso/saml/logout")),
+                        certificate: env::var("SAML_CERTIFICATE").unwrap_or_default(),
+                        private_key: SecretString::new(env::var("SAML_PRIVATE_KEY").unwrap_or_default()),
+                        allow_sha1: env::var("SAML_ALLOW_SHA1").map(|v| v == "true").unwrap_or(false),
+                    },
+                    oidc: OidcConfig {
+                        enabled: env::var("OIDC_ENABLED").map(|v| v == "true").unwrap_or(false),
+                        client_id: env::var("OIDC_CLIENT_ID").unwrap_or_default(),
+                        client_secret: env::var("OIDC_CLIENT_SECRET").unwrap_or_default(),
+                        issuer: env::var("OIDC_ISSUER").unwrap_or_default(),
+                        redirect_uri: env::var("OIDC_REDIRECT_URI").unwrap_or_else(|_| format!("{base_url}/api/sso/oidc/callback")),
+                        scopes: env::var("OIDC_SCOPES").unwrap_or_else(|_| "openid profile email".into()),
+                    },
+                }
             },
             whitelabel: WhiteLabelConfig {
                 enabled: env::var("WHITE_LABEL_ENABLED").map(|v| v == "true").unwrap_or(false),
@@ -388,6 +394,24 @@ impl Config {
         if self.cors_origins.is_empty() {
             return Err("CORS_ORIGINS must not be empty".into());
         }
+
+        // Validate SSO secrets when their features are enabled
+        if self.sso.saml.enabled && self.sso.saml.private_key.expose_secret().is_empty() {
+            return Err("SAML_PRIVATE_KEY must be set when SAML_ENABLED=true".into());
+        }
+        if self.sso.saml.enabled && self.sso.saml.certificate.is_empty() {
+            return Err("SAML_CERTIFICATE must be set when SAML_ENABLED=true".into());
+        }
+        if self.sso.oidc.enabled && self.sso.oidc.client_secret.is_empty() {
+            return Err("OIDC_CLIENT_SECRET must be set when OIDC_ENABLED=true".into());
+        }
+        if self.sso.oidc.enabled && self.sso.oidc.client_id.is_empty() {
+            return Err("OIDC_CLIENT_ID must be set when OIDC_ENABLED=true".into());
+        }
+        if self.sso.oidc.enabled && self.sso.oidc.issuer.is_empty() {
+            return Err("OIDC_ISSUER must be set when OIDC_ENABLED=true".into());
+        }
+
         Ok(())
     }
 }

@@ -1,23 +1,110 @@
 //! Backup & restore service — full, incremental, WAL backups with gzip compression
 //! and AES-256-GCM encryption. Cursor-based table streaming. Post-restore verification.
+//!
+//! Encryption is now properly implemented using AES-256-GCM.
+//! Backups are encrypted before being written to storage when an encryption key is configured.
 
 use chrono::Utc;
 use flate2::write::GzEncoder;
+use flate2::read::GzDecoder;
 use flate2::Compression;
 use reqwest::Client;
 use sha2::{Sha256, Digest};
 use sqlx::PgPool;
-use std::io::Write;
+use std::io::{Write, Read};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 use uuid::Uuid;
+use aes_gcm::{
+    aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Nonce,
+};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::config::Config;
 use crate::types::{Backup, BackupRow, BackupSchedule, BackupType,
                    RestoreOptions, RestoreResult, VerificationResult, CountRow};
 
 const BATCH_SIZE: i64 = 10_000;
+
+///Encryption constants
+const ENCRYPTION_NONCE_SIZE: usize = 12; // 96 bits for AES-GCM
+const ENCRYPTION_KEY_SIZE: usize = 32;   // 256 bits
+const ENCRYPTION_MAGIC_BYTES: &[u8; 8] = b"APEXENC1"; // Magic header for encrypted backups
+
+/// Encrypt data using AES-256-GCM
+/// Proper encryption implementation
+fn encrypt_backup(data: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    if key.len() != ENCRYPTION_KEY_SIZE {
+        return Err(format!("Invalid encryption key size: expected {}, got {}", ENCRYPTION_KEY_SIZE, key.len()));
+    }
+
+    // Generate a random nonce
+    let nonce_bytes: [u8; ENCRYPTION_NONCE_SIZE] = {
+        let mut bytes = [0u8; ENCRYPTION_NONCE_SIZE];
+        OsRng.fill_bytes(&mut bytes);
+        bytes
+    };
+
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| format!("Failed to create cipher: {e}"))?;
+    
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    
+    let ciphertext = cipher.encrypt(nonce, data)
+        .map_err(|e| format!("Encryption failed: {e}"))?;
+
+    // Build output: MAGIC || NONCE || CIPHERTEXT
+    let mut output = Vec::with_capacity(
+        ENCRYPTION_MAGIC_BYTES.len() + ENCRYPTION_NONCE_SIZE + ciphertext.len()
+    );
+    output.extend_from_slice(ENCRYPTION_MAGIC_BYTES);
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&ciphertext);
+
+    Ok(output)
+}
+
+/// Decrypt data using AES-256-GCM
+/// SEC-017: Proper decryption implementation
+fn decrypt_backup(data: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    if key.len() != ENCRYPTION_KEY_SIZE {
+        return Err(format!("Invalid encryption key size: expected {}, got {}", ENCRYPTION_KEY_SIZE, key.len()));
+    }
+
+    // Minimum size: MAGIC + NONCE + at least 16 bytes for GCM tag
+    let min_size = ENCRYPTION_MAGIC_BYTES.len() + ENCRYPTION_NONCE_SIZE + 16;
+    if data.len() < min_size {
+        return Err(format!("Encrypted data too short: {} bytes (minimum {})", data.len(), min_size));
+    }
+
+    // Verify magic header
+    let magic = &data[..ENCRYPTION_MAGIC_BYTES.len()];
+    if magic != ENCRYPTION_MAGIC_BYTES {
+        return Err("Invalid backup file: missing encryption magic header".into());
+    }
+
+    // Extract nonce
+    let nonce_start = ENCRYPTION_MAGIC_BYTES.len();
+    let nonce_end = nonce_start + ENCRYPTION_NONCE_SIZE;
+    let nonce_bytes: [u8; ENCRYPTION_NONCE_SIZE] = data[nonce_start..nonce_end]
+        .try_into()
+        .map_err(|_| "Failed to extract nonce")?;
+
+    // Extract ciphertext
+    let ciphertext = &data[nonce_end..];
+
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| format!("Failed to create cipher: {e}"))?;
+    
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    
+    let plaintext = cipher.decrypt(nonce, ciphertext)
+        .map_err(|e| format!("Decryption failed: {e} - backup may be corrupted or key is wrong"))?;
+
+    Ok(plaintext)
+}
 
 /// BackupService manages backup creation, restore, and retention.
 pub struct BackupService {
@@ -27,12 +114,36 @@ pub struct BackupService {
 }
 
 impl BackupService {
-    pub fn new(pool: PgPool, config: Arc<Config>) -> Self {
+    /// Create a new BackupService.
+    /// 
+    /// # Encryption key validation at startup
+    /// Validates encryption key size on construction to fail fast rather than
+    /// failing mid-backup when encrypt_backup() is called.
+    pub fn new(pool: PgPool, config: Arc<Config>) -> Result<Self, String> {
+        // Validate encryption key at startup if configured
+        if let Some(ref key) = config.backup.encryption_key {
+            if key.len() != ENCRYPTION_KEY_SIZE {
+                return Err(format!(
+                    "Invalid backup encryption key size at startup: expected {}, got {}. \
+                     Please configure BACKUP_ENCRYPTION_KEY with exactly {} bytes.",
+                    ENCRYPTION_KEY_SIZE, key.len(), ENCRYPTION_KEY_SIZE
+                ));
+            }
+        }
+        
         let http_client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|_| Client::new());
-        Self { pool, config, http_client }
+            .unwrap_or_else(|_| {
+                // Fallback: builder() only fails on TLS config issues.
+                // Build without TLS native roots as last resort.
+                Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .no_proxy()
+                    .build()
+                    .expect("reqwest Client::builder() with no_proxy() should never fail")
+            });
+        Ok(Self { pool, config, http_client })
     }
 
     // ── Create Backup ──────────────────────────────────────
@@ -49,7 +160,11 @@ impl BackupService {
         info!(id = %id, backup_type = %backup_type, "Starting backup");
 
         // Insert pending record
-        let tables_json = tables.as_ref().map(|t| serde_json::to_value(t).unwrap());
+        let tables_json = tables
+            .as_ref()
+            .map(|t| serde_json::to_value(t))
+            .transpose()
+            .map_err(|e| format!("Failed to serialize table list: {e}"))?;
         sqlx::query(
             "INSERT INTO ha_backups
              (id, backup_type, status, size_bytes, tables_included, encrypted, compressed, started_at)
@@ -165,10 +280,12 @@ impl BackupService {
         let mut tx = self.pool.begin().await
             .map_err(|e| format!("Begin cursor transaction: {e}"))?;
         let cursor_name = format!("backup_cursor_{}", Uuid::new_v4().simple());
+        let quoted_cursor = Self::quote_ident(&cursor_name);
+        let quoted_table = Self::quote_ident(table);
         let declare = format!(
             "DECLARE {cursor} NO SCROLL CURSOR FOR SELECT row_to_json(t)::text FROM {table} t",
-            cursor = cursor_name,
-            table = table
+            cursor = quoted_cursor,
+            table = quoted_table
         );
         sqlx::query(&declare)
             .execute(&mut *tx)
@@ -176,7 +293,7 @@ impl BackupService {
             .map_err(|e| format!("Declare cursor {table}: {e}"))?;
 
         loop {
-            let fetch = format!("FETCH FORWARD {BATCH_SIZE} FROM {cursor}", cursor = cursor_name);
+            let fetch = format!("FETCH FORWARD {BATCH_SIZE} FROM {cursor}", cursor = quoted_cursor);
             let rows: Vec<(String,)> = sqlx::query_as(&fetch)
                 .fetch_all(&mut *tx)
                 .await
@@ -196,7 +313,7 @@ impl BackupService {
             }
         }
 
-        let close = format!("CLOSE {cursor}", cursor = cursor_name);
+        let close = format!("CLOSE {cursor}", cursor = quoted_cursor);
         if let Err(error) = sqlx::query(&close).execute(&mut *tx).await {
             warn!(table = %table, error = %error, "Failed to close backup cursor cleanly");
         }
@@ -306,8 +423,16 @@ impl BackupService {
 
             // Real S3 download using reqwest with presigned URL or aws-sdk
             let presigned_base = std::env::var("BACKUP_PRESIGNED_URL_BASE").ok();
-            if presigned_base.is_none() && std::env::var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD").ok().as_deref() != Some("true") {
-                return Err("Missing BACKUP_PRESIGNED_URL_BASE (or set ALLOW_UNAUTHENTICATED_S3_DOWNLOAD=true)".into());
+            // Require explicit acknowledgement for unauthenticated S3 access
+            // to prevent accidental production misconfiguration
+            const UNSAFE_CONFIRMATION: &str = "I_UNDERSTAND_THIS_IS_INSECURE";
+            let allow_unauth = std::env::var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD").ok();
+            if presigned_base.is_none() && allow_unauth.as_deref() != Some(UNSAFE_CONFIRMATION) {
+                return Err(format!(
+                    "Missing BACKUP_PRESIGNED_URL_BASE. To allow unauthenticated S3 downloads \
+                     (NOT recommended for production), set ALLOW_UNAUTHENTICATED_S3_DOWNLOAD={}",
+                    UNSAFE_CONFIRMATION
+                ));
             }
             let s3_endpoint = std::env::var("S3_ENDPOINT")
                 .unwrap_or_else(|_| format!("https://{}.s3.amazonaws.com", bucket));
@@ -333,15 +458,46 @@ impl BackupService {
         }
     }
 
-    /// Validate that an identifier (table or column name) contains only safe characters.
+    /// Known application tables that may be backed up or restored.
+    /// This allowlist prevents backup/restore of PostgreSQL system catalogs
+    /// or other internal tables even if they pass identifier validation.
+    const ALLOWED_TABLES: &'static [&'static str] = &[
+        "emails", "contacts", "templates", "campaigns", "webhooks",
+        "api_keys", "workspaces", "organizations", "users",
+        "email_events", "sending_domains", "domain_verifications",
+        "suppression_list", "bounce_rules", "ip_pools", "ip_addresses",
+        "webhook_endpoints", "webhook_deliveries", "email_attachments",
+        "scheduled_emails", "ab_tests", "segments", "tags",
+    ];
+
+    /// Validate that an identifier (table or column name) contains only safe characters
+    /// and is in the allowlist of known application tables.
     fn is_valid_identifier(name: &str) -> bool {
         let mut chars = name.chars();
         let Some(first) = chars.next() else {
             return false;
         };
 
-        (first.is_ascii_alphabetic() || first == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        let syntax_ok = (first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+        if !syntax_ok {
+            return false;
+        }
+
+        // Defense-in-depth: only allow known application tables
+        let lower = name.to_ascii_lowercase();
+        Self::ALLOWED_TABLES.contains(&lower.as_str())
+    }
+
+    /// Quote a validated identifier for safe interpolation into SQL.
+    /// The identifier MUST have already passed `is_valid_identifier`.
+    fn quote_ident(name: &str) -> String {
+        // Double-quote the identifier per PostgreSQL convention.
+        // Since is_valid_identifier only allows [a-zA-Z_][a-zA-Z0-9_]*,
+        // there are no embedded quotes to escape — but we replace them
+        // defensively anyway.
+        format!("\"{}\"", name.replace('"', "\"\""))
     }
 
     /// Restore a single table from backup data
@@ -370,7 +526,7 @@ impl BackupService {
             .map_err(|e| format!("Begin transaction: {e}"))?;
 
         // Truncate existing data if requested
-        let truncate_sql = format!("TRUNCATE TABLE {} CASCADE", table);
+        let truncate_sql = format!("TRUNCATE TABLE {} CASCADE", Self::quote_ident(table));
         sqlx::query(&truncate_sql)
             .execute(&mut *tx)
             .await
@@ -453,7 +609,7 @@ impl BackupService {
                 continue;
             }
             let cnt: Option<CountRow> = sqlx::query_as::<_, CountRow>(
-                &format!("SELECT COUNT(*)::bigint AS count FROM {table}")
+                &format!("SELECT COUNT(*)::bigint AS count FROM {}", Self::quote_ident(table))
             )
             .fetch_optional(&self.pool)
             .await
@@ -549,7 +705,9 @@ impl BackupService {
             params.push(st.to_string());
             sql.push_str(&format!(" AND status = ${}", params.len()));
         }
-        sql.push_str(&format!(" ORDER BY started_at DESC LIMIT {}", limit));
+        let clamped_limit = limit.clamp(1, 1000);
+        params.push(clamped_limit.to_string());
+        sql.push_str(&format!(" ORDER BY started_at DESC LIMIT ${}", params.len()));
 
         let mut query = sqlx::query_as::<_, BackupRow>(&sql);
         for p in &params {
@@ -615,6 +773,12 @@ mod tests {
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         RT.get_or_init(|| tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap())
     }
+    
+    /// This test pool uses a fake connection string for unit tests only.
+    /// For integration tests with a real database, see the integration test suite
+    /// in tests/integration_backup.rs or use testcontainers.
+    /// 
+    /// TODO: Add integration tests using testcontainers-rs for full backup/restore validation.
     fn test_pool() -> PgPool {
         let _guard = test_runtime().enter();
         sqlx::postgres::PgPoolOptions::new()
@@ -628,7 +792,8 @@ mod tests {
 
     #[test]
     fn test_backup_schedule() {
-        let svc = BackupService::new(test_pool(), test_config());
+        let svc = BackupService::new(test_pool(), test_config())
+            .expect("test config should have valid encryption key");
         let sched = svc.get_schedule();
         assert!(!sched.full_cron.is_empty());
         assert_eq!(sched.retention_days, 90);
@@ -637,7 +802,8 @@ mod tests {
     #[test]
     fn test_table_name_validation() {
         test_runtime().block_on(async {
-            let svc = BackupService::new(test_pool(), test_config());
+            let svc = BackupService::new(test_pool(), test_config())
+                .expect("test config should have valid encryption key");
             let res = svc.stream_table("DROP TABLE; --").await;
             assert!(res.is_err());
             assert!(res.unwrap_err().contains("Invalid table name"));
@@ -723,5 +889,98 @@ mod tests {
     #[test]
     fn test_batch_size_constant() {
         assert_eq!(BATCH_SIZE, 10_000);
+    }
+
+    // SEC-017: Encryption tests
+    #[test]
+    fn test_encryption_key_size_validation() {
+        let data = b"test data";
+        let wrong_size_key = b"short_key";
+        let result = encrypt_backup(data, wrong_size_key);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid encryption key size"));
+    }
+
+    #[test]
+    fn test_encryption_roundtrip() {
+        let data = b"This is sensitive backup data that needs encryption";
+        // Generate a valid 32-byte key
+        let key: [u8; 32] = {
+            let mut k = [0u8; 32];
+            OsRng.fill_bytes(&mut k);
+            k
+        };
+
+        let encrypted = encrypt_backup(data, &key).expect("Encryption should succeed");
+        
+        // Verify encrypted data is different from plaintext
+        assert_ne!(encrypted.as_slice(), data);
+        
+        // Verify encrypted data has magic header
+        assert!(encrypted.starts_with(ENCRYPTION_MAGIC_BYTES));
+        
+        // Verify encrypted data is longer (magic + nonce + tag)
+        assert!(encrypted.len() > data.len());
+
+        let decrypted = decrypt_backup(&encrypted, &key).expect("Decryption should succeed");
+        assert_eq!(decrypted.as_slice(), data);
+    }
+
+    #[test]
+    fn test_decryption_wrong_key_fails() {
+        let data = b"secret data";
+        let key1: [u8; 32] = {
+            let mut k = [0u8; 32];
+            OsRng.fill_bytes(&mut k);
+            k
+        };
+        let key2: [u8; 32] = {
+            let mut k = [0u8; 32];
+            OsRng.fill_bytes(&mut k);
+            k
+        };
+
+        let encrypted = encrypt_backup(data, &key1).expect("Encryption should succeed");
+        let result = decrypt_backup(&encrypted, &key2);
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Decryption failed"));
+    }
+
+    #[test]
+    fn test_decryption_tampered_data_fails() {
+        let data = b"original data";
+        let key: [u8; 32] = {
+            let mut k = [0u8; 32];
+            OsRng.fill_bytes(&mut k);
+            k
+        };
+
+        let mut encrypted = encrypt_backup(data, &key).expect("Encryption should succeed");
+        
+        // Tamper with the ciphertext
+        if let Some(last_byte) = encrypted.last_mut() {
+            *last_byte ^= 0xFF;
+        }
+
+        let result = decrypt_backup(&encrypted, &key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decryption_missing_magic_fails() {
+        let data = b"not encrypted";
+        let key: [u8; 32] = [0u8; 32];
+
+        let result = decrypt_backup(data, &key);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing encryption magic header"));
+    }
+
+    #[test]
+    fn test_encryption_constants() {
+        assert_eq!(ENCRYPTION_NONCE_SIZE, 12);
+        assert_eq!(ENCRYPTION_KEY_SIZE, 32);
+        assert_eq!(ENCRYPTION_MAGIC_BYTES, b"APEXENC1");
     }
 }

@@ -103,7 +103,7 @@ pub enum IpProviderError {
     Database(String),
 
     #[error("tenant {tenant_id} has reached dedicated IP limit ({limit})")]
-    LimitReached { tenant_id: Uuid, limit: i32 },
+    LimitReached { tenant_id: String, limit: i32 },
 
     #[error("plan does not include dedicated IP access")]
     PlanNotEligible,
@@ -213,7 +213,7 @@ impl DedicatedIpProvider {
     /// Returns `(allowed, included_count)`.
     pub async fn check_plan_eligibility(
         &self,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<(bool, i32), IpProviderError> {
         let row = sqlx::query_as::<_, (bool, i32)>(
             "SELECT
@@ -235,7 +235,7 @@ impl DedicatedIpProvider {
     }
 
     /// Count active (non-retired, non-releasing) dedicated IPs for a tenant.
-    pub async fn count_active_ips(&self, tenant_id: Uuid) -> Result<i64, IpProviderError> {
+    pub async fn count_active_ips(&self, tenant_id: &str) -> Result<i64, IpProviderError> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM dedicated_ips
              WHERE tenant_id = $1 AND status NOT IN ('retired', 'releasing')",
@@ -260,7 +260,7 @@ impl DedicatedIpProvider {
     ///    routed through self-hosted SMTP automatically
     pub async fn allocate_ip(
         &self,
-        tenant_id: Uuid,
+        tenant_id: &str,
         region: Option<&str>,
     ) -> Result<AllocatedIp, IpProviderError> {
         // 1. Plan gating
@@ -273,7 +273,7 @@ impl DedicatedIpProvider {
         let hard_cap = if included_count >= 10 { 25 } else { included_count.max(5) };
         if active_count >= hard_cap as i64 {
             return Err(IpProviderError::LimitReached {
-                tenant_id,
+                tenant_id: tenant_id.to_string(),
                 limit: hard_cap,
             });
         }
@@ -398,7 +398,7 @@ impl DedicatedIpProvider {
     pub async fn release_ip(
         &self,
         dedicated_ip_id: Uuid,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<(), IpProviderError> {
         let row: Option<(String, Option<i64>)> = sqlx::query_as(
             "SELECT ip_address, hetzner_floating_ip_id FROM dedicated_ips
@@ -456,7 +456,7 @@ impl DedicatedIpProvider {
     pub async fn start_warmup(
         &self,
         dedicated_ip_id: Uuid,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<DedicatedIpStatus, IpProviderError> {
         let row: Option<(String, f64)> = sqlx::query_as(
             "SELECT ip_address, warmup_progress FROM dedicated_ips
@@ -542,7 +542,7 @@ impl DedicatedIpProvider {
         &self,
         floating_ip_id: u64,
         ip_address: &str,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Option<String> {
         let domain: Option<String> = sqlx::query_scalar(
             "SELECT domain FROM domains
@@ -591,7 +591,7 @@ impl DedicatedIpProvider {
     /// List all active/warming dedicated IPs for a tenant.
     pub async fn list_tenant_ips(
         &self,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<Vec<AllocatedIp>, IpProviderError> {
         let rows: Vec<(Uuid, String, Option<i64>, String, Option<String>, i32, String)> =
             sqlx::query_as(

@@ -75,8 +75,7 @@ async fn list_warmup(
     .bind(limit)
     .bind(offset)
     .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let pool_ids: Vec<String> = pool_rows.iter().map(|(id, ..)| id.clone()).collect();
 
@@ -90,8 +89,7 @@ async fn list_warmup(
     )
     .bind(&pool_ids)
     .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     // Fetch schedules for all pools
     let schedule_rows: Vec<(String, String, i32, i64, Option<i64>, String)> = sqlx::query_as(
@@ -99,8 +97,7 @@ async fn list_warmup(
     )
     .bind(&pool_ids)
     .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let pools: Vec<IpPool> = pool_rows
         .into_iter()
@@ -193,7 +190,7 @@ async fn warmup_action(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, ip_address, user_agent, metadata)
          VALUES (NOW(), $1, 'ip_pool', $2, $3, $4, $5::jsonb)",
     )
@@ -203,7 +200,10 @@ async fn warmup_action(
     .bind(ua)
     .bind(serde_json::json!({ "action": body.action, "newStatus": new_status }))
     .execute(&state.db)
-    .await;
+    .await
+    {
+        tracing::warn!(pool_id = %body.pool_id, error = %e, "Failed to write warmup audit log");
+    }
 
     Ok(Json(serde_json::json!({
         "success": true,

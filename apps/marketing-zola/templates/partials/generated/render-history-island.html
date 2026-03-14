@@ -1,0 +1,66 @@
+{# ── Render History (static showcase, zero JS) ────────────────── #}
+{# This island is already purely static in the Rust code (no &self #}
+{# — it's an associated function). Shows feature highlights.       #}
+
+<section class="py-20 lg:py-32 bg-surface-50 relative" id="render-history">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="text-center mb-16">
+      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        Render History
+      </div>
+      <h2 class="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">Every Render, Preserved Forever</h2>
+      <p class="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">Full audit trail of every email rendered. Debug deliverability issues, track template changes, and maintain compliance records.</p>
+    </div>
+
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div class="bg-white rounded-2xl border border-surface-200 p-6 shadow-sm">
+        <div class="w-10 h-10 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+          <svg class="w-5 h-5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </div>
+        <h3 class="text-base font-bold text-surface-900 mb-2">Exact Snapshots</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">Every email send captures the exact HTML, headers, and metadata. Byte-identical reproduction of what was delivered.</p>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-surface-200 p-6 shadow-sm">
+        <div class="w-10 h-10 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+          <svg class="w-5 h-5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        </div>
+        <h3 class="text-base font-bold text-surface-900 mb-2">Diff Viewer</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">Side-by-side comparison between any two versions. See exactly what changed between template iterations.</p>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-surface-200 p-6 shadow-sm">
+        <div class="w-10 h-10 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+          <svg class="w-5 h-5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </div>
+        <h3 class="text-base font-bold text-surface-900 mb-2">Delivery Forensics</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">Trace the full journey: render → queue → SMTP handshake → delivery confirmation → open/click events.</p>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-surface-200 p-6 shadow-sm">
+        <div class="w-10 h-10 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+          <svg class="w-5 h-5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </div>
+        <h3 class="text-base font-bold text-surface-900 mb-2">90-Day Retention</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">Standard 90-day retention with optional unlimited archival for compliance. Encrypted at rest with customer-managed keys.</p>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-surface-200 p-6 shadow-sm">
+        <div class="w-10 h-10 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+          <svg class="w-5 h-5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </div>
+        <h3 class="text-base font-bold text-surface-900 mb-2">Tamper-Proof</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">SHA-256 content hashing with Merkle tree verification. Cryptographic proof that records haven't been modified.</p>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-surface-200 p-6 shadow-sm">
+        <div class="w-10 h-10 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+          <svg class="w-5 h-5 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>
+        </div>
+        <h3 class="text-base font-bold text-surface-900 mb-2">Export &amp; API</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">Bulk export render history via API. Integrate with your SIEM, compliance tools, or data warehouse.</p>
+      </div>
+    </div>
+  </div>
+</section>

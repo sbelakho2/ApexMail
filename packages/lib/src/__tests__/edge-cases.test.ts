@@ -844,7 +844,8 @@ describe('Time utilities — edge cases', () => {
   });
 
   it('addDays positive and negative', () => {
-    const d = new Date('2024-03-01');
+    // Use explicit local date to avoid timezone issues
+    const d = new Date(2024, 2, 1); // March 1, 2024 local time
     expect(addDays(d, 1).getDate()).toBe(2);
     expect(addDays(d, -1).getMonth()).toBe(1); // February
   });
@@ -890,10 +891,11 @@ describe('Time utilities — edge cases', () => {
   });
 
   it('getWeekNumber for known dates', () => {
+    // Use explicit local dates to avoid timezone issues
     // Jan 1, 2024 is Monday — ISO week 1
-    expect(getWeekNumber(new Date('2024-01-01'))).toBe(1);
+    expect(getWeekNumber(new Date(2024, 0, 1))).toBe(1);
     // Dec 28, 2023 is Thursday — should be week 52
-    expect(getWeekNumber(new Date('2023-12-28'))).toBe(52);
+    expect(getWeekNumber(new Date(2023, 11, 28))).toBe(52);
   });
 
   it('formatDate short/long/iso', () => {

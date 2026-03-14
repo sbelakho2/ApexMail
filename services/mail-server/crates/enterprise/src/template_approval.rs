@@ -33,7 +33,8 @@ impl TemplateApprovalService {
             "pending"
         };
 
-        let spam_json = serde_json::to_value(&spam_result).unwrap_or_default();
+        let spam_json = serde_json::to_value(&spam_result)
+            .map_err(|e| format!("failed to serialize spam result: {e}"))?;
 
         let row = sqlx::query_as::<_, TemplateSubmission>(
             "INSERT INTO ent_template_submissions (id, tenant_id, name, subject, html_content, text_content, status, submitted_by, spam_score, spam_details, created_at, updated_at)

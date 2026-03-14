@@ -1,0 +1,235 @@
+{
+  "version": 1,
+  "requiredBrowsers": ["chromium", "firefox", "webkit"],
+  "artifacts": {
+    "captureRoot": "apps/testing/reports/ui-behavior-baseline"
+  },
+  "scenarios": [
+    {
+      "id": "web-behavior-major-states",
+      "surface": "web",
+      "baseUrlEnv": "WEB_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3010",
+      "route": "/storybook/behavior-matrix",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "[data-testid=\"major-states-matrix\"]",
+      "coverage": ["loading", "success", "empty", "error", "warning", "submitting"],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "web-behavior-form-matrix",
+      "surface": "web",
+      "baseUrlEnv": "WEB_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3010",
+      "route": "/storybook/behavior-matrix",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "[data-testid=\"form-matrix\"]",
+      "coverage": ["pristine", "dirty", "validating", "valid", "invalid", "submitting"],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "web-behavior-overlay-matrix",
+      "surface": "web",
+      "baseUrlEnv": "WEB_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3010",
+      "route": "/storybook/behavior-matrix",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "[data-testid=\"overlay-matrix\"]",
+      "coverage": ["modal", "drawer", "tooltip", "popover", "toast", "dropdown"],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "web-behavior-table-matrix",
+      "surface": "web",
+      "baseUrlEnv": "WEB_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3010",
+      "route": "/storybook/behavior-matrix",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "[data-testid=\"table-matrix\"]",
+      "coverage": ["table-empty", "table-sparse", "table-dense", "table-overflow"],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "web-behavior-chart-matrix",
+      "surface": "web",
+      "baseUrlEnv": "WEB_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3010",
+      "route": "/storybook/behavior-matrix",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "[data-testid=\"chart-matrix\"]",
+      "coverage": ["chart-empty", "chart-min-max", "chart-null", "chart-sparse", "chart-dense", "chart-outlier"],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "web-login-invalid-keyboard-flow",
+      "surface": "web",
+      "baseUrlEnv": "WEB_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3010",
+      "route": "/login",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "form",
+      "coverage": ["keyboard-flow", "invalid-form", "focus-order"],
+      "mocks": [
+        { "url": "**/v1/auth/csrf", "status": 200, "body": { "token": "csrf_test_token" } },
+        { "url": "**/v1/auth/session", "status": 200, "body": { "authenticated": false } },
+        { "url": "**/v1/auth/telemetry", "status": 204, "body": {} }
+      ],
+      "actions": [
+        { "type": "press", "selector": "body", "value": "Tab" },
+        { "type": "fill", "selector": "#email", "value": "broken-address" },
+        { "type": "press", "selector": "#email", "value": "Tab" },
+        { "type": "fill", "selector": "#password", "value": "short" },
+        { "type": "press", "selector": "#password", "value": "Tab" },
+        { "type": "click", "selector": "button[type=submit]" },
+        { "type": "waitForText", "value": "Enter a valid email address" }
+      ],
+      "expectedNetwork": [
+        { "urlIncludes": "/v1/auth/csrf", "method": "GET", "status": 200 },
+        { "urlIncludes": "/v1/auth/session", "method": "GET", "status": 200 }
+      ],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "web-login-rate-limited-flow",
+      "surface": "web",
+      "baseUrlEnv": "WEB_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3010",
+      "route": "/login",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "[data-error-key=\"auth.error.rate_limited\"]",
+      "coverage": ["network-waterfall", "auth-error", "analytics-telemetry"],
+      "mocks": [
+        { "url": "**/v1/auth/csrf", "status": 200, "body": { "token": "csrf_test_token" } },
+        { "url": "**/v1/auth/session", "status": 200, "body": { "authenticated": false } },
+        { "url": "**/v1/auth/login", "status": 429, "headers": { "Retry-After": "42" }, "body": { "errorCode": "RATE_LIMITED" } },
+        { "url": "**/v1/auth/telemetry", "status": 204, "body": {} }
+      ],
+      "actions": [
+        { "type": "fill", "selector": "#email", "value": "ops@apexmail.ee" },
+        { "type": "fill", "selector": "#password", "value": "EnterprisePass123" },
+        { "type": "click", "selector": "button[type=submit]" },
+        { "type": "waitForText", "value": "Too many sign-in attempts. Please wait and try again." }
+      ],
+      "expectedNetwork": [
+        { "urlIncludes": "/v1/auth/csrf", "method": "GET", "status": 200 },
+        { "urlIncludes": "/v1/auth/session", "method": "GET", "status": 200 },
+        { "urlIncludes": "/v1/auth/login", "method": "POST", "status": 429, "requestBodyIncludes": ["ops@apexmail.ee", "EnterprisePass123"] },
+        { "urlIncludes": "/v1/auth/telemetry", "method": "POST", "status": 204, "requestBodyIncludes": ["rate_limited_response"] }
+      ],
+      "expectedAnalytics": [
+        { "type": "network", "match": "/v1/auth/telemetry" }
+      ],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "web-login-mfa-required-flow",
+      "surface": "web",
+      "baseUrlEnv": "WEB_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3010",
+      "route": "/login",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "#mfaCode",
+      "coverage": ["interaction-flow", "network-waterfall", "analytics-telemetry"],
+      "mocks": [
+        { "url": "**/v1/auth/csrf", "status": 200, "body": { "token": "csrf_test_token" } },
+        { "url": "**/v1/auth/session", "status": 200, "body": { "authenticated": false } },
+        { "url": "**/v1/auth/login", "status": 401, "body": { "errorCode": "MFA_REQUIRED", "requiresMfa": true } },
+        { "url": "**/v1/auth/telemetry", "status": 204, "body": {} }
+      ],
+      "actions": [
+        { "type": "fill", "selector": "#email", "value": "owner@apexmail.ee" },
+        { "type": "fill", "selector": "#password", "value": "EnterprisePass123" },
+        { "type": "click", "selector": "button[type=submit]" },
+        { "type": "waitForText", "value": "Additional verification required. Enter your MFA code." }
+      ],
+      "expectedNetwork": [
+        { "urlIncludes": "/v1/auth/csrf", "method": "GET", "status": 200 },
+        { "urlIncludes": "/v1/auth/session", "method": "GET", "status": 200 },
+        { "urlIncludes": "/v1/auth/login", "method": "POST", "status": 401, "requestBodyIncludes": ["owner@apexmail.ee", "EnterprisePass123"] },
+        { "urlIncludes": "/v1/auth/telemetry", "method": "POST", "status": 204, "requestBodyIncludes": ["mfa_required"] }
+      ],
+      "expectedAnalytics": [
+        { "type": "network", "match": "/v1/auth/telemetry" }
+      ],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "control-plane-login-invalid-keyboard-flow",
+      "surface": "control-plane",
+      "baseUrlEnv": "CONTROL_PLANE_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3020",
+      "route": "/login",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "form",
+      "coverage": ["keyboard-flow", "interaction-flow", "invalid-form", "focus-order"],
+      "mocks": [
+        { "url": "**/api/csrf", "status": 200, "body": { "token": "csrf_test_token" } }
+      ],
+      "actions": [
+        { "type": "press", "selector": "body", "value": "Tab" },
+        { "type": "fill", "selector": "#login-email", "value": "ab" },
+        { "type": "press", "selector": "#login-email", "value": "Tab" },
+        { "type": "fill", "selector": "#login-password", "value": "short" },
+        { "type": "press", "selector": "#login-password", "value": "Tab" },
+        { "type": "click", "selector": "button[type=submit]" },
+        { "type": "waitForText", "value": "Enter a valid email address or username" }
+      ],
+      "expectedNetwork": [
+        { "urlIncludes": "/api/csrf", "method": "GET", "status": 200 }
+      ],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "control-plane-login-mfa-flow",
+      "surface": "control-plane",
+      "baseUrlEnv": "CONTROL_PLANE_URL",
+      "defaultBaseUrl": "http://127.0.0.1:3020",
+      "route": "/login",
+      "breakpoint": "desktop",
+      "theme": "light",
+      "targetSelector": "#login-mfa",
+      "coverage": ["interaction-flow", "network-waterfall"],
+      "mocks": [
+        { "url": "**/api/csrf", "status": 200, "body": { "token": "csrf_test_token" } },
+        { "url": "**/api/auth/login", "status": 401, "body": { "requireMfa": true } }
+      ],
+      "actions": [
+        { "type": "fill", "selector": "#login-email", "value": "owner@apexmail.ee" },
+        { "type": "fill", "selector": "#login-password", "value": "EnterprisePass123" },
+        { "type": "click", "selector": "button[type=submit]" },
+        { "type": "waitForText", "value": "MFA Verification" }
+      ],
+      "expectedNetwork": [
+        { "urlIncludes": "/api/csrf", "method": "GET", "status": 200 },
+        { "urlIncludes": "/api/auth/login", "method": "POST", "status": 401, "requestBodyIncludes": ["owner@apexmail.ee", "EnterprisePass123"] }
+      ],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    },
+    {
+      "id": "marketing-zola-api-console-touch-flow",
+      "surface": "marketing-zola",
+      "baseUrlEnv": "MARKETING_ZOLA_URL",
+      "defaultBaseUrl": "http://127.0.0.1:1111",
+      "route": "/api-console",
+      "breakpoint": "mobile",
+      "theme": "light",
+      "hasTouch": true,
+      "targetSelector": "pre",
+      "coverage": ["touch-flow", "interaction-flow", "response-rendering"],
+      "actions": [
+        { "type": "tap", "selector": "button:has-text(\"Send →\")" },
+        { "type": "waitForText", "value": "queued" }
+      ],
+      "artifacts": ["screenshot", "dom", "accessibility", "console", "network", "interaction", "keyboard", "analytics", "timing"]
+    }
+  ]
+}

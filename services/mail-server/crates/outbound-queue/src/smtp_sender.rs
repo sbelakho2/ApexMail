@@ -486,7 +486,7 @@ impl SmtpSender {
                 accepted.push(recipient.clone());
             } else {
                 rejected.push(recipient.clone());
-                warn!(recipient = %recipient, response = %response.trim(), "Recipient rejected");
+                warn!(recipient = %mail_common::pii::redact_email(&recipient), response = %response.trim(), "Recipient rejected");
             }
         }
         
