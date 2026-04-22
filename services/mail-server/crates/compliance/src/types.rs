@@ -26,7 +26,7 @@ impl RiskLevel {
         }
     }
 
-    /// Multiplier applied to base sending limits.
+/// Multiplier applied to base sending limits.
     pub fn limit_multiplier(&self) -> f64 {
         match self {
             Self::Low => 1.0,
@@ -36,13 +36,13 @@ impl RiskLevel {
         }
     }
 
-    /// Reassessment interval in seconds.
+/// Reassessment interval in seconds.
     pub fn reassessment_secs(&self) -> i64 {
         match self {
-            Self::Low => 86_400,      // 24h
-            Self::Medium => 21_600,   // 6h
-            Self::High => 3_600,      // 1h
-            Self::Critical => 900,    // 15m
+            Self::Low => 86_400, // 24h
+            Self::Medium => 21_600, // 6h
+            Self::High => 3_600, // 1h
+            Self::Critical => 900, // 15m
         }
     }
 }
@@ -308,7 +308,7 @@ pub struct AttachmentInfo {
     pub filename: String,
     pub content_type: String,
     pub size: usize,
-    /// First 16 bytes for magic-byte detection (base64 if transmitted).
+/// First 16 bytes for magic-byte detection (base64 if transmitted).
     pub header_bytes: Option<Vec<u8>>,
 }
 

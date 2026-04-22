@@ -1,8 +1,8 @@
 //! Health-check endpoints.
 //!
-//! - `GET /health/live`  — liveness probe (always 200)
-//! - `GET /health/ready` — readiness: DB + Redis
-//! - `GET /health/deep`  — comprehensive with response times
+//! - `GET /health/live` — liveness probe (always 200)
+//! - `GET /health/ready` — readiness:DB + Redis
+//! - `GET /health/deep` — comprehensive with response times
 
 use axum::extract::State;
 use axum::http::StatusCode;

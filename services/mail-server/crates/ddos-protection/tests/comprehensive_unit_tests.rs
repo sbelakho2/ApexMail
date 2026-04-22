@@ -1,10 +1,10 @@
 //! # Comprehensive Unit Tests for DDoS Protection System
 //!
-//! Tests all new modules: smtp_protection, adaptive, bot_detection, middleware
+//! Tests all new modules:smtp_protection, adaptive, bot_detection, middleware
 //! Plus regressions for the fingerprint lookup fix.
 
 // ═══════════════════════════════════════════════════════════════
-//  SMTP PROTECTION UNIT TESTS
+// SMTP PROTECTION UNIT TESTS
 // ═══════════════════════════════════════════════════════════════
 mod smtp_unit_tests {
     use ddos_protection::smtp_protection::*;
@@ -19,7 +19,7 @@ mod smtp_unit_tests {
         IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
     }
 
-    // ── Command Parsing ─────────────────────────────────────
+// ── Command Parsing ─────────────────────────────────────
 
     #[test]
     fn test_parse_ehlo() {
@@ -121,7 +121,7 @@ mod smtp_unit_tests {
         }
     }
 
-    // ── State Machine ───────────────────────────────────────
+// ── State Machine ───────────────────────────────────────
 
     #[test]
     fn test_full_session_flow() {
@@ -159,7 +159,7 @@ mod smtp_unit_tests {
         prot.process_command("RSET").unwrap();
         assert_eq!(prot.state(), SmtpState::GreetingReceived);
 
-        // Can start new transaction
+// Can start new transaction
         prot.process_command("MAIL FROM:<x@y.com>").unwrap();
         assert_eq!(prot.state(), SmtpState::MailFrom);
     }
@@ -170,7 +170,7 @@ mod smtp_unit_tests {
         let mut prot = SmtpConnectionProtection::new(ip4(), 50, config);
 
         prot.process_command("EHLO test.com").unwrap();
-        // Re-greeting should be OK
+// Re-greeting should be OK
         prot.process_command("EHLO other.com").unwrap();
         assert_eq!(prot.state(), SmtpState::GreetingReceived);
     }
@@ -224,7 +224,7 @@ mod smtp_unit_tests {
         assert_eq!(action, SmtpAction::Reject("503 Bad sequence of commands"));
     }
 
-    // ── Limits ──────────────────────────────────────────────
+// ── Limits ──────────────────────────────────────────────
 
     #[test]
     fn test_max_commands_enforced() {
@@ -264,7 +264,7 @@ mod smtp_unit_tests {
         assert!(matches!(prot.record_data(200), Err(SmtpProtectionError::MessageTooLarge)));
     }
 
-    // ── Tarpit ──────────────────────────────────────────────
+// ── Tarpit ──────────────────────────────────────────────
 
     #[test]
     fn test_tarpit_scales_with_invalids() {
@@ -276,23 +276,23 @@ mod smtp_unit_tests {
         };
         let mut prot = SmtpConnectionProtection::new(ip4(), 50, config);
 
-        // 2 invalids: at limit, no tarpit yet
+// 2 invalids:at limit, no tarpit yet
         prot.process_command("BOGUS1").unwrap();
         prot.process_command("BOGUS2").unwrap();
         assert!(prot.should_tarpit().is_none());
 
-        // 3rd invalid: 1 over limit -> 1 * 3s = 3s
+// 3rd invalid:1 over limit -> 1 * 3s = 3s
         prot.process_command("BOGUS3").unwrap();
         assert_eq!(prot.should_tarpit(), Some(Duration::from_secs(3)));
 
-        // 4th command: record_invalid() runs through the state machine first,
-        // incrementing invalid_commands to 4 (2 over limit), then tarpit fires.
-        // Progressive delay: (4 - 2) * 3s = 6s
+// 4th command:record_invalid runs through the state machine first,
+// incrementing invalid_commands to 4 (2 over limit), then tarpit fires.
+// Progressive delay:(4 - 2) * 3s = 6s
         let action = prot.process_command("BOGUS4").unwrap();
         assert_eq!(action, SmtpAction::Tarpit(Duration::from_secs(6)));
         assert_eq!(prot.should_tarpit(), Some(Duration::from_secs(6)));
 
-        // 5th command: invalid_commands = 5, 3 over limit → 3 * 3s = 9s (progressive escalation)
+// 5th command:invalid_commands = 5, 3 over limit → 3 * 3s = 9s (progressive escalation)
         let action = prot.process_command("BOGUS5").unwrap();
         assert_eq!(action, SmtpAction::Tarpit(Duration::from_secs(9)));
     }
@@ -309,14 +309,14 @@ mod smtp_unit_tests {
         assert!(prot.should_tarpit().is_none());
     }
 
-    // ── Slowloris ───────────────────────────────────────────
+// ── Slowloris ───────────────────────────────────────────
 
     #[test]
     fn test_slowloris_detects_slow_rate() {
         let config = SmtpProtectionConfig { min_data_rate_bps: 200, ..SmtpProtectionConfig::default() };
         let prot = SmtpConnectionProtection::new(ip4(), 50, config);
 
-        // 50 bytes in 2 seconds = 25 bps < 200 bps
+// 50 bytes in 2 seconds = 25 bps < 200 bps
         let result = prot.check_data_rate(50, Duration::from_secs(2));
         assert!(matches!(result, Err(SmtpProtectionError::SlowlorisDetected { .. })));
     }
@@ -326,7 +326,7 @@ mod smtp_unit_tests {
         let config = SmtpProtectionConfig { min_data_rate_bps: 100, ..SmtpProtectionConfig::default() };
         let prot = SmtpConnectionProtection::new(ip4(), 50, config);
 
-        // 5000 bytes in 2 seconds = 2500 bps > 100 bps
+// 5000 bytes in 2 seconds = 2500 bps > 100 bps
         assert!(prot.check_data_rate(5000, Duration::from_secs(2)).is_ok());
     }
 
@@ -335,11 +335,11 @@ mod smtp_unit_tests {
         let config = SmtpProtectionConfig { min_data_rate_bps: 100000, ..SmtpProtectionConfig::default() };
         let prot = SmtpConnectionProtection::new(ip4(), 50, config);
 
-        // 0 bytes but under 1 second: should pass (grace period)
+// 0 bytes but under 1 second:should pass (grace period)
         assert!(prot.check_data_rate(0, Duration::from_millis(500)).is_ok());
     }
 
-    // ── IPv6 Support ────────────────────────────────────────
+// ── IPv6 Support ────────────────────────────────────────
 
     #[test]
     fn test_ipv6_connection_protection() {
@@ -351,7 +351,7 @@ mod smtp_unit_tests {
         assert_eq!(prot.state(), SmtpState::GreetingReceived);
     }
 
-    // ── Connection Tracker ──────────────────────────────────
+// ── Connection Tracker ──────────────────────────────────
 
     #[test]
     fn test_tracker_register_and_unregister() {
@@ -412,7 +412,7 @@ mod smtp_unit_tests {
         assert_eq!(tracker.active_count(&ip2), 1);
     }
 
-    // ── Connection Age & Metadata ───────────────────────────
+// ── Connection Age & Metadata ───────────────────────────
 
     #[test]
     fn test_connection_metadata() {
@@ -425,7 +425,7 @@ mod smtp_unit_tests {
         assert!(prot.connection_age() < Duration::from_secs(1));
     }
 
-    // ── Error Display ───────────────────────────────────────
+// ── Error Display ───────────────────────────────────────
 
     #[test]
     fn test_error_display_messages() {
@@ -445,7 +445,7 @@ mod smtp_unit_tests {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  ADAPTIVE RATE LIMITER UNIT TESTS
+// ADAPTIVE RATE LIMITER UNIT TESTS
 // ═══════════════════════════════════════════════════════════════
 mod adaptive_unit_tests {
     use ddos_protection::adaptive::*;
@@ -510,12 +510,12 @@ mod adaptive_unit_tests {
     fn test_ema_moves_threshold_toward_ideal() {
         let limiter = AdaptiveRateLimiter::new(test_config());
 
-        // Feed stable 100 rps traffic
+// Feed stable 100 rps traffic
         for _ in 0..50 {
             limiter.update(obs(100.0));
         }
 
-        // Ideal = 100 * 1.5 = 150. After EMA from 5000, threshold should decrease.
+// Ideal = 100 * 1.5 = 150. After EMA from 5000, threshold should decrease.
         let t = limiter.current_threshold();
         assert!(t < 5000, "Threshold should have decreased from initial 5000: {}", t);
     }
@@ -528,20 +528,20 @@ mod adaptive_unit_tests {
         };
         let limiter = AdaptiveRateLimiter::new(config);
 
-        // Build baseline with slight variance
+// Build baseline with slight variance
         for i in 0..20 {
             limiter.update(obs(100.0 + (i as f64 % 5.0)));
         }
 
-        // One spike: not enough
+// One spike:not enough
         limiter.update(obs(2000.0));
         assert!(!limiter.is_under_attack());
 
-        // Two spikes: still not enough
+// Two spikes:still not enough
         limiter.update(obs(2000.0));
         assert!(!limiter.is_under_attack());
 
-        // Third spike: should trigger attack
+// Third spike:should trigger attack
         limiter.update(obs(2000.0));
         assert!(limiter.is_under_attack());
     }
@@ -608,7 +608,7 @@ mod adaptive_unit_tests {
 
         std::thread::sleep(Duration::from_millis(20));
 
-        // Normal traffic should trigger recovery
+// Normal traffic should trigger recovery
         for _ in 0..5 {
             limiter.update(obs(100.0));
         }
@@ -637,7 +637,7 @@ mod adaptive_unit_tests {
         };
         let limiter = AdaptiveRateLimiter::new(config);
 
-        // Feed very low traffic to drive threshold down
+// Feed very low traffic to drive threshold down
         for _ in 0..30 {
             limiter.update(obs(1.0));
         }
@@ -654,7 +654,7 @@ mod adaptive_unit_tests {
         };
         let limiter = AdaptiveRateLimiter::new(config);
 
-        // Initial = 500/2 = 250, feed high traffic
+// Initial = 500/2 = 250, feed high traffic
         for _ in 0..30 {
             limiter.update(obs(10000.0));
         }
@@ -664,7 +664,7 @@ mod adaptive_unit_tests {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  BOT DETECTION UNIT TESTS
+// BOT DETECTION UNIT TESTS
 // ═══════════════════════════════════════════════════════════════
 mod bot_detection_unit_tests {
     use ddos_protection::bot_detection::*;
@@ -696,7 +696,7 @@ mod bot_detection_unit_tests {
 
         let assessment = behavior.analyze();
         assert!(assessment.has_sufficient_data);
-        // Single endpoint → high concentration
+// Single endpoint → high concentration
         assert!(
             assessment.signals.endpoint_concentration > 0.5,
             "Single endpoint should have high concentration: {}",
@@ -747,7 +747,7 @@ mod bot_detection_unit_tests {
         }
 
         let assessment = behavior.analyze();
-        // Zero errors after 60 requests is somewhat suspicious
+// Zero errors after 60 requests is somewhat suspicious
         assert!(
             assessment.signals.error_anomaly >= 0.4,
             "Zero errors after many requests should be somewhat suspicious: {}",
@@ -831,14 +831,14 @@ mod bot_detection_unit_tests {
             behavior.record_request(ep, "GET", false);
         }
 
-        // Window sized to 5, so inter_arrival_times should be bounded
-        // Even though total_count is 20
+// Window sized to 5, so inter_arrival_times should be bounded
+// Even though total_count is 20
         assert_eq!(behavior.total_count(), 20);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MIDDLEWARE UNIT TESTS
+// MIDDLEWARE UNIT TESTS
 // ═══════════════════════════════════════════════════════════════
 mod middleware_unit_tests {
     use ddos_protection::middleware::*;
@@ -881,25 +881,25 @@ mod middleware_unit_tests {
     fn test_ip_extraction_priority() {
         let direct: IpAddr = "127.0.0.1".parse().unwrap();
 
-        // X-Real-IP first
+// X-Real-IP first
         assert_eq!(
             extract_client_ip(Some("10.0.0.1"), Some("10.0.0.2"), Some("10.0.0.3"), direct),
             "10.0.0.1".parse::<IpAddr>().unwrap()
         );
 
-        // XFF second
+// XFF second
         assert_eq!(
             extract_client_ip(None, Some("10.0.0.2, 10.0.0.3"), Some("10.0.0.4"), direct),
             "10.0.0.2".parse::<IpAddr>().unwrap()
         );
 
-        // CF-Connecting-IP third
+// CF-Connecting-IP third
         assert_eq!(
             extract_client_ip(None, None, Some("10.0.0.4"), direct),
             "10.0.0.4".parse::<IpAddr>().unwrap()
         );
 
-        // Fallback to direct
+// Fallback to direct
         assert_eq!(extract_client_ip(None, None, None, direct), direct);
     }
 
@@ -907,13 +907,13 @@ mod middleware_unit_tests {
     fn test_ip_extraction_invalid_headers_fallthrough() {
         let direct: IpAddr = "192.168.1.1".parse().unwrap();
 
-        // Invalid X-Real-IP falls through to XFF
+// Invalid X-Real-IP falls through to XFF
         assert_eq!(
             extract_client_ip(Some("not-an-ip"), Some("10.0.0.2"), None, direct),
             "10.0.0.2".parse::<IpAddr>().unwrap()
         );
 
-        // All invalid falls to direct
+// All invalid falls to direct
         assert_eq!(
             extract_client_ip(Some("garbage"), Some("also,garbage"), Some("nope"), direct),
             direct
@@ -936,7 +936,7 @@ mod middleware_unit_tests {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  FINGERPRINT FIX REGRESSION TESTS
+// FINGERPRINT REGRESSION TESTS
 // ═══════════════════════════════════════════════════════════════
 mod fingerprint_fix_tests {
     use ddos_protection::config::ProtectorConfig;
@@ -976,11 +976,11 @@ mod fingerprint_fix_tests {
         let config = ProtectorConfig::default();
         let protector = DdosProtector::new(config).await.unwrap();
 
-        // Very short fingerprint (< 15 chars) is now flagged
+// Very short fingerprint (< 15 chars) is now flagged
         let ctx = make_ctx("2.3.4.5", Some("abc"));
         let _decision = protector.evaluate(&ctx).await;
-        // Reputation should have been decreased for this IP
-        // (We can't directly check reputation from outside, but at least it doesn't crash)
+// Reputation should have been decreased for this IP
+// (We can't directly check reputation from outside, but at least it doesn't crash)
     }
 
     #[tokio::test]

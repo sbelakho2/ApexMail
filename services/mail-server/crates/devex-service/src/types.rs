@@ -20,7 +20,7 @@ pub enum SdkLanguage {
 }
 
 impl SdkLanguage {
-    /// Human-readable display name.
+/// Human-readable display name.
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::Go => "Go",
@@ -32,7 +32,7 @@ impl SdkLanguage {
         }
     }
 
-    /// Primary package manager for this language.
+/// Primary package manager for this language.
     pub fn package_manager(&self) -> &'static str {
         match self {
             Self::Go => "go mod",
@@ -44,7 +44,7 @@ impl SdkLanguage {
         }
     }
 
-    /// All supported SDK languages.
+/// All supported SDK languages.
     pub fn all() -> &'static [SdkLanguage] {
         &[
             Self::Go,

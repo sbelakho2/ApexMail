@@ -20,7 +20,7 @@ impl<'a> SearchEngine<'a> {
         }
     }
 
-    /// Search by text query — generates embedding then searches.
+/// Search by text query — generates embedding then searches.
     pub async fn search_by_text(
         &self,
         query: &str,
@@ -37,7 +37,7 @@ impl<'a> SearchEngine<'a> {
         Ok(results)
     }
 
-    /// Search by raw vector — skips embedding generation.
+/// Search by raw vector — skips embedding generation.
     pub fn search_by_vector(
         &self,
         vector: &[f32],
@@ -53,7 +53,7 @@ impl<'a> SearchEngine<'a> {
         results
     }
 
-    /// Add text with auto-embedding to the store.
+/// Add text with auto-embedding to the store.
     pub async fn add_text(
         &self,
         text: String,
@@ -112,7 +112,7 @@ mod tests {
 
         let query = l2_normalize(vec![1.0, 0.0, 0.0]);
         let results = engine.search_by_vector(&query, 10, Some(0.5));
-        // Only "close" should pass the threshold
+// Only "close" should pass the threshold
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text, "close");
     }

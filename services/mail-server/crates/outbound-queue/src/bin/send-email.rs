@@ -15,7 +15,7 @@ use mail_proto::generated::{SendEmailRequest, QueueEmailRequest, GetQueueStatsRe
 #[command(name = "send-email")]
 #[command(about = "Send emails via ApexMail")]
 struct Cli {
-    /// Outbound service gRPC address
+/// Outbound service gRPC address
     #[arg(long, env = "OUTBOUND_GRPC_URL", default_value = "http://localhost:50052")]
     server: String,
     
@@ -25,61 +25,61 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Send an email immediately
+/// Send an email immediately
     Send {
-        /// From address
+/// From address
         #[arg(short, long)]
         from: String,
         
-        /// To address(es)
+/// To address(es)
         #[arg(short, long)]
         to: Vec<String>,
         
-        /// Subject
+/// Subject
         #[arg(short, long)]
         subject: String,
         
-        /// Text body
+/// Text body
         #[arg(long)]
         text: Option<String>,
         
-        /// HTML body
+/// HTML body
         #[arg(long)]
         html: Option<String>,
         
-        /// Read body from file
+/// Read body from file
         #[arg(long)]
         body_file: Option<PathBuf>,
     },
     
-    /// Queue an email for later delivery
+/// Queue an email for later delivery
     Queue {
-        /// From address
+/// From address
         #[arg(short, long)]
         from: String,
         
-        /// To address(es)
+/// To address(es)
         #[arg(short, long)]
         to: Vec<String>,
         
-        /// Subject
+/// Subject
         #[arg(short, long)]
         subject: String,
         
-        /// Text body
+/// Text body
         #[arg(long)]
         text: Option<String>,
         
-        /// HTML body
+/// HTML body
         #[arg(long)]
         html: Option<String>,
         
-        /// Campaign ID
+/// Campaign ID
         #[arg(long)]
         campaign_id: Option<String>,
     },
     
-    /// Get queue statistics
+/// Get queue statistics
     Stats,
 }
 
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     
     let cli = Cli::parse();
     
-    // Connect to the outbound service
+// Connect to the outbound service
     let channel = Channel::from_shared(cli.server.clone())?
         .connect()
         .await?;

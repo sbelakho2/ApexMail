@@ -1,6 +1,6 @@
 //! CSRF token endpoint.
 //!
-//! Migrated from: apps/web/src/app/api/csrf/route.ts
+//! Migrated from:apps/web/src/app/api/csrf/route.ts
 //! Generates CSRF tokens using HMAC-SHA256 with a server secret.
 
 use axum::extract::State;
@@ -31,12 +31,12 @@ async fn get_csrf_token(
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    // Generate a unique nonce with timestamp
+// Generate a unique nonce with timestamp
     let now = chrono::Utc::now().timestamp_millis();
     let random = uuid::Uuid::new_v4();
     let nonce = format!("{now}:{random}");
 
-    // Sign with CSRF secret
+// Sign with CSRF secret
     let mut mac = Hmac::<Sha256>::new_from_slice(state.config.csrf_secret.as_bytes())
         .map_err(|_| ApiError::Internal("CSRF HMAC key error".into()))?;
     mac.update(nonce.as_bytes());
@@ -51,7 +51,7 @@ async fn get_csrf_token(
         nonce.as_bytes(),
     ));
 
-    // Set CSRF cookie alongside JSON response
+// Set CSRF cookie alongside JSON response
     let cookie_value = format!(
         "csrf_token={token}; HttpOnly; Path=/; Max-Age=3600; SameSite=Strict{}",
         if state.config.environment.is_production() { "; Secure" } else { "" }
@@ -89,14 +89,14 @@ pub fn validate_csrf_token(
     }
     let (sig_part, nonce_part) = (parts[0], parts[1]);
 
-    // Decode nonce
+// Decode nonce
     let nonce_bytes = base64::Engine::decode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
         nonce_part,
     )
     .map_err(|_| ApiError::Forbidden("invalid CSRF token".into()))?;
 
-    // Verify signature
+// Verify signature
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .map_err(|_| ApiError::Internal("CSRF HMAC key error".into()))?;
     mac.update(&nonce_bytes);
@@ -110,7 +110,7 @@ pub fn validate_csrf_token(
     mac.verify_slice(&sig_bytes)
         .map_err(|_| ApiError::Forbidden("CSRF token validation failed".into()))?;
 
-    // Optionally check timestamp (within 1 hour)
+// Optionally check timestamp (within 1 hour)
     if let Ok(nonce_str) = std::str::from_utf8(&nonce_bytes) {
         if let Some(ts_str) = nonce_str.split(':').next() {
             if let Ok(ts) = ts_str.parse::<i64>() {
@@ -151,8 +151,8 @@ mod tests {
         );
 
         let token = format!("{nonce_b64}.{sig_b64}");
-        // Cannot validate because timestamp check (12345 ms ago) is expired
-        // so just check the format
+// Cannot validate because timestamp check (12345 ms ago) is expired
+// so just check the format
         assert!(token.contains('.'));
     }
 }

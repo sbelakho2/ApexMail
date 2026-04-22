@@ -1,37 +1,36 @@
 //! # ApexMail DDoS Protection System
 //!
-//! Multi-layer DDoS protection providing:
-//!
-//! - **Layer 1**: Network edge protection (XDP/eBPF packet filtering)
-//! - **Layer 2**: Protocol-level defense (TLS fingerprinting, protocol validation)
-//! - **Layer 3**: Application-level protection (rate limiting, challenges)
-//! - **Layer 4**: Behavioral analysis & ML (anomaly detection, adaptive thresholds)
-//! - **Layer 5**: Distributed coordination (cross-region threat intel, CRDT rate limits)
+//! Multi-layer DDoS protection providing://!
+//! - **Layer 1**:Network edge protection (XDP/eBPF packet filtering)
+//! - **Layer 2**:Protocol-level defense (TLS fingerprinting, protocol validation)
+//! - **Layer 3**:Application-level protection (rate limiting, challenges)
+//! - **Layer 4**:Behavioral analysis & ML (anomaly detection, adaptive thresholds)
+//! - **Layer 5**:Distributed coordination (cross-region threat intel, CRDT rate limits)
 //!
 //! ## Quick Start
 //!
 //! ```rust,ignore
 //! use ddos_protection::{DdosProtector, ProtectorConfig};
 //!
-//! let config = ProtectorConfig::default();
+//! let config = ProtectorConfig::default;
 //! let protector = DdosProtector::new(config).await?;
 //!
 //! // In your middleware
 //! match protector.evaluate(&request_context).await {
-//!     ProtectionDecision::Allow => { /* proceed */ }
-//!     ProtectionDecision::Challenge(c) => { /* issue challenge */ }
-//!     ProtectionDecision::RateLimit { retry_after } => { /* 429 */ }
-//!     ProtectionDecision::Block => { /* 403 */ }
+//! ProtectionDecision::Allow => { /* proceed */ }
+//! ProtectionDecision::Challenge(c) => { /* issue challenge */ }
+//! ProtectionDecision::RateLimit { retry_after } => { /* 429 */ }
+//! ProtectionDecision::Block => { /* 403 */ }
 //! }
 //! ```
 //!
 //! ## Feature Flags
 //!
-//! - `core` (default): Basic rate limiting and fingerprinting
-//! - `ml`: Machine learning anomaly detection (Isolation Forest)
-//! - `challenges`: Proof-of-work and JS challenges
-//! - `coordinator`: Cross-region threat intelligence sharing
-//! - `full`: All features enabled
+//! - `core` (default):Basic rate limiting and fingerprinting
+//! - `ml`:Machine learning anomaly detection (Isolation Forest)
+//! - `challenges`:Proof-of-work and JS challenges
+//! - `coordinator`:Cross-region threat intelligence sharing
+//! - `full`:All features enabled
 
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
@@ -89,83 +88,83 @@ pub use fingerprint::{Ja4Fingerprint, Http2Fingerprint};
 pub struct DdosProtector {
     config: Arc<ProtectorConfig>,
     
-    /// Per-IP reputation scores
+/// Per-IP reputation scores
     reputation_db: Arc<DashMap<IpAddr, ReputationScore>>,
     
-    /// Session tracking for behavioral analysis
+/// Session tracking for behavioral analysis
     session_tracker: Arc<SessionTracker>,
     
-    /// Cost-based rate limiter
+/// Cost-based rate limiter
     cost_limiter: Arc<CostBasedLimiter>,
     
-    /// IP blocklist with expiration
+/// IP blocklist with expiration
     blocklist: Arc<DashMap<IpAddr, BlockEntry>>,
     
-    /// Attack state
+/// Attack state
     attack_state: Arc<RwLock<AttackState>>,
     
     #[cfg(feature = "ml")]
-    /// Anomaly detector
+/// Anomaly detector
     anomaly_detector: Option<Arc<ml::IsolationForest>>,
     
     #[cfg(feature = "challenges")]
-    /// Challenge manager
+/// Challenge manager
     challenge_manager: Option<Arc<challenges::ChallengeManager>>,
     
     #[cfg(feature = "coordinator")]
-    /// Threat intelligence service
+/// Threat intelligence service
     threat_intel: Option<Arc<coordinator::ThreatIntelService>>,
 }
 
 /// Block list entry
 #[derive(Debug, Clone)]
 pub struct BlockEntry {
-    /// Reason for blocking
+/// Reason for blocking
     pub reason: String,
-    /// When this block expires
+/// When this block expires
     pub expires_at: std::time::Instant,
-    /// Source region (if from distributed intel)
+/// Source region (if from distributed intel)
     pub from_region: Option<String>,
 }
 
 /// Global attack state
 #[derive(Debug, Clone, Default)]
 pub struct AttackState {
-    /// Is the system under active attack?
+/// Is the system under active attack?
     pub is_under_attack: bool,
-    /// When the attack started
+/// When the attack started
     pub attack_started: Option<std::time::Instant>,
-    /// Attack type (if identified)
+/// Attack type (if identified)
     pub attack_type: Option<String>,
-    /// Current mitigation level (0-5)
+/// Current mitigation level (0-5)
     pub mitigation_level: u8,
 }
 
 /// Context for evaluating a request
 #[derive(Debug, Clone)]
 pub struct RequestContext {
-    /// Client IP address
+/// Client IP address
     pub ip: IpAddr,
-    /// Request path/endpoint
+/// Request path/endpoint
     pub path: String,
-    /// HTTP method
+/// HTTP method
     pub method: String,
-    /// TLS fingerprint (JA4)
+/// TLS fingerprint (JA4)
     pub tls_fingerprint: Option<String>,
-    /// HTTP/2 fingerprint
+/// HTTP/2 fingerprint
     pub h2_fingerprint: Option<String>,
-    /// User-Agent header
+/// User-Agent header
     pub user_agent: Option<String>,
-    /// Request body size
+/// Request body size
     pub body_size: usize,
-    /// Tenant ID (if authenticated)
+/// Tenant ID (if authenticated)
     pub tenant_id: Option<String>,
-    /// API key ID (if authenticated)
+/// API key ID (if authenticated)
     pub api_key_id: Option<String>,
 }
 
 impl DdosProtector {
-    /// Create a new DDoS protector with the given configuration
+/// Create a new DDoS protector with the given configuration
     pub async fn new(config: ProtectorConfig) -> Result<Self, DdosError> {
         let config = Arc::new(config);
         
@@ -195,14 +194,14 @@ impl DdosProtector {
         })
     }
     
-    /// Evaluate a request and return protection decision
+/// Evaluate a request and return protection decision
     pub async fn evaluate(&self, ctx: &RequestContext) -> ProtectionDecision {
-        // Increment metrics
+// Increment metrics
         if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
             metric.with_label_values(&["evaluated", "all"]).inc();
         }
         
-        // Layer 0: Check blocklist
+// Layer 0:Check blocklist
         if self.is_blocked(&ctx.ip) {
             if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
                 metric.with_label_values(&["blocked", "blocklist"]).inc();
@@ -210,18 +209,18 @@ impl DdosProtector {
             return ProtectionDecision::Block;
         }
         
-        // Layer 1: Check fingerprint (if available)
+// Layer 1:Check fingerprint (if available)
         if let Some(ref fp) = ctx.tls_fingerprint {
             if self.is_suspicious_fingerprint(fp) {
                 self.decrease_reputation(&ctx.ip, 10);
             }
         }
         
-        // Re-read reputation after potential fingerprint penalty so the
-        // current request's decisions use the updated score.
+// Re-read reputation after potential fingerprint penalty so the
+// current request's decisions use the updated score.
         let reputation = self.get_or_create_reputation(&ctx.ip);
         
-        // Layer 2: Cost-based rate limiting
+// Layer 2:Cost-based rate limiting
         let cost_decision = self.cost_limiter.check(
             &ctx.tenant_id.clone().unwrap_or_default(),
             &ctx.path,
@@ -244,35 +243,35 @@ impl DdosProtector {
             cost_based::CostDecision::Allowed { .. } => {}
         }
         
-        // Layer 3: Session tracking and behavioral analysis
+// Layer 3:Session tracking and behavioral analysis
         let session = self.session_tracker.track(ctx);
         #[cfg(not(feature = "ml"))]
         let _ = &session;
         
-        // ML anomaly detection (uses anomaly_score, not a predict() method)
+// ML anomaly detection (uses anomaly_score, not a predict method)
         #[cfg(feature = "ml")]
         if let Some(ref detector) = self.anomaly_detector {
-            // Build fully-populated feature vector from session and request context.
-            // Previously several fields were left as 0.0 which degraded the
-            // Isolation Forest's decision boundary — see security audit report.
+// Build fully-populated feature vector from session and request context.
+// Previously several fields were left as 0.0 which degraded the
+// Isolation Forest's decision boundary — see security audit report.
             let iat_cov = session.inter_arrival_cov;
-            // Estimate IAT mean from requests_per_minute: if RPM > 0 then
-            // mean IAT (ms) ≈ 60_000 / RPM, else default to 1000 ms.
+// Estimate IAT mean from requests_per_minute:if RPM > 0 then
+// mean IAT (ms) ≈ 60_000 / RPM, else default to 1000 ms.
             let iat_mean_ms = if session.requests_per_minute > 0.0 {
                 60_000.0 / session.requests_per_minute
             } else {
                 1000.0
             };
-            // Estimate IAT variance from CoV: variance = (CoV * mean)^2
+// Estimate IAT variance from CoV:variance = (CoV * mean)^2
             let iat_variance_ms = (iat_cov * iat_mean_ms).powi(2);
 
-            // Estimate bytes_rate from body_size and request rate
+// Estimate bytes_rate from body_size and request rate
             let bytes_rate = ctx.body_size as f64 * (session.requests_per_minute / 60.0);
 
-            // Size variance: use CoV as a proxy (low CoV = uniform sizes = suspicious)
+// Size variance:use CoV as a proxy (low CoV = uniform sizes = suspicious)
             let size_variance = iat_cov * ctx.body_size as f64;
 
-            // Time-of-day factor: distance from business hours (9-17)
+// Time-of-day factor:distance from business hours (9-17)
             let hour = chrono::Utc::now().hour() as f64;
             let time_factor = if (9.0..17.0).contains(&hour) {
                 0.0 // Business hours — normal
@@ -304,16 +303,16 @@ impl DdosProtector {
             if anomaly_score > self.config.anomaly_threshold {
                 self.decrease_reputation(&ctx.ip, 20);
                 
-                // Issue challenge for high anomaly scores with adaptive difficulty.
-                // Under active attack (high anomaly volume), increase PoW difficulty
-                // to make brute-force infeasible. During normal traffic, use the
-                // configured baseline difficulty.
+// Issue challenge for high anomaly scores with adaptive difficulty.
+// Under active attack (high anomaly volume), increase PoW difficulty
+// to make brute-force infeasible. During normal traffic, use the
+// configured baseline difficulty.
                 #[cfg(feature = "challenges")]
                 if let Some(ref cm) = self.challenge_manager {
                     let challenge = cm.select_challenge(anomaly_score);
-                    // Adaptive PoW: scale difficulty based on anomaly severity.
-                    // Base difficulty from config (e.g. 16 bits). Under heavy
-                    // attack (anomaly_score near 1.0), add up to 8 extra bits.
+// Adaptive PoW:scale difficulty based on anomaly severity.
+// Base difficulty from config (e.g. 16 bits). Under heavy
+// attack (anomaly_score near 1.0), add up to 8 extra bits.
                     let attack_multiplier = ((anomaly_score - self.config.anomaly_threshold)
                         / (1.0 - self.config.anomaly_threshold))
                         .clamp(0.0, 1.0);
@@ -340,7 +339,7 @@ impl DdosProtector {
             }
         }
         
-        // Layer 4: Reputation-based decisions
+// Layer 4:Reputation-based decisions
         if reputation.score < self.config.block_threshold {
             self.block_ip(ctx.ip, Duration::from_secs(3600), "low_reputation".to_string());
             if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
@@ -352,7 +351,7 @@ impl DdosProtector {
         #[cfg(feature = "challenges")]
         if reputation.score < self.config.challenge_threshold {
             if let Some(ref _cm) = self.challenge_manager {
-                // Convert reputation to risk score (lower reputation = higher risk)
+// Convert reputation to risk score (lower reputation = higher risk)
                 let risk_score = 1.0 - (reputation.score as f64 / 100.0);
                 if risk_score > 0.3 {
                     if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
@@ -374,14 +373,14 @@ impl DdosProtector {
             }
         }
         
-        // Allowed
+// Allowed
         if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
             metric.with_label_values(&["allowed", "ok"]).inc();
         }
         ProtectionDecision::Allow
     }
 
-    /// Evaluate request and emit a normalized security event.
+/// Evaluate request and emit a normalized security event.
     pub async fn evaluate_with_event(
         &self,
         ctx: &RequestContext,
@@ -429,20 +428,20 @@ impl DdosProtector {
         (decision, event)
     }
     
-    /// Check if an IP is blocked
+/// Check if an IP is blocked
     pub fn is_blocked(&self, ip: &IpAddr) -> bool {
         if let Some(entry) = self.blocklist.get(ip) {
             if entry.expires_at > std::time::Instant::now() {
                 return true;
             }
-            // Expired, remove
+// Expired, remove
             drop(entry);
             self.blocklist.remove(ip);
         }
         false
     }
     
-    /// Block an IP address
+/// Block an IP address
     pub fn block_ip(&self, ip: IpAddr, duration: Duration, reason: String) {
         let entry = BlockEntry {
             reason,
@@ -458,7 +457,7 @@ impl DdosProtector {
         
         #[cfg(feature = "coordinator")]
         if let Some(ref intel) = self.threat_intel {
-            // Async publish to other regions
+// Async publish to other regions
             let intel = intel.clone();
             let ip_str = ip.to_string();
             tokio::spawn(async move {
@@ -469,7 +468,7 @@ impl DdosProtector {
         }
     }
     
-    /// Get or create reputation for an IP
+/// Get or create reputation for an IP
     fn get_or_create_reputation(&self, ip: &IpAddr) -> ReputationScore {
         self.reputation_db
             .entry(*ip)
@@ -477,7 +476,7 @@ impl DdosProtector {
             .clone()
     }
     
-    /// Decrease reputation score for an IP
+/// Decrease reputation score for an IP
     fn decrease_reputation(&self, ip: &IpAddr, amount: u8) {
         let mut entry = self
             .reputation_db
@@ -487,24 +486,22 @@ impl DdosProtector {
         debug!(%ip, new_score = entry.score, "Reputation decreased");
     }
     
-    /// Check if a TLS fingerprint is suspicious.
-    ///
-    /// Parses the JA4 fingerprint and checks for anomalies:
-    /// - Very few cipher suites (< 5)
-    /// - Very few extensions (< 3)
-    /// - Missing ALPN
-    /// - Known-malicious fingerprint patterns
+/// Check if a TLS fingerprint is suspicious.
+/// Parses the JA4 fingerprint and checks for anomalies:/// - Very few cipher suites (< 5)
+/// - Very few extensions (< 3)
+/// - Missing ALPN
+/// - Known-malicious fingerprint patterns
     fn is_suspicious_fingerprint(&self, fingerprint: &str) -> bool {
-        // Parse the JA4 fingerprint
+// Parse the JA4 fingerprint
         if let Some(parsed) = fingerprint::Ja4Fingerprint::parse(fingerprint) {
-            // Check for anomalous characteristics
+// Check for anomalous characteristics
             if parsed.is_anomalous() {
                 return true;
             }
         }
 
-        // Check for known-bad fingerprint patterns
-        // Extremely short fingerprints are suspicious (custom/minimal TLS stacks)
+// Check for known-bad fingerprint patterns
+// Extremely short fingerprints are suspicious (custom/minimal TLS stacks)
         if fingerprint.len() < 15 {
             return true;
         }
@@ -512,17 +509,17 @@ impl DdosProtector {
         false
     }
     
-    /// Check if currently under attack
+/// Check if currently under attack
     pub fn is_under_attack(&self) -> bool {
         self.attack_state.read().is_under_attack
     }
     
-    /// Get current attack state
+/// Get current attack state
     pub fn attack_state(&self) -> AttackState {
         self.attack_state.read().clone()
     }
     
-    /// Background cleanup task
+/// Background cleanup task
     pub async fn run_cleanup_loop(&self, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
         
@@ -531,7 +528,7 @@ impl DdosProtector {
             
             let now = std::time::Instant::now();
             
-            // Cleanup expired blocks
+// Cleanup expired blocks
             let mut expired = Vec::new();
             for entry in self.blocklist.iter() {
                 if entry.expires_at < now {
@@ -545,22 +542,22 @@ impl DdosProtector {
                 }
             }
             
-            // Cleanup old sessions
+// Cleanup old sessions
             self.session_tracker.cleanup(now);
             
-            // Decay reputation scores toward neutral and evict stale entries
-            // Bug E-104 fix: Evict entries that have been at neutral for >1 hour
-            // to prevent unbounded memory growth from ephemeral IPs
+// Decay reputation scores toward neutral and evict stale entries
+// Bug E-104 fix:Evict entries that have been at neutral for >1 hour
+// to prevent unbounded memory growth from ephemeral IPs
             let eviction_threshold = Duration::from_secs(3600);
             self.reputation_db.retain(|_ip, entry| {
-                // Decay toward neutral
+// Decay toward neutral
                 if entry.score < 50 {
                     entry.score = (entry.score + 1).min(50);
                 } else if entry.score > 50 {
                     entry.score = (entry.score - 1).max(50);
                 }
                 
-                // Evict if: neutral score AND no significant activity AND old enough
+// Evict if:neutral score AND no significant activity AND old enough
                 let is_neutral = entry.score == 50;
                 let is_inactive = entry.total_requests < 10 
                     && entry.challenges_passed == 0 
@@ -571,7 +568,7 @@ impl DdosProtector {
                     && !entry.is_flagged;
                 let is_old = entry.first_seen.elapsed() > eviction_threshold;
                 
-                // Keep entry if it's NOT evictable
+// Keep entry if it's NOT evictable
                 !(is_neutral && is_inactive && is_old)
             });
             
@@ -588,15 +585,15 @@ impl DdosProtector {
 /// DDoS protection errors
 #[derive(Debug, thiserror::Error)]
 pub enum DdosError {
-    /// Configuration error
+/// Configuration error
     #[error("Configuration error: {0}")]
     Config(String),
     
-    /// Redis connection error
+/// Redis connection error
     #[error("Redis error: {0}")]
     Redis(String),
     
-    /// Internal error
+/// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
 }

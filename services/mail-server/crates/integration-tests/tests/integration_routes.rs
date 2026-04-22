@@ -29,7 +29,9 @@ mod devex {
     use devex_service::routes::{build_router, AppState};
 
     fn app() -> axum::Router {
-        build_router(AppState::from_config(DevExConfig::default()).expect("devex state"))
+        let mut state = AppState::from_config(DevExConfig::default()).expect("devex state");
+        state.service_token = "test-key".into();
+        build_router(state)
     }
 
     #[tokio::test]
@@ -46,7 +48,12 @@ mod devex {
     #[tokio::test]
     async fn sdks_returns_six_entries() {
         let resp = app()
-            .oneshot(Request::get("/sdks").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/sdks")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -63,15 +70,16 @@ mod devex {
         let resp = app()
             .oneshot(
                 Request::post("/webhooks/test")
+                    .header("x-api-key", "test-key")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        // The handler tries to actually POST to the URL, and will fail in tests
-        // (no network). We just verify the route exists and returns a response.
-        // Either 200 (if network is available) or 500 (network error) is fine.
+// The handler tries to actually POST to the URL, and will fail in tests
+// (no network). We just verify the route exists and returns a response.
+// Either 200 (if network is available) or 500 (network error) is fine.
         assert!(
             resp.status() == StatusCode::OK
                 || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
@@ -81,7 +89,12 @@ mod devex {
     #[tokio::test]
     async fn versions_returns_current_version() {
         let resp = app()
-            .oneshot(Request::get("/versions").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/versions")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -95,6 +108,7 @@ mod devex {
         let resp = app()
             .oneshot(
                 Request::get("/onboarding/checklist")
+                    .header("x-api-key", "test-key")
                     .header("x-tenant-id", "tenant-test")
                     .body(Body::empty())
                     .unwrap(),
@@ -120,13 +134,14 @@ mod observability {
 
     fn app() -> (axum::Router, Arc<MetricsCollector>) {
         let metrics = Arc::new(MetricsCollector::new(vec![0.1, 0.5, 1.0]));
-        let state = AppState::new(
+        let mut state = AppState::new(
             metrics.clone(),
             Arc::new(TraceCollector::new()),
             Arc::new(LogAggregator::new()),
             Arc::new(AlertManager::new()),
             Arc::new(SloMonitor::new()),
         );
+        state.service_token = "test-key".into();
         (router(state), metrics)
     }
 
@@ -150,6 +165,7 @@ mod observability {
         let resp = app
             .oneshot(
                 Request::get("/metrics/summary")
+                    .header("x-api-key", "test-key")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -166,7 +182,12 @@ mod observability {
     async fn alerts_list_empty_initially() {
         let (app, _) = app();
         let resp = app
-            .oneshot(Request::get("/alerts").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/alerts")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -178,7 +199,12 @@ mod observability {
     async fn slos_list_returns_200() {
         let (app, _) = app();
         let resp = app
-            .oneshot(Request::get("/slos").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/slos")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -199,19 +225,15 @@ mod ops {
     use ops_service::warmup::IpWarmupManager;
 
     async fn app() -> axum::Router {
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy(&std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://localhost/apexmail_test".to_string()
-            }))
+        let db = sqlx::PgPool::connect_lazy("postgres://localhost/unused")
             .expect("Failed to create lazy test database pool");
 
         router(AppState {
             db: db.clone(),
             health: HealthChecker::new(100),
-            incidents: IncidentManager::new(db.clone()),
+            incidents: IncidentManager::new_ephemeral(),
             slo: SloTracker::new(),
-            warmup: IpWarmupManager::new(db),
+            warmup: IpWarmupManager::new_ephemeral(),
             api_key: "test-key".into(),
             trust_cache: Arc::new(DashMap::new()),
         })
@@ -284,10 +306,7 @@ mod ops {
             )
             .await
             .unwrap();
-        assert!(
-            resp.status() == StatusCode::CREATED
-                || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
-        );
+        assert_eq!(resp.status(), StatusCode::CREATED);
     }
 }
 
@@ -297,7 +316,7 @@ mod ops {
 
 mod sales {
     use super::*;
-    use sqlx::PgPool;
+    use sqlx::postgres::PgPoolOptions;
     use sales_autopilot::calendar::CalendarService;
     use sales_autopilot::campaigns::CampaignManager;
     use sales_autopilot::crm::CrmService;
@@ -306,7 +325,11 @@ mod sales {
     use sales_autopilot::routes::{router, AppState};
 
     fn app() -> axum::Router {
-        let db = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool");
         router(AppState {
             db,
             crm: CrmService::new(),
@@ -314,6 +337,7 @@ mod sales {
             campaigns: CampaignManager::new(10),
             calendar: CalendarService::new(),
             inbox: InboxManager::new(),
+            service_token: "test-key".into(),
         })
     }
 
@@ -338,6 +362,7 @@ mod sales {
         let resp = app()
             .oneshot(
                 Request::post("/leads")
+                    .header("x-api-key", "test-key")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -352,7 +377,12 @@ mod sales {
     #[tokio::test]
     async fn list_leads_returns_200() {
         let resp = app()
-            .oneshot(Request::get("/leads").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/leads")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -364,21 +394,17 @@ mod sales {
         let resp = app()
             .oneshot(
                 Request::post("/enrich")
+                    .header("x-api-key", "test-key")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert!(
-            resp.status() == StatusCode::OK
-                || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
-        );
-        if resp.status() == StatusCode::OK {
-            let json = body_json(resp).await;
-            assert!(json["name"].is_string());
-            assert!(json["industry"].is_string());
-        }
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["name"].is_string());
+        assert!(json["industry"].is_string());
     }
 }
 
@@ -392,7 +418,10 @@ mod ai {
     use ai_service::types::{Model, ModelStatus, ModelType};
 
     fn app() -> axum::Router {
-        let state = default_app_state();
+        let mut state = default_app_state();
+        Arc::get_mut(&mut state)
+            .expect("exclusive app state")
+            .service_token = "test-key".into();
         state.inference.register_model(Model {
             id: "test-model".into(),
             name: "integration-test".into(),
@@ -422,6 +451,7 @@ mod ai {
         let resp = app()
             .oneshot(
                 Request::post("/content/score")
+                    .header("x-api-key", "test-key")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -442,6 +472,7 @@ mod ai {
         let resp = app()
             .oneshot(
                 Request::post("/predict")
+                    .header("x-api-key", "test-key")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -456,7 +487,12 @@ mod ai {
     #[tokio::test]
     async fn list_models_returns_registered_model() {
         let resp = app()
-            .oneshot(Request::get("/models").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/models")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -474,7 +510,6 @@ mod ai {
 
 mod billing {
     use billing_service::plans::default_plans;
-    use billing_service::types::SupportLevel;
 
     #[test]
     fn default_plans_contains_expected_tiers() {
@@ -515,7 +550,7 @@ mod billing {
     fn all_plans_have_positive_limits() {
         let plans = default_plans();
         for p in &plans {
-            // -1 means unlimited, otherwise must be positive
+// -1 means unlimited, otherwise must be positive
             assert!(p.email_limit > 0 || p.email_limit == -1, "{} email_limit", p.name);
             assert!(p.api_call_limit > 0 || p.api_call_limit == -1, "{} api_call_limit", p.name);
         }

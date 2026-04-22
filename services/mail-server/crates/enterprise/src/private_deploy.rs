@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::types::*;
 
-/// Private Deploy Service: dedicated/private cloud deployments, dedicated IPs, BYOIP
+/// Private Deploy Service:dedicated/private cloud deployments, dedicated IPs, BYOIP
 pub struct PrivateDeployService {
     db: PgPool,
 }
@@ -15,7 +15,7 @@ impl PrivateDeployService {
         Self { db }
     }
 
-    /// Create a new deployment
+/// Create a new deployment
     pub async fn create(
         &self, tenant_id: Uuid, name: &str, deployment_type: &str,
         region: Option<&str>, config: Option<serde_json::Value>,
@@ -36,7 +36,7 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get deployment by ID
+/// Get deployment by ID
     pub async fn get(&self, id: Uuid) -> Result<ApiResult<PrivateDeployment>, String> {
         let row = sqlx::query_as::<_, PrivateDeployment>(
             "SELECT * FROM ent_private_deployments WHERE id = $1"
@@ -52,7 +52,7 @@ impl PrivateDeployService {
         }
     }
 
-    /// List deployments for a tenant
+/// List deployments for a tenant
     pub async fn list(&self, tenant_id: Uuid) -> Result<ApiResult<Vec<PrivateDeployment>>, String> {
         let rows = sqlx::query_as::<_, PrivateDeployment>(
             "SELECT * FROM ent_private_deployments WHERE tenant_id = $1 ORDER BY created_at DESC"
@@ -65,7 +65,7 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Start provisioning a deployment
+/// Start provisioning a deployment
     pub async fn provision(&self, id: Uuid) -> Result<ApiResult<PrivateDeployment>, String> {
         let row = sqlx::query_as::<_, PrivateDeployment>(
             "UPDATE ent_private_deployments SET status = 'provisioning', updated_at = NOW()
@@ -85,7 +85,7 @@ impl PrivateDeployService {
         }
     }
 
-    /// Check deployment health
+/// Check deployment health
     pub async fn health_check(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let deploy = sqlx::query_as::<_, PrivateDeployment>(
             "SELECT * FROM ent_private_deployments WHERE id = $1"
@@ -110,7 +110,7 @@ impl PrivateDeployService {
             "unknown"
         };
 
-        // Update health status in DB
+// Update health status in DB
         if let Err(e) = sqlx::query(
             "UPDATE ent_private_deployments SET last_health_check_at = NOW(), health_status = $2 WHERE id = $1"
         )
@@ -128,7 +128,7 @@ impl PrivateDeployService {
         })))
     }
 
-    /// Allocate a dedicated IP
+/// Allocate a dedicated IP
     pub async fn allocate_dedicated_ip(
         &self, tenant_id: Uuid, deployment_id: Option<Uuid>, ip_address: &str,
     ) -> Result<ApiResult<DedicatedIP>, String> {
@@ -147,7 +147,7 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Allocate a dedicated IP from the available pool
+/// Allocate a dedicated IP from the available pool
     pub async fn allocate_ip_from_pool(
         &self,
         tenant_id: Uuid,
@@ -155,8 +155,8 @@ impl PrivateDeployService {
         region: Option<&str>,
         prefer_warmed: bool,
     ) -> Result<ApiResult<DedicatedIP>, String> {
-        // #269: Use hash-based lock ID to avoid UUID-to-i64 truncation collision
-        // XOR the upper and lower 64 bits to create a more collision-resistant lock ID
+// #269:Use hash-based lock ID to avoid UUID-to-i64 truncation collision
+// XOR the upper and lower 64 bits to create a more collision-resistant lock ID
         let uuid_bytes = tenant_id.as_u128();
         let upper = (uuid_bytes >> 64) as i64;
         let lower = uuid_bytes as i64;
@@ -164,14 +164,14 @@ impl PrivateDeployService {
 
         let mut tx = self.db.begin().await.map_err(|e| format!("Begin transaction: {e}"))?;
 
-        // Acquire advisory lock
+// Acquire advisory lock
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("Advisory lock: {e}"))?;
 
-        // Find an available IP from the pool, preferring warmed IPs if requested
+// Find an available IP from the pool, preferring warmed IPs if requested
         let query = if prefer_warmed {
             "SELECT id, ip_address, region, datacenter, provider, reputation_score, ptr_record
              FROM ip_pool_available
@@ -207,7 +207,7 @@ impl PrivateDeployService {
             }
         };
 
-        // Mark the pool IP as allocated
+// Mark the pool IP as allocated
         sqlx::query(
             "UPDATE ip_pool_available
              SET status = 'allocated', allocated_to = $1, allocated_at = NOW(), updated_at = NOW()
@@ -219,7 +219,7 @@ impl PrivateDeployService {
             .await
             .map_err(|e| format!("Update pool IP: {e}"))?;
 
-        // Create the dedicated IP record for the tenant
+// Create the dedicated IP record for the tenant
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, DedicatedIP>(
             "INSERT INTO ent_dedicated_ips (
@@ -255,11 +255,11 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Release a dedicated IP back to the pool
+/// Release a dedicated IP back to the pool
     pub async fn release_ip_to_pool(&self, tenant_id: Uuid, ip_id: Uuid) -> Result<ApiResult<()>, String> {
         let mut tx = self.db.begin().await.map_err(|e| format!("Begin transaction: {e}"))?;
 
-        // Get the IP address
+// Get the IP address
         let ip_row: Option<(String,)> = sqlx::query_as(
             "SELECT ip_address::text FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2"
         )
@@ -276,7 +276,7 @@ impl PrivateDeployService {
             }
         };
 
-        // Release in pool
+// Release in pool
         sqlx::query(
             "UPDATE ip_pool_available
              SET status = 'available', allocated_to = NULL, allocated_at = NULL, updated_at = NOW()
@@ -288,7 +288,7 @@ impl PrivateDeployService {
             .await
             .map_err(|e| format!("Update pool IP: {e}"))?;
 
-        // Remove from dedicated IPs
+// Remove from dedicated IPs
         sqlx::query("DELETE FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2")
             .bind(ip_id)
             .bind(tenant_id)
@@ -302,7 +302,7 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(()))
     }
 
-    /// Get available IP count by region
+/// Get available IP count by region
     pub async fn get_available_ip_count(&self, region: Option<&str>) -> Result<ApiResult<AvailableIpCount>, String> {
         let counts: Vec<(String, i64)> = sqlx::query_as(
             "SELECT region, COUNT(*) as count
@@ -321,7 +321,7 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(AvailableIpCount { total, by_region }))
     }
 
-    /// Get dedicated IP by ID
+/// Get dedicated IP by ID
     pub async fn get_dedicated_ip(&self, id: Uuid) -> Result<ApiResult<DedicatedIP>, String> {
         let row = sqlx::query_as::<_, DedicatedIP>(
             "SELECT * FROM ent_dedicated_ips WHERE id = $1"
@@ -337,7 +337,7 @@ impl PrivateDeployService {
         }
     }
 
-    /// List dedicated IPs for a tenant
+/// List dedicated IPs for a tenant
     pub async fn list_dedicated_ips(
         &self,
         tenant_id: Uuid,
@@ -357,7 +357,7 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Get IP reputation
+/// Get IP reputation
     pub async fn get_ip_reputation(&self, ip_address: &str) -> Result<ApiResult<IPReputation>, String> {
         let row: Option<(Option<f64>, i64, i32, i32, bool)> = sqlx::query_as(
             "SELECT reputation_score, emails_sent_total, bounces_total, complaints_total, blocklisted
@@ -385,7 +385,7 @@ impl PrivateDeployService {
         }
     }
 
-    /// Register a BYOIP range
+/// Register a BYOIP range
     pub async fn register_byoip(&self, tenant_id: Uuid, cidr_block: &str) -> Result<ApiResult<BYOIPRange>, String> {
         let id = Uuid::new_v4();
         let verification_token = crate::sso::generate_random_token(32);
@@ -404,8 +404,8 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Verify BYOIP ownership
-    /// #253: Requires proof-of-control token match before marking verified.
+/// Verify BYOIP ownership
+/// #253:Requires proof-of-control token match before marking verified.
     pub async fn verify_byoip(&self, id: Uuid, verification_token: &str) -> Result<ApiResult<BYOIPRange>, String> {
         let row = sqlx::query_as::<_, BYOIPRange>(
             "UPDATE ent_byoip_ranges SET status = 'verified', verified_at = NOW()
@@ -475,17 +475,17 @@ pub fn generate_warming_plan() -> IPWarmingPlan {
 pub fn calculate_reputation(bounce_rate: f64, complaint_rate: f64, blocklisted: bool) -> f64 {
     let mut score = 100.0;
 
-    // Bounce penalty (weight: 0.3)
+// Bounce penalty (weight:0.3)
     if bounce_rate > 2.0 {
         score -= (bounce_rate - 2.0) * 10.0 * 0.3;
     }
 
-    // Complaint penalty (weight: 0.4)
+// Complaint penalty (weight:0.4)
     if complaint_rate > 0.1 {
         score -= (complaint_rate - 0.1) * 100.0 * 0.4;
     }
 
-    // Blocklist penalty (weight: 0.3)
+// Blocklist penalty (weight:0.3)
     if blocklisted {
         score -= 30.0;
     }
@@ -494,7 +494,7 @@ pub fn calculate_reputation(bounce_rate: f64, complaint_rate: f64, blocklisted: 
 }
 
 /// Shared HTTP client for health checks — avoids TLS handshake per request
-/// #270: Reuse client instead of creating new one per health check
+/// #270:Reuse client instead of creating new one per health check
 fn health_client() -> &'static reqwest::Client {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();

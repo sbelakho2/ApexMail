@@ -25,7 +25,7 @@ fn hash_ep(path: &str) -> u64 {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 1: SMTP command parsing throughput
+// PERF 1:SMTP command parsing throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -61,7 +61,7 @@ fn stress_smtp_command_parsing_throughput() {
         iterations, elapsed, ops_per_sec
     );
 
-    // Should parse at least 100K commands per second
+// Should parse at least 100K commands per second
     assert!(
         ops_per_sec > 100_000.0,
         "SMTP parsing too slow: {:.0} ops/sec",
@@ -70,7 +70,7 @@ fn stress_smtp_command_parsing_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 2: SMTP state machine throughput
+// PERF 2:SMTP state machine throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -86,7 +86,7 @@ fn stress_smtp_state_machine_throughput() {
             config,
         );
 
-        // Complete one full SMTP session
+// Complete one full SMTP session
         let _ = prot.process_command("EHLO test.com");
         let _ = prot.process_command("MAIL FROM:<a@b.com>");
         let _ = prot.process_command("RCPT TO:<c@d.com>");
@@ -112,7 +112,7 @@ fn stress_smtp_state_machine_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 3: Connection tracker concurrent registration throughput
+// PERF 3:Connection tracker concurrent registration throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -153,7 +153,7 @@ fn stress_connection_tracker_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 4: Adaptive rate limiter update throughput
+// PERF 4:Adaptive rate limiter update throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -185,7 +185,7 @@ fn stress_adaptive_limiter_update_throughput() {
         iterations, elapsed, ops_per_sec
     );
 
-    // Debug builds are ~10-20x slower than release; 1000 ops/sec is reasonable
+// Debug builds are ~10-20x slower than release; 1000 ops/sec is reasonable
     assert!(
         ops_per_sec > 1_000.0,
         "Adaptive update too slow: {:.0}/sec",
@@ -194,7 +194,7 @@ fn stress_adaptive_limiter_update_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 5: Bot detection analysis throughput
+// PERF 5:Bot detection analysis throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -207,13 +207,13 @@ fn stress_bot_detection_analysis_throughput() {
     for i in 0..iterations {
         let mut behavior = SessionBehavior::new(100);
 
-        // Record 50 requests
+// Record 50 requests
         for j in 0..50 {
             let ep = endpoints[(i + j) % endpoints.len()];
             behavior.record_request(ep, "GET", j % 10 == 0);
         }
 
-        // Run analysis
+// Run analysis
         let _assessment = behavior.analyze();
     }
 
@@ -233,7 +233,7 @@ fn stress_bot_detection_analysis_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 6: IP extraction throughput
+// PERF 6:IP extraction throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -263,7 +263,7 @@ fn stress_ip_extraction_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 7: RequestContextBuilder throughput
+// PERF 7:RequestContextBuilder throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -299,7 +299,7 @@ fn stress_request_context_builder_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 8: Reputation scoring throughput
+// PERF 8:Reputation scoring throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -336,7 +336,7 @@ fn stress_reputation_scoring_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 9: Full protector evaluation throughput
+// PERF 9:Full protector evaluation throughput
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -371,7 +371,7 @@ async fn stress_protector_evaluation_throughput() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 10: Concurrent connection tracker under contention
+// PERF 10:Concurrent connection tracker under contention
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -401,7 +401,7 @@ fn stress_connection_tracker_contention() {
                 ]);
 
                 let _ = tracker.register_connection(ip);
-                // Don't unregister — just measure registration throughput
+// Don't unregister — just measure registration throughput
             }
         }));
     }
@@ -427,7 +427,7 @@ fn stress_connection_tracker_contention() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 11: Adaptive limiter under sustained high-frequency updates
+// PERF 11:Adaptive limiter under sustained high-frequency updates
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -441,7 +441,7 @@ fn stress_adaptive_limiter_high_frequency() {
     let iterations = 5_000;
     let start = Instant::now();
 
-    // Simulate rapid-fire observations (as if from multiple threads feeding into one limiter)
+// Simulate rapid-fire observations (as if from multiple threads feeding into one limiter)
     for i in 0..iterations {
         let rps = if i % 1000 < 50 {
             5000.0 // Occasional spike
@@ -466,20 +466,20 @@ fn stress_adaptive_limiter_high_frequency() {
         iterations, elapsed, ops_per_sec
     );
 
-    // Debug builds are slower; 1000 ops/sec is reasonable
+// Debug builds are slower; 1000 ops/sec is reasonable
     assert!(
         ops_per_sec > 1_000.0,
         "Adaptive limiter too slow under high frequency: {:.0}/sec",
         ops_per_sec
     );
 
-    // Verify it's still in a consistent state
+// Verify it's still in a consistent state
     let threshold = limiter.current_threshold();
     assert!(threshold > 0, "Threshold should be positive after updates");
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 12: Bot detection with large session windows
+// PERF 12:Bot detection with large session windows
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -493,7 +493,7 @@ fn stress_bot_detection_large_windows() {
     for i in 0..iterations {
         let mut behavior = SessionBehavior::new(window_size);
 
-        // Fill the window
+// Fill the window
         for j in 0..window_size {
             let ep = endpoints[(i + j) % endpoints.len()];
             behavior.record_request(ep, "GET", j % 15 == 0);
@@ -519,7 +519,7 @@ fn stress_bot_detection_large_windows() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PERF 13: Sequence entropy computation scaling
+// PERF 13:Sequence entropy computation scaling
 // ═══════════════════════════════════════════════════════════════
 
 #[test]

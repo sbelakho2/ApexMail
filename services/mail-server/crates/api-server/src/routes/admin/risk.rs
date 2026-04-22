@@ -1,6 +1,6 @@
 //! Risk monitoring endpoints.
 //!
-//! Migrated from: apps/control-plane/src/app/api/risk/route.ts
+//! Migrated from:apps/control-plane/src/app/api/risk/route.ts
 
 use super::super::helpers::table_exists;
 use axum::extract::{Query, State};
@@ -90,7 +90,7 @@ async fn get_risk_tenants(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // Return thresholds if requested
+// Return thresholds if requested
     if params.resource.as_deref() == Some("thresholds") {
         let thresholds = THRESHOLDS.lock().ok()
             .and_then(|g| g.clone())
@@ -108,7 +108,7 @@ async fn get_risk_tenants(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-    // Build SQL dynamically based on available tables
+// Build SQL dynamically based on available tables
     let critical_alerts_expr = if has_reputation_alerts {
         "COALESCE(SUM(CASE WHEN ra.alert_type = 'critical' THEN 1 ELSE 0 END), 0)::text"
     } else {
@@ -256,7 +256,7 @@ async fn update_risk(
                 }
             }
 
-            // Best-effort persist to DB
+// Best-effort persist to DB
             if let Err(e) = sqlx::query(
                 "UPDATE tenants
                  SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(

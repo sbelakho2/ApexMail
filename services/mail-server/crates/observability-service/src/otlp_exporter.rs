@@ -8,9 +8,9 @@
 //! use observability_service::otlp_exporter::init_otlp_tracing;
 //!
 //! #[tokio::main]
-//! async fn main() {
-//!     let _guard = init_otlp_tracing("http://localhost:4317", "api-server")?;
-//!     // ... your application code
+//! async fn main {
+//! let _guard = init_otlp_tracing("http://localhost:4317", "api-server")?;
+//! // ... your application code
 //! }
 //! ```
 
@@ -18,30 +18,30 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     runtime,
-    trace::{BatchConfig, Config as TraceConfig, Sampler, TracerProvider as SdkTracerProvider},
+    trace::{BatchConfigBuilder, Config as TraceConfig, Sampler, TracerProvider as SdkTracerProvider},
     Resource,
 };
 use opentelemetry::KeyValue;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// OTLP exporter configuration.
 #[derive(Debug, Clone)]
 pub struct OtlpConfig {
-    /// OTLP collector endpoint (e.g., "http://localhost:4317")
+/// OTLP collector endpoint (e.g., "http://localhost:4317")
     pub endpoint: String,
-    /// Service name for span attribution
+/// Service name for span attribution
     pub service_name: String,
-    /// Optional service version
+/// Optional service version
     pub service_version: Option<String>,
-    /// Optional environment (e.g., "production", "staging")
+/// Optional environment (e.g., "production", "staging")
     pub environment: Option<String>,
-    /// Sampling ratio (0.0 to 1.0) — 1.0 = sample all traces
+/// Sampling ratio (0.0 to 1.0) — 1.0 = sample all traces
     pub sample_rate: f64,
-    /// Batch config: max export batch size
+/// Batch config:max export batch size
     pub batch_size: usize,
-    /// Batch config: max queue size before dropping spans
+/// Batch config:max queue size before dropping spans
     pub max_queue_size: usize,
-    /// Batch config: scheduled delay in milliseconds
+/// Batch config:scheduled delay in milliseconds
     pub scheduled_delay_ms: u64,
 }
 
@@ -79,14 +79,12 @@ impl Drop for TracingGuard {
 }
 
 /// Initialize OpenTelemetry OTLP tracing.
-///
 /// Returns a guard that must be held for the lifetime of the application.
 /// Dropping the guard will flush and shutdown the tracer.
-///
 /// # Errors
 /// Returns an error if the OTLP exporter cannot be initialized.
 pub fn init_otlp_tracing(config: OtlpConfig) -> Result<TracingGuard, Box<dyn std::error::Error + Send + Sync>> {
-    // Build resource attributes
+// Build resource attributes
     let mut attributes = vec![
         KeyValue::new("service.name", config.service_name.clone()),
     ];
@@ -101,18 +99,19 @@ pub fn init_otlp_tracing(config: OtlpConfig) -> Result<TracingGuard, Box<dyn std
     
     let resource = Resource::new(attributes);
 
-    // Configure the OTLP exporter
+// Configure the OTLP exporter
     let exporter = opentelemetry_otlp::new_exporter()
         .tonic()
         .with_endpoint(&config.endpoint);
 
-    // Configure batch processing
-    let batch_config = BatchConfig::default()
+// Configure batch processing
+    let batch_config = BatchConfigBuilder::default()
         .with_max_export_batch_size(config.batch_size)
         .with_max_queue_size(config.max_queue_size)
-        .with_scheduled_delay(std::time::Duration::from_millis(config.scheduled_delay_ms));
+        .with_scheduled_delay(std::time::Duration::from_millis(config.scheduled_delay_ms))
+        .build();
 
-    // Configure sampler
+// Configure sampler
     let sampler = if config.sample_rate >= 1.0 {
         Sampler::AlwaysOn
     } else if config.sample_rate <= 0.0 {
@@ -121,7 +120,7 @@ pub fn init_otlp_tracing(config: OtlpConfig) -> Result<TracingGuard, Box<dyn std
         Sampler::TraceIdRatioBased(config.sample_rate)
     };
 
-    // Build the tracer provider
+// Build the tracer provider
     let trace_config = TraceConfig::default()
         .with_sampler(sampler)
         .with_resource(resource);
@@ -133,11 +132,11 @@ pub fn init_otlp_tracing(config: OtlpConfig) -> Result<TracingGuard, Box<dyn std
         .with_batch_config(batch_config)
         .install_batch(runtime::Tokio)?;
 
-    // Create the tracing-opentelemetry layer
+// Create the tracing-opentelemetry layer
     let tracer = provider.tracer(config.service_name.clone());
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    // Combine with existing tracing subscriber
+// Combine with existing tracing subscriber
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
@@ -181,12 +180,24 @@ pub fn is_otlp_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned")
+    }
 
     #[test]
     fn test_config_default() {
-        // Clear env vars for predictable test
+        let _guard = env_lock();
+
+// Clear env vars for predictable test
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         std::env::remove_var("OTEL_SERVICE_NAME");
+        std::env::remove_var("OTEL_SAMPLE_RATE");
         
         let config = OtlpConfig::default();
         assert_eq!(config.endpoint, "http://localhost:4317");
@@ -196,6 +207,8 @@ mod tests {
 
     #[test]
     fn test_config_from_env() {
+        let _guard = env_lock();
+
         std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4317");
         std::env::set_var("OTEL_SERVICE_NAME", "test-service");
         std::env::set_var("OTEL_SAMPLE_RATE", "0.5");
@@ -205,7 +218,7 @@ mod tests {
         assert_eq!(config.service_name, "test-service");
         assert_eq!(config.sample_rate, 0.5);
         
-        // Clean up
+// Clean up
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         std::env::remove_var("OTEL_SERVICE_NAME");
         std::env::remove_var("OTEL_SAMPLE_RATE");
@@ -213,6 +226,8 @@ mod tests {
 
     #[test]
     fn test_is_otlp_enabled() {
+        let _guard = env_lock();
+
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         assert!(!is_otlp_enabled());
         

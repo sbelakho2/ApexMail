@@ -1,14 +1,12 @@
 //! OAuth / SSO initiation endpoints.
 //!
-//! Migrated from:
-//!   - apps/web/src/app/api/auth/sso/google/route.ts
-//!   - apps/web/src/app/api/auth/sso/github/route.ts
+//! Migrated from://! - apps/web/src/app/api/auth/sso/google/route.ts
+//! - apps/web/src/app/api/auth/sso/github/route.ts
 //!
 //! These endpoints generate OAuth state tokens, set state cookies,
 //! and redirect to the OAuth provider authorization URLs.
 
 use axum::extract::{Query, State};
-use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
@@ -34,14 +32,14 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 pub struct SsoInitQuery {
-    /// Where to redirect after successful auth
+/// Where to redirect after successful auth
     #[serde(default)]
     pub next: Option<String>,
-    /// Return URL passed by frontend
+/// Return URL passed by frontend
     #[serde(rename = "returnUrl")]
     #[serde(default)]
     pub return_url: Option<String>,
-    /// OAuth state parameter
+/// OAuth state parameter
     #[serde(default)]
     pub state: Option<String>,
 }
@@ -83,7 +81,7 @@ async fn sso_google(
         encode_uri_component(&oauth_state),
     );
 
-    // Set state cookie and redirect
+// Set state cookie and redirect
     let mut response = Redirect::to(&auth_url).into_response();
     set_state_cookie(&mut response, "am_sso_state_google", &oauth_state, state.config.environment.is_production())?;
     Ok(response)
@@ -152,7 +150,7 @@ async fn sso_google_callback(
     let redirect_base = &state.config.oauth_redirect_base_url;
     let callback_url = format!("{redirect_base}/v1/auth/sso/google/callback");
 
-    // Exchange code for tokens
+// Exchange code for tokens
     let token_resp = state
         .http_client
         .post("https://oauth2.googleapis.com/token")
@@ -181,7 +179,7 @@ async fn sso_google_callback(
         .as_str()
         .ok_or_else(|| ApiError::Internal("missing id_token from Google".into()))?;
 
-    // Decode the ID token (we trust Google's signing)
+// Decode the ID token (we trust Google's signing)
     let parts: Vec<&str> = id_token.split('.').collect();
     if parts.len() != 3 {
         return Err(ApiError::Internal("invalid Google ID token format".into()));
@@ -200,7 +198,7 @@ async fn sso_google_callback(
         .ok_or_else(|| ApiError::Internal("email not in Google ID token".into()))?;
     let google_name = claims["name"].as_str().unwrap_or("");
 
-    // Find or create user
+// Find or create user
     complete_sso_login(&state, google_email, google_name, "google").await
 }
 
@@ -229,7 +227,7 @@ async fn sso_github_callback(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("GitHub SSO secret not configured".into()))?;
 
-    // Exchange code for access token
+// Exchange code for access token
     let token_resp = state
         .http_client
         .post("https://github.com/login/oauth/access_token")
@@ -256,7 +254,7 @@ async fn sso_github_callback(
         .as_str()
         .ok_or_else(|| ApiError::Internal("missing access_token from GitHub".into()))?;
 
-    // Fetch user profile
+// Fetch user profile
     let user_resp = state
         .http_client
         .get("https://api.github.com/user")
@@ -271,11 +269,11 @@ async fn sso_github_callback(
         .await
         .map_err(|e| ApiError::Internal(format!("GitHub user parse failed: {e}")))?;
 
-    // Fetch user emails (may not be public)
+// Fetch user emails (may not be public)
     let email = if let Some(email) = user_data["email"].as_str() {
         email.to_string()
     } else {
-        // Fetch from /user/emails endpoint
+// Fetch from /user/emails endpoint
         let emails_resp = state
             .http_client
             .get("https://api.github.com/user/emails")
@@ -323,7 +321,7 @@ async fn complete_sso_login(
 
     let email_lower = email.to_lowercase();
 
-    // Look up existing user
+// Look up existing user
     let existing: Option<(uuid::Uuid, uuid::Uuid, String, Option<String>, String, String)> =
         sqlx::query_as(
             "SELECT id, tenant_id, email, name, role, status FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
@@ -337,7 +335,7 @@ async fn complete_sso_login(
             if status != "active" {
                 return Ok(Redirect::to("/login?error=account_inactive").into_response());
             }
-            // Update SSO metadata
+// Update SSO metadata
             sqlx::query(
                 "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2",
             )
@@ -352,7 +350,7 @@ async fn complete_sso_login(
             (id, tid, role)
         }
         None => {
-            // Auto-provision: create tenant + user for SSO-first signup
+// Auto-provision:create tenant + user for SSO-first signup
             let tenant_id = uuid::Uuid::new_v4();
             let user_id = uuid::Uuid::new_v4();
             let now = Utc::now();
@@ -367,7 +365,7 @@ async fn complete_sso_login(
                 &uuid::Uuid::new_v4().to_string()[..8]
             );
 
-            // Create placeholder password hash for SSO-only accounts
+// Create placeholder password hash for SSO-only accounts
             let sso_placeholder_hash = format!("$sso${provider}$no-password-sso-login-only");
 
             sqlx::query(
@@ -416,7 +414,7 @@ async fn complete_sso_login(
         }
     };
 
-    // Generate JWT
+// Generate JWT
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
     let now = Utc::now();
     let exp = now + chrono::Duration::seconds(expiry_secs);
@@ -451,7 +449,7 @@ async fn complete_sso_login(
     )
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
-    // Redirect to dashboard with token in cookie
+// Redirect to dashboard with token in cookie
     let mut response = Redirect::to("/dashboard").into_response();
     let cookie_value = format!(
         "am_session={token}; HttpOnly; Path=/; Max-Age={expiry_secs}; SameSite=Lax{}",
@@ -478,7 +476,7 @@ fn generate_oauth_state(next: &str) -> String {
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
         &hash,
     );
-    // Encode the return path into the state so we can redirect back
+// Encode the return path into the state so we can redirect back
     format!("{state_token}:{next}")
 }
 
@@ -490,8 +488,8 @@ fn rand_bytes() -> [u8; 32] {
 }
 
 fn sanitize_redirect(next: &str) -> String {
-    // Only allow relative paths starting with /
-    if next.starts_with('/') && !next.starts_with("//") {
+// Only allow relative paths starting with /
+    if next.starts_with('/') && !next.starts_with(" //") {
         next.to_string()
     } else {
         "/dashboard".to_string()
@@ -520,7 +518,7 @@ mod tests {
         assert_eq!(sanitize_redirect("/dashboard"), "/dashboard");
         assert_eq!(sanitize_redirect("/settings/billing"), "/settings/billing");
         assert_eq!(sanitize_redirect("https://evil.com"), "/dashboard");
-        assert_eq!(sanitize_redirect("//evil.com"), "/dashboard");
+        assert_eq!(sanitize_redirect(" //evil.com"), "/dashboard");
         assert_eq!(sanitize_redirect(""), "/dashboard");
     }
 

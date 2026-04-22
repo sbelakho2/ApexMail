@@ -1,7 +1,6 @@
 //! ApexMail PDF Renderer — Typst-powered document generation.
 //!
-//! This crate provides:
-//! - A Typst virtual filesystem (`TypstWorld`) for template resolution
+//! This crate provides://! - A Typst virtual filesystem (`TypstWorld`) for template resolution
 //! - A compiler that turns `.typ` templates + JSON data → PDF bytes
 //! - Axum HTTP routes for on-demand rendering
 //!

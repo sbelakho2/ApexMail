@@ -147,7 +147,6 @@ async fn list_contacts(
     )
     .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 200))
-    // Fix #58: Clamp offset to valid range.
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
@@ -173,7 +172,7 @@ async fn update_contact(
 ) -> Result<Json<ContactResponse>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
-    let existing = fetch_contact(&state, &auth.tenant_id, id.clone()).await?;;
+    let existing = fetch_contact(&state, &auth.tenant_id, id.clone()).await?;
 
     let name = body.name.or(existing.name);
     let tags = body.tags.map(|t| serde_json::json!(t)).or(existing.tags);
@@ -231,7 +230,6 @@ async fn bulk_import(
 ) -> Result<Json<BulkImportResponse>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
-    // Fix #53: Limit bulk import size to prevent resource exhaustion.
     const MAX_BULK_CONTACTS: usize = 10_000;
     if body.contacts.len() > MAX_BULK_CONTACTS {
         return Err(ApiError::Validation(vec![
@@ -240,7 +238,7 @@ async fn bulk_import(
     }
 
     let mut created = 0usize;
-    let mut updated = 0usize;  // Fix #52: Track updates properly
+    let mut updated = 0usize;
     let mut failed = 0usize;
 
     for contact in &body.contacts {
@@ -250,8 +248,7 @@ async fn bulk_import(
         }
 
         let tags = contact.tags.as_ref().map(|t| serde_json::json!(t));
-        // Fix #52: Use RETURNING with xmax to detect insert vs update.
-        // xmax = 0 means a fresh insert; non-zero means update.
+// xmax = 0 means a fresh insert; non-zero means update.
         let res: Result<Option<i64>, _> = sqlx::query_scalar(
             r#"INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at)
                VALUES ($1,$2,$3,$4,$5,$6,'active',NOW(),NOW())
@@ -280,7 +277,7 @@ async fn bulk_import(
                 }
             }
             Ok(None) => {
-                // Shouldn't happen with RETURNING, but count as created
+// Shouldn't happen with RETURNING, but count as created
                 created += 1;
             }
             Err(e) => {
@@ -366,7 +363,7 @@ mod tests {
 
 // ─── Additional Handlers (6B migration) ────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ContactCounts {
     pub total: i64,
     pub active: i64,
@@ -381,16 +378,16 @@ async fn contact_counts(
 ) -> Result<Json<ContactCounts>, ApiError> {
     require_scopes(&auth, &["contacts:read"])?;
 
-    let counts = sqlx::query!(
+    let counts = sqlx::query_as::<_, ContactCounts>(
         r#"SELECT
-            COUNT(*)::bigint AS "total!",
-            COUNT(*) FILTER (WHERE status = 'active')::bigint AS "active!",
-            COUNT(*) FILTER (WHERE status = 'unsubscribed')::bigint AS "unsubscribed!",
-            COUNT(*) FILTER (WHERE status = 'bounced')::bigint AS "bounced!",
-            COUNT(*) FILTER (WHERE status = 'complained')::bigint AS "complained!"
+            COUNT(*)::bigint AS total,
+            COUNT(*) FILTER (WHERE status = 'active')::bigint AS active,
+            COUNT(*) FILTER (WHERE status = 'unsubscribed')::bigint AS unsubscribed,
+            COUNT(*) FILTER (WHERE status = 'bounced')::bigint AS bounced,
+            COUNT(*) FILTER (WHERE status = 'complained')::bigint AS complained
            FROM contacts WHERE tenant_id = $1"#,
-        auth.tenant_id.to_string(),
     )
+    .bind(auth.tenant_id.to_string())
     .fetch_one(&state.db)
     .await?;
 
@@ -420,12 +417,12 @@ async fn bulk_delete(
 ) -> Result<Json<BulkActionResult>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
-    let affected = sqlx::query!(
+    let affected = sqlx::query(
         "UPDATE contacts SET status = 'deleted', updated_at = NOW()
          WHERE tenant_id = $1 AND id = ANY($2) AND status != 'deleted'",
-        auth.tenant_id.to_string(),
-        &body.ids as &[Uuid],
     )
+    .bind(auth.tenant_id.to_string())
+    .bind(&body.ids[..])
     .execute(&state.db)
     .await?
     .rows_affected() as i64;
@@ -440,12 +437,12 @@ async fn bulk_restore(
 ) -> Result<Json<BulkActionResult>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
-    let affected = sqlx::query!(
+    let affected = sqlx::query(
         "UPDATE contacts SET status = 'active', updated_at = NOW()
          WHERE tenant_id = $1 AND id = ANY($2) AND status = 'deleted'",
-        auth.tenant_id.to_string(),
-        &body.ids as &[Uuid],
     )
+    .bind(auth.tenant_id.to_string())
+    .bind(&body.ids[..])
     .execute(&state.db)
     .await?
     .rows_affected() as i64;
@@ -468,15 +465,15 @@ async fn bulk_tag(
 
     let tags_json = serde_json::to_value(&body.tags)
         .map_err(|e| ApiError::Internal(format!("tags serialization error: {e}")))?;
-    let affected = sqlx::query!(
+    let affected = sqlx::query(
         r#"UPDATE contacts SET
             tags = COALESCE(tags, '[]'::jsonb) || $3::jsonb,
             updated_at = NOW()
          WHERE tenant_id = $1 AND id = ANY($2)"#,
-        auth.tenant_id.to_string(),
-        &body.ids[..],
-        tags_json,
     )
+    .bind(auth.tenant_id.to_string())
+    .bind(&body.ids[..])
+    .bind(tags_json)
     .execute(&state.db)
     .await?
     .rows_affected() as i64;
@@ -490,8 +487,8 @@ async fn bulk_resolve_duplicates(
 ) -> Result<Json<BulkActionResult>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
-    // Soft-delete duplicate contacts, keeping the oldest (lowest id) per email
-    let affected = sqlx::query!(
+// Soft-delete duplicate contacts, keeping the oldest (lowest id) per email
+    let affected = sqlx::query(
         r#"WITH dupes AS (
             SELECT id, ROW_NUMBER() OVER (PARTITION BY LOWER(email) ORDER BY created_at ASC) AS rn
             FROM contacts
@@ -499,8 +496,8 @@ async fn bulk_resolve_duplicates(
         )
         UPDATE contacts SET status = 'deleted', updated_at = NOW()
         WHERE id IN (SELECT id FROM dupes WHERE rn > 1)"#,
-        auth.tenant_id.to_string(),
     )
+    .bind(auth.tenant_id.to_string())
     .execute(&state.db)
     .await?
     .rows_affected() as i64;
@@ -516,7 +513,7 @@ async fn import_contacts(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
-    // Detect file format from Content-Type header or file magic bytes
+// Detect file format from Content-Type header or file magic bytes
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -524,7 +521,7 @@ async fn import_contacts(
 
     let is_xlsx = content_type.contains("spreadsheet")
         || content_type.contains("xlsx")
-        || (body.len() >= 4 && &body[..4] == b"PK\x03\x04");  // ZIP magic bytes
+        || (body.len() >= 4 && &body[..4] == b"PK\x03\x04"); // ZIP magic bytes
 
     let rows: Vec<(String, Option<String>)> = if is_xlsx {
         parse_xlsx_rows(&body)?
@@ -546,17 +543,17 @@ async fn import_contacts(
         }
 
         let id = Uuid::new_v4();
-        let result = sqlx::query!(
+        let result = sqlx::query(
             "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
              VALUES ($1, $2, $3, $4, 'active', NOW(), NOW())
              ON CONFLICT (tenant_id, email) DO UPDATE SET
                 name = COALESCE(EXCLUDED.name, contacts.name),
                 updated_at = NOW()",
-            id,
-            auth.tenant_id.to_string(),
-            email,
-            name.as_deref(),
         )
+        .bind(id)
+        .bind(auth.tenant_id.to_string())
+        .bind(email)
+        .bind(name.as_deref())
         .execute(&state.db)
         .await;
 
@@ -618,7 +615,7 @@ fn parse_xlsx_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiErro
     let mut is_header = true;
 
     for row in range.rows() {
-        // Skip header row
+// Skip header row
         if is_header {
             is_header = false;
             continue;
@@ -646,7 +643,7 @@ mod tests_extra {
     #[test]
     fn test_contact_response_serialisation() {
         let resp = ContactResponse {
-            id: String::nil(),
+            id: String::new(),
             email: "a@b.com".into(),
             name: Some("A".into()),
             tags: Some(serde_json::json!(["vip"])),

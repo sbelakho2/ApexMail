@@ -19,7 +19,7 @@ impl ReconciliationWorker {
         Self { pool, redis }
     }
 
-    /// Run full reconciliation cycle.
+/// Run full reconciliation cycle.
     pub async fn run(&self) -> anyhow::Result<ReconciliationResult> {
         let since = Utc::now() - TimeDelta::try_hours(24).unwrap_or(TimeDelta::zero());
         let discrepancies = self.find_discrepancies(since).await?;
@@ -37,12 +37,12 @@ impl ReconciliationWorker {
         })
     }
 
-    /// Find messages with incomplete event chains.
+/// Find messages with incomplete event chains.
     async fn find_discrepancies(
         &self,
         since: chrono::DateTime<Utc>,
     ) -> anyhow::Result<Vec<DiscrepancyDetail>> {
-        // Find messages that were queued but not delivered
+// Find messages that were queued but not delivered
         let rows = sqlx::query_as::<_, (String, String, Vec<String>)>(
             r#"
             SELECT message_id, tenant_id, array_agg(DISTINCT event_type ORDER BY event_type) as events
@@ -81,12 +81,12 @@ impl ReconciliationWorker {
         Ok(discrepancies)
     }
 
-    /// Health checks: orphaned messages, event lag, queue backlog.
+/// Health checks:orphaned messages, event lag, queue backlog.
     async fn check_health(&self) -> anyhow::Result<serde_json::Value> {
         let now = Utc::now();
 
-        // Orphaned messages: sent but no events in 5+ min
-        // #189: Use NOT EXISTS instead of NOT IN (SELECT DISTINCT ...) for O(n) instead of O(n×m)
+// Orphaned messages:sent but no events in 5+ min
+// #189:Use NOT EXISTS instead of NOT IN (SELECT DISTINCT ...) for O(n) instead of O(n×m)
         let five_min_ago = now - Duration::minutes(5);
         let orphaned_count: (i64,) = sqlx::query_as(
             "SELECT COUNT(DISTINCT m.message_id) FROM messages m \
@@ -98,7 +98,7 @@ impl ReconciliationWorker {
         .await
         .map_err(|e| anyhow::anyhow!("reconciliation orphaned_count query failed: {e}"))?;
 
-        // Event lag: average time between events
+// Event lag:average time between events
         let event_lag: (Option<f64>,) = sqlx::query_as(
             "SELECT AVG(EXTRACT(EPOCH FROM (NOW() - timestamp))) as avg_lag \
              FROM events WHERE timestamp >= NOW() - INTERVAL '1 hour'",
@@ -107,7 +107,7 @@ impl ReconciliationWorker {
         .await
         .map_err(|e| anyhow::anyhow!("reconciliation event_lag query failed: {e}"))?;
 
-        // Queue backlog
+// Queue backlog
         let queue_backlog: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM messages WHERE status = 'queued'",
         )
@@ -128,7 +128,7 @@ impl ReconciliationWorker {
         }))
     }
 
-    /// Publish reconciliation alert via Redis pub/sub.
+/// Publish reconciliation alert via Redis pub/sub.
     async fn publish_alert(&self, discrepancies: &[DiscrepancyDetail]) -> anyhow::Result<()> {
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let payload = serde_json::json!({

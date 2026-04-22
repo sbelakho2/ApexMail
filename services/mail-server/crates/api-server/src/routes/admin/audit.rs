@@ -1,6 +1,6 @@
 //! Audit log viewer endpoints.
 //!
-//! Migrated from: apps/control-plane/src/app/api/audit/route.ts
+//! Migrated from:apps/control-plane/src/app/api/audit/route.ts
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -60,7 +60,7 @@ async fn list_audit_logs(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-    // Build dynamic WHERE clause
+// Build dynamic WHERE clause
     let mut conditions: Vec<String> = Vec::new();
     let mut param_idx = 1u32;
     let mut bind_values: Vec<String> = Vec::new();

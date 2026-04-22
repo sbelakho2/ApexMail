@@ -8,7 +8,7 @@ use rand::Rng;
 
 #[test]
 fn fuzz_open_rate_bounded() {
-    // Any inputs must produce a rate in [0.0, 1.0].
+// Any inputs must produce a rate in [0.0, 1.0].
     let predictor = AnalyticsPredictor::new();
     let mut rng = rand::thread_rng();
     for _ in 0..5_000 {
@@ -26,7 +26,7 @@ fn fuzz_open_rate_bounded() {
 
 #[test]
 fn fuzz_click_rate_bounded() {
-    // Any inputs must produce a rate in [0.0, 1.0].
+// Any inputs must produce a rate in [0.0, 1.0].
     let predictor = AnalyticsPredictor::new();
     let mut rng = rand::thread_rng();
     for _ in 0..5_000 {
@@ -43,8 +43,8 @@ fn fuzz_click_rate_bounded() {
 
 #[test]
 fn fuzz_sentiment_bounded() {
-    // predict_unsubscribe_risk acts as our sentiment proxy — any inputs
-    // must produce a value in [0.0, 1.0].
+// predict_unsubscribe_risk acts as our sentiment proxy — any inputs
+// must produce a value in [0.0, 1.0].
     let predictor = AnalyticsPredictor::new();
     let mut rng = rand::thread_rng();
     for _ in 0..5_000 {
@@ -60,7 +60,7 @@ fn fuzz_sentiment_bounded() {
 
 #[test]
 fn fuzz_subject_score_bounded() {
-    // ContentOptimizer::score_subject_line must return 0-100.
+// ContentOptimizer::score_subject_line must return 0-100.
     let optimizer = ContentOptimizer::new();
     let mut rng = rand::thread_rng();
     for _ in 0..5_000 {
@@ -72,14 +72,14 @@ fn fuzz_subject_score_bounded() {
             text.len()
         );
     }
-    // Edge cases
+// Edge cases
     assert!(optimizer.score_subject_line("") <= 100);
     assert!(optimizer.score_subject_line(&"x".repeat(10_000)) <= 100);
 }
 
 #[test]
 fn fuzz_bandit_selection_valid() {
-    // Selected arm must always exist in the registered arms.
+// Selected arm must always exist in the registered arms.
     let optimizer = BanditOptimizer::new(0.1);
     let arm_ids: Vec<String> = (0..10)
         .map(|i| optimizer.add_arm(&format!("arm_{i}")))
@@ -93,7 +93,7 @@ fn fuzz_bandit_selection_valid() {
         );
     }
 
-    // Record some rewards and keep selecting
+// Record some rewards and keep selecting
     for id in &arm_ids {
         let _ = optimizer.record_reward(id, rand::thread_rng().gen_range(0.0..1.0));
     }

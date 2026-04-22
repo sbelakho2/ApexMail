@@ -94,7 +94,7 @@ pub struct SecretsConfig {
 }
 
 impl ComplianceConfig {
-    /// Load configuration from environment variables with sane defaults.
+/// Load configuration from environment variables with sane defaults.
     pub fn from_env() -> Self {
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
         let is_production = node_env.eq_ignore_ascii_case("production") || node_env.eq_ignore_ascii_case("prod");

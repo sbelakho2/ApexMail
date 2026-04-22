@@ -1,8 +1,7 @@
 //! IP rotation and source-binding for the self-hosted SMTP path.
 //!
 //! When we run our own MTA on Hetzner (or any host with multiple IPs), each
-//! tenant may be assigned one or more dedicated IPs.  This module:
-//!
+//! tenant may be assigned one or more dedicated IPs. This module://!
 //! 1. **IP pool management** — maintains a set of outbound IPs with metadata.
 //! 2. **Round-robin rotation** — selects the next IP in the pool for each send.
 //! 3. **Source binding** — creates a `TcpSocket` bound to the chosen IP.
@@ -11,8 +10,8 @@
 //!
 //! ## Integration
 //!
-//! The `SmtpSender` calls `IpPool::next_outbound_socket()` instead of
-//! `TcpStream::connect()` to get a socket that is pre-bound to the correct
+//! The `SmtpSender` calls `IpPool::next_outbound_socket` instead of
+//! `TcpStream::connect` to get a socket that is pre-bound to the correct
 //! source address.
 
 use std::collections::HashMap;
@@ -21,6 +20,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use mail_common::warmup::WarmupSchedule;
 use tokio::net::TcpSocket;
 use tracing::debug;
 
@@ -29,13 +29,13 @@ use tracing::debug;
 /// Health status of an outbound IP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpHealth {
-    /// Normal operation.
+/// Normal operation.
     Healthy,
-    /// In warmup period — subject to daily rate limits.
+/// In warmup period — subject to daily rate limits.
     Warming,
-    /// Listed on one or more DNSBLs — should not be used until cleared.
+/// Listed on one or more DNSBLs — should not be used until cleared.
     Degraded,
-    /// Manually disabled by operator.
+/// Manually disabled by operator.
     Disabled,
 }
 
@@ -62,10 +62,10 @@ impl IpDailyCounters {
         self.sends_today.load(Ordering::Relaxed)
     }
 
-    /// Reset if the current day has changed.
+/// Reset if the current day has changed.
     pub fn maybe_reset(&self) {
         let now = Utc::now();
-        // Compare ordinal day — if it's a new day, reset.
+// Compare ordinal day — if it's a new day, reset.
         if now.date_naive() != self.day_start.date_naive() {
             self.sends_today.store(0, Ordering::Relaxed);
         }
@@ -83,19 +83,19 @@ impl Default for IpDailyCounters {
 pub struct OutboundIp {
     pub addr: IpAddr,
     pub health: IpHealth,
-    /// Which tenant owns this IP (None = shared pool).
+/// Which tenant owns this IP (None = shared pool).
     pub tenant_id: Option<String>,
-    /// Day the IP was allocated (for warmup age calculation).
+/// Day the IP was allocated (for warmup age calculation).
     pub allocated_at: DateTime<Utc>,
-    /// Warmup day limit: number of emails allowed per day.
-    /// None = no limit (fully warmed).
+/// Warmup day limit:number of emails allowed per day.
+/// None = no limit (fully warmed).
     pub daily_limit: Option<u64>,
-    /// Per-day counters.
+/// Per-day counters.
     pub counters: IpDailyCounters,
 }
 
 impl OutboundIp {
-    /// Create a new outbound IP in warming state.
+/// Create a new outbound IP in warming state.
     pub fn new_warming(addr: IpAddr, tenant_id: Option<String>) -> Self {
         Self {
             addr,
@@ -107,7 +107,7 @@ impl OutboundIp {
         }
     }
 
-    /// Create a fully warmed outbound IP.
+/// Create a fully warmed outbound IP.
     pub fn new_healthy(addr: IpAddr, tenant_id: Option<String>) -> Self {
         Self {
             addr,
@@ -119,7 +119,7 @@ impl OutboundIp {
         }
     }
 
-    /// Whether this IP can accept another send right now.
+/// Whether this IP can accept another send right now.
     pub fn can_send(&self) -> bool {
         if self.health == IpHealth::Degraded || self.health == IpHealth::Disabled {
             return false;
@@ -131,7 +131,7 @@ impl OutboundIp {
         }
     }
 
-    /// Record a send and return whether we're still under limit.
+/// Record a send and return whether we're still under limit.
     pub fn record_send(&self) -> bool {
         self.counters.maybe_reset();
         let prev = self.counters.increment();
@@ -141,12 +141,12 @@ impl OutboundIp {
         }
     }
 
-    /// Get warmup day number (days since allocation).
+/// Get warmup day number (days since allocation).
     pub fn warmup_day(&self) -> i64 {
         (Utc::now() - self.allocated_at).num_days()
     }
 
-    /// Update the daily limit based on current warmup day.
+/// Update the daily limit based on current warmup day.
     pub fn update_warmup_limit(&mut self) {
         let day = self.warmup_day();
         if day >= WarmupSchedule::FULL_WARMUP_DAYS as i64 {
@@ -158,65 +158,22 @@ impl OutboundIp {
     }
 }
 
-// ─── Warmup schedule ───────────────────────────────────────────
-
-/// ISP-safe warmup schedule for new IPs.
-///
-/// This follows industry best practice: start very low and double every ~2 days
-/// until reaching full capacity around day 45.
-///
-/// | Day Range |  Daily Limit |
-/// |-----------|-------------|
-/// | 0-1       |          50 |
-/// | 2-3       |         100 |
-/// | 4-5       |         250 |
-/// | 6-7       |         500 |
-/// | 8-10      |       1,000 |
-/// | 11-14     |       2,500 |
-/// | 15-20     |       5,000 |
-/// | 21-28     |      10,000 |
-/// | 29-35     |      25,000 |
-/// | 36-44     |      50,000 |
-/// | 45+       |   unlimited |
-pub struct WarmupSchedule;
-
-impl WarmupSchedule {
-    pub const FULL_WARMUP_DAYS: u32 = 45;
-
-    /// Get the daily send limit for a given warmup day.
-    pub fn limit_for_day(day: u32) -> u64 {
-        match day {
-            0..=1 => 50,
-            2..=3 => 100,
-            4..=5 => 250,
-            6..=7 => 500,
-            8..=10 => 1_000,
-            11..=14 => 2_500,
-            15..=20 => 5_000,
-            21..=28 => 10_000,
-            29..=35 => 25_000,
-            36..=44 => 50_000,
-            _ => u64::MAX, // Unlimited
-        }
-    }
-}
-
 // ─── IP Pool ───────────────────────────────────────────────────
 
 /// Manages a pool of outbound IPs with round-robin rotation.
 pub struct IpPool {
-    /// All IPs in the pool, indexed by address.
+/// All IPs in the pool, indexed by address.
     ips: HashMap<IpAddr, Arc<OutboundIp>>,
-    /// Ordered list for round-robin selection.
+/// Ordered list for round-robin selection.
     rotation_order: Vec<IpAddr>,
-    /// Atomic round-robin counter.
+/// Atomic round-robin counter.
     next_index: AtomicUsize,
-    /// Default/shared IP used when no dedicated IPs are assigned.
+/// Default/shared IP used when no dedicated IPs are assigned.
     default_ip: Option<IpAddr>,
 }
 
 impl IpPool {
-    /// Create an empty IP pool.
+/// Create an empty IP pool.
     pub fn new() -> Self {
         Self {
             ips: HashMap::new(),
@@ -226,7 +183,7 @@ impl IpPool {
         }
     }
 
-    /// Create an IP pool with a default shared IP.
+/// Create an IP pool with a default shared IP.
     pub fn with_default(default_ip: IpAddr) -> Self {
         Self {
             ips: HashMap::new(),
@@ -236,20 +193,20 @@ impl IpPool {
         }
     }
 
-    /// Add an IP to the pool.
+/// Add an IP to the pool.
     pub fn add_ip(&mut self, ip: OutboundIp) {
         let addr = ip.addr;
         self.ips.insert(addr, Arc::new(ip));
         self.rotation_order.push(addr);
     }
 
-    /// Remove an IP from the pool.
+/// Remove an IP from the pool.
     pub fn remove_ip(&mut self, addr: &IpAddr) -> Option<Arc<OutboundIp>> {
         self.rotation_order.retain(|a| a != addr);
         self.ips.remove(addr)
     }
 
-    /// Get the IPs assigned to a specific tenant.
+/// Get the IPs assigned to a specific tenant.
     pub fn tenant_ips(&self, tenant_id: &str) -> Vec<&Arc<OutboundIp>> {
         self.ips
             .values()
@@ -257,9 +214,9 @@ impl IpPool {
             .collect()
     }
 
-    /// Select the next IP for sending (round-robin among healthy IPs).
-    /// If `tenant_id` is provided, only consider IPs assigned to that tenant.
-    /// Falls back to the default IP if no tenant IPs are available.
+/// Select the next IP for sending (round-robin among healthy IPs).
+/// If `tenant_id` is provided, only consider IPs assigned to that tenant.
+/// Falls back to the default IP if no tenant IPs are available.
     pub fn select_ip(&self, tenant_id: Option<&str>) -> Option<Arc<OutboundIp>> {
         let candidates: Vec<&IpAddr> = if let Some(tid) = tenant_id {
             self.rotation_order
@@ -278,7 +235,7 @@ impl IpPool {
         };
 
         if candidates.is_empty() {
-            // Fall back to default IP
+// Fall back to default IP
             return self
                 .default_ip
                 .and_then(|addr| self.ips.get(&addr).cloned());
@@ -288,10 +245,9 @@ impl IpPool {
         candidates.get(idx).and_then(|addr| self.ips.get(addr).cloned())
     }
 
-    /// Create a TCP socket bound to the selected outbound IP and connect to
-    /// the given remote address.
-    ///
-    /// This replaces `TcpStream::connect(remote)` in SmtpSender.
+/// Create a TCP socket bound to the selected outbound IP and connect to
+/// the given remote address.
+/// This replaces `TcpStream::connect(remote)` in SmtpSender.
     pub async fn connect_with_source(
         &self,
         remote: SocketAddr,
@@ -327,22 +283,22 @@ impl IpPool {
         Ok((stream, source_addr))
     }
 
-    /// Number of IPs in the pool.
+/// Number of IPs in the pool.
     pub fn len(&self) -> usize {
         self.ips.len()
     }
 
-    /// Whether the pool is empty.
+/// Whether the pool is empty.
     pub fn is_empty(&self) -> bool {
         self.ips.is_empty()
     }
 
-    /// Get all IP addresses in the pool.
+/// Get all IP addresses in the pool.
     pub fn addresses(&self) -> Vec<IpAddr> {
         self.rotation_order.clone()
     }
 
-    /// Get an IP by its address.
+/// Get an IP by its address.
     pub fn get(&self, addr: &IpAddr) -> Option<&Arc<OutboundIp>> {
         self.ips.get(addr)
     }
@@ -371,7 +327,10 @@ mod tests {
         assert_eq!(WarmupSchedule::limit_for_day(15), 5_000);
         assert_eq!(WarmupSchedule::limit_for_day(30), 25_000);
         assert_eq!(WarmupSchedule::limit_for_day(40), 50_000);
-        assert_eq!(WarmupSchedule::limit_for_day(45), u64::MAX);
+        assert_eq!(WarmupSchedule::limit_for_day(45), 75_000);
+        assert_eq!(WarmupSchedule::limit_for_day(50), 100_000);
+        assert_eq!(WarmupSchedule::limit_for_day(55), 250_000);
+        assert_eq!(WarmupSchedule::limit_for_day(60), u64::MAX);
         assert_eq!(WarmupSchedule::limit_for_day(100), u64::MAX);
     }
 
@@ -430,7 +389,7 @@ mod tests {
         let selected_1 = pool.select_ip(None).unwrap();
         let selected_2 = pool.select_ip(None).unwrap();
 
-        // Round-robin should give different IPs
+// Round-robin should give different IPs
         assert_ne!(selected_1.addr, selected_2.addr);
     }
 
@@ -468,10 +427,10 @@ mod tests {
         let default_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
         let mut pool = IpPool::with_default(default_addr);
 
-        // Add the default as a healthy IP
+// Add the default as a healthy IP
         pool.add_ip(OutboundIp::new_healthy(default_addr, None));
 
-        // Request tenant that has no IPs → should fall back to default
+// Request tenant that has no IPs → should fall back to default
         let selected = pool.select_ip(Some("unknown-tenant")).unwrap();
         assert_eq!(selected.addr, default_addr);
     }
@@ -493,18 +452,18 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
             None,
         );
-        // Limit is 50 for day 0
+// Limit is 50 for day 0
         for _ in 0..50 {
             assert!(ip.record_send());
         }
-        // 51st send should exceed limit
+// 51st send should exceed limit
         assert!(!ip.record_send());
         assert!(!ip.can_send());
     }
 
     #[test]
     fn test_warmup_schedule_full_days() {
-        assert_eq!(WarmupSchedule::FULL_WARMUP_DAYS, 45);
+        assert_eq!(WarmupSchedule::FULL_WARMUP_DAYS, 60);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::types::*;
 
-/// Log Streaming Service: deliver logs to S3, Webhook, Splunk, Datadog, etc.
+/// Log Streaming Service:deliver logs to S3, Webhook, Splunk, Datadog, etc.
 pub struct LogStreamingService {
     db: PgPool,
 }
@@ -17,7 +17,7 @@ impl LogStreamingService {
         Self { db }
     }
 
-    /// Create a new log stream
+/// Create a new log stream
     pub async fn create(
         &self, tenant_id: Uuid, name: &str, description: Option<&str>,
         destination_type: &str, destination_config: Option<serde_json::Value>,
@@ -41,7 +41,7 @@ impl LogStreamingService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get a log stream by ID
+/// Get a log stream by ID
     pub async fn get(&self, id: Uuid) -> Result<ApiResult<LogStream>, String> {
         let row = sqlx::query_as::<_, LogStream>(
             "SELECT * FROM ent_log_streams WHERE id = $1"
@@ -57,7 +57,7 @@ impl LogStreamingService {
         }
     }
 
-    /// List log streams for an account
+/// List log streams for an account
     pub async fn list(&self, tenant_id: Uuid) -> Result<ApiResult<Vec<LogStream>>, String> {
         let rows = sqlx::query_as::<_, LogStream>(
             "SELECT * FROM ent_log_streams WHERE tenant_id = $1 ORDER BY created_at DESC"
@@ -70,7 +70,7 @@ impl LogStreamingService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Update a log stream
+/// Update a log stream
     pub async fn update(
         &self, id: Uuid, name: Option<&str>, description: Option<&str>,
         destination_config: Option<serde_json::Value>,
@@ -97,7 +97,7 @@ impl LogStreamingService {
         }
     }
 
-    /// Pause a log stream
+/// Pause a log stream
     pub async fn pause(&self, id: Uuid) -> Result<ApiResult<LogStream>, String> {
         let row = sqlx::query_as::<_, LogStream>(
             "UPDATE ent_log_streams SET status = 'paused', updated_at = NOW() WHERE id = $1 RETURNING *"
@@ -113,7 +113,7 @@ impl LogStreamingService {
         }
     }
 
-    /// Resume a log stream
+/// Resume a log stream
     pub async fn resume(&self, id: Uuid) -> Result<ApiResult<LogStream>, String> {
         let row = sqlx::query_as::<_, LogStream>(
             "UPDATE ent_log_streams SET status = 'active', updated_at = NOW() WHERE id = $1 RETURNING *"
@@ -129,7 +129,7 @@ impl LogStreamingService {
         }
     }
 
-    /// Delete a log stream
+/// Delete a log stream
     pub async fn delete(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let result = sqlx::query("DELETE FROM ent_log_streams WHERE id = $1")
             .bind(id)
@@ -144,7 +144,7 @@ impl LogStreamingService {
         }
     }
 
-    /// Verify destination connectivity
+/// Verify destination connectivity
     pub async fn verify(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let stream = sqlx::query_as::<_, LogStream>(
             "SELECT * FROM ent_log_streams WHERE id = $1"
@@ -159,7 +159,7 @@ impl LogStreamingService {
             None => return Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         };
 
-        // Verify based on destination type
+// Verify based on destination type
         let result = match stream.destination_type.as_str() {
             "webhook" => verify_webhook(&stream).await,
             "splunk" => verify_splunk(&stream).await,
@@ -173,7 +173,7 @@ impl LogStreamingService {
         }
     }
 
-    /// Record a delivery batch
+/// Record a delivery batch
     pub async fn record_delivery(
         &self, stream_id: Uuid, batch_id: &str, event_count: i32,
         bytes_delivered: i64, duration_ms: i32, success: bool, error_message: Option<&str>,
@@ -200,8 +200,8 @@ impl LogStreamingService {
             .await
             .map_err(|e| format!("Update stream stats: {e}"))?;
         } else {
-            // #274: Fixed race condition - increment first, then check the NEW value
-            // Using a single atomic update that increments and evaluates in one operation
+// #274:Fixed race condition - increment first, then check the NEW value
+// Using a single atomic update that increments and evaluates in one operation
             sqlx::query(
                 "UPDATE ent_log_streams SET 
                  last_error = $2, 
@@ -218,7 +218,7 @@ impl LogStreamingService {
         Ok(())
     }
 
-    /// Get delivery statistics for a stream
+/// Get delivery statistics for a stream
     pub async fn get_stats(&self, stream_id: Uuid) -> Result<ApiResult<StreamStats>, String> {
         let row: Option<(i64, Option<i64>, Option<i64>, Option<f64>)> = sqlx::query_as(
             "SELECT COUNT(*), SUM(event_count)::bigint, SUM(bytes_delivered)::bigint, AVG(duration_ms)::float8
@@ -249,7 +249,7 @@ impl LogStreamingService {
         }))
     }
 
-    /// Get all active streams for background processing
+/// Get all active streams for background processing
     pub async fn get_active_streams(&self) -> Result<Vec<LogStream>, String> {
         sqlx::query_as::<_, LogStream>(
             "SELECT * FROM ent_log_streams WHERE status = 'active' AND enabled = true"
@@ -278,16 +278,16 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 /// Validate that a URL is safe for server-side requests (SSRF protection)
-/// #252: Prevents requests to internal/private networks
+/// #252:Prevents requests to internal/private networks
 fn is_safe_url(url: &str) -> Result<bool, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
     
-    // Must use HTTPS for security
+// Must use HTTPS for security
     if parsed.scheme() != "https" {
         return Ok(false);
     }
     
-    // Check for private/internal hostnames
+// Check for private/internal hostnames
     let host = parsed.host_str().ok_or("No host in URL")?;
     let blocked_patterns = [
         "localhost", "127.0.0.1", "::1", "0.0.0.0",
@@ -313,7 +313,7 @@ async fn verify_webhook(stream: &LogStream) -> Result<serde_json::Value, String>
     let config = stream.destination_config.as_ref().ok_or("No destination config")?;
     let url = config.get("url").and_then(|v| v.as_str()).ok_or("No webhook URL")?;
 
-    // #252: SSRF protection - validate URL is safe before making request
+// #252:SSRF protection - validate URL is safe before making request
     if !is_safe_url(url)? {
         return Err("Webhook URL blocked: internal/private addresses not allowed".into());
     }
@@ -377,7 +377,7 @@ pub fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// Sign a webhook payload with HMAC-SHA256
-/// #271: Returns Result instead of panicking on invalid key
+/// #271:Returns Result instead of panicking on invalid key
 pub fn hmac_sign(key: &[u8], data: &[u8]) -> Result<String, String> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;

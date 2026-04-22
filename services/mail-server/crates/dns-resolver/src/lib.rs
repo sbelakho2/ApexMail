@@ -1,7 +1,6 @@
 //! Reusable DNS resolver with caching for ApexMail.
 //!
-//! Provides:
-//! - Cached MX record lookups
+//! Provides://! - Cached MX record lookups
 //! - SPF TXT record parsing
 //! - DKIM selector resolution
 //! - DMARC policy lookups

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// ============================================================================
-/// INTEGRATION TESTS: Multi-Layer Protection Flow
+/// INTEGRATION TESTS:Multi-Layer Protection Flow
 /// ============================================================================
 #[cfg(test)]
 mod multi_layer_tests {
@@ -90,12 +90,12 @@ mod multi_layer_tests {
         }
         
         fn evaluate(&mut self, ip: &str) -> Decision {
-            // Layer 1: Rate limiting
+// Layer 1:Rate limiting
             if !self.rate_limiter.check(ip) {
                 return Decision::RateLimit;
             }
             
-            // Layer 2: Reputation check
+// Layer 2:Reputation check
             let score = self.reputation.get_score(ip);
             
             if score <= self.block_threshold {
@@ -143,12 +143,12 @@ mod multi_layer_tests {
         protector.rate_limiter = MockRateLimiter::new(5);
         protector.reputation.set_score("8.8.8.8", 100); // Perfect reputation
         
-        // Should allow first 5 requests
+// Should allow first 5 requests
         for _ in 0..5 {
             assert_eq!(protector.evaluate("8.8.8.8"), Decision::Allow);
         }
         
-        // 6th request should be rate limited despite good reputation
+// 6th request should be rate limited despite good reputation
         assert_eq!(protector.evaluate("8.8.8.8"), Decision::RateLimit);
     }
     
@@ -157,20 +157,20 @@ mod multi_layer_tests {
         let mut protector = MockProtector::new();
         protector.rate_limiter = MockRateLimiter::new(2);
         
-        // Each IP has independent rate limit
+// Each IP has independent rate limit
         assert_eq!(protector.evaluate("1.1.1.1"), Decision::Allow);
         assert_eq!(protector.evaluate("2.2.2.2"), Decision::Allow);
         assert_eq!(protector.evaluate("1.1.1.1"), Decision::Allow);
         assert_eq!(protector.evaluate("2.2.2.2"), Decision::Allow);
         
-        // Both hit limit on 3rd request
+// Both hit limit on 3rd request
         assert_eq!(protector.evaluate("1.1.1.1"), Decision::RateLimit);
         assert_eq!(protector.evaluate("2.2.2.2"), Decision::RateLimit);
     }
 }
 
 /// ============================================================================
-/// INTEGRATION TESTS: Session + Rate Limiting
+/// INTEGRATION TESTS:Session + Rate Limiting
 /// ============================================================================
 #[cfg(test)]
 mod session_rate_limit_tests {
@@ -196,7 +196,7 @@ mod session_rate_limit_tests {
             let now = Instant::now();
             let cutoff = now - self.window;
             
-            // Remove old entries
+// Remove old entries
             while let Some(&front) = self.request_times.front() {
                 if front < cutoff {
                     self.request_times.pop_front();
@@ -205,7 +205,7 @@ mod session_rate_limit_tests {
                 }
             }
             
-            // Check limit
+// Check limit
             if self.request_times.len() >= self.max_requests {
                 return false;
             }
@@ -223,12 +223,12 @@ mod session_rate_limit_tests {
     fn test_sliding_window_enforcement() {
         let mut tracker = SessionTracker::new(Duration::from_secs(60), 10);
         
-        // Should allow up to limit
+// Should allow up to limit
         for i in 0..10 {
             assert!(tracker.record_and_check(), "Request {} should be allowed", i);
         }
         
-        // 11th should be blocked
+// 11th should be blocked
         assert!(!tracker.record_and_check());
         assert_eq!(tracker.requests_in_window(), 10);
     }
@@ -237,22 +237,22 @@ mod session_rate_limit_tests {
     fn test_window_expiration() {
         let mut tracker = SessionTracker::new(Duration::from_millis(100), 5);
         
-        // Fill window
+// Fill window
         for _ in 0..5 {
             assert!(tracker.record_and_check());
         }
         assert!(!tracker.record_and_check()); // Blocked
         
-        // Wait for window to expire
+// Wait for window to expire
         std::thread::sleep(Duration::from_millis(150));
         
-        // Should be allowed again
+// Should be allowed again
         assert!(tracker.record_and_check());
     }
 }
 
 /// ============================================================================
-/// INTEGRATION TESTS: Fingerprint + Reputation
+/// INTEGRATION TESTS:Fingerprint + Reputation
 /// ============================================================================
 #[cfg(test)]
 mod fingerprint_reputation_tests {
@@ -277,7 +277,7 @@ mod fingerprint_reputation_tests {
                 known_fingerprints: HashMap::new(),
             };
             
-            // Pre-populate with known fingerprints
+// Pre-populate with known fingerprints
             db.known_fingerprints.insert("chrome_win10_v120".to_string(), FingerprintClass::ValidBrowser);
             db.known_fingerprints.insert("firefox_macos_v121".to_string(), FingerprintClass::ValidBrowser);
             db.known_fingerprints.insert("python_requests".to_string(), FingerprintClass::SuspiciousBrowser);
@@ -367,7 +367,7 @@ mod fingerprint_reputation_tests {
 }
 
 /// ============================================================================
-/// INTEGRATION TESTS: Challenge System E2E
+/// INTEGRATION TESTS:Challenge System E2E
 /// ============================================================================
 #[cfg(test)]
 mod challenge_e2e_tests {
@@ -399,7 +399,7 @@ mod challenge_e2e_tests {
         }
         
         fn verify(&self, nonce: u64) -> Result<(), &'static str> {
-            // Check TTL
+// Check TTL
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -409,7 +409,7 @@ mod challenge_e2e_tests {
                 return Err("Challenge expired");
             }
             
-            // Verify PoW
+// Verify PoW
             let data = format!("{}{}", self.prefix, nonce);
             let mut hasher = Sha256::new();
             hasher.update(data.as_bytes());
@@ -449,11 +449,11 @@ mod challenge_e2e_tests {
     fn test_challenge_issue_and_solve() {
         let challenge = PowerChallenge::new("test_client", 8, 300);
         
-        // Solve the challenge
+// Solve the challenge
         let solution = challenge.solve(10000);
         assert!(solution.is_some(), "Should find solution with difficulty 8");
         
-        // Verify the solution
+// Verify the solution
         assert!(challenge.verify(solution.unwrap()).is_ok());
     }
     
@@ -461,7 +461,7 @@ mod challenge_e2e_tests {
     fn test_invalid_solution_rejected() {
         let challenge = PowerChallenge::new("test_client", 16, 300);
         
-        // Random nonce very unlikely to work
+// Random nonce very unlikely to work
         let result = challenge.verify(999999999);
         assert!(result.is_err());
     }
@@ -473,16 +473,16 @@ mod challenge_e2e_tests {
         
         let solution1 = challenge1.solve(1000).unwrap();
         
-        // Solution for challenge1 should not work for challenge2
-        // (different prefix means different hash)
+// Solution for challenge1 should not work for challenge2
+// (different prefix means different hash)
         let result = challenge2.verify(solution1);
-        // This might pass by chance for low difficulty, so check prefixes differ
+// This might pass by chance for low difficulty, so check prefixes differ
         assert_ne!(challenge1.prefix, challenge2.prefix);
     }
 }
 
 /// ============================================================================
-/// INTEGRATION TESTS: Cost-Based + Session Tracking
+/// INTEGRATION TESTS:Cost-Based + Session Tracking
 /// ============================================================================
 #[cfg(test)]
 mod cost_session_tests {
@@ -534,7 +534,7 @@ mod cost_session_tests {
         }
         
         fn check_and_deduct(&mut self, session: &str, endpoint: &str) -> bool {
-            // Get cost first before mutably borrowing session_budgets
+// Get cost first before mutably borrowing session_budgets
             let cost = self.endpoint_costs
                 .get(endpoint)
                 .map(|c| (c.cpu_weight + c.memory_weight + c.io_weight) as i64)
@@ -561,7 +561,7 @@ mod cost_session_tests {
     fn test_expensive_endpoint_drains_budget() {
         let mut tracker = CostTracker::new(500);
         
-        // Login is expensive (160 cost)
+// Login is expensive (160 cost)
         assert!(tracker.check_and_deduct("session1", "/api/login"));
         assert_eq!(tracker.remaining_budget("session1"), 340);
         
@@ -571,7 +571,7 @@ mod cost_session_tests {
         assert!(tracker.check_and_deduct("session1", "/api/login"));
         assert_eq!(tracker.remaining_budget("session1"), 20);
         
-        // Not enough budget for another login
+// Not enough budget for another login
         assert!(!tracker.check_and_deduct("session1", "/api/login"));
     }
     
@@ -579,12 +579,12 @@ mod cost_session_tests {
     fn test_cheap_endpoint_many_requests() {
         let mut tracker = CostTracker::new(500);
         
-        // Data endpoint is cheap (25 cost)
+// Data endpoint is cheap (25 cost)
         for i in 0..20 {
             assert!(tracker.check_and_deduct("session2", "/api/data"), "Request {} should succeed", i);
         }
         
-        // Eventually runs out
+// Eventually runs out
         assert!(!tracker.check_and_deduct("session2", "/api/data"));
     }
     
@@ -592,13 +592,13 @@ mod cost_session_tests {
     fn test_mixed_endpoint_usage() {
         let mut tracker = CostTracker::new(1000);
         
-        // Mix of endpoints
-        tracker.check_and_deduct("session3", "/api/login");    // 160
-        tracker.check_and_deduct("session3", "/api/search");   // 170
-        tracker.check_and_deduct("session3", "/api/data");     // 25
-        tracker.check_and_deduct("session3", "/api/data");     // 25
+// Mix of endpoints
+        tracker.check_and_deduct("session3", "/api/login"); // 160
+        tracker.check_and_deduct("session3", "/api/search"); // 170
+        tracker.check_and_deduct("session3", "/api/data"); // 25
+        tracker.check_and_deduct("session3", "/api/data"); // 25
         
-        // 1000 - 160 - 170 - 25 - 25 = 620
+// 1000 - 160 - 170 - 25 - 25 = 620
         assert_eq!(tracker.remaining_budget("session3"), 620);
     }
 }

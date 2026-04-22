@@ -1,4 +1,4 @@
-//! SMTP servers: inbound, bounce, feedback‑loop.
+//! SMTP servers:inbound, bounce, feedback‑loop.
 
 pub mod bounce;
 pub mod feedback_loop;

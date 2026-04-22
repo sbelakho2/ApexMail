@@ -33,7 +33,7 @@ pub struct Rule {
 }
 
 impl Rule {
-    /// Create a new rule. `description` doubles as the pattern text for matching.
+/// Create a new rule. `description` doubles as the pattern text for matching.
     pub fn new(
         pattern: impl Into<String>,
         id: impl Into<String>,
@@ -82,7 +82,7 @@ impl RuleSet {
         Self { rules, matcher }
     }
 
-    /// Evaluate all rules against the input text.
+/// Evaluate all rules against the input text.
     pub fn evaluate(&self, text: &str) -> Vec<RuleMatch> {
         let matches = self.matcher.find_all(text);
         matches
@@ -101,12 +101,12 @@ impl RuleSet {
             .collect()
     }
 
-    /// Calculate total score from all rule matches.
+/// Calculate total score from all rule matches.
     pub fn total_score(&self, text: &str) -> f64 {
         self.evaluate(text).iter().map(|m| m.score).sum()
     }
 
-    /// Check if any critical rules match.
+/// Check if any critical rules match.
     pub fn has_critical(&self, text: &str) -> bool {
         self.evaluate(text)
             .iter()

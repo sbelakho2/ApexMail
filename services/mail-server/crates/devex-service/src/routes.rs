@@ -39,7 +39,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build `AppState` from a `DevExConfig`.
+/// Build `AppState` from a `DevExConfig`.
     pub fn from_config(cfg: DevExConfig) -> Result<Self, crate::types::DevExError> {
         let openapi = OpenApiGenerator::new(&cfg.current_api_version, &cfg.api_base_url);
         let webhook_tester = WebhookTester::new(cfg.webhook_signing_secret.clone())?;
@@ -238,7 +238,9 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_state() -> Result<AppState, crate::types::DevExError> {
-        AppState::from_config(DevExConfig::default())
+        let mut state = AppState::from_config(DevExConfig::default())?;
+        state.service_token = "test-key".into();
+        Ok(state)
     }
 
     #[tokio::test]
@@ -275,6 +277,7 @@ mod tests {
         };
         let req = Request::builder()
             .uri("/versions")
+            .header("x-api-key", "test-key")
             .body(Body::empty())
             .unwrap();
 
@@ -298,6 +301,7 @@ mod tests {
         };
         let req = Request::builder()
             .uri("/sdks")
+            .header("x-api-key", "test-key")
             .body(Body::empty())
             .unwrap();
 

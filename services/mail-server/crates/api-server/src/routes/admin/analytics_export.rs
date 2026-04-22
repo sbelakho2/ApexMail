@@ -1,6 +1,6 @@
 //! Analytics CSV/JSON export endpoint.
 //!
-//! Migrated from: apps/control-plane/src/app/api/analytics/export/route.ts (136 lines)
+//! Migrated from:apps/control-plane/src/app/api/analytics/export/route.ts (136 lines)
 
 use axum::extract::{Query, State};
 use axum::http::header;
@@ -60,7 +60,7 @@ async fn export_analytics(
 
     let interval = range_to_interval(&params.range);
 
-    // Detect columns
+// Detect columns
     let type_col = super::analytics::detect_column(&state, "events", &["event_type", "type"])
         .await
         .unwrap_or_else(|| "event_type".into());

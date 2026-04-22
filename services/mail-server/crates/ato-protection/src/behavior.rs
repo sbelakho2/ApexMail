@@ -1,7 +1,6 @@
 //! Behavioral profiling — login pattern analysis
 //!
-//! Analyzes user behavior patterns to detect anomalies:
-//! - Time-of-day deviation from typical patterns
+//! Analyzes user behavior patterns to detect anomalies://! - Time-of-day deviation from typical patterns
 //! - Login frequency anomalies
 //! - Geographic consistency
 
@@ -10,20 +9,20 @@ use crate::session::UserLoginHistory;
 /// Behavioral analysis result
 #[derive(Debug, Clone)]
 pub struct BehaviorScore {
-    /// Total risk from behavioral analysis (0.0 - 10.0)
+/// Total risk from behavioral analysis (0.0 - 10.0)
     pub score: f64,
-    /// Individual findings
+/// Individual findings
     pub findings: Vec<BehaviorFinding>,
 }
 
 /// A behavioral finding
 #[derive(Debug, Clone)]
 pub struct BehaviorFinding {
-    /// Finding ID
+/// Finding ID
     pub id: &'static str,
-    /// Description
+/// Description
     pub description: String,
-    /// Risk score
+/// Risk score
     pub risk: f64,
 }
 
@@ -34,11 +33,11 @@ pub fn analyze_behavior(
 ) -> BehaviorScore {
     let mut findings = Vec::new();
 
-    // 1. Time-of-day anomaly
+// 1. Time-of-day anomaly
     if let Some(typical_hour) = history.typical_login_hour() {
         let hour_diff = hour_distance(login_hour, typical_hour);
         if hour_diff >= 10 {
-            // Far outside typical hours (e.g. usually logs in at 9am, now at 3am)
+// Far outside typical hours (e.g. usually logs in at 9am, now at 3am)
             findings.push(BehaviorFinding {
                 id: "UNUSUAL_HOUR_HIGH",
                 description: format!(
@@ -59,7 +58,7 @@ pub fn analyze_behavior(
         }
     }
 
-    // 2. Very few historical logins (new account or rarely used)
+// 2. Very few historical logins (new account or rarely used)
     let successful_logins = history.events.iter().filter(|e| e.success).count();
     if successful_logins < 3 {
         findings.push(BehaviorFinding {
@@ -69,7 +68,7 @@ pub fn analyze_behavior(
         });
     }
 
-    // 3. Burst login pattern (many logins in short period — could be automated)
+// 3. Burst login pattern (many logins in short period — could be automated)
     let recent_logins = history.events.iter()
         .filter(|e| {
             let age = chrono::Utc::now().signed_duration_since(e.timestamp);
@@ -153,7 +152,7 @@ mod tests {
     #[test]
     fn test_unusual_hour() {
         let history = make_history_at_hours(&[9, 10, 9, 8, 10, 9, 9]);
-        // Login at 3am when typical is ~9am
+// Login at 3am when typical is ~9am
         let result = analyze_behavior(3, &history);
         assert!(
             result.findings.iter().any(|f| f.id.starts_with("UNUSUAL_HOUR")),

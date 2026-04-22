@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::types::*;
 
-/// Quarterly Business Review Service: scheduling, data gathering, insights, benchmarks
+/// Quarterly Business Review Service:scheduling, data gathering, insights, benchmarks
 pub struct QBRService {
     db: PgPool,
 }
@@ -15,7 +15,7 @@ impl QBRService {
         Self { db }
     }
 
-    /// Schedule a new QBR
+/// Schedule a new QBR
     pub async fn schedule(
         &self, tenant_id: Uuid, quarter: i32, year: i32,
         scheduled_date: Option<chrono::NaiveDate>, attendees: Option<serde_json::Value>,
@@ -36,7 +36,7 @@ impl QBRService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get a QBR by ID
+/// Get a QBR by ID
     pub async fn get(&self, id: Uuid) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
         let row = sqlx::query_as::<_, QuarterlyBusinessReview>(
             "SELECT * FROM ent_qbrs WHERE id = $1"
@@ -52,7 +52,7 @@ impl QBRService {
         }
     }
 
-    /// List QBRs for a tenant
+/// List QBRs for a tenant
     pub async fn list(
         &self, tenant_id: Uuid, limit: i64, offset: i64,
     ) -> Result<ApiResult<Vec<QuarterlyBusinessReview>>, String> {
@@ -67,7 +67,7 @@ impl QBRService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Generate QBR data (gather metrics + insights)
+/// Generate QBR data (gather metrics + insights)
     pub async fn generate(
         &self, id: Uuid,
     ) -> Result<ApiResult<serde_json::Value>, String> {
@@ -84,12 +84,12 @@ impl QBRService {
             None => return Ok(ApiResult::err("QBR not found", "NOT_FOUND")),
         };
 
-        // Gather quarter metrics
+// Gather quarter metrics
         let (q_start, q_end) = quarter_date_range(qbr.quarter, qbr.year);
         let metrics = self.gather_quarter_metrics(qbr.tenant_id, q_start, q_end).await?;
         let insights = generate_insights(&metrics);
 
-        // Update QBR with generated data
+// Update QBR with generated data
         let metrics_json = serde_json::to_value(&metrics)
             .map_err(|e| format!("failed to serialize QBR metrics: {e}"))?;
         let insights_json = serde_json::to_value(&insights)
@@ -111,7 +111,7 @@ impl QBRService {
         })))
     }
 
-    /// Mark QBR as delivered
+/// Mark QBR as delivered
     pub async fn mark_delivered(&self, id: Uuid) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
         let row = sqlx::query_as::<_, QuarterlyBusinessReview>(
             "UPDATE ent_qbrs SET status = 'delivered', delivered_date = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *"
@@ -127,7 +127,7 @@ impl QBRService {
         }
     }
 
-    /// Submit feedback on a QBR
+/// Submit feedback on a QBR
     pub async fn submit_feedback(
         &self, id: Uuid, rating: i32, feedback_text: Option<&str>,
     ) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
@@ -149,7 +149,7 @@ impl QBRService {
         }
     }
 
-    /// Update a QBR goal
+/// Update a QBR goal
     pub async fn update_goal(
         &self, id: Uuid, goal_id: Uuid, current_value: f64,
     ) -> Result<ApiResult<QBRGoal>, String> {
@@ -183,7 +183,7 @@ impl QBRService {
         Ok(ApiResult::ok(updated))
     }
 
-    /// Get industry benchmarks
+/// Get industry benchmarks
     pub async fn get_benchmarks(
         &self, industry: &str,
     ) -> Result<ApiResult<Vec<IndustryBenchmark>>, String> {
@@ -198,7 +198,7 @@ impl QBRService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Gather metrics for a quarter (internal)
+/// Gather metrics for a quarter (internal)
     async fn gather_quarter_metrics(
         &self, tenant_id: Uuid, start: chrono::DateTime<Utc>, end: chrono::DateTime<Utc>,
     ) -> Result<serde_json::Value, String> {
@@ -244,7 +244,7 @@ impl QBRService {
 
 // ── Pure Functions ──────────────────────────────────────────────────────
 
-/// Calculate goal progress: ((current - baseline) / (target - baseline)) * 100
+/// Calculate goal progress:((current - baseline) / (target - baseline)) * 100
 pub fn calculate_goal_progress(baseline: f64, target: f64, current: f64) -> f64 {
     let range = target - baseline;
     if range.abs() < f64::EPSILON {
@@ -254,10 +254,10 @@ pub fn calculate_goal_progress(baseline: f64, target: f64, current: f64) -> f64 
     progress.clamp(0.0, 200.0) // Cap at 200% (over-achievement)
 }
 
-/// Get start/end dates for a quarter (quarter as int: 1-4)
-/// #267-268: Added validation for quarter range and safe date construction
+/// Get start/end dates for a quarter (quarter as int:1-4)
+/// #267-268:Added validation for quarter range and safe date construction
 pub fn quarter_date_range(quarter: i32, year: i32) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
-    // #268: Validate quarter is 1-4, default to Q1 for invalid values with warning
+// #268:Validate quarter is 1-4, default to Q1 for invalid values with warning
     let valid_quarter = if quarter < 1 || quarter > 4 {
         tracing::warn!(quarter = quarter, "Invalid quarter value, defaulting to Q1");
         1
@@ -273,11 +273,11 @@ pub fn quarter_date_range(quarter: i32, year: i32) -> (chrono::DateTime<Utc>, ch
         _ => unreachable!(), // Already validated
     };
 
-    // #267: Use checked construction to avoid potential panics
+// #267:Use checked construction to avoid potential panics
     let start = chrono::NaiveDate::from_ymd_opt(year, start_month, 1)
         .and_then(|d| d.and_hms_opt(0, 0, 0))
         .unwrap_or_else(|| {
-            // Fallback: January 1st of the year at midnight
+// Fallback:January 1st of the year at midnight
             chrono::NaiveDate::from_ymd_opt(year, 1, 1)
                 .unwrap_or(chrono::NaiveDate::MIN)
                 .and_hms_opt(0, 0, 0)
@@ -306,7 +306,7 @@ pub fn generate_insights(metrics: &serde_json::Value) -> Vec<QBRInsight> {
     let open_rate = metrics["open_rate"].as_f64().unwrap_or(0.0);
     let click_rate = metrics["click_rate"].as_f64().unwrap_or(0.0);
 
-    // Insight: Low delivery rate
+// Insight:Low delivery rate
     if delivery_rate < 95.0 {
         insights.push(QBRInsight {
             category: "deliverability".into(),
@@ -318,7 +318,7 @@ pub fn generate_insights(metrics: &serde_json::Value) -> Vec<QBRInsight> {
         });
     }
 
-    // Insight: High bounce rate
+// Insight:High bounce rate
     if bounce_rate > 5.0 {
         insights.push(QBRInsight {
             category: "list_hygiene".into(),
@@ -330,7 +330,7 @@ pub fn generate_insights(metrics: &serde_json::Value) -> Vec<QBRInsight> {
         });
     }
 
-    // Insight: Low open rate
+// Insight:Low open rate
     if open_rate < 15.0 {
         insights.push(QBRInsight {
             category: "engagement".into(),
@@ -342,7 +342,7 @@ pub fn generate_insights(metrics: &serde_json::Value) -> Vec<QBRInsight> {
         });
     }
 
-    // Insight: Low click rate
+// Insight:Low click rate
     if click_rate < 2.0 {
         insights.push(QBRInsight {
             category: "engagement".into(),
@@ -354,7 +354,7 @@ pub fn generate_insights(metrics: &serde_json::Value) -> Vec<QBRInsight> {
         });
     }
 
-    // Positive insight: Good performance
+// Positive insight:Good performance
     if delivery_rate >= 99.0 && bounce_rate < 1.0 {
         insights.push(QBRInsight {
             category: "deliverability".into(),

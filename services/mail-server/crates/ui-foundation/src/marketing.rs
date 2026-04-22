@@ -68,8 +68,6 @@ struct NavigationTiming {
 pub struct MarketingIslandSpec {
     pub checklist_id: &'static str,
     pub name: &'static str,
-    pub zola_source: &'static str,
-    pub react_source: &'static str,
     pub status: &'static str,
 }
 
@@ -421,8 +419,8 @@ mod tests {
     }
 
     #[test]
-    fn react_sources_removed_after_js_elimination() {
-        // Old Next.js marketing app deleted — no more React source references
+    fn marketing_source_catalog_is_baseline_only() {
+// Marketing now keeps only neutral manifests and behavioral baselines.
         assert_eq!(marketing_source_catalog().len(), 5);
     }
 

@@ -90,7 +90,7 @@ pub async fn get_subscription(
     .await
     .map_err(SubscriptionError::Db)?;
 
-    Ok(row.map(|r| r.into_subscription()))
+    row.map(|r| r.into_subscription()).transpose()
 }
 
 /// Change the plan on an existing subscription (upgrade / downgrade).
@@ -100,7 +100,7 @@ pub async fn update_plan(
     tenant_id: Uuid,
     new_plan: &str,
 ) -> Result<(), SubscriptionError> {
-    // Verify the plan exists.
+// Verify the plan exists.
     let exists: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM plans WHERE name = $1 AND is_active = true",
     )
@@ -115,26 +115,39 @@ pub async fn update_plan(
 
     let now = Utc::now();
 
-    // Wrap both writes in a transaction for atomicity.
+// Wrap both writes in a transaction for atomicity.
     let mut tx = pool.begin().await.map_err(SubscriptionError::Db)?;
 
-    // Update subscription record.
-    sqlx::query(
+// Update only the current visible subscription record.
+    let updated_subscription_id: Option<Uuid> = sqlx::query_scalar(
         r#"
-        UPDATE subscriptions
+        WITH target AS (
+            SELECT id
+            FROM subscriptions
+            WHERE tenant_id = $3
+              AND status IN ('active', 'trialing', 'past_due')
+            ORDER BY created_at DESC
+            LIMIT 1
+        )
+        UPDATE subscriptions s
         SET plan_name = $1, updated_at = $2
-        WHERE tenant_id = $3
-          AND status IN ('active', 'trialing', 'past_due')
+        FROM target
+        WHERE s.id = target.id
+        RETURNING s.id
         "#,
     )
     .bind(new_plan)
     .bind(now)
     .bind(tenant_id)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(SubscriptionError::Db)?;
 
-    // Update tenant plan column.
+    if updated_subscription_id.is_none() {
+        return Err(SubscriptionError::NotFound);
+    }
+
+// Update tenant plan column.
     sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
         .bind(new_plan)
         .bind(now)
@@ -202,15 +215,15 @@ fn interval_to_str(i: BillingInterval) -> &'static str {
     }
 }
 
-fn parse_status(s: &str) -> SubscriptionStatus {
+fn parse_status(s: &str) -> Result<SubscriptionStatus, SubscriptionError> {
     match s {
-        "active" => SubscriptionStatus::Active,
-        "past_due" => SubscriptionStatus::PastDue,
-        "canceled" => SubscriptionStatus::Canceled,
-        "trialing" => SubscriptionStatus::Trialing,
-        "paused" => SubscriptionStatus::Paused,
-        "incomplete" => SubscriptionStatus::Incomplete,
-        _ => SubscriptionStatus::Active,
+        "active" => Ok(SubscriptionStatus::Active),
+        "past_due" => Ok(SubscriptionStatus::PastDue),
+        "canceled" => Ok(SubscriptionStatus::Canceled),
+        "trialing" => Ok(SubscriptionStatus::Trialing),
+        "paused" => Ok(SubscriptionStatus::Paused),
+        "incomplete" => Ok(SubscriptionStatus::Incomplete),
+        _ => Err(SubscriptionError::InvalidStatus(s.to_string())),
     }
 }
 
@@ -238,12 +251,12 @@ struct SubRow {
 }
 
 impl SubRow {
-    fn into_subscription(self) -> Subscription {
-        Subscription {
+    fn into_subscription(self) -> Result<Subscription, SubscriptionError> {
+        Ok(Subscription {
             id: self.id,
             tenant_id: self.tenant_id,
             plan_name: self.plan_name,
-            status: parse_status(&self.status),
+            status: parse_status(&self.status)?,
             billing_interval: parse_interval(&self.billing_interval),
             current_period_start: self.current_period_start,
             current_period_end: self.current_period_end,
@@ -252,7 +265,7 @@ impl SubRow {
             cancel_at_period_end: self.cancel_at_period_end,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }
 
@@ -268,6 +281,8 @@ pub enum SubscriptionError {
     PlanNotFound(String),
     #[error("active subscription not found")]
     NotFound,
+    #[error("invalid subscription status: {0}")]
+    InvalidStatus(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -280,12 +295,19 @@ mod tests {
 
     #[test]
     fn parse_status_variants() {
-        assert_eq!(parse_status("active"), SubscriptionStatus::Active);
-        assert_eq!(parse_status("past_due"), SubscriptionStatus::PastDue);
-        assert_eq!(parse_status("canceled"), SubscriptionStatus::Canceled);
-        assert_eq!(parse_status("trialing"), SubscriptionStatus::Trialing);
-        assert_eq!(parse_status("paused"), SubscriptionStatus::Paused);
-        assert_eq!(parse_status("unknown"), SubscriptionStatus::Active);
+        assert_eq!(parse_status("active").unwrap(), SubscriptionStatus::Active);
+        assert_eq!(parse_status("past_due").unwrap(), SubscriptionStatus::PastDue);
+        assert_eq!(parse_status("canceled").unwrap(), SubscriptionStatus::Canceled);
+        assert_eq!(parse_status("trialing").unwrap(), SubscriptionStatus::Trialing);
+        assert_eq!(parse_status("paused").unwrap(), SubscriptionStatus::Paused);
+        assert_eq!(parse_status("incomplete").unwrap(), SubscriptionStatus::Incomplete);
+    }
+
+    #[test]
+    fn parse_status_unknown_is_error() {
+        let err = parse_status("unknown").unwrap_err();
+
+        assert!(matches!(err, SubscriptionError::InvalidStatus(status) if status == "unknown"));
     }
 
     #[test]
@@ -318,10 +340,32 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let sub = row.into_subscription();
+        let sub = row.into_subscription().unwrap();
         assert_eq!(sub.plan_name, "pro");
         assert_eq!(sub.status, SubscriptionStatus::Active);
         assert_eq!(sub.billing_interval, BillingInterval::Monthly);
+    }
+
+    #[test]
+    fn sub_row_into_subscription_rejects_invalid_status() {
+        let now = Utc::now();
+        let row = SubRow {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            plan_name: "pro".into(),
+            status: "corrupted".into(),
+            billing_interval: "monthly".into(),
+            current_period_start: now,
+            current_period_end: now,
+            stripe_subscription_id: None,
+            stripe_customer_id: None,
+            cancel_at_period_end: false,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let err = row.into_subscription().unwrap_err();
+        assert!(matches!(err, SubscriptionError::InvalidStatus(status) if status == "corrupted"));
     }
 
     #[test]

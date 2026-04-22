@@ -6,14 +6,13 @@ use uuid::Uuid;
 use crate::types::{Campaign, CampaignStatus, SalesError};
 
 /// In-memory campaign manager.
-///
 /// Mirrors the TypeScript drip-engine / campaign subsystem, exposing CRUD +
 /// lifecycle operations. Recipients are tracked as a simple Vec of email
 /// addresses per campaign for now.
 #[derive(Debug, Clone)]
 pub struct CampaignManager {
     campaigns: Arc<RwLock<Vec<Campaign>>>,
-    /// campaign_id → list of recipient emails
+/// campaign_id → list of recipient emails
     recipients: Arc<RwLock<std::collections::HashMap<Uuid, Vec<String>>>>,
     max_campaigns: usize,
 }
@@ -27,7 +26,7 @@ impl CampaignManager {
         }
     }
 
-    /// Create a campaign in Draft status.
+/// Create a campaign in Draft status.
     pub fn create_campaign(
         &self,
         name: String,
@@ -60,12 +59,12 @@ impl CampaignManager {
         Ok(campaign)
     }
 
-    /// List all campaigns.
+/// List all campaigns.
     pub fn list_campaigns(&self) -> Vec<Campaign> {
         self.campaigns.read().clone()
     }
 
-    /// Transition a draft/paused campaign to Active.
+/// Transition a draft/paused campaign to Active.
     pub fn start_campaign(&self, id: Uuid) -> Result<Campaign, SalesError> {
         let mut store = self.campaigns.write();
         let c = store
@@ -84,7 +83,7 @@ impl CampaignManager {
         }
     }
 
-    /// Pause an active campaign.
+/// Pause an active campaign.
     pub fn pause_campaign(&self, id: Uuid) -> Result<Campaign, SalesError> {
         let mut store = self.campaigns.write();
         let c = store
@@ -98,7 +97,7 @@ impl CampaignManager {
         Ok(c.clone())
     }
 
-    /// Return stats for a campaign (sent / opened / clicked / recipients).
+/// Return stats for a campaign (sent / opened / clicked / recipients).
     pub fn get_stats(&self, id: Uuid) -> Result<serde_json::Value, SalesError> {
         let store = self.campaigns.read();
         let c = store
@@ -120,13 +119,13 @@ impl CampaignManager {
         }))
     }
 
-    /// Add recipient emails to a campaign.
+/// Add recipient emails to a campaign.
     pub fn add_recipients(
         &self,
         id: Uuid,
         emails: Vec<String>,
     ) -> Result<usize, SalesError> {
-        // verify campaign exists
+// verify campaign exists
         if !self.campaigns.read().iter().any(|c| c.id == id) {
             return Err(SalesError::CampaignNotFound(id));
         }
@@ -172,7 +171,7 @@ mod tests {
         let paused = mgr.pause_campaign(c.id).unwrap();
         assert_eq!(paused.status, CampaignStatus::Paused);
 
-        // re-start after pause
+// re-start after pause
         let restarted = mgr.start_campaign(c.id).unwrap();
         assert_eq!(restarted.status, CampaignStatus::Active);
     }
@@ -185,7 +184,7 @@ mod tests {
             .unwrap();
         mgr.start_campaign(c.id).unwrap();
 
-        // second active campaign should be rejected
+// second active campaign should be rejected
         let c2 = mgr.create_campaign("C2".into(), "t".into(), "a".into());
         assert!(c2.is_err());
     }

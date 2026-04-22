@@ -9,7 +9,7 @@ use crate::types::SupportTicket;
 pub struct SupportTicketsRepo;
 
 impl SupportTicketsRepo {
-    /// Create a new support ticket.
+/// Create a new support ticket.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -32,7 +32,7 @@ impl SupportTicketsRepo {
         .await
     }
 
-    /// Find a support ticket by ID.
+/// Find a support ticket by ID.
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -47,7 +47,7 @@ impl SupportTicketsRepo {
         .await
     }
 
-    /// List support tickets for a tenant.
+/// List support tickets for a tenant.
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -64,7 +64,7 @@ impl SupportTicketsRepo {
         .await
     }
 
-    /// Update support ticket status.
+/// Update support ticket status.
     pub async fn update_status(
         pool: &PgPool,
         tenant_id: Uuid,

@@ -13,13 +13,13 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialise tracing
+// Initialise tracing
     tracing_subscriber::fmt::init();
 
     let config = OpsConfig::from_env();
     info!(?config, "ops-service starting");
 
-    // Connect to database
+// Connect to database
     let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         trust_cache: Arc::new(DashMap::new()),
     };
 
-    // Load existing state from database
+// Load existing state from database
     if let Err(e) = state.incidents.load_from_db().await {
         tracing::warn!(?e, "Failed to load incidents from database");
     }

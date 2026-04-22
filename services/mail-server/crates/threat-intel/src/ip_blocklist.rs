@@ -1,9 +1,7 @@
 //! IP blocklist with CIDR support
 //!
-//! Stores blocked IP addresses and CIDR ranges. Supports:
-//! - Individual IPv4 addresses
-//! - Individual IPv6 addresses  
-//! - CIDR notation (e.g., 192.168.0.0/16, 2001:db8::/32)
+//! Stores blocked IP addresses and CIDR ranges. Supports://! - Individual IPv4 addresses
+//! - Individual IPv6 addresses //! - CIDR notation (e.g., 192.168.0.0/16, 2001:db8::/32)
 //! - Source attribution (which feed added the entry)
 //! - TTL-based expiration
 
@@ -15,38 +13,38 @@ use std::sync::Arc;
 /// A blocklist entry
 #[derive(Debug, Clone)]
 pub struct IpBlockEntry {
-    /// The blocked IP or CIDR
+/// The blocked IP or CIDR
     pub cidr: String,
-    /// Source feed name
+/// Source feed name
     pub source: String,
-    /// Threat category
+/// Threat category
     pub category: ThreatCategory,
-    /// Confidence score (0.0 - 10.0)
+/// Confidence score (0.0 - 10.0)
     pub confidence: f64,
-    /// When this entry was added
+/// When this entry was added
     pub added_at: DateTime<Utc>,
-    /// When this entry expires
+/// When this entry expires
     pub expires_at: DateTime<Utc>,
 }
 
 /// Threat category for an IP
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThreatCategory {
-    /// Known spam source
+/// Known spam source
     Spam,
-    /// Known malware C2/distribution
+/// Known malware C2/distribution
     Malware,
-    /// Botnet member
+/// Botnet member
     Botnet,
-    /// Brute force / scanner
+/// Brute force / scanner
     Scanner,
-    /// Phishing infrastructure
+/// Phishing infrastructure
     Phishing,
-    /// Hijacked netblock
+/// Hijacked netblock
     Hijacked,
-    /// Bogon / unallocated
+/// Bogon / unallocated
     Bogon,
-    /// Generic bad reputation
+/// Generic bad reputation
     BadReputation,
 }
 
@@ -70,7 +68,7 @@ impl std::fmt::Display for ThreatCategory {
 struct CidrRange {
     network: u32,
     mask: u32,
-    /// Prefix length for sorting (more specific = higher priority)
+/// Prefix length for sorting (more specific = higher priority)
     prefix_len: u8,
     entry: Arc<IpBlockEntry>,
 }
@@ -78,16 +76,16 @@ struct CidrRange {
 /// Thread-safe IP blocklist
 #[derive(Clone)]
 pub struct IpBlocklist {
-    /// Exact IP matches (for /32 entries)
+/// Exact IP matches (for /32 entries)
     exact: Arc<DashMap<u32, Arc<IpBlockEntry>>>,
-    /// CIDR ranges (for prefix matches)
+/// CIDR ranges (for prefix matches)
     cidrs: Arc<parking_lot::RwLock<Vec<CidrRange>>>,
-    /// Maximum entries
+/// Maximum entries
     max_entries: usize,
 }
 
 impl IpBlocklist {
-    /// Create a new IP blocklist
+/// Create a new IP blocklist
     pub fn new(max_entries: usize) -> Self {
         Self {
             exact: Arc::new(DashMap::new()),
@@ -96,7 +94,7 @@ impl IpBlocklist {
         }
     }
 
-    /// Add an individual IP to the blocklist
+/// Add an individual IP to the blocklist
     pub fn add_ip(&self, ip: Ipv4Addr, entry: IpBlockEntry) -> bool {
         if self.exact.len() >= self.max_entries {
             return false;
@@ -106,7 +104,7 @@ impl IpBlocklist {
         true
     }
 
-    /// Add a CIDR range to the blocklist
+/// Add a CIDR range to the blocklist
     pub fn add_cidr(&self, cidr_str: &str, entry: IpBlockEntry) -> Result<(), crate::ThreatIntelError> {
         let (network, prefix_len) = parse_cidr(cidr_str)?;
         let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
@@ -122,27 +120,27 @@ impl IpBlocklist {
         Ok(())
     }
 
-    /// Optimize CIDR list by sorting (most specific prefixes first)
-    /// Call this after bulk loading entries for faster lookups
+/// Optimize CIDR list by sorting (most specific prefixes first)
+/// Call this after bulk loading entries for faster lookups
     pub fn optimize(&self) {
         let mut cidrs = self.cidrs.write();
-        // Sort by prefix length descending (more specific = checked first)
+// Sort by prefix length descending (more specific = checked first)
         cidrs.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
     }
 
-    /// Check if an IP is blocked
+/// Check if an IP is blocked
     pub fn lookup(&self, ip: Ipv4Addr) -> Option<Arc<IpBlockEntry>> {
         let ip_u32 = u32::from(ip);
         let now = Utc::now();
 
-        // Check exact match first
+// Check exact match first
         if let Some(entry) = self.exact.get(&ip_u32) {
             if entry.expires_at > now {
                 return Some(entry.clone());
             }
         }
 
-        // Check CIDR ranges
+// Check CIDR ranges
         let cidrs = self.cidrs.read();
         for range in cidrs.iter() {
             if (ip_u32 & range.mask) == range.network && range.entry.expires_at > now {
@@ -153,27 +151,27 @@ impl IpBlocklist {
         None
     }
 
-    /// Check if an IP string is blocked
+/// Check if an IP string is blocked
     pub fn lookup_str(&self, ip_str: &str) -> Option<Arc<IpBlockEntry>> {
         ip_str.parse::<Ipv4Addr>().ok().and_then(|ip| self.lookup(ip))
     }
 
-    /// Number of exact entries
+/// Number of exact entries
     pub fn exact_count(&self) -> usize {
         self.exact.len()
     }
 
-    /// Number of CIDR ranges
+/// Number of CIDR ranges
     pub fn cidr_count(&self) -> usize {
         self.cidrs.read().len()
     }
 
-    /// Remove expired entries
+/// Remove expired entries
     pub fn purge_expired(&self) -> usize {
         let now = Utc::now();
         let mut removed = 0;
 
-        // Purge exact entries
+// Purge exact entries
         self.exact.retain(|_, entry| {
             let keep = entry.expires_at > now;
             if !keep {
@@ -182,7 +180,7 @@ impl IpBlocklist {
             keep
         });
 
-        // Purge CIDR ranges
+// Purge CIDR ranges
         let mut cidrs = self.cidrs.write();
         let before = cidrs.len();
         cidrs.retain(|range| range.entry.expires_at > now);
@@ -204,9 +202,7 @@ impl Default for IpBlocklist {
 const MIN_CIDR_PREFIX_LEN: u8 = 8;
 
 /// Parse a CIDR string like "192.168.0.0/16"
-///
 /// # Security
-///
 /// - Rejects prefix lengths 0-7 to prevent blocking the entire internet or large portions of it.
 /// - Rejects prefix lengths > 32 (invalid for IPv4).
 /// - Use `MIN_CIDR_PREFIX_LEN` constant to see the minimum allowed prefix.
@@ -221,7 +217,7 @@ fn parse_cidr(cidr: &str) -> Result<(u32, u8), crate::ThreatIntelError> {
     let prefix_len: u8 = parts[1].parse()
         .map_err(|_| crate::ThreatIntelError::InvalidCidr(cidr.into()))?;
 
-    // Security: Reject prefix lengths that are too broad (0-7 would block huge swaths of internet)
+// Security:Reject prefix lengths that are too broad (0-7 would block huge swaths of internet)
     if prefix_len < MIN_CIDR_PREFIX_LEN {
         return Err(crate::ThreatIntelError::InvalidCidr(
             format!(
@@ -307,7 +303,7 @@ pub fn parse_plain_text_list(content: &str, source: &str, category: ThreatCatego
 struct Ipv6CidrRange {
     network: u128,
     mask: u128,
-    /// Prefix length for sorting (more specific = higher priority)
+/// Prefix length for sorting (more specific = higher priority)
     prefix_len: u8,
     entry: Arc<IpBlockEntry>,
 }
@@ -315,16 +311,16 @@ struct Ipv6CidrRange {
 /// Thread-safe IPv6 blocklist
 #[derive(Clone)]
 pub struct Ipv6Blocklist {
-    /// Exact IPv6 matches (for /128 entries)
+/// Exact IPv6 matches (for /128 entries)
     exact: Arc<DashMap<u128, Arc<IpBlockEntry>>>,
-    /// CIDR ranges (for prefix matches)
+/// CIDR ranges (for prefix matches)
     cidrs: Arc<parking_lot::RwLock<Vec<Ipv6CidrRange>>>,
-    /// Maximum entries
+/// Maximum entries
     max_entries: usize,
 }
 
 impl Ipv6Blocklist {
-    /// Create a new IPv6 blocklist
+/// Create a new IPv6 blocklist
     pub fn new(max_entries: usize) -> Self {
         Self {
             exact: Arc::new(DashMap::new()),
@@ -333,7 +329,7 @@ impl Ipv6Blocklist {
         }
     }
 
-    /// Add an individual IPv6 to the blocklist
+/// Add an individual IPv6 to the blocklist
     pub fn add_ip(&self, ip: Ipv6Addr, entry: IpBlockEntry) -> bool {
         if self.exact.len() >= self.max_entries {
             return false;
@@ -343,7 +339,7 @@ impl Ipv6Blocklist {
         true
     }
 
-    /// Add a CIDR range to the blocklist
+/// Add a CIDR range to the blocklist
     pub fn add_cidr(&self, cidr_str: &str, entry: IpBlockEntry) -> Result<(), crate::ThreatIntelError> {
         let (network, prefix_len) = parse_ipv6_cidr(cidr_str)?;
         let mask = if prefix_len == 0 { 0 } else { !0u128 << (128 - prefix_len) };
@@ -359,26 +355,26 @@ impl Ipv6Blocklist {
         Ok(())
     }
 
-    /// Optimize CIDR list by sorting (most specific prefixes first)
-    /// Call this after bulk loading entries for faster lookups
+/// Optimize CIDR list by sorting (most specific prefixes first)
+/// Call this after bulk loading entries for faster lookups
     pub fn optimize(&self) {
         let mut cidrs = self.cidrs.write();
         cidrs.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
     }
 
-    /// Check if an IPv6 is blocked
+/// Check if an IPv6 is blocked
     pub fn lookup(&self, ip: Ipv6Addr) -> Option<Arc<IpBlockEntry>> {
         let ip_u128 = u128::from(ip);
         let now = Utc::now();
 
-        // Check exact match first
+// Check exact match first
         if let Some(entry) = self.exact.get(&ip_u128) {
             if entry.expires_at > now {
                 return Some(entry.clone());
             }
         }
 
-        // Check CIDR ranges
+// Check CIDR ranges
         let cidrs = self.cidrs.read();
         for range in cidrs.iter() {
             if (ip_u128 & range.mask) == range.network && range.entry.expires_at > now {
@@ -389,27 +385,27 @@ impl Ipv6Blocklist {
         None
     }
 
-    /// Check if an IPv6 string is blocked
+/// Check if an IPv6 string is blocked
     pub fn lookup_str(&self, ip_str: &str) -> Option<Arc<IpBlockEntry>> {
         ip_str.parse::<Ipv6Addr>().ok().and_then(|ip| self.lookup(ip))
     }
 
-    /// Number of exact entries
+/// Number of exact entries
     pub fn exact_count(&self) -> usize {
         self.exact.len()
     }
 
-    /// Number of CIDR ranges
+/// Number of CIDR ranges
     pub fn cidr_count(&self) -> usize {
         self.cidrs.read().len()
     }
 
-    /// Remove expired entries
+/// Remove expired entries
     pub fn purge_expired(&self) -> usize {
         let now = Utc::now();
         let mut removed = 0;
 
-        // Purge exact entries
+// Purge exact entries
         self.exact.retain(|_, entry| {
             let keep = entry.expires_at > now;
             if !keep {
@@ -418,7 +414,7 @@ impl Ipv6Blocklist {
             keep
         });
 
-        // Purge CIDR ranges
+// Purge CIDR ranges
         let mut cidrs = self.cidrs.write();
         let before = cidrs.len();
         cidrs.retain(|range| range.entry.expires_at > now);
@@ -462,14 +458,14 @@ fn parse_ipv6_cidr(cidr: &str) -> Result<(u128, u8), crate::ThreatIntelError> {
 /// Unified blocklist that handles both IPv4 and IPv6
 #[derive(Clone)]
 pub struct UnifiedIpBlocklist {
-    /// IPv4 blocklist storage.
+/// IPv4 blocklist storage.
     pub v4: IpBlocklist,
-    /// IPv6 blocklist storage.
+/// IPv6 blocklist storage.
     pub v6: Ipv6Blocklist,
 }
 
 impl UnifiedIpBlocklist {
-    /// Create a unified blocklist with independent capacities for IPv4 and IPv6.
+/// Create a unified blocklist with independent capacities for IPv4 and IPv6.
     pub fn new(max_v4: usize, max_v6: usize) -> Self {
         Self {
             v4: IpBlocklist::new(max_v4),
@@ -477,19 +473,19 @@ impl UnifiedIpBlocklist {
         }
     }
 
-    /// Lookup any IP address string (auto-detects v4 vs v6)
+/// Lookup any IP address string (auto-detects v4 vs v6)
     pub fn lookup_str(&self, ip_str: &str) -> Option<Arc<IpBlockEntry>> {
-        // Try IPv4 first (more common)
+// Try IPv4 first (more common)
         if let Some(entry) = self.v4.lookup_str(ip_str) {
             return Some(entry);
         }
-        // Then try IPv6
+// Then try IPv6
         self.v6.lookup_str(ip_str)
     }
 
-    /// Add a CIDR range (auto-detects v4 vs v6)
+/// Add a CIDR range (auto-detects v4 vs v6)
     pub fn add_cidr(&self, cidr_str: &str, entry: IpBlockEntry) -> Result<(), crate::ThreatIntelError> {
-        // Heuristic: IPv6 addresses contain colons
+// Heuristic:IPv6 addresses contain colons
         if cidr_str.contains(':') {
             self.v6.add_cidr(cidr_str, entry)
         } else {
@@ -497,13 +493,13 @@ impl UnifiedIpBlocklist {
         }
     }
 
-    /// Remove expired entries from both blocklists
+/// Remove expired entries from both blocklists
     pub fn purge_expired(&self) -> usize {
         self.v4.purge_expired() + self.v6.purge_expired()
     }
 
-    /// Optimize both blocklists for faster lookups
-    /// Call after bulk loading entries
+/// Optimize both blocklists for faster lookups
+/// Call after bulk loading entries
     pub fn optimize(&self) {
         self.v4.optimize();
         self.v6.optimize();
@@ -612,9 +608,9 @@ mod tests {
         assert!(bl.add_cidr("1.2.3.4/33", make_entry("x")).is_err());
     }
 
-    // =========================================================================
-    // IPv6 Tests
-    // =========================================================================
+// =========================================================================
+// IPv6 Tests
+// =========================================================================
 
     #[test]
     fn test_ipv6_exact_lookup() {
@@ -672,9 +668,9 @@ mod tests {
         assert_eq!(bl.exact_count(), 1);
     }
 
-    // =========================================================================
-    // Unified Blocklist Tests
-    // =========================================================================
+// =========================================================================
+// Unified Blocklist Tests
+// =========================================================================
 
     #[test]
     fn test_unified_lookup() {

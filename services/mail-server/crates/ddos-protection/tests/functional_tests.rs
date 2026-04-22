@@ -1,4 +1,4 @@
-//! Functional Tests: Real-World Attack Scenario Simulations
+//! Functional Tests:Real-World Attack Scenario Simulations
 //!
 //! These tests simulate actual attack patterns and verify the system's
 //! response to various DDoS attack vectors.
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// ============================================================================
-/// FUNCTIONAL TESTS: HTTP Flood Attack Mitigation
+/// FUNCTIONAL TESTS:HTTP Flood Attack Mitigation
 /// ============================================================================
 #[cfg(test)]
 mod http_flood_tests {
@@ -42,7 +42,7 @@ mod http_flood_tests {
         }
         
         fn check_request(&mut self, ip: &str) -> FloodResult {
-            // Reset window if needed
+// Reset window if needed
             if self.window_start.elapsed() > self.window_duration {
                 self.request_counts.clear();
                 self.window_start = Instant::now();
@@ -65,7 +65,7 @@ mod http_flood_tests {
     fn test_normal_traffic_allowed() {
         let mut detector = FloodDetector::new(100, 500);
         
-        // Normal user makes 10 requests
+// Normal user makes 10 requests
         for _ in 0..10 {
             assert_eq!(detector.check_request("192.168.1.1"), FloodResult::Allowed);
         }
@@ -75,7 +75,7 @@ mod http_flood_tests {
     fn test_flood_triggers_rate_limit() {
         let mut detector = FloodDetector::new(50, 200);
         
-        // Flood with 150 requests
+// Flood with 150 requests
         let mut rate_limited_count = 0;
         for _ in 0..150 {
             if detector.check_request("10.0.0.1") == FloodResult::RateLimited {
@@ -83,7 +83,7 @@ mod http_flood_tests {
             }
         }
         
-        // Should have rate limited most requests
+// Should have rate limited most requests
         assert!(rate_limited_count > 90, "Got {} rate limited", rate_limited_count);
     }
     
@@ -91,7 +91,7 @@ mod http_flood_tests {
     fn test_extreme_flood_triggers_block() {
         let mut detector = FloodDetector::new(50, 100);
         
-        // Extreme flood
+// Extreme flood
         let mut final_result = FloodResult::Allowed;
         for _ in 0..200 {
             final_result = detector.check_request("attacker.ip");
@@ -104,18 +104,18 @@ mod http_flood_tests {
     fn test_multiple_attackers_isolated() {
         let mut detector = FloodDetector::new(20, 100);
         
-        // Attacker floods
+// Attacker floods
         for _ in 0..50 {
             detector.check_request("attacker1");
         }
         
-        // Legitimate user should still be allowed
+// Legitimate user should still be allowed
         assert_eq!(detector.check_request("legitimate_user"), FloodResult::Allowed);
     }
 }
 
 /// ============================================================================
-/// FUNCTIONAL TESTS: Slowloris Attack Mitigation
+/// FUNCTIONAL TESTS:Slowloris Attack Mitigation
 /// ============================================================================
 #[cfg(test)]
 mod slowloris_tests {
@@ -169,8 +169,8 @@ mod slowloris_tests {
             if let Some(conn) = self.connections.get(conn_id) {
                 let elapsed = conn.started_at.elapsed();
                 
-                // If connection has been open > 30 seconds without completing headers
-                // and receiving very little data, it's likely Slowloris
+// If connection has been open > 30 seconds without completing headers
+// and receiving very little data, it's likely Slowloris
                 if elapsed > Duration::from_secs(30) 
                     && !conn.headers_complete 
                     && conn.bytes_received < 1000 
@@ -178,7 +178,7 @@ mod slowloris_tests {
                     return true;
                 }
                 
-                // Data rate too slow (< 100 bytes per 10 seconds)
+// Data rate too slow (< 100 bytes per 10 seconds)
                 let expected_min_data = (elapsed.as_secs() / 10).saturating_mul(100);
                 if elapsed > Duration::from_secs(20) && conn.bytes_received < expected_min_data {
                     return true;
@@ -208,16 +208,16 @@ mod slowloris_tests {
     fn test_per_ip_connection_limit() {
         let mut tracker = ConnectionTracker::new(10, Duration::from_secs(60));
         
-        // Fill up connections from one IP
+// Fill up connections from one IP
         for i in 0..10 {
             assert!(tracker.can_accept_connection("192.168.1.1"));
             tracker.add_connection(&format!("192.168.1.1_{}", i));
         }
         
-        // 11th should be rejected
+// 11th should be rejected
         assert!(!tracker.can_accept_connection("192.168.1.1"));
         
-        // Different IP should still be allowed
+// Different IP should still be allowed
         assert!(tracker.can_accept_connection("192.168.1.2"));
     }
     
@@ -227,16 +227,16 @@ mod slowloris_tests {
         
         tracker.add_connection("good_client_1");
         
-        // Simulate sending full request quickly
+// Simulate sending full request quickly
         tracker.update_connection("good_client_1", 5000, true);
         
-        // Should not be detected as Slowloris
+// Should not be detected as Slowloris
         assert!(!tracker.detect_slowloris("good_client_1"));
     }
 }
 
 /// ============================================================================
-/// FUNCTIONAL TESTS: Application Layer Attack Detection
+/// FUNCTIONAL TESTS:Application Layer Attack Detection
 /// ============================================================================
 #[cfg(test)]
 mod app_layer_tests {
@@ -284,12 +284,12 @@ mod app_layer_tests {
                 .map(|v| v.len())
                 .unwrap_or(0);
             
-            // High error rate on login endpoint
+// High error rate on login endpoint
             request_count >= 10 && error_count as f64 / request_count as f64 > 0.8
         }
         
         fn detect_resource_exhaustion(&self, ip: &str) -> bool {
-            // Check for rapid requests to expensive endpoints
+// Check for rapid requests to expensive endpoints
             let expensive_endpoints = ["/api/search", "/api/export", "/api/report"];
             
             for endpoint in &expensive_endpoints {
@@ -318,7 +318,7 @@ mod app_layer_tests {
     fn test_credential_stuffing_detection() {
         let mut detector = PatternDetector::new();
         
-        // Simulate credential stuffing: many failed logins
+// Simulate credential stuffing:many failed logins
         for _ in 0..15 {
             detector.record_request("attacker_ip", "/api/login", true);
         }
@@ -333,7 +333,7 @@ mod app_layer_tests {
     fn test_legitimate_login_failures() {
         let mut detector = PatternDetector::new();
         
-        // Normal user: few failures
+// Normal user:few failures
         detector.record_request("user_ip", "/api/login", true);
         detector.record_request("user_ip", "/api/login", true);
         detector.record_request("user_ip", "/api/login", false);
@@ -345,7 +345,7 @@ mod app_layer_tests {
     fn test_resource_exhaustion_detection() {
         let mut detector = PatternDetector::new();
         
-        // Spam expensive endpoint
+// Spam expensive endpoint
         for _ in 0..25 {
             detector.record_request("bad_actor", "/api/export", false);
         }
@@ -358,7 +358,7 @@ mod app_layer_tests {
 }
 
 /// ============================================================================
-/// FUNCTIONAL TESTS: Distributed Attack Detection
+/// FUNCTIONAL TESTS:Distributed Attack Detection
 /// ============================================================================
 #[cfg(test)]
 mod distributed_attack_tests {
@@ -396,7 +396,7 @@ mod distributed_attack_tests {
         }
         
         fn is_distributed_attack(&self) -> bool {
-            // If under attack and traffic from many unique IPs
+// If under attack and traffic from many unique IPs
             self.is_under_attack() && self.unique_attacker_count() > 100
         }
         
@@ -414,13 +414,13 @@ mod distributed_attack_tests {
     fn test_detect_attack_surge() {
         let mut tracker = GlobalRateTracker::new(100);
         
-        // Normal traffic
+// Normal traffic
         for i in 0..100 {
             tracker.record_request(&format!("user_{}", i));
         }
         assert!(!tracker.is_under_attack());
         
-        // Surge traffic (over threshold)
+// Surge traffic (over threshold)
         for i in 0..300 {
             tracker.record_request(&format!("attacker_{}", i % 50));
         }
@@ -431,7 +431,7 @@ mod distributed_attack_tests {
     fn test_detect_distributed_attack() {
         let mut tracker = GlobalRateTracker::new(100);
         
-        // Simulate distributed attack from 200 unique IPs
+// Simulate distributed attack from 200 unique IPs
         for i in 0..400 {
             tracker.record_request(&format!("botnet_node_{}", i));
         }
@@ -445,12 +445,12 @@ mod distributed_attack_tests {
     fn test_identify_top_offenders() {
         let mut tracker = GlobalRateTracker::new(100);
         
-        // One heavy attacker
+// One heavy attacker
         for _ in 0..100 {
             tracker.record_request("heavy_hitter");
         }
         
-        // Some normal users
+// Some normal users
         for i in 0..50 {
             tracker.record_request(&format!("user_{}", i));
         }
@@ -462,7 +462,7 @@ mod distributed_attack_tests {
 }
 
 /// ============================================================================
-/// FUNCTIONAL TESTS: Adaptive Challenge System
+/// FUNCTIONAL TESTS:Adaptive Challenge System
 /// ============================================================================
 #[cfg(test)]
 mod adaptive_challenge_tests {
@@ -499,8 +499,8 @@ mod adaptive_challenge_tests {
         
         fn get_challenge(&self, ip: &str) -> ChallengeType {
             let ip_score = *self.ip_threat_scores.get(ip).unwrap_or(&0);
-            // Use maximum of global threat and IP-specific threat
-            // This ensures elevated global threats aren't diluted by unknown IPs
+// Use maximum of global threat and IP-specific threat
+// This ensures elevated global threats aren't diluted by unknown IPs
             let combined_score = self.global_threat_level.max(ip_score);
             
             match combined_score {
@@ -514,7 +514,7 @@ mod adaptive_challenge_tests {
         fn pow_difficulty(&self, ip: &str) -> u8 {
             let ip_score = *self.ip_threat_scores.get(ip).unwrap_or(&0);
             
-            // Higher threat = harder PoW
+// Higher threat = harder PoW
             match ip_score {
                 0..=25 => 8,
                 26..=50 => 12,
@@ -571,7 +571,7 @@ mod adaptive_challenge_tests {
 }
 
 /// ============================================================================
-/// FUNCTIONAL TESTS: Reputation Recovery
+/// FUNCTIONAL TESTS:Reputation Recovery
 /// ============================================================================
 #[cfg(test)]
 mod reputation_recovery_tests {
@@ -652,7 +652,7 @@ mod reputation_recovery_tests {
         system.penalize("reformed", 50);
         assert_eq!(system.get_score("reformed"), -50);
         
-        // Simulate time passing with recovery
+// Simulate time passing with recovery
         for _ in 0..30 {
             system.apply_recovery();
         }
@@ -677,12 +677,12 @@ mod reputation_recovery_tests {
         
         system.penalize("test_ip", 5);
         
-        // Apply more recovery than needed
+// Apply more recovery than needed
         for _ in 0..20 {
             system.apply_recovery();
         }
         
-        // Should recover to 0, not go positive
+// Should recover to 0, not go positive
         assert_eq!(system.get_score("test_ip"), 0);
     }
 }

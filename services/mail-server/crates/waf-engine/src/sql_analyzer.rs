@@ -1,8 +1,7 @@
 //! SQL injection detection via structural (AST-level) analysis
 //!
 //! Instead of relying on regex patterns that attackers routinely bypass,
-//! this module tokenizes SQL fragments and detects structural manipulation:
-//!
+//! this module tokenizes SQL fragments and detects structural manipulation://!
 //! - Tautologies (`1=1`, `'a'='a'`, `1<2`)
 //! - Union-based injection (`UNION SELECT`)
 //! - Stacked queries (`;DROP TABLE`)
@@ -36,27 +35,27 @@ enum SqlKeyword {
     Having, Group, Order, By, Like, In, Between, Is, Null, Not,
     Sleep, Benchmark, Waitfor, Delay, If, Case, When, Then, Else,
     Load, File, Outfile, Dumpfile, Information,
-    // PostgreSQL/database-specific blind injection functions
-    PgSleep,       // pg_sleep() - PostgreSQL
-    DbmsLock,      // dbms_lock.sleep() - Oracle
-    UtlHttp,       // UTL_HTTP.request() - Oracle
-    Xor,           // XOR operator (MySQL boolean injection)
+// PostgreSQL/database-specific blind injection functions
+    PgSleep, // pg_sleep - PostgreSQL
+    DbmsLock, // dbms_lock.sleep - Oracle
+    UtlHttp, // UTL_HTTP.request - Oracle
+    Xor, // XOR operator (MySQL boolean injection)
     Regexp, Rlike, // REGEXP/RLIKE (MySQL pattern matching)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SqlOp {
-    Eq,      // =
-    Neq,     // != or <>
-    Lt,      // <
-    Gt,      // >
-    LtEq,    // <=
-    GtEq,    // >=
+    Eq, // =
+    Neq, // != or <>
+    Lt, // <
+    Gt, // >
+    LtEq, // <=
+    GtEq, // >=
     Plus,
     Minus,
     Star,
     Slash,
-    Pipe,    // ||
+    Pipe, // ||
     Ampersand,
 }
 
@@ -67,7 +66,7 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     let lower = input.to_lowercase();
     let tokens = tokenize_sql(&lower);
 
-    // Detection 1: Tautology (e.g., 1=1, 'a'='a')
+// Detection 1:Tautology (e.g., 1=1, 'a'='a')
     if let Some(score) = detect_tautology(&tokens) {
         results.push(RuleMatch {
             rule_id: 942100,
@@ -79,7 +78,7 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 2: UNION SELECT
+// Detection 2:UNION SELECT
     if detect_union_select(&tokens) {
         results.push(RuleMatch {
             rule_id: 942200,
@@ -91,7 +90,7 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 3: Stacked queries
+// Detection 3:Stacked queries
     if detect_stacked_queries(&tokens) {
         results.push(RuleMatch {
             rule_id: 942300,
@@ -103,7 +102,7 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 4: Comment-based evasion
+// Detection 4:Comment-based evasion
     if detect_comment_evasion(&lower) {
         results.push(RuleMatch {
             rule_id: 942400,
@@ -115,7 +114,7 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 5: Blind / time-based injection
+// Detection 5:Blind / time-based injection
     if detect_blind_injection(&tokens) {
         results.push(RuleMatch {
             rule_id: 942500,
@@ -127,7 +126,7 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 6: String termination + boolean logic
+// Detection 6:String termination + boolean logic
     if detect_string_termination_logic(&tokens) {
         results.push(RuleMatch {
             rule_id: 942600,
@@ -139,7 +138,7 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 7: Dangerous functions/data exfiltration
+// Detection 7:Dangerous functions/data exfiltration
     if detect_dangerous_functions(&tokens) {
         results.push(RuleMatch {
             rule_id: 942700,
@@ -162,7 +161,7 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
     let mut i = 0;
 
     while i < len {
-        // Skip whitespace
+// Skip whitespace
         if chars[i].is_whitespace() {
             tokens.push(SqlToken::Whitespace);
             while i < len && chars[i].is_whitespace() {
@@ -171,7 +170,7 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
             continue;
         }
 
-        // Comments: -- or /* ... */ or #
+// Comments:-- or /* ... */ or #
         if i + 1 < len && chars[i] == '-' && chars[i + 1] == '-' {
             tokens.push(SqlToken::Comment);
             while i < len && chars[i] != '\n' { i += 1; }
@@ -190,7 +189,7 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
             continue;
         }
 
-        // String literals
+// String literals
         if chars[i] == '\'' || chars[i] == '"' {
             let quote = chars[i];
             i += 1;
@@ -200,22 +199,22 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
                 i += 1;
             }
             if i < len {
-                // Properly terminated string literal
+// Properly terminated string literal
                 let s: String = chars[start..i].iter().collect();
                 tokens.push(SqlToken::StringLiteral(s));
                 i += 1;
             } else {
-                // Unterminated quote — likely an injection breaking out of a string
-                // Emit the quote as unknown and re-parse from after the quote
+// Unterminated quote — likely an injection breaking out of a string
+// Emit the quote as unknown and re-parse from after the quote
                 tokens.push(SqlToken::Unknown(quote));
                 i = start; // resume tokenizing after the opening quote
             }
             continue;
         }
 
-        // Hexadecimal literals: 0x1A, 0xFF, etc.
-        // Without this, `0x31=0x31` parses as NumberLiteral(0) + Identifier(x31)
-        // and the tautology checker never sees two equal numbers.
+// Hexadecimal literals:0x1A, 0xFF, etc.
+// Without this, `0x31=0x31` parses as NumberLiteral(0) + Identifier(x31)
+// and the tautology checker never sees two equal numbers.
         if chars[i] == '0'
             && i + 1 < len
             && (chars[i + 1] == 'x' || chars[i + 1] == 'X')
@@ -231,7 +230,7 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
             continue;
         }
 
-        // Decimal / float numbers
+// Decimal / float numbers
         if chars[i].is_ascii_digit() || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit()) {
             let start = i;
             while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') { i += 1; }
@@ -241,7 +240,7 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
             continue;
         }
 
-        // Operators
+// Operators
         match chars[i] {
             '=' => { tokens.push(SqlToken::Operator(SqlOp::Eq)); i += 1; }
             '!' if i + 1 < len && chars[i + 1] == '=' => {
@@ -332,7 +331,7 @@ fn match_keyword(word: &str) -> Option<SqlKeyword> {
         "outfile" => Some(SqlKeyword::Outfile),
         "dumpfile" => Some(SqlKeyword::Dumpfile),
         "information_schema" => Some(SqlKeyword::Information),
-        // Database-specific blind injection functions
+// Database-specific blind injection functions
         "pg_sleep" => Some(SqlKeyword::PgSleep),
         "dbms_lock" => Some(SqlKeyword::DbmsLock),
         "utl_http" => Some(SqlKeyword::UtlHttp),
@@ -351,47 +350,56 @@ fn detect_tautology(tokens: &[SqlToken]) -> Option<u32> {
 
     for window in significant.windows(3) {
         match (&window[0], &window[1], &window[2]) {
-            // Number = Number (same value)
+// Number = Number (same value)
             (SqlToken::NumberLiteral(a), SqlToken::Operator(SqlOp::Eq), SqlToken::NumberLiteral(b)) => {
                 if (a - b).abs() < f64::EPSILON {
                     return Some(5);
                 }
             }
-            // String = String (any value): injected literal-to-literal comparison.
-            // 'a'='a', 'x'='y', 'admin'='admin' — all indicate injection; legitimate
-            // queries compare a column against a literal, never literal against literal.
+// String = String (any value):injected literal-to-literal comparison.
+// 'a'='a', 'x'='y', 'admin'='admin' — all indicate injection; legitimate
+// queries compare a column against a literal, never literal against literal.
             (SqlToken::StringLiteral(_), SqlToken::Operator(SqlOp::Eq), SqlToken::StringLiteral(_)) => {
                 return Some(5);
             }
-            // String comparison with inequality operators: 'z'>'a', 'Z'>='A', etc.
-            // Catches tautology-style injections via SQL lexicographic ordering.
-            // Use a guard instead of nested OR patterns for maximum compatibility.
+// String comparison with inequality operators:'z'>'a', 'Z'>='A', etc.
+// Catches tautology-style injections via SQL lexicographic ordering.
+// Use a guard instead of nested OR patterns for maximum compatibility.
             (SqlToken::StringLiteral(_), SqlToken::Operator(op), SqlToken::StringLiteral(_))
                 if matches!(op, SqlOp::Lt | SqlOp::Gt | SqlOp::LtEq | SqlOp::GtEq | SqlOp::Neq) =>
             {
                 return Some(5);
             }
-            // Number < Number (always true like 1<2)
+// Number < Number (always true like 1<2)
             (SqlToken::NumberLiteral(a), SqlToken::Operator(SqlOp::Lt), SqlToken::NumberLiteral(b)) => {
                 if a < b {
                     return Some(4);
                 }
             }
-            // Number > Number (always true like 2>1)
+// Number > Number (always true like 2>1)
             (SqlToken::NumberLiteral(a), SqlToken::Operator(SqlOp::Gt), SqlToken::NumberLiteral(b)) => {
                 if a > b {
                     return Some(4);
                 }
             }
+// Greedy pairing around quote-broken injections like `1' OR '1'='1`
+// can tokenize the comparison operator as a string literal fragment.
+            (left, SqlToken::StringLiteral(op), right)
+                if is_tautology_operand(left)
+                    && is_tautology_operand(right)
+                    && is_comparison_fragment(op) =>
+            {
+                return Some(5);
+            }
             _ => {}
         }
     }
 
-    // Greedy-pair tokenizer artefact: `'z'>'a'` tokenizes as
-    //   Identifier("z") + StringLiteral(">") + Identifier("a")
-    // because the lexer wraps the comparison operator between adjacent quote pairs.
-    // A string literal whose ENTIRE content is a comparison operator is a unique
-    // indicator of an injected string-comparison tautology — never valid SQL.
+// Greedy-pair tokenizer artefact:`'z'>'a'` tokenizes as
+// Identifier("z") + StringLiteral(">") + Identifier("a")
+// because the lexer wraps the comparison operator between adjacent quote pairs.
+// A string literal whose ENTIRE content is a comparison operator is a unique
+// indicator of an injected string-comparison tautology — never valid SQL.
     for token in &significant {
         if let SqlToken::StringLiteral(s) = token {
             if matches!(s.as_str(), ">" | "<" | ">=" | "<=" | "!=" | "<>") {
@@ -410,7 +418,7 @@ fn detect_union_select(tokens: &[SqlToken]) -> bool {
         .filter(|t| !matches!(t, SqlToken::Whitespace | SqlToken::Comment))
         .collect();
 
-    // Check 2-token window: UNION SELECT
+// Check 2-token window:UNION SELECT
     for window in significant.windows(2) {
         if matches!(window[0], SqlToken::Keyword(SqlKeyword::Union))
             && matches!(window[1], SqlToken::Keyword(SqlKeyword::Select))
@@ -419,7 +427,7 @@ fn detect_union_select(tokens: &[SqlToken]) -> bool {
         }
     }
 
-    // Check 3-token window: UNION ALL SELECT (previously bypassed the 2-token check)
+// Check 3-token window:UNION ALL SELECT (previously bypassed the 2-token check)
     for window in significant.windows(3) {
         if matches!(window[0], SqlToken::Keyword(SqlKeyword::Union))
             && matches!(window[1], SqlToken::Keyword(SqlKeyword::All))
@@ -433,7 +441,6 @@ fn detect_union_select(tokens: &[SqlToken]) -> bool {
 }
 
 /// Detect stacked queries (semicolon followed by SQL keyword)
-///
 /// Uses a forward-scan rather than a 2-token window so that interleaved tokens
 /// like parentheses (`; (DROP TABLE users)`) do not defeat detection.
 fn detect_stacked_queries(tokens: &[SqlToken]) -> bool {
@@ -457,24 +464,22 @@ fn detect_stacked_queries(tokens: &[SqlToken]) -> bool {
 }
 
 /// Detect inline comment evasion (e.g., UN/**/ION SE/**/LECT)
-/// 
 /// Works by stripping all inline comments and checking if the resulting
 /// string contains SQL keywords, which indicates evasion was attempted.
 fn detect_comment_evasion(input: &str) -> bool {
-    // Check for MySQL conditional comments (always suspicious)
+// Check for MySQL conditional comments (always suspicious)
     if input.contains("/*!") {
         return true;
     }
     
-    // If no SQL comment markers, no evasion possible
-    if !input.contains("/*") && !input.contains("--") && !input.contains('#') {
+// If no SQL comment markers, no evasion possible
+    if !input.contains("/*") && !input.contains(" --") && !input.contains('#') {
         return false;
     }
     
-    // Strip comments and compare a compacted representation (letters/digits only).
-    // This catches token stitching attacks such as:
-    //   UN--x\nION SE--y\nLECT
-    // where post-strip text effectively becomes UNION SELECT.
+// Strip comments and compare a compacted representation (letters/digits only).
+// This catches token stitching attacks such as:// UN--x\nION SE--y\nLECT
+// where post-strip text effectively becomes UNION SELECT.
     let collapsed = strip_sql_comments(input);
 
     let compact = |s: &str| -> String {
@@ -490,7 +495,7 @@ fn detect_comment_evasion(input: &str) -> bool {
     let input_lower = input.to_lowercase();
     let collapsed_lower = collapsed.to_lowercase();
 
-    // Classic keyword stitching via comments, e.g. UN/**/ION or SE/**/LECT.
+// Classic keyword stitching via comments, e.g. UN/**/ION or SE/**/LECT.
     let dangerous_keywords = [
         "union", "select", "insert", "update", "delete", "drop",
         "alter", "create", "exec", "execute", "sleep", "benchmark",
@@ -525,9 +530,7 @@ fn detect_comment_evasion(input: &str) -> bool {
 }
 
 /// Strip SQL comments from input, collapsing adjacent text.
-///
-/// Handles:
-/// - `/* ... */` block comments
+/// Handles:/// - `/* ... */` block comments
 /// - `-- ...` line comments
 /// - `# ...` line comments
 fn strip_sql_comments(input: &str) -> String {
@@ -554,7 +557,7 @@ fn strip_sql_comments(input: &str) -> String {
         }
 
         if !in_single_quote && !in_double_quote {
-            // Block comment: /* ... */
+// Block comment:/* ... */
             if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
                 i += 2;
                 while i + 1 < chars.len() {
@@ -567,7 +570,7 @@ fn strip_sql_comments(input: &str) -> String {
                 continue;
             }
 
-            // Line comment: -- ...
+// Line comment:-- ...
             if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
                 i += 2;
                 while i < chars.len() && chars[i] != '\n' {
@@ -576,7 +579,7 @@ fn strip_sql_comments(input: &str) -> String {
                 continue;
             }
 
-            // Line comment: # ...
+// Line comment:# ...
             if c == '#' {
                 i += 1;
                 while i < chars.len() && chars[i] != '\n' {
@@ -594,12 +597,10 @@ fn strip_sql_comments(input: &str) -> String {
 }
 
 /// Detect blind/time-based injection
-/// 
-/// Covers time-based blind injection across multiple database platforms:
-/// - MySQL: SLEEP(), BENCHMARK()
-/// - MSSQL: WAITFOR DELAY
-/// - PostgreSQL: pg_sleep()
-/// - Oracle: dbms_lock.sleep(), UTL_HTTP.request()
+/// Covers time-based blind injection across multiple database platforms:/// - MySQL:SLEEP, BENCHMARK
+/// - MSSQL:WAITFOR DELAY
+/// - PostgreSQL:pg_sleep
+/// - Oracle:dbms_lock.sleep, UTL_HTTP.request
 fn detect_blind_injection(tokens: &[SqlToken]) -> bool {
     for token in tokens {
         if matches!(token, SqlToken::Keyword(
@@ -616,8 +617,17 @@ fn detect_blind_injection(tokens: &[SqlToken]) -> bool {
 /// Detect string termination followed by boolean logic
 fn detect_string_termination_logic(tokens: &[SqlToken]) -> bool {
     let significant: Vec<&SqlToken> = tokens.iter()
-        .filter(|t| !matches!(t, SqlToken::Whitespace | SqlToken::Comment))
+        .filter(|t| !matches!(t, SqlToken::Whitespace))
         .collect();
+
+    for window in significant.windows(3) {
+        if is_tautology_operand(window[0])
+            && matches!(window[1], SqlToken::StringLiteral(fragment) if is_boolean_logic_fragment(fragment))
+            && is_tautology_operand(window[2])
+        {
+            return true;
+        }
+    }
 
     for window in significant.windows(2) {
         if matches!(window[0], SqlToken::StringLiteral(_))
@@ -625,8 +635,59 @@ fn detect_string_termination_logic(tokens: &[SqlToken]) -> bool {
         {
             return true;
         }
+
+        if matches!(window[0], SqlToken::Unknown('\'' | '"'))
+            && is_suspicious_followup(window[1])
+        {
+            return true;
+        }
     }
     false
+}
+
+fn is_tautology_operand(token: &SqlToken) -> bool {
+    matches!(token, SqlToken::NumberLiteral(_) | SqlToken::StringLiteral(_) | SqlToken::Identifier(_))
+}
+
+fn is_comparison_fragment(fragment: &str) -> bool {
+    matches!(fragment.trim(), "=" | ">" | "<" | ">=" | "<=" | "!=" | "<>")
+}
+
+fn is_boolean_logic_fragment(fragment: &str) -> bool {
+    matches!(fragment.trim(), "or" | "and")
+}
+
+fn is_suspicious_followup(token: &SqlToken) -> bool {
+    matches!(token,
+        SqlToken::Comment
+            | SqlToken::Keyword(
+                SqlKeyword::And
+                    | SqlKeyword::Or
+                    | SqlKeyword::Union
+                    | SqlKeyword::Select
+                    | SqlKeyword::Order
+                    | SqlKeyword::By
+                    | SqlKeyword::Having
+                    | SqlKeyword::Group
+                    | SqlKeyword::Into
+                    | SqlKeyword::Exec
+                    | SqlKeyword::Sleep
+                    | SqlKeyword::Benchmark
+                    | SqlKeyword::Waitfor
+                    | SqlKeyword::Delay
+                    | SqlKeyword::Load
+                    | SqlKeyword::File
+                    | SqlKeyword::Outfile
+                    | SqlKeyword::Dumpfile
+                    | SqlKeyword::Information
+                    | SqlKeyword::Like
+                    | SqlKeyword::Regexp
+                    | SqlKeyword::Rlike
+                    | SqlKeyword::PgSleep
+                    | SqlKeyword::DbmsLock
+                    | SqlKeyword::UtlHttp
+            )
+    )
 }
 
 /// Detect dangerous functions (LOAD_FILE, INTO OUTFILE, etc.)
@@ -638,7 +699,7 @@ fn detect_dangerous_functions(tokens: &[SqlToken]) -> bool {
             return true;
         }
     }
-    // Check for INFORMATION_SCHEMA access
+// Check for INFORMATION_SCHEMA access
     for token in tokens {
         if matches!(token, SqlToken::Keyword(SqlKeyword::Information)) {
             return true;
@@ -669,6 +730,20 @@ mod tests {
     }
 
     #[test]
+    fn test_quoted_tautology_detection() {
+        let results = analyze_sqli("1' OR '1'='1", MatchLocation::QueryParam("id".into()));
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.rule_id == 942100 || r.rule_id == 942600));
+    }
+
+    #[test]
+    fn test_unterminated_quote_followed_by_comment_detection() {
+        let results = analyze_sqli("admin' --", MatchLocation::QueryParam("id".into()));
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.rule_id == 942600));
+    }
+
+    #[test]
     fn test_union_select() {
         let results = analyze_sqli("1 UNION SELECT username, password FROM users", MatchLocation::QueryParam("id".into()));
         assert!(results.iter().any(|r| r.rule_id == 942200));
@@ -689,7 +764,7 @@ mod tests {
     #[test]
     fn test_clean_input_no_false_positive() {
         let results = analyze_sqli("John O'Brien", MatchLocation::QueryParam("name".into()));
-        // Should NOT trigger tautology or union
+// Should NOT trigger tautology or union
         assert!(results.iter().all(|r| r.rule_id != 942100 && r.rule_id != 942200));
     }
 
@@ -701,7 +776,7 @@ mod tests {
 
     #[test]
     fn test_union_all_select_bypasses_fixed() {
-        // Previously this bypassed the 2-token window check
+// Previously this bypassed the 2-token window check
         let results = analyze_sqli("1 UNION ALL SELECT username, password FROM users", MatchLocation::QueryParam("id".into()));
         assert!(results.iter().any(|r| r.rule_id == 942200),
             "UNION ALL SELECT must be detected, got: {:?}", results.iter().map(|r| r.rule_id).collect::<Vec<_>>());
@@ -709,18 +784,18 @@ mod tests {
 
     #[test]
     fn test_union_select_variants() {
-        // UNION SELECT (basic)
+// UNION SELECT (basic)
         let r = analyze_sqli("1 UNION SELECT 1,2,3", MatchLocation::QueryParam("x".into()));
         assert!(r.iter().any(|r| r.rule_id == 942200), "UNION SELECT should be caught");
 
-        // UNION ALL SELECT (evasion)
-        let r2 = analyze_sqli("1 UNION ALL SELECT NULL,NULL,NULL--", MatchLocation::QueryParam("x".into()));
+// UNION ALL SELECT (evasion)
+        let r2 = analyze_sqli("1 UNION ALL SELECT NULL,NULL,NULL --", MatchLocation::QueryParam("x".into()));
         assert!(r2.iter().any(|r| r.rule_id == 942200), "UNION ALL SELECT should be caught");
     }
 
     #[test]
     fn test_string_tautology_gt() {
-        let results = analyze_sqli("alice' OR 'z'>'a'--", MatchLocation::QueryParam("q".into()));
+        let results = analyze_sqli("alice' OR 'z'>'a' --", MatchLocation::QueryParam("q".into()));
         assert!(
             results.iter().any(|r| r.rule_id == 942100),
             "String comparison tautology 'z'>'a' must fire rule 942100"
@@ -729,7 +804,7 @@ mod tests {
 
     #[test]
     fn test_string_tautology_neq() {
-        let results = analyze_sqli("active' OR 'x'!='y'--", MatchLocation::QueryParam("f".into()));
+        let results = analyze_sqli("active' OR 'x'!='y' --", MatchLocation::QueryParam("f".into()));
         assert!(
             results.iter().any(|r| r.rule_id == 942100),
             "String NEQ tautology 'x'!='y' must fire rule 942100"
@@ -744,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_double_dash_comment_evasion_detected() {
-        let results = analyze_sqli("UN--x\nION SE--y\nLECT 1,2,3", MatchLocation::Body);
+        let results = analyze_sqli("UN --x\nION SE--y\nLECT 1,2,3", MatchLocation::Body);
         assert!(results.iter().any(|r| r.rule_id == 942400));
     }
 }

@@ -1,7 +1,6 @@
 //! # DLP Engine — Data Loss Prevention
 //!
-//! Prevents sensitive data from leaving the organization via email:
-//!
+//! Prevents sensitive data from leaving the organization via email://!
 //! 1. **PII detection** — Credit card numbers (Luhn), SSNs, passport numbers, phone numbers
 //! 2. **Sensitive content scanning** — Regex + keyword pattern matching for confidential markers
 //! 3. **Entropy analysis** — Detects potential secrets/keys via Shannon entropy
@@ -29,15 +28,15 @@ use thiserror::Error;
 /// DLP errors
 #[derive(Debug, Error)]
 pub enum DlpError {
-    /// Pattern compilation failed
+/// Pattern compilation failed
     #[error("Pattern error: {0}")]
     PatternError(String),
 
-    /// Content scanning error
+/// Content scanning error
     #[error("Scan error: {0}")]
     ScanError(String),
 
-    /// Policy violation
+/// Policy violation
     #[error("Policy violation: {0}")]
     PolicyViolation(String),
 }

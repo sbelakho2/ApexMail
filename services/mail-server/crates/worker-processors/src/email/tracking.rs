@@ -10,22 +10,21 @@ use super::types::EmailJob;
 use crate::common::TrackingConfig;
 
 /// Tracking payload encoded in URLs.
-/// Fix #78: tenant_id is hashed to prevent leakage in URLs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackingPayload {
-    /// Message ID.
+/// Message ID.
     #[serde(rename = "m")]
     pub message_id: String,
-    /// Tenant ID (hashed for privacy - cannot be decoded back).
+/// Tenant ID (hashed for privacy - cannot be decoded back).
     #[serde(rename = "t")]
     pub tenant_id: String,
-    /// Recipient email (hashed for privacy).
+/// Recipient email (hashed for privacy).
     #[serde(rename = "r")]
     pub recipient_hash: String,
-    /// Original URL (for click tracking).
+/// Original URL (for click tracking).
     #[serde(rename = "u", skip_serializing_if = "Option::is_none")]
     pub original_url: Option<String>,
-    /// Campaign ID.
+/// Campaign ID.
     #[serde(rename = "c", skip_serializing_if = "Option::is_none")]
     pub campaign_id: Option<String>,
 }
@@ -50,7 +49,7 @@ fn compile_regex(pattern: &str) -> Option<Regex> {
 fn hash_tenant_id(tenant_id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    // Add salt to prevent rainbow table attacks
+// Add salt to prevent rainbow table attacks
     hasher.update(b"apexmail_tenant_v1:");
     hasher.update(tenant_id.as_bytes());
     let result = hasher.finalize();
@@ -58,13 +57,12 @@ fn hash_tenant_id(tenant_id: &str) -> String {
 }
 
 /// Encode a tracking payload to a URL-safe string.
-/// Fix #98: Log serialization errors instead of silently producing empty token.
 pub fn encode_tracking_id(payload: &TrackingPayload) -> String {
     match serde_json::to_string(payload) {
         Ok(json) => URL_SAFE_NO_PAD.encode(json.as_bytes()),
         Err(e) => {
             tracing::error!(error = %e, "Failed to serialize tracking payload");
-            // Return a distinctive invalid token instead of empty string
+// Return a distinctive invalid token instead of empty string
             format!("err_{}", payload.message_id)
         }
     }
@@ -83,7 +81,7 @@ fn hash_email(email: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(email.as_bytes());
     let result = hasher.finalize();
-    // Use first 8 bytes encoded as hex (16 chars) for compactness
+// Use first 8 bytes encoded as hex (16 chars) for compactness
     hex::encode(&result[..8])
 }
 
@@ -91,7 +89,7 @@ fn hash_email(email: &str) -> String {
 pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -> String {
     let payload = TrackingPayload {
         message_id: job.message_id.clone(),
-        tenant_id: hash_tenant_id(&job.tenant_id), // Fix #78: Hash tenant ID
+        tenant_id: hash_tenant_id(&job.tenant_id),
         recipient_hash: hash_email(&job.to),
         original_url: None,
         campaign_id: job.campaign_id.clone(),
@@ -103,13 +101,12 @@ pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -
         config.base_url, config.open_pixel_path, tracking_id
     );
 
-    // Insert pixel before closing </body> tag, or append if no </body>
+// Insert pixel before closing </body> tag, or append if no </body>
     let pixel_html = format!(
         r#"<img src="{}" width="1" height="1" style="display:none" alt="" />"#,
         pixel_url
     );
 
-    // Fix #90: Case-insensitive search without allocating a full lowercase copy
     let pos = html.as_bytes().windows(7).rposition(|w| {
         w.eq_ignore_ascii_case(b"</body>")
     });
@@ -133,7 +130,7 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
         .replace_all(html, |caps: &regex::Captures| {
             let original_url = caps.get(1).map(|m| m.as_str()).unwrap_or("");
 
-            // Skip mailto:, tel:, and internal links
+// Skip mailto:, tel:, and internal links
             if original_url.starts_with("mailto:")
                 || original_url.starts_with("tel:")
                 || original_url.starts_with("#")
@@ -142,14 +139,14 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
                 return caps[0].to_string();
             }
 
-            // Skip unsubscribe links (they should work directly)
+// Skip unsubscribe links (they should work directly)
             if original_url.contains("unsubscribe") || original_url.contains("opt-out") {
                 return caps[0].to_string();
             }
 
             let payload = TrackingPayload {
                 message_id: job.message_id.clone(),
-                tenant_id: hash_tenant_id(&job.tenant_id), // Fix #78: Hash tenant ID
+                tenant_id: hash_tenant_id(&job.tenant_id),
                 recipient_hash: hash_email(&job.to),
                 original_url: Some(original_url.to_string()),
                 campaign_id: job.campaign_id.clone(),
@@ -288,7 +285,7 @@ mod tests {
         };
 
         let result = rewrite_links(html, &job, &config);
-        // mailto links should not be rewritten
+// mailto links should not be rewritten
         assert!(result.contains("mailto:test@example.com"));
     }
 }

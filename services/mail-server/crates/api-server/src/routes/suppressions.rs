@@ -82,7 +82,6 @@ pub struct BulkSuppressResponse {
     pub invalid: usize,
 }
 
-// Fix #40: Maximum entries in bulk suppress request
 const MAX_BULK_ENTRIES: usize = 10_000;
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -98,7 +97,7 @@ async fn create_suppression(
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
 
-    // Check duplicate
+// Check duplicate
     let exists = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2",
     )
@@ -207,7 +206,6 @@ async fn bulk_suppress(
 ) -> Result<Json<BulkSuppressResponse>, ApiError> {
     require_scopes(&auth, &["suppressions:write"])?;
 
-    // Fix #40: Limit bulk entries count
     if body.entries.len() > MAX_BULK_ENTRIES {
         return Err(ApiError::BadRequest(format!(
             "bulk suppress limited to {} entries, got {}",
@@ -220,8 +218,6 @@ async fn bulk_suppress(
     let mut duplicates = 0usize;
     let mut invalid = 0usize;
 
-    // Fix #41: Validate all email addresses first
-    // Fix #39: Filter valid entries and batch check duplicates
     let mut valid_entries: Vec<&BulkEntry> = Vec::with_capacity(body.entries.len());
     for entry in &body.entries {
         if !apexmail_lib::validation::is_valid_email(&entry.email) {
@@ -231,7 +227,7 @@ async fn bulk_suppress(
         valid_entries.push(entry);
     }
 
-    // Batch query for existing emails to avoid N+1
+// Batch query for existing emails to avoid N+1
     if !valid_entries.is_empty() {
         let emails: Vec<&str> = valid_entries.iter().map(|e| e.email.as_str()).collect();
         let existing: Vec<(String,)> = sqlx::query_as(
@@ -245,7 +241,7 @@ async fn bulk_suppress(
         let existing_set: std::collections::HashSet<&str> =
             existing.iter().map(|(e,)| e.as_str()).collect();
 
-        // Batch insert non-duplicates
+// Batch insert non-duplicates
         let now = Utc::now();
         for entry in &valid_entries {
             if existing_set.contains(entry.email.as_str()) {

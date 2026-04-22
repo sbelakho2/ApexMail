@@ -2,7 +2,7 @@
 //!
 //! Services load a shared secret from `INTERNAL_SERVICE_TOKEN` (or a
 //! service-specific override) and reject requests that don't present it
-//! via `Authorization: Bearer <token>` or `X-Api-Key: <token>`.
+//! via `Authorization:Bearer <token>` or `X-Api-Key:<token>`.
 
 use axum::{
     extract::State,
@@ -18,9 +18,7 @@ pub trait HasServiceToken {
 }
 
 /// Axum middleware that rejects requests missing a valid service token.
-///
-/// Usage:
-/// ```ignore
+/// Usage:/// ```ignore
 /// .layer(middleware::from_fn_with_state(state, require_service_token::<MyAppState>))
 /// ```
 pub async fn require_service_token<S: HasServiceToken + Send + Sync + 'static>(
@@ -30,7 +28,7 @@ pub async fn require_service_token<S: HasServiceToken + Send + Sync + 'static>(
 ) -> Result<Response, StatusCode> {
     let expected = state.service_token();
     if expected.is_empty() {
-        // No token configured — deny all for safety
+// No token configured — deny all for safety
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -43,11 +41,11 @@ pub async fn require_service_token<S: HasServiceToken + Send + Sync + 'static>(
 }
 
 fn extract_token(headers: &HeaderMap) -> Option<String> {
-    // Check X-Api-Key first
+// Check X-Api-Key first
     if let Some(value) = headers.get("x-api-key") {
         return value.to_str().ok().map(|s| s.to_string());
     }
-    // Fall back to Authorization: Bearer <token>
+// Fall back to Authorization:Bearer <token>
     if let Some(value) = headers.get(AUTHORIZATION) {
         if let Ok(raw) = value.to_str() {
             if let Some(token) = raw.trim().strip_prefix("Bearer ") {
@@ -59,7 +57,6 @@ fn extract_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Load the internal service token from the environment with a fallback.
-///
 /// In production, callers should validate the token is strong enough.
 pub fn load_service_token(env_key: &str) -> String {
     std::env::var(env_key)

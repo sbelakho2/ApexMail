@@ -1,6 +1,6 @@
 //! IP warmup schedule management endpoints.
 //!
-//! Migrated from: apps/control-plane/src/app/api/warmup/route.ts
+//! Migrated from:apps/control-plane/src/app/api/warmup/route.ts
 
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -68,7 +68,7 @@ async fn list_warmup(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-    // Fetch pools
+// Fetch pools
     let pool_rows: Vec<(String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT id, name, status, created_at FROM ip_pools ORDER BY created_at DESC LIMIT $1 OFFSET $2",
     )
@@ -83,7 +83,7 @@ async fn list_warmup(
         return Ok(Json(vec![]));
     }
 
-    // Fetch addresses for all pools
+// Fetch addresses for all pools
     let addr_rows: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT id, pool_id, ip_address, status FROM ip_pool_addresses WHERE pool_id = ANY($1)",
     )
@@ -91,7 +91,7 @@ async fn list_warmup(
     .fetch_all(db)
     .await?;
 
-    // Fetch schedules for all pools
+// Fetch schedules for all pools
     let schedule_rows: Vec<(String, String, i32, i64, Option<i64>, String)> = sqlx::query_as(
         "SELECT id, pool_id, day, target_volume, actual_volume, status FROM isp_warmup_schedules WHERE pool_id = ANY($1) ORDER BY day ASC",
     )
@@ -180,7 +180,7 @@ async fn warmup_action(
         .await?;
     }
 
-    // Audit log
+// Audit log
     let ip = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())

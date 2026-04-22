@@ -1,6 +1,6 @@
 //! Dashboard stats endpoint.
 //!
-//! Migrated from: apps/control-plane/src/app/api/dashboard/stats/route.ts
+//! Migrated from:apps/control-plane/src/app/api/dashboard/stats/route.ts
 
 use super::super::helpers::table_exists;
 use axum::extract::State;
@@ -87,7 +87,7 @@ async fn get_dashboard_stats(
 ) -> Result<Json<DashboardStats>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // Check cache
+// Check cache
     {
         if let Ok(guard) = CACHE.lock() {
             if let Some((ts, ref cached)) = *guard {
@@ -106,7 +106,7 @@ async fn get_dashboard_stats(
     let has_system_alerts = table_exists(db, "system_alerts").await;
     let has_stripe_subs = table_exists(db, "stripe_subscriptions").await;
 
-    // Aggregate counts
+// Aggregate counts
     let active_leads = if has_sales_leads {
         parse_count(
             sqlx::query_scalar("SELECT COUNT(*)::text FROM sales_leads WHERE status NOT IN ('converted', 'lost', 'unqualified')")
@@ -173,7 +173,7 @@ async fn get_dashboard_stats(
         .fetch_one(db).await.ok().and_then(|s| s.parse().ok()).unwrap_or(0.0)
     } else { 0.0 };
 
-    // Risk / health
+// Risk / health
     let (mut risk_alerts, mut critical_tenants) = (0i64, 0i64);
     let mut critical_alert_count = 0i64;
     let mut high_alert_count = 0i64;
@@ -210,7 +210,7 @@ async fn get_dashboard_stats(
         )
     } else { 0 };
 
-    // Pipeline
+// Pipeline
     let mut pipeline = PipelineStats { prospect: 0, outreach: 0, engaged: 0, demo: 0, closed: 0 };
 
     if has_sales_leads {
@@ -231,7 +231,7 @@ async fn get_dashboard_stats(
         }
     }
 
-    // Recent activity (simple — latest leads)
+// Recent activity (simple — latest leads)
     let mut recent_activity: Vec<ActivityEntry> = Vec::new();
 
     if has_sales_leads {
@@ -276,7 +276,7 @@ async fn get_dashboard_stats(
         pipeline,
     };
 
-    // Update cache
+// Update cache
     if let Ok(mut guard) = CACHE.lock() {
         *guard = Some((Instant::now(), stats.clone()));
     }

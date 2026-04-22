@@ -1,8 +1,7 @@
 //! # TLS and HTTP/2 Fingerprinting
 //!
 //! This crate provides fingerprinting capabilities for identifying clients
-//! based on their TLS and HTTP/2 behavior. This is useful for:
-//!
+//! based on their TLS and HTTP/2 behavior. This is useful for://!
 //! - Bot detection (bots often have distinct fingerprints)
 //! - Client identification (browsers have consistent fingerprints)
 //! - Anomaly detection (unusual fingerprints may indicate attacks)
@@ -10,8 +9,7 @@
 //! ## JA4 TLS Fingerprinting
 //!
 //! JA4 is the successor to JA3, designed for TLS 1.3+ where many JA3
-//! distinguishing features were removed. JA4 format:
-//!
+//! distinguishing features were removed. JA4 format://!
 //! ```text
 //! JA4 = JA4_a_JA4_b_JA4_c
 //! JA4_a = protocol + SNI + cipher_count + extension_count + ALPN

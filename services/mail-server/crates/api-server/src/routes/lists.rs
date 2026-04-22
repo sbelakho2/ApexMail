@@ -1,19 +1,18 @@
 //! Contact list / audience management routes.
 //!
-//! Routes:
-//!   GET    /           → list all lists for tenant
-//!   POST   /           → create a new list
-//!   GET    /:id        → get a single list
-//!   PUT    /:id        → update a list
-//!   DELETE /:id        → delete a list
-//!   GET    /:id/subscribers → list subscribers in a list
-//!   POST   /:id/subscribers → add subscriber(s) to a list
-//!   DELETE /:id/subscribers → remove subscriber(s) from a list
+//! Routes://! GET / → list all lists for tenant
+//! POST / → create a new list
+//! GET /:id → get a single list
+//! PUT /:id → update a list
+//! DELETE /:id → delete a list
+//! GET /:id/subscribers → list subscribers in a list
+//! POST /:id/subscribers → add subscriber(s) to a list
+//! DELETE /:id/subscribers → remove subscriber(s) from a list
 
 use super::helpers::default_limit;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, post, put};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -41,7 +40,7 @@ pub struct CreateListRequest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    /// "single_opt_in" | "double_opt_in"
+/// "single_opt_in" | "double_opt_in"
     #[serde(default = "default_opt_in")]
     pub opt_in_mode: String,
 }
@@ -124,10 +123,9 @@ async fn list_lists(
     let limit = q.limit.min(200).max(1);
     let offset = q.offset.max(0);
 
-    let rows = sqlx::query_as!(
-        ListRow,
+    let rows = sqlx::query_as::<_, ListRow>(
         r#"SELECT l.id, l.name, l.description, l.opt_in_mode,
-                  COUNT(ls.contact_id)::bigint AS "subscriber_count!",
+                  COUNT(ls.contact_id)::bigint AS subscriber_count,
                   l.created_at, l.updated_at
            FROM lists l
            LEFT JOIN list_subscribers ls ON ls.list_id = l.id
@@ -136,21 +134,20 @@ async fn list_lists(
            GROUP BY l.id
            ORDER BY l.created_at DESC
            LIMIT $2 OFFSET $3"#,
-        auth.tenant_id.to_string(),
-        limit,
-        offset,
-        q.search.as_deref(),
     )
+    .bind(auth.tenant_id.to_string())
+    .bind(limit)
+    .bind(offset)
+    .bind(q.search.as_deref())
     .fetch_all(&state.db)
     .await?;
 
-    let total: i64 = sqlx::query_scalar!(
+    let total = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM lists WHERE tenant_id = $1",
-        auth.tenant_id.to_string(),
     )
+    .bind(auth.tenant_id.to_string())
     .fetch_one(&state.db)
-    .await?
-    .unwrap_or(0);
+    .await?;
 
     let data = rows.into_iter().map(|r| ListResponse {
         id: r.id,
@@ -306,7 +303,7 @@ async fn list_subscribers(
     let limit = q.limit.min(200).max(1);
     let offset = q.offset.max(0);
 
-    // Verify list belongs to tenant
+// Verify list belongs to tenant
     let exists: Option<bool> = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM lists WHERE id = $1 AND tenant_id = $2)",
     )
@@ -333,20 +330,25 @@ async fn list_subscribers(
                   ls.created_at AS subscribed_at
            FROM list_subscribers ls
            JOIN contacts c ON c.id = ls.contact_id
-           WHERE ls.list_id = $1
+           WHERE ls.list_id = $1 AND c.tenant_id = $2
            ORDER BY ls.created_at DESC
-           LIMIT $2 OFFSET $3"#,
+           LIMIT $3 OFFSET $4"#,
     )
     .bind(&list_id)
+    .bind(&auth.tenant_id)
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
     let total: i64 = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT COUNT(*)::bigint FROM list_subscribers WHERE list_id = $1",
+        "SELECT COUNT(*)::bigint
+         FROM list_subscribers ls
+         JOIN contacts c ON c.id = ls.contact_id
+         WHERE ls.list_id = $1 AND c.tenant_id = $2",
     )
     .bind(&list_id)
+    .bind(&auth.tenant_id)
     .fetch_one(&state.db)
     .await?
     .unwrap_or(0);
@@ -378,7 +380,7 @@ async fn add_subscribers(
 ) -> Result<Json<BulkResult>, ApiError> {
     require_scopes(&auth, &["lists:write"])?;
 
-    // Verify list belongs to tenant
+// Verify list belongs to tenant
     let exists: Option<bool> = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM lists WHERE id = $1 AND tenant_id = $2)",
     )
@@ -395,11 +397,14 @@ async fn add_subscribers(
     for contact_id in &body.contact_ids {
         let result = sqlx::query(
             "INSERT INTO list_subscribers (list_id, contact_id, status, created_at)
-             VALUES ($1, $2, 'active', NOW())
+             SELECT $1, c.id, 'active', NOW()
+             FROM contacts c
+             WHERE c.id = $2 AND c.tenant_id = $3
              ON CONFLICT (list_id, contact_id) DO NOTHING",
         )
         .bind(&list_id)
         .bind(contact_id.to_string())
+        .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
         affected += result.rows_affected() as i64;
@@ -418,10 +423,16 @@ async fn remove_subscribers(
 
     let contact_ids: Vec<String> = body.contact_ids.iter().map(|id| id.to_string()).collect();
     let affected = sqlx::query(
-        "DELETE FROM list_subscribers WHERE list_id = $1 AND contact_id = ANY($2)",
+                "DELETE FROM list_subscribers ls
+                 USING contacts c
+                 WHERE ls.list_id = $1
+                     AND ls.contact_id = ANY($2)
+                     AND c.id = ls.contact_id
+                     AND c.tenant_id = $3",
     )
     .bind(&list_id)
     .bind(&contact_ids)
+        .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?
     .rows_affected() as i64;

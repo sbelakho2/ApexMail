@@ -1,7 +1,6 @@
 //! Deep module tests — wider coverage + test the 6 bug fixes
 //!
-//! This file tests:
-//! 1. Bug fixes discovered in deep scan (6 bugs)
+//! This file tests://! 1. Bug fixes discovered in deep scan (6 bugs)
 //! 2. Session tracking module (session.rs)
 //! 3. Config module validation (config.rs)
 //! 4. Decision module (decision.rs)
@@ -26,15 +25,15 @@ fn ip(last: u8) -> IpAddr {
 }
 
 // ============================================================================
-// BUG FIX VERIFICATION TESTS
+// BUG VERIFICATION TESTS
 // ============================================================================
 
 mod bug_fix_verification {
     use super::*;
 
-    /// Bug fix #1: Session first IAT should not be polluted by creation time.
-    /// The first record_request() should NOT produce an inter-arrival time
-    /// because there was no prior request to measure from.
+/// Bug Session first IAT should not be polluted by creation time.
+/// The first record_request should NOT produce an inter-arrival time
+/// because there was no prior request to measure from.
     #[test]
     fn session_first_iat_not_polluted() {
         let tracker = SessionTracker::new(Duration::from_secs(300), 1000);
@@ -51,32 +50,32 @@ mod bug_fix_verification {
             api_key_id: None,
         };
         
-        // First request
+// First request
         let info1 = tracker.track(&ctx);
         assert_eq!(info1.request_count, 1);
         
-        // Sleep a bit
+// Sleep a bit
         std::thread::sleep(Duration::from_millis(50));
         
-        // Second request
+// Second request
         let info2 = tracker.track(&ctx);
         assert_eq!(info2.request_count, 2);
         
-        // The IAT analysis relies on inter_arrival_times having VALID data.
-        // With the fix, the first IAT should be from request 1 -> request 2,
-        // not from session creation -> request 1.
-        // We verify this by checking the CoV is reasonable (not polluted).
+// The IAT analysis relies on inter_arrival_times having VALID data.
+// With the fix, the first IAT should be from request 1 -> request 2,
+// not from session creation -> request 1.
+// We verify this by checking the CoV is reasonable (not polluted).
         let cov = info2.inter_arrival_cov;
-        // With only 1 actual IAT value, we should get the default of 1.0
+// With only 1 actual IAT value, we should get the default of 1.0
         assert_eq!(cov, 1.0, "CoV should be default with insufficient data: {}", cov);
     }
 
-    /// Bug fix #2: Session endpoints should be windowed, not unbounded HashSet.
+/// Bug Session endpoints should be windowed, not unbounded HashSet.
     #[test]
     fn session_endpoints_bounded_memory() {
         let tracker = SessionTracker::new(Duration::from_secs(300), 1000);
         
-        // Track 200 requests to different endpoints
+// Track 200 requests to different endpoints
         for i in 0u8..200 {
             let ctx = RequestContext {
                 ip: ip(1),
@@ -92,18 +91,18 @@ mod bug_fix_verification {
             tracker.track(&ctx);
         }
         
-        // Get session info
+// Get session info
         let info = tracker.get_session(&ip(1), None).unwrap();
         
-        // Endpoint diversity should be computed on a bounded window
-        // With 200 unique endpoints, but a window of 100, diversity should be 1.0
-        // because recent_endpoints only holds the last 100 unique hashes
+// Endpoint diversity should be computed on a bounded window
+// With 200 unique endpoints, but a window of 100, diversity should be 1.0
+// because recent_endpoints only holds the last 100 unique hashes
         assert!(info.endpoint_diversity <= 1.0, "Diversity should be <= 1.0");
         assert!(info.endpoint_diversity > 0.9, "With all unique endpoints, diversity should be high: {}", info.endpoint_diversity);
     }
 
-    /// Bug fix #3: Cost-based limiter refill should use CAS to prevent overshoot.
-    /// This is a logical test — actual race would require multi-threading.
+/// Bug Cost-based limiter refill should use CAS to prevent overshoot.
+/// This is a logical test — actual race would require multi-threading.
     #[test]
     fn cost_limiter_refill_logic_correct() {
         let config = CostLimiterConfig {
@@ -112,19 +111,19 @@ mod bug_fix_verification {
         };
         let limiter = CostBasedLimiter::new(config);
         
-        // System starts at capacity
+// System starts at capacity
         assert_eq!(limiter.system_remaining(), 1000);
         
-        // Consume most of the budget
+// Consume most of the budget
         let decision = limiter.check("tenant1", "/v1/health", Some(RequestCost::new(900, 0, 0, 0)));
         assert!(matches!(decision, CostDecision::Allowed { .. }));
         
-        // Should have ~100 remaining (900 consumed - epsilon from health endpoint cost)
+// Should have ~100 remaining (900 consumed - epsilon from health endpoint cost)
         let remaining = limiter.system_remaining();
         assert!(remaining < 200, "Should have consumed most budget: {}", remaining);
     }
 
-    /// Bug fix #4: Config builder produces valid config.
+/// Bug Config builder produces valid config.
     #[test]
     fn config_builder_works() {
         let config = ProtectorConfig::builder()
@@ -167,14 +166,14 @@ mod session_tests {
             api_key_id: None,
         };
         
-        // Track 10 requests
+// Track 10 requests
         for _ in 0..10 {
             tracker.track(&ctx);
         }
         
         let info = tracker.get_session(&ip(10), None).unwrap();
         assert_eq!(info.request_count, 10);
-        // RPM should be very high since requests are instant
+// RPM should be very high since requests are instant
         assert!(info.requests_per_minute > 100.0, "RPM should be high: {}", info.requests_per_minute);
     }
 
@@ -194,18 +193,18 @@ mod session_tests {
             api_key_id: None,
         };
         
-        // Track 3 requests
+// Track 3 requests
         tracker.track(&ctx);
         tracker.track(&ctx);
         tracker.track(&ctx);
         
-        // Record 2 errors
+// Record 2 errors
         tracker.record_error(&ctx);
         tracker.record_error(&ctx);
         
         let info = tracker.get_session(&ip(20), None).unwrap();
         assert_eq!(info.request_count, 3);
-        // Error rate = 2/3 = 0.666...
+// Error rate = 2/3 = 0.666...
         assert!(info.error_rate > 0.6 && info.error_rate < 0.7, 
             "Error rate should be ~0.666: {}", info.error_rate);
     }
@@ -231,7 +230,7 @@ mod session_tests {
         tracker.record_duration(&ctx, 200);
         tracker.record_duration(&ctx, 300);
         
-        // Session should track durations (internal to Session struct)
+// Session should track durations (internal to Session struct)
         let info = tracker.get_session(&ip(30), None).unwrap();
         assert_eq!(info.request_count, 1);
     }
@@ -255,12 +254,12 @@ mod session_tests {
         tracker.track(&ctx);
         assert_eq!(tracker.active_count(), 1);
         
-        // Wait for session to become idle
+// Wait for session to become idle
         std::thread::sleep(Duration::from_millis(20));
         
         tracker.cleanup(Instant::now());
         
-        // Session should be removed
+// Session should be removed
         assert_eq!(tracker.active_count(), 0);
     }
 
@@ -268,7 +267,7 @@ mod session_tests {
     fn session_api_key_isolation() {
         let tracker = SessionTracker::new(Duration::from_secs(300), 1000);
         
-        // Same IP, different API keys = different sessions
+// Same IP, different API keys = different sessions
         let ctx1 = RequestContext {
             ip: ip(50),
             path: "/v1/test".to_string(),
@@ -316,27 +315,27 @@ mod config_tests {
     fn default_config_has_sensible_values() {
         let config = ProtectorConfig::default();
         
-        // Rate limiting
+// Rate limiting
         assert!(config.default_cost_budget > 0);
         assert!(config.system_cost_capacity > config.default_cost_budget);
         
-        // Reputation
+// Reputation
         assert!(config.block_threshold < config.challenge_threshold);
         assert!(config.challenge_threshold < config.initial_reputation);
         assert!(config.initial_reputation <= 100);
         
-        // Session
+// Session
         assert!(config.session_window.as_secs() > 0);
         assert!(config.max_sessions > 0);
         
-        // Cleanup
+// Cleanup
         assert!(config.cleanup_interval.as_secs() > 0);
         assert!(config.low_rep_block_duration.as_secs() > 0);
     }
 
     #[test]
     fn config_from_env_uses_defaults_when_no_vars() {
-        // Clear any test-interfering env vars (if set)
+// Clear any test-interfering env vars (if set)
         std::env::remove_var("DDOS_COST_BUDGET");
         std::env::remove_var("DDOS_BLOCK_THRESHOLD");
         std::env::remove_var("DDOS_REDIS_URL");
@@ -405,7 +404,7 @@ mod decision_tests {
             expected_time_ms: 100,
         };
         
-        // Find a valid nonce by brute force (difficulty 4 = 16 combinations)
+// Find a valid nonce by brute force (difficulty 4 = 16 combinations)
         let mut found_nonce: Option<u64> = None;
         for nonce in 0..10000 {
             if challenge.verify(nonce) {
@@ -430,7 +429,7 @@ mod decision_tests {
             expected_time_ms: 1000,
         };
         
-        // Random nonces should almost certainly fail
+// Random nonces should almost certainly fail
         assert!(!challenge.verify(12345));
         assert!(!challenge.verify(67890));
         assert!(!challenge.verify(0));
@@ -446,7 +445,7 @@ mod decision_tests {
             expected_time_ms: 0,
         };
         
-        // Even nonce 0 should work for difficulty 0, but expiration should cause failure
+// Even nonce 0 should work for difficulty 0, but expiration should cause failure
         assert!(!challenge.verify(0));
     }
 
@@ -496,15 +495,15 @@ mod reputation_extended_tests {
         let mut rep = ReputationScore::default();
         assert_eq!(rep.level(), ReputationLevel::Normal);
         
-        // Drop to suspicious
+// Drop to suspicious
         rep.score = 25;
         assert_eq!(rep.level(), ReputationLevel::Suspicious);
         
-        // Drop to blocked
+// Drop to blocked
         rep.score = 8;
         assert_eq!(rep.level(), ReputationLevel::Blocked);
         
-        // Rise to trusted
+// Rise to trusted
         rep.score = 85;
         assert_eq!(rep.level(), ReputationLevel::Trusted);
     }
@@ -533,14 +532,14 @@ mod reputation_extended_tests {
     fn reputation_challenge_pass_rate() {
         let mut rep = ReputationScore::default();
         
-        // No challenges = 1.0 (neutral)
+// No challenges = 1.0 (neutral)
         assert_eq!(rep.challenge_pass_rate(), 1.0);
         
         rep.record_challenge_passed();
         rep.record_challenge_passed();
         rep.record_challenge_failed();
         
-        // 2 passed, 1 failed = 2/3 = 0.666...
+// 2 passed, 1 failed = 2/3 = 0.666...
         let rate = rep.challenge_pass_rate();
         assert!(rate > 0.66 && rate < 0.67);
     }
@@ -549,7 +548,7 @@ mod reputation_extended_tests {
     fn reputation_block_rate() {
         let mut rep = ReputationScore::default();
         
-        // No requests = 0.0 block rate
+// No requests = 0.0 block rate
         assert_eq!(rep.block_rate(), 0.0);
         
         rep.total_requests = 10;
@@ -563,12 +562,12 @@ mod reputation_extended_tests {
         let mut rep = ReputationScore::default();
         rep.score = 100;
         
-        // Should saturate at 100, not overflow
+// Should saturate at 100, not overflow
         rep.record_challenge_passed();
         assert_eq!(rep.score, 100);
         
         rep.score = 0;
-        // Should saturate at 0, not underflow
+// Should saturate at 0, not underflow
         rep.record_challenge_failed();
         assert_eq!(rep.score, 0);
     }
@@ -606,11 +605,11 @@ mod cost_tests {
         };
         let limiter = CostBasedLimiter::new(config);
         
-        // First request uses default endpoint cost
+// First request uses default endpoint cost
         let d1 = limiter.check("tenant1", "/v1/messages/:id", None);
         assert!(matches!(d1, CostDecision::Allowed { .. }));
         
-        // Exhaust with big request
+// Exhaust with big request
         let d2 = limiter.check("tenant1", "/v1/messages/:id", Some(RequestCost::new(1000, 0, 0, 0)));
         assert!(matches!(d2, CostDecision::QuotaExceeded { .. }));
     }
@@ -623,7 +622,7 @@ mod cost_tests {
         };
         let limiter = CostBasedLimiter::new(config);
         
-        // Request bigger than system capacity
+// Request bigger than system capacity
         let decision = limiter.check("tenant1", "/v1/messages/:id", Some(RequestCost::new(200, 0, 0, 0)));
         assert!(matches!(decision, CostDecision::SystemOverloaded { .. }));
     }
@@ -636,10 +635,10 @@ mod cost_tests {
         };
         let limiter = CostBasedLimiter::new(config);
         
-        // Exhaust tenant1
+// Exhaust tenant1
         let _ = limiter.check("tenant1", "/v1/messages/:id", Some(RequestCost::new(2000, 0, 0, 0)));
         
-        // tenant2 should still work
+// tenant2 should still work
         let d2 = limiter.check("tenant2", "/v1/health", None);
         assert!(matches!(d2, CostDecision::Allowed { .. }));
     }
@@ -656,11 +655,11 @@ mod cost_tests {
         limiter.record_cost("tenant1", 500);
         let after = limiter.get_remaining("tenant1");
         
-        // Should still be default since tenant wasn't created yet
-        // record_cost only works on existing tenants
+// Should still be default since tenant wasn't created yet
+// record_cost only works on existing tenants
         assert_eq!(after, before);
         
-        // Create tenant with a check first
+// Create tenant with a check first
         limiter.check("tenant2", "/v1/health", None);
         let b2 = limiter.get_remaining("tenant2");
         limiter.record_cost("tenant2", 100);
@@ -673,17 +672,17 @@ mod cost_tests {
     fn cost_set_tenant_budget() {
         let limiter = CostBasedLimiter::new(CostLimiterConfig::default());
         
-        // Set custom budget
+// Set custom budget
         limiter.set_tenant_budget("premium_tenant", 1000000, 20000);
         
-        // Use and verify
+// Use and verify
         let remaining = limiter.get_remaining("premium_tenant");
         assert_eq!(remaining, 1000000);
     }
 }
 
 // ============================================================================
-// INTEGRATION: Full Protection Flow
+// INTEGRATION:Full Protection Flow
 // ============================================================================
 
 mod integration_tests {
@@ -739,7 +738,7 @@ mod integration_tests {
         let config = ProtectorConfig::default();
         let protector = DdosProtector::new(config).await.unwrap();
         
-        // Initially not under attack
+// Initially not under attack
         assert!(!protector.is_under_attack());
         
         let state = protector.attack_state();
@@ -753,7 +752,7 @@ mod integration_tests {
         let config = ProtectorConfig::default();
         let protector = DdosProtector::new(config).await.unwrap();
         
-        // Very short fingerprint is suspicious
+// Very short fingerprint is suspicious
         let ctx = RequestContext {
             ip: ip(102),
             path: "/v1/test".to_string(),
@@ -766,15 +765,15 @@ mod integration_tests {
             api_key_id: None,
         };
         
-        // First request creates reputation and decreases it
+// First request creates reputation and decreases it
         let _ = protector.evaluate(&ctx).await;
         
-        // Multiple requests should further decrease reputation
+// Multiple requests should further decrease reputation
         for _ in 0..10 {
             let _ = protector.evaluate(&ctx).await;
         }
         
-        // Should still be allowed (reputation starts at 50, decreases by 10 per request)
-        // After many requests, may trigger blocking
+// Should still be allowed (reputation starts at 50, decreases by 10 per request)
+// After many requests, may trigger blocking
     }
 }

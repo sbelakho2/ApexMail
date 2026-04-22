@@ -6,11 +6,11 @@
 //!
 //! ## Metrics Emitted
 //!
-//! | Metric                                | Type      | Labels                        |
+//! | Metric | Type | Labels |
 //! |---------------------------------------|-----------|-------------------------------|
 //! | `apexmail_http_request_duration_seconds` | Histogram | method, path_pattern, status |
-//! | `apexmail_http_requests_total`           | Counter   | method, path_pattern, status |
-//! | `apexmail_http_requests_in_flight`       | Gauge     | method                       |
+//! | `apexmail_http_requests_total` | Counter | method, path_pattern, status |
+//! | `apexmail_http_requests_in_flight` | Gauge | method |
 
 use axum::extract::MatchedPath;
 use axum::http::Request;
@@ -18,11 +18,9 @@ use axum::middleware::Next;
 use axum::response::Response;
 use std::time::Instant;
 
-/// Axum middleware: records request duration and counts as Prometheus metrics.
-///
+/// Axum middleware:records request duration and counts as Prometheus metrics.
 /// Must be placed *after* the router so that `MatchedPath` is available in
 /// request extensions (axum populates it when a route matches).
-///
 /// Injects via `axum::middleware::from_fn(metrics_middleware)`.
 pub async fn metrics_middleware(
     req: Request<axum::body::Body>,
@@ -30,15 +28,15 @@ pub async fn metrics_middleware(
 ) -> Response {
     let method = req.method().clone().to_string();
 
-    // Prefer the matched pattern ("/v1/messages/:id") over the raw URI
-    // to avoid high-cardinality label explosion.
+// Prefer the matched pattern ("/v1/messages/:id") over the raw URI
+// to avoid high-cardinality label explosion.
     let path_pattern = req
         .extensions()
         .get::<MatchedPath>()
         .map(|mp| mp.as_str().to_owned())
         .unwrap_or_else(|| req.uri().path().to_owned());
 
-    // In-flight gauge
+// In-flight gauge
     metrics::gauge!("apexmail_http_requests_in_flight", "method" => method.clone())
         .increment(1.0);
 
@@ -48,11 +46,11 @@ pub async fn metrics_middleware(
 
     let status = response.status().as_u16().to_string();
 
-    // Decrement in-flight
+// Decrement in-flight
     metrics::gauge!("apexmail_http_requests_in_flight", "method" => method.clone())
         .decrement(1.0);
 
-    // Request count
+// Request count
     metrics::counter!(
         "apexmail_http_requests_total",
         "method" => method.clone(),
@@ -61,7 +59,7 @@ pub async fn metrics_middleware(
     )
     .increment(1);
 
-    // Duration histogram
+// Duration histogram
     metrics::histogram!(
         "apexmail_http_request_duration_seconds",
         "method" => method,
@@ -91,7 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_middleware_records_without_panic() {
-        // Install a noop recorder so metrics macros don't panic in tests
+// Install a noop recorder so metrics macros don't panic in tests
         let _ = metrics_exporter_prometheus::PrometheusBuilder::new()
             .install_recorder();
 
@@ -110,7 +108,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_middleware_handles_unmatched_paths() {
-        // Ensure 404s don't blow up the middleware
+// Ensure 404s don't blow up the middleware
         let app = Router::new()
             .route("/test", get(ok_handler))
             .layer(middleware::from_fn(metrics_middleware));

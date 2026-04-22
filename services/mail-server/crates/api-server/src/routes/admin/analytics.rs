@@ -1,6 +1,6 @@
 //! Analytics endpoints — event stats, time series, provider breakdown.
 //!
-//! Migrated from: apps/control-plane/src/app/api/analytics/route.ts (216 lines)
+//! Migrated from:apps/control-plane/src/app/api/analytics/route.ts (216 lines)
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -84,7 +84,7 @@ async fn get_analytics(
 
     let interval = range_to_interval(&params.range);
 
-    // Detect column names (event_type vs type, created_at vs timestamp)
+// Detect column names (event_type vs type, created_at vs timestamp)
     let type_col = detect_column(&state, "events", &["event_type", "type"])
         .await
         .unwrap_or_else(|| "event_type".into());
@@ -92,7 +92,7 @@ async fn get_analytics(
         .await
         .unwrap_or_else(|| "created_at".into());
 
-    // Aggregate stats
+// Aggregate stats
     let stats_sql = format!(
         "SELECT
             COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0) as sent,
@@ -127,7 +127,7 @@ async fn get_analytics(
         complaint_rate: (complaints as f64 / safe_sent * 100.0).min(100.0),
     };
 
-    // Time series
+// Time series
     let ts_sql = format!(
         "SELECT DATE({time_col})::text as d,
             COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0),
@@ -147,7 +147,7 @@ async fn get_analytics(
         .map(|(date, s, d, o, c)| TimeSeriesPoint { date, sent: s, delivered: d, opened: o, clicked: c })
         .collect();
 
-    // Provider breakdown by recipient domain
+// Provider breakdown by recipient domain
     let prov_sql = format!(
         "SELECT
             CASE

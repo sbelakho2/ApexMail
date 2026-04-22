@@ -4,24 +4,22 @@
 //!
 //! Clients connect via EventSource / fetch and receive a continuous stream of
 //! tracking events (opened, clicked, unsubscribed, delivered, bounced) as they
-//! happen.  Events are scoped to the authenticated tenant via a JWT bearer
+//! happen. Events are scoped to the authenticated tenant via a JWT bearer
 //! token passed as a query parameter (SSE does not support Authorization headers).
 //!
-//! Architecture:
-//!   1. Client connects with a short-lived JWT containing `tenant_id` + `sub` (user id).
-//!   2. Handler validates token, subscribes to Redis Pub/Sub channel `events:{tenant_id}`.
-//!   3. The EventProcessor publishes each flushed event to `events:{tenant_id}` after
-//!      successful Postgres write.
-//!   4. This handler forwards matching events as SSE `data:` frames.
-//!   5. Keepalive comments (`: keepalive`) are sent every 15 seconds to prevent
-//!      proxy/LB idle timeouts.
-//!   6. On disconnect, the Redis subscription is dropped automatically.
+//! Architecture://! 1. Client connects with a short-lived JWT containing `tenant_id` + `sub` (user id).
+//! 2. Handler validates token, subscribes to Redis Pub/Sub channel `events:{tenant_id}`.
+//! 3. The EventProcessor publishes each flushed event to `events:{tenant_id}` after
+//! successful Postgres write.
+//! 4. This handler forwards matching events as SSE `data:` frames.
+//! 5. Keepalive comments (`:keepalive`) are sent every 15 seconds to prevent
+//! proxy/LB idle timeouts.
+//! 6. On disconnect, the Redis subscription is dropped automatically.
 //!
-//! Security:
-//!   - Token is validated with HMAC-SHA256 signature check (same signing key as API).
-//!   - Token must have `stream` scope.
-//!   - Maximum connection duration: 1 hour (server-side timeout).
-//!   - Rate-limited to 5 concurrent SSE connections per tenant.
+//! Security://! - Token is validated with HMAC-SHA256 signature check (same signing key as API).
+//! - Token must have `stream` scope.
+//! - Maximum connection duration:1 hour (server-side timeout).
+//! - Rate-limited to 5 concurrent SSE connections per tenant.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -45,13 +43,13 @@ use crate::state::AppState;
 /// Query parameters for SSE endpoint.
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
-    /// JWT token with `tenant_id` claim and `stream` scope.
+/// JWT token with `tenant_id` claim and `stream` scope.
     pub token: String,
-    /// Optional: filter by event types (comma-separated).
-    /// Values: opened, clicked, unsubscribed, delivered, bounced
+/// Optional:filter by event types (comma-separated).
+/// Values:opened, clicked, unsubscribed, delivered, bounced
     #[serde(default)]
     pub events: Option<String>,
-    /// Optional: filter by specific message_id.
+/// Optional:filter by specific message_id.
     #[serde(default)]
     pub message_id: Option<String>,
 }
@@ -59,23 +57,23 @@ pub struct StreamQuery {
 /// Minimal JWT claims for SSE authentication.
 #[derive(Debug, serde::Deserialize)]
 struct StreamClaims {
-    /// Tenant ID
+/// Tenant ID
     pub tenant_id: String,
-    /// User/API key ID
+/// User/API key ID
     pub sub: String,
-    /// Scopes (must include "stream" or "*")
+/// Scopes (must include "stream" or "*")
     #[serde(default)]
     pub scopes: Vec<String>,
-    /// Expiration (unix timestamp)
+/// Expiration (unix timestamp)
     pub exp: u64,
 }
 
-/// SSE handler: validates token, subscribes to Redis Pub/Sub, streams events.
+/// SSE handler:validates token, subscribes to Redis Pub/Sub, streams events.
 pub async fn handle_stream(
     State(state): State<AppState>,
     Query(params): Query<StreamQuery>,
 ) -> Response {
-    // ── Validate JWT ──────────────────────────────────────────────────
+// ── Validate JWT ──────────────────────────────────────────────────
     let claims = match validate_stream_token(&params.token, &state) {
         Ok(c) => c,
         Err(msg) => {
@@ -91,7 +89,7 @@ pub async fn handle_stream(
 
     let tenant_id = claims.tenant_id.clone();
 
-    // ── Check concurrent connection limit ─────────────────────────────
+// ── Check concurrent connection limit ─────────────────────────────
     let conn_key = format!("sse:conns:{}", &tenant_id);
     let conn_check: Result<bool, String> = async {
         let mut conn = state.redis.get().await.map_err(|e| format!("Redis: {e}"))?;
@@ -100,7 +98,7 @@ pub async fn handle_stream(
             .query_async(&mut *conn)
             .await
             .map_err(|e| format!("Redis INCR: {e}"))?;
-        // Set expiry on first increment to auto-cleanup on crash
+// Set expiry on first increment to auto-cleanup on crash
         if count == 1 {
             let _: () = redis::cmd("EXPIRE")
                 .arg(&conn_key)
@@ -110,7 +108,7 @@ pub async fn handle_stream(
                 .map_err(|e| format!("Redis EXPIRE: {e}"))?;
         }
         if count > 5 {
-            // Decrement back since we won't actually use the slot
+// Decrement back since we won't actually use the slot
             let _: () = redis::cmd("DECR")
                 .arg(&conn_key)
                 .query_async(&mut *conn)
@@ -137,12 +135,12 @@ pub async fn handle_stream(
         }
         Err(e) => {
             error!(error = %e, "SSE connection limit check failed");
-            // Allow on Redis failure (fail open for availability)
+// Allow on Redis failure (fail open for availability)
         }
         Ok(true) => {}
     }
 
-    // ── Parse event type filter ───────────────────────────────────────
+// ── Parse event type filter ───────────────────────────────────────
     let event_filter: Option<Vec<String>> = params.events.map(|e| {
         e.split(',')
             .map(|s| s.trim().to_lowercase())
@@ -160,10 +158,10 @@ pub async fn handle_stream(
         "SSE stream connected"
     );
 
-    // ── Subscribe to Redis Pub/Sub channel ────────────────────────────
+// ── Subscribe to Redis Pub/Sub channel ────────────────────────────
     let channel = format!("events:{}", &tenant_id);
     let redis_url = state.config.redis.url.clone();
-    // Decrement connection count cleanup
+// Decrement connection count cleanup
     let cleanup_redis = state.redis.clone();
     let cleanup_key = conn_key.clone();
 
@@ -187,7 +185,6 @@ pub async fn handle_stream(
 }
 
 /// Create the SSE event stream backed by a Redis Pub/Sub subscription.
-///
 /// This spawns a dedicated Redis connection (separate from the pool) for the
 /// Pub/Sub subscription, since subscribed connections cannot issue other commands.
 fn make_event_stream(
@@ -200,7 +197,7 @@ fn make_event_stream(
     cleanup_key: String,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
-        // ── Initial connection event ──────────────────────────────────
+// ── Initial connection event ──────────────────────────────────
         yield Ok(Event::default()
             .event("connected")
             .data(serde_json::json!({
@@ -213,7 +210,7 @@ fn make_event_stream(
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             }).to_string()));
 
-        // ── Connect to Redis Pub/Sub ──────────────────────────────────
+// ── Connect to Redis Pub/Sub ──────────────────────────────────
         let client = match redis::Client::open(redis_url.as_str()) {
             Ok(c) => c,
             Err(e) => {
@@ -249,7 +246,7 @@ fn make_event_stream(
 
         debug!(channel = %channel, "Subscribed to Redis Pub/Sub");
 
-        // ── Stream events with 1-hour maximum duration ────────────────
+// ── Stream events with 1-hour maximum duration ────────────────
         let max_duration = tokio::time::sleep(Duration::from_secs(3600));
         tokio::pin!(max_duration);
 
@@ -257,7 +254,7 @@ fn make_event_stream(
 
         loop {
             tokio::select! {
-                // Timeout after 1 hour
+// Timeout after 1 hour
                 _ = &mut max_duration => {
                     info!(tenant_id = %tenant_id, "SSE stream max duration reached (1h)");
                     yield Ok(Event::default()
@@ -265,7 +262,7 @@ fn make_event_stream(
                         .data(r#"{"message":"Maximum stream duration reached. Please reconnect."}"#.to_string()));
                     break;
                 }
-                // Receive message from Redis Pub/Sub
+// Receive message from Redis Pub/Sub
                 msg = msg_stream.next() => {
                     match msg {
                         Some(msg) => {
@@ -277,9 +274,9 @@ fn make_event_stream(
                                 }
                             };
 
-                            // Parse the event JSON to apply filters
+// Parse the event JSON to apply filters
                             if let Ok(event_json) = serde_json::from_str::<serde_json::Value>(&payload) {
-                                // Apply event type filter
+// Apply event type filter
                                 if let Some(ref filter) = event_filter {
                                     if let Some(event_type) = event_json.get("type").and_then(|v| v.as_str()) {
                                         if !filter.iter().any(|f| f == event_type) {
@@ -288,7 +285,7 @@ fn make_event_stream(
                                     }
                                 }
 
-                                // Apply message_id filter
+// Apply message_id filter
                                 if let Some(ref mid) = message_filter {
                                     if let Some(msg_id) = event_json.get("messageId").and_then(|v| v.as_str()) {
                                         if msg_id != mid.as_str() {
@@ -297,7 +294,7 @@ fn make_event_stream(
                                     }
                                 }
 
-                                // Determine SSE event name from the type field
+// Determine SSE event name from the type field
                                 let event_name = event_json
                                     .get("type")
                                     .and_then(|v| v.as_str())
@@ -307,14 +304,14 @@ fn make_event_stream(
                                     .event(event_name)
                                     .data(payload));
                             } else {
-                                // Raw payload without valid JSON — send as-is
+// Raw payload without valid JSON — send as-is
                                 yield Ok(Event::default()
                                     .event("event")
                                     .data(payload));
                             }
                         }
                         None => {
-                            // Redis connection closed
+// Redis connection closed
                             warn!(tenant_id = %tenant_id, "Redis Pub/Sub stream ended");
                             yield Ok(Event::default()
                                 .event("error")
@@ -326,7 +323,7 @@ fn make_event_stream(
             }
         }
 
-        // Cleanup: decrement connection count
+// Cleanup:decrement connection count
         decrement_conn_count(&cleanup_redis, &cleanup_key).await;
         info!(tenant_id = %tenant_id, "SSE stream disconnected");
     }
@@ -343,11 +340,8 @@ async fn decrement_conn_count(pool: &deadpool_redis::Pool, key: &str) {
 }
 
 /// Validate the SSE stream JWT token.
-///
 /// We use a lightweight HMAC-SHA256 check here rather than pulling in the full
-/// jsonwebtoken crate (which is an api-server dependency).  The token format is:
-///   base64url(header).base64url(payload).base64url(signature)
-///
+/// jsonwebtoken crate (which is an api-server dependency). The token format is:/// base64url(header).base64url(payload).base64url(signature)
 /// The signing key is derived from the tracking service's `TRACKING_SECRET_KEY`
 /// via HKDF or direct HMAC — matching what the API server issues.
 fn validate_stream_token(token: &str, state: &AppState) -> Result<StreamClaims, String> {
@@ -356,7 +350,7 @@ fn validate_stream_token(token: &str, state: &AppState) -> Result<StreamClaims, 
         return Err("Invalid token format".into());
     }
 
-    // Decode and verify signature
+// Decode and verify signature
     let signing_input = format!("{}.{}", parts[0], parts[1]);
     let signature_bytes = base64_url_decode(parts[2])
         .map_err(|_| "Invalid token signature encoding")?;
@@ -369,13 +363,13 @@ fn validate_stream_token(token: &str, state: &AppState) -> Result<StreamClaims, 
     mac.verify_slice(&signature_bytes)
         .map_err(|_| "Invalid token signature")?;
 
-    // Decode claims payload
+// Decode claims payload
     let payload_bytes = base64_url_decode(parts[1])
         .map_err(|_| "Invalid token payload encoding")?;
     let claims: StreamClaims = serde_json::from_slice(&payload_bytes)
         .map_err(|_| "Invalid token claims")?;
 
-    // Check expiry
+// Check expiry
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -385,7 +379,7 @@ fn validate_stream_token(token: &str, state: &AppState) -> Result<StreamClaims, 
         return Err("Token expired".into());
     }
 
-    // Check scope
+// Check scope
     if !claims.scopes.iter().any(|s| s == "stream" || s == "*") {
         return Err("Token missing 'stream' scope".into());
     }

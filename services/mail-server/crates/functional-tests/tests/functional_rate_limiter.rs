@@ -1,4 +1,4 @@
-//! Functional tests for apexmail-rate-limiter: SlidingWindowCounter.
+//! Functional tests for apexmail-rate-limiter:SlidingWindowCounter.
 
 use std::time::Duration;
 use apexmail_rate_limiter::SlidingWindowCounter;
@@ -67,7 +67,7 @@ fn concurrent_access_does_not_panic() {
         h.join().expect("thread panicked");
     }
 
-    // Just ensure we didn't panic — the count should be roughly 1000
+// Just ensure we didn't panic — the count should be roughly 1000
     let count = counter.current_count();
     assert!(count > 0, "some events should have been counted");
 }
@@ -79,12 +79,12 @@ fn independent_counters_do_not_interfere() {
     let counter_a = SlidingWindowCounter::from_params(Duration::from_secs(60), 5);
     let counter_b = SlidingWindowCounter::from_params(Duration::from_secs(60), 5);
 
-    // Exhaust counter A
+// Exhaust counter A
     for _ in 0..5 {
         counter_a.check_and_increment();
     }
     assert!(counter_a.check_and_increment().is_denied());
 
-    // Counter B should still be fresh
+// Counter B should still be fresh
     assert!(counter_b.check_and_increment().is_allowed());
 }

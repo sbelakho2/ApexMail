@@ -17,7 +17,7 @@ use api_server::state::AppStateInner;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ── Logging ─────────────────────────────────────────────
+// ── Logging ─────────────────────────────────────────────
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
 
-    // ── Config ──────────────────────────────────────────────
+// ── Config ──────────────────────────────────────────────
     let config = Config::from_env()?;
     tracing::info!(
         port = config.port,
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         "loaded configuration"
     );
 
-    // ── Database pool ───────────────────────────────────────
+// ── Database pool ───────────────────────────────────────
     let db = apexmail_db::pool::create_pool_from_config(
         &config.db_host,
         config.db_port,
@@ -46,14 +46,14 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     tracing::info!("database pool created");
 
-    // ── Redis pool ──────────────────────────────────────────
+// ── Redis pool ──────────────────────────────────────────
     let redis_cfg = deadpool_redis::Config::from_url(&config.redis_url());
     let redis = redis_cfg
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .map_err(|e| anyhow::anyhow!("failed to create Redis pool: {e}"))?;
     tracing::info!("redis pool created");
 
-    // ── AWS SES client ──────────────────────────────────────
+// ── AWS SES client ──────────────────────────────────────
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_sdk_sesv2::config::Region::new(config.aws_region.clone()))
         .load()
@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!(region = %config.aws_region, "AWS SES client initialized (shared-pool sending only)");
 
-    // ── Hetzner dedicated IP provider ───────────────────────
+// ── Hetzner dedicated IP provider ───────────────────────
     let ip_provider = DedicatedIpProvider::from_env(db.clone());
     if ip_provider.is_some() {
         tracing::info!("Hetzner dedicated IP provider initialized");
@@ -75,14 +75,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("HETZNER_API_TOKEN not set — dedicated IP provisioning disabled");
     }
 
-    // ── App state ───────────────────────────────────────────
+// ── App state ───────────────────────────────────────────
     let http_client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
     let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider, ip_provider);
 
-    // ── Prometheus metrics recorder ─────────────────────────
+// ── Prometheus metrics recorder ─────────────────────────
     if config.metrics_port > 0 {
         let metrics_addr: std::net::SocketAddr =
             format!("0.0.0.0:{}", config.metrics_port).parse()?;
@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(port = config.metrics_port, "Prometheus metrics server ready");
     }
 
-    // ── Build & serve ───────────────────────────────────────
+// ── Build & serve ───────────────────────────────────────
     let app = build_app(state);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
@@ -112,7 +112,7 @@ async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = signal::ctrl_c().await {
             tracing::error!(error = %e, "failed to listen for Ctrl+C — shutdown may require SIGKILL");
-            // Fall back to pending so the other branch (SIGTERM) can still work.
+// Fall back to pending so the other branch (SIGTERM) can still work.
             std::future::pending::<()>().await;
         }
     };

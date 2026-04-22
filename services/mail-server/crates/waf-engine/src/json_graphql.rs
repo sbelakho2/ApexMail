@@ -8,13 +8,13 @@
 /// Result of JSON inspection showing paths to potentially dangerous values
 #[derive(Debug, Clone)]
 pub struct JsonInspectionResult {
-    /// All string values found in the JSON, with their paths
+/// All string values found in the JSON, with their paths
     pub string_values: Vec<JsonPathValue>,
-    /// Whether parsing was successful
+/// Whether parsing was successful
     pub parsed_ok: bool,
-    /// Error message if parsing failed
+/// Error message if parsing failed
     pub error: Option<String>,
-    /// Total field count encountered during parsing
+/// Total field count encountered during parsing
     pub field_count: usize,
 }
 
@@ -27,9 +27,9 @@ const MAX_NODE_COUNT: usize = 20000;
 /// A value extracted from JSON with its path
 #[derive(Debug, Clone)]
 pub struct JsonPathValue {
-    /// JSON path (e.g., "$.user.name" or "$[0].query")
+/// JSON path (e.g., "$.user.name" or "$[0].query")
     pub path: String,
-    /// The extracted string value
+/// The extracted string value
     pub value: String,
 }
 
@@ -52,7 +52,7 @@ pub fn extract_json_values(json: &str) -> JsonInspectionResult {
         };
     }
     
-    // Simple recursive parser for JSON values
+// Simple recursive parser for JSON values
     let chars: Vec<char> = trimmed.chars().collect();
     let mut pos = 0;
     
@@ -131,7 +131,7 @@ fn parse_string(chars: &[char], pos: &mut usize) -> Result<String, String> {
                 'r' => result.push('\r'),
                 't' => result.push('\t'),
                 'u' => {
-                    // Unicode escape
+// Unicode escape
                     if *pos + 4 <= chars.len() {
                         let hex: String = chars[*pos..*pos + 4].iter().collect();
                         *pos += 4;
@@ -178,7 +178,7 @@ fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_d
     
     skip_whitespace(chars, pos);
     
-    // Empty object
+// Empty object
     if *pos < chars.len() && chars[*pos] == '}' {
         *pos += 1;
         return Ok(values);
@@ -187,7 +187,7 @@ fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_d
     loop {
         skip_whitespace(chars, pos);
         
-        // Parse key
+// Parse key
         if *pos >= chars.len() || chars[*pos] != '"' {
             return Err("Expected key".into());
         }
@@ -200,7 +200,7 @@ fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_d
         
         skip_whitespace(chars, pos);
         
-        // Expect colon
+// Expect colon
         if *pos >= chars.len() || chars[*pos] != ':' {
             return Err("Expected colon".into());
         }
@@ -208,7 +208,7 @@ fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_d
         
         skip_whitespace(chars, pos);
         
-        // Parse value
+// Parse value
         values.extend(parse_value(chars, pos, &new_path, depth + 1, max_depth, field_count, node_count)?);
         
         skip_whitespace(chars, pos);
@@ -252,7 +252,7 @@ fn parse_array(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_de
     
     skip_whitespace(chars, pos);
     
-    // Empty array
+// Empty array
     if *pos < chars.len() && chars[*pos] == ']' {
         *pos += 1;
         return Ok(values);
@@ -313,7 +313,7 @@ fn parse_value(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_de
         '{' => parse_object(chars, pos, path, depth, max_depth, field_count, node_count),
         '[' => parse_array(chars, pos, path, depth, max_depth, field_count, node_count),
         't' | 'f' => {
-            // true or false
+// true or false
             let word: String = chars[*pos..].iter().take(5).collect();
             if word.starts_with("true") {
                 *pos += 4;
@@ -323,12 +323,12 @@ fn parse_value(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_de
             Ok(vec![])
         }
         'n' => {
-            // null
+// null
             *pos += 4;
             Ok(vec![])
         }
         c if c.is_ascii_digit() || c == '-' => {
-            // Number
+// Number
             while *pos < chars.len() && (chars[*pos].is_ascii_digit() 
                 || chars[*pos] == '.' 
                 || chars[*pos] == 'e' 
@@ -347,32 +347,32 @@ fn parse_value(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_de
 /// GraphQL query inspection result
 #[derive(Debug, Clone)]
 pub struct GraphQLInspectionResult {
-    /// Extracted operation name
+/// Extracted operation name
     pub operation_name: Option<String>,
-    /// Extracted query/mutation type
+/// Extracted query/mutation type
     pub operation_type: Option<String>,
-    /// All string arguments found
+/// All string arguments found
     pub string_arguments: Vec<GraphQLArgument>,
-    /// All variable values (from the variables field)
+/// All variable values (from the variables field)
     pub variables: Vec<JsonPathValue>,
-    /// Whether this looks like valid GraphQL
+/// Whether this looks like valid GraphQL
     pub looks_like_graphql: bool,
-    /// Estimated number of GraphQL fields in the request
+/// Estimated number of GraphQL fields in the request
     pub field_count: usize,
-    /// Maximum observed GraphQL selection-set depth
+/// Maximum observed GraphQL selection-set depth
     pub max_depth: usize,
-    /// True when field/depth limits are exceeded
+/// True when field/depth limits are exceeded
     pub limit_exceeded: bool,
 }
 
 /// A GraphQL argument with its location
 #[derive(Debug, Clone)]
 pub struct GraphQLArgument {
-    /// The field path (e.g., "user.email")
+/// The field path (e.g., "user.email")
     pub field_path: String,
-    /// Argument name
+/// Argument name
     pub arg_name: String,
-    /// Argument value
+/// Argument value
     pub value: String,
 }
 
@@ -391,18 +391,18 @@ pub fn extract_graphql_values(body: &str) -> GraphQLInspectionResult {
     
     let trimmed = body.trim();
     
-    // First, check if this is a JSON-wrapped GraphQL (POST)
+// First, check if this is a JSON-wrapped GraphQL (POST)
     if trimmed.starts_with('{') {
-        // Try to extract "query" and "variables" fields
+// Try to extract "query" and "variables" fields
         let json_result = extract_json_values(body);
         
-        // Only treat as JSON-wrapped GraphQL if we found a query or mutation field
+// Only treat as JSON-wrapped GraphQL if we found a query or mutation field
         let mut found_query_field = false;
         for jpv in &json_result.string_values {
             if jpv.path == "$.query" || jpv.path == "$.mutation" {
                 found_query_field = true;
                 result.looks_like_graphql = true;
-                // Parse the GraphQL query string
+// Parse the GraphQL query string
                 let inner = parse_graphql_query(&jpv.value);
                 result.operation_name = inner.operation_name;
                 result.operation_type = inner.operation_type;
@@ -415,15 +415,15 @@ pub fn extract_graphql_values(body: &str) -> GraphQLInspectionResult {
             }
         }
         
-        // If we found variables in the JSON, they're attack surfaces too
+// If we found variables in the JSON, they're attack surfaces too
         for jpv in json_result.string_values {
             if jpv.path.starts_with("$.variables.") {
                 result.variables.push(jpv);
             }
         }
         
-        // If this wasn't JSON-wrapped GraphQL, try parsing as raw GraphQL
-        // (e.g., "{ __schema { types { name } } }" is valid GraphQL, not JSON)
+// If this wasn't JSON-wrapped GraphQL, try parsing as raw GraphQL
+// (e.g., "{ __schema { types { name } } }" is valid GraphQL, not JSON)
         if !found_query_field {
             let inner = parse_graphql_query(body);
             if inner.looks_like_graphql {
@@ -431,7 +431,7 @@ pub fn extract_graphql_values(body: &str) -> GraphQLInspectionResult {
             }
         }
     } else if trimmed.starts_with("query") || trimmed.starts_with("mutation") || trimmed.starts_with("subscription") || trimmed.starts_with("fragment") {
-        // Raw GraphQL query (GET or direct)
+// Raw GraphQL query (GET or direct)
         result.looks_like_graphql = true;
         let inner = parse_graphql_query(body);
         result.operation_name = inner.operation_name;
@@ -459,7 +459,7 @@ fn parse_graphql_query(query: &str) -> GraphQLInspectionResult {
     
     let trimmed = query.trim();
     
-    // Detect operation type
+// Detect operation type
     if trimmed.starts_with("query") {
         result.operation_type = Some("query".into());
         result.looks_like_graphql = true;
@@ -470,7 +470,7 @@ fn parse_graphql_query(query: &str) -> GraphQLInspectionResult {
         result.operation_type = Some("subscription".into());
         result.looks_like_graphql = true;
     } else if trimmed.starts_with("fragment") {
-        // GraphQL fragment definition
+// GraphQL fragment definition
         result.operation_type = Some("fragment".into());
         result.looks_like_graphql = true;
     } else if trimmed.starts_with('{') {
@@ -478,8 +478,8 @@ fn parse_graphql_query(query: &str) -> GraphQLInspectionResult {
         result.looks_like_graphql = true;
     }
     
-    // Extract string arguments (simplified regex-like approach)
-    // Look for patterns like: field(arg: "value")
+// Extract string arguments (simplified regex-like approach)
+// Look for patterns like:field(arg:"value")
     let mut in_string = false;
     let mut string_start = 0;
     let mut current_arg = String::new();
@@ -495,12 +495,12 @@ fn parse_graphql_query(query: &str) -> GraphQLInspectionResult {
                 in_string = true;
                 string_start = i + 1;
                 
-                // Try to find the argument name before this string
-                // Look backwards for ": or :
+// Try to find the argument name before this string
+// Look backwards for ':'
                 let before: String = chars[..i].iter().collect();
                 if let Some(colon_pos) = before.rfind(':') {
                     let before_colon = before[..colon_pos].trim_end();
-                    // Extract the argument name (last word before :)
+// Extract the argument name (last word before :)
                     current_arg = before_colon
                         .chars()
                         .rev()
@@ -623,7 +623,7 @@ mod tests {
         let json = r#"{"user": {"name": "alice", "email": "alice@test.com"}, "query": "SELECT * FROM users"}"#;
         let result = extract_json_values(json);
         assert!(result.parsed_ok);
-        // Should find name, email, query
+// Should find name, email, query
         assert!(result.string_values.iter().any(|v| v.value == "SELECT * FROM users"));
     }
 
@@ -664,7 +664,7 @@ mod tests {
         let json = r#"{"payload": "\u003cscript\u003ealert(1)\u003c/script\u003e"}"#;
         let result = extract_json_values(json);
         assert!(result.parsed_ok);
-        // The unicode should decode to <script>alert(1)</script>
+// The unicode should decode to <script>alert(1)</script>
         assert!(result.string_values.iter().any(|v| v.value.contains("<script>")));
     }
 }

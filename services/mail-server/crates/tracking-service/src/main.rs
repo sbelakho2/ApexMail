@@ -1,18 +1,16 @@
 //! ApexMail Tracking Service — entry point.
 //!
-//! Startup sequence:
-//!   1. Load configuration from environment variables.
-//!   2. Derive crypto codec from `TRACKING_SECRET_KEY`.
-//!   3. Connect to PostgreSQL and Redis.
-//!   4. Build bot detector (AhoCorasick automaton).
-//!   5. Assemble `AppState` and start the WAL flush processor.
-//!   6. Bind axum HTTP server + (optionally) metrics listener.
-//!   7. Serve until SIGTERM / SIGINT → graceful shutdown.
+//! Startup sequence://! 1. Load configuration from environment variables.
+//! 2. Derive crypto codec from `TRACKING_SECRET_KEY`.
+//! 3. Connect to PostgreSQL and Redis.
+//! 4. Build bot detector (AhoCorasick automaton).
+//! 5. Assemble `AppState` and start the WAL flush processor.
+//! 6. Bind axum HTTP server + (optionally) metrics listener.
+//! 7. Serve until SIGTERM / SIGINT → graceful shutdown.
 //!
-//! Graceful shutdown:
-//!   • Stops accepting new connections.
-//!   • Waits for in-flight requests to complete (tower graceful shutdown).
-//!   • Drains the Redis WAL → Postgres (EventProcessor::stop).
+//! Graceful shutdown://! • Stops accepting new connections.
+//! • Waits for in-flight requests to complete (tower graceful shutdown).
+//! • Drains the Redis WAL → Postgres (EventProcessor::stop).
 
 mod bot;
 mod codec;
@@ -41,7 +39,7 @@ use crate::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // ── Structured logging ────────────────────────────────────────────
+// ── Structured logging ────────────────────────────────────────────
     tracing_subscriber::registry()
         .with(fmt::layer().json())
         .with(EnvFilter::from_default_env().add_directive("tracking_service=info".parse()?))
@@ -49,14 +47,14 @@ async fn main() -> Result<()> {
 
     info!("ApexMail Tracking Service starting");
 
-    // ── Config ────────────────────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────────────
     let cfg = load_config().context("Failed to load configuration")?;
     let addr = cfg.server.addr;
 
-    // ── Crypto codec ──────────────────────────────────────────────────
+// ── Crypto codec ──────────────────────────────────────────────────
     let codec = TrackingCodec::new(&cfg.secret_key);
 
-    // ── PostgreSQL ────────────────────────────────────────────────────
+// ── PostgreSQL ────────────────────────────────────────────────────
     let db = PgPoolOptions::new()
         .max_connections(cfg.database.max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -68,7 +66,7 @@ async fn main() -> Result<()> {
 
     info!(max_conns = cfg.database.max_connections, "PostgreSQL pool ready");
 
-    // ── Redis ─────────────────────────────────────────────────────────
+// ── Redis ─────────────────────────────────────────────────────────
     let redis_cfg = RedisPoolConfig::from_url(&cfg.redis.url);
     let redis_pool = redis_cfg
         .builder()
@@ -78,17 +76,17 @@ async fn main() -> Result<()> {
         .build()
         .context("Failed to build Redis pool")?;
 
-    // Verify connectivity
+// Verify connectivity
     {
         let mut conn = redis_pool.get().await.context("Redis connection check")?;
         let _: String = redis::cmd("PING").query_async(&mut *conn).await.context("Redis PING")?;
     }
     info!(pool_size = cfg.redis.pool_size, "Redis pool ready");
 
-    // ── Bot detector ──────────────────────────────────────────────────
+// ── Bot detector ──────────────────────────────────────────────────
     let bot_detector = BotDetector::new();
 
-    // ── Event processor ───────────────────────────────────────────────
+// ── Event processor ───────────────────────────────────────────────
     let processor_arc = Arc::new(EventProcessor::new(db.clone(), redis_pool.clone()));
     {
         let p = processor_arc.clone();
@@ -96,7 +94,7 @@ async fn main() -> Result<()> {
     }
     info!("Event processor started");
 
-    // ── Optional metrics server ───────────────────────────────────────
+// ── Optional metrics server ───────────────────────────────────────
     if cfg.metrics.enabled {
         let metrics_addr: std::net::SocketAddr =
             format!("0.0.0.0:{}", cfg.metrics.port).parse().context("Bad metrics port")?;
@@ -108,7 +106,7 @@ async fn main() -> Result<()> {
         info!(port = cfg.metrics.port, "Prometheus metrics server ready");
     }
 
-    // ── App state ─────────────────────────────────────────────────────
+// ── App state ─────────────────────────────────────────────────────
     let state = AppState::new(
         codec,
         db.clone(),
@@ -121,13 +119,13 @@ async fn main() -> Result<()> {
     let router = build_router(state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
-    // ── Bind and serve ────────────────────────────────────────────────
+// ── Bind and serve ────────────────────────────────────────────────
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context(format!("Failed to bind to {addr}"))?;
     info!(addr = %addr, "HTTP server listening");
 
-    // Graceful shutdown via SIGTERM or SIGINT
+// Graceful shutdown via SIGTERM or SIGINT
     let shutdown_signal = async {
         let ctrl_c = async { signal::ctrl_c().await.ok() };
         #[cfg(unix)]
@@ -149,7 +147,7 @@ async fn main() -> Result<()> {
             _ = sigterm => info!("SIGTERM received"),
         }
 
-        // Signal health check to return 503 immediately (FIX-500-354)
+// Signal health check to return 503 immediately (-500-354)
         SHUTTING_DOWN.store(true, Ordering::SeqCst);
         info!("Shutdown signal received — draining connections");
     };
@@ -159,7 +157,7 @@ async fn main() -> Result<()> {
         .await
         .context("axum server error")?;
 
-    // ── Drain WAL on shutdown ─────────────────────────────────────────
+// ── Drain WAL on shutdown ─────────────────────────────────────────
     info!("HTTP server stopped — draining Redis WAL");
     processor_arc.stop().await;
     info!("ApexMail Tracking Service stopped cleanly");

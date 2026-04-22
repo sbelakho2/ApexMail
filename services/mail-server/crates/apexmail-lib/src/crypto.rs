@@ -35,7 +35,6 @@ pub fn create_hmac_signature_base64(key: &[u8], data: &[u8]) -> String {
 }
 
 /// Timing-safe comparison of two strings (constant-time).
-///
 /// Does NOT short-circuit on length difference — we use a dummy comparison
 /// to avoid leaking the length of the expected value.
 pub fn timing_safe_compare(a: &str, b: &str) -> bool {
@@ -43,8 +42,8 @@ pub fn timing_safe_compare(a: &str, b: &str) -> bool {
     let b_bytes = b.as_bytes();
     let len_matches = a_bytes.len() == b_bytes.len();
 
-    // Always iterate over at least one full pass to avoid timing leaks.
-    // Compare against the first string if lengths differ (result is discarded).
+// Always iterate over at least one full pass to avoid timing leaks.
+// Compare against the first string if lengths differ (result is discarded).
     let compare_against = if len_matches { b_bytes } else { a_bytes };
     let mut result: u8 = 0;
     for (x, y) in a_bytes.iter().zip(compare_against.iter()) {
@@ -61,7 +60,6 @@ pub fn hash_api_key(key: &str) -> String {
 }
 
 /// Hash an API key using HMAC-SHA256 with a secret.
-///
 /// This is the preferred method — the secret prevents offline brute-force
 /// even if the database is leaked.
 pub fn hash_api_key_with_secret(key: &str, secret: &str) -> String {
@@ -90,7 +88,7 @@ mod tests {
     fn test_hmac_signature() {
         let sig = create_hmac_signature(b"secret", b"hello world");
         assert_eq!(sig.len(), 64); // hex-encoded SHA-256 = 64 chars
-        // Deterministic
+// Deterministic
         let sig2 = create_hmac_signature(b"secret", b"hello world");
         assert_eq!(sig, sig2);
     }
@@ -99,7 +97,7 @@ mod tests {
     fn test_hmac_base64() {
         let sig = create_hmac_signature_base64(b"secret", b"test");
         assert!(!sig.is_empty());
-        // Should be valid base64
+// Should be valid base64
         assert!(BASE64.decode(&sig).is_ok());
     }
 
@@ -116,9 +114,9 @@ mod tests {
     fn test_hash_api_key() {
         let hash = hash_api_key("am_live_abc123");
         assert_eq!(hash.len(), 64);
-        // Deterministic
+// Deterministic
         assert_eq!(hash, hash_api_key("am_live_abc123"));
-        // Different key → different hash
+// Different key → different hash
         assert_ne!(hash, hash_api_key("am_live_xyz789"));
     }
 

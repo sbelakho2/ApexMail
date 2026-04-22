@@ -4,7 +4,7 @@ use reqwest::Client;
 use std::time::Duration;
 
 /// Build a pre-configured HTTP client.
-/// #237: Returns Result instead of panicking on build failure
+/// #237:Returns Result instead of panicking on build failure
 pub fn build_http_client(timeout_secs: u64) -> Result<Client, reqwest::Error> {
     Client::builder()
         .timeout(Duration::from_secs(timeout_secs))

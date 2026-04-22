@@ -21,7 +21,7 @@ pub struct WebhookTester {
 }
 
 impl WebhookTester {
-    /// Create a new tester with the given signing secret.
+/// Create a new tester with the given signing secret.
     pub fn new(signing_secret: String) -> Result<Self, DevExError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -31,7 +31,7 @@ impl WebhookTester {
         Ok(Self { http, signing_secret })
     }
 
-    /// Build a test webhook payload for a given event type.
+/// Build a test webhook payload for a given event type.
     pub fn build_test_payload(event_type: &str) -> serde_json::Value {
         let now = Utc::now();
         serde_json::json!({
@@ -50,7 +50,7 @@ impl WebhookTester {
         })
     }
 
-    /// Compute HMAC-SHA256 signature for a payload body.
+/// Compute HMAC-SHA256 signature for a payload body.
     pub fn sign_payload(&self, body: &[u8]) -> String {
         let timestamp = Utc::now().timestamp();
         let signed_content = format!("{}.{}", timestamp, String::from_utf8_lossy(body));
@@ -69,9 +69,9 @@ impl WebhookTester {
         format!("t={},v1={}", timestamp, sig)
     }
 
-    /// Verify that a signature header is valid for the given body + secret.
+/// Verify that a signature header is valid for the given body + secret.
     pub fn verify_signature(secret: &str, body: &[u8], signature_header: &str) -> bool {
-        // Parse "t=<ts>,v1=<hex>"
+// Parse "t=<ts>,v1=<hex>"
         let parts: Vec<&str> = signature_header.split(',').collect();
         let timestamp = parts
             .iter()
@@ -94,17 +94,17 @@ impl WebhookTester {
         mac.update(signed_content.as_bytes());
         let expected = hex::encode(mac.finalize().into_bytes());
 
-        // Constant-time comparison to prevent timing attacks.
+// Constant-time comparison to prevent timing attacks.
         constant_time_eq(expected.as_bytes(), provided_sig.as_bytes())
     }
 
-    /// Send a test webhook to the given URL.
+/// Send a test webhook to the given URL.
     pub async fn send_test_webhook(
         &self,
         url: &str,
         event_type: &str,
     ) -> Result<WebhookTestResult, DevExError> {
-        // SSRF protection: only allow https (or http) with public hostnames
+// SSRF protection:only allow https (or http) with public hostnames
         let parsed = url::Url::parse(url)
             .map_err(|_| DevExError::Validation("Invalid webhook URL".into()))?;
 
@@ -113,7 +113,7 @@ impl WebhookTester {
             _ => return Err(DevExError::Validation("Only http/https URLs are allowed".into())),
         }
 
-        // Block requests to private/internal networks
+// Block requests to private/internal networks
         if let Some(host) = parsed.host_str() {
             if is_private_host(host) {
                 return Err(DevExError::Validation(
@@ -244,11 +244,11 @@ mod tests {
             .map(|t| t.sign_payload(body))
             .unwrap_or_default();
 
-        // The signature should start with "t=" and contain "v1="
+// The signature should start with "t=" and contain "v1="
         assert!(sig.starts_with("t="));
         assert!(sig.contains(",v1="));
 
-        // Verify with the same secret should succeed
+// Verify with the same secret should succeed
         assert!(WebhookTester::verify_signature(secret, body, &sig));
     }
 

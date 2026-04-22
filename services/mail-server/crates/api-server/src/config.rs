@@ -9,13 +9,13 @@ use std::time::Duration;
 /// Top-level configuration for the API server.
 #[derive(Debug, Clone)]
 pub struct Config {
-    // ── Server ──────────────────────────────────────────────
+// ── Server ──────────────────────────────────────────────
     pub port: u16,
     pub host: String,
     pub base_url: String,
     pub environment: Environment,
 
-    // ── Database ────────────────────────────────────────────
+// ── Database ────────────────────────────────────────────
     pub db_host: String,
     pub db_port: u16,
     pub db_name: String,
@@ -23,67 +23,74 @@ pub struct Config {
     pub db_password: String,
     pub db_max_connections: u32,
 
-    // ── Redis ───────────────────────────────────────────────
+// ── Redis ───────────────────────────────────────────────
     pub redis_host: String,
     pub redis_port: u16,
     pub redis_password: Option<String>,
     pub redis_db: u8,
 
-    // ── Auth ────────────────────────────────────────────────
+// ── Auth ────────────────────────────────────────────────
     pub jwt_private_key_pem: String,
     pub jwt_public_key_pem: String,
     pub jwt_expiry: Duration,
     pub api_key_hash_secret: String,
 
-    // ── Rate limiting ───────────────────────────────────────
+// ── Rate limiting ───────────────────────────────────────
     pub rate_limit_window_ms: u64,
     pub rate_limit_max_requests: u64,
 
-    // ── CORS ────────────────────────────────────────────────
+// ── CORS ────────────────────────────────────────────────
     pub cors_origins: Vec<String>,
     pub trusted_proxies: Vec<String>,
 
-    // ── Webhooks ────────────────────────────────────────────
+// ── UI surface routing ──────────────────────────────────
+    pub ui_web_hosts: Vec<String>,
+    pub ui_control_plane_hosts: Vec<String>,
+    pub ui_marketing_hosts: Vec<String>,
+    pub ui_marketing_surface: String,
+    pub ui_default_surface: Option<String>,
+
+// ── Webhooks ────────────────────────────────────────────
     pub webhook_signing_secret: String,
     pub webhook_timeout_ms: u64,
     pub webhook_max_retries: u32,
 
-    // ── Idempotency ─────────────────────────────────────────
+// ── Idempotency ─────────────────────────────────────────
     pub idempotency_ttl_seconds: u64,
 
-    // ── AWS SES (dedicated IPs) ─────────────────────────────
+// ── AWS SES (dedicated IPs) ─────────────────────────────
     pub aws_region: String,
     pub ses_ip_pool_prefix: String,
     pub ses_default_warmup_days: u32,
-    /// SES configuration set for event tracking (bounces, complaints, deliveries).
+/// SES configuration set for event tracking (bounces, complaints, deliveries).
     pub ses_configuration_set: Option<String>,
 
-    // ── OAuth / SSO ─────────────────────────────────────────
+// ── OAuth / SSO ─────────────────────────────────────────
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
     pub oauth_redirect_base_url: String,
 
-    // ── Session / Impersonation ─────────────────────────────
+// ── Session / Impersonation ─────────────────────────────
     pub session_secret: String,
     pub impersonation_secret: String,
     pub csrf_secret: String,
 
-    // ── Control Plane ───────────────────────────────────────
-    /// Static API key used by the control-plane backend to authenticate
-    /// internal requests. If set, X-API-Key matching this value bypasses
-    /// the normal api_keys DB lookup and returns a super-admin identity.
+// ── Control Plane ───────────────────────────────────────
+/// Static API key used by the control-plane backend to authenticate
+/// internal requests. If set, X-API-Key matching this value bypasses
+/// the normal api_keys DB lookup and returns a super-admin identity.
     pub control_plane_api_key: Option<String>,
 
-    // ── Tracking / SSE ──────────────────────────────────────
-    /// Shared HMAC secret with the tracking-service, used to issue short-lived
-    /// SSE stream tokens.  Must match the tracking-service `TRACKING_SECRET_KEY`.
+// ── Tracking / SSE ──────────────────────────────────────
+/// Shared HMAC secret with the tracking-service, used to issue short-lived
+/// SSE stream tokens. Must match the tracking-service `TRACKING_SECRET_KEY`.
     pub tracking_secret_key: String,
 
-    // ── Metrics ──────────────────────────────────────────────
-    /// Port for the dedicated Prometheus metrics HTTP endpoint (default: 9090).
-    /// Set to 0 to disable the metrics server.
+// ── Metrics ──────────────────────────────────────────────
+/// Port for the dedicated Prometheus metrics HTTP endpoint (default:9090).
+/// Set to 0 to disable the metrics server.
     pub metrics_port: u16,
 }
 
@@ -153,7 +160,7 @@ fn parse_u8(key: &str, val: &str) -> Result<u8, ConfigError> {
 }
 
 fn parse_duration_hours(key: &str, val: &str) -> Result<Duration, ConfigError> {
-    // Accept formats: "24h", "1h", or plain seconds
+// Accept formats:"24h", "1h", or plain seconds
     let trimmed = val.trim();
     if let Some(h) = trimmed.strip_suffix('h') {
         let hours: u64 = h.parse().map_err(|_| ConfigError::Invalid {
@@ -176,8 +183,7 @@ fn parse_csv(val: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .collect();
     
-    // Fix #60: Warn if both wildcard and specific origins are present.
-    // With "*" in the list, specific origins are ignored.
+// With "*" in the list, specific origins are ignored.
     if items.iter().any(|s| s == "*") && items.len() > 1 {
         tracing::warn!(
             "CORS_ORIGINS contains '*' along with {} other origin(s). \
@@ -188,8 +194,21 @@ fn parse_csv(val: &str) -> Vec<String> {
     items
 }
 
+fn normalize_host(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if let Some(stripped) = host.strip_prefix('[') {
+        if let Some((addr, _)) = stripped.split_once(']') {
+            return addr.to_string();
+        }
+    }
+    if host.matches(':').count() == 1 {
+        return host.split(':').next().unwrap_or(&host).to_string();
+    }
+    host
+}
+
 impl Config {
-    /// Load configuration from environment variables.
+/// Load configuration from environment variables.
     pub fn from_env() -> Result<Self, ConfigError> {
         let environment = match env_or("ENVIRONMENT", "development").to_lowercase().as_str() {
             "production" | "prod" => Environment::Production,
@@ -240,6 +259,30 @@ impl Config {
             cors_origins: parse_csv(&env_or("CORS_ORIGINS", "*")),
             trusted_proxies: parse_csv(&env_or("TRUSTED_PROXIES", "")),
 
+            ui_web_hosts: parse_csv(&env_or(
+                "UI_WEB_HOSTS",
+                "app.apexmail.ee,localhost,127.0.0.1",
+            )),
+            ui_control_plane_hosts: parse_csv(&env_or(
+                "UI_CONTROL_PLANE_HOSTS",
+                "admin.apexmail.ee,control.apexmail.ee",
+            )),
+            ui_marketing_hosts: parse_csv(&env_or(
+                "UI_MARKETING_HOSTS",
+                "apexmail.ee,www.apexmail.ee",
+            )),
+            ui_marketing_surface: env_or("UI_MARKETING_SURFACE", "marketing-zola"),
+            ui_default_surface: env::var("UI_DEFAULT_SURFACE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    if environment == Environment::Development {
+                        Some("web".to_string())
+                    } else {
+                        None
+                    }
+                }),
+
             webhook_signing_secret,
             webhook_timeout_ms: parse_u64(
                 "WEBHOOK_TIMEOUT_MS",
@@ -280,7 +323,7 @@ impl Config {
             metrics_port: parse_u16("METRICS_PORT", &env_or("METRICS_PORT", "9090"))?,
         };
 
-        // Production security checks
+// Production security checks
         if config.environment.is_production() {
             config.validate_production()?;
         }
@@ -288,10 +331,9 @@ impl Config {
         Ok(config)
     }
 
-    /// Build a Postgres connection URL from the config.
-    ///
-    /// User and password are percent-encoded so that special characters
-    /// (like `@`, `:`, `/`) do not corrupt the URL.
+/// Build a Postgres connection URL from the config.
+/// User and password are percent-encoded so that special characters
+/// (like `@`, `:`, `/`) do not corrupt the URL.
     pub fn database_url(&self) -> String {
         use url::form_urlencoded;
         let encoded_user: String = form_urlencoded::byte_serialize(self.db_user.as_bytes()).collect();
@@ -302,7 +344,7 @@ impl Config {
         )
     }
 
-    /// Build a Redis connection URL from the config.
+/// Build a Redis connection URL from the config.
     pub fn redis_url(&self) -> String {
         match &self.redis_password {
             Some(pw) => format!(
@@ -316,7 +358,47 @@ impl Config {
         }
     }
 
-    /// Validate secrets and settings for production safety.
+    pub fn ui_surface_for_host<'a>(&'a self, host: Option<&str>) -> Option<&'a str> {
+        let normalized = host.map(normalize_host);
+
+        if let Some(host) = normalized.as_deref() {
+            if self
+                .ui_control_plane_hosts
+                .iter()
+                .any(|candidate| normalize_host(candidate) == host)
+            {
+                return Some("control-plane");
+            }
+            if self
+                .ui_marketing_hosts
+                .iter()
+                .any(|candidate| normalize_host(candidate) == host)
+            {
+                return Some(self.ui_marketing_surface.as_str());
+            }
+            if self
+                .ui_web_hosts
+                .iter()
+                .any(|candidate| normalize_host(candidate) == host)
+            {
+                return Some("web");
+            }
+        }
+
+        self.ui_default_surface.as_deref()
+    }
+
+    pub fn is_explicit_web_host(&self, host: Option<&str>) -> bool {
+        let Some(host) = host.map(normalize_host) else {
+            return false;
+        };
+
+        self.ui_web_hosts
+            .iter()
+            .any(|candidate| normalize_host(candidate) == host)
+    }
+
+/// Validate secrets and settings for production safety.
     fn validate_production(&self) -> Result<(), ConfigError> {
         if !self.jwt_private_key_pem.contains("BEGIN") {
             return Err(ConfigError::SecurityCheck(
@@ -338,13 +420,11 @@ impl Config {
                 "WEBHOOK_SIGNING_SECRET must be at least 32 characters in production".into(),
             ));
         }
-        // Fix #3: Reject empty DB password in production
         if self.db_password.is_empty() {
             return Err(ConfigError::SecurityCheck(
                 "DB_PASSWORD must not be empty in production".into(),
             ));
         }
-        // Fix #4: Check all secrets for dev defaults (including webhook_signing_secret)
         let dev_defaults = ["dev-secret", "secret", "changeme", "password"];
         for secret_name in ["api_key_hash_secret", "webhook_signing_secret"] {
             let value = match secret_name {
@@ -431,6 +511,11 @@ mod tests {
             rate_limit_max_requests: 1000,
             cors_origins: vec!["https://app.example.com".into()],
             trusted_proxies: vec![],
+            ui_web_hosts: vec!["app.example.com".into()],
+            ui_control_plane_hosts: vec!["admin.example.com".into()],
+            ui_marketing_hosts: vec!["example.com".into()],
+            ui_marketing_surface: "marketing-zola".into(),
+            ui_default_surface: None,
             webhook_signing_secret: "short-webhook".into(),
             webhook_timeout_ms: 5000,
             webhook_max_retries: 3,
@@ -452,5 +537,64 @@ mod tests {
             metrics_port: 9090,
         };
         assert!(config.validate_production().is_err());
+    }
+
+    #[test]
+    fn ui_surface_for_host_prefers_explicit_host_maps() {
+        let config = Config {
+            port: 3000,
+            host: "0.0.0.0".into(),
+            base_url: "http://localhost:3000".into(),
+            environment: Environment::Development,
+            db_host: "localhost".into(),
+            db_port: 5432,
+            db_name: "apexmail".into(),
+            db_user: "apexmail".into(),
+            db_password: "password".into(),
+            db_max_connections: 20,
+            redis_host: "localhost".into(),
+            redis_port: 6379,
+            redis_password: None,
+            redis_db: 0,
+            jwt_private_key_pem: "BEGIN TEST".into(),
+            jwt_public_key_pem: "BEGIN TEST".into(),
+            jwt_expiry: Duration::from_secs(86400),
+            api_key_hash_secret: "a-very-long-secret-value-for-tests-1234".into(),
+            rate_limit_window_ms: 60000,
+            rate_limit_max_requests: 1000,
+            cors_origins: vec!["*".into()],
+            trusted_proxies: vec![],
+            ui_web_hosts: vec!["app.apexmail.ee".into(), "localhost".into()],
+            ui_control_plane_hosts: vec!["admin.apexmail.ee".into()],
+            ui_marketing_hosts: vec!["apexmail.ee".into()],
+            ui_marketing_surface: "marketing-zola".into(),
+            ui_default_surface: Some("web".into()),
+            webhook_signing_secret: "test-webhook-signing-secret-1234567890".into(),
+            webhook_timeout_ms: 5000,
+            webhook_max_retries: 3,
+            idempotency_ttl_seconds: 86400,
+            aws_region: "us-east-1".into(),
+            ses_ip_pool_prefix: "apexmail".into(),
+            ses_default_warmup_days: 14,
+            ses_configuration_set: None,
+            google_client_id: None,
+            google_client_secret: None,
+            github_client_id: None,
+            github_client_secret: None,
+            oauth_redirect_base_url: "http://localhost:3000".into(),
+            session_secret: "test-session-secret-1234567890ab".into(),
+            impersonation_secret: "test-impersonation-secret-12345".into(),
+            csrf_secret: "test-csrf-secret-1234567890abcd".into(),
+            control_plane_api_key: None,
+            tracking_secret_key: "test-tracking-secret-123456789012".into(),
+            metrics_port: 9090,
+        };
+
+        assert_eq!(config.ui_surface_for_host(Some("app.apexmail.ee")), Some("web"));
+        assert_eq!(config.ui_surface_for_host(Some("admin.apexmail.ee:3002")), Some("control-plane"));
+        assert_eq!(config.ui_surface_for_host(Some("apexmail.ee")), Some("marketing-zola"));
+        assert_eq!(config.ui_surface_for_host(Some("unknown.example.com")), Some("web"));
+        assert!(config.is_explicit_web_host(Some("app.apexmail.ee")));
+        assert!(!config.is_explicit_web_host(Some("unknown.example.com")));
     }
 }

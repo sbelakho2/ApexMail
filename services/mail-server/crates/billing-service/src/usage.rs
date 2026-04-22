@@ -10,16 +10,16 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::plans::builtin_quota_limits;
 use crate::types::{MeterEventType, UsageSummary};
 
 /// Record a single metering event with deduplication.
-///
 /// Returns `true` if the event was newly recorded, `false` if it was a
 /// duplicate.
 pub async fn record_usage(
     pool: &PgPool,
     redis: &RedisPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
     event_type: MeterEventType,
     quantity: i64,
     event_id: Option<Uuid>,
@@ -29,8 +29,8 @@ pub async fn record_usage(
     let now = Utc::now();
     let meta = metadata.unwrap_or_else(|| json!({}));
 
-    // 1. Check idempotency key in Redis.
-    let dedup_key = format!("meter:dedup:{id}");
+// 1. Check idempotency key in Redis.
+    let dedup_key = usage_dedup_key(id);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
     let was_set: bool = redis::cmd("SET")
         .arg(&dedup_key)
@@ -46,7 +46,7 @@ pub async fn record_usage(
         return Ok(false); // duplicate
     }
 
-    // 2. Persist to DB.
+// 2. Persist to DB.
     sqlx::query(
         r#"
         INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
@@ -64,14 +64,8 @@ pub async fn record_usage(
     .await
     .map_err(UsageError::Db)?;
 
-    // 3. Bump real-time Redis counter.
-    let period_key = format!(
-        "meter:rt:{}:{}:{}-{:02}",
-        tenant_id,
-        event_type_to_str(event_type),
-        now.year(),
-        now.month()
-    );
+// 3. Bump real-time Redis counter.
+    let period_key = usage_counter_key(tenant_id, event_type, now);
     let _: i64 = conn.incr(&period_key, quantity).await.map_err(UsageError::RedisCmd)?;
     let _: () = conn.expire(&period_key, 40 * 86_400).await.map_err(UsageError::RedisCmd)?; // 40 days TTL
 
@@ -81,7 +75,7 @@ pub async fn record_usage(
 /// Aggregate usage for a tenant in a billing period.
 pub async fn get_usage(
     pool: &PgPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
 ) -> Result<UsageSummary, UsageError> {
@@ -116,13 +110,14 @@ pub async fn get_usage(
         }
     }
 
-    // Look up plan limits.
-    let limits: Option<PlanLimitRow> = sqlx::query_as(
+// Look up plan limits.
+    let limits: Option<TenantPlanLimitRow> = sqlx::query_as(
         r#"
-        SELECT COALESCE(p.email_limit, 0) as email_limit,
-               COALESCE(p.api_call_limit, 0) as api_call_limit
+        SELECT t.plan as plan_name,
+               p.email_limit,
+               p.api_call_limit
         FROM tenants t
-        JOIN plans  p ON t.plan = p.name
+        LEFT JOIN plans p ON t.plan = p.name
         WHERE t.id = $1
         "#,
     )
@@ -131,9 +126,9 @@ pub async fn get_usage(
     .await
     .map_err(UsageError::Db)?;
 
-    let (emails_limit, api_calls_limit) = limits
-        .map(|l| (l.email_limit, l.api_call_limit))
-        .unwrap_or((0, 0));
+    let resolved_limits = resolve_plan_limits(limits);
+    let emails_limit = resolved_limits.email_limit;
+    let api_calls_limit = resolved_limits.api_call_limit;
 
     let percent_used = if emails_limit > 0 {
         (emails_sent as f64 / emails_limit as f64) * 100.0
@@ -142,7 +137,7 @@ pub async fn get_usage(
     };
 
     Ok(UsageSummary {
-        tenant_id,
+        tenant_id: tenant_id.to_string(),
         period_start,
         period_end,
         emails_sent,
@@ -159,25 +154,53 @@ pub async fn get_usage(
 pub async fn check_quota(
     pool: &PgPool,
     redis: &RedisPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
 ) -> Result<QuotaStatus, UsageError> {
-    // Fast-path: read the real-time Redis counter for the current month.
+// Fast-path:read the real-time Redis counter for the current month.
     let now = Utc::now();
-    let counter_key = format!(
-        "meter:rt:{}:emails_sent:{}-{:02}",
-        tenant_id,
-        now.year(),
-        now.month()
-    );
+    let counter_key = usage_counter_key(tenant_id, MeterEventType::EmailsSent, now);
 
-    let mut conn = redis.get().await.map_err(UsageError::Redis)?;
-    let current: Option<i64> = conn.get(&counter_key).await.map_err(UsageError::RedisCmd)?;
-    let current = current.unwrap_or(0);
+// that metering is degraded rather than completely broken.
+    let current = match redis.get().await {
+        Ok(mut conn) => {
+            let val: Option<i64> = conn.get(&counter_key).await.map_err(UsageError::RedisCmd)?;
+            val.unwrap_or(0)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, tenant_id, "Redis unavailable for quota check — falling back to DB aggregate");
+            let period_start = Utc::now()
+                .date_naive()
+                .with_day(1)
+                .unwrap_or(Utc::now().date_naive());
+            let period_start = period_start.and_hms_opt(0, 0, 0)
+                .unwrap_or_default();
+            let period_start = DateTime::<Utc>::from_naive_utc_and_offset(period_start, Utc);
 
-    let limits: Option<EmailLimitRow> = sqlx::query_as(
+            let row: Option<(Option<i64>,)> = sqlx::query_as(
+                r#"
+                SELECT SUM(quantity)::bigint
+                FROM metering_events
+                WHERE tenant_id = $1
+                  AND event_type = 'emails_sent'
+                  AND timestamp >= $2
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(period_start)
+            .fetch_optional(pool)
+            .await
+            .map_err(UsageError::Db)?;
+            row.and_then(|r| r.0).unwrap_or(0)
+        }
+    };
+
+    let limits: Option<TenantPlanLimitRow> = sqlx::query_as(
         r#"
-        SELECT COALESCE(p.email_limit, 0) as email_limit
-        FROM tenants t JOIN plans p ON t.plan = p.name
+        SELECT t.plan as plan_name,
+               p.email_limit,
+               p.api_call_limit
+        FROM tenants t
+        LEFT JOIN plans p ON t.plan = p.name
         WHERE t.id = $1
         "#,
     )
@@ -186,10 +209,10 @@ pub async fn check_quota(
     .await
     .map_err(UsageError::Db)?;
 
-    let limit = limits.map(|l| l.email_limit).unwrap_or(0);
+    let limit = resolve_plan_limits(limits).email_limit;
 
     if limit < 0 {
-        // Unlimited plan.
+// Unlimited plan.
         return Ok(QuotaStatus {
             allowed: true,
             current,
@@ -216,14 +239,14 @@ pub async fn check_quota(
 /// rollover).
 pub async fn reset_monthly_counters(
     redis: &RedisPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
     year: i32,
     month: u32,
 ) -> Result<(), UsageError> {
     let pattern = format!("meter:rt:{tenant_id}:*:{year}-{month:02}");
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
-    // Use SCAN instead of KEYS for production safety — KEYS blocks Redis.
+// Use SCAN instead of KEYS for production safety — KEYS blocks Redis.
     let mut cursor: u64 = 0;
     let mut all_keys: Vec<String> = Vec::new();
     loop {
@@ -259,13 +282,11 @@ pub async fn reset_monthly_counters(
 // ---------------------------------------------------------------------------
 
 /// Lua script for atomic quota check-and-increment in Redis.
-///
 /// KEYS[1] = counter key (e.g. "meter:rt:<tenant>:emails_sent:2026-03")
-/// ARGV[1] = plan limit  (-1 = unlimited)
+/// ARGV[1] = plan limit (-1 = unlimited)
 /// ARGV[2] = quantity to increment
 /// ARGV[3] = TTL in seconds for the counter key
-///
-/// Returns:  new counter value on success, -1 if quota exceeded.
+/// Returns:new counter value on success, -1 if quota exceeded.
 const QUOTA_CHECK_AND_INCR_LUA: &str = r#"
 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
 local lim     = tonumber(ARGV[1])
@@ -280,20 +301,18 @@ return new_val
 "#;
 
 /// Atomically check the quota and record a metering event in a single
-/// operation.  Unlike the separate `check_quota` → `record_usage` workflow,
+/// operation. Unlike the separate `check_quota` → `record_usage` workflow,
 /// this avoids the TOCTOU window between the quota look-up and the counter
 /// increment by executing a Lua script inside Redis.
-///
 /// Returns `Ok(QuotaRecordResult)` with `allowed = true` and the new counter
 /// value when the event is recorded, or `allowed = false` when the quota
 /// would be exceeded (counter is NOT incremented in that case).
-///
 /// Duplicates (same `event_id`) are silently de-duplicated and return
-/// `QuotaRecordResult { allowed: true, current: <unchanged>, duplicate: true }`.
+/// `QuotaRecordResult { allowed:true, current:<unchanged>, duplicate:true }`.
 pub async fn record_with_quota_check(
     pool: &PgPool,
     redis: &RedisPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
     event_type: MeterEventType,
     quantity: i64,
     event_id: Option<Uuid>,
@@ -303,8 +322,8 @@ pub async fn record_with_quota_check(
     let now = Utc::now();
     let meta = metadata.unwrap_or_else(|| json!({}));
 
-    // 1. Dedup check (same as record_usage).
-    let dedup_key = format!("meter:dedup:{id}");
+// 1. Dedup check (same as record_usage).
+    let dedup_key = usage_dedup_key(id);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
     let was_set: bool = redis::cmd("SET")
         .arg(&dedup_key)
@@ -317,14 +336,8 @@ pub async fn record_with_quota_check(
         .map_err(UsageError::RedisCmd)?;
 
     if !was_set {
-        // Already processed — read current counter for informational purposes.
-        let counter_key = format!(
-            "meter:rt:{}:{}:{}-{:02}",
-            tenant_id,
-            event_type_to_str(event_type),
-            now.year(),
-            now.month()
-        );
+// Already processed — read current counter for informational purposes.
+        let counter_key = usage_counter_key(tenant_id, event_type, now);
         let current: i64 = conn.get(&counter_key).await.unwrap_or(0);
         return Ok(QuotaRecordResult {
             allowed: true,
@@ -333,11 +346,14 @@ pub async fn record_with_quota_check(
         });
     }
 
-    // 2. Fetch plan limit from Postgres.
-    let limit_row: Option<EmailLimitRow> = sqlx::query_as(
+// 2. Fetch plan limit from Postgres.
+    let limit_row: Option<TenantPlanLimitRow> = sqlx::query_as(
         r#"
-        SELECT COALESCE(p.email_limit, 0) as email_limit
-        FROM tenants t JOIN plans p ON t.plan = p.name
+        SELECT t.plan as plan_name,
+               p.email_limit,
+               p.api_call_limit
+        FROM tenants t
+        LEFT JOIN plans p ON t.plan = p.name
         WHERE t.id = $1
         "#,
     )
@@ -346,16 +362,10 @@ pub async fn record_with_quota_check(
     .await
     .map_err(UsageError::Db)?;
 
-    let limit = limit_row.map(|l| l.email_limit).unwrap_or(0);
+    let limit = resolve_plan_limits(limit_row).email_limit;
 
-    // 3. Atomic check-and-increment via Lua.
-    let counter_key = format!(
-        "meter:rt:{}:{}:{}-{:02}",
-        tenant_id,
-        event_type_to_str(event_type),
-        now.year(),
-        now.month()
-    );
+// 3. Atomic check-and-increment via Lua.
+    let counter_key = usage_counter_key(tenant_id, event_type, now);
     let ttl_seconds: i64 = 40 * 86_400; // 40 days
 
     let new_val: i64 = redis::Script::new(QUOTA_CHECK_AND_INCR_LUA)
@@ -368,8 +378,8 @@ pub async fn record_with_quota_check(
         .map_err(UsageError::RedisCmd)?;
 
     if new_val < 0 {
-        // Quota exceeded — roll back the dedup key so a retry after a plan
-        // upgrade can succeed.
+// Quota exceeded — roll back the dedup key so a retry after a plan
+// upgrade can succeed.
         let _: () = conn.del(&dedup_key).await.unwrap_or(());
         return Ok(QuotaRecordResult {
             allowed: false,
@@ -378,8 +388,8 @@ pub async fn record_with_quota_check(
         });
     }
 
-    // 4. Persist to DB.
-    sqlx::query(
+// 4. Persist to DB.
+    if let Err(db_error) = sqlx::query(
         r#"
         INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
         VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
@@ -394,7 +404,27 @@ pub async fn record_with_quota_check(
     .bind(&meta)
     .execute(pool)
     .await
-    .map_err(UsageError::Db)?;
+    {
+        if let Err(rollback_error) = rollback_quota_reservation(
+            redis,
+            tenant_id,
+            event_type,
+            quantity,
+            id,
+            now,
+        )
+        .await
+        {
+            tracing::error!(
+                error = %rollback_error,
+                tenant_id,
+                event_id = %id,
+                "failed to roll back quota reservation after metering DB insert failure"
+            );
+        }
+
+        return Err(UsageError::Db(db_error));
+    }
 
     Ok(QuotaRecordResult {
         allowed: true,
@@ -403,21 +433,67 @@ pub async fn record_with_quota_check(
     })
 }
 
+pub async fn rollback_usage_record(
+    pool: &PgPool,
+    redis: &RedisPool,
+    tenant_id: &str,
+    event_type: MeterEventType,
+    quantity: i64,
+    event_id: Uuid,
+    recorded_at: DateTime<Utc>,
+) -> Result<(), UsageError> {
+    sqlx::query("DELETE FROM metering_events WHERE id = $1")
+        .bind(event_id)
+        .execute(pool)
+        .await
+        .map_err(UsageError::Db)?;
+
+    rollback_quota_reservation(
+        redis,
+        tenant_id,
+        event_type,
+        quantity,
+        event_id,
+        recorded_at,
+    )
+    .await
+}
+
 #[derive(sqlx::FromRow)]
 struct UsageAggRow {
     event_type: String,
     total: Option<i64>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Debug, Clone)]
 struct PlanLimitRow {
     email_limit: i64,
     api_call_limit: i64,
 }
 
 #[derive(sqlx::FromRow)]
-struct EmailLimitRow {
-    email_limit: i64,
+struct TenantPlanLimitRow {
+    plan_name: String,
+    email_limit: Option<i64>,
+    api_call_limit: Option<i64>,
+}
+
+fn resolve_plan_limits(row: Option<TenantPlanLimitRow>) -> PlanLimitRow {
+    match row {
+        Some(row) => {
+            let (fallback_email_limit, fallback_api_call_limit) =
+                builtin_quota_limits(Some(&row.plan_name));
+
+            PlanLimitRow {
+                email_limit: row.email_limit.unwrap_or(fallback_email_limit),
+                api_call_limit: row.api_call_limit.unwrap_or(fallback_api_call_limit),
+            }
+        }
+        None => PlanLimitRow {
+            email_limit: 0,
+            api_call_limit: 0,
+        },
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -431,11 +507,11 @@ pub struct QuotaStatus {
 /// Result of an atomic quota-check + record operation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct QuotaRecordResult {
-    /// Whether the event was allowed (quota not exceeded).
+/// Whether the event was allowed (quota not exceeded).
     pub allowed: bool,
-    /// Current counter value after the operation.
+/// Current counter value after the operation.
     pub current: i64,
-    /// Whether this was a duplicate event (already idempotently processed).
+/// Whether this was a duplicate event (already idempotently processed).
     pub duplicate: bool,
 }
 
@@ -449,6 +525,48 @@ fn event_type_to_str(et: MeterEventType) -> &'static str {
         MeterEventType::StorageGbHours => "storage_gb_hours",
         MeterEventType::BandwidthGb => "bandwidth_gb",
     }
+}
+
+fn usage_dedup_key(event_id: Uuid) -> String {
+    format!("meter:dedup:{event_id}")
+}
+
+fn usage_counter_key(tenant_id: &str, event_type: MeterEventType, at: DateTime<Utc>) -> String {
+    format!(
+        "meter:rt:{}:{}:{}-{:02}",
+        tenant_id,
+        event_type_to_str(event_type),
+        at.year(),
+        at.month()
+    )
+}
+
+async fn rollback_quota_reservation(
+    redis: &RedisPool,
+    tenant_id: &str,
+    event_type: MeterEventType,
+    quantity: i64,
+    event_id: Uuid,
+    recorded_at: DateTime<Utc>,
+) -> Result<(), UsageError> {
+    let counter_key = usage_counter_key(tenant_id, event_type, recorded_at);
+    let dedup_key = usage_dedup_key(event_id);
+    let mut conn = redis.get().await.map_err(UsageError::Redis)?;
+
+    let _: () = redis::pipe()
+        .atomic()
+        .cmd("INCRBY")
+        .arg(&counter_key)
+        .arg(-quantity)
+        .ignore()
+        .cmd("DEL")
+        .arg(&dedup_key)
+        .ignore()
+        .query_async(&mut conn)
+        .await
+        .map_err(UsageError::RedisCmd)?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +627,38 @@ mod tests {
     }
 
     #[test]
+    fn resolve_plan_limits_prefers_database_values() {
+        let limits = resolve_plan_limits(Some(TenantPlanLimitRow {
+            plan_name: "pro".to_string(),
+            email_limit: Some(250_000),
+            api_call_limit: Some(3_000_000),
+        }));
+
+        assert_eq!(limits.email_limit, 250_000);
+        assert_eq!(limits.api_call_limit, 3_000_000);
+    }
+
+    #[test]
+    fn resolve_plan_limits_fall_back_to_builtin_plan_defaults() {
+        let limits = resolve_plan_limits(Some(TenantPlanLimitRow {
+            plan_name: "free".to_string(),
+            email_limit: None,
+            api_call_limit: None,
+        }));
+
+        assert_eq!(limits.email_limit, 3_000);
+        assert_eq!(limits.api_call_limit, 50_000);
+    }
+
+    #[test]
+    fn resolve_plan_limits_keep_missing_tenants_denied() {
+        let limits = resolve_plan_limits(None);
+
+        assert_eq!(limits.email_limit, 0);
+        assert_eq!(limits.api_call_limit, 0);
+    }
+
+    #[test]
     fn event_type_roundtrip() {
         for et in [
             MeterEventType::EmailsSent,
@@ -522,5 +672,17 @@ mod tests {
             let s = event_type_to_str(et);
             assert!(!s.is_empty());
         }
+    }
+
+    #[test]
+    fn usage_counter_key_uses_billing_period() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-04-15T12:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            usage_counter_key("tenant_123", MeterEventType::EmailsSent, at),
+            "meter:rt:tenant_123:emails_sent:2026-04"
+        );
     }
 }

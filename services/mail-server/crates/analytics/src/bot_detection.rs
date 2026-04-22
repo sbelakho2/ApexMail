@@ -47,15 +47,15 @@ fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
 /// Known bot IP prefixes (simplified – GCP/AWS crawlers).
 static KNOWN_BOT_PREFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "66.249.",   // Googlebot
-        "64.233.",   // Google
-        "207.46.",   // Bing
-        "40.77.",    // Bing
-        "114.119.",  // Baidu
-        "180.76.",   // Baidu
-        "77.88.",    // Yandex
-        "141.8.",    // Yandex
-        "17.0.",     // Apple
+        "66.249.", // Googlebot
+        "64.233.", // Google
+        "207.46.", // Bing
+        "40.77.", // Bing
+        "114.119.", // Baidu
+        "180.76.", // Baidu
+        "77.88.", // Yandex
+        "141.8.", // Yandex
+        "17.0.", // Apple
     ]
 });
 
@@ -65,11 +65,11 @@ static SUSPICIOUS_HEADERS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 });
 
 pub struct BotDetectionService {
-    /// #198: In-memory velocity cache is per-process only.
-    /// For multi-replica deployments, consider using Redis with a sliding-window
-    /// counter (e.g., `bot:velocity:{ip}:{minute}`) for shared state.
-    /// Current in-memory approach is acceptable for single-replica or when
-    /// per-replica velocity detection is sufficient (bots typically target all replicas).
+/// #198:In-memory velocity cache is per-process only.
+/// For multi-replica deployments, consider using Redis with a sliding-window
+/// counter (e.g., `bot:velocity:{ip}:{minute}`) for shared state.
+/// Current in-memory approach is acceptable for single-replica or when
+/// per-replica velocity detection is sufficient (bots typically target all replicas).
     velocity_cache: Arc<DashMap<String, Arc<RwLock<Vec<Instant>>>>>,
 }
 
@@ -80,24 +80,24 @@ impl BotDetectionService {
         }
     }
 
-    /// Detect if a click event is from a bot.
+/// Detect if a click event is from a bot.
     pub fn detect(&self, event: &ClickEvent) -> BotDetectionResult {
         let mut score = 0.0;
         let mut signals = Vec::with_capacity(5);
 
-        // Signal 1: User-Agent match
+// Signal 1:User-Agent match
         if let Some(ref ua) = event.user_agent {
             if is_bot_ua(ua) {
                 score += UA_MATCH_WEIGHT;
                 signals.push("ua_match".into());
             }
         } else {
-            // No UA is suspicious
+// No UA is suspicious
             score += UA_MATCH_WEIGHT * 0.5;
             signals.push("missing_ua".into());
         }
 
-        // Signal 2: Instant click (< 1 second after delivery)
+// Signal 2:Instant click (< 1 second after delivery)
         if let Some(delay_ms) = event.click_delay_ms {
             if delay_ms < 1000 {
                 score += INSTANT_CLICK_WEIGHT;
@@ -105,20 +105,20 @@ impl BotDetectionService {
             }
         }
 
-        // Signal 3: Known bot IP
+// Signal 3:Known bot IP
         if is_known_bot_ip(&event.ip_address) {
             score += KNOWN_BOT_IP_WEIGHT;
             signals.push("known_bot_ip".into());
         }
 
-        // Signal 4: Click velocity
+// Signal 4:Click velocity
         let velocity = self.record_velocity(&event.ip_address);
         if velocity >= VELOCITY_THRESHOLD {
             score += VELOCITY_WEIGHT;
             signals.push("high_velocity".into());
         }
 
-        // Signal 5: Suspicious headers
+// Signal 5:Suspicious headers
         if let Some(ref headers) = event.headers {
             let header_score = check_suspicious_headers(headers);
             if header_score > 0.0 {
@@ -142,12 +142,12 @@ impl BotDetectionService {
         }
     }
 
-    /// Record click and return recent velocity count.
+/// Record click and return recent velocity count.
     fn record_velocity(&self, ip: &str) -> usize {
         let now = Instant::now();
         let window = Duration::from_secs(VELOCITY_WINDOW_SECS);
 
-        // Cleanup old entries if cache is too large
+// Cleanup old entries if cache is too large
         if self.velocity_cache.len() > VELOCITY_CACHE_MAX {
             self.cleanup_velocity_cache();
         }
@@ -172,7 +172,7 @@ impl BotDetectionService {
         });
     }
 
-    /// Generate honeypot link for invisible injection.
+/// Generate honeypot link for invisible injection.
     pub fn generate_honeypot_link(campaign_id: &str) -> String {
         let token = uuid::Uuid::new_v4().to_string();
         format!(
@@ -181,7 +181,7 @@ impl BotDetectionService {
         )
     }
 
-    /// Adjust metrics by removing bot clicks.
+/// Adjust metrics by removing bot clicks.
     pub fn adjust_metrics(
         total_clicks: i64,
         bot_clicks: i64,
@@ -284,7 +284,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         let result = svc.detect(&event);
-        // UA match (40) + instant click (35) = 75 >= 50
+// UA match (40) + instant click (35) = 75 >= 50
         assert!(result.is_bot);
         assert!(result.score >= BOT_THRESHOLD);
     }
@@ -319,7 +319,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         let result = svc.detect(&event);
-        // Known IP (30) + instant click (35) = 65 >= 50
+// Known IP (30) + instant click (35) = 65 >= 50
         assert!(result.is_bot);
     }
 
@@ -360,7 +360,7 @@ mod tests {
             };
             svc.detect(&event);
         }
-        // After 5 rapid clicks from same IP, velocity should trigger
+// After 5 rapid clicks from same IP, velocity should trigger
         let final_event = ClickEvent {
             message_id: "msg".into(),
             link_id: "link".into(),

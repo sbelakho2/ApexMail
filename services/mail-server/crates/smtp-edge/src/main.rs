@@ -3,7 +3,7 @@
 //! Inbound SMTP server handling mail from the internet (port 25).
 
 mod session;
-// #165: Removed dead `parser` module — all parsing is handled in session.rs.
+// #165:Removed dead `parser` module — all parsing is handled in session.rs.
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -39,63 +39,63 @@ fn default_max_recipients() -> usize { 100 }
 #[command(name = "smtp-edge")]
 #[command(about = "SMTP Edge - Inbound mail server")]
 struct Cli {
-    /// Listen address
+/// Listen address
     #[arg(short, long, default_value = "0.0.0.0:25")]
     listen: String,
     
-    /// Hostname to announce
+/// Hostname to announce
     #[arg(long, default_value = "mail.apexmail.ee")]
     hostname: String,
     
-    /// Mailstore gRPC address
+/// Mailstore gRPC address
     #[arg(long, default_value = "127.0.0.1:50051")]
     mailstore_addr: String,
     
-    /// TLS certificate path
+/// TLS certificate path
     #[arg(long)]
     cert: Option<String>,
     
-    /// TLS key path
+/// TLS key path
     #[arg(long)]
     key: Option<String>,
     
-    /// Log level
+/// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
 
-    /// #162: Comma-separated list of local domains to accept mail for
+/// #162:Comma-separated list of local domains to accept mail for
     #[arg(long, env = "LOCAL_DOMAINS", value_delimiter = ',')]
     local_domains: Vec<String>,
 
-    /// #163: Maximum concurrent connections
+/// #163:Maximum concurrent connections
     #[arg(long, env = "MAX_CONNECTIONS", default_value_t = default_max_connections())]
         max_connections: usize,
 
-    /// Max wait in seconds for a connection slot before sending 421
+/// Max wait in seconds for a connection slot before sending 421
     #[arg(long, env = "SMTP_CONNECTION_QUEUE_TIMEOUT_SECS", default_value_t = default_connection_queue_timeout_secs())]
         connection_queue_timeout_secs: u64,
 
-    /// Maximum accepted SMTP line length (including CRLF)
+/// Maximum accepted SMTP line length (including CRLF)
     #[arg(long, env = "SMTP_MAX_LINE_LENGTH", default_value_t = default_max_line_length())]
         max_line_length: usize,
 
-    /// Maximum wait time for one SMTP command/data line (seconds)
+/// Maximum wait time for one SMTP command/data line (seconds)
     #[arg(long, env = "SMTP_COMMAND_TIMEOUT_SECS", default_value_t = default_command_timeout_secs())]
         command_timeout_secs: u64,
 
-    /// Maximum total SMTP session duration (seconds)
+/// Maximum total SMTP session duration (seconds)
     #[arg(long, env = "SMTP_SESSION_TIMEOUT_SECS", default_value_t = default_session_timeout_secs())]
         session_timeout_secs: u64,
 
-    /// Maximum SMTP message size in bytes
+/// Maximum SMTP message size in bytes
     #[arg(long, env = "SMTP_MAX_MESSAGE_BYTES", default_value_t = default_max_message_bytes())]
         max_message_bytes: usize,
 
-    /// Maximum recipients per message
+/// Maximum recipients per message
     #[arg(long, env = "SMTP_MAX_RECIPIENTS", default_value_t = default_max_recipients())]
         max_recipients: usize,
 
-    /// HTTP listen address for health/metrics
+/// HTTP listen address for health/metrics
     #[arg(long, env = "SMTP_EDGE_HTTP_LISTEN", default_value = DEFAULT_HTTP_LISTEN)]
     http_listen: String,
 }
@@ -130,7 +130,7 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     
-    // Initialize logging
+// Initialize logging
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
     
@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
     
     info!("Starting SMTP Edge on {}", cli.listen);
     
-    // #164: Both cert AND key must be present to enable STARTTLS (was || — wrong)
+// #164:Both cert AND key must be present to enable STARTTLS (was || — wrong)
     let enable_starttls = cli.cert.is_some() && cli.key.is_some();
     let tls_acceptor = if enable_starttls {
         let (Some(cert_path), Some(key_path)) = (cli.cert.as_deref(), cli.key.as_deref()) else {
@@ -155,7 +155,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    // #162: local_domains from CLI/env; fail fast if empty
+// #162:local_domains from CLI/env; fail fast if empty
     if cli.local_domains.is_empty() {
         return Err(anyhow!(
             "No --local-domains configured; refusing to start because all inbound mail would be rejected"
@@ -185,7 +185,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // #163: Semaphore limits concurrent connections
+// #163:Semaphore limits concurrent connections
     let conn_semaphore = Arc::new(Semaphore::new(cli.max_connections));
     
     let listener = TcpListener::bind(&cli.listen).await?;
@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
 
         match accept_result {
             Ok((mut socket, addr)) => {
-                // #E-034: Allow bounded queueing for a slot instead of immediate rejection
+// #E-034:Allow bounded queueing for a slot instead of immediate rejection
                 let permit = match timeout(
                     Duration::from_secs(cli.connection_queue_timeout_secs),
                     conn_semaphore.clone().acquire_owned(),
@@ -244,7 +244,7 @@ async fn main() -> Result<()> {
                         warn!(peer = %peer, error = %e, "SMTP session error");
                     }
 
-                    // Permit is dropped here, releasing the semaphore slot
+// Permit is dropped here, releasing the semaphore slot
                     drop(permit);
                 });
             }
@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Graceful drain: wait for active sessions to release semaphore permits.
+// Graceful drain:wait for active sessions to release semaphore permits.
     let drain_timeout = Duration::from_secs(30);
     let start = tokio::time::Instant::now();
     while conn_semaphore.available_permits() < cli.max_connections {

@@ -20,14 +20,14 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertRule {
     pub name: String,
-    /// Human-readable description of the condition (e.g. "error_rate > 0.05").
+/// Human-readable description of the condition (e.g. "error_rate > 0.05").
     pub condition_description: String,
-    /// The metric name this rule monitors.
+/// The metric name this rule monitors.
     pub metric_name: String,
-    /// Threshold above which the rule fires.
+/// Threshold above which the rule fires.
     pub threshold: f64,
     pub severity: AlertSeverity,
-    /// Minimum seconds between consecutive firings for the same rule.
+/// Minimum seconds between consecutive firings for the same rule.
     pub cooldown_secs: u64,
 }
 
@@ -37,7 +37,6 @@ pub struct AlertRule {
 
 /// Manages alert rules, evaluates them against metric summaries, and stores
 /// fired alerts.
-///
 /// Caps stored alerts at `max_alerts`; when full, resolved/acknowledged alerts
 /// are evicted first, then the oldest firing alerts.
 #[derive(Debug)]
@@ -48,12 +47,12 @@ pub struct AlertManager {
 }
 
 impl AlertManager {
-    /// Create a new, empty manager with a default 10 000 alert cap.
+/// Create a new, empty manager with a default 10 000 alert cap.
     pub fn new() -> Self {
         Self::with_capacity(10_000)
     }
 
-    /// Create a manager that retains at most `max_alerts` alerts.
+/// Create a manager that retains at most `max_alerts` alerts.
     pub fn with_capacity(max_alerts: usize) -> Self {
         Self {
             rules: RwLock::new(Vec::new()),
@@ -62,13 +61,13 @@ impl AlertManager {
         }
     }
 
-    /// Register a new alert rule.
+/// Register a new alert rule.
     pub fn add_rule(&self, rule: AlertRule) {
         self.rules.write().push(rule);
     }
 
-    /// Evaluate all rules against the provided metric summaries.
-    /// Returns the list of newly-fired alerts.
+/// Evaluate all rules against the provided metric summaries.
+/// Returns the list of newly-fired alerts.
     pub fn evaluate_all(&self, summaries: &[MetricSummary]) -> Vec<Alert> {
         let rules = self.rules.read();
         let mut alerts_guard = self.alerts.write();
@@ -76,7 +75,7 @@ impl AlertManager {
         let mut new_alerts = Vec::new();
 
         for rule in rules.iter() {
-            // Find matching metric
+// Find matching metric
             let metric_value = summaries
                 .iter()
                 .find(|m| m.name == rule.metric_name)
@@ -87,12 +86,12 @@ impl AlertManager {
                 None => continue,
             };
 
-            // Check threshold
+// Check threshold
             if value <= rule.threshold {
                 continue;
             }
 
-            // Cooldown: skip if there's a recent firing for this rule name
+// Cooldown:skip if there's a recent firing for this rule name
             let recently_fired = alerts_guard.iter().any(|a| {
                 a.rule_name == rule.name
                     && (now - a.fired_at).num_seconds() < rule.cooldown_secs as i64
@@ -129,9 +128,9 @@ impl AlertManager {
             alerts_guard.push(alert);
         }
 
-        // Evict if over capacity: remove resolved/acknowledged first, then oldest
+// Evict if over capacity:remove resolved/acknowledged first, then oldest
         if alerts_guard.len() > self.max_alerts {
-            // Partition: keep firing alerts, evict resolved/acknowledged
+// Partition:keep firing alerts, evict resolved/acknowledged
             alerts_guard.retain(|a| a.status == AlertStatus::Firing);
         }
         if alerts_guard.len() > self.max_alerts {
@@ -142,7 +141,7 @@ impl AlertManager {
         new_alerts
     }
 
-    /// List all alerts that are currently firing (not acknowledged / resolved).
+/// List all alerts that are currently firing (not acknowledged / resolved).
     pub fn list_active_alerts(&self) -> Vec<Alert> {
         self.alerts
             .read()
@@ -152,7 +151,7 @@ impl AlertManager {
             .collect()
     }
 
-    /// Acknowledge an alert by ID. Returns `true` if the alert was found.
+/// Acknowledge an alert by ID. Returns `true` if the alert was found.
     pub fn acknowledge(&self, alert_id: &str) -> bool {
         let mut guard = self.alerts.write();
         if let Some(alert) = guard.iter_mut().find(|a| a.id == alert_id) {
@@ -164,12 +163,12 @@ impl AlertManager {
         }
     }
 
-    /// Return a snapshot of all registered rules.
+/// Return a snapshot of all registered rules.
     pub fn list_rules(&self) -> Vec<AlertRule> {
         self.rules.read().clone()
     }
 
-    /// Return all alerts (any status).
+/// Return all alerts (any status).
     pub fn list_all_alerts(&self) -> Vec<Alert> {
         self.alerts.read().clone()
     }
@@ -264,10 +263,10 @@ mod tests {
         assert!(mgr.acknowledge(&alert_id));
         assert!(mgr.list_active_alerts().is_empty()); // acknowledged → no longer active
 
-        // Acknowledging again is fine (already found)
+// Acknowledging again is fine (already found)
         assert!(mgr.acknowledge(&alert_id));
 
-        // Non-existent ID
+// Non-existent ID
         assert!(!mgr.acknowledge("nonexistent"));
     }
 }

@@ -1,6 +1,6 @@
 //! Secrets management endpoints.
 //!
-//! Migrated from: apps/control-plane/src/app/api/secrets/route.ts
+//! Migrated from:apps/control-plane/src/app/api/secrets/route.ts
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -126,7 +126,7 @@ async fn create_secret(
 ) -> Result<(StatusCode, Json<SecretResponse>), ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // Validate name
+// Validate name
     if body.name.is_empty() || body.name.len() > 100 {
         return Err(ApiError::Validation(vec!["Name must be 1-100 characters".into()]));
     }

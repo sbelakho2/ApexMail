@@ -95,11 +95,11 @@ pub struct SmtpSender {
     from_domain: String,
     resolver: TokioAsyncResolver,
     dkim_signer: Option<DkimSigner>,
-    /// MX cache with TTL and bounded size (#106/#107)
+/// MX cache with TTL and bounded size (#106/#107)
     mx_cache: Cache<String, Vec<String>>,
-    /// Per-MX SMTP connection pool to reduce TCP/TLS handshakes
+/// Per-MX SMTP connection pool to reduce TCP/TLS handshakes
     connection_pool: RwLock<HashMap<String, Vec<PooledStream>>>,
-    /// Optional IP pool for source-binding and rotation (self-hosted path).
+/// Optional IP pool for source-binding and rotation (self-hosted path).
     ip_pool: Option<Arc<tokio::sync::RwLock<IpPool>>>,
 }
 
@@ -158,17 +158,17 @@ enum PooledStream {
 }
 
 impl SmtpSender {
-    /// Create a new SMTP sender with just the from domain
+/// Create a new SMTP sender with just the from domain
     pub fn new(from_domain: String) -> Self {
         Self::build_sender(from_domain, SmtpSenderConfig::default(), None)
     }
     
-    /// Create with custom config
+/// Create with custom config
     pub fn with_config(from_domain: String, config: SmtpSenderConfig) -> Self {
         Self::build_sender(from_domain, config, None)
     }
     
-    /// Create with DKIM signer
+/// Create with DKIM signer
     pub fn with_dkim(from_domain: String, config: SmtpSenderConfig, dkim_signer: DkimSigner) -> Self {
         Self::build_sender(from_domain, config, Some(dkim_signer))
     }
@@ -195,17 +195,17 @@ impl SmtpSender {
         }
     }
     
-    /// Attach an IP pool for source-binding and rotation.
+/// Attach an IP pool for source-binding and rotation.
     pub fn set_ip_pool(&mut self, pool: Arc<tokio::sync::RwLock<IpPool>>) {
         self.ip_pool = Some(pool);
     }
     
-    /// Set DKIM signer
+/// Set DKIM signer
     pub fn set_dkim_signer(&mut self, signer: DkimSigner) {
         self.dkim_signer = Some(signer);
     }
     
-    /// Send an email directly via SMTP
+/// Send an email directly via SMTP
     pub async fn send(
         &self,
         from: &str,
@@ -215,7 +215,7 @@ impl SmtpSender {
         html_body: Option<&str>,
         headers: Option<HashMap<String, String>>,
     ) -> Result<SmtpSendResult> {
-        // Group recipients by domain
+// Group recipients by domain
         let mut by_domain: HashMap<String, Vec<String>> = HashMap::new();
         for recipient in to {
             let domain = recipient.split('@').nth(1)
@@ -229,7 +229,7 @@ impl SmtpSender {
         let mut all_rejected = Vec::with_capacity(to.len());
         let mut last_response: Option<String> = None;
         
-        // Generate a single Message-ID for the email (#103: avoid dual generation)
+// Generate a single Message-ID for the email (#103:avoid dual generation)
         let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), self.config.hostname);
         
         let mut domain_payloads = Vec::with_capacity(by_domain.len());
@@ -320,9 +320,9 @@ impl SmtpSender {
         OUTBOUND_METRICS.snapshot()
     }
     
-    /// Look up MX records for a domain
+/// Look up MX records for a domain
     async fn lookup_mx(&self, domain: &str) -> Result<Vec<String>> {
-        // Check cache first (moka handles TTL and eviction)
+// Check cache first (moka handles TTL and eviction)
         if let Some(cached) = self.mx_cache.get(domain).await {
             return Ok(cached);
         }
@@ -344,14 +344,14 @@ impl SmtpSender {
                     if *response_code == ResponseCode::NoError
                         || *response_code == ResponseCode::NXDomain =>
                 {
-                    // Fall back to A record (implicit MX)
+// Fall back to A record (implicit MX)
                     vec![domain.to_string()]
                 }
                 _ => return Err(err.into()),
             },
         };
         
-        // Cache the result (moka enforces TTL + max capacity)
+// Cache the result (moka enforces TTL + max capacity)
         self.mx_cache.insert(domain.to_string(), mx_servers).await;
 
         self.mx_cache
@@ -360,7 +360,7 @@ impl SmtpSender {
             .ok_or_else(|| anyhow!("MX cache insert/read inconsistency for {}", domain))
     }
     
-    /// Send to a specific MX server
+/// Send to a specific MX server
     async fn send_to_mx(
         &self,
         mx_host: &str,
@@ -385,7 +385,7 @@ impl SmtpSender {
             return Ok(result);
         }
 
-        // Resolve MX host to IP
+// Resolve MX host to IP
         let addrs = self.resolver.lookup_ip(mx_host).await?;
         let addr = addrs
             .iter()
@@ -396,7 +396,7 @@ impl SmtpSender {
 
         debug!(mx = %mx_host, addr = %socket_addr, "Connecting to MX server");
 
-        // Connect with timeout — use source-bound socket when IP pool is available
+// Connect with timeout — use source-bound socket when IP pool is available
         let stream = if let Some(ref ip_pool) = self.ip_pool {
             let pool = ip_pool.read().await;
             let (stream, source_ip) = timeout(
@@ -422,7 +422,7 @@ impl SmtpSender {
         Ok(result)
     }
     
-    /// Continue SMTP conversation over a TLS stream
+/// Continue SMTP conversation over a TLS stream
     async fn smtp_conversation_over_tls(
         &self,
         tls_stream: tokio_rustls::client::TlsStream<TcpStream>,
@@ -435,13 +435,13 @@ impl SmtpSender {
         let mut stream = BufStream::new(tls_stream);
         let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
         
-        // Re-EHLO after TLS upgrade (RFC 3207 §4.2)
+// Re-EHLO after TLS upgrade (RFC 3207 §4.2)
         let ehlo_cmd = format!("EHLO {}\r\n", self.config.hostname);
         stream.write_all(ehlo_cmd.as_bytes()).await?;
         
         read_ehlo_response(&mut stream, timeout_duration).await?;
         
-        // Proceed with MAIL FROM / RCPT TO / DATA over TLS
+// Proceed with MAIL FROM / RCPT TO / DATA over TLS
         let result = self
             .smtp_mail_transaction(&mut stream, from, recipients, message, mx_host, message_id)
             .await?;
@@ -450,7 +450,7 @@ impl SmtpSender {
         Ok((result, pooled))
     }
     
-    /// Execute the MAIL FROM → RCPT TO → DATA → message sequence
+/// Execute the MAIL FROM → RCPT TO → DATA → message sequence
     async fn smtp_mail_transaction<S>(
         &self,
         stream: &mut S,
@@ -473,7 +473,7 @@ impl SmtpSender {
             return Err(anyhow!("MAIL FROM failed: {}", response.trim()));
         }
         
-        // RCPT TO for each recipient
+// RCPT TO for each recipient
         let mut accepted = Vec::with_capacity(recipients.len());
         let mut rejected = Vec::with_capacity(recipients.len());
         
@@ -491,7 +491,7 @@ impl SmtpSender {
         }
         
         if accepted.is_empty() {
-            // RSET and read response (#104: avoid stream desync)
+// RSET and read response (#104:avoid stream desync)
             stream.write_all(b"RSET\r\n").await?;
             response.clear();
             if let Err(error) = read_smtp_line_timeout(stream, &mut response, timeout_duration).await {
@@ -506,7 +506,7 @@ impl SmtpSender {
             });
         }
         
-        // DATA
+// DATA
         stream.write_all(b"DATA\r\n").await?;
         response.clear();
         read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
@@ -514,12 +514,12 @@ impl SmtpSender {
             return Err(anyhow!("DATA failed: {}", response.trim()));
         }
         
-        // Send message with dot-stuffing (RFC 5321 §4.5.2) (#100)
-        // Any line starting with '.' must have it doubled to prevent SMTP smuggling
+// Send message with dot-stuffing (RFC 5321 §4.5.2) (#100)
+// Any line starting with '.' must have it doubled to prevent SMTP smuggling
         let stuffed = dot_stuff_message(message);
         stream.write_all(&stuffed).await?;
         
-        // End of message
+// End of message
         stream.write_all(b"\r\n.\r\n").await?;
         response.clear();
         read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
@@ -542,13 +542,13 @@ impl SmtpSender {
         })
     }
     
-    /// Sanitize a header value to prevent header injection (#101)
-    /// Strips CR, LF, and NUL bytes that could inject additional headers
+/// Sanitize a header value to prevent header injection (#101)
+/// Strips CR, LF, and NUL bytes that could inject additional headers
     fn sanitize_header(value: &str) -> String {
         value.chars().filter(|c| *c != '\r' && *c != '\n' && *c != '\0').collect()
     }
     
-    /// Build an RFC 5322 compliant email message
+/// Build an RFC 5322 compliant email message
     fn build_message(
         &self,
         from: &str,
@@ -565,7 +565,7 @@ impl SmtpSender {
         
         let mut msg = Vec::with_capacity(1024);
         
-        // Required headers — sanitize all user-supplied values (#101)
+// Required headers — sanitize all user-supplied values (#101)
         let safe_from = Self::sanitize_header(from);
         let safe_to: Vec<String> = to.iter().map(|t| Self::sanitize_header(t)).collect();
         let safe_subject = Self::sanitize_header(subject);
@@ -577,7 +577,7 @@ impl SmtpSender {
         msg.extend_from_slice(format!("Message-ID: {}\r\n", message_id).as_bytes());
         msg.extend_from_slice(b"MIME-Version: 1.0\r\n");
         
-        // Custom headers — sanitize keys and values (#101)
+// Custom headers — sanitize keys and values (#101)
         if let Some(hdrs) = headers {
             for (key, value) in hdrs {
                 let safe_key = Self::sanitize_header(key);
@@ -586,16 +586,16 @@ impl SmtpSender {
             }
         }
         
-        // Body
-        // #102: Use 8bit transfer encoding (honest about the encoding we actually use)
+// Body
+// #102:Use 8bit transfer encoding (honest about the encoding we actually use)
         match (text_body, html_body) {
             (Some(text), Some(html)) => {
-                // Multipart alternative
+// Multipart alternative
                 let boundary = format!("----=_Part_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
                 msg.extend_from_slice(format!("Content-Type: multipart/alternative; boundary=\"{}\"\r\n", boundary).as_bytes());
                 msg.extend_from_slice(b"\r\n");
                 
-                // Text part
+// Text part
                 msg.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
                 msg.extend_from_slice(b"Content-Type: text/plain; charset=utf-8\r\n");
                 msg.extend_from_slice(b"Content-Transfer-Encoding: 8bit\r\n");
@@ -603,7 +603,7 @@ impl SmtpSender {
                 msg.extend_from_slice(text.as_bytes());
                 msg.extend_from_slice(b"\r\n");
                 
-                // HTML part
+// HTML part
                 msg.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
                 msg.extend_from_slice(b"Content-Type: text/html; charset=utf-8\r\n");
                 msg.extend_from_slice(b"Content-Transfer-Encoding: 8bit\r\n");
@@ -611,7 +611,7 @@ impl SmtpSender {
                 msg.extend_from_slice(html.as_bytes());
                 msg.extend_from_slice(b"\r\n");
                 
-                // End boundary
+// End boundary
                 msg.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
             }
             (Some(text), None) => {
@@ -630,7 +630,7 @@ impl SmtpSender {
             }
         }
         
-        // Sign with DKIM if configured
+// Sign with DKIM if configured
         if let Some(ref signer) = self.dkim_signer {
             let signature = signer.sign(&msg)?;
             let mut signed_msg = signature.into_bytes();
@@ -740,19 +740,19 @@ impl SmtpSender {
             }
         }
 
-        // EHLO
+// EHLO
         let ehlo_cmd = format!("EHLO {}\r\n", self.config.hostname);
         stream.write_all(ehlo_cmd.as_bytes()).await?;
 
-        // Read EHLO response (may be multi-line), collect capabilities
+// Read EHLO response (may be multi-line), collect capabilities
         let ehlo_lines = read_ehlo_response(&mut stream, timeout_duration).await?;
 
-        // Check if remote server advertises STARTTLS
+// Check if remote server advertises STARTTLS
         let supports_starttls = ehlo_lines.iter().any(|l| {
             l.len() >= 4 && l[4..].trim().eq_ignore_ascii_case("STARTTLS")
         });
 
-        // Attempt STARTTLS upgrade if supported
+// Attempt STARTTLS upgrade if supported
         if supports_starttls {
             debug!(mx = %mx_host, "Server supports STARTTLS, upgrading connection");
 

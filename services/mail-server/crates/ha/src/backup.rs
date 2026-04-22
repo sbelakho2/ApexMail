@@ -17,7 +17,7 @@ use std::time::Duration;
 use tracing::{info, warn, error};
 use uuid::Uuid;
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -30,7 +30,7 @@ const BATCH_SIZE: i64 = 10_000;
 
 ///Encryption constants
 const ENCRYPTION_NONCE_SIZE: usize = 12; // 96 bits for AES-GCM
-const ENCRYPTION_KEY_SIZE: usize = 32;   // 256 bits
+const ENCRYPTION_KEY_SIZE: usize = 32; // 256 bits
 const ENCRYPTION_MAGIC_BYTES: &[u8; 8] = b"APEXENC1"; // Magic header for encrypted backups
 
 /// Encrypt data using AES-256-GCM
@@ -40,7 +40,7 @@ fn encrypt_backup(data: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
         return Err(format!("Invalid encryption key size: expected {}, got {}", ENCRYPTION_KEY_SIZE, key.len()));
     }
 
-    // Generate a random nonce
+// Generate a random nonce
     let nonce_bytes: [u8; ENCRYPTION_NONCE_SIZE] = {
         let mut bytes = [0u8; ENCRYPTION_NONCE_SIZE];
         OsRng.fill_bytes(&mut bytes);
@@ -55,7 +55,7 @@ fn encrypt_backup(data: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
     let ciphertext = cipher.encrypt(nonce, data)
         .map_err(|e| format!("Encryption failed: {e}"))?;
 
-    // Build output: MAGIC || NONCE || CIPHERTEXT
+// Build output:MAGIC || NONCE || CIPHERTEXT
     let mut output = Vec::with_capacity(
         ENCRYPTION_MAGIC_BYTES.len() + ENCRYPTION_NONCE_SIZE + ciphertext.len()
     );
@@ -67,32 +67,35 @@ fn encrypt_backup(data: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// Decrypt data using AES-256-GCM
-/// SEC-017: Proper decryption implementation
 fn decrypt_backup(data: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
     if key.len() != ENCRYPTION_KEY_SIZE {
         return Err(format!("Invalid encryption key size: expected {}, got {}", ENCRYPTION_KEY_SIZE, key.len()));
     }
 
-    // Minimum size: MAGIC + NONCE + at least 16 bytes for GCM tag
-    let min_size = ENCRYPTION_MAGIC_BYTES.len() + ENCRYPTION_NONCE_SIZE + 16;
-    if data.len() < min_size {
-        return Err(format!("Encrypted data too short: {} bytes (minimum {})", data.len(), min_size));
+// Verify magic header
+    if data.len() < ENCRYPTION_MAGIC_BYTES.len() {
+        return Err("Invalid backup file: missing encryption magic header".into());
     }
 
-    // Verify magic header
     let magic = &data[..ENCRYPTION_MAGIC_BYTES.len()];
     if magic != ENCRYPTION_MAGIC_BYTES {
         return Err("Invalid backup file: missing encryption magic header".into());
     }
 
-    // Extract nonce
+// Minimum size:MAGIC + NONCE + at least 16 bytes for GCM tag
+    let min_size = ENCRYPTION_MAGIC_BYTES.len() + ENCRYPTION_NONCE_SIZE + 16;
+    if data.len() < min_size {
+        return Err(format!("Encrypted data too short: {} bytes (minimum {})", data.len(), min_size));
+    }
+
+// Extract nonce
     let nonce_start = ENCRYPTION_MAGIC_BYTES.len();
     let nonce_end = nonce_start + ENCRYPTION_NONCE_SIZE;
     let nonce_bytes: [u8; ENCRYPTION_NONCE_SIZE] = data[nonce_start..nonce_end]
         .try_into()
         .map_err(|_| "Failed to extract nonce")?;
 
-    // Extract ciphertext
+// Extract ciphertext
     let ciphertext = &data[nonce_end..];
 
     let cipher = Aes256Gcm::new_from_slice(key)
@@ -114,13 +117,12 @@ pub struct BackupService {
 }
 
 impl BackupService {
-    /// Create a new BackupService.
-    /// 
-    /// # Encryption key validation at startup
-    /// Validates encryption key size on construction to fail fast rather than
-    /// failing mid-backup when encrypt_backup() is called.
+/// Create a new BackupService.
+/// # Encryption key validation at startup
+/// Validates encryption key size on construction to fail fast rather than
+/// failing mid-backup when encrypt_backup is called.
     pub fn new(pool: PgPool, config: Arc<Config>) -> Result<Self, String> {
-        // Validate encryption key at startup if configured
+// Validate encryption key at startup if configured
         if let Some(ref key) = config.backup.encryption_key {
             if key.len() != ENCRYPTION_KEY_SIZE {
                 return Err(format!(
@@ -135,8 +137,8 @@ impl BackupService {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| {
-                // Fallback: builder() only fails on TLS config issues.
-                // Build without TLS native roots as last resort.
+// Fallback:builder only fails on TLS config issues.
+// Build without TLS native roots as last resort.
                 Client::builder()
                     .timeout(Duration::from_secs(30))
                     .no_proxy()
@@ -146,9 +148,9 @@ impl BackupService {
         Ok(Self { pool, config, http_client })
     }
 
-    // ── Create Backup ──────────────────────────────────────
+// ── Create Backup ──────────────────────────────────────
 
-    /// Create a new backup of the specified type.
+/// Create a new backup of the specified type.
     pub async fn create_backup(
         &self,
         backup_type: BackupType,
@@ -159,7 +161,7 @@ impl BackupService {
 
         info!(id = %id, backup_type = %backup_type, "Starting backup");
 
-        // Insert pending record
+// Insert pending record
         let tables_json = tables
             .as_ref()
             .map(|t| serde_json::to_value(t))
@@ -179,21 +181,21 @@ impl BackupService {
         .await
         .map_err(|e| format!("Insert backup record: {e}"))?;
 
-        // Mark in-progress
+// Mark in-progress
         sqlx::query("UPDATE ha_backups SET status = 'in_progress' WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await
             .map_err(|e| e.to_string())?;
 
-        // Get WAL LSN before backup
+// Get WAL LSN before backup
         let wal_start: Option<String> = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
             .fetch_optional(&self.pool)
             .await
             .ok()
             .flatten();
 
-        // Stream tables and compress
+// Stream tables and compress
         let target_tables = match &tables {
             Some(t) => t.clone(),
             None => self.get_all_tables().await?,
@@ -204,8 +206,8 @@ impl BackupService {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
 
         for table in &target_tables {
-            // Write table start marker
-            let start_marker = format!("--TABLE:{}:START--\n", table);
+// Write table start marker
+            let start_marker = format!(" --TABLE:{}:START--\n", table);
             encoder.write_all(start_marker.as_bytes()).map_err(|e| format!("Write marker: {e}"))?;
             hasher.update(start_marker.as_bytes());
 
@@ -214,8 +216,8 @@ impl BackupService {
             encoder.write_all(&data).map_err(|e| format!("Gzip write: {e}"))?;
             total_size += data.len() as i64;
 
-            // Write table end marker
-            let end_marker = format!("--TABLE:{}:END--\n", table);
+// Write table end marker
+            let end_marker = format!(" --TABLE:{}:END--\n", table);
             encoder.write_all(end_marker.as_bytes()).map_err(|e| format!("Write marker: {e}"))?;
             hasher.update(end_marker.as_bytes());
         }
@@ -229,7 +231,7 @@ impl BackupService {
             1.0
         };
 
-        // WAL position after
+// WAL position after
         let wal_end: Option<String> = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
             .fetch_optional(&self.pool)
             .await
@@ -242,7 +244,7 @@ impl BackupService {
         let completed_at = Utc::now();
         let duration_ms = (completed_at - started_at).num_milliseconds();
 
-        // Update record
+// Update record
         sqlx::query(
             "UPDATE ha_backups SET status='completed', size_bytes=$2, location=$3,
              checksum=$4, compression_ratio=$5, wal_start_lsn=$6, wal_end_lsn=$7,
@@ -269,9 +271,9 @@ impl BackupService {
         })
     }
 
-    /// Stream a table's rows in batches using cursor-based pagination.
+/// Stream a table's rows in batches using cursor-based pagination.
     async fn stream_table(&self, table: &str) -> Result<Vec<u8>, String> {
-        // Sanitize table name (prevent SQL injection)
+// Sanitize table name (prevent SQL injection)
         if !Self::is_valid_identifier(table) {
             return Err(format!("Invalid table name: {table}"));
         }
@@ -332,9 +334,9 @@ impl BackupService {
         Ok(rows.into_iter().map(|(t,)| t).collect())
     }
 
-    // ── Restore ────────────────────────────────────────────
+// ── Restore ────────────────────────────────────────────
 
-    /// Restore from a backup.
+/// Restore from a backup.
     pub async fn restore(&self, options: RestoreOptions) -> Result<RestoreResult, String> {
         let backup = self.get_backup(options.backup_id).await?
             .ok_or("Backup not found")?;
@@ -358,11 +360,11 @@ impl BackupService {
 
         let started = Utc::now();
 
-        // Download backup from S3
+// Download backup from S3
         let location = backup.location.clone().ok_or("Backup location not set")?;
         let compressed_data = self.download_from_storage(&location).await?;
 
-        // Decompress the backup data
+// Decompress the backup data
         use flate2::read::GzDecoder;
         use std::io::Read;
         let mut decoder = GzDecoder::new(&compressed_data[..]);
@@ -370,7 +372,7 @@ impl BackupService {
         decoder.read_to_end(&mut decompressed)
             .map_err(|e| format!("Decompress failed: {e}"))?;
 
-        // Verify checksum
+// Verify checksum
         if let Some(expected_checksum) = &backup.checksum {
             let mut hasher = Sha256::new();
             hasher.update(&decompressed);
@@ -381,7 +383,7 @@ impl BackupService {
             }
         }
 
-        // Parse and restore each table
+// Parse and restore each table
         let tables = backup.tables_included.clone().unwrap_or_default();
         for table in &tables {
             self.restore_table(table, &decompressed).await?;
@@ -389,7 +391,7 @@ impl BackupService {
 
         let duration_ms = (Utc::now() - started).num_milliseconds();
 
-        // Post-restore verification
+// Post-restore verification
         let verification = self.verify_restore(&tables).await?;
 
         Ok(RestoreResult {
@@ -402,9 +404,9 @@ impl BackupService {
         })
     }
 
-    /// Download backup data from S3/storage
+/// Download backup data from S3/storage
     async fn download_from_storage(&self, location: &str) -> Result<Vec<u8>, String> {
-        // Parse S3 URI: s3://bucket/path/to/file.gz
+// Parse S3 URI:s3://bucket/path/to/file.gz
         if let Some(path) = location.strip_prefix("s3://") {
             let parts: Vec<&str> = path.splitn(2, '/').collect();
             if parts.len() != 2 {
@@ -413,18 +415,18 @@ impl BackupService {
             let bucket = parts[0];
             let key = parts[1];
 
-            // Use AWS SDK or object_store crate
-            // For now, check if it's a local file fallback
+// Use AWS SDK or object_store crate
+// For now, check if it's a local file fallback
             let local_path = format!("/tmp/apexmail-backups/{}", key.replace('/', "_"));
             if std::path::Path::new(&local_path).exists() {
                 return tokio::fs::read(&local_path).await
                     .map_err(|e| format!("Read local backup: {e}"));
             }
 
-            // Real S3 download using reqwest with presigned URL or aws-sdk
+// Real S3 download using reqwest with presigned URL or aws-sdk
             let presigned_base = std::env::var("BACKUP_PRESIGNED_URL_BASE").ok();
-            // Require explicit acknowledgement for unauthenticated S3 access
-            // to prevent accidental production misconfiguration
+// Require explicit acknowledgement for unauthenticated S3 access
+// to prevent accidental production misconfiguration
             const UNSAFE_CONFIRMATION: &str = "I_UNDERSTAND_THIS_IS_INSECURE";
             let allow_unauth = std::env::var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD").ok();
             if presigned_base.is_none() && allow_unauth.as_deref() != Some(UNSAFE_CONFIRMATION) {
@@ -450,7 +452,7 @@ impl BackupService {
                 .map(|b| b.to_vec())
                 .map_err(|e| format!("Read S3 response: {e}"))
         } else if let Some(path) = location.strip_prefix("file://") {
-            // Local file for testing
+// Local file for testing
             tokio::fs::read(path).await
                 .map_err(|e| format!("Read local file: {e}"))
         } else {
@@ -458,9 +460,9 @@ impl BackupService {
         }
     }
 
-    /// Known application tables that may be backed up or restored.
-    /// This allowlist prevents backup/restore of PostgreSQL system catalogs
-    /// or other internal tables even if they pass identifier validation.
+/// Known application tables that may be backed up or restored.
+/// This allowlist prevents backup/restore of PostgreSQL system catalogs
+/// or other internal tables even if they pass identifier validation.
     const ALLOWED_TABLES: &'static [&'static str] = &[
         "emails", "contacts", "templates", "campaigns", "webhooks",
         "api_keys", "workspaces", "organizations", "users",
@@ -470,8 +472,8 @@ impl BackupService {
         "scheduled_emails", "ab_tests", "segments", "tags",
     ];
 
-    /// Validate that an identifier (table or column name) contains only safe characters
-    /// and is in the allowlist of known application tables.
+/// Validate that an identifier (table or column name) contains only safe characters
+/// and is in the allowlist of known application tables.
     fn is_valid_identifier(name: &str) -> bool {
         let mut chars = name.chars();
         let Some(first) = chars.next() else {
@@ -485,34 +487,34 @@ impl BackupService {
             return false;
         }
 
-        // Defense-in-depth: only allow known application tables
+// Defense-in-depth:only allow known application tables
         let lower = name.to_ascii_lowercase();
         Self::ALLOWED_TABLES.contains(&lower.as_str())
     }
 
-    /// Quote a validated identifier for safe interpolation into SQL.
-    /// The identifier MUST have already passed `is_valid_identifier`.
+/// Quote a validated identifier for safe interpolation into SQL.
+/// The identifier MUST have already passed `is_valid_identifier`.
     fn quote_ident(name: &str) -> String {
-        // Double-quote the identifier per PostgreSQL convention.
-        // Since is_valid_identifier only allows [a-zA-Z_][a-zA-Z0-9_]*,
-        // there are no embedded quotes to escape — but we replace them
-        // defensively anyway.
+// Double-quote the identifier per PostgreSQL convention.
+// Since is_valid_identifier only allows [a-zA-Z_][a-zA-Z0-9_]*,
+// there are no embedded quotes to escape — but we replace them
+// defensively anyway.
         format!("\"{}\"", name.replace('"', "\"\""))
     }
 
-    /// Restore a single table from backup data
+/// Restore a single table from backup data
     async fn restore_table(&self, table: &str, data: &[u8]) -> Result<(), String> {
-        // Sanitize table name (prevent SQL injection)
+// Sanitize table name (prevent SQL injection)
         if !Self::is_valid_identifier(table) {
             return Err(format!("Invalid table name: {table}"));
         }
 
-        // Parse the backup format: table data is JSONL with table markers
+// Parse the backup format:table data is JSONL with table markers
         let content = String::from_utf8_lossy(data);
 
-        // Find this table's section in the backup
-        let marker_start = format!("--TABLE:{}:START--", table);
-        let marker_end = format!("--TABLE:{}:END--", table);
+// Find this table's section in the backup
+        let marker_start = format!(" --TABLE:{}:START--", table);
+        let marker_end = format!(" --TABLE:{}:END--", table);
 
         let start_idx = content.find(&marker_start)
             .ok_or_else(|| format!("Table {} not found in backup", table))?;
@@ -521,18 +523,18 @@ impl BackupService {
 
         let table_data = &content[start_idx + marker_start.len()..end_idx];
 
-        // Begin transaction for this table's restore
+// Begin transaction for this table's restore
         let mut tx = self.pool.begin().await
             .map_err(|e| format!("Begin transaction: {e}"))?;
 
-        // Truncate existing data if requested
+// Truncate existing data if requested
         let truncate_sql = format!("TRUNCATE TABLE {} CASCADE", Self::quote_ident(table));
         sqlx::query(&truncate_sql)
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("Truncate {}: {e}", table))?;
 
-        // Insert each row
+// Insert each row
         let mut row_count = 0;
         for line in table_data.lines() {
             let line = line.trim();
@@ -540,7 +542,7 @@ impl BackupService {
                 continue;
             }
 
-            // Parse JSONL row and generate INSERT
+// Parse JSONL row and generate INSERT
             if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
                 if let Some(obj) = row.as_object() {
                     let insert_sql = format!(
@@ -565,9 +567,9 @@ impl BackupService {
         Ok(())
     }
 
-    /// Point in time recovery.
+/// Point in time recovery.
     pub async fn pitr(&self, target_time: chrono::DateTime<Utc>) -> Result<RestoreResult, String> {
-        // Find the latest full backup before target_time
+// Find the latest full backup before target_time
         let row: Option<BackupRow> = sqlx::query_as::<_, BackupRow>(
             "SELECT id, backup_type, status, size_bytes, tables_included, location, checksum,
                     encrypted, compressed, compression_ratio, wal_start_lsn, wal_end_lsn,
@@ -599,7 +601,7 @@ impl BackupService {
         })
     }
 
-    /// Run post-restore verification checks.
+/// Run post-restore verification checks.
     async fn verify_restore(&self, tables: &[String]) -> Result<VerificationResult, String> {
         let mut tables_verified = 0u32;
         let mut rows_verified = 0u64;
@@ -622,7 +624,7 @@ impl BackupService {
             }
         }
 
-        // Check 1: index health
+// Check 1:index health
         let index_ok: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM pg_stat_user_indexes WHERE idx_scan = 0"
         )
@@ -633,7 +635,7 @@ impl BackupService {
         .map(|c| c < 100)
         .unwrap_or(true);
 
-        // Check 2: constraint validity
+// Check 2:constraint validity
         let constraint_ok: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM information_schema.table_constraints WHERE constraint_type = 'CHECK'"
         )
@@ -644,7 +646,7 @@ impl BackupService {
         .map(|_| true)
         .unwrap_or(true);
 
-        // Check 3: sequence validity
+// Check 3:sequence validity
         let sequence_ok: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM information_schema.sequences"
         )
@@ -667,7 +669,7 @@ impl BackupService {
         })
     }
 
-    // ── List / Get Backups ─────────────────────────────────
+// ── List / Get Backups ─────────────────────────────────
 
     pub async fn get_backup(&self, id: Uuid) -> Result<Option<Backup>, String> {
         let row: Option<BackupRow> = sqlx::query_as::<_, BackupRow>(
@@ -718,7 +720,7 @@ impl BackupService {
         Ok(rows.into_iter().map(|r| r.into_backup()).collect())
     }
 
-    /// Delete a backup record.
+/// Delete a backup record.
     pub async fn delete_backup(&self, id: Uuid) -> Result<bool, String> {
         let res = sqlx::query("DELETE FROM ha_backups WHERE id = $1")
             .bind(id)
@@ -728,9 +730,9 @@ impl BackupService {
         Ok(res.rows_affected() > 0)
     }
 
-    // ── Retention / Cleanup ────────────────────────────────
+// ── Retention / Cleanup ────────────────────────────────
 
-    /// Remove expired backups beyond the retention period.
+/// Remove expired backups beyond the retention period.
     pub async fn enforce_retention(&self) -> Result<u64, String> {
         let days = self.config.backup.retention_days as i64;
         let res = sqlx::query(
@@ -749,7 +751,7 @@ impl BackupService {
         Ok(deleted)
     }
 
-    // ── Schedule Info ──────────────────────────────────────
+// ── Schedule Info ──────────────────────────────────────
 
     pub fn get_schedule(&self) -> BackupSchedule {
         BackupSchedule {
@@ -774,11 +776,10 @@ mod tests {
         RT.get_or_init(|| tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap())
     }
     
-    /// This test pool uses a fake connection string for unit tests only.
-    /// For integration tests with a real database, see the integration test suite
-    /// in tests/integration_backup.rs or use testcontainers.
-    /// 
-    /// TODO: Add integration tests using testcontainers-rs for full backup/restore validation.
+/// This test pool uses a fake connection string for unit tests only.
+/// For integration tests with a real database, see the integration test suite
+/// in tests/integration_backup.rs or use testcontainers.
+/// TODO:Add integration tests using testcontainers-rs for full backup/restore validation.
     fn test_pool() -> PgPool {
         let _guard = test_runtime().enter();
         sqlx::postgres::PgPoolOptions::new()
@@ -812,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_valid_table_name() {
-        // Just validates the check passes — doesn't hit DB
+// Just validates the check passes — doesn't hit DB
         let name = "public_users_table";
         assert!(name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.'));
     }
@@ -891,7 +892,6 @@ mod tests {
         assert_eq!(BATCH_SIZE, 10_000);
     }
 
-    // SEC-017: Encryption tests
     #[test]
     fn test_encryption_key_size_validation() {
         let data = b"test data";
@@ -904,7 +904,7 @@ mod tests {
     #[test]
     fn test_encryption_roundtrip() {
         let data = b"This is sensitive backup data that needs encryption";
-        // Generate a valid 32-byte key
+// Generate a valid 32-byte key
         let key: [u8; 32] = {
             let mut k = [0u8; 32];
             OsRng.fill_bytes(&mut k);
@@ -913,13 +913,13 @@ mod tests {
 
         let encrypted = encrypt_backup(data, &key).expect("Encryption should succeed");
         
-        // Verify encrypted data is different from plaintext
+// Verify encrypted data is different from plaintext
         assert_ne!(encrypted.as_slice(), data);
         
-        // Verify encrypted data has magic header
+// Verify encrypted data has magic header
         assert!(encrypted.starts_with(ENCRYPTION_MAGIC_BYTES));
         
-        // Verify encrypted data is longer (magic + nonce + tag)
+// Verify encrypted data is longer (magic + nonce + tag)
         assert!(encrypted.len() > data.len());
 
         let decrypted = decrypt_backup(&encrypted, &key).expect("Decryption should succeed");
@@ -958,13 +958,30 @@ mod tests {
 
         let mut encrypted = encrypt_backup(data, &key).expect("Encryption should succeed");
         
-        // Tamper with the ciphertext
+// Tamper with the ciphertext
         if let Some(last_byte) = encrypted.last_mut() {
             *last_byte ^= 0xFF;
         }
 
         let result = decrypt_backup(&encrypted, &key);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encryption_uses_fresh_nonce_each_time() {
+        let data = b"same payload";
+        let key: [u8; 32] = {
+            let mut k = [0u8; 32];
+            OsRng.fill_bytes(&mut k);
+            k
+        };
+
+        let encrypted_a = encrypt_backup(data, &key).expect("first encryption should succeed");
+        let encrypted_b = encrypt_backup(data, &key).expect("second encryption should succeed");
+
+        assert_ne!(encrypted_a, encrypted_b);
+        assert_eq!(decrypt_backup(&encrypted_a, &key).unwrap(), data);
+        assert_eq!(decrypt_backup(&encrypted_b, &key).unwrap(), data);
     }
 
     #[test]

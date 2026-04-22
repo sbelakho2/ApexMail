@@ -5,7 +5,7 @@
 //!
 //! ## STIX 2.1
 //! - Parses STIX Bundle objects containing `indicator`, `malware`,
-//!   `attack-pattern`, and `relationship` SDOs
+//! `attack-pattern`, and `relationship` SDOs
 //! - Extracts IP, domain, URL, and file hash indicators
 //! - Maps STIX patterns to threat-intel blocklist entries
 //!
@@ -31,35 +31,34 @@ use std::collections::HashMap;
 /// A STIX 2.1 Bundle — top-level container for STIX objects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StixBundle {
-    /// Must be `"bundle"`
+/// Must be `"bundle"`
     #[serde(rename = "type")]
     pub object_type: String,
-    /// Bundle ID (e.g. `bundle--<uuid>`)
+/// Bundle ID (e.g. `bundle--<uuid>`)
     pub id: String,
-    /// Objects contained in the bundle
+/// Objects contained in the bundle
     #[serde(default)]
     pub objects: Vec<StixObject>,
 }
 
 /// Union of supported STIX Domain Objects (SDOs).
-///
 /// We use `#[serde(tag = "type")]` to dispatch on the `"type"` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StixObject {
-    /// Indicator — contains a STIX pattern describing observables.
+/// Indicator — contains a STIX pattern describing observables.
     #[serde(rename = "indicator")]
     Indicator(StixIndicator),
-    /// Malware family descriptor.
+/// Malware family descriptor.
     #[serde(rename = "malware")]
     Malware(StixMalware),
-    /// ATT&CK technique or generic attack pattern.
+/// ATT&CK technique or generic attack pattern.
     #[serde(rename = "attack-pattern")]
     AttackPattern(StixAttackPattern),
-    /// Relationship link between two SDOs.
+/// Relationship link between two SDOs.
     #[serde(rename = "relationship")]
     Relationship(StixRelationship),
-    /// Catch-all for unrecognised types — stored as raw JSON map.
+/// Catch-all for unrecognised types — stored as raw JSON map.
     #[serde(other)]
     Unknown,
 }
@@ -67,39 +66,39 @@ pub enum StixObject {
 /// STIX Indicator SDO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StixIndicator {
-    /// STIX ID (e.g. `indicator--<uuid>`)
+/// STIX ID (e.g. `indicator--<uuid>`)
     pub id: String,
-    /// Created timestamp
+/// Created timestamp
     #[serde(default)]
     pub created: Option<DateTime<Utc>>,
-    /// Modified timestamp
+/// Modified timestamp
     #[serde(default)]
     pub modified: Option<DateTime<Utc>>,
-    /// Human-readable name
+/// Human-readable name
     #[serde(default)]
     pub name: Option<String>,
-    /// Longer description
+/// Longer description
     #[serde(default)]
     pub description: Option<String>,
-    /// STIX Pattern (e.g. `[ipv4-addr:value = '1.2.3.4']`)
+/// STIX Pattern (e.g. `[ipv4-addr:value = '1.2.3.4']`)
     #[serde(default)]
     pub pattern: Option<String>,
-    /// Pattern type (should be `"stix"`)
+/// Pattern type (should be `"stix"`)
     #[serde(default)]
     pub pattern_type: Option<String>,
-    /// Indicator type labels
+/// Indicator type labels
     #[serde(default)]
     pub indicator_types: Vec<String>,
-    /// Valid-from timestamp
+/// Valid-from timestamp
     #[serde(default)]
     pub valid_from: Option<DateTime<Utc>>,
-    /// Valid-until timestamp
+/// Valid-until timestamp
     #[serde(default)]
     pub valid_until: Option<DateTime<Utc>>,
-    /// Confidence (0–100)
+/// Confidence (0–100)
     #[serde(default)]
     pub confidence: Option<u8>,
-    /// Kill chain phases
+/// Kill chain phases
     #[serde(default)]
     pub kill_chain_phases: Vec<KillChainPhase>,
 }
@@ -107,18 +106,18 @@ pub struct StixIndicator {
 /// STIX Malware SDO (simplified).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StixMalware {
-    /// STIX ID
+/// STIX ID
     pub id: String,
-    /// Malware name
+/// Malware name
     #[serde(default)]
     pub name: Option<String>,
-    /// Description
+/// Description
     #[serde(default)]
     pub description: Option<String>,
-    /// Malware type labels
+/// Malware type labels
     #[serde(default)]
     pub malware_types: Vec<String>,
-    /// Is this a family (true) or an instance (false)?
+/// Is this a family (true) or an instance (false)?
     #[serde(default)]
     pub is_family: bool,
 }
@@ -126,15 +125,15 @@ pub struct StixMalware {
 /// STIX Attack Pattern SDO (simplified).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StixAttackPattern {
-    /// STIX ID
+/// STIX ID
     pub id: String,
-    /// Technique name
+/// Technique name
     #[serde(default)]
     pub name: Option<String>,
-    /// Description
+/// Description
     #[serde(default)]
     pub description: Option<String>,
-    /// Kill chain phases
+/// Kill chain phases
     #[serde(default)]
     pub kill_chain_phases: Vec<KillChainPhase>,
 }
@@ -142,22 +141,22 @@ pub struct StixAttackPattern {
 /// STIX Relationship SRO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StixRelationship {
-    /// STIX ID
+/// STIX ID
     pub id: String,
-    /// Relationship type (e.g. `"indicates"`, `"uses"`)
+/// Relationship type (e.g. `"indicates"`, `"uses"`)
     pub relationship_type: String,
-    /// Source SDO reference
+/// Source SDO reference
     pub source_ref: String,
-    /// Target SDO reference
+/// Target SDO reference
     pub target_ref: String,
 }
 
 /// Kill chain phase reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KillChainPhase {
-    /// Kill chain name (e.g. `"mitre-attack"`)
+/// Kill chain name (e.g. `"mitre-attack"`)
     pub kill_chain_name: String,
-    /// Phase name (e.g. `"initial-access"`)
+/// Phase name (e.g. `"initial-access"`)
     pub phase_name: String,
 }
 
@@ -168,40 +167,37 @@ pub struct KillChainPhase {
 /// An extracted observable from a STIX pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractedIndicator {
-    /// IPv4 address
+/// IPv4 address
     Ipv4(String),
-    /// IPv6 address
+/// IPv6 address
     Ipv6(String),
-    /// Domain name
+/// Domain name
     Domain(String),
-    /// URL
+/// URL
     Url(String),
-    /// File hash (algorithm, value)
+/// File hash (algorithm, value)
     FileHash(String, String),
-    /// Email address
+/// Email address
     Email(String),
 }
 
 /// Parse a STIX 2.1 indicator pattern and extract observables.
-///
-/// Supports common STIX Cyber Observation patterns like:
-/// - `[ipv4-addr:value = '1.2.3.4']`
+/// Supports common STIX Cyber Observation patterns like:/// - `[ipv4-addr:value = '1.2.3.4']`
 /// - `[domain-name:value = 'evil.com']`
 /// - `[url:value = 'http://evil.com/malware']`
 /// - `[file:hashes.'SHA-256' = 'abc123...']`
 /// - `[email-addr:value = 'bad@evil.com']`
-///
 /// Returns empty vec for patterns that cannot be parsed.
 pub fn extract_indicators(pattern: &str) -> Vec<ExtractedIndicator> {
     let mut results = Vec::new();
 
-    // Simple regex-free extraction: find quoted values after known keys
+// Simple regex-free extraction:find quoted values after known keys
     let extract_value = |key: &str, input: &str| -> Option<String> {
         let key_pos = input.find(key)?;
         let after_key = &input[key_pos + key.len()..];
-        // Skip whitespace and '='
+// Skip whitespace and '='
         let after_eq = after_key.find('=').map(|p| &after_key[p + 1..])?;
-        // Find quoted value
+// Find quoted value
         let quote_start = after_eq.find('\'')?;
         let value_start = &after_eq[quote_start + 1..];
         let quote_end = value_start.find('\'')?;
@@ -224,7 +220,7 @@ pub fn extract_indicators(pattern: &str) -> Vec<ExtractedIndicator> {
         results.push(ExtractedIndicator::Email(email));
     }
 
-    // File hash extraction: file:hashes.'<algo>'
+// File hash extraction:file:hashes.'<algo>'
     let hash_algorithms = ["SHA-256", "SHA-1", "MD5", "SHA-512"];
     for algo in &hash_algorithms {
         let key = format!("file:hashes.'{}'", algo);
@@ -264,21 +260,21 @@ pub fn process_bundle(bundle: &StixBundle) -> Vec<ProcessedIndicator> {
 /// A processed indicator ready for ingestion into the threat-intel store.
 #[derive(Debug, Clone)]
 pub struct ProcessedIndicator {
-    /// Original STIX ID
+/// Original STIX ID
     pub stix_id: String,
-    /// Human-readable name (if any)
+/// Human-readable name (if any)
     pub name: Option<String>,
-    /// Description (if any)
+/// Description (if any)
     pub description: Option<String>,
-    /// Extracted observable
+/// Extracted observable
     pub indicator: ExtractedIndicator,
-    /// Confidence (0–100)
+/// Confidence (0–100)
     pub confidence: u8,
-    /// Valid-from timestamp
+/// Valid-from timestamp
     pub valid_from: Option<DateTime<Utc>>,
-    /// Valid-until timestamp
+/// Valid-until timestamp
     pub valid_until: Option<DateTime<Utc>>,
-    /// Indicator type labels
+/// Indicator type labels
     pub indicator_types: Vec<String>,
 }
 
@@ -289,19 +285,19 @@ pub struct ProcessedIndicator {
 /// TAXII 2.1 Discovery response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxiiDiscovery {
-    /// Human-readable title
+/// Human-readable title
     #[serde(default)]
     pub title: Option<String>,
-    /// Description
+/// Description
     #[serde(default)]
     pub description: Option<String>,
-    /// Contact info
+/// Contact info
     #[serde(default)]
     pub contact: Option<String>,
-    /// Default API Root URL
+/// Default API Root URL
     #[serde(default)]
     pub default: Option<String>,
-    /// All available API Root URLs
+/// All available API Root URLs
     #[serde(default)]
     pub api_roots: Vec<String>,
 }
@@ -309,16 +305,16 @@ pub struct TaxiiDiscovery {
 /// TAXII 2.1 API Root information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxiiApiRoot {
-    /// Title
+/// Title
     #[serde(default)]
     pub title: Option<String>,
-    /// Description
+/// Description
     #[serde(default)]
     pub description: Option<String>,
-    /// Versions supported
+/// Versions supported
     #[serde(default)]
     pub versions: Vec<String>,
-    /// Max content length
+/// Max content length
     #[serde(default)]
     pub max_content_length: Option<u64>,
 }
@@ -326,21 +322,21 @@ pub struct TaxiiApiRoot {
 /// TAXII 2.1 Collection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxiiCollection {
-    /// Collection ID (UUID)
+/// Collection ID (UUID)
     pub id: String,
-    /// Title
+/// Title
     #[serde(default)]
     pub title: Option<String>,
-    /// Description
+/// Description
     #[serde(default)]
     pub description: Option<String>,
-    /// Whether this collection can be read
+/// Whether this collection can be read
     #[serde(default = "default_true")]
     pub can_read: bool,
-    /// Whether this collection can be written to
+/// Whether this collection can be written to
     #[serde(default)]
     pub can_write: bool,
-    /// Media types supported
+/// Media types supported
     #[serde(default)]
     pub media_types: Vec<String>,
 }
@@ -352,7 +348,7 @@ fn default_true() -> bool {
 /// TAXII 2.1 Collections list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxiiCollections {
-    /// Collections
+/// Collections
     #[serde(default)]
     pub collections: Vec<TaxiiCollection>,
 }
@@ -360,13 +356,13 @@ pub struct TaxiiCollections {
 /// TAXII 2.1 Envelope — container for objects returned from a collection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxiiEnvelope {
-    /// Whether more objects are available (pagination)
+/// Whether more objects are available (pagination)
     #[serde(default)]
     pub more: bool,
-    /// Next page URL (if pagination)
+/// Next page URL (if pagination)
     #[serde(default)]
     pub next: Option<String>,
-    /// STIX objects
+/// STIX objects
     #[serde(default)]
     pub objects: Vec<serde_json::Value>,
 }
@@ -378,27 +374,27 @@ pub struct TaxiiEnvelope {
 /// Configuration for a TAXII 2.1 client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxiiClientConfig {
-    /// TAXII server base URL (e.g. `https://taxii.example.com`)
+/// TAXII server base URL (e.g. `https://taxii.example.com`)
     pub server_url: String,
-    /// Optional username for HTTP Basic authentication
+/// Optional username for HTTP Basic authentication
     #[serde(default)]
     pub username: Option<String>,
-    /// Optional password
+/// Optional password
     #[serde(default)]
     pub password: Option<String>,
-    /// Optional API key (sent as `Authorization: Bearer <key>`)
+/// Optional API key (sent as `Authorization:Bearer <key>`)
     #[serde(default)]
     pub api_key: Option<String>,
-    /// Specific collection IDs to poll (empty = poll all readable)
+/// Specific collection IDs to poll (empty = poll all readable)
     #[serde(default)]
     pub collection_ids: Vec<String>,
-    /// Poll interval in seconds (default: 3600 = 1 hour)
+/// Poll interval in seconds (default:3600 = 1 hour)
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
-    /// Maximum objects per page
+/// Maximum objects per page
     #[serde(default = "default_page_size")]
     pub page_size: u32,
-    /// Custom HTTP headers
+/// Custom HTTP headers
     #[serde(default)]
     pub custom_headers: HashMap<String, String>,
 }
@@ -426,7 +422,6 @@ impl Default for TaxiiClientConfig {
 }
 
 /// TAXII 2.1 Client.
-///
 /// Provides methods for TAXII discovery, collection enumeration, and
 /// object retrieval. Actual HTTP I/O is stubbed unless the `taxii`
 /// feature flag is enabled.
@@ -435,27 +430,27 @@ pub struct TaxiiClient {
 }
 
 impl TaxiiClient {
-    /// Create a new TAXII client.
+/// Create a new TAXII client.
     pub fn new(config: TaxiiClientConfig) -> Self {
         Self { config }
     }
 
-    /// Get the server URL.
+/// Get the server URL.
     pub fn server_url(&self) -> &str {
         &self.config.server_url
     }
 
-    /// Build the discovery URL: `<server>/taxii2/`
+/// Build the discovery URL:`<server>/taxii2/`
     pub fn discovery_url(&self) -> String {
         format!("{}/taxii2/", self.config.server_url.trim_end_matches('/'))
     }
 
-    /// Build the collections URL for a given API root.
+/// Build the collections URL for a given API root.
     pub fn collections_url(&self, api_root: &str) -> String {
         format!("{}/collections/", api_root.trim_end_matches('/'))
     }
 
-    /// Build the objects URL for a given API root and collection.
+/// Build the objects URL for a given API root and collection.
     pub fn objects_url(&self, api_root: &str, collection_id: &str) -> String {
         format!(
             "{}/collections/{}/objects/",
@@ -464,12 +459,12 @@ impl TaxiiClient {
         )
     }
 
-    /// Parse a TAXII envelope JSON response into STIX objects.
+/// Parse a TAXII envelope JSON response into STIX objects.
     pub fn parse_envelope(json: &str) -> Result<TaxiiEnvelope, serde_json::Error> {
         serde_json::from_str(json)
     }
 
-    /// Parse a STIX bundle JSON string.
+/// Parse a STIX bundle JSON string.
     pub fn parse_bundle(json: &str) -> Result<StixBundle, serde_json::Error> {
         serde_json::from_str(json)
     }
@@ -528,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_extract_multiple_from_compound_pattern() {
-        // Compound pattern with OR
+// Compound pattern with OR
         let pattern = "[ipv4-addr:value = '10.0.0.1'] OR [domain-name:value = 'bad.com']";
         let indicators = extract_indicators(pattern);
         assert!(indicators.len() >= 2, "Should extract both indicators: {:?}", indicators);
@@ -545,11 +540,11 @@ mod tests {
     fn test_parse_stix_bundle() {
         let json = r#"{
             "type": "bundle",
-            "id": "bundle--12345",
+            "id": "bundle --12345",
             "objects": [
                 {
                     "type": "indicator",
-                    "id": "indicator--00001",
+                    "id": "indicator --00001",
                     "pattern": "[ipv4-addr:value = '203.0.113.5']",
                     "pattern_type": "stix",
                     "indicator_types": ["malicious-activity"],
@@ -557,7 +552,7 @@ mod tests {
                 },
                 {
                     "type": "malware",
-                    "id": "malware--00001",
+                    "id": "malware --00001",
                     "name": "TestMalware",
                     "is_family": true,
                     "malware_types": ["ransomware"]
@@ -566,7 +561,7 @@ mod tests {
         }"#;
 
         let bundle: StixBundle = serde_json::from_str(json).expect("parse bundle");
-        assert_eq!(bundle.id, "bundle--12345");
+        assert_eq!(bundle.id, "bundle --12345");
         assert_eq!(bundle.objects.len(), 2);
 
         let indicators = process_bundle(&bundle);
@@ -579,7 +574,7 @@ mod tests {
     fn test_process_bundle_empty() {
         let bundle = StixBundle {
             object_type: "bundle".into(),
-            id: "bundle--empty".into(),
+            id: "bundle --empty".into(),
             objects: vec![],
         };
         let indicators = process_bundle(&bundle);
@@ -611,7 +606,7 @@ mod tests {
             "more": true,
             "next": "https://taxii.example.com/api1/collections/abc/objects/?next=page2",
             "objects": [
-                {"type": "indicator", "id": "indicator--1", "pattern": "[ipv4-addr:value = '1.2.3.4']"}
+                {"type": "indicator", "id": "indicator --1", "pattern":"[ipv4-addr:value = '1.2.3.4']"}
             ]
         }"#;
 
@@ -664,14 +659,14 @@ mod tests {
     fn test_stix_relationship_deserialization() {
         let json = r#"{
             "type": "bundle",
-            "id": "bundle--rels",
+            "id": "bundle --rels",
             "objects": [
                 {
                     "type": "relationship",
-                    "id": "relationship--001",
+                    "id": "relationship --001",
                     "relationship_type": "indicates",
-                    "source_ref": "indicator--001",
-                    "target_ref": "malware--001"
+                    "source_ref": "indicator --001",
+                    "target_ref": "malware --001"
                 }
             ]
         }"#;
@@ -689,11 +684,11 @@ mod tests {
     fn test_stix_attack_pattern() {
         let json = r#"{
             "type": "bundle",
-            "id": "bundle--ap",
+            "id": "bundle --ap",
             "objects": [
                 {
                     "type": "attack-pattern",
-                    "id": "attack-pattern--001",
+                    "id": "attack-pattern --001",
                     "name": "Spear Phishing",
                     "kill_chain_phases": [
                         {"kill_chain_name": "mitre-attack", "phase_name": "initial-access"}
@@ -723,9 +718,9 @@ mod tests {
     fn test_unknown_stix_object_handled() {
         let json = r#"{
             "type": "bundle",
-            "id": "bundle--unknown",
+            "id": "bundle --unknown",
             "objects": [
-                {"type": "campaign", "id": "campaign--001", "name": "APT28"}
+                {"type": "campaign", "id": "campaign --001", "name":"APT28"}
             ]
         }"#;
 

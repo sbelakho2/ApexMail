@@ -54,9 +54,8 @@ impl AiAssistant {
         Self
     }
 
-    /// Generate subject line suggestions for a topic with a given tone.
-    ///
-    /// `tone` can be "urgent", "friendly", "formal", "curious", "playful".
+/// Generate subject line suggestions for a topic with a given tone.
+/// `tone` can be "urgent", "friendly", "formal", "curious", "playful".
     pub fn suggest_subject_lines(&self, topic: &str, tone: &str, count: usize) -> Vec<String> {
         let templates: &[TemplateFn] = match tone {
             "urgent" => URGENT_TEMPLATES,
@@ -73,19 +72,19 @@ impl AiAssistant {
             .collect()
     }
 
-    /// Suggest improvements for a piece of email content.
+/// Suggest improvements for a piece of email content.
     pub fn improve_content(&self, text: &str) -> ContentSuggestion {
         let mut suggested = text.to_string();
         let mut improvement = ImprovementType::SubjectLine;
         let mut confidence = 0.7;
 
-        // Simple rule-based improvements
+// Simple rule-based improvements
         if !text.contains("{{name}}") && !text.contains("{name}") {
             suggested = format!("Hi {{{{name}}}}, {}", text);
             improvement = ImprovementType::Personalization;
             confidence = 0.8;
         } else if text.len() > 80 {
-            // Trim to a punchier version
+// Trim to a punchier version
             let words: Vec<&str> = text.split_whitespace().collect();
             let half = words.len() / 2;
             suggested = words[..half.max(5)].join(" ") + "...";
@@ -96,7 +95,7 @@ impl AiAssistant {
         ContentSuggestion::new(text, &suggested, improvement, confidence)
     }
 
-    /// Keyword-based sentiment analysis returning a score in \[-1.0, 1.0\].
+/// Keyword-based sentiment analysis returning a score in \[-1.0, 1.0\].
     pub fn analyze_sentiment(&self, text: &str) -> f64 {
         let lower = text.to_lowercase();
         let positive = [
@@ -121,13 +120,13 @@ impl AiAssistant {
             }
         }
 
-        // Normalise: map to [-1, 1] via tanh-like sigmoid
+// Normalise:map to [-1, 1] via tanh-like sigmoid
         let word_count = lower.split_whitespace().count().max(1) as f64;
         let normed = score / word_count.sqrt();
         normed.clamp(-1.0, 1.0)
     }
 
-    /// Summarise text to at most `max_words` words using extractive summarisation.
+/// Summarise text to at most `max_words` words using extractive summarisation.
     pub fn summarize(&self, text: &str, max_words: usize) -> String {
         if max_words == 0 {
             return String::new();
@@ -136,7 +135,7 @@ impl AiAssistant {
         if words.len() <= max_words {
             return text.to_string();
         }
-        // Pick first `max_words` words (extractive lead summary).
+// Pick first `max_words` words (extractive lead summary).
         let mut summary: String = words[..max_words].join(" ");
         if !summary.ends_with('.') {
             summary.push_str("...");
@@ -180,7 +179,7 @@ mod tests {
         let text = "The quick brown fox jumps over the lazy dog and runs away";
         let summary = a.summarize(text, 5);
         let word_count = summary.split_whitespace().count();
-        // 5 words + possible "..." appended to last word
+// 5 words + possible "..." appended to last word
         assert!(word_count <= 6, "summary has {word_count} words");
     }
 }

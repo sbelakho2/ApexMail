@@ -38,19 +38,19 @@ pub struct AppState {
 pub fn router(state: Arc<AppState>) -> Router {
     let shared = state.clone();
     Router::new()
-        // EAI
+// EAI
         .route("/eai/validate", post(eai_validate))
         .route("/eai/parse", post(eai_parse))
         .route("/eai/normalize", post(eai_normalize))
-        // Attachments
+// Attachments
         .route("/attachments/validate", post(attachments_validate))
         .route("/attachments/size-check", post(attachments_size_check))
         .route("/attachments/stats", post(attachments_stats))
-        // Calendar
+// Calendar
         .route("/calendar/invite", post(calendar_create_invite))
         .route("/calendar/parse", post(calendar_parse))
         .route("/calendar/generate-ics", post(calendar_generate_ics))
-        // Delivery
+// Delivery
         .route("/delivery/parse-response", post(delivery_parse_response))
         .route("/delivery/retry-schedule", post(delivery_retry_schedule))
         .route("/delivery/detect-loop", post(delivery_detect_loop))
@@ -64,7 +64,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(delivery_history),
         )
         .route("/delivery/greylist-check/:domain", get(delivery_greylist_check))
-        // Health
+// Health
         .route("/health", get(health))
         .route("/health/ready", get(health))
         .route("/health/live", get(health))

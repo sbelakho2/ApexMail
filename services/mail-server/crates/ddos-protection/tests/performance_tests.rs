@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// ============================================================================
-/// PERFORMANCE TESTS: Rate Limiter Throughput
+/// PERFORMANCE TESTS:Rate Limiter Throughput
 /// ============================================================================
 #[cfg(test)]
 mod rate_limiter_perf_tests {
@@ -63,7 +63,7 @@ mod rate_limiter_perf_tests {
             if bucket.try_acquire(1.0) {
                 successful += 1;
             }
-            // Simulate small time passage
+// Simulate small time passage
             bucket.tokens = (bucket.tokens + 0.001).min(bucket.max_tokens);
         }
         
@@ -78,7 +78,7 @@ mod rate_limiter_perf_tests {
     fn test_burst_handling() {
         let mut bucket = TokenBucket::new(100.0, 10.0);
         
-        // Burst of 100 requests should succeed
+// Burst of 100 requests should succeed
         let mut burst_success = 0;
         for _ in 0..100 {
             if bucket.try_acquire(1.0) {
@@ -88,13 +88,13 @@ mod rate_limiter_perf_tests {
         
         assert_eq!(burst_success, 100);
         
-        // Next request should fail (no tokens left)
+// Next request should fail (no tokens left)
         assert!(!bucket.try_acquire(1.0));
     }
 }
 
 /// ============================================================================
-/// PERFORMANCE TESTS: Hash Map Lookup Speed
+/// PERFORMANCE TESTS:Hash Map Lookup Speed
 /// ============================================================================
 #[cfg(test)]
 mod hashmap_perf_tests {
@@ -105,13 +105,13 @@ mod hashmap_perf_tests {
     fn test_ip_lookup_performance() {
         let mut map: HashMap<String, u64> = HashMap::new();
         
-        // Pre-populate with 100k IPs
+// Pre-populate with 100k IPs
         for i in 0..100_000 {
             let ip = format!("192.168.{}.{}", i / 256, i % 256);
             map.insert(ip, i as u64);
         }
         
-        // Benchmark lookups
+// Benchmark lookups
         let start = Instant::now();
         let iterations = 1_000_000;
         
@@ -124,18 +124,18 @@ mod hashmap_perf_tests {
         let lookups_per_sec = iterations as f64 / elapsed.as_secs_f64();
         
         println!("HashMap lookups: {:.0}/sec", lookups_per_sec);
-        // Relaxed threshold for debug builds; expect >100k/sec (release achieves >1M)
+// Relaxed threshold for debug builds; expect >100k/sec (release achieves >1M)
         assert!(lookups_per_sec > 100_000.0, "Should handle >100k lookups/sec");
     }
     
     #[test]
     fn test_concurrent_hashmap_simulation() {
-        // Simulate concurrent access pattern
+// Simulate concurrent access pattern
         let mut maps: Vec<HashMap<String, u64>> = (0..8)
             .map(|_| HashMap::new())
             .collect();
         
-        // Each "shard" gets its own map
+// Each "shard" gets its own map
         let start = Instant::now();
         
         for i in 0..100_000 {
@@ -153,7 +153,7 @@ mod hashmap_perf_tests {
 }
 
 /// ============================================================================
-/// PERFORMANCE TESTS: Fingerprint Hashing
+/// PERFORMANCE TESTS:Fingerprint Hashing
 /// ============================================================================
 #[cfg(test)]
 mod fingerprint_perf_tests {
@@ -176,7 +176,7 @@ mod fingerprint_perf_tests {
         let hashes_per_sec = iterations as f64 / elapsed.as_secs_f64();
         
         println!("SHA256: {:.0} hashes/sec", hashes_per_sec);
-        // Relaxed threshold for debug builds; expect >50k/sec
+// Relaxed threshold for debug builds; expect >50k/sec
         assert!(hashes_per_sec > 50_000.0, "Should handle >50k hashes/sec");
     }
     
@@ -186,7 +186,7 @@ mod fingerprint_perf_tests {
         let iterations = 100_000;
         
         for i in 0..iterations {
-            // Simulate JA4 fingerprint generation
+// Simulate JA4 fingerprint generation
             let protocol = 't';
             let version = "13";
             let sni = 'd';
@@ -213,7 +213,7 @@ mod fingerprint_perf_tests {
 }
 
 /// ============================================================================
-/// PERFORMANCE TESTS: PoW Verification
+/// PERFORMANCE TESTS:PoW Verification
 /// ============================================================================
 #[cfg(test)]
 mod pow_perf_tests {
@@ -264,7 +264,7 @@ mod pow_perf_tests {
     
     #[test]
     fn test_pow_solve_time_by_difficulty() {
-        // Measure solve times for different difficulties
+// Measure solve times for different difficulties
         let difficulties = [4, 8, 12, 16];
         
         for difficulty in difficulties {
@@ -286,7 +286,7 @@ mod pow_perf_tests {
 }
 
 /// ============================================================================
-/// PERFORMANCE TESTS: Decision Engine Latency
+/// PERFORMANCE TESTS:Decision Engine Latency
 /// ============================================================================
 #[cfg(test)]
 mod decision_latency_tests {
@@ -319,12 +319,12 @@ mod decision_latency_tests {
         }
         
         fn decide(&mut self, ip: &str) -> Decision {
-            // Check blocklist first (fast path)
+// Check blocklist first (fast path)
             if self.blocked_ips.contains_key(ip) {
                 return Decision::Block;
             }
             
-            // Check rate limit
+// Check rate limit
             let count = self.request_counts.entry(ip.to_string()).or_insert(0);
             *count += 1;
             
@@ -342,18 +342,18 @@ mod decision_latency_tests {
     fn test_decision_latency() {
         let mut engine = FastDecisionEngine::new(100);
         
-        // Pre-populate some blocked IPs
+// Pre-populate some blocked IPs
         for i in 0..1000 {
             engine.block_ip(&format!("blocked_{}", i));
         }
         
-        // Warm up
+// Warm up
         for i in 0..1000 {
             let ip = format!("warmup_{}", i);
             engine.decide(&ip);
         }
         
-        // Measure latency over many decisions
+// Measure latency over many decisions
         let start = Instant::now();
         let iterations = 1_000_000;
         
@@ -369,7 +369,7 @@ mod decision_latency_tests {
         println!("Decision latency: {}ns avg", avg_latency_ns);
         println!("Decisions/sec: {:.0}", decisions_per_sec);
         
-        // Relaxed for debug builds; expect <5µs (release achieves <1µs)
+// Relaxed for debug builds; expect <5µs (release achieves <1µs)
         assert!(avg_latency_ns < 5000, "Latency should be <5µs");
         assert!(decisions_per_sec > 100_000.0, "Should handle >100k decisions/sec");
     }
@@ -378,10 +378,10 @@ mod decision_latency_tests {
     fn test_blocked_ip_fast_path() {
         let mut engine = FastDecisionEngine::new(100);
         
-        // Block an IP
+// Block an IP
         engine.block_ip("bad_actor");
         
-        // Measure blocked IP check latency
+// Measure blocked IP check latency
         let start = Instant::now();
         let iterations = 1_000_000;
         
@@ -393,13 +393,13 @@ mod decision_latency_tests {
         let avg_latency_ns = elapsed.as_nanos() / iterations as u128;
         
         println!("Blocked IP check latency: {}ns", avg_latency_ns);
-        // Relaxed for debug builds; expect <2µs (release achieves <500ns)
+// Relaxed for debug builds; expect <2µs (release achieves <500ns)
         assert!(avg_latency_ns < 2000, "Blocked IP check should be <2µs");
     }
 }
 
 /// ============================================================================
-/// PERFORMANCE TESTS: Memory Usage
+/// PERFORMANCE TESTS:Memory Usage
 /// ============================================================================
 #[cfg(test)]
 mod memory_tests {
@@ -409,7 +409,7 @@ mod memory_tests {
     fn test_ip_entry_size() {
         let map: HashMap<String, u64> = HashMap::new();
         
-        // Estimate entry size
+// Estimate entry size
         let ip_size = std::mem::size_of::<String>(); // String metadata
         let value_size = std::mem::size_of::<u64>();
         let overhead = 8; // HashMap overhead per entry (approx)
@@ -419,7 +419,7 @@ mod memory_tests {
         println!("Estimated entry size: {} bytes", entry_size);
         println!("100k IPs would use: {} MB", entry_size * 100_000 / 1_000_000);
         
-        // Should be reasonable
+// Should be reasonable
         assert!(entry_size < 100, "Entry size should be <100 bytes");
     }
     
@@ -437,11 +437,11 @@ mod memory_tests {
         let size = std::mem::size_of::<SessionState>();
         println!("SessionState size: {} bytes", size);
         
-        // 1M sessions
+// 1M sessions
         let total_mb = size * 1_000_000 / 1_000_000;
         println!("1M sessions would use: {} MB", total_mb);
         
-        // Should be compact
+// Should be compact
         assert!(size <= 48, "SessionState should be <=48 bytes");
     }
     
@@ -458,7 +458,7 @@ mod memory_tests {
         let size = std::mem::size_of::<FingerprintEntry>();
         println!("FingerprintEntry size: {} bytes", size);
         
-        // 10k fingerprints
+// 10k fingerprints
         let total_kb = size * 10_000 / 1_000;
         println!("10k fingerprints would use: {} KB", total_kb);
         
@@ -467,7 +467,7 @@ mod memory_tests {
 }
 
 /// ============================================================================
-/// PERFORMANCE TESTS: Concurrent Request Simulation
+/// PERFORMANCE TESTS:Concurrent Request Simulation
 /// ============================================================================
 #[cfg(test)]
 mod concurrent_perf_tests {
@@ -475,7 +475,7 @@ mod concurrent_perf_tests {
     
     #[test]
     fn test_simulated_concurrent_load() {
-        // Simulate high concurrent request processing
+// Simulate high concurrent request processing
         let counters: Vec<AtomicU64> = (0..16)
             .map(|_| AtomicU64::new(0))
             .collect();
@@ -483,7 +483,7 @@ mod concurrent_perf_tests {
         let start = Instant::now();
         let iterations_per_shard = 100_000;
         
-        // Simulate sharded processing
+// Simulate sharded processing
         for shard in 0..16 {
             for _ in 0..iterations_per_shard {
                 counters[shard].fetch_add(1, Ordering::Relaxed);
@@ -505,12 +505,12 @@ mod concurrent_perf_tests {
     
     #[test]
     fn test_request_routing_overhead() {
-        // Simulate routing requests to shards
+// Simulate routing requests to shards
         let start = Instant::now();
         let iterations = 1_000_000;
         
         for i in 0..iterations {
-            // Simulate shard selection
+// Simulate shard selection
             let ip_hash = i * 31; // Simple hash
             let shard = ip_hash % 16;
             let _ = shard; // Use the shard
@@ -525,7 +525,7 @@ mod concurrent_perf_tests {
 }
 
 /// ============================================================================
-/// PERFORMANCE TESTS: Statistics Computation
+/// PERFORMANCE TESTS:Statistics Computation
 /// ============================================================================
 #[cfg(test)]
 mod stats_perf_tests {
@@ -600,7 +600,7 @@ mod stats_perf_tests {
 }
 
 /// ============================================================================
-/// PERFORMANCE TESTS: Anomaly Detection
+/// PERFORMANCE TESTS:Anomaly Detection
 /// ============================================================================
 #[cfg(test)]
 mod anomaly_perf_tests {
@@ -637,7 +637,7 @@ mod anomaly_perf_tests {
     
     #[test]
     fn test_feature_extraction_performance() {
-        // Simulate extracting features for ML
+// Simulate extracting features for ML
         struct Features {
             request_rate: f64,
             error_rate: f64,

@@ -42,11 +42,11 @@ impl TrainingManager {
         }
     }
 
-    /// Start a new training job for the given model. Returns the created job.
+/// Start a new training job for the given model. Returns the created job.
     pub fn start_job(&self, model_id: &str, config: &TrainingConfig) -> TrainingJob {
         let mut job = TrainingJob::new(model_id, config.epochs);
         job.status = JobStatus::Running;
-        // Simulate immediate "training" with a synthetic loss
+// Simulate immediate "training" with a synthetic loss
         job.loss = 1.0 / (config.epochs as f64 + 1.0);
         job.completed_at = Some(Utc::now());
         job.status = JobStatus::Completed;
@@ -56,7 +56,7 @@ impl TrainingManager {
         ret
     }
 
-    /// Retrieve a training job by ID.
+/// Retrieve a training job by ID.
     pub fn get_job(&self, id: &str) -> Result<TrainingJob, AiError> {
         self.jobs
             .read()
@@ -66,12 +66,12 @@ impl TrainingManager {
             .ok_or_else(|| AiError::JobNotFound(id.to_string()))
     }
 
-    /// List all training jobs.
+/// List all training jobs.
     pub fn list_jobs(&self) -> Vec<TrainingJob> {
         self.jobs.read().clone()
     }
 
-    /// Cancel a running or queued training job.
+/// Cancel a running or queued training job.
     pub fn cancel_job(&self, id: &str) -> Result<TrainingJob, AiError> {
         let mut jobs = self.jobs.write();
         let job = jobs
@@ -92,9 +92,8 @@ impl TrainingManager {
         }
     }
 
-    /// Evaluate a model by comparing predicted labels to ground truth.
-    ///
-    /// Binary classification: predictions and actuals are 0.0 or 1.0.
+/// Evaluate a model by comparing predicted labels to ground truth.
+/// Binary classification:predictions and actuals are 0.0 or 1.0.
     pub fn evaluate_model(&self, predictions: &[f64], actuals: &[f64]) -> Result<EvalMetrics, AiError> {
         if predictions.len() != actuals.len() || predictions.is_empty() {
             return Err(AiError::InvalidInput(
@@ -170,13 +169,13 @@ mod tests {
     #[test]
     fn test_evaluate_model_imperfect() {
         let mgr = TrainingManager::new();
-        // 3 correct out of 4
+// 3 correct out of 4
         let preds = vec![1.0, 0.0, 1.0, 1.0];
         let actuals = vec![1.0, 0.0, 1.0, 0.0];
         let metrics = mgr.evaluate_model(&preds, &actuals).unwrap();
         assert!((metrics.accuracy - 0.75).abs() < f64::EPSILON);
-        // TP=2 (idx 0,2), FP=1 (idx 3), FN=0, TN=1 (idx 1)
-        // precision = 2/3, recall = 2/2 = 1.0, f1 = 2*(2/3)*1.0 / (2/3+1.0)
+// TP=2 (idx 0,2), FP=1 (idx 3), FN=0, TN=1 (idx 1)
+// precision = 2/3, recall = 2/2 = 1.0, f1 = 2*(2/3)*1.0 / (2/3+1.0)
         let expected_precision = 2.0 / 3.0;
         assert!((metrics.precision - expected_precision).abs() < 1e-9);
         assert!((metrics.recall - 1.0).abs() < f64::EPSILON);

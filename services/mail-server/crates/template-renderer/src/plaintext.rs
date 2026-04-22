@@ -12,7 +12,7 @@ static BLOCK_TAGS: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"(?i)</?(p|div|br|h[1-6]|li|tr|table|hr|blockquote)\b[^>]*>").ok()
 });
 
-// #202: Use (?is) flags so `.*?` can match across line breaks in multi-line <a> tags
+// #202:Use (?is) flags so `.*?` can match across line breaks in multi-line <a> tags
 static LINK_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']*)["'][^>]*>(.*?)</a>"#).ok()
 });
@@ -43,12 +43,12 @@ static HTML_ENTITY_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 pub fn html_to_plaintext(html: &str) -> String {
     let mut text = html.to_string();
 
-    // 1. Remove style/script blocks entirely
+// 1. Remove style/script blocks entirely
     if let Some(style_script_re) = STYLE_SCRIPT_RE.as_ref() {
         text = style_script_re.replace_all(&text, "").into_owned();
     }
 
-    // 2. Convert links to "text (url)" format
+// 2. Convert links to "text (url)" format
     if let Some(link_re) = LINK_RE.as_ref() {
         text = link_re
             .replace_all(&text, |caps: &regex::Captures| {
@@ -69,20 +69,20 @@ pub fn html_to_plaintext(html: &str) -> String {
             .into_owned();
     }
 
-    // 3. Convert block-level tags to newlines
+// 3. Convert block-level tags to newlines
     if let Some(block_tags) = BLOCK_TAGS.as_ref() {
         text = block_tags.replace_all(&text, "\n").into_owned();
     }
 
-    // 4. Strip all remaining HTML tags
+// 4. Strip all remaining HTML tags
     if let Some(all_tags_re) = ALL_TAGS_RE.as_ref() {
         text = all_tags_re.replace_all(&text, "").into_owned();
     }
 
-    // 5. Decode HTML entities
+// 5. Decode HTML entities
     text = decode_entities(&text);
 
-    // 6. Normalize whitespace
+// 6. Normalize whitespace
     if let Some(multi_space_re) = MULTI_SPACE_RE.as_ref() {
         text = multi_space_re.replace_all(&text, " ").into_owned();
     }
@@ -90,7 +90,7 @@ pub fn html_to_plaintext(html: &str) -> String {
         text = multi_newline_re.replace_all(&text, "\n\n").into_owned();
     }
 
-    // 7. Trim lines and overall
+// 7. Trim lines and overall
     text = text
         .lines()
         .map(|l| l.trim())

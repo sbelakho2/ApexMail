@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::config::VolumeAllocationMode;
 use crate::types::*;
 
-/// Sub-Accounts Service: agency/reseller sub-accounts, volume allocation, API keys
+/// Sub-Accounts Service:agency/reseller sub-accounts, volume allocation, API keys
 pub struct SubAccountService {
     db: PgPool,
     max_sub_accounts: i32,
@@ -18,13 +18,13 @@ impl SubAccountService {
         Self { db, max_sub_accounts, volume_allocation_mode }
     }
 
-    /// Create a sub-account
+/// Create a sub-account
     pub async fn create(
         &self, parent_id: Uuid, name: &str, email: Option<&str>,
         domain: Option<&str>, plan: Option<&str>, volume_limit: Option<i64>,
         inherit_parent_settings: bool,
     ) -> Result<ApiResult<SubAccount>, String> {
-        // Check sub-account limit
+// Check sub-account limit
         let count: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM ent_sub_accounts WHERE parent_id = $1"
         )
@@ -56,7 +56,7 @@ impl SubAccountService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get a sub-account by ID
+/// Get a sub-account by ID
     pub async fn get(&self, id: Uuid) -> Result<ApiResult<SubAccount>, String> {
         let row = sqlx::query_as::<_, SubAccount>(
             "SELECT * FROM ent_sub_accounts WHERE id = $1"
@@ -72,7 +72,7 @@ impl SubAccountService {
         }
     }
 
-    /// List sub-accounts for a parent
+/// List sub-accounts for a parent
     pub async fn list(
         &self, parent_id: Uuid, status: Option<&str>, limit: i64, offset: i64,
     ) -> Result<ApiResult<Vec<SubAccount>>, String> {
@@ -95,7 +95,7 @@ impl SubAccountService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Update a sub-account
+/// Update a sub-account
     pub async fn update(
         &self, id: Uuid, name: Option<&str>, email: Option<&str>,
         volume_limit: Option<i64>, settings: Option<serde_json::Value>,
@@ -120,7 +120,7 @@ impl SubAccountService {
         }
     }
 
-    /// Suspend a sub-account
+/// Suspend a sub-account
     pub async fn suspend(&self, id: Uuid, reason: Option<&str>) -> Result<ApiResult<SubAccount>, String> {
         let row = sqlx::query_as::<_, SubAccount>(
             "UPDATE ent_sub_accounts SET status = 'suspended', updated_at = NOW() WHERE id = $1 RETURNING *"
@@ -139,7 +139,7 @@ impl SubAccountService {
         }
     }
 
-    /// Delete a sub-account
+/// Delete a sub-account
     pub async fn delete(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let result = sqlx::query("DELETE FROM ent_sub_accounts WHERE id = $1")
             .bind(id)
@@ -154,7 +154,7 @@ impl SubAccountService {
         }
     }
 
-    /// Get aggregate stats for all sub-accounts of a parent
+/// Get aggregate stats for all sub-accounts of a parent
     pub async fn get_stats(&self, parent_id: Uuid) -> Result<ApiResult<SubAccountStats>, String> {
         let row: (i64, i64, Option<i64>, Option<i64>) = sqlx::query_as(
             "SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'active'),
@@ -174,7 +174,7 @@ impl SubAccountService {
         }))
     }
 
-    /// Create an API key for a sub-account
+/// Create an API key for a sub-account
     pub async fn create_api_key(
         &self, sub_account_id: Uuid, name: &str, permissions: Option<Vec<String>>,
         rate_limit: Option<i32>,
@@ -196,7 +196,7 @@ impl SubAccountService {
         .map_err(|e| format!("Create API key: {e}"))?;
 
         info!(sub_account_id = %sub_account_id, "API key created");
-        // Return the raw key only once — it cannot be retrieved later
+// Return the raw key only once — it cannot be retrieved later
         Ok(ApiResult::ok(serde_json::json!({
             "id": id,
             "key": raw_key,
@@ -205,33 +205,33 @@ impl SubAccountService {
         })))
     }
 
-    /// Check volume allocation for a sub-account
+/// Check volume allocation for a sub-account
     pub fn check_volume_allowed(&self, volume_used: i64, volume_limit: Option<i64>, parent_headroom: i64) -> bool {
         check_volume_logic(&self.volume_allocation_mode, volume_used, volume_limit, parent_headroom)
     }
 }
 
-/// Pure function: volume check logic (extracted for testability)
-/// #265-266: Fixed to properly use parent_headroom and not always return true for shared mode
+/// Pure function:volume check logic (extracted for testability)
+/// #265-266:Fixed to properly use parent_headroom and not always return true for shared mode
 pub fn check_volume_logic(
     mode: &VolumeAllocationMode, volume_used: i64, volume_limit: Option<i64>, parent_headroom: i64,
 ) -> bool {
     match mode {
         VolumeAllocationMode::Fixed => {
-            // Fixed mode: strict per-account limit enforcement
+// Fixed mode:strict per-account limit enforcement
             volume_limit.map(|l| volume_used < l).unwrap_or(true)
         }
         VolumeAllocationMode::Shared => {
-            // #266: Shared mode should check parent's remaining capacity
-            // Don't always return true - respect the parent's headroom
+// #266:Shared mode should check parent's remaining capacity
+// Don't always return true - respect the parent's headroom
             parent_headroom > 0
         }
         VolumeAllocationMode::Burst => {
-            // #265: Burst mode: allow up to 120% of limit if parent has headroom
+// #265:Burst mode:allow up to 120% of limit if parent has headroom
             volume_limit.map(|l| {
                 let burst_limit = (l as f64 * 1.2) as i64;
                 let within_burst = volume_used < burst_limit;
-                // Only allow burst if parent has headroom to cover the extra usage
+// Only allow burst if parent has headroom to cover the extra usage
                 let burst_amount = (volume_used - l).max(0);
                 within_burst && parent_headroom >= burst_amount
             }).unwrap_or(parent_headroom > 0)

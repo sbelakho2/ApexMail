@@ -109,16 +109,16 @@ pub struct Template {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderOptions {
-    /// Template variables / props
+/// Template variables / props
     #[serde(default)]
     pub props: serde_json::Value,
-    /// Whether to generate plaintext fallback
+/// Whether to generate plaintext fallback
     #[serde(default = "default_true")]
     pub generate_plaintext: bool,
-    /// Whether to minify HTML output
+/// Whether to minify HTML output
     #[serde(default)]
     pub minify: bool,
-    /// Subject line (may contain {{ variable }} placeholders)
+/// Subject line (may contain {{ variable }} placeholders)
     pub subject: Option<String>,
 }
 

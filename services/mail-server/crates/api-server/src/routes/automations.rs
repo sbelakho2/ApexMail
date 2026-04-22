@@ -127,7 +127,6 @@ async fn list_automations(
     )
     .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 100))
-    // Fix #58: Clamp offset to valid range to prevent DB scan issues.
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
@@ -153,7 +152,7 @@ async fn update_automation(
 ) -> Result<Json<AutomationResponse>, ApiError> {
     require_scopes(&auth, &["automations:write"])?;
 
-    let existing = fetch_automation(&state, &auth.tenant_id, id.clone()).await?;;
+    let existing = fetch_automation(&state, &auth.tenant_id, id.clone()).await?;
 
     let name = body.name.unwrap_or(existing.name);
     let trigger = body.trigger.unwrap_or(existing.trigger_config);
@@ -307,7 +306,7 @@ mod tests {
     #[test]
     fn test_automation_response_serialisation() {
         let resp = AutomationResponse {
-            id: String::nil(),
+            id: String::new(),
             name: "Follow-up".into(),
             trigger: serde_json::json!({"type": "event"}),
             actions: serde_json::json!([]),

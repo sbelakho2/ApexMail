@@ -7,9 +7,9 @@ use crate::types::Job;
 
 /// Weighted fair scheduler that limits per-tenant share.
 pub struct FairQueueScheduler {
-    /// Maximum share of total processing a single tenant can use (0.0-1.0)
+/// Maximum share of total processing a single tenant can use (0.0-1.0)
     max_tenant_share: f64,
-    /// Maximum tracked tenant count (bounded to prevent memory issues)
+/// Maximum tracked tenant count (bounded to prevent memory issues)
     max_tracked_tenants: usize,
 }
 
@@ -21,13 +21,13 @@ impl FairQueueScheduler {
         }
     }
 
-    /// Default scheduler with 30% max share per tenant.
+/// Default scheduler with 30% max share per tenant.
     pub fn default_scheduler() -> Self {
         Self::new(0.30, 10_000)
     }
 
-    /// Filter a batch of dequeued jobs to enforce fair scheduling.
-    /// Returns the jobs that should be processed, respecting tenant limits.
+/// Filter a batch of dequeued jobs to enforce fair scheduling.
+/// Returns the jobs that should be processed, respecting tenant limits.
     pub fn schedule(&self, jobs: Vec<Job>, batch_size: usize) -> Vec<Job> {
         if jobs.is_empty() || batch_size == 0 {
             return vec![];
@@ -44,7 +44,7 @@ impl FairQueueScheduler {
                 break;
             }
 
-            // Bound tracked tenants
+// Bound tracked tenants
             if tenant_counts.len() >= self.max_tracked_tenants
                 && !tenant_counts.contains_key(&job.tenant_id)
             {
@@ -61,7 +61,7 @@ impl FairQueueScheduler {
         selected
     }
 
-    /// Calculate tenant distribution for monitoring.
+/// Calculate tenant distribution for monitoring.
     pub fn tenant_distribution(&self, jobs: &[Job]) -> HashMap<Uuid, usize> {
         let mut dist: HashMap<Uuid, usize> = HashMap::new();
         for job in jobs {
@@ -105,7 +105,7 @@ mod tests {
         let tenant_b = Uuid::new_v4();
 
         let mut jobs = Vec::new();
-        // 8 jobs from tenant A, 2 from tenant B
+// 8 jobs from tenant A, 2 from tenant B
         for _ in 0..8 {
             jobs.push(make_job(tenant_a));
         }
@@ -116,9 +116,9 @@ mod tests {
         let selected = scheduler.schedule(jobs, 10);
         let dist = scheduler.tenant_distribution(&selected);
 
-        // Tenant A should be capped at ~30% of 10 = 3
+// Tenant A should be capped at ~30% of 10 = 3
         assert!(*dist.get(&tenant_a).unwrap_or(&0) <= 3);
-        // Tenant B should get all 2
+// Tenant B should get all 2
         assert_eq!(*dist.get(&tenant_b).unwrap_or(&0), 2);
     }
 
@@ -144,7 +144,7 @@ mod tests {
         let jobs: Vec<Job> = (0..20).map(|_| make_job(tenant)).collect();
         let selected = scheduler.schedule(jobs, 10);
 
-        // Should be capped at 50% of 10 = 5
+// Should be capped at 50% of 10 = 5
         assert!(selected.len() <= 5);
     }
 
@@ -163,7 +163,7 @@ mod tests {
         let selected = scheduler.schedule(jobs, 15);
         let dist = scheduler.tenant_distribution(&selected);
 
-        // Each tenant should get at most 5 (30% of 15 = 4.5 → 5)
+// Each tenant should get at most 5 (30% of 15 = 4.5 → 5)
         for (_tenant, count) in &dist {
             assert!(*count <= 5);
         }

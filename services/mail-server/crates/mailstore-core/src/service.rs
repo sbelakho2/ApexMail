@@ -207,7 +207,7 @@ impl MailstoreServiceImpl {
 impl MailstoreService for MailstoreServiceImpl {
     type SubscribeMailboxStream = Pin<Box<dyn futures::Stream<Item = Result<MailboxEvent, Status>> + Send>>;
     
-    /// Store a new message
+/// Store a new message
     async fn store_message(
         &self,
         request: Request<StoreMessageRequest>,
@@ -273,7 +273,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// Get a message by UID
+/// Get a message by UID
     async fn get_message(
         &self,
         request: Request<GetMessageRequest>,
@@ -304,7 +304,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// List messages in a mailbox
+/// List messages in a mailbox
     async fn list_messages(
         &self,
         request: Request<ListMessagesRequest>,
@@ -354,7 +354,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// Search messages
+/// Search messages
     async fn search_messages(
         &self,
         request: Request<SearchMessagesRequest>,
@@ -392,7 +392,7 @@ impl MailstoreService for MailstoreServiceImpl {
         Ok(Response::new(SearchMessagesResponse { messages: metas, total }))
     }
     
-    /// Set flags on messages
+/// Set flags on messages
     async fn set_flags(
         &self,
         request: Request<SetFlagsRequest>,
@@ -450,7 +450,7 @@ impl MailstoreService for MailstoreServiceImpl {
         Ok(Response::new(SetFlagsResponse { updated_count: updated }))
     }
     
-    /// Get flags for messages
+/// Get flags for messages
     async fn get_flags(
         &self,
         request: Request<GetFlagsRequest>,
@@ -482,7 +482,7 @@ impl MailstoreService for MailstoreServiceImpl {
         Ok(Response::new(GetFlagsResponse { flags: flags_map }))
     }
     
-    /// Move messages to another mailbox
+/// Move messages to another mailbox
     async fn move_message(
         &self,
         request: Request<MoveMessageRequest>,
@@ -531,7 +531,7 @@ impl MailstoreService for MailstoreServiceImpl {
         Ok(Response::new(MoveMessageResponse { uid_mapping }))
     }
     
-    /// Copy messages to another mailbox
+/// Copy messages to another mailbox
     async fn copy_message(
         &self,
         request: Request<CopyMessageRequest>,
@@ -584,7 +584,7 @@ impl MailstoreService for MailstoreServiceImpl {
         Ok(Response::new(CopyMessageResponse { uid_mapping }))
     }
     
-    /// Create a mailbox
+/// Create a mailbox
     async fn create_mailbox(
         &self,
         request: Request<CreateMailboxRequest>,
@@ -636,7 +636,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// Delete a mailbox
+/// Delete a mailbox
     async fn delete_mailbox(
         &self,
         request: Request<DeleteMailboxRequest>,
@@ -682,7 +682,7 @@ impl MailstoreService for MailstoreServiceImpl {
         Ok(Response::new(DeleteMailboxResponse { success: true }))
     }
     
-    /// List mailboxes for an account
+/// List mailboxes for an account
     async fn list_mailboxes(
         &self,
         request: Request<ListMailboxesRequest>,
@@ -722,7 +722,7 @@ impl MailstoreService for MailstoreServiceImpl {
         Ok(Response::new(ListMailboxesResponse { mailboxes }))
     }
     
-    /// Get mailbox status
+/// Get mailbox status
     async fn get_mailbox_status(
         &self,
         request: Request<GetMailboxStatusRequest>,
@@ -741,7 +741,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// Expunge deleted messages
+/// Expunge deleted messages
     async fn expunge(
         &self,
         request: Request<ExpungeRequest>,
@@ -773,7 +773,7 @@ impl MailstoreService for MailstoreServiceImpl {
         Ok(Response::new(ExpungeResponse { expunged_uids }))
     }
     
-    /// Create a new account
+/// Create a new account
     async fn create_account(
         &self,
         request: Request<CreateAccountRequest>,
@@ -815,7 +815,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// Get account details
+/// Get account details
     async fn get_account(
         &self,
         request: Request<GetAccountRequest>,
@@ -849,7 +849,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// Authenticate an account
+/// Authenticate an account
     async fn authenticate_account(
         &self,
         request: Request<AuthenticateRequest>,
@@ -912,7 +912,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// Get account quota
+/// Get account quota
     async fn get_quota(
         &self,
         request: Request<GetQuotaRequest>,
@@ -948,7 +948,7 @@ impl MailstoreService for MailstoreServiceImpl {
         }))
     }
     
-    /// Subscribe to mailbox events (streaming)
+/// Subscribe to mailbox events (streaming)
     async fn subscribe_mailbox(
         &self,
         request: Request<SubscribeMailboxRequest>,

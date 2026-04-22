@@ -24,7 +24,7 @@ pub struct GovernorLimiter {
 }
 
 impl GovernorLimiter {
-    /// Create a new limiter from config.
+/// Create a new limiter from config.
     pub fn new(config: &RateLimitConfig) -> Self {
         let burst = config.effective_burst();
         let quota = Quota::per_second(config.requests_per_second).allow_burst(burst);
@@ -37,19 +37,19 @@ impl GovernorLimiter {
         }
     }
 
-    /// Create a limiter from raw parameters.
+/// Create a limiter from raw parameters.
     pub fn from_params(rps: u32, burst: u32) -> Self {
         let config = RateLimitConfig::new(rps).with_burst(burst);
         Self::new(&config)
     }
 
-    /// Check if a single request is allowed.
-    /// #229: Note: `remaining` is approximate (burst capacity) as Governor doesn't expose actual count
+/// Check if a single request is allowed.
+/// #229:Note:`remaining` is approximate (burst capacity) as Governor doesn't expose actual count
     pub fn check(&self) -> Decision {
         match self.limiter.check() {
             Ok(()) => {
-                // Governor doesn't expose remaining directly; approximate from burst.
-                // For accurate remaining counts, use sliding_window limiter instead.
+// Governor doesn't expose remaining directly; approximate from burst.
+// For accurate remaining counts, use sliding_window limiter instead.
                 Decision::Allowed {
                     remaining: self.burst.get() as u64,
                 }
@@ -65,7 +65,7 @@ impl GovernorLimiter {
         }
     }
 
-    /// Check if `n` requests are allowed (batch check).
+/// Check if `n` requests are allowed (batch check).
     pub fn check_n(&self, n: u32) -> Decision {
         match NonZeroU32::new(n) {
             None => Decision::Allowed {
@@ -85,12 +85,12 @@ impl GovernorLimiter {
         }
     }
 
-    /// Async check that waits until a cell is available.
+/// Async check that waits until a cell is available.
     pub async fn until_ready(&self) {
         self.limiter.until_ready().await;
     }
 
-    /// Burst capacity.
+/// Burst capacity.
     pub fn burst_size(&self) -> u32 {
         self.burst.get()
     }
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn test_governor_allows_burst() {
         let limiter = GovernorLimiter::from_params(10, 5);
-        // First 5 should be allowed (burst)
+// First 5 should be allowed (burst)
         for _ in 0..5 {
             assert!(limiter.check().is_allowed());
         }
@@ -116,7 +116,7 @@ mod tests {
     fn test_governor_denies_after_burst() {
         let limiter = GovernorLimiter::from_params(1, 1);
         assert!(limiter.check().is_allowed());
-        // Second request should be denied (only 1 burst, 1/sec refill)
+// Second request should be denied (only 1 burst, 1/sec refill)
         let d = limiter.check();
         assert!(d.is_denied());
     }
@@ -137,7 +137,7 @@ mod tests {
         let limiter = GovernorLimiter::new(&config);
         limiter.check(); // consume burst
         if let Decision::Denied { retry_after } = limiter.check() {
-            // Should include jitter
+// Should include jitter
             assert!(retry_after >= Duration::from_millis(500));
         }
     }
@@ -164,7 +164,7 @@ mod tests {
     async fn test_governor_until_ready() {
         let limiter = GovernorLimiter::from_params(1000, 1);
         limiter.check(); // consume one
-        // should complete quickly at 1000 rps
+// should complete quickly at 1000 rps
         let result = tokio::time::timeout(Duration::from_millis(50), limiter.until_ready()).await;
         assert!(result.is_ok(), "Should complete within 50ms");
     }

@@ -1,6 +1,6 @@
 //! Lead discovery endpoint — sources and discovered leads.
 //!
-//! Migrated from: apps/control-plane/src/app/api/leads/discovery/route.ts (83 lines)
+//! Migrated from:apps/control-plane/src/app/api/leads/discovery/route.ts (83 lines)
 
 use axum::extract::State;
 use axum::routing::get;
@@ -53,7 +53,7 @@ async fn get_discovery(
 ) -> Result<Json<DiscoveryResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // Check table exists
+// Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class WHERE relname = 'sales_leads')",
     )
@@ -66,7 +66,7 @@ async fn get_discovery(
         return Ok(Json(DiscoveryResponse { sources: vec![], leads: vec![] }));
     }
 
-    // Sources breakdown from sales_leads.source
+// Sources breakdown from sales_leads.source
     let source_rows = sqlx::query_as::<_, (Option<String>, i64)>(
         "SELECT source, COUNT(*) as cnt FROM sales_leads GROUP BY source ORDER BY cnt DESC",
     )
@@ -100,7 +100,7 @@ async fn get_discovery(
         })
         .collect();
 
-    // Recent leads
+// Recent leads
     let lead_rows = sqlx::query_as::<_, (
         String, Option<String>, Option<String>, Option<String>,
         Option<String>, Option<String>, chrono::DateTime<chrono::Utc>,

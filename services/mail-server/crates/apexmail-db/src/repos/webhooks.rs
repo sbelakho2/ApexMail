@@ -9,7 +9,7 @@ use crate::types::Webhook;
 pub struct WebhooksRepo;
 
 impl WebhooksRepo {
-    /// Create a new webhook.
+/// Create a new webhook.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -31,7 +31,7 @@ impl WebhooksRepo {
         .await
     }
 
-    /// Find a webhook by ID.
+/// Find a webhook by ID.
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -46,8 +46,8 @@ impl WebhooksRepo {
         .await
     }
 
-    /// List webhooks for a tenant with pagination.
-    /// #225: Added limit/offset parameters
+/// List webhooks for a tenant with pagination.
+/// #225:Added limit/offset parameters
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -66,7 +66,7 @@ impl WebhooksRepo {
         .await
     }
 
-    /// Update a webhook.
+/// Update a webhook.
     pub async fn update(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -88,7 +88,7 @@ impl WebhooksRepo {
         .await
     }
 
-    /// Delete a webhook.
+/// Delete a webhook.
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM webhooks WHERE id = $1 AND tenant_id = $2")
             .bind(id)
@@ -98,7 +98,7 @@ impl WebhooksRepo {
         Ok(result.rows_affected() > 0)
     }
 
-    /// List all webhooks subscribed to a specific event type.
+/// List all webhooks subscribed to a specific event type.
     pub async fn list_by_event_type(
         pool: &PgPool,
         tenant_id: Uuid,

@@ -1,7 +1,7 @@
 //! Unified API error type that serialises to a consistent JSON envelope.
 //!
 //! ```json
-//! {"error": {"code": "NOT_FOUND", "message": "Resource not found"}}
+//! {"error":{"code":"NOT_FOUND", "message":"Resource not found"}}
 //! ```
 
 use axum::http::StatusCode;

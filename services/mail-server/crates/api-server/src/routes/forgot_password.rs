@@ -1,6 +1,6 @@
 //! Forgot-password endpoint.
 //!
-//! Migrated from: apps/web/src/app/api/auth/forgot-password/route.ts
+//! Migrated from:apps/web/src/app/api/auth/forgot-password/route.ts
 //! Validates email, rate-limits by IP, then delegates to password reset logic.
 
 use super::helpers::html_escape;
@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+
+const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", post(forgot_password))
@@ -36,13 +38,13 @@ async fn forgot_password(
     headers: HeaderMap,
     Json(body): Json<ForgotPasswordRequest>,
 ) -> Result<Json<ForgotPasswordResponse>, ApiError> {
-    // Validate email
+// Validate email
     let email = body.email.trim().to_lowercase();
     if email.is_empty() || email.len() > 254 || !email.contains('@') {
         return Err(ApiError::Validation(vec!["Invalid email address.".into()]));
     }
 
-    // Rate-limit by client IP using Redis
+// Rate-limit by client IP using Redis
     let client_ip = extract_client_ip(&headers)
         .unwrap_or_else(|| "unknown".into());
 
@@ -58,7 +60,7 @@ async fn forgot_password(
             .unwrap_or(1);
 
         if count == 1 {
-            // Set expiry on first request in window
+// Set expiry on first request in window
             let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
                 .arg(&rate_key)
                 .arg(window_secs)
@@ -71,8 +73,8 @@ async fn forgot_password(
         }
     }
 
-    // Look up user — always return success to avoid email enumeration
-    let user: Option<(uuid::Uuid, String)> = sqlx::query_as(
+// Look up user — always return success to avoid email enumeration
+    let user: Option<(String, String)> = sqlx::query_as(
         "SELECT id, email FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1",
     )
     .bind(&email)
@@ -80,11 +82,11 @@ async fn forgot_password(
     .await?;
 
     if let Some((user_id, _user_email)) = user {
-        // Generate password reset token
+// Generate password reset token
         let token = apexmail_lib::id::generate_verification_token();
         let expires = chrono::Utc::now() + chrono::Duration::hours(1);
 
-        // Store reset token in user metadata
+// Store reset token in user metadata
         sqlx::query(
             "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2",
         )
@@ -92,7 +94,7 @@ async fn forgot_password(
             "password_reset_token": token,
             "password_reset_expires": expires.to_rfc3339(),
         }))
-        .bind(user_id)
+        .bind(&user_id)
         .execute(&state.db)
         .await?;
 
@@ -101,15 +103,15 @@ async fn forgot_password(
             "Password reset token generated"
         );
 
-        // Enqueue the password reset email into the messages table so the
-        // MTA worker picks it up for delivery.
+// Enqueue the password reset email into the messages table so the
+// MTA worker picks it up for delivery.
         let encoded_token = percent_encode_component(&token);
         let encoded_email_param = percent_encode_component(&email);
         let reset_link = format!(
             "{}/reset-password?token={}&email={}",
             state.config.base_url, encoded_token, encoded_email_param,
         );
-        let msg_id = uuid::Uuid::new_v4();
+        let msg_id = apexmail_lib::id::generate_id("msg", 22);
         let safe_email = html_escape(&email);
         let safe_link = html_escape(&reset_link);
         let html_body = format!(
@@ -127,16 +129,12 @@ async fn forgot_password(
             "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee",
         );
 
-        // System tenant UUID (well-known) for internal transactional mail
-        let system_tenant_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
-            .unwrap_or_else(|_| uuid::Uuid::nil());
-
         sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at)
              VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
         )
-        .bind(msg_id)
-        .bind(system_tenant_id)
+        .bind(&msg_id)
+        .bind(SYSTEM_TENANT_ID)
         .bind("noreply@apexmail.ee")
         .bind(serde_json::json!([email]))
         .bind("Reset your ApexMail password")
@@ -157,7 +155,7 @@ async fn forgot_password(
         );
     }
 
-    // Always return success to prevent email enumeration
+// Always return success to prevent email enumeration
     Ok(Json(ForgotPasswordResponse { success: true }))
 }
 
@@ -184,7 +182,7 @@ fn percent_encode_component(input: &str) -> String {
 const HEX: [u8; 16] = *b"0123456789ABCDEF";
 
 fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    // Check X-Forwarded-For first
+// Check X-Forwarded-For first
     if let Some(xff) = headers.get("x-forwarded-for") {
         if let Ok(val) = xff.to_str() {
             if let Some(first) = val.split(',').next() {
@@ -196,7 +194,7 @@ fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
         }
     }
 
-    // Check X-Real-IP
+// Check X-Real-IP
     if let Some(real_ip) = headers.get("x-real-ip") {
         if let Ok(val) = real_ip.to_str() {
             let ip = val.trim();

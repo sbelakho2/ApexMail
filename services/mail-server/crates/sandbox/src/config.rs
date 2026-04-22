@@ -6,40 +6,40 @@ use std::collections::HashSet;
 /// Sandbox configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
-    /// Maximum file size in bytes (default: 25 MB)
+/// Maximum file size in bytes (default:25 MB)
     pub max_file_size: u64,
 
-    /// Maximum nesting depth for archives (zip bomb protection)
+/// Maximum nesting depth for archives (zip bomb protection)
     pub max_nesting_depth: u32,
 
-    /// Maximum total extracted size from archives (decompression bomb protection)
+/// Maximum total extracted size from archives (decompression bomb protection)
     pub max_total_extracted_size: u64,
 
-    /// Maximum number of files inside an archive
+/// Maximum number of files inside an archive
     pub max_archive_entries: u32,
 
-    /// Dangerous file extensions that trigger elevated analysis
+/// Dangerous file extensions that trigger elevated analysis
     pub dangerous_extensions: HashSet<String>,
 
-    /// Blocked file extensions (always reject)
+/// Blocked file extensions (always reject)
     pub blocked_extensions: HashSet<String>,
 
-    /// Blocked MIME types (always reject)
+/// Blocked MIME types (always reject)
     pub blocked_mime_types: HashSet<String>,
 
-    /// Score threshold for flagging as suspicious (default: 5.0)
+/// Score threshold for flagging as suspicious (default:5.0)
     pub suspicious_threshold: f64,
 
-    /// Score threshold for rejecting (default: 10.0)
+/// Score threshold for rejecting (default:10.0)
     pub reject_threshold: f64,
 
-    /// Whether to analyze embedded OLE/macro content
+/// Whether to analyze embedded OLE/macro content
     pub analyze_macros: bool,
 
-    /// Whether to analyze embedded URLs in documents
+/// Whether to analyze embedded URLs in documents
     pub analyze_embedded_urls: bool,
 
-    /// Analysis timeout in seconds
+/// Analysis timeout in seconds
     pub analysis_timeout_secs: u64,
 }
 

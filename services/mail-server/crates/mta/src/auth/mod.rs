@@ -1,4 +1,4 @@
-//! Email authentication: SPF, DKIM, DMARC, ARC, BIMI, DANE, MTA‑STS.
+//! Email authentication:SPF, DKIM, DMARC, ARC, BIMI, DANE, MTA‑STS.
 
 pub mod arc;
 pub mod bimi;

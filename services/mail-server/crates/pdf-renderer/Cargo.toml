@@ -41,6 +41,7 @@ metrics-exporter-prometheus.workspace = true
 # Utils
 chrono.workspace = true
 uuid.workspace = true
+base64.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 bytes.workspace = true

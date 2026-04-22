@@ -186,6 +186,7 @@ mod tests {
             embedding_service: EmbeddingService::new(config.inference.clone()).unwrap(),
             vector_store: VectorStore::new(384, 1000, 900),
             config,
+            service_token: "test-key".into(),
         });
         let _router = router(state);
     }

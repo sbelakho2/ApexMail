@@ -1,7 +1,7 @@
 //! Health-check and readiness-probe endpoints.
 //!
 //! GET `/health` — liveness probe; returns 200 normally, 503 when shutting down.
-//! GET `/ready`  — readiness probe; checks DB + Redis connectivity in parallel.
+//! GET `/ready` — readiness probe; checks DB + Redis connectivity in parallel.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -15,9 +15,9 @@ use tracing::error;
 
 use crate::state::AppState;
 
-/// Set to `true` when SIGTERM/SIGINT is received.  The `/health` endpoint
+/// Set to `true` when SIGTERM/SIGINT is received. The `/health` endpoint
 /// returns 503 once this flag is set, signalling to the load-balancer that
-/// the pod should no longer receive new connections (FIX-500-354).
+/// the pod should no longer receive new connections (-500-354).
 pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 pub async fn handle_health() -> Response {
@@ -32,7 +32,6 @@ pub async fn handle_health() -> Response {
 }
 
 pub async fn handle_ready(State(state): State<AppState>) -> Response {
-    // FIX-078: Parallel health checks — DB and Redis are independent.
     let db_check = sqlx::query("SELECT 1").execute(&state.db);
     let redis_check = ping_redis(state.redis.clone());
 

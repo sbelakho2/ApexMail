@@ -1,7 +1,6 @@
 //! Triple-depth test suite for comprehensive edge case coverage
 //!
-//! This test suite covers:
-//! - CRDT arithmetic overflow protection
+//! This test suite covers://! - CRDT arithmetic overflow protection
 //! - Timestamp handling edge cases
 //! - Statistical function robustness
 //! - Concurrency stress scenarios
@@ -16,41 +15,41 @@ mod crdt_overflow_tests {
     
     #[test]
     fn gcounter_saturating_increment() {
-        // Test that GCounter uses saturating arithmetic
+// Test that GCounter uses saturating arithmetic
         let mut counter = GCounter::new();
         
-        // First increment near max
+// First increment near max
         counter.increment("node1", u64::MAX - 10);
         
-        // Second increment should saturate, not wrap
+// Second increment should saturate, not wrap
         counter.increment("node1", 100);
         
-        // Value should be at u64::MAX, not wrapped to 89
+// Value should be at u64::MAX, not wrapped to 89
         assert_eq!(counter.value(), u64::MAX);
     }
     
     #[test]
     fn gcounter_multi_node_saturating_sum() {
-        // Test that summing multiple nodes saturates
+// Test that summing multiple nodes saturates
         let mut counter = GCounter::new();
         
-        // Two nodes each at near-max
+// Two nodes each at near-max
         counter.increment("node1", u64::MAX / 2 + 1);
         counter.increment("node2", u64::MAX / 2 + 1);
         
-        // Sum should saturate to MAX, not overflow
+// Sum should saturate to MAX, not overflow
         assert_eq!(counter.value(), u64::MAX);
     }
     
     #[test]
     fn pncounter_large_positive() {
-        // Test PNCounter with large positive values
+// Test PNCounter with large positive values
         let mut counter = PNCounter::new();
         
-        // Very large positive value
+// Very large positive value
         counter.increment("node1", u64::MAX / 2);
         
-        // Result should be clamped to i64::MAX
+// Result should be clamped to i64::MAX
         let val = counter.value();
         assert!(val > 0);
         assert!(val <= i64::MAX);
@@ -58,13 +57,13 @@ mod crdt_overflow_tests {
     
     #[test]
     fn pncounter_large_negative() {
-        // Test PNCounter with large negative values
+// Test PNCounter with large negative values
         let mut counter = PNCounter::new();
         
-        // Only decrement (negative)
+// Only decrement (negative)
         counter.decrement("node1", u64::MAX / 2);
         
-        // Result should be negative and clamped
+// Result should be negative and clamped
         let val = counter.value();
         assert!(val < 0);
         assert!(val >= i64::MIN);
@@ -72,39 +71,39 @@ mod crdt_overflow_tests {
     
     #[test]
     fn pncounter_exact_boundary() {
-        // Test PNCounter exactly at i64::MAX boundary
+// Test PNCounter exactly at i64::MAX boundary
         let mut counter = PNCounter::new();
         
-        // Increment by exactly i64::MAX
+// Increment by exactly i64::MAX
         counter.increment("node1", i64::MAX as u64);
         
-        // Should be exactly i64::MAX
+// Should be exactly i64::MAX
         assert_eq!(counter.value(), i64::MAX);
     }
     
     #[test]
     fn pncounter_over_i64_max() {
-        // Test PNCounter with value > i64::MAX
+// Test PNCounter with value > i64::MAX
         let mut counter = PNCounter::new();
         
-        // Increment beyond i64::MAX
+// Increment beyond i64::MAX
         counter.increment("node1", i64::MAX as u64 + 1);
         
-        // Should be clamped to i64::MAX
+// Should be clamped to i64::MAX
         assert_eq!(counter.value(), i64::MAX);
     }
     
     #[test]
     fn pncounter_subtraction_near_boundary() {
-        // Test subtraction that results in value near i64 boundaries
+// Test subtraction that results in value near i64 boundaries
         let mut counter = PNCounter::new();
         
-        // Large increment
+// Large increment
         counter.increment("node1", 100);
-        // Larger decrement
+// Larger decrement
         counter.decrement("node2", i64::MAX as u64 + 10);
         
-        // Should be clamped negative
+// Should be clamped negative
         let val = counter.value();
         assert!(val < 0);
         assert!(val >= i64::MIN);
@@ -112,7 +111,7 @@ mod crdt_overflow_tests {
     
     #[test]
     fn orset_add_remove_cycle() {
-        // Test OR-Set add/remove cycles
+// Test OR-Set add/remove cycles
         let mut set: ORSet<IpAddr> = ORSet::new();
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         
@@ -122,29 +121,29 @@ mod crdt_overflow_tests {
         set.remove(&ip);
         assert!(!set.contains(&ip));
         
-        // Re-add after remove should work
+// Re-add after remove should work
         set.add(ip.clone(), "node1");
         assert!(set.contains(&ip));
     }
     
     #[test]
     fn orset_merge_with_concurrent_ops() {
-        // Test OR-Set merge with concurrent operations
+// Test OR-Set merge with concurrent operations
         let mut set1: ORSet<IpAddr> = ORSet::new();
         let mut set2: ORSet<IpAddr> = ORSet::new();
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         
-        // Both add same IP
+// Both add same IP
         set1.add(ip.clone(), "node1");
         set2.add(ip.clone(), "node2");
         
-        // One removes
+// One removes
         set1.remove(&ip);
         
-        // Merge - should still contain because set2's add is not tombstoned
+// Merge - should still contain because set2's add is not tombstoned
         set1.merge(&set2);
         
-        // After merge, the element should exist (add-wins semantics)
+// After merge, the element should exist (add-wins semantics)
         assert!(set1.contains(&ip));
     }
 }
@@ -157,7 +156,7 @@ mod statistical_robustness_tests {
     
     #[test]
     fn session_tracker_zero_window() {
-        // Test with minimal window duration
+// Test with minimal window duration
         let tracker = SessionTracker::new(Duration::from_nanos(1), 100);
         
         let ctx = RequestContext {
@@ -172,14 +171,14 @@ mod statistical_robustness_tests {
             api_key_id: None,
         };
         
-        // Should not panic
+// Should not panic
         let info = tracker.track(&ctx);
         assert!(info.requests_per_minute >= 0.0);
     }
     
     #[test]
     fn endpoint_diversity_single_endpoint() {
-        // Test diversity with exactly one unique endpoint
+// Test diversity with exactly one unique endpoint
         let tracker = SessionTracker::new(Duration::from_secs(300), 100);
         
         let ctx = RequestContext {
@@ -194,20 +193,20 @@ mod statistical_robustness_tests {
             api_key_id: None,
         };
         
-        // Track same endpoint multiple times
+// Track same endpoint multiple times
         for _ in 0..10 {
             tracker.track(&ctx);
         }
         
         let info = tracker.track(&ctx);
-        // Diversity should be very low (approaching 1/N where N is number of samples)
+// Diversity should be very low (approaching 1/N where N is number of samples)
         assert!(info.endpoint_diversity <= 1.0);
         assert!(info.endpoint_diversity > 0.0);
     }
     
     #[test]
     fn error_rate_all_errors() {
-        // Test with 100% error rate
+// Test with 100% error rate
         let tracker = SessionTracker::new(Duration::from_secs(300), 100);
         
         let ctx = RequestContext {
@@ -222,17 +221,17 @@ mod statistical_robustness_tests {
             api_key_id: None,
         };
         
-        // Track first request
+// Track first request
         tracker.track(&ctx);
         
-        // Record all as errors
+// Record all as errors
         for _ in 0..10 {
             tracker.record_error(&ctx);
         }
         
         let info = tracker.track(&ctx);
-        // Error rate should be a valid float (though may be NaN if no successful requests)
-        // We just check it doesn't panic and produces some value
+// Error rate should be a valid float (though may be NaN if no successful requests)
+// We just check it doesn't panic and produces some value
         let _ = info.error_rate; // Implementation may vary
     }
 }
@@ -243,14 +242,14 @@ mod ml_edge_cases {
     
     #[test]
     fn isolation_forest_empty_training_data() {
-        // Test training with empty data
+// Test training with empty data
         let config = IsolationForestConfig::default();
         let mut forest = IsolationForest::new(config);
         
-        // Train with empty data
+// Train with empty data
         forest.train(&[], 42);
         
-        // Anomaly score should return neutral
+// Anomaly score should return neutral
         let features = FeatureVector::default();
         let score = forest.anomaly_score(&features);
         assert_eq!(score, 0.5);
@@ -258,14 +257,14 @@ mod ml_edge_cases {
     
     #[test]
     fn isolation_forest_single_sample() {
-        // Test training with single sample
+// Test training with single sample
         let config = IsolationForestConfig::default();
         let mut forest = IsolationForest::new(config);
         
         let data = [[1.0; 10]];
         forest.train(&data, 42);
         
-        // Should handle gracefully
+// Should handle gracefully
         let features = FeatureVector::default();
         let score = forest.anomaly_score(&features);
         assert!(score >= 0.0 && score <= 1.0);
@@ -273,14 +272,14 @@ mod ml_edge_cases {
     
     #[test]
     fn isolation_forest_identical_samples() {
-        // Test training with all identical samples
+// Test training with all identical samples
         let config = IsolationForestConfig::default();
         let mut forest = IsolationForest::new(config);
         
         let data: Vec<[f64; 10]> = (0..100).map(|_| [5.0; 10]).collect();
         forest.train(&data, 42);
         
-        // Test with identical sample
+// Test with identical sample
         let features = FeatureVector {
             request_rate: 5.0,
             bytes_rate: 5.0,
@@ -294,14 +293,14 @@ mod ml_edge_cases {
             time_factor: 5.0,
         };
         
-        // Should be normal (low anomaly score)
+// Should be normal (low anomaly score)
         let score = forest.anomaly_score(&features);
         assert!(score >= 0.0 && score <= 1.0);
     }
     
     #[test]
     fn feature_vector_extreme_values() {
-        // Test with extreme feature values
+// Test with extreme feature values
         let features = FeatureVector {
             request_rate: f64::MAX,
             bytes_rate: f64::MIN_POSITIVE,
@@ -315,7 +314,7 @@ mod ml_edge_cases {
             time_factor: f64::MIN,
         };
         
-        // as_slice should not panic
+// as_slice should not panic
         let slice = features.as_slice();
         assert_eq!(slice.len(), 10);
     }
@@ -328,7 +327,7 @@ mod adaptive_edge_cases {
     
     #[test]
     fn adaptive_limiter_rapid_observations() {
-        // Test rapid-fire observations
+// Test rapid-fire observations
         let config = AdaptiveConfig {
             z_threshold: 3.0,
             baseline_window: Duration::from_secs(300),
@@ -341,7 +340,7 @@ mod adaptive_edge_cases {
         
         let limiter = AdaptiveRateLimiter::new(config);
         
-        // Add many observations at once
+// Add many observations at once
         let now = Instant::now();
         for i in 0..200 {
             let obs = TrafficObservation {
@@ -354,19 +353,19 @@ mod adaptive_edge_cases {
             limiter.update(obs);
         }
         
-        // Should handle without panic
+// Should handle without panic
         let stats = limiter.baseline_stats();
         assert!(stats.is_some());
     }
     
     #[test]
     fn adaptive_limiter_zero_variance() {
-        // Test with zero variance data
+// Test with zero variance data
         let config = AdaptiveConfig::default();
         let limiter = AdaptiveRateLimiter::new(config);
         
         let now = Instant::now();
-        // Add identical observations
+// Add identical observations
         for _ in 0..20 {
             let obs = TrafficObservation {
                 timestamp: now,
@@ -378,7 +377,7 @@ mod adaptive_edge_cases {
             limiter.update(obs);
         }
         
-        // Add one different observation - should trigger z-score handling
+// Add one different observation - should trigger z-score handling
         let obs = TrafficObservation {
             timestamp: now,
             requests_per_second: 200.0, // Deviation
@@ -388,14 +387,14 @@ mod adaptive_edge_cases {
         };
         limiter.update(obs);
         
-        // Check stats - std should be 0 or handled
+// Check stats - std should be 0 or handled
         let stats = limiter.baseline_stats();
         assert!(stats.is_some());
     }
     
     #[test]
     fn adaptive_reset_during_attack() {
-        // Test reset while in attack state
+// Test reset while in attack state
         let config = AdaptiveConfig {
             z_threshold: 2.0,
             consecutive_alert_trigger: 2,
@@ -405,7 +404,7 @@ mod adaptive_edge_cases {
         let limiter = AdaptiveRateLimiter::new(config);
         
         let now = Instant::now();
-        // Build baseline
+// Build baseline
         for _ in 0..20 {
             let obs = TrafficObservation {
                 timestamp: now,
@@ -417,7 +416,7 @@ mod adaptive_edge_cases {
             limiter.update(obs);
         }
         
-        // Trigger attack
+// Trigger attack
         for _ in 0..3 {
             let obs = TrafficObservation {
                 timestamp: now,
@@ -429,7 +428,7 @@ mod adaptive_edge_cases {
             limiter.update(obs);
         }
         
-        // Reset should work even during attack
+// Reset should work even during attack
         limiter.reset();
         
         let info = limiter.attack_info();
@@ -448,7 +447,7 @@ mod challenge_edge_cases {
         
         let challenge = manager.issue_pow_challenge();
         
-        // Verify with empty nonce by pattern matching on the enum
+// Verify with empty nonce by pattern matching on the enum
         if let ChallengeType::ProofOfWork(pow) = challenge {
             let result = pow.verify("");
             assert!(!result);
@@ -459,14 +458,14 @@ mod challenge_edge_cases {
     
     #[test]
     fn challenge_manager_pow_verification_invalid_nonce() {
-        // Use difficulty 24 (24 leading zero bits = 1/16 million chance of false positive)
-        // Difficulty 4 only required 4 leading zero bits = 1/16 chance, making test flaky
+// Use difficulty 24 (24 leading zero bits = 1/16 million chance of false positive)
+// Difficulty 4 only required 4 leading zero bits = 1/16 chance, making test flaky
         let manager = ChallengeManager::new([0u8; 32])
             .with_pow_difficulty(24);
         
         let challenge = manager.issue_pow_challenge();
         
-        // Verify with invalid nonce
+// Verify with invalid nonce
         if let ChallengeType::ProofOfWork(pow) = challenge {
             let result = pow.verify("definitely_not_valid_nonce_12345");
             assert!(!result);
@@ -482,7 +481,7 @@ mod challenge_edge_cases {
         
         let challenge = manager.issue_cookie_challenge();
         
-        // Verify the cookie value by extracting inner type
+// Verify the cookie value by extracting inner type
         if let ChallengeType::Cookie(cookie) = challenge {
             let result = manager.verify_cookie(&cookie.cookie_value);
             assert!(result);
@@ -496,7 +495,7 @@ mod challenge_edge_cases {
         let secret = [42u8; 32];
         let manager = ChallengeManager::new(secret);
         
-        // Verify wrong cookie value
+// Verify wrong cookie value
         let result = manager.verify_cookie("wrong_cookie_value");
         assert!(!result);
     }
@@ -507,7 +506,7 @@ mod challenge_edge_cases {
         
         let challenge = manager.issue_js_challenge();
         
-        // Script should not be empty - extract inner type
+// Script should not be empty - extract inner type
         if let ChallengeType::JavaScript(js) = challenge {
             assert!(!js.script.is_empty());
             assert!(!js.challenge_id.is_empty());
@@ -523,7 +522,7 @@ mod cost_limiter_edge_cases {
     
     #[test]
     fn cost_limiter_zero_capacity() {
-        // Test with minimal capacity
+// Test with minimal capacity
         let config = CostLimiterConfig {
             default_tenant_budget: 1,
             system_capacity: 1,
@@ -531,13 +530,13 @@ mod cost_limiter_edge_cases {
         
         let limiter = CostBasedLimiter::new(config);
         
-        // First request might succeed
+// First request might succeed
         let decision = limiter.check("tenant1", "/health", None);
         
-        // Match on decision type
+// Match on decision type
         match decision {
             CostDecision::Allowed { .. } | CostDecision::QuotaExceeded { .. } | CostDecision::SystemOverloaded { .. } => {
-                // Any of these is acceptable behavior
+// Any of these is acceptable behavior
             }
         }
     }
@@ -547,14 +546,14 @@ mod cost_limiter_edge_cases {
         let config = CostLimiterConfig::default();
         let limiter = CostBasedLimiter::new(config);
         
-        // Unknown endpoint should use default cost
+// Unknown endpoint should use default cost
         let decision = limiter.check(
             "tenant1",
             "/some/unknown/endpoint/that/does/not/exist",
             None
         );
         
-        // Should still make a decision
+// Should still make a decision
         match decision {
             CostDecision::Allowed { cost, .. } => {
                 assert!(cost > 0);
@@ -572,7 +571,7 @@ mod cost_limiter_edge_cases {
         
         let limiter = CostBasedLimiter::new(config);
         
-        // Multiple tenants should each have their own budget
+// Multiple tenants should each have their own budget
         for i in 0..10 {
             let tenant = format!("tenant_{}", i);
             let decision = limiter.check(&tenant, "/health", None);
@@ -598,7 +597,7 @@ mod smtp_edge_cases {
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         let mut protector = SmtpConnectionProtection::new(ip, 50, config);
         
-        // Empty command should be handled
+// Empty command should be handled
         let result = protector.process_command("");
         assert!(result.is_err()); // Invalid command
     }
@@ -612,12 +611,12 @@ mod smtp_edge_cases {
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         let mut protector = SmtpConnectionProtection::new(ip, 50, config);
         
-        // Very long command - test command limit
-        // Note: process_command() may not reject based on length alone,
-        // but we can test that it handles unusual inputs gracefully
+// Very long command - test command limit
+// Note:process_command may not reject based on length alone,
+// but we can test that it handles unusual inputs gracefully
         let long_cmd = "EHLO ".to_string() + &"x".repeat(1000);
         let result = protector.process_command(&long_cmd);
-        // Either rejected for invalid domain or accepted (we just ensure no panic)
+// Either rejected for invalid domain or accepted (we just ensure no panic)
         let _ = result;
     }
     
@@ -630,20 +629,20 @@ mod smtp_edge_cases {
         let tracker = SmtpConnectionTracker::new(config);
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         
-        // Register connections up to limit
+// Register connections up to limit
         for _ in 0..5 {
             let result = tracker.register_connection(ip);
             assert!(result.is_ok());
         }
         
-        // Next should fail
+// Next should fail
         let result = tracker.register_connection(ip);
         assert!(result.is_err());
         
-        // Unregister one
+// Unregister one
         tracker.unregister_connection(&ip);
         
-        // Should be able to register again
+// Should be able to register again
         let result = tracker.register_connection(ip);
         assert!(result.is_ok());
     }
@@ -654,12 +653,12 @@ mod smtp_edge_cases {
         let tracker = SmtpConnectionTracker::new(config);
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         
-        // Unregister non-existent connection (should not panic or wrap)
+// Unregister non-existent connection (should not panic or wrap)
         tracker.unregister_connection(&ip);
         tracker.unregister_connection(&ip);
         tracker.unregister_connection(&ip);
         
-        // Count should still be 0
+// Count should still be 0
         assert_eq!(tracker.active_count(&ip), 0);
     }
 }
@@ -678,7 +677,7 @@ mod decision_helper_tests {
             expected_time_ms: 1000,
         };
         
-        // Verification should fail due to expiration (verify takes u64 nonce)
+// Verification should fail due to expiration (verify takes u64 nonce)
         let result = challenge.verify(12345u64);
         assert!(!result);
     }
@@ -691,7 +690,7 @@ mod decision_helper_tests {
             expires_at: 0, // Already expired
         };
         
-        // Verification should fail due to expiration
+// Verification should fail due to expiration
         let result = challenge.verify("cookie_value");
         assert!(!result);
     }
@@ -704,7 +703,7 @@ mod decision_helper_tests {
             expires_at: u64::MAX, // Far future
         };
         
-        // Wrong value should fail
+// Wrong value should fail
         let result = challenge.verify("wrong_value");
         assert!(!result);
     }
@@ -719,7 +718,7 @@ mod ml_lock_safety_tests {
         let config = IsolationForestConfig::default();
         let forest = IsolationForest::new(config);
         
-        // Multiple observations should not panic
+// Multiple observations should not panic
         for i in 0..100 {
             let features = FeatureVector {
                 request_rate: i as f64,
@@ -746,10 +745,10 @@ mod ml_lock_safety_tests {
         };
         let forest = IsolationForest::new(config);
         
-        // Check retraining need on empty buffer
+// Check retraining need on empty buffer
         assert!(!forest.needs_retraining());
         
-        // Add samples and check again
+// Add samples and check again
         for i in 0..60 {
             let features = FeatureVector {
                 request_rate: i as f64,
@@ -758,7 +757,7 @@ mod ml_lock_safety_tests {
             forest.observe(&features);
         }
         
-        // Should need retraining after enough samples
+// Should need retraining after enough samples
         assert!(forest.needs_retraining());
     }
     
@@ -767,7 +766,7 @@ mod ml_lock_safety_tests {
         let config = IsolationForestConfig::default();
         let forest = IsolationForest::new(config);
         
-        // Stats should work on empty forest
+// Stats should work on empty forest
         let stats = forest.stats();
         assert_eq!(stats.num_trees, 0);
         assert!(!stats.is_trained);
@@ -778,10 +777,10 @@ mod ml_lock_safety_tests {
         let config = IsolationForestConfig::default();
         let mut forest = IsolationForest::new(config);
         
-        // Retrain with insufficient data should not panic
+// Retrain with insufficient data should not panic
         forest.retrain(42);
         
-        // Add enough samples
+// Add enough samples
         for i in 0..20 {
             let features = FeatureVector {
                 request_rate: i as f64,
@@ -798,7 +797,7 @@ mod ml_lock_safety_tests {
             forest.observe(&features);
         }
         
-        // Now retrain should work
+// Now retrain should work
         forest.retrain(42);
         
         let stats = forest.stats();
@@ -815,13 +814,13 @@ mod cost_limiter_cleanup_tests {
         let config = CostLimiterConfig::default();
         let limiter = CostBasedLimiter::new(config);
         
-        // Add some tenants
+// Add some tenants
         limiter.set_tenant_budget("tenant1", 100_000, 1000);
         limiter.set_tenant_budget("tenant2", 100_000, 1000);
         
         assert!(limiter.tracked_tenants() >= 2);
         
-        // Cleanup should not panic
+// Cleanup should not panic
         limiter.cleanup();
     }
     
@@ -832,7 +831,7 @@ mod cost_limiter_cleanup_tests {
         
         assert_eq!(limiter.tracked_tenants(), 0);
         
-        // Trigger tenant creation through check
+// Trigger tenant creation through check
         let _ = limiter.check("tenant1", "/v1/health", None);
         assert!(limiter.tracked_tenants() >= 1);
         

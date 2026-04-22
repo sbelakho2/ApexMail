@@ -9,30 +9,30 @@ use chrono::Utc;
 /// Composite DLP verdict
 #[derive(Debug, Clone)]
 pub struct DlpVerdict {
-    /// Total risk score
+/// Total risk score
     pub risk_score: f64,
-    /// Recommended action
+/// Recommended action
     pub action: DlpAction,
-    /// PII findings
+/// PII findings
     pub pii_findings: Vec<PiiMatch>,
-    /// High-entropy (potential secret) findings
+/// High-entropy (potential secret) findings
     pub entropy_findings: Vec<entropy::EntropyFinding>,
-    /// Content policy matches
+/// Content policy matches
     pub policy_matches: Vec<content_policy::PolicyMatch>,
-    /// Summary of all findings for logging
+/// Summary of all findings for logging
     pub summary: String,
 }
 
 /// DLP action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DlpAction {
-    /// Allow (no sensitive content detected)
+/// Allow (no sensitive content detected)
     Allow,
-    /// Audit (log findings but allow)
+/// Audit (log findings but allow)
     Audit,
-    /// Quarantine for human review
+/// Quarantine for human review
     Quarantine,
-    /// Block outbound delivery
+/// Block outbound delivery
     Block,
 }
 
@@ -53,32 +53,31 @@ pub struct DlpEngine {
 }
 
 impl DlpEngine {
-    /// Create engine with default config
+/// Create engine with default config
     pub fn new() -> Self {
         Self {
             config: DlpConfig::default(),
         }
     }
 
-    /// Create engine with custom config
+/// Create engine with custom config
     pub fn with_config(config: DlpConfig) -> Self {
         Self { config }
     }
 
-    /// Scan outbound email content for sensitive data
-    ///
-    /// # Arguments
-    /// * `body` - Email body text
-    /// * `recipient_domain` - The recipient's domain (for allowlist check)
+/// Scan outbound email content for sensitive data
+/// # Arguments
+/// * `body` - Email body text
+/// * `recipient_domain` - The recipient's domain (for allowlist check)
     pub fn scan(&self, body: &str, recipient_domain: Option<&str>) -> DlpVerdict {
-        // Even for allowlisted domains, run a PII baseline scan so that
-        // the result contains the findings (for auditing). The action
-        // will still be Allow, but the findings are visible.
+// Even for allowlisted domains, run a PII baseline scan so that
+// the result contains the findings (for auditing). The action
+// will still be Allow, but the findings are visible.
         let is_allowlisted = recipient_domain
             .map(|domain| self.config.allowlisted_domains.iter().any(|d| d == domain))
             .unwrap_or(false);
 
-        // Truncate body to max scan size
+// Truncate body to max scan size
         let scan_text = if body.len() > self.config.max_scan_size {
             &body[..self.config.max_scan_size]
         } else {
@@ -88,7 +87,7 @@ impl DlpEngine {
         let mut total_risk = 0.0;
         let mut summary_parts = Vec::with_capacity(16);
 
-        // 1. PII scanning
+// 1. PII scanning
         let pii_findings = pii::scan_pii(
             scan_text,
             self.config.detect_credit_cards,
@@ -101,7 +100,7 @@ impl DlpEngine {
             summary_parts.push(format!("{}: {}", finding.pii_type, finding.redacted));
         }
 
-        // 2. Entropy analysis (secret detection)
+// 2. Entropy analysis (secret detection)
         let entropy_result = if self.config.detect_secrets {
             entropy::scan_entropy(
                 scan_text,
@@ -119,7 +118,7 @@ impl DlpEngine {
             summary_parts.push(format!("Secret: {} (entropy={:.1})", finding.token_preview, finding.entropy));
         }
 
-        // 3. Content policy scanning
+// 3. Content policy scanning
         let policy_matches = content_policy::scan_content_policy(
             scan_text,
             &self.config.confidential_keywords,
@@ -133,7 +132,7 @@ impl DlpEngine {
             total_risk *= self.risk_multiplier_for_domain(domain);
         }
 
-        // Determine action
+// Determine action
         let mut action = if total_risk >= self.config.block_threshold {
             DlpAction::Block
         } else if total_risk >= self.config.quarantine_threshold {
@@ -144,7 +143,7 @@ impl DlpEngine {
             DlpAction::Allow
         };
 
-        // For allowlisted domains, override action to Allow but keep findings for audit
+// For allowlisted domains, override action to Allow but keep findings for audit
         if is_allowlisted {
             action = DlpAction::Allow;
             summary_parts.push("Recipient domain is allowlisted (findings retained for audit)".into());
@@ -178,7 +177,7 @@ impl DlpEngine {
         }
     }
 
-    /// Scan with default recipient (no allowlist bypass)
+/// Scan with default recipient (no allowlist bypass)
     pub fn scan_body(&self, body: &str) -> DlpVerdict {
         self.scan(body, None)
     }
@@ -217,9 +216,8 @@ impl DlpEngine {
 
 #[cfg(feature = "events")]
 impl DlpEngine {
-    /// Scan outbound content and also produce a normalized security event.
-    ///
-    /// Requires the `events` feature flag (which enables the `mail-common` dep).
+/// Scan outbound content and also produce a normalized security event.
+/// Requires the `events` feature flag (which enables the `mail-common` dep).
     pub fn scan_with_event(
         &self,
         body: &str,
@@ -340,7 +338,7 @@ mod tests {
             "SSN: 123-45-6789 CONFIDENTIAL",
             Some("internal.example.com"),
         );
-        // Allowlisted domains still get action=Allow but findings are retained for audit
+// Allowlisted domains still get action=Allow but findings are retained for audit
         assert_eq!(verdict.action, DlpAction::Allow);
         assert!(
             !verdict.pii_findings.is_empty() || !verdict.policy_matches.is_empty(),
@@ -354,7 +352,7 @@ mod tests {
         let verdict = engine.scan_body(
             "Here is the production key: sk_live_4eC39HqLyjWDarjtT1zdp7dc please deploy"
         );
-        // Should detect high-entropy secret
+// Should detect high-entropy secret
         assert!(verdict.risk_score > 0.0, "Should detect API key");
     }
 

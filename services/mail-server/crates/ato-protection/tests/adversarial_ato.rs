@@ -1,7 +1,6 @@
 //! Adversarial ATO (Account Takeover) protection tests.
 //!
-//! Designed to catch regressions in:
-//! - TLS fingerprint risk integration (P1 — was never wired into evaluate())
+//! Designed to catch regressions in://! - TLS fingerprint risk integration (P1 — was never wired into evaluate)
 //! - FIFO eviction of UserTlsHistory (was non-deterministic HashSet-based)
 //! - Impossible travel detection
 //! - Failed-attempt lockout
@@ -27,14 +26,14 @@ fn make_event(user: &str, ip: &str, lat: f64, lon: f64) -> LoginEvent {
 // ── TLS Fingerprint integration (P1 regression) ──────────────────────────────
 
 /// Bot-like TLS fingerprint (old TLS, few ciphers) must raise risk score.
-/// Regression: before fix, TlsFingerprintTracker was never called in evaluate().
+/// Regression:before fix, TlsFingerprintTracker was never called in evaluate.
 #[test]
 fn test_bot_tls_fingerprint_raises_risk_regression() {
     let engine = AtoEngine::new();
     let bot_fp = TlsFingerprint::from_client_hello(
-        0x0301,        // TLS 1.0
+        0x0301, // TLS 1.0
         &[0x002f, 0x0035], // 2 ciphers only
-        &[0x0000],     // 1 extension
+        &[0x0000], // 1 extension
         &[],
         &[],
     );
@@ -59,7 +58,7 @@ fn test_bot_tls_fingerprint_raises_risk_regression() {
 fn test_tls_stack_switch_modern_to_bot_high_risk() {
     let engine = AtoEngine::new();
 
-    // Login 1: modern TLS stack
+// Login 1:modern TLS stack
     let modern_fp = TlsFingerprint::from_client_hello(
         0x0304, // TLS 1.3
         &[0x1301, 0x1302, 0x1303, 0xc02b, 0xc02c, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035],
@@ -71,7 +70,7 @@ fn test_tls_stack_switch_modern_to_bot_high_risk() {
     ev1.tls_fingerprint = Some(modern_fp);
     engine.evaluate(&ev1);
 
-    // Login 2: bot TLS stack (attacker replay with different TLS library)
+// Login 2:bot TLS stack (attacker replay with different TLS library)
     let bot_fp = TlsFingerprint::from_client_hello(
         0x0301,
         &[0x002f, 0x0035],
@@ -94,8 +93,8 @@ fn test_tls_stack_switch_modern_to_bot_high_risk() {
 #[test]
 fn test_known_tls_fingerprint_zero_added_risk() {
     let engine = AtoEngine::new();
-    // Use a non-bot fingerprint: t12 with >= 5 ciphers and >= 3 extensions
-    // so that looks_like_bot() returns false and the second (known) login adds 0 risk.
+// Use a non-bot fingerprint:t12 with >= 5 ciphers and >= 3 extensions
+// so that looks_like_bot returns false and the second (known) login adds 0 risk.
     let fp = TlsFingerprint::from_client_hello(
         0x0303, // TLS 1.2
         &[0x1301, 0x1302, 0xc02b, 0xc02c, 0xc02f, 0xc030, 0x002f, 0x0035], // 8 ciphers
@@ -122,8 +121,8 @@ fn test_known_tls_fingerprint_zero_added_risk() {
 
 // ── FIFO eviction (P1 non-determinism fix) ────────────────────────────────────
 
-/// FIFO eviction: oldest fingerprint is always evicted first (not random).
-/// Regression: old code used HashSet::iter().next() which is not insertion-ordered.
+/// FIFO eviction:oldest fingerprint is always evicted first (not random).
+/// Regression:old code used HashSet::iter.next which is not insertion-ordered.
 #[test]
 fn test_tls_history_fifo_eviction_deterministic() {
     use ato_protection::tls_fingerprint::UserTlsHistory;
@@ -134,13 +133,13 @@ fn test_tls_history_fifo_eviction_deterministic() {
         .map(|i| TlsFingerprint::from_ja4_string(&format!("fp_unique_{}", i)))
         .collect();
 
-    // Fill to capacity: fp[0], fp[1], fp[2]
+// Fill to capacity:fp[0], fp[1], fp[2]
     assert!(history.record(&fps[0]));
     assert!(history.record(&fps[1]));
     assert!(history.record(&fps[2]));
     assert_eq!(history.len(), 3);
 
-    // 4th entry → should evict fp[0] (oldest)
+// 4th entry → should evict fp[0] (oldest)
     history.record(&fps[3]);
     assert!(!history.is_known(&fps[0]), "FIFO: fp[0] must be evicted first");
     assert!(history.is_known(&fps[1]));
@@ -148,7 +147,7 @@ fn test_tls_history_fifo_eviction_deterministic() {
     assert!(history.is_known(&fps[3]));
     assert_eq!(history.len(), 3);
 
-    // 5th entry → should evict fp[1] (second oldest)
+// 5th entry → should evict fp[1] (second oldest)
     history.record(&fps[4]);
     assert!(!history.is_known(&fps[1]), "FIFO: fp[1] must be evicted second");
     assert!(history.is_known(&fps[2]));
@@ -184,9 +183,9 @@ fn test_impossible_travel_nyc_to_tokyo() {
 #[test]
 fn test_nearby_logins_are_not_impossible() {
     let engine = AtoEngine::new();
-    // NYC to Newark (same metro area, ~15km apart).
-    // Set ev2 timestamp 30 minutes later — easily drivable at 30 km/h.
-    // Without an elapsed-time gap, speed = ∞ and even 1m travel looks impossible.
+// NYC to Newark (same metro area, ~15km apart).
+// Set ev2 timestamp 30 minutes later — easily drivable at 30 km/h.
+// Without an elapsed-time gap, speed = ∞ and even 1m travel looks impossible.
     let mut ev1 = make_event("frank", "1.1.1.1", 40.7128, -74.0059); // NYC
     ev1.timestamp = Utc::now() - chrono::Duration::minutes(30);
     engine.evaluate(&ev1);

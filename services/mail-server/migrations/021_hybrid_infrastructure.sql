@@ -1,9 +1,6 @@
--- Migration 021: Hybrid email infrastructure
---
--- Architecture:
---   • Dedicated IPs  → Hetzner floating IPs, self-hosted SMTP
---   • Shared sending  → AWS SES shared IP pool
---
+-- Migration 021:Hybrid email infrastructure
+-- Architecture:-- • Dedicated IPs → Hetzner floating IPs, self-hosted SMTP
+-- • Shared sending → AWS SES shared IP pool
 -- There is NO provider choice. Dedicated IPs are always Hetzner,
 -- shared sending is always SES.
 
@@ -24,16 +21,16 @@ BEGIN
                             CHECK (status IN ('warming', 'active', 'cooldown', 'releasing', 'retired')),
             warmup_progress DOUBLE PRECISION NOT NULL DEFAULT 0.0,
 
-            -- Hetzner identifiers (mandatory for all dedicated IPs)
+-- Hetzner identifiers (mandatory for all dedicated IPs)
             hetzner_floating_ip_id  BIGINT UNIQUE,
             hetzner_server_id       BIGINT,
             rdns_hostname           VARCHAR(255),
 
-            -- Warmup tracking
+-- Warmup tracking
             warmup_started_at   TIMESTAMPTZ,
             warmup_completed_at TIMESTAMPTZ,
 
-            -- Billing
+-- Billing
             billing_status  VARCHAR(30) DEFAULT 'included'
                             CHECK (billing_status IN ('included', 'pending_charge', 'active', 'pending_cancel', 'cancelled')),
             allocated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -46,7 +43,7 @@ BEGIN
         CREATE INDEX idx_dedicated_ips_status ON dedicated_ips(status);
         CREATE INDEX idx_dedicated_ips_hetzner ON dedicated_ips(hetzner_floating_ip_id);
     ELSE
-        -- Table exists from earlier migration; add Hetzner columns if missing.
+-- Table exists from earlier migration; add Hetzner columns if missing.
         BEGIN ALTER TABLE dedicated_ips ADD COLUMN hetzner_floating_ip_id BIGINT UNIQUE; EXCEPTION WHEN duplicate_column THEN NULL; END;
         BEGIN ALTER TABLE dedicated_ips ADD COLUMN hetzner_server_id BIGINT; EXCEPTION WHEN duplicate_column THEN NULL; END;
         BEGIN ALTER TABLE dedicated_ips ADD COLUMN rdns_hostname VARCHAR(255); EXCEPTION WHEN duplicate_column THEN NULL; END;
@@ -55,10 +52,10 @@ BEGIN
         BEGIN ALTER TABLE dedicated_ips ADD COLUMN billing_status VARCHAR(30) DEFAULT 'included'; EXCEPTION WHEN duplicate_column THEN NULL; END;
         BEGIN ALTER TABLE dedicated_ips ADD COLUMN allocated_at TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END;
 
-        -- Remove legacy provider column if it exists (no longer needed — all dedicated IPs are Hetzner)
+-- Remove legacy provider column if it exists (no longer needed — all dedicated IPs are Hetzner)
         BEGIN ALTER TABLE dedicated_ips DROP COLUMN IF EXISTS provider; EXCEPTION WHEN undefined_column THEN NULL; END;
 
-        -- Add index on Hetzner ID if missing
+-- Add index on Hetzner ID if missing
         IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_dedicated_ips_hetzner') THEN
             CREATE INDEX idx_dedicated_ips_hetzner ON dedicated_ips(hetzner_floating_ip_id);
         END IF;
@@ -67,8 +64,8 @@ END $$;
 
 
 -- ─── Transport routing cache ─────────────────────────────────
--- Materialized view pattern: the trigger keeps this up to date whenever
--- dedicated_ips changes.  The transport router reads only this table
+-- Materialized view pattern:the trigger keeps this up to date whenever
+-- dedicated_ips changes. The transport router reads only this table
 -- (fast, no joins).
 
 CREATE TABLE IF NOT EXISTS transport_routing_cache (
@@ -80,7 +77,7 @@ CREATE TABLE IF NOT EXISTS transport_routing_cache (
 );
 
 
--- ─── Trigger: auto-update routing cache ──────────────────────
+-- ─── Trigger:auto-update routing cache ──────────────────────
 
 CREATE OR REPLACE FUNCTION fn_update_transport_routing()
 RETURNS TRIGGER AS $$
@@ -89,14 +86,14 @@ DECLARE
     v_count     INTEGER;
     v_best_ip   INET;
 BEGIN
-    -- Determine which tenant to update
+-- Determine which tenant to update
     IF TG_OP = 'DELETE' THEN
         v_tenant_id := OLD.tenant_id;
     ELSE
         v_tenant_id := NEW.tenant_id;
     END IF;
 
-    -- Count active/warming IPs for this tenant
+-- Count active/warming IPs for this tenant
     SELECT COUNT(*), (
         SELECT ip_address FROM dedicated_ips
         WHERE tenant_id = v_tenant_id AND status IN ('active', 'warming')
@@ -108,7 +105,7 @@ BEGIN
     FROM dedicated_ips
     WHERE tenant_id = v_tenant_id AND status IN ('active', 'warming');
 
-    -- Upsert routing cache
+-- Upsert routing cache
     INSERT INTO transport_routing_cache
         (tenant_id, has_dedicated_ips, preferred_dedicated_ip, dedicated_ip_count, updated_at)
     VALUES

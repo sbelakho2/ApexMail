@@ -4,30 +4,30 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
-    // Auth
+// Auth
     Unauthorized,
     Forbidden,
     TokenExpired,
     TokenBlacklisted,
     InvalidApiKey,
     InsufficientScopes,
-    // Validation
+// Validation
     ValidationError,
     InvalidInput,
     PayloadTooLarge,
     NullByteDetected,
-    // Rate limiting
+// Rate limiting
     RateLimitExceeded,
-    // Resources
+// Resources
     NotFound,
     Conflict,
     Gone,
-    // Server
+// Server
     InternalError,
     ServiceUnavailable,
     RequestTimeout,
     GatewayTimeout,
-    // Business
+// Business
     DomainNotVerified,
     SuppressionExists,
     WebhookDeliveryFailed,

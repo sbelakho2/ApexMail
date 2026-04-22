@@ -45,7 +45,7 @@ impl ChaosEngineeringService {
         }
     }
 
-    /// Create with a metrics collector for real metric capture.
+/// Create with a metrics collector for real metric capture.
     pub fn with_metrics(pool: PgPool, config: Arc<Config>, metrics: Arc<MetricsCollector>) -> Self {
         Self {
             pool,
@@ -55,9 +55,9 @@ impl ChaosEngineeringService {
         }
     }
 
-    // ── Experiment Lifecycle ───────────────────────────────
+// ── Experiment Lifecycle ───────────────────────────────
 
-    /// Create and start a new chaos experiment.
+/// Create and start a new chaos experiment.
     pub async fn start_experiment(
         &self,
         name: &str,
@@ -67,7 +67,7 @@ impl ChaosEngineeringService {
             return Err("Chaos engineering is disabled".into());
         }
 
-        // Validate experiment type
+// Validate experiment type
         let _exp_type = ExperimentType::parse(&experiment_config.experiment_type)
             .ok_or_else(|| format!("Unknown experiment type: {}", experiment_config.experiment_type))?;
 
@@ -89,7 +89,7 @@ impl ChaosEngineeringService {
         let params_json = serde_json::to_value(&experiment_config.parameters).map_err(|e| e.to_string())?;
         let safety_json = serde_json::to_value(&experiment_config.safety_checks).map_err(|e| e.to_string())?;
 
-        // Insert experiment record
+// Insert experiment record
         sqlx::query(
             "INSERT INTO ha_chaos_experiments
              (id, name, experiment_type, status, config, target, parameters, safety_checks, created_at)
@@ -105,10 +105,10 @@ impl ChaosEngineeringService {
         .await
         .map_err(|e| format!("Insert experiment: {e}"))?;
 
-        // Capture pre-experiment metrics
+// Capture pre-experiment metrics
         let metrics_before = self.capture_metrics().await;
 
-        // Mark as running
+// Mark as running
         sqlx::query("UPDATE ha_chaos_experiments SET status = $2, started_at = NOW() WHERE id = $1")
             .bind(id)
             .bind(ExperimentStatus::Running.to_string())
@@ -118,7 +118,7 @@ impl ChaosEngineeringService {
 
         info!(experiment_id = %id, name, experiment_type = experiment_config.experiment_type, "Chaos experiment started");
 
-        // Start safety monitoring in background
+// Start safety monitoring in background
         let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
         {
             let mut running = self.running_experiments.write().await;
@@ -155,7 +155,7 @@ impl ChaosEngineeringService {
         Ok(experiment)
     }
 
-    /// Safety monitoring loop. Runs until experiment completes or gets aborted.
+/// Safety monitoring loop. Runs until experiment completes or gets aborted.
     async fn monitor_experiment(
         pool: PgPool,
         experiment_id: Uuid,
@@ -172,7 +172,7 @@ impl ChaosEngineeringService {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(*SAFETY_CHECK_INTERVAL_MS)) => {
-                    // Check safety thresholds
+// Check safety thresholds
                     let current = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
                     for check in &safety_checks {
                         if check.abort_on_failure {
@@ -204,7 +204,7 @@ impl ChaosEngineeringService {
                         }
                     }
 
-                    // Check duration
+// Check duration
                     if start.elapsed() >= duration {
                         let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
                         if let Err(e) = Self::complete_experiment_static(
@@ -278,7 +278,7 @@ impl ChaosEngineeringService {
         Ok(())
     }
 
-    /// Abort a running experiment.
+/// Abort a running experiment.
     pub async fn abort_experiment(&self, id: Uuid) -> Result<(), String> {
         let running = self.running_experiments.read().await;
         if let Some(tx) = running.get(&id) {
@@ -292,7 +292,7 @@ impl ChaosEngineeringService {
         }
     }
 
-    // ── Query ──────────────────────────────────────────────
+// ── Query ──────────────────────────────────────────────
 
     pub async fn get_experiment(&self, id: Uuid) -> Result<Option<Experiment>, String> {
         let row: Option<ExperimentRow> = sqlx::query_as::<_, ExperimentRow>(
@@ -345,7 +345,7 @@ impl ChaosEngineeringService {
         Ok(rows.into_iter().map(|r| r.into_experiment()).collect())
     }
 
-    /// Delete an experiment record.
+/// Delete an experiment record.
     pub async fn delete_experiment(&self, id: Uuid) -> Result<bool, String> {
         let res = sqlx::query("DELETE FROM ha_chaos_experiments WHERE id = $1")
             .bind(id)
@@ -355,24 +355,24 @@ impl ChaosEngineeringService {
         Ok(res.rows_affected() > 0)
     }
 
-    // ── Metrics ────────────────────────────────────────────
+// ── Metrics ────────────────────────────────────────────
 
     async fn capture_metrics(&self) -> MetricSnapshot {
         Self::capture_metrics_with_collector(self.metrics.as_ref()).await
     }
 
-    /// Capture real metrics from the metrics collector and system.
+/// Capture real metrics from the metrics collector and system.
     async fn capture_metrics_with_collector(collector: Option<&Arc<MetricsCollector>>) -> MetricSnapshot {
-        // Get system metrics (CPU and memory)
+// Get system metrics (CPU and memory)
         let mut sys = System::new();
         sys.refresh_cpu_usage();
         sys.refresh_memory();
         
-        // CPU usage as fraction (0.0 to 1.0)
+// CPU usage as fraction (0.0 to 1.0)
         let cpu_count = sys.cpus().len().max(1) as f32;
         let cpu_usage = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cpu_count / 100.0;
         
-        // Memory usage as fraction
+// Memory usage as fraction
         let total_mem = sys.total_memory();
         let used_mem = sys.used_memory();
         let memory_usage = if total_mem > 0 {
@@ -381,11 +381,11 @@ impl ChaosEngineeringService {
             0.0
         };
 
-        // Get application metrics from collector if available
+// Get application metrics from collector if available
         let (error_rate, latency_p50, latency_p99, throughput) = if let Some(mc) = collector {
             let summaries = mc.get_summary();
             
-            // Look up known metric names
+// Look up known metric names
             let error_rate = summaries.iter()
                 .find(|m| m.name == "error_rate" || m.name == "errors_total")
                 .map(|m| m.value)
@@ -396,10 +396,10 @@ impl ChaosEngineeringService {
                 .map(|m| m.value)
                 .unwrap_or(0.0);
             
-            // Estimate throughput from requests counter (simplified - real impl would diff over time)
+// Estimate throughput from requests counter (simplified - real impl would diff over time)
             let throughput = requests_total.min(10000.0); // Cap at reasonable value
             
-            // Look for latency histogram metrics
+// Look for latency histogram metrics
             let latency_p50 = summaries.iter()
                 .find(|m| m.name == "latency_p50" || m.name.contains("latency"))
                 .map(|m| m.value * 1000.0) // Convert to ms if in seconds
@@ -412,7 +412,7 @@ impl ChaosEngineeringService {
             
             (error_rate, latency_p50, latency_p99, throughput)
         } else {
-            // No collector, return zeros for app metrics (system metrics still real)
+// No collector, return zeros for app metrics (system metrics still real)
             (0.0, 0.0, 0.0, 0.0)
         };
 

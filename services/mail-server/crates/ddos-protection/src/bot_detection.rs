@@ -2,8 +2,7 @@
 //!
 //! Analyzes request patterns over time to detect automated (bot) traffic.
 //!
-//! Detection signals:
-//! - Inter-arrival time regularity (bots are mechanically periodic)
+//! Detection signals://! - Inter-arrival time regularity (bots are mechanically periodic)
 //! - Endpoint diversity (bots tend to hit the same endpoint repeatedly)
 //! - Error rate patterns (bots may probe or have zero errors)
 //! - Request sequence entropy (bots follow repetitive patterns)
@@ -15,51 +14,51 @@ use std::time::Instant;
 /// Bot probability assessment
 #[derive(Debug, Clone)]
 pub struct BotAssessment {
-    /// Overall probability of being a bot (0.0 = definitely human, 1.0 = definitely bot)
+/// Overall probability of being a bot (0.0 = definitely human, 1.0 = definitely bot)
     pub bot_probability: f64,
-    /// Individual signal scores
+/// Individual signal scores
     pub signals: BotSignals,
-    /// Whether we have enough data for a confident assessment
+/// Whether we have enough data for a confident assessment
     pub has_sufficient_data: bool,
 }
 
 /// Individual signal scores for bot detection
 #[derive(Debug, Clone, Default)]
 pub struct BotSignals {
-    /// Inter-arrival time regularity score (0=human-like, 1=bot-like)
+/// Inter-arrival time regularity score (0=human-like, 1=bot-like)
     pub timing_regularity: f64,
-    /// Periodicity score (0=no periodicity, 1=highly periodic)
+/// Periodicity score (0=no periodicity, 1=highly periodic)
     pub periodicity: f64,
-    /// Endpoint diversity score (0=diverse, 1=concentrated)
+/// Endpoint diversity score (0=diverse, 1=concentrated)
     pub endpoint_concentration: f64,
-    /// Error rate anomaly score
+/// Error rate anomaly score
     pub error_anomaly: f64,
-    /// Sequence entropy score (0=high entropy/human, 1=low entropy/bot)
+/// Sequence entropy score (0=high entropy/human, 1=low entropy/bot)
     pub sequence_predictability: f64,
 }
 
 /// Session behavior data for bot analysis
 pub struct SessionBehavior {
-    /// Request timestamps (only inter-arrival times stored)
+/// Request timestamps (only inter-arrival times stored)
     inter_arrival_times: VecDeque<u64>,
-    /// Request endpoint hashes
+/// Request endpoint hashes
     request_sequence: VecDeque<u64>,
-    /// Recent unique endpoints (windowed, tracks last N endpoint hashes)
+/// Recent unique endpoints (windowed, tracks last N endpoint hashes)
     recent_endpoints: VecDeque<u64>,
-    /// Error count
+/// Error count
     error_count: u32,
-    /// Total request count
+/// Total request count
     total_count: u32,
-    /// Method distribution
+/// Method distribution
     method_counts: HashMap<String, u32>,
-    /// Last request timestamp (None until first request is recorded)
+/// Last request timestamp (None until first request is recorded)
     last_request: Option<Instant>,
-    /// Maximum window size
+/// Maximum window size
     window_size: usize,
 }
 
 impl SessionBehavior {
-    /// Create a new session behavior tracker
+/// Create a new session behavior tracker
     pub fn new(window_size: usize) -> Self {
         Self {
             inter_arrival_times: VecDeque::with_capacity(window_size),
@@ -73,13 +72,13 @@ impl SessionBehavior {
         }
     }
 
-    /// Record a new request
+/// Record a new request
     pub fn record_request(&mut self, endpoint_hash: u64, method: &str, is_error: bool) {
         let now = Instant::now();
 
-        // Only record inter-arrival time if we've seen a prior request.
-        // This avoids polluting timing analysis with the gap between
-        // tracker creation and the first actual request.
+// Only record inter-arrival time if we've seen a prior request.
+// This avoids polluting timing analysis with the gap between
+// tracker creation and the first actual request.
         if let Some(last) = self.last_request {
             let inter_arrival = now.duration_since(last).as_millis() as u64;
             if self.inter_arrival_times.len() >= self.window_size {
@@ -93,7 +92,7 @@ impl SessionBehavior {
         }
         self.request_sequence.push_back(endpoint_hash);
 
-        // Windowed unique endpoints: keep only the last window_size entries
+// Windowed unique endpoints:keep only the last window_size entries
         if self.recent_endpoints.len() >= self.window_size {
             self.recent_endpoints.pop_front();
         }
@@ -103,8 +102,8 @@ impl SessionBehavior {
         if is_error {
             self.error_count += 1;
         }
-        // Normalize method to known HTTP methods to prevent unbounded HashMap growth.
-        // Attackers could send arbitrary method strings to cause OOM.
+// Normalize method to known HTTP methods to prevent unbounded HashMap growth.
+// Attackers could send arbitrary method strings to cause OOM.
         let normalized_method = match method.to_uppercase().as_str() {
             "GET" => "GET",
             "POST" => "POST",
@@ -121,7 +120,7 @@ impl SessionBehavior {
         self.last_request = Some(now);
     }
 
-    /// Analyze the session for bot behavior
+/// Analyze the session for bot behavior
     pub fn analyze(&self) -> BotAssessment {
         let has_sufficient_data = self.total_count >= 10 && self.inter_arrival_times.len() >= 10;
 
@@ -141,7 +140,7 @@ impl SessionBehavior {
             sequence_predictability: self.score_sequence_predictability(),
         };
 
-        // Weighted combination of signals
+// Weighted combination of signals
         let bot_probability = signals.timing_regularity * 0.25
             + signals.periodicity * 0.20
             + signals.endpoint_concentration * 0.20
@@ -155,8 +154,8 @@ impl SessionBehavior {
         }
     }
 
-    /// Score based on coefficient of variation of inter-arrival times.
-    /// Bots have very low CoV (mechanical regularity), humans have higher CoV.
+/// Score based on coefficient of variation of inter-arrival times.
+/// Bots have very low CoV (mechanical regularity), humans have higher CoV.
     fn score_timing_regularity(&self) -> f64 {
         let cov = self.calculate_cov(&self.inter_arrival_times);
         if cov < 0.1 {
@@ -172,7 +171,7 @@ impl SessionBehavior {
         }
     }
 
-    /// Detect periodicity via autocorrelation analysis
+/// Detect periodicity via autocorrelation analysis
     fn score_periodicity(&self) -> f64 {
         if self.inter_arrival_times.len() < 30 {
             return 0.0;
@@ -218,14 +217,14 @@ impl SessionBehavior {
         }
     }
 
-    /// Score based on endpoint diversity.
-    /// Bots tend to hit the same endpoint(s) repeatedly.
+/// Score based on endpoint diversity.
+/// Bots tend to hit the same endpoint(s) repeatedly.
     fn score_endpoint_concentration(&self) -> f64 {
         if self.total_count == 0 || self.recent_endpoints.is_empty() {
             return 0.0;
         }
 
-        // Count unique endpoints within the recent window
+// Count unique endpoints within the recent window
         let unique_in_window: HashSet<u64> = self.recent_endpoints.iter().cloned().collect();
         let diversity = unique_in_window.len() as f64 / self.recent_endpoints.len() as f64;
 
@@ -240,9 +239,9 @@ impl SessionBehavior {
         }
     }
 
-    /// Score based on error rate patterns.
-    /// - Very high error rate = probing bot
-    /// - Zero errors after many requests = possibly automated
+/// Score based on error rate patterns.
+/// - Very high error rate = probing bot
+/// - Zero errors after many requests = possibly automated
     fn score_error_anomaly(&self) -> f64 {
         if self.total_count < 10 {
             return 0.0;
@@ -261,8 +260,8 @@ impl SessionBehavior {
         }
     }
 
-    /// Score based on request sequence entropy (Shannon entropy of bigram transitions).
-    /// Low entropy = predictable/repetitive = bot-like.
+/// Score based on request sequence entropy (Shannon entropy of bigram transitions).
+/// Low entropy = predictable/repetitive = bot-like.
     fn score_sequence_predictability(&self) -> f64 {
         if self.request_sequence.len() < 5 {
             return 0.0;
@@ -281,7 +280,7 @@ impl SessionBehavior {
         }
     }
 
-    /// Calculate Shannon entropy of request sequence bigram transitions
+/// Calculate Shannon entropy of request sequence bigram transitions
     pub fn sequence_entropy(&self) -> f64 {
         let seq: Vec<u64> = self.request_sequence.iter().cloned().collect();
         if seq.len() < 2 {
@@ -310,7 +309,7 @@ impl SessionBehavior {
             .sum()
     }
 
-    /// Calculate coefficient of variation
+/// Calculate coefficient of variation
     fn calculate_cov(&self, data: &VecDeque<u64>) -> f64 {
         if data.len() < 2 {
             return 1.0;
@@ -325,17 +324,17 @@ impl SessionBehavior {
         variance.sqrt() / mean
     }
 
-    /// Get the total request count
+/// Get the total request count
     pub fn total_count(&self) -> u32 {
         self.total_count
     }
 
-    /// Get the error count
+/// Get the error count
     pub fn error_count(&self) -> u32 {
         self.error_count
     }
 
-    /// Get unique endpoint count (within the recent window)
+/// Get unique endpoint count (within the recent window)
     pub fn unique_endpoint_count(&self) -> usize {
         let unique: HashSet<u64> = self.recent_endpoints.iter().cloned().collect();
         unique.len()
@@ -367,16 +366,16 @@ mod tests {
         let mut behavior = SessionBehavior::new(100);
         let ep = hash_endpoint("/api/health");
 
-        // Simulate mechanically regular requests
+// Simulate mechanically regular requests
         for _ in 0..20 {
             behavior.record_request(ep, "GET", false);
-            // All inter-arrival times will be ~0 (very regular since they're in a loop)
+// All inter-arrival times will be ~0 (very regular since they're in a loop)
         }
 
         let assessment = behavior.analyze();
         assert!(assessment.has_sufficient_data);
-        // Since all requests hit same endpoint and have very regular timing,
-        // bot probability should be elevated
+// Since all requests hit same endpoint and have very regular timing,
+// bot probability should be elevated
         assert!(
             assessment.bot_probability > 0.3,
             "Bot probability should be elevated for regular timing: {}",
@@ -388,7 +387,7 @@ mod tests {
     fn test_diverse_behavior_scores_low() {
         let mut behavior = SessionBehavior::new(100);
 
-        // Simulate varied behavior
+// Simulate varied behavior
         let endpoints = [
             "/api/health",
             "/api/messages",
@@ -409,7 +408,7 @@ mod tests {
 
         let assessment = behavior.analyze();
         assert!(assessment.has_sufficient_data);
-        // Diverse endpoints should score lower on endpoint concentration
+// Diverse endpoints should score lower on endpoint concentration
         assert!(
             assessment.signals.endpoint_concentration < 0.5,
             "Diverse endpoints should have low concentration: {}",
@@ -422,7 +421,7 @@ mod tests {
         let mut behavior = SessionBehavior::new(100);
         let ep = hash_endpoint("/api/login");
 
-        // High error rate (probing behavior)
+// High error rate (probing behavior)
         for i in 0..20 {
             behavior.record_request(ep, "POST", i >= 2); // 90% errors
         }
@@ -438,15 +437,15 @@ mod tests {
     #[test]
     fn test_sequence_entropy_low_for_repetitive() {
         let mut behavior = SessionBehavior::new(100);
-        // Same endpoint over and over
+// Same endpoint over and over
         let ep = hash_endpoint("/api/data");
         for _ in 0..30 {
             behavior.record_request(ep, "GET", false);
         }
 
         let entropy = behavior.sequence_entropy();
-        // Single endpoint = zero transitions to other endpoints = zero entropy from transitions
-        // But technically only 1 type of bigram (ep -> ep), so entropy = 0
+// Single endpoint = zero transitions to other endpoints = zero entropy from transitions
+// But technically only 1 type of bigram (ep -> ep), so entropy = 0
         assert!(
             entropy < 0.1,
             "Repetitive sequence should have near-zero entropy: {}",
@@ -460,7 +459,7 @@ mod tests {
         let endpoints: Vec<u64> = (0..10).map(|i| hash_endpoint(&format!("/api/ep{}", i))).collect();
 
         for (i, ep) in endpoints.iter().cycle().take(50).enumerate() {
-            // Cycle through all 10 endpoints
+// Cycle through all 10 endpoints
             behavior.record_request(*ep, "GET", false);
         }
 

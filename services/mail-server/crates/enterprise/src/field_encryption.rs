@@ -1,19 +1,17 @@
 //! AES-256-GCM field-level encryption for HIPAA-protected PHI data.
 //!
-//! This module provides **envelope encryption**: each field value is encrypted
+//! This module provides **envelope encryption**:each field value is encrypted
 //! with a unique Data Encryption Key (DEK), and the DEK itself is wrapped
-//! (encrypted) using the tenant's Key Encryption Key (KEK).  This design:
-//!
-//!   1. Limits blast radius — compromising one DEK exposes only one field value.
-//!   2. Enables key rotation without re-encrypting all data — only re-wrap DEKs.
-//!   3. Meets HIPAA §164.312(a)(2)(iv) encryption-at-rest requirements.
+//! (encrypted) using the tenant's Key Encryption Key (KEK). This design://!
+//! 1. Limits blast radius — compromising one DEK exposes only one field value.
+//! 2. Enables key rotation without re-encrypting all data — only re-wrap DEKs.
+//! 3. Meets HIPAA §164.312(a)(2)(iv) encryption-at-rest requirements.
 //!
 //! ## Wire format
 //!
-//! Encrypted values are stored as a single base64-encoded blob:
-//!
+//! Encrypted values are stored as a single base64-encoded blob://!
 //! ```text
-//! ENC:v1:<base64( version(1) || kek_id(16) || wrapped_dek_len(2) || wrapped_dek(N) || nonce(12) || ciphertext || tag(16) )>
+//! ENC:v1:<base64(version(1) || kek_id(16) || wrapped_dek_len(2) || wrapped_dek(N) || nonce(12) || ciphertext || tag(16))>
 //! ```
 //!
 //! The `ENC:v1:` prefix allows unambiguous detection of encrypted fields vs
@@ -87,22 +85,21 @@ pub enum EncryptionError {
 // ── Key types ─────────────────────────────────────────────────────────────────
 
 /// A Key Encryption Key (KEK) used to wrap/unwrap Data Encryption Keys.
-///
-/// Stored in memory only — never serialized.  Zeroized on drop.
+/// Stored in memory only — never serialized. Zeroized on drop.
 pub struct Kek {
-    /// Unique identifier for this KEK (UUID bytes).
+/// Unique identifier for this KEK (UUID bytes).
     pub id: [u8; KEK_ID_LEN],
-    /// The raw 256-bit key material.
+/// The raw 256-bit key material.
     key: [u8; AES_KEY_LEN],
 }
 
 impl Kek {
-    /// Create a KEK from raw key material and a UUID identifier.
+/// Create a KEK from raw key material and a UUID identifier.
     pub fn new(id: [u8; KEK_ID_LEN], key: [u8; AES_KEY_LEN]) -> Self {
         Self { id, key }
     }
 
-    /// Create a KEK from hex-encoded key and hex-encoded ID.
+/// Create a KEK from hex-encoded key and hex-encoded ID.
     pub fn from_hex(id_hex: &str, key_hex: &str) -> Result<Self, EncryptionError> {
         let id_bytes = hex::decode(id_hex)
             .map_err(|e| EncryptionError::KeyDerivation(format!("invalid KEK ID hex: {e}")))?;
@@ -128,14 +125,13 @@ impl Kek {
         Ok(Self { id, key })
     }
 
-    /// Expose raw key bytes (for test/demo endpoints that need to return KEK material).
-    ///
-    /// **Warning**: Do not log or persist this value outside of secure key stores.
+/// Expose raw key bytes (for test/demo endpoints that need to return KEK material).
+/// **Warning**:Do not log or persist this value outside of secure key stores.
     pub fn key_bytes(&self) -> &[u8; AES_KEY_LEN] {
         &self.key
     }
 
-    /// Generate a new random KEK with a random UUID.
+/// Generate a new random KEK with a random UUID.
     pub fn generate() -> Self {
         let mut id = [0u8; KEK_ID_LEN];
         let mut key = [0u8; AES_KEY_LEN];
@@ -163,44 +159,39 @@ impl fmt::Debug for Kek {
 // ── FieldEncryptor ────────────────────────────────────────────────────────────
 
 /// Thread-safe field-level encryptor that supports key rotation.
-///
-/// Holds one or more KEKs.  Encryption always uses the **primary** (first) KEK.
+/// Holds one or more KEKs. Encryption always uses the **primary** (first) KEK.
 /// Decryption tries the KEK matching the `kek_id` in the envelope, falling back
 /// to all KEKs if needed (for emergency recovery).
 pub struct FieldEncryptor {
-    /// Ordered list of KEKs.  The first entry is the primary (used for encryption).
+/// Ordered list of KEKs. The first entry is the primary (used for encryption).
     keks: Vec<Kek>,
 }
 
 impl FieldEncryptor {
-    /// Create a new encryptor with the given KEKs.
-    ///
-    /// The first KEK in the list is the primary key used for new encryptions.
-    /// Older KEKs are retained for decrypting data encrypted before rotation.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `keks` is empty.
+/// Create a new encryptor with the given KEKs.
+/// The first KEK in the list is the primary key used for new encryptions.
+/// Older KEKs are retained for decrypting data encrypted before rotation.
+/// # Panics
+/// Panics if `keks` is empty.
     pub fn new(keks: Vec<Kek>) -> Self {
         assert!(!keks.is_empty(), "FieldEncryptor requires at least one KEK");
         Self { keks }
     }
 
-    /// The primary KEK used for new encryptions.
+/// The primary KEK used for new encryptions.
     fn primary_kek(&self) -> &Kek {
         &self.keks[0]
     }
 
-    /// Find a KEK by its ID.
+/// Find a KEK by its ID.
     fn find_kek(&self, id: &[u8; KEK_ID_LEN]) -> Option<&Kek> {
         self.keks.iter().find(|k| &k.id == id)
     }
 
-    // ── Public API ────────────────────────────────────────────────────
+// ── Public API ────────────────────────────────────────────────────
 
-    /// Encrypt a plaintext field value.
-    ///
-    /// Returns a string prefixed with `ENC:v1:` containing the full envelope.
+/// Encrypt a plaintext field value.
+/// Returns a string prefixed with `ENC:v1:` containing the full envelope.
     pub fn encrypt(&self, plaintext: &str) -> Result<String, EncryptionError> {
         if plaintext.is_empty() {
             return Ok(String::new());
@@ -208,11 +199,11 @@ impl FieldEncryptor {
 
         let kek = self.primary_kek();
 
-        // 1. Generate a random DEK
+// 1. Generate a random DEK
         let mut dek = [0u8; AES_KEY_LEN];
         rand::thread_rng().fill_bytes(&mut dek);
 
-        // 2. Encrypt plaintext with DEK
+// 2. Encrypt plaintext with DEK
         let cipher = Aes256Gcm::new_from_slice(&dek)
             .map_err(|e| {
                 tracing::error!(error = %e, "DEK cipher init failed during encrypt");
@@ -226,7 +217,7 @@ impl FieldEncryptor {
                 EncryptionError::EncryptionFailed
             })?;
 
-        // 3. Wrap (encrypt) the DEK with the KEK
+// 3. Wrap (encrypt) the DEK with the KEK
         let kek_cipher = Aes256Gcm::new_from_slice(&kek.key)
             .map_err(|e| {
                 tracing::error!(error = %e, "KEK cipher init failed during encrypt");
@@ -234,7 +225,7 @@ impl FieldEncryptor {
             })?;
         let kek_nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-        // Wrapped DEK = kek_nonce(12) || aes-gcm(dek, kek_nonce, kek)
+// Wrapped DEK = kek_nonce(12) || aes-gcm(dek, kek_nonce, kek)
         let wrapped_dek_body = kek_cipher
             .encrypt(&kek_nonce, dek.as_ref())
             .map_err(|e| {
@@ -246,11 +237,10 @@ impl FieldEncryptor {
         wrapped_dek.extend_from_slice(kek_nonce.as_ref());
         wrapped_dek.extend_from_slice(&wrapped_dek_body);
 
-        // Zeroize the plaintext DEK
+// Zeroize the plaintext DEK
         dek.zeroize();
 
-        // 4. Build the envelope:
-        //    version(1) || kek_id(16) || wrapped_dek_len(2) || wrapped_dek(N) || nonce(12) || ciphertext+tag
+// 4. Build the envelope:// version(1) || kek_id(16) || wrapped_dek_len(2) || wrapped_dek(N) || nonce(12) || ciphertext+tag
         let wrapped_dek_len = wrapped_dek.len() as u16;
         let total_len = 1 + KEK_ID_LEN + WRAPPED_DEK_LEN_SIZE + wrapped_dek.len() + NONCE_LEN + ciphertext.len();
         let mut envelope = Vec::with_capacity(total_len);
@@ -265,10 +255,9 @@ impl FieldEncryptor {
         Ok(format!("{}{}", ENCRYPTED_PREFIX, b64.encode(&envelope)))
     }
 
-    /// Decrypt an encrypted field value.
-    ///
-    /// If the value does not start with `ENC:v1:`, it is returned as-is
-    /// (plaintext passthrough for gradual migration).
+/// Decrypt an encrypted field value.
+/// If the value does not start with `ENC:v1:`, it is returned as-is
+/// (plaintext passthrough for gradual migration).
     pub fn decrypt(&self, value: &str) -> Result<String, EncryptionError> {
         if value.is_empty() {
             return Ok(String::new());
@@ -283,7 +272,7 @@ impl FieldEncryptor {
         let envelope = b64.decode(encoded)
             .map_err(|e| EncryptionError::InvalidEnvelope(format!("base64: {e}")))?;
 
-        // Parse envelope
+// Parse envelope
         if envelope.is_empty() {
             return Err(EncryptionError::InvalidEnvelope("empty envelope".into()));
         }
@@ -300,12 +289,12 @@ impl FieldEncryptor {
 
         let mut pos = 1;
 
-        // KEK ID
+// KEK ID
         let mut kek_id = [0u8; KEK_ID_LEN];
         kek_id.copy_from_slice(&envelope[pos..pos + KEK_ID_LEN]);
         pos += KEK_ID_LEN;
 
-        // Wrapped DEK length
+// Wrapped DEK length
         let wrapped_dek_len = u16::from_be_bytes([envelope[pos], envelope[pos + 1]]) as usize;
         pos += WRAPPED_DEK_LEN_SIZE;
 
@@ -313,19 +302,19 @@ impl FieldEncryptor {
             return Err(EncryptionError::InvalidEnvelope("truncated".into()));
         }
 
-        // Wrapped DEK
+// Wrapped DEK
         let wrapped_dek = &envelope[pos..pos + wrapped_dek_len];
         pos += wrapped_dek_len;
 
-        // Nonce
+// Nonce
         let nonce_bytes = &envelope[pos..pos + NONCE_LEN];
         let nonce = Nonce::from_slice(nonce_bytes);
         pos += NONCE_LEN;
 
-        // Ciphertext + tag
+// Ciphertext + tag
         let ciphertext = &envelope[pos..];
 
-        // Unwrap DEK
+// Unwrap DEK
         let kek = self.find_kek(&kek_id)
             .ok_or_else(|| EncryptionError::UnknownKekId(hex::encode(kek_id)))?;
 
@@ -352,7 +341,7 @@ impl FieldEncryptor {
             return Err(EncryptionError::MalformedWrappedDek);
         }
 
-        // Decrypt field value with DEK
+// Decrypt field value with DEK
         let cipher = Aes256Gcm::new_from_slice(&dek)
             .map_err(|e| {
                 tracing::error!(error = %e, "DEK cipher init failed during decrypt");
@@ -374,23 +363,21 @@ impl FieldEncryptor {
             })
     }
 
-    /// Check if a value is encrypted (starts with the ENC prefix).
+/// Check if a value is encrypted (starts with the ENC prefix).
     pub fn is_encrypted(value: &str) -> bool {
         value.starts_with(ENCRYPTED_PREFIX)
     }
 
-    /// Re-encrypt a value with the current primary KEK.
-    ///
-    /// Use this during key rotation to migrate encrypted fields to the new KEK
-    /// without exposing plaintext in application logs.
+/// Re-encrypt a value with the current primary KEK.
+/// Use this during key rotation to migrate encrypted fields to the new KEK
+/// without exposing plaintext in application logs.
     pub fn rotate(&self, value: &str) -> Result<String, EncryptionError> {
         let plaintext = self.decrypt(value)?;
         self.encrypt(&plaintext)
     }
 
-    /// Encrypt multiple fields in a map, returning the encrypted map.
-    ///
-    /// Only the specified field names are encrypted; other fields are passed through.
+/// Encrypt multiple fields in a map, returning the encrypted map.
+/// Only the specified field names are encrypted; other fields are passed through.
     pub fn encrypt_fields(
         &self,
         fields: &std::collections::HashMap<String, String>,
@@ -407,7 +394,7 @@ impl FieldEncryptor {
         Ok(result)
     }
 
-    /// Decrypt multiple fields in a map, returning the decrypted map.
+/// Decrypt multiple fields in a map, returning the decrypted map.
     pub fn decrypt_fields(
         &self,
         fields: &std::collections::HashMap<String, String>,
@@ -439,7 +426,6 @@ impl fmt::Debug for FieldEncryptor {
 // ── PHI field definitions ─────────────────────────────────────────────────────
 
 /// Standard PHI field names that should be encrypted when HIPAA mode is active.
-///
 /// These map to columns in `subscribers`, `messages`, `contacts`, etc.
 pub const PHI_FIELDS: &[&str] = &[
     "email",
@@ -513,17 +499,17 @@ mod tests {
         let old_kek = Kek::generate();
         let _new_kek = Kek::generate();
 
-        // Encrypt with old KEK
+// Encrypt with old KEK
         let enc_old = FieldEncryptor::new(vec![old_kek]);
         let encrypted = enc_old.encrypt("phi-data@example.com").unwrap();
 
-        // Simulate rotation: new KEK is primary, old KEK is retained
-        // We need to rebuild since Kek doesn't implement Clone
+// Simulate rotation:new KEK is primary, old KEK is retained
+// We need to rebuild since Kek doesn't implement Clone
         let different_kek1 = Kek::generate(); // Different KEK for testing unknown-key path
         let different_kek2 = Kek::generate();
         let enc_both = FieldEncryptor::new(vec![different_kek1, different_kek2]);
 
-        // This will fail because neither new key matches
+// This will fail because neither new key matches
         assert!(enc_both.decrypt(&encrypted).is_err());
     }
 
@@ -547,14 +533,14 @@ mod tests {
         let enc = test_encryptor();
         let encrypted = enc.encrypt("sensitive@data.com").unwrap();
 
-        // Tamper with the last byte of the base64-encoded data
+// Tamper with the last byte of the base64-encoded data
         let mut tampered = encrypted.clone();
         let len = tampered.len();
         let last = tampered.as_bytes()[len - 2];
         let replacement = if last == b'A' { b'B' } else { b'A' };
         unsafe { tampered.as_bytes_mut()[len - 2] = replacement; }
 
-        // Decryption should fail due to authentication tag mismatch
+// Decryption should fail due to authentication tag mismatch
         assert!(enc.decrypt(&tampered).is_err());
     }
 

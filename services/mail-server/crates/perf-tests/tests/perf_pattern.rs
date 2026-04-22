@@ -42,13 +42,13 @@ fn test_pattern_match_throughput() {
 
 #[test]
 fn test_regex_compilation_reuse() {
-    // Verify that the Aho-Corasick automaton is built once and reused,
-    // not recompiled per call. We measure the cost of a second batch
-    // versus the first batch — they should be similar (no recompilation).
+// Verify that the Aho-Corasick automaton is built once and reused,
+// not recompiled per call. We measure the cost of a second batch
+// versus the first batch — they should be similar (no recompilation).
     let matcher = build_bot_detector();
     let ua = "Mozilla/5.0 (compatible; Googlebot/2.1)";
 
-    // Warm up
+// Warm up
     for _ in 0..1_000 {
         let _ = matcher.is_match(ua);
     }
@@ -74,8 +74,8 @@ fn test_regex_compilation_reuse() {
         elapsed2.as_secs_f64() / elapsed1.as_secs_f64()
     );
 
-    // If regex were recompiled, second batch would not be faster or similar.
-    // Allow up to 3x variance for timing jitter — the point is both are fast.
+// If regex were recompiled, second batch would not be faster or similar.
+// Allow up to 3x variance for timing jitter — the point is both are fast.
     assert!(
         elapsed2 < elapsed1 * 3,
         "Second batch ({:?}) should not be significantly slower than first ({:?})",

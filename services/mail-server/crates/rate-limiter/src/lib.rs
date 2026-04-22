@@ -1,7 +1,6 @@
 //! Reusable rate-limiting primitives for ApexMail.
 //!
-//! Provides three complementary strategies:
-//! - **In-memory governor-based** rate limiter (token bucket, zero-alloc hot path)
+//! Provides three complementary strategies://! - **In-memory governor-based** rate limiter (token bucket, zero-alloc hot path)
 //! - **Sliding window** counter (for quota enforcement without Redis)
 //! - **Keyed multi-tenant** limiter with per-key governors and auto-eviction
 

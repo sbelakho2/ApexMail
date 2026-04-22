@@ -74,18 +74,18 @@ fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode>
 
 pub fn build_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
-        // Health
+// Health
         .route("/health", get(health_check))
         .route("/api/v1/health", get(health_detailed))
         .route("/api/v1/health/cluster", get(cluster_status))
-        // Failover
+// Failover
         .route("/api/v1/failover/status", get(failover_status))
         .route("/api/v1/failover/initiate", post(failover_initiate))
         .route("/api/v1/failover/failback", post(failover_failback))
         .route("/api/v1/failover/history", get(failover_history))
         .route("/api/v1/failover/split-brain", get(split_brain_check))
         .route("/api/v1/failover/split-brain/resolve", post(split_brain_resolve))
-        // Backup
+// Backup
         .route("/api/v1/backup", post(backup_create))
         .route("/api/v1/backup/list", get(backup_list))
         .route("/api/v1/backup/:id", get(backup_get))
@@ -94,7 +94,7 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/backup/pitr", post(backup_pitr))
         .route("/api/v1/backup/schedule", get(backup_schedule))
         .route("/api/v1/backup/retention", post(backup_retention_cleanup))
-        // Replication
+// Replication
         .route("/api/v1/replication/status", get(replication_status))
         .route("/api/v1/replication/replicas", get(replication_replicas))
         .route("/api/v1/replication/slots", get(replication_slots))
@@ -103,7 +103,7 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/replication/promote", post(replication_promote))
         .route("/api/v1/replication/sync-mode", put(replication_sync_mode))
         .route("/api/v1/replication/lag/history", get(replication_lag_history))
-        // Multi-Region
+// Multi-Region
         .route("/api/v1/regions", get(regions_list))
         .route("/api/v1/regions", post(regions_register))
         .route("/api/v1/regions/:name", get(regions_get))
@@ -117,13 +117,13 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/regions/geo-rules", get(geo_rules_list))
         .route("/api/v1/regions/geo-rules", post(geo_rules_add))
         .route("/api/v1/regions/geo-rules/:id", delete(geo_rules_delete))
-        // Circuit Breaker
+// Circuit Breaker
         .route("/api/v1/circuit-breakers", get(circuits_list))
         .route("/api/v1/circuit-breakers/:name", get(circuits_get))
         .route("/api/v1/circuit-breakers/:name/reset", post(circuits_reset))
         .route("/api/v1/circuit-breakers", post(circuits_configure))
         .route("/api/v1/circuit-breakers/:name", delete(circuits_remove))
-        // Chaos Engineering
+// Chaos Engineering
         .route("/api/v1/chaos/experiments", get(chaos_list))
         .route("/api/v1/chaos/experiments", post(chaos_start))
         .route("/api/v1/chaos/experiments/:id", get(chaos_get))
@@ -914,7 +914,7 @@ mod tests {
 
     #[test]
     fn test_route_count() {
-        // Verify we have 40+ routes by building the router and checking it doesn't panic
+// Verify we have 40+ routes by building the router and checking it doesn't panic
         let _app = build_router(test_state());
     }
 }

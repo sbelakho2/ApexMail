@@ -18,12 +18,12 @@ use crate::types::SloTarget;
 pub struct SloComplianceResult {
     pub name: String,
     pub compliant: bool,
-    /// Current success percentage (0.0–100.0).
+/// Current success percentage (0.0–100.0).
     pub current_pct: f64,
-    /// Target percentage (0.0–100.0).
+/// Target percentage (0.0–100.0).
     pub target_pct: f64,
-    /// Fraction of the error budget still remaining (0.0–1.0).
-    /// Negative values indicate the budget has been exceeded.
+/// Fraction of the error budget still remaining (0.0–1.0).
+/// Negative values indicate the budget has been exceeded.
     pub error_budget_remaining: f64,
 }
 
@@ -38,20 +38,19 @@ pub struct SloMonitor {
 }
 
 impl SloMonitor {
-    /// Create a new, empty monitor.
+/// Create a new, empty monitor.
     pub fn new() -> Self {
         Self {
             targets: RwLock::new(Vec::new()),
         }
     }
 
-    /// Define (or overwrite) an SLO by name.
-    ///
-    /// * `target_pct` – target success percentage, e.g. `99.9` for 99.9 %.
-    /// * `window_days` – rolling window expressed in days.
+/// Define (or overwrite) an SLO by name.
+/// * `target_pct` – target success percentage, e.g. `99.9` for 99.9 %.
+/// * `window_days` – rolling window expressed in days.
     pub fn define_slo(&self, name: &str, target_pct: f64, window_days: u32) {
         let mut guard = self.targets.write();
-        // Overwrite if same name already exists
+// Overwrite if same name already exists
         guard.retain(|t| t.name != name);
 
         let now = Utc::now();
@@ -69,9 +68,8 @@ impl SloMonitor {
         });
     }
 
-    /// Check compliance for the named SLO given observed request counts.
-    ///
-    /// Returns `None` if no SLO with that name has been defined.
+/// Check compliance for the named SLO given observed request counts.
+/// Returns `None` if no SLO with that name has been defined.
     pub fn check_compliance(
         &self,
         name: &str,
@@ -109,7 +107,7 @@ impl SloMonitor {
         })
     }
 
-    /// Snapshot of all defined SLOs.
+/// Snapshot of all defined SLOs.
     pub fn list_slos(&self) -> Vec<SloTarget> {
         self.targets.read().clone()
     }
@@ -146,7 +144,7 @@ mod tests {
         let mon = SloMonitor::new();
         mon.define_slo("availability", 99.9, 30);
 
-        // 10 000 requests, 5 errors → 99.95% (above 99.9% target)
+// 10 000 requests, 5 errors → 99.95% (above 99.9% target)
         let result = mon.check_compliance("availability", 10_000, 5).unwrap();
         assert!(result.compliant);
         assert!(result.current_pct > 99.9);
@@ -158,14 +156,14 @@ mod tests {
         let mon = SloMonitor::new();
         mon.define_slo("availability", 99.9, 30);
 
-        // 10 000 requests, 20 errors → 99.8% (below 99.9% target)
-        // Allowed errors = 10, actual = 20 → budget = 1 - 20/10 = -1.0
+// 10 000 requests, 20 errors → 99.8% (below 99.9% target)
+// Allowed errors = 10, actual = 20 → budget = 1 - 20/10 = -1.0
         let result = mon.check_compliance("availability", 10_000, 20).unwrap();
         assert!(!result.compliant);
         assert!(result.current_pct < 99.9);
         assert!(result.error_budget_remaining < 0.0);
 
-        // Non-existent SLO
+// Non-existent SLO
         assert!(mon.check_compliance("nonexistent", 100, 1).is_none());
     }
 }

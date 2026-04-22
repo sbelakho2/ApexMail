@@ -141,7 +141,6 @@ async fn dashboard(
     .fetch_one(&state.db)
     .await?;
 
-    // Fix #46: Handle zero sent properly - return 0 rates instead of artificial 1
     let total_sent = row.total_sent;
     let total_delivered = row.total_delivered;
 
@@ -167,7 +166,6 @@ async fn volume(
     let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
-    // Fix #42: Map interval to valid SQL date_trunc unit
     let interval_unit = match params.interval.as_str() {
         "hour" => "hour",
         "week" => "week",
@@ -175,7 +173,7 @@ async fn volume(
         _ => "day", // default to day
     };
 
-    // Use parameterized interval (safe from SQL injection as it's validated above)
+// Use parameterized interval (safe from SQL injection as it's validated above)
     let query = format!(
         "SELECT
             date_trunc('{}', created_at) as day,
@@ -316,7 +314,7 @@ async fn export(
     let format = params.format.clone();
     let job_id = uuid::Uuid::new_v4();
 
-    // Create export job record
+// Create export job record
     sqlx::query(
         "INSERT INTO export_jobs (id, tenant_id, job_type, status, format, date_range_start, date_range_end, created_by)
          VALUES ($1, $2, 'analytics', 'pending', $3, $4, $5, $6)"
@@ -330,7 +328,6 @@ async fn export(
         .execute(&state.db)
         .await?;
 
-    // Fix #44: Spawn background task with catch_unwind to handle panics properly.
     let db = state.db.clone();
     let tenant_id = auth.tenant_id.clone();
     tokio::spawn(async move {
@@ -342,7 +339,7 @@ async fn export(
             Ok(Err(e)) => {
                 let err_msg = e.to_string();
                 tracing::error!(job_id = %job_id, error = %err_msg, "Export job failed");
-                // Mark job as failed
+// Mark job as failed
                 if let Err(db_err) = sqlx::query(
                     "UPDATE export_jobs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2"
                 )
@@ -356,7 +353,7 @@ async fn export(
             },
             Err(_panic) => {
                 tracing::error!(job_id = %job_id, "Export job panicked");
-                // Mark job as failed due to panic
+// Mark job as failed due to panic
                 if let Err(db_err) = sqlx::query(
                     "UPDATE export_jobs SET status = 'failed', error_message = 'internal error (panic)', completed_at = NOW() WHERE id = $1"
                 )
@@ -385,13 +382,13 @@ async fn process_analytics_export(
     to: DateTime<Utc>,
     format: String,
 ) -> anyhow::Result<()> {
-    // Mark job as processing
+// Mark job as processing
     sqlx::query("UPDATE export_jobs SET status = 'processing', started_at = NOW() WHERE id = $1")
         .bind(job_id)
         .execute(&db)
         .await?;
 
-    // Query analytics data
+// Query analytics data
     let rows: Vec<ExportRow> = sqlx::query_as(
         "SELECT
             m.message_id,
@@ -420,14 +417,14 @@ async fn process_analytics_export(
 
     let total_rows = rows.len() as i64;
 
-    // Generate export content based on format
+// Generate export content based on format
     let (content, content_type, extension) = match format.as_str() {
         "json" => {
             let json = serde_json::to_string_pretty(&rows)?;
             (json.into_bytes(), "application/json", "json")
         }
         _ => {
-            // CSV format (default)
+// CSV format (default)
             let mut csv = String::from("message_id,subject,recipient,sent_at,last_event,event_time\n");
             for row in &rows {
                 csv.push_str(&format!(
@@ -446,12 +443,12 @@ async fn process_analytics_export(
 
     let file_size = content.len() as i64;
 
-    // Upload to S3 (using object store pattern)
+// Upload to S3 (using object store pattern)
     let object_key = format!("exports/{}/{}.{}", tenant_id, job_id, extension);
     let download_url = upload_export_to_storage(&object_key, &content, content_type).await?;
     let expires_at = Utc::now() + TimeDelta::try_hours(24).unwrap_or(TimeDelta::zero());
 
-    // Update job as completed
+// Update job as completed
     sqlx::query(
         "UPDATE export_jobs SET
             status = 'completed',
@@ -475,11 +472,10 @@ async fn process_analytics_export(
     Ok(())
 }
 
-/// Fix #43: Sanitize value for CSV to prevent formula injection.
 /// Prefixes dangerous characters with a single quote.
 fn escape_csv(s: &str) -> String {
     let trimmed = s.trim();
-    // CSV injection prevention: prefix = + - @ with single quote
+// CSV injection prevention:prefix = + - @ with single quote
     let needs_prefix = matches!(
         trimmed.chars().next(),
         Some('=' | '+' | '-' | '@' | '\t' | '\r')
@@ -499,22 +495,21 @@ fn escape_csv(s: &str) -> String {
 }
 
 async fn upload_export_to_storage(key: &str, content: &[u8], _content_type: &str) -> anyhow::Result<String> {
-    // In production, this would upload to S3/GCS/MinIO
-    // For now, generate a presigned-style URL
-    // The actual implementation would use object_store crate
+// In production, this would upload to S3/GCS/MinIO
+// For now, generate a presigned-style URL
+// The actual implementation would use object_store crate
 
-    // Fix #45: Use secure directory with proper permissions instead of /tmp
     let export_dir = std::env::var("EXPORT_STORAGE_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
-            // Use XDG data dir or fallback to a more secure location
+// Use XDG data dir or fallback to a more secure location
             dirs::data_local_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/apexmail"))
                 .join("exports")
         });
     tokio::fs::create_dir_all(&export_dir).await?;
     
-    // Set restrictive permissions on the directory (owner only)
+// Set restrictive permissions on the directory (owner only)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -525,7 +520,7 @@ async fn upload_export_to_storage(key: &str, content: &[u8], _content_type: &str
     let file_path = export_dir.join(key.replace('/', "_"));
     tokio::fs::write(&file_path, content).await?;
 
-    // Return a URL - in production this would be a presigned S3 URL
+// Return a URL - in production this would be a presigned S3 URL
     let base_url = std::env::var("EXPORT_BASE_URL").unwrap_or_else(|_| "https://exports.apexmail.io".into());
     Ok(format!("{}/{}", base_url, key))
 }
@@ -645,9 +640,8 @@ struct DeliverabilityRow {
 // ─── PDF Export (via pdf-renderer service) ─────────────────────
 
 /// `GET /analytics/export/pdf?from=...&to=...`
-///
 /// Calls the pdf-renderer service to generate a PDF analytics export and
-/// streams the result back to the client with `Content-Disposition: attachment`.
+/// streams the result back to the client with `Content-Disposition:attachment`.
 async fn export_pdf(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -660,7 +654,7 @@ async fn export_pdf(
     let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
-    // Gather summary data for the PDF template
+// Gather summary data for the PDF template
     let summary: Option<DashboardRow> = sqlx::query_as(
         "SELECT
             COUNT(*) as total_sent,

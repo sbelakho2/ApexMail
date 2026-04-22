@@ -87,10 +87,10 @@ mod tests {
 
     #[test]
     fn resolves_known_web_tokens() {
-        assert_eq!(token_value("web", "colors", "--background").as_deref(), Some("248 246 243"));
-        assert_eq!(token_value("web", "spacing", "--space-4").as_deref(), Some("16px"));
-        assert_eq!(token_value("web", "motion", "--motion-duration-180").as_deref(), Some("180ms"));
-        assert_eq!(token_value("web", "radius", "--radius-lg").as_deref(), Some("18px"));
+        assert_eq!(token_value("web", "colors", " --background").as_deref(), Some("248 246 243"));
+        assert_eq!(token_value("web", "spacing", " --space-4").as_deref(), Some("16px"));
+        assert_eq!(token_value("web", "motion", " --motion-duration-180").as_deref(), Some("180ms"));
+        assert_eq!(token_value("web", "radius", " --radius-lg").as_deref(), Some("18px"));
     }
 
     #[test]

@@ -102,7 +102,7 @@ async fn test_concurrent_lead_scoring() {
                 "Engineer".into(),
                 "load-test".into(),
             );
-            // score_lead is a static method
+// score_lead is a static method
             let score = CrmService::score_lead(0.5, 0.5, 0.5);
             assert_eq!(score, 50);
             lead
@@ -144,7 +144,7 @@ async fn test_concurrent_metric_recording() {
     let summary = collector.get_summary();
     assert!(!summary.is_empty(), "metrics should have been recorded");
 
-    // The counter should have been incremented 100 times
+// The counter should have been incremented 100 times
     let counter = summary.iter().find(|m| m.name == "load_test_counter");
     assert!(counter.is_some());
     assert!((counter.unwrap().value - 100.0).abs() < 1.0);
@@ -190,10 +190,10 @@ async fn test_concurrent_health_checks() {
 async fn test_concurrent_bandit_selection() {
     let bandit = Arc::new(BanditOptimizer::new(0.3));
 
-    // Register some arms upfront
+// Register some arms upfront
     let arm_ids: Vec<String> = (0..5).map(|i| bandit.add_arm(&format!("arm-{i}"))).collect();
 
-    // Seed some rewards so selection has data
+// Seed some rewards so selection has data
     for id in &arm_ids {
         bandit.record_reward(id, 1.0).unwrap();
     }

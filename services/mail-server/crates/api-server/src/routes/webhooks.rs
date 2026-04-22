@@ -44,8 +44,7 @@ pub struct WebhookResponse {
     pub id: String,
     pub url: String,
     pub events: serde_json::Value,
-    // Fix #35: Never expose secrets in API responses.
-    // Secret is only returned at creation time.
+// Secret is only returned at creation time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
     pub status: String,
@@ -76,16 +75,15 @@ pub struct ListWebhooksQuery {
 
 /// Validate webhook URL format and security requirements.
 /// Requires HTTPS (or HTTP for localhost in development).
-/// Fix #33: Complete SSRF validation including all private ranges.
 fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     let url = Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
     
     let scheme = url.scheme();
     let host = url.host_str().ok_or("URL must have a host")?;
     
-    // Require HTTPS for production URLs
+// Require HTTPS for production URLs
     if scheme == "http" {
-        // Allow HTTP only for localhost/development
+// Allow HTTP only for localhost/development
         if host != "localhost" && host != "127.0.0.1" && host != "::1" {
             return Err("webhook URL must use HTTPS for non-local hosts".into());
         }
@@ -93,7 +91,6 @@ fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         return Err(format!("invalid URL scheme: {}, must be https", scheme));
     }
     
-    // Fix #33: Block ALL private/reserved IP ranges (comprehensive SSRF prevention)
     if is_private_or_reserved_host(host) {
         return Err("webhook URL cannot point to private or reserved addresses".into());
     }
@@ -101,35 +98,34 @@ fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Fix #33: Comprehensive check for private/reserved IP addresses and hostnames.
 fn is_private_or_reserved_host(host: &str) -> bool {
-    // Allow localhost for development
+// Allow localhost for development
     if host == "localhost" || host == "127.0.0.1" || host == "::1" {
         return false;
     }
     
-    // Try parsing as IPv4
+// Try parsing as IPv4
     if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-        return ip.is_private()           // 10.x, 172.16-31.x, 192.168.x
-            || ip.is_loopback()           // 127.x.x.x
-            || ip.is_link_local()         // 169.254.x.x
-            || ip.is_broadcast()          // 255.255.255.255
-            || ip.is_documentation()      // 192.0.2.0, 198.51.100.0, 203.0.113.0
-            || ip.is_unspecified()        // 0.0.0.0
-            || host.starts_with("100.64.") // Carrier-grade NAT (100.64.0.0/10)
-            || host.starts_with("198.18.") // Benchmark (198.18.0.0/15)
-            || host.starts_with("198.19.");
+        let octets = ip.octets();
+        return ip.is_private() // 10.x, 172.16-31.x, 192.168.x
+            || ip.is_loopback() // 127.x.x.x
+            || ip.is_link_local() // 169.254.x.x
+            || ip.is_broadcast() // 255.255.255.255
+            || ip.is_documentation() // 192.0.2.0, 198.51.100.0, 203.0.113.0
+            || ip.is_unspecified() // 0.0.0.0
+            || (octets[0] == 100 && (octets[1] & 0xC0) == 64) // 100.64.0.0 - 100.127.255.255
+// Benchmark testing (198.18.0.0/15)
+            || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19));
     }
     
-    // Try parsing as IPv6
+// Try parsing as IPv6
     if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
-        return ip.is_loopback()           // ::1
-            || ip.is_unspecified()        // ::
-            || is_ipv6_link_local(&ip)    // fe80::/10
+        return ip.is_loopback() // ::1
+            || ip.is_unspecified() // ::            || is_ipv6_link_local(&ip) // fe80::/10
             || is_ipv6_unique_local(&ip); // fc00::/7
     }
     
-    // Block common internal hostnames
+// Block common internal hostnames
     let lower = host.to_lowercase();
     if lower.ends_with(".local")
         || lower.ends_with(".internal")
@@ -178,6 +174,22 @@ async fn create_webhook(
         return Err(ApiError::Validation(errors));
     }
 
+// Enforce per-tenant webhook count limit (default:25)
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1",
+    )
+    .bind(&auth.tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    const MAX_WEBHOOKS_PER_TENANT: i64 = 25;
+    if count.0 >= MAX_WEBHOOKS_PER_TENANT {
+        return Err(ApiError::Forbidden(format!(
+            "webhook limit reached: maximum {} webhooks per tenant",
+            MAX_WEBHOOKS_PER_TENANT,
+        )));
+    }
+
     let id = Uuid::new_v4();
     let now = Utc::now();
     let secret = apexmail_lib::id::generate_webhook_secret();
@@ -201,7 +213,7 @@ async fn create_webhook(
             id: id.to_string(),
             url: body.url,
             events: serde_json::json!(body.events),
-            // Only return secret at creation time
+// Only return secret at creation time
             secret: Some(secret),
             status: "active".into(),
             created_at: now.to_rfc3339(),
@@ -249,18 +261,17 @@ async fn update_webhook(
 ) -> Result<Json<WebhookResponse>, ApiError> {
     require_scopes(&auth, &["webhooks:write"])?;
 
-    // Validate new URL if provided
+// Validate new URL if provided
     if let Some(ref new_url) = body.url {
         if let Err(e) = validate_webhook_url(new_url) {
             return Err(ApiError::Validation(vec![e]));
         }
     }
 
-    let existing = fetch_webhook(&state, &auth.tenant_id, id.clone()).await?;;
+    let existing = fetch_webhook(&state, &auth.tenant_id, id.clone()).await?;
     let url = body.url.unwrap_or(existing.url);
     let events = body.events.map(|e| serde_json::json!(e)).unwrap_or(existing.events);
     
-    // Fix #36: Validate status field against allowed values.
     let status = match body.status.as_deref() {
         Some(s) if s == "active" || s == "paused" || s == "disabled" => s.to_string(),
         Some(s) => return Err(ApiError::Validation(vec![format!(
@@ -320,18 +331,17 @@ async fn test_webhook(
 
     let wh = fetch_webhook(&state, &auth.tenant_id, id).await?;
     
-    // Fix #34: Validate URL at request time to prevent SSRF via DNS rebinding.
     if let Err(e) = validate_webhook_url(&wh.url) {
         return Err(ApiError::BadRequest(format!("webhook URL validation failed: {e}")));
     }
     
-    // Additional DNS rebinding protection: resolve and check IP before request.
+// Additional DNS rebinding protection:resolve and check IP before request.
     let url = Url::parse(&wh.url)
         .map_err(|e| ApiError::BadRequest(format!("invalid URL: {e}")))?;
     if let Some(host) = url.host_str() {
-        // Skip DNS check for localhost in dev
+// Skip DNS check for localhost in dev
         if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-            // Try to resolve and verify the IP isn't private
+// Try to resolve and verify the IP isn't private
             if let Ok(addrs) = tokio::net::lookup_host(format!("{}:{}", host, url.port_or_known_default().unwrap_or(443))).await {
                 for addr in addrs {
                     let ip_str = addr.ip().to_string();
@@ -405,7 +415,7 @@ impl From<WebhookRow> for WebhookResponse {
             id: r.id,
             url: r.url,
             events: r.events,
-            secret: None, // Fix #35: Don't expose secret in list/get responses
+            secret: None,
             status: r.status,
             created_at: r.created_at.to_rfc3339(),
             updated_at: r.updated_at.to_rfc3339(),
@@ -441,7 +451,7 @@ mod tests {
     #[test]
     fn test_webhook_response_serialisation() {
         let resp = WebhookResponse {
-            id: String::nil(),
+            id: String::new(),
             url: "https://example.com".into(),
             events: serde_json::json!(["delivered"]),
             secret: Some("whsec_abc".into()),

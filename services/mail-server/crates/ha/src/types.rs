@@ -1,4 +1,4 @@
-//! HA domain types: enums, structs and helpers.
+//! HA domain types:enums, structs and helpers.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

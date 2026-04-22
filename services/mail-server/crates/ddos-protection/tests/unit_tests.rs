@@ -3,14 +3,14 @@
 use std::time::Instant;
 
 /// ============================================================================
-/// UNIT TESTS: Reputation Module
+/// UNIT TESTS:Reputation Module
 /// ============================================================================
 #[cfg(test)]
 mod reputation_tests {
     use super::*;
     
-    // Note: These tests would import from the actual module
-    // For now, we define test structures inline
+// Note:These tests would import from the actual module
+// For now, we define test structures inline
     
     #[derive(Debug, Clone)]
     struct ReputationScore {
@@ -77,7 +77,7 @@ mod reputation_tests {
 }
 
 /// ============================================================================
-/// UNIT TESTS: Cost-Based Rate Limiting
+/// UNIT TESTS:Cost-Based Rate Limiting
 /// ============================================================================
 #[cfg(test)]
 mod cost_based_tests {
@@ -131,20 +131,20 @@ mod cost_based_tests {
     #[test]
     fn test_cost_calculation_combined() {
         let cost = RequestCost::new(1000, 2048, 2, 1);
-        // 1000 + 2 + 20 + 100 = 1122
+// 1000 + 2 + 20 + 100 = 1122
         assert_eq!(cost.total_cost(), 1122);
     }
     
     #[test]
     fn test_high_cost_endpoint() {
         let cost = RequestCost::new(5000, 1024 * 1024, 5, 1);
-        // 5000 + 1024 + 50 + 100 = 6174
+// 5000 + 1024 + 50 + 100 = 6174
         assert_eq!(cost.total_cost(), 6174);
     }
 }
 
 /// ============================================================================
-/// UNIT TESTS: Session Tracking
+/// UNIT TESTS:Session Tracking
 /// ============================================================================
 #[cfg(test)]
 mod session_tests {
@@ -275,7 +275,7 @@ mod session_tests {
         for _ in 0..10 {
             session.inter_arrival_times.push_back(100);
         }
-        // Uniform distribution should have CoV of 0
+// Uniform distribution should have CoV of 0
         assert!(session.inter_arrival_cov() < 0.01);
     }
     
@@ -287,13 +287,13 @@ mod session_tests {
         session.inter_arrival_times.push_back(50);
         session.inter_arrival_times.push_back(200);
         
-        // Variable distribution should have higher CoV
+// Variable distribution should have higher CoV
         assert!(session.inter_arrival_cov() > 0.5);
     }
 }
 
 /// ============================================================================
-/// UNIT TESTS: JA4 Fingerprinting
+/// UNIT TESTS:JA4 Fingerprinting
 /// ============================================================================
 #[cfg(test)]
 mod ja4_tests {
@@ -354,7 +354,7 @@ mod ja4_tests {
 }
 
 /// ============================================================================
-/// UNIT TESTS: HTTP/2 Fingerprinting
+/// UNIT TESTS:HTTP/2 Fingerprinting
 /// ============================================================================
 #[cfg(test)]
 mod http2_tests {
@@ -437,7 +437,7 @@ mod http2_tests {
 }
 
 /// ============================================================================
-/// UNIT TESTS: CRDT Counters
+/// UNIT TESTS:CRDT Counters
 /// ============================================================================
 #[cfg(test)]
 mod crdt_tests {
@@ -589,11 +589,11 @@ mod crdt_tests {
 }
 
 /// ============================================================================
-/// UNIT TESTS: Isolation Forest ML
+/// UNIT TESTS:Isolation Forest ML
 /// ============================================================================
 #[cfg(test)]
 mod ml_tests {
-    /// Expected path length adjustment factor c(n)
+/// Expected path length adjustment factor c(n)
     fn c_factor(n: usize) -> f64 {
         if n <= 1 {
             return 0.0;
@@ -624,41 +624,40 @@ mod ml_tests {
     
     #[test]
     fn test_c_factor_256() {
-        // c(256) = 2*H(255) - 2*(255/256) ≈ 10.24
-        // H(255) = ln(255) + γ ≈ 5.54 + 0.577 ≈ 6.12
-        // c(256) = 12.24 - 1.99 ≈ 10.24
+// c(256) = 2*H(255) - 2*(255/256) ≈ 10.24
+// H(255) = ln(255) + γ ≈ 5.54 + 0.577 ≈ 6.12
+// c(256) = 12.24 - 1.99 ≈ 10.24
         let c = c_factor(256);
         assert!(c > 10.0 && c < 10.5, "c(256) = {} should be around 10.24", c);
     }
     
     #[test]
     fn test_anomaly_score_formula() {
-        // Anomaly score formula: s(x, n) = 2^(-E(h(x))/c(n))
-        // Where E(h(x)) is expected path length and c(n) is the adjustment factor
-        // With c(256) ≈ 10.24:
-        // - path=1:  2^(-1/10.24) ≈ 0.935
-        // - path=5:  2^(-5/10.24) ≈ 0.713
-        // - path=10: 2^(-10/10.24) ≈ 0.508
-        // - path=15: 2^(-15/10.24) ≈ 0.364
+// Anomaly score formula:s(x, n) = 2^(-E(h(x))/c(n))
+// Where E(h(x)) is expected path length and c(n) is the adjustment factor
+// With c(256) ≈ 10.24:// - path=1:2^(-1/10.24) ≈ 0.935
+// - path=5:2^(-5/10.24) ≈ 0.713
+// - path=10:2^(-10/10.24) ≈ 0.508
+// - path=15:2^(-15/10.24) ≈ 0.364
         
         let c = c_factor(256);
         
-        // Short path (anomaly) - path length 1
+// Short path (anomaly) - path length 1
         let anomaly_score = 2.0_f64.powf(-1.0 / c);
         assert!(anomaly_score > 0.9, "Short path should have high anomaly score");
         
-        // Medium path - path length 5
+// Medium path - path length 5
         let medium_score = 2.0_f64.powf(-5.0 / c);
         assert!(medium_score > 0.6 && medium_score < 0.8, "Medium path score: {}", medium_score);
         
-        // Long path (normal) - path length 15
+// Long path (normal) - path length 15
         let normal_score = 2.0_f64.powf(-15.0 / c);
         assert!(normal_score < 0.4, "Long path should have low anomaly score: {}", normal_score);
     }
 }
 
 /// ============================================================================
-/// UNIT TESTS: PoW Challenge
+/// UNIT TESTS:PoW Challenge
 /// ============================================================================
 #[cfg(test)]
 mod pow_tests {
@@ -701,14 +700,14 @@ mod pow_tests {
     
     #[test]
     fn test_pow_difficulty_0() {
-        // Difficulty 0 should always pass
+// Difficulty 0 should always pass
         assert!(verify_pow("test", 0, 0));
         assert!(verify_pow("test", 123, 0));
     }
     
     #[test]
     fn test_pow_difficulty_8() {
-        // Find a nonce for difficulty 8 (first byte is 0)
+// Find a nonce for difficulty 8 (first byte is 0)
         let prefix = "test_pow_d8";
         let solution = solve_pow(prefix, 8, 10000);
         assert!(solution.is_some(), "Should find solution for difficulty 8");
@@ -720,9 +719,9 @@ mod pow_tests {
     
     #[test]
     fn test_pow_wrong_nonce() {
-        // A random nonce is unlikely to satisfy difficulty 16
+// A random nonce is unlikely to satisfy difficulty 16
         let prefix = "test_pow";
-        // This specific nonce is very unlikely to work
+// This specific nonce is very unlikely to work
         assert!(!verify_pow(prefix, 999999, 16));
     }
     
@@ -731,7 +730,7 @@ mod pow_tests {
         let prefix = "consistent_test";
         let nonce: u64 = 12345;
         
-        // Same inputs should give same result
+// Same inputs should give same result
         let result1 = verify_pow(prefix, nonce, 4);
         let result2 = verify_pow(prefix, nonce, 4);
         assert_eq!(result1, result2);

@@ -1,6 +1,6 @@
 //! Revenue analytics endpoint.
 //!
-//! Migrated from: apps/control-plane/src/app/api/revenue/route.ts
+//! Migrated from:apps/control-plane/src/app/api/revenue/route.ts
 
 use axum::extract::State;
 use axum::routing::get;
@@ -66,7 +66,7 @@ async fn get_revenue(
 
     let db = &state.db;
 
-    // Current MRR
+// Current MRR
     let current_mrr: f64 = sqlx::query_scalar::<_, String>(
         "SELECT COALESCE(SUM(
             CASE WHEN billing_interval = 'year' THEN amount / 12.0 ELSE 0 END
@@ -80,7 +80,7 @@ async fn get_revenue(
     .and_then(|s| s.parse().ok())
     .unwrap_or(0.0);
 
-    // Previous MRR (30 days ago snapshot)
+// Previous MRR (30 days ago snapshot)
     let previous_mrr: f64 = sqlx::query_scalar::<_, String>(
         "SELECT COALESCE(SUM(
             CASE WHEN billing_interval = 'year' THEN amount / 12.0
@@ -103,7 +103,7 @@ async fn get_revenue(
     let previous_arr = previous_mrr * 12.0;
     let arr_growth = if previous_arr > 0.0 { (arr - previous_arr) / previous_arr } else { 0.0 };
 
-    // Revenue by plan
+// Revenue by plan
     let plan_rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT t.plan,
                 COUNT(DISTINCT t.id)::text,
@@ -142,7 +142,7 @@ async fn get_revenue(
         })
         .collect();
 
-    // Monthly data (last 6 months)
+// Monthly data (last 6 months)
     let monthly_rows: Vec<(String, String)> = sqlx::query_as(
         "WITH months AS (
             SELECT generate_series(
@@ -175,7 +175,7 @@ async fn get_revenue(
         })
         .collect();
 
-    // Customer counts
+// Customer counts
     let new_customers: i64 = sqlx::query_scalar::<_, String>(
         "SELECT COUNT(*)::text FROM tenants WHERE created_at >= NOW() - INTERVAL '30 days'",
     )

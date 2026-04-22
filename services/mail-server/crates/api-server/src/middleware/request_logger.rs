@@ -8,7 +8,7 @@ use axum::response::Response;
 use std::time::Instant;
 use uuid::Uuid;
 
-/// Axum middleware: injects `X-Request-ID` and logs the request lifecycle.
+/// Axum middleware:injects `X-Request-ID` and logs the request lifecycle.
 pub async fn request_logger(
     mut req: Request,
     next: Next,
@@ -20,7 +20,7 @@ pub async fn request_logger(
         .map(String::from)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    // Attach to extensions so downstream handlers can read it.
+// Attach to extensions so downstream handlers can read it.
     req.extensions_mut().insert(RequestId(request_id.clone()));
 
     let method = req.method().clone();
@@ -41,7 +41,7 @@ pub async fn request_logger(
         "request completed"
     );
 
-    // Set X-Request-ID on response
+// Set X-Request-ID on response
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("x-request-id", val);
     }

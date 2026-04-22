@@ -58,7 +58,7 @@ pub struct DkimConfig {
     #[serde(default = "default_dkim_selector")]
     pub selector: String,
     pub private_key_path: Option<String>,
-    /// Base64-encoded private key (alternative to file path)
+/// Base64-encoded private key (alternative to file path)
     pub private_key: Option<String>,
 }
 
@@ -154,14 +154,14 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from file
+/// Load configuration from file
     pub fn load_from(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
 
-    /// Load configuration from environment variables
+/// Load configuration from environment variables
     pub fn from_env() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
         

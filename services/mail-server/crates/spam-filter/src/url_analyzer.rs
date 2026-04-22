@@ -1,12 +1,11 @@
 //! URL analysis for spam/phishing detection
 //!
-//! Checks:
-//! - Known URL shortener services
+//! Checks://! - Known URL shortener services
 //! - IDN homograph attacks (mixed-script detection)
 //! - Suspicious TLDs
 //! - IP-address URLs
 //! - Excessive URL count
-//! - Data URI schemes and javascript: URIs
+//! - Data URI schemes and javascript:URIs
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -21,22 +20,22 @@ const REDIRECT_TIMEOUT_SECS: u64 = 5;
 /// Result of URL analysis
 #[derive(Debug, Clone)]
 pub struct UrlScore {
-    /// Total penalty from URL inspection
+/// Total penalty from URL inspection
     pub score: f64,
-    /// Individual findings
+/// Individual findings
     pub findings: Vec<UrlFinding>,
-    /// Count of distinct URLs found
+/// Count of distinct URLs found
     pub url_count: usize,
 }
 
 /// A single URL finding
 #[derive(Debug, Clone)]
 pub struct UrlFinding {
-    /// Finding identifier
+/// Finding identifier
     pub id: &'static str,
-    /// Description
+/// Description
     pub description: String,
-    /// Penalty
+/// Penalty
     pub penalty: f64,
 }
 
@@ -44,7 +43,7 @@ fn suspicious_tlds() -> &'static HashSet<&'static str> {
     static INSTANCE: OnceLock<HashSet<&'static str>> = OnceLock::new();
     INSTANCE.get_or_init(|| {
         [
-            "tk", "ml", "ga", "cf", "gq",  // Free TLDs abused by spam
+            "tk", "ml", "ga", "cf", "gq", // Free TLDs abused by spam
             "buzz", "top", "xyz", "club", "icu", "cam", "rest",
             "surf", "monster", "click", "link", "fit",
         ].into_iter().collect()
@@ -70,7 +69,7 @@ fn is_url_shortener_in_config(host: &str, shorteners: &[String]) -> bool {
 /// Extract URLs from text (simple extraction, not a full parser)
 pub fn extract_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
-    // Match http(s):// URLs
+// Match http(s):// URLs
     let mut remaining = text;
     loop {
         let http_pos = remaining.find("http://");
@@ -96,7 +95,7 @@ pub fn extract_urls(text: &str) -> Vec<String> {
 
 /// Analyze URLs found in email body for spam/phishing indicators
 pub fn analyze_urls(body: &str) -> UrlScore {
-    // Use default static list (backward compatible)
+// Use default static list (backward compatible)
     analyze_urls_with_shorteners(body, None)
 }
 
@@ -107,7 +106,7 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
     let urls = extract_urls(body);
     let url_count = urls.len();
 
-    // 1. Excessive URLs
+// 1. Excessive URLs
     if url_count > 15 {
         findings.push(UrlFinding {
             id: "EXCESSIVE_URLS",
@@ -117,11 +116,11 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
     }
 
     for url_str in &urls {
-        // Parse host from URL
+// Parse host from URL
         let host = extract_host(url_str);
         let host_lower = host.to_lowercase();
 
-        // 2. URL shorteners (use config list if provided, else default)
+// 2. URL shorteners (use config list if provided, else default)
         let is_shortener = match shorteners {
             Some(list) => is_url_shortener_in_config(&host_lower, list),
             None => url_shorteners().contains(host_lower.as_str()),
@@ -134,7 +133,7 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
             });
         }
 
-        // 3. IP-address URL (http://192.168.1.1/...)
+// 3. IP-address URL (http://192.168.1.1/...)
         if is_ip_address(&host_lower) {
             findings.push(UrlFinding {
                 id: "IP_URL",
@@ -143,7 +142,7 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
             });
         }
 
-        // 4. Suspicious TLD
+// 4. Suspicious TLD
         if let Some(tld) = extract_tld(&host_lower) {
             if suspicious_tlds().contains(tld) {
                 findings.push(UrlFinding {
@@ -154,7 +153,7 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
             }
         }
 
-        // 5. IDN homograph detection (mixed scripts)
+// 5. IDN homograph detection (mixed scripts)
         if has_mixed_scripts(&host_lower) {
             findings.push(UrlFinding {
                 id: "IDN_HOMOGRAPH",
@@ -163,7 +162,7 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
             });
         }
 
-        // 6. Extremely long URL (data exfiltration / obfuscation)
+// 6. Extremely long URL (data exfiltration / obfuscation)
         if url_str.len() > 500 {
             findings.push(UrlFinding {
                 id: "VERY_LONG_URL",
@@ -172,7 +171,7 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
             });
         }
 
-        // 7. Port in URL (http://example.com:8080)
+// 7. Port in URL (http://example.com:8080)
         if host_lower.contains(':') && !host_lower.starts_with('[') {
             findings.push(UrlFinding {
                 id: "URL_WITH_PORT",
@@ -182,7 +181,7 @@ pub fn analyze_urls_with_shorteners(body: &str, shorteners: Option<&[String]>) -
         }
     }
 
-    // 8. data: or javascript: URIs
+// 8. data:or javascript:URIs
     let lower_body = body.to_lowercase();
     if lower_body.contains("data:text/html") || lower_body.contains("data:application") {
         findings.push(UrlFinding {
@@ -214,7 +213,7 @@ fn extract_host(url: &str) -> String {
         .unwrap_or(url);
     let host_end = without_scheme.find('/').unwrap_or(without_scheme.len());
     let host_with_port = &without_scheme[..host_end];
-    // Strip userinfo (user:pass@)
+// Strip userinfo (user:pass@)
     let host = host_with_port
         .rfind('@')
         .map(|i| &host_with_port[i + 1..])
@@ -223,14 +222,14 @@ fn extract_host(url: &str) -> String {
 }
 
 fn extract_tld(host: &str) -> Option<&str> {
-    // Remove port if present
+// Remove port if present
     let h = host.split(':').next().unwrap_or(host);
     h.rsplit('.').next()
 }
 
 fn is_ip_address(host: &str) -> bool {
     let h = host.split(':').next().unwrap_or(host);
-    // IPv4 check
+// IPv4 check
     h.split('.').all(|part| part.parse::<u8>().is_ok()) && h.split('.').count() == 4
 }
 
@@ -244,11 +243,11 @@ fn has_mixed_scripts(host: &str) -> bool {
             has_latin = true;
             continue;
         }
-        // Check Unicode blocks for Cyrillic (U+0400-U+04FF)
+// Check Unicode blocks for Cyrillic (U+0400-U+04FF)
         if ('\u{0400}'..='\u{04FF}').contains(&c) {
             has_cyrillic = true;
         }
-        // Check for Greek (U+0370-U+03FF)
+// Check for Greek (U+0370-U+03FF)
         if ('\u{0370}'..='\u{03FF}').contains(&c) {
             has_greek = true;
         }
@@ -264,38 +263,36 @@ fn has_mixed_scripts(host: &str) -> bool {
 /// Result of detonating (following redirects on) a single URL.
 #[derive(Debug, Clone)]
 pub struct DetonationResult {
-    /// The original URL that was submitted.
+/// The original URL that was submitted.
     pub original_url: String,
-    /// The final URL after following all redirects.
+/// The final URL after following all redirects.
     pub final_url: String,
-    /// Ordered list of intermediate URLs traversed.
+/// Ordered list of intermediate URLs traversed.
     pub redirect_chain: Vec<String>,
-    /// Number of redirect hops taken.
+/// Number of redirect hops taken.
     pub hops: usize,
-    /// Whether the resolution was truncated because we hit `MAX_REDIRECT_HOPS`.
+/// Whether the resolution was truncated because we hit `MAX_REDIRECT_HOPS`.
     pub truncated: bool,
-    /// Error message if resolution failed at some point.
+/// Error message if resolution failed at some point.
     pub error: Option<String>,
 }
 
 /// Result of detonating all URLs found in a message body.
 #[derive(Debug, Clone)]
 pub struct DetonationReport {
-    /// Per-URL results.
+/// Per-URL results.
     pub results: Vec<DetonationResult>,
-    /// Additional findings generated from detonation (e.g. a shortener
-    /// resolves to a suspicious TLD).
+/// Additional findings generated from detonation (e.g. a shortener
+/// resolves to a suspicious TLD).
     pub findings: Vec<UrlFinding>,
-    /// Aggregate penalty from detonation-specific findings.
+/// Aggregate penalty from detonation-specific findings.
     pub score: f64,
 }
 
 /// Follow HTTP redirects for a single URL and return the chain.
-///
 /// This uses a HEAD-only request with no cookies and a 5-second timeout per
-/// hop.  The `reqwest` client is configured with `redirect::Policy::none()`
+/// hop. The `reqwest` client is configured with `redirect::Policy::none`
 /// so that we can manually track each hop and enforce our own limit.
-///
 /// When the `phishing` feature is **not** enabled, this always returns an
 /// error result without making any network calls.
 pub async fn detonate_url(url: &str) -> DetonationResult {
@@ -370,7 +367,7 @@ async fn detonate_url_impl(url: &str) -> DetonationResult {
             if let Some(loc) = resp.headers().get("location") {
                 let next = match loc.to_str() {
                     Ok(s) => {
-                        // Handle relative redirects
+// Handle relative redirects
                         if s.starts_with("http://") || s.starts_with("https://") {
                             s.to_string()
                         } else if let Ok(base) = url::Url::parse(&current) {
@@ -404,7 +401,6 @@ async fn detonate_url_impl(url: &str) -> DetonationResult {
 
 /// Detonate **all** URLs found in the message body and produce a report with
 /// additional findings.
-///
 /// For each URL shortener or redirect, the final resolved URL is also checked
 /// against our suspicious-TLD list, IP-address heuristic, and IDN homograph
 /// detector.
@@ -416,13 +412,13 @@ pub async fn detonate_urls(body: &str) -> DetonationReport {
     for url_str in &urls {
         let result = detonate_url(url_str).await;
 
-        // If the final URL differs from the original, run our checks on the
-        // resolved destination.
+// If the final URL differs from the original, run our checks on the
+// resolved destination.
         if result.final_url != result.original_url && result.error.is_none() {
             let resolved_host = extract_host(&result.final_url);
             let resolved_lower = resolved_host.to_lowercase();
 
-            // Check resolved TLD
+// Check resolved TLD
             if let Some(tld) = extract_tld(&resolved_lower) {
                 if suspicious_tlds().contains(tld) {
                     findings.push(UrlFinding {
@@ -436,7 +432,7 @@ pub async fn detonate_urls(body: &str) -> DetonationReport {
                 }
             }
 
-            // Check resolved IP address URL
+// Check resolved IP address URL
             if is_ip_address(&resolved_lower) {
                 findings.push(UrlFinding {
                     id: "DETONATION_IP_URL",
@@ -448,7 +444,7 @@ pub async fn detonate_urls(body: &str) -> DetonationReport {
                 });
             }
 
-            // Check resolved IDN homograph
+// Check resolved IDN homograph
             if has_mixed_scripts(&resolved_lower) {
                 findings.push(UrlFinding {
                     id: "DETONATION_IDN_HOMOGRAPH",
@@ -460,7 +456,7 @@ pub async fn detonate_urls(body: &str) -> DetonationReport {
                 });
             }
 
-            // Excessive redirect hops
+// Excessive redirect hops
             if result.hops > 3 {
                 findings.push(UrlFinding {
                     id: "DETONATION_EXCESSIVE_HOPS",
@@ -545,18 +541,18 @@ mod tests {
 
     #[test]
     fn test_mixed_scripts() {
-        // Cyrillic 'а' mixed with Latin
+// Cyrillic 'а' mixed with Latin
         assert!(has_mixed_scripts("exаmple.com"));
-        // Pure ASCII
+// Pure ASCII
         assert!(!has_mixed_scripts("example.com"));
     }
 
     #[tokio::test]
     async fn test_detonate_url_no_phishing_feature() {
-        // Without the phishing feature, detonation returns a noop result
+// Without the phishing feature, detonation returns a noop result
         let result = detonate_url("https://bit.ly/abc123").await;
         assert_eq!(result.original_url, "https://bit.ly/abc123");
-        // When phishing feature is off, we get an error result
+// When phishing feature is off, we get an error result
         #[cfg(not(feature = "phishing"))]
         assert!(result.error.is_some());
     }
@@ -573,7 +569,7 @@ mod tests {
         let result = DetonationResult {
             original_url: "https://bit.ly/test".into(),
             final_url: "https://evil.tk/phish".into(),
-            redirect_chain: vec!["https://bit.ly/test".into()],
+            redirect_chain: vec!["https://bit.ly/test".into],
             hops: 1,
             truncated: false,
             error: None,

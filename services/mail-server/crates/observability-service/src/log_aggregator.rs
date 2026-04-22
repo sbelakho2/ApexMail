@@ -16,7 +16,6 @@ use crate::types::{LogEntry, LogLevel};
 // ---------------------------------------------------------------------------
 
 /// Thread-safe in-memory structured log store.
-///
 /// Caps total stored entries at `max_entries`; when full, the oldest entries
 /// are evicted on each insert to prevent unbounded memory growth.
 #[derive(Debug)]
@@ -26,12 +25,12 @@ pub struct LogAggregator {
 }
 
 impl LogAggregator {
-    /// Create a new, empty aggregator with a default 500 000 entry cap.
+/// Create a new, empty aggregator with a default 500 000 entry cap.
     pub fn new() -> Self {
         Self::with_capacity(500_000)
     }
 
-    /// Create an aggregator that retains at most `max_entries` entries.
+/// Create an aggregator that retains at most `max_entries` entries.
     pub fn with_capacity(max_entries: usize) -> Self {
         Self {
             entries: RwLock::new(Vec::new()),
@@ -39,19 +38,19 @@ impl LogAggregator {
         }
     }
 
-    /// Ingest a single log entry.
-    ///
-    /// If the store is at capacity, the oldest 10% of entries are evicted.
+/// Ingest a single log entry.
+/// If the store is at capacity, the oldest 10% of entries are evicted.
     pub fn ingest(&self, entry: LogEntry) {
         let mut guard = self.entries.write();
         if guard.len() >= self.max_entries {
-            guard.drain(..guard.len() / 10);
+            let prune_count = guard.len() / 10;
+            guard.drain(..prune_count);
         }
         guard.push(entry);
     }
 
-    /// Query logs with optional level and service filters, returning at most
-    /// `limit` entries ordered newest-first.
+/// Query logs with optional level and service filters, returning at most
+/// `limit` entries ordered newest-first.
     pub fn query(
         &self,
         level_filter: Option<LogLevel>,
@@ -88,7 +87,7 @@ impl LogAggregator {
         results
     }
 
-    /// Return the count of log entries grouped by [`LogLevel`].
+/// Return the count of log entries grouped by [`LogLevel`].
     pub fn count_by_level(&self) -> HashMap<LogLevel, usize> {
         let guard = self.entries.read();
         let mut counts = HashMap::new();
@@ -98,9 +97,9 @@ impl LogAggregator {
         counts
     }
 
-    /// Calculate the error rate (errors / total) within the last
-    /// `window_secs` seconds. Returns 0.0 when there are no entries in the
-    /// window.
+/// Calculate the error rate (errors / total) within the last
+/// `window_secs` seconds. Returns 0.0 when there are no entries in the
+/// window.
     pub fn get_error_rate(&self, window_secs: i64) -> f64 {
         let guard = self.entries.read();
         let cutoff = Utc::now() - Duration::seconds(window_secs);
@@ -122,12 +121,12 @@ impl LogAggregator {
         }
     }
 
-    /// Total number of stored entries.
+/// Total number of stored entries.
     pub fn len(&self) -> usize {
         self.entries.read().len()
     }
 
-    /// Whether the store is empty.
+/// Whether the store is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.read().is_empty()
     }
@@ -171,16 +170,16 @@ mod tests {
         agg.ingest(make_log(LogLevel::Error, "api", "db timeout"));
         agg.ingest(make_log(LogLevel::Warn, "worker", "slow job"));
 
-        // No filters
+// No filters
         let all = agg.query(None, None, 100);
         assert_eq!(all.len(), 3);
 
-        // Level filter: Error and above
+// Level filter:Error and above
         let errors = agg.query(Some(LogLevel::Error), None, 100);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "db timeout");
 
-        // Service filter
+// Service filter
         let worker_logs = agg.query(None, Some("worker"), 100);
         assert_eq!(worker_logs.len(), 1);
     }
@@ -201,7 +200,7 @@ mod tests {
     #[test]
     fn test_error_rate() {
         let agg = LogAggregator::new();
-        // 2 info + 1 error = 1/3 ≈ 0.333
+// 2 info + 1 error = 1/3 ≈ 0.333
         agg.ingest(make_log(LogLevel::Info, "api", "ok"));
         agg.ingest(make_log(LogLevel::Info, "api", "ok2"));
         agg.ingest(make_log(LogLevel::Error, "api", "fail"));
@@ -209,7 +208,7 @@ mod tests {
         let rate = agg.get_error_rate(60);
         assert!((rate - 1.0 / 3.0).abs() < 0.01);
 
-        // Empty window (impossibly old) → 0
+// Empty window (impossibly old) → 0
         let empty = LogAggregator::new();
         assert!((empty.get_error_rate(60)).abs() < f64::EPSILON);
     }

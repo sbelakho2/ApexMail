@@ -1,7 +1,6 @@
 //! XSS (Cross-Site Scripting) detection via HTML/JS token analysis
 //!
-//! Detects:
-//! - Script tags (including obfuscated: `<scr\x00ipt>`, `<ScRiPt>`)
+//! Detects://! - Script tags (including obfuscated:`<scr\x00ipt>`, `<ScRiPt>`)
 //! - Event handler attributes (`onerror`, `onload`, `onclick`, etc.)
 //! - JavaScript URI schemes (`javascript:`, `vbscript:`, `data:text/html`)
 //! - SVG/MathML XSS vectors
@@ -14,10 +13,10 @@ use crate::{AttackCategory, MatchLocation, RuleMatch};
 pub fn analyze_xss(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     let mut results = Vec::with_capacity(6);
     let lower = input.to_lowercase();
-    // Strip null bytes (common evasion)
+// Strip null bytes (common evasion)
     let cleaned: String = lower.chars().filter(|c| *c != '\0').collect();
 
-    // Detection 1: Script tags
+// Detection 1:Script tags
     if detect_script_tags(&cleaned) {
         results.push(RuleMatch {
             rule_id: 941100,
@@ -29,7 +28,7 @@ pub fn analyze_xss(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 2: Event handler attributes
+// Detection 2:Event handler attributes
     if detect_event_handlers(&cleaned) {
         results.push(RuleMatch {
             rule_id: 941200,
@@ -41,7 +40,7 @@ pub fn analyze_xss(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 3: JavaScript/VBScript URI schemes
+// Detection 3:JavaScript/VBScript URI schemes
     if detect_js_uri(&cleaned) {
         results.push(RuleMatch {
             rule_id: 941300,
@@ -53,7 +52,7 @@ pub fn analyze_xss(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 4: SVG/MathML/Object/Embed/Iframe vectors
+// Detection 4:SVG/MathML/Object/Embed/Iframe vectors
     if detect_dangerous_tags(&cleaned) {
         results.push(RuleMatch {
             rule_id: 941400,
@@ -65,7 +64,7 @@ pub fn analyze_xss(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         });
     }
 
-    // Detection 5: CSS expression injection
+// Detection 5:CSS expression injection
     if detect_css_injection(&cleaned) {
         results.push(RuleMatch {
             rule_id: 941500,
@@ -82,7 +81,7 @@ pub fn analyze_xss(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
 
 /// Detect <script> tags (including obfuscation)
 fn detect_script_tags(input: &str) -> bool {
-    // Standard and variations
+// Standard and variations
     let patterns = [
         "<script", "</script", "<script/",
         "<script\t", "<script\n", "<script\r",
@@ -114,8 +113,8 @@ fn detect_event_handlers(input: &str) -> bool {
             return true;
         }
     }
-    // Also detect with whitespace before =
-    // e.g., onerror = "..."
+// Also detect with whitespace before =
+// e.g., onerror = "..."
     let handler_names = [
         "onerror", "onload", "onclick", "onmouseover", "onfocus",
         "onblur", "onsubmit", "onkeydown", "onkeyup",
@@ -137,19 +136,18 @@ fn detect_js_uri(input: &str) -> bool {
     let schemes = [
         "javascript:", "vbscript:", "livescript:",
         "data:text/html", "data:application/xhtml",
-        // data: URIs with JavaScript MIME types are equally dangerous:
-        // <script src="data:text/javascript,alert(1)"> executes in-browser.
+// data:URIs with JavaScript MIME types are equally dangerous:// <script src="data:text/javascript,alert(1)"> executes in-browser.
         "data:text/javascript", "data:application/javascript",
         "data:text/vbscript", "data:application/x-javascript",
         "data:application/ecmascript",
     ];
     for s in &schemes {
-        // Also check with whitespace evasion (java\tscript:)
+// Also check with whitespace evasion (java\tscript:)
         if input.contains(s) {
             return true;
         }
     }
-    // Check for whitespace-obfuscated javascript:
+// Check for whitespace-obfuscated javascript:
     let no_space: String = input.chars().filter(|c| !c.is_whitespace()).collect();
     if no_space.contains("javascript:") || no_space.contains("vbscript:") {
         return true;

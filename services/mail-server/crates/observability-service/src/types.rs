@@ -1,7 +1,6 @@
 //! Core domain types for the observability service.
 //!
-//! Maps 1-to-1 with the TypeScript interfaces in the original codebase:
-//! `MetricPoint`, `TraceSpan`, `LogEntry`, `Alert`, `SloTarget`,
+//! Maps 1-to-1 with the TypeScript interfaces in the original codebase://! `MetricPoint`, `TraceSpan`, `LogEntry`, `Alert`, `SloTarget`,
 //! `HealthStatus`, and `AlertSeverity`.
 
 use chrono::{DateTime, Utc};
@@ -215,7 +214,7 @@ pub struct AlertRule {
     pub description: String,
     pub enabled: bool,
     pub expression: String,
-    /// Duration in seconds that condition must hold before firing.
+/// Duration in seconds that condition must hold before firing.
     pub duration_secs: u64,
     pub severity: AlertSeverity,
     pub labels: HashMap<String, String>,
@@ -237,13 +236,13 @@ pub struct SloTarget {
     pub name: String,
     pub description: String,
     pub service: String,
-    /// Target ratio (0.0 – 1.0), e.g. 0.999 = 99.9 %.
+/// Target ratio (0.0 – 1.0), e.g. 0.999 = 99.9 %.
     pub target: f64,
-    /// Rolling window in seconds.
+/// Rolling window in seconds.
     pub window_secs: u64,
-    /// Metric expression used for numerator (good events).
+/// Metric expression used for numerator (good events).
     pub good_event_expr: String,
-    /// Metric expression used for denominator (total events).
+/// Metric expression used for denominator (total events).
     pub total_event_expr: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

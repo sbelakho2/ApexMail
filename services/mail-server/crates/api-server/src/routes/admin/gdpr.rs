@@ -1,6 +1,6 @@
 //! GDPR request management endpoints.
 //!
-//! Migrated from: apps/control-plane/src/app/api/gdpr/route.ts
+//! Migrated from:apps/control-plane/src/app/api/gdpr/route.ts
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -70,7 +70,7 @@ async fn list_gdpr_requests(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-    // Check if table exists
+// Check if table exists
     let exists: (bool,) = sqlx::query_as(
         "SELECT to_regclass('public.gdpr_requests') IS NOT NULL",
     )

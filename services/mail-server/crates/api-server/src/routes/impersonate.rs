@@ -1,8 +1,7 @@
 //! Impersonation endpoints.
 //!
-//! Migrated from:
-//!   - apps/web/src/app/api/auth/impersonate/route.ts
-//!   - apps/web/src/app/api/auth/impersonate/end/route.ts
+//! Migrated from://! - apps/web/src/app/api/auth/impersonate/route.ts
+//! - apps/web/src/app/api/auth/impersonate/end/route.ts
 //!
 //! Allows platform operators to impersonate tenant accounts.
 //! All impersonation events are audit-logged.
@@ -60,10 +59,10 @@ async fn start_impersonation(
         return Err(ApiError::BadRequest("missing impersonation token".into()));
     }
 
-    // Validate the impersonation token
+// Validate the impersonation token
     let payload = verify_impersonation_token(&body.token, &state.config.impersonation_secret)?;
 
-    // Validate token type
+// Validate token type
     if payload.token_type.as_deref() != Some("impersonation") {
         return Err(ApiError::Unauthorized("invalid impersonation token type".into()));
     }
@@ -83,7 +82,7 @@ async fn start_impersonation(
     let exp = payload.exp.unwrap_or(0);
     let jti = payload.jti.as_deref().unwrap_or_default();
 
-    // Audit log the impersonation start
+// Audit log the impersonation start
     if let Err(e) = sqlx::query(
         "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
          VALUES (NOW(), 'impersonation_session_started', 'session', $1, $2, $3::jsonb)",
@@ -109,7 +108,7 @@ async fn start_impersonation(
         "Impersonation session started"
     );
 
-    // Create session token for the impersonation
+// Create session token for the impersonation
     let session_payload = serde_json::json!({
         "type": "impersonation",
         "tenantId": tenant_id,
@@ -120,7 +119,7 @@ async fn start_impersonation(
     });
     let session_token = create_signed_token(&session_payload, &state.config.session_secret)?;
 
-    // Calculate cookie max-age from token expiry
+// Calculate cookie max-age from token expiry
     let now_ms = chrono::Utc::now().timestamp_millis();
     let max_age_secs = if exp > now_ms {
         (exp - now_ms) / 1000
@@ -148,11 +147,11 @@ async fn end_impersonation(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    // Try to read the impersonation cookie for audit logging
+// Try to read the impersonation cookie for audit logging
     let imp_token = extract_cookie(&headers, "impersonation_session");
     if let Some(token) = imp_token {
         if let Ok(payload) = verify_session_token_soft(&token, &state.config.session_secret) {
-            // Audit log the end
+// Audit log the end
             if let Err(e) = sqlx::query(
                 "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
                  VALUES (NOW(), 'impersonation_session_ended', 'session', $1, $2, $3::jsonb)",
@@ -174,7 +173,7 @@ async fn end_impersonation(
         }
     }
 
-    // Clear the impersonation cookie
+// Clear the impersonation cookie
     let mut response = (
         StatusCode::OK,
         Json(EndImpersonationResponse { success: true }),
@@ -231,7 +230,7 @@ fn verify_impersonation_token(
     let payload: ImpersonationTokenPayload = serde_json::from_slice(&payload_bytes)
         .map_err(|_| ApiError::Unauthorized("invalid token payload".into()))?;
 
-    // Check expiry
+// Check expiry
     if let Some(exp) = payload.exp {
         let now_ms = chrono::Utc::now().timestamp_millis();
         if now_ms > exp {
@@ -307,7 +306,7 @@ mod tests {
         let token = create_signed_token(&payload, secret).unwrap();
         assert!(token.contains('.'));
 
-        // Verify the soft verification also works
+// Verify the soft verification also works
         let decoded = verify_session_token_soft(&token, secret).unwrap();
         assert_eq!(decoded["type"], "impersonation");
         assert_eq!(decoded["tenantId"], "t1");
@@ -317,7 +316,7 @@ mod tests {
     fn test_create_signed_token_tamper_detection() {
         let payload = serde_json::json!({"type": "impersonation"});
         let token = create_signed_token(&payload, "secret1").unwrap();
-        // Should fail with different secret
+// Should fail with different secret
         assert!(verify_session_token_soft(&token, "wrong-secret").is_err());
     }
 }

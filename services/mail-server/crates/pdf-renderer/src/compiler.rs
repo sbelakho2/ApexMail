@@ -1,9 +1,8 @@
 //! Typst compiler — template + JSON data → PDF bytes.
 //!
-//! This module wraps the Typst compiler pipeline:
-//!   1. Build a `TypstWorld` from template name + JSON data
-//!   2. Compile the Typst source to a Typst document
-//!   3. Export the document to PDF bytes via `typst-pdf`
+//! This module wraps the Typst compiler pipeline://! 1. Build a `TypstWorld` from template name + JSON data
+//! 2. Compile the Typst source to a Typst document
+//! 3. Export the document to PDF bytes via `typst-pdf`
 
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -15,14 +14,11 @@ use crate::world::{TypstWorld, WorldError};
 // ---------------------------------------------------------------------------
 
 /// Render a named template with JSON data → PDF bytes.
-///
 /// # Arguments
 /// * `template` — template name (e.g. `"invoice"`, `"dpa"`)
 /// * `data` — arbitrary JSON value to inject into the template
-///
 /// # Returns
 /// PDF bytes on success.
-///
 /// # Errors
 /// Returns `RenderError` if template not found, compilation fails, or PDF
 /// export fails.
@@ -49,7 +45,6 @@ pub fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<u8>, R
 // ---------------------------------------------------------------------------
 
 /// Generate a minimal but valid PDF 1.4 document with the template data.
-///
 /// Uses raw PDF operators to produce a single-page document containing
 /// the title, template name, timestamp and a preview of the injected data.
 /// This avoids a Typst compile dependency while producing spec-compliant
@@ -65,7 +60,7 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
         _ => "Document",
     };
 
-    // Minimal PDF structure
+// Minimal PDF structure
     let content = format!(
         r#"%PDF-1.4
 1 0 obj
@@ -131,19 +126,19 @@ startxref
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderRequest {
-    /// Template name: "invoice", "dpa", "compliance_report", "analytics_export", "qbr"
+/// Template name:"invoice", "dpa", "compliance_report", "analytics_export", "qbr"
     pub template: String,
-    /// Arbitrary JSON data to pass to the template
+/// Arbitrary JSON data to pass to the template
     pub data: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderResponse {
-    /// Base64-encoded PDF bytes (only used for JSON response mode)
+/// Base64-encoded PDF bytes (only used for JSON response mode)
     pub pdf_base64: Option<String>,
-    /// Size in bytes
+/// Size in bytes
     pub size: usize,
-    /// Template used
+/// Template used
     pub template: String,
 }
 

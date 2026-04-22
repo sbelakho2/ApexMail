@@ -6,15 +6,15 @@ use tracing::{error, info};
 #[derive(Parser)]
 #[command(name = "analytics-worker", about = "ApexMail Analytics Worker")]
 struct Args {
-    /// Run compaction immediately and exit
+/// Run compaction immediately and exit
     #[arg(long)]
     compact: bool,
 
-    /// Run reconciliation immediately and exit
+/// Run reconciliation immediately and exit
     #[arg(long)]
     reconcile: bool,
 
-    /// Health check and exit
+/// Health check and exit
     #[arg(long)]
     health: bool,
 }
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting analytics worker");
 
-    // Database pool
+// Database pool
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -38,13 +38,13 @@ async fn main() -> anyhow::Result<()> {
         .connect(&config.database_url)
         .await?;
 
-    // Redis pool
+// Redis pool
     let redis_cfg = deadpool_redis::Config::from_url(&config.redis_url);
     let redis = redis_cfg
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .map_err(|e| anyhow::anyhow!("Redis pool error: {e}"))?;
 
-    // One-shot modes
+// One-shot modes
     if args.compact {
         let worker = analytics::compaction::CompactionWorker::new(
             pool.clone(),
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Main loop: schedule compaction + reconciliation + health checks
+// Main loop:schedule compaction + reconciliation + health checks
     let compaction_config = config.compaction.clone();
     let storage_path = config.storage_path.clone();
     let pool_c = pool.clone();
@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let pool_r = pool.clone();
     let redis_r = redis.clone();
 
-    // Compaction task (runs at configured hour, default 2 AM)
+// Compaction task (runs at configured hour, default 2 AM)
     let compaction_handle = tokio::spawn(async move {
         loop {
             let now = chrono::Utc::now();
@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Reconciliation task (runs at configured hour, default 3 AM)
+// Reconciliation task (runs at configured hour, default 3 AM)
     let reconciliation_config = config.reconciliation.clone();
     let reconciliation_handle = tokio::spawn(async move {
         loop {
@@ -134,12 +134,12 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Health check (every 60s)
+// Health check (every 60s)
     let health_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            // Simple ping check
+// Simple ping check
             match sqlx::query("SELECT 1").fetch_one(&pool).await {
                 Ok(_) => {}
                 Err(e) => error!("Health check failed: {e}"),
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Wait for shutdown signal (SIGINT or SIGTERM)
+// Wait for shutdown signal (SIGINT or SIGTERM)
     {
         let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
         #[cfg(unix)]

@@ -1,11 +1,10 @@
 //! Adversarial Threat Intelligence tests.
 //!
-//! Critical properties under test:
-//! - Blocklisted IPs are correctly flagged
+//! Critical properties under test://! - Blocklisted IPs are correctly flagged
 //! - CIDR ranges correctly match all IPs within them
-//! - TTL expiry: after purge, expired entries no longer block traffic
-//!   (This catches the "empty blocklist after 24h" regression —
-//!    without auto-refresh, all entries purge and blocklists go empty)
+//! - TTL expiry:after purge, expired entries no longer block traffic
+//! (This catches the "empty blocklist after 24h" regression —
+//! without auto-refresh, all entries purge and blocklists go empty)
 //! - Domain blocklist works for known malicious domains
 //! - Clean IPs / domains are not false-positived
 //! - Feed refresh task can be spawned without panicking
@@ -72,7 +71,7 @@ fn test_clean_ip_not_flagged() {
 fn test_malformed_ip_no_panic() {
     let engine = ThreatIntelEngine::new();
     let verdict = engine.check_ip("not_an_ip");
-    // Should return a safe Allow verdict without panicking
+// Should return a safe Allow verdict without panicking
     assert_eq!(verdict.action, ThreatAction::Allow);
 }
 
@@ -86,7 +85,7 @@ fn test_cidr_match_inside_range() {
         .add_cidr("198.51.100.0/24", spam_entry("198.51.100.0/24", 3600))
         .expect("add CIDR");
 
-    // Any IP in .0/24 should match
+// Any IP in .0/24 should match
     for last_octet in [1u8, 100, 254] {
         let ip = format!("198.51.100.{}", last_octet);
         let verdict = engine.check_ip(&ip);
@@ -106,7 +105,7 @@ fn test_cidr_miss_outside_range() {
         .add_cidr("198.51.100.0/24", spam_entry("198.51.100.0/24", 3600))
         .expect("add CIDR");
 
-    // 198.51.101.1 is outside /24 (different third octet)
+// 198.51.101.1 is outside /24 (different third octet)
     let verdict = engine.check_ip("198.51.101.1");
     assert_eq!(verdict.action, ThreatAction::Allow, "IP outside /24 CIDR must NOT be flagged");
 }
@@ -114,18 +113,18 @@ fn test_cidr_miss_outside_range() {
 // ── TTL expiry (the empty-blocklist-after-24h regression) ────────────────────
 
 /// After TTL expiry and purge, a formerly blocked IP must no longer be blocked.
-/// This demonstrates the risk: without feed auto-refresh, after 24h the blocklist
+/// This demonstrates the risk:without feed auto-refresh, after 24h the blocklist
 /// is purged to empty and ALL malicious IPs pass through unchecked.
 #[test]
 fn test_expired_entry_purged_and_no_longer_blocked() {
     let engine = ThreatIntelEngine::new();
     let ip: Ipv4Addr = "198.51.100.50".parse().unwrap();
 
-    // Add entry with TTL already expired (negative seconds)
+// Add entry with TTL already expired (negative seconds)
     engine.ip_blocklist().add_ip(ip, spam_entry("198.51.100.50", -1));
 
-    // Before purge: entry may or may not be returned (implementation-dependent)
-    // After purge: MUST be removed
+// Before purge:entry may or may not be returned (implementation-dependent)
+// After purge:MUST be removed
     let stats = purge_once(&engine);
     assert!(
         stats.expired_ips_removed > 0,
@@ -150,7 +149,7 @@ fn test_valid_entry_survives_purge() {
     engine.ip_blocklist().add_ip(ip, spam_entry("198.51.100.77", 86400)); // expires in 24h
 
     let stats = purge_once(&engine);
-    // Nothing expired so removal count should be 0
+// Nothing expired so removal count should be 0
     assert_eq!(stats.expired_ips_removed, 0, "Fresh entry must not be purged");
 
     let verdict = engine.check_ip("198.51.100.77");
@@ -191,7 +190,7 @@ fn test_subdomain_not_matched_by_base_domain_block() {
         domain_entry("phishing.com", 3600),
     );
 
-    // The lookup walks up: mail.phishing.com → phishing.com → match!
+// The lookup walks up:mail.phishing.com → phishing.com → match!
     let verdict = engine.check_domain("mail.phishing.com");
     assert_eq!(
         verdict.action, ThreatAction::Block,
@@ -214,14 +213,14 @@ async fn test_spawn_refresh_task_no_panic() {
         enabled: true,
     };
 
-    // No-op loader — just verifies the task can be spawned
+// No-op loader — just verifies the task can be spawned
     let handle = spawn_refresh_task(engine, config, |_engine| {
-        // In real usage: fetch feed data and load into engine
+// In real usage:fetch feed data and load into engine
     });
 
-    // Abort immediately — we're just checking it spawns without panic
+// Abort immediately — we're just checking it spawns without panic
     handle.abort();
-    // Give Tokio a moment to process the abort
+// Give Tokio a moment to process the abort
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 }
 
@@ -241,7 +240,7 @@ async fn test_disabled_refresh_task_does_not_run_loader() {
         enabled: false, // disabled!
     };
 
-    // run_refresh_loop returns immediately when enabled=false
+// run_refresh_loop returns immediately when enabled=false
     let task_engine = engine.clone();
     tokio::time::timeout(
         std::time::Duration::from_millis(100),

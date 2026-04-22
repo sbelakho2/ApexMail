@@ -1,7 +1,6 @@
 //! Content policy scanning — confidentiality markers, classification labels
 //!
-//! Detects organizational sensitivity markers in outbound email content:
-//! - "CONFIDENTIAL", "INTERNAL ONLY", "DO NOT DISTRIBUTE"
+//! Detects organizational sensitivity markers in outbound email content://! - "CONFIDENTIAL", "INTERNAL ONLY", "DO NOT DISTRIBUTE"
 //! - Custom keyword lists configured by policy
 //! - Classification banners
 
@@ -10,11 +9,11 @@ use aho_corasick::AhoCorasick;
 /// Content policy match
 #[derive(Debug, Clone)]
 pub struct PolicyMatch {
-    /// Matched keyword/phrase
+/// Matched keyword/phrase
     pub keyword: String,
-    /// Risk score
+/// Risk score
     pub risk: f64,
-    /// Byte offset
+/// Byte offset
     pub offset: usize,
 }
 
@@ -38,7 +37,7 @@ pub fn scan_content_policy(text: &str, keywords: &[String]) -> Vec<PolicyMatch> 
     for mat in ac.find_iter(text) {
         let idx = mat.pattern().as_usize();
         if idx < keywords.len() && seen.insert(idx) {
-            // Assign risk based on keyword severity
+// Assign risk based on keyword severity
             let keyword = &keywords[idx];
             let risk = classify_keyword_risk(keyword);
             matches.push(PolicyMatch {

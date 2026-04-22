@@ -6,7 +6,6 @@ use uuid::Uuid;
 use crate::types::{Lead, LeadStatus, SalesError};
 
 /// In-memory CRM service backed by an `RwLock<Vec<Lead>>`.
-///
 /// Production workloads persist to Postgres (via `sqlx`); this in-memory
 /// implementation keeps the crate self-contained for testing.
 #[derive(Debug, Clone)]
@@ -27,7 +26,7 @@ impl CrmService {
         }
     }
 
-    /// Insert a new lead and return its assigned id.
+/// Insert a new lead and return its assigned id.
     pub fn create_lead(
         &self,
         email: String,
@@ -51,7 +50,7 @@ impl CrmService {
         lead
     }
 
-    /// Retrieve a lead by id.
+/// Retrieve a lead by id.
     pub fn get_lead(&self, id: Uuid) -> Result<Lead, SalesError> {
         self.leads
             .read()
@@ -61,7 +60,7 @@ impl CrmService {
             .ok_or(SalesError::LeadNotFound(id))
     }
 
-    /// List leads, optionally filtering by status and/or source.
+/// List leads, optionally filtering by status and/or source.
     pub fn list_leads(
         &self,
         status: Option<LeadStatus>,
@@ -76,7 +75,7 @@ impl CrmService {
             .collect()
     }
 
-    /// Transition a lead to a new status.
+/// Transition a lead to a new status.
     pub fn update_lead_status(
         &self,
         id: Uuid,
@@ -91,10 +90,9 @@ impl CrmService {
         Ok(lead.clone())
     }
 
-    /// Compute a deterministic lead score (0–100) from three normalised
-    /// dimensions: email engagement, company size tier, and recency.
-    ///
-    /// Each input should be in `0.0..=1.0`.
+/// Compute a deterministic lead score (0–100) from three normalised
+/// dimensions:email engagement, company size tier, and recency.
+/// Each input should be in `0.0..=1.0`.
     pub fn score_lead(
         email_engagement: f64,
         company_size: f64,
@@ -107,7 +105,7 @@ impl CrmService {
         (raw.round() as u8).min(100)
     }
 
-    /// Full-text search over lead name, email, and company.
+/// Full-text search over lead name, email, and company.
     pub fn search_leads(&self, query: &str) -> Vec<Lead> {
         let q = query.to_lowercase();
         self.leads
@@ -168,7 +166,7 @@ mod tests {
         let updated = svc.update_lead_status(id, LeadStatus::Contacted).unwrap();
         assert_eq!(updated.status, LeadStatus::Contacted);
 
-        // missing lead
+// missing lead
         let res = svc.update_lead_status(Uuid::new_v4(), LeadStatus::Lost);
         assert!(res.is_err());
     }
@@ -178,7 +176,7 @@ mod tests {
         assert_eq!(CrmService::score_lead(1.0, 1.0, 1.0), 100);
         assert_eq!(CrmService::score_lead(0.0, 0.0, 0.0), 0);
         assert_eq!(CrmService::score_lead(0.5, 0.5, 0.5), 50);
-        // clamping
+// clamping
         assert_eq!(CrmService::score_lead(2.0, 2.0, 2.0), 100);
     }
 
@@ -186,24 +184,24 @@ mod tests {
     fn test_search_and_filter() {
         let svc = make_svc();
 
-        // search
+// search
         let results = svc.search_leads("alice");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Alice");
 
-        // filter by source
+// filter by source
         let manual = svc.list_leads(None, Some("manual"));
         assert_eq!(manual.len(), 1);
         assert_eq!(manual[0].name, "Bob");
 
-        // filter by status — both are New
+// filter by status — both are New
         let new_leads = svc.list_leads(Some(LeadStatus::New), None);
         assert_eq!(new_leads.len(), 2);
     }
 
-    // -----------------------------------------------------------------------
-    // Additional comprehensive tests for all code paths
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Additional comprehensive tests for all code paths
+// -----------------------------------------------------------------------
 
     #[test]
     fn default_creates_empty_service() {
@@ -305,26 +303,26 @@ mod tests {
 
     #[test]
     fn score_lead_boundary_values() {
-        // Exact boundaries
+// Exact boundaries
         assert_eq!(CrmService::score_lead(0.0, 0.0, 0.0), 0);
         assert_eq!(CrmService::score_lead(1.0, 1.0, 1.0), 100);
         
-        // Negative inputs clamped to 0
+// Negative inputs clamped to 0
         assert_eq!(CrmService::score_lead(-1.0, -1.0, -1.0), 0);
         
-        // Only engagement
+// Only engagement
         assert_eq!(CrmService::score_lead(1.0, 0.0, 0.0), 40);
         
-        // Only company size
+// Only company size
         assert_eq!(CrmService::score_lead(0.0, 1.0, 0.0), 30);
         
-        // Only recency
+// Only recency
         assert_eq!(CrmService::score_lead(0.0, 0.0, 1.0), 30);
     }
 
     #[test]
     fn score_lead_fractional() {
-        // 0.25 * 40 + 0.75 * 30 + 0.5 * 30 = 10 + 22.5 + 15 = 47.5 → 48
+// 0.25 * 40 + 0.75 * 30 + 0.5 * 30 = 10 + 22.5 + 15 = 47.5 → 48
         assert_eq!(CrmService::score_lead(0.25, 0.75, 0.5), 48);
     }
 

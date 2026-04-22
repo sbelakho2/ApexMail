@@ -1,9 +1,8 @@
 use regex::Regex;
 use url::Url;
 
-/// Web scraper utilities: email extraction, URL validation, robots.txt
+/// Web scraper utilities:email extraction, URL validation, robots.txt
 /// checks.
-///
 /// The TypeScript version contains full Puppeteer-based crawlers; this Rust
 /// port focuses on the *deterministic* text-processing parts that can run
 /// without a browser.
@@ -21,7 +20,7 @@ impl Default for WebScraper {
 impl WebScraper {
     pub fn new() -> Self {
         Self {
-            // RFC-5322-lite: we capture common email patterns.
+// RFC-5322-lite:we capture common email patterns.
             email_re: Regex::new(
                 r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
             )
@@ -29,7 +28,7 @@ impl WebScraper {
         }
     }
 
-    /// Extract all email addresses from arbitrary text.
+/// Extract all email addresses from arbitrary text.
     pub fn extract_emails_from_text(&self, text: &str) -> Vec<String> {
         let mut emails: Vec<String> = self
             .email_re
@@ -41,7 +40,7 @@ impl WebScraper {
         emails
     }
 
-    /// Derive basic company info from a domain (name + common pages).
+/// Derive basic company info from a domain (name + common pages).
     pub fn extract_company_info(domain: &str) -> serde_json::Value {
         let name = domain
             .split('.')
@@ -57,7 +56,7 @@ impl WebScraper {
         })
     }
 
-    /// Validate that a string is a well-formed HTTP(S) URL.
+/// Validate that a string is a well-formed HTTP(S) URL.
     pub fn validate_url(input: &str) -> bool {
         match Url::parse(input) {
             Ok(u) => u.scheme() == "http" || u.scheme() == "https",
@@ -65,11 +64,10 @@ impl WebScraper {
         }
     }
 
-    /// Simplified robots.txt check: returns `true` if the path is
-    /// *not* disallowed by the given robots.txt content.
-    ///
-    /// This is intentionally conservative: if we cannot parse the
-    /// robots.txt, we assume the URL is allowed.
+/// Simplified robots.txt check:returns `true` if the path is
+/// *not* disallowed by the given robots.txt content.
+/// This is intentionally conservative:if we cannot parse the
+/// robots.txt, we assume the URL is allowed.
     pub fn is_allowed_by_robots(robots_txt: &str, path: &str) -> bool {
         let mut in_group = false;
         let mut group_matches = false;
@@ -181,7 +179,7 @@ Allow: /
         assert!(WebScraper::is_allowed_by_robots(robots, "/about"));
         assert!(!WebScraper::is_allowed_by_robots(robots, "/admin"));
         assert!(!WebScraper::is_allowed_by_robots(robots, "/private/data"));
-        // empty robots.txt → everything allowed
+// empty robots.txt → everything allowed
         assert!(WebScraper::is_allowed_by_robots("", "/anything"));
     }
 }

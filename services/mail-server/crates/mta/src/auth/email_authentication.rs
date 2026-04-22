@@ -1,4 +1,4 @@
-//! Core email authentication: SPF, DKIM, DMARC (RFC 7208, 6376, 7489).
+//! Core email authentication:SPF, DKIM, DMARC (RFC 7208, 6376, 7489).
 //!
 //! Leverages `mail-auth` for the heavy lifting (DNS‑based checks, crypto) and adds
 //! caching, policy evaluation, and the `AuthenticationResults` header builder.
@@ -109,23 +109,23 @@ pub struct DmarcAlignment {
 /// Stateful email authenticator with DNS caching.
 pub struct EmailAuthenticator {
     resolver: Resolver,
-    /// #120: Dedicated DNS resolver for DMARC TXT lookups.
+/// #120:Dedicated DNS resolver for DMARC TXT lookups.
     dns_resolver: TokioAsyncResolver,
     config: EmailAuthConfig,
     hostname: String,
-    /// Domain → SPF evaluation cache (TTL 5 min).
+/// Domain → SPF evaluation cache (TTL 5 min).
     spf_cache: Cache<String, SpfVerdict>,
-    /// #120: Domain → DMARC policy cache (TTL 5 min).
+/// #120:Domain → DMARC policy cache (TTL 5 min).
     dmarc_cache: Cache<String, DmarcPolicy>,
 }
 
 impl EmailAuthenticator {
-    /// Create a new authenticator.
+/// Create a new authenticator.
     pub async fn new(config: EmailAuthConfig, hostname: String) -> anyhow::Result<Self> {
         let resolver =
             Resolver::new_system_conf().map_err(|e| anyhow::anyhow!("resolver: {e}"))?;
 
-        // #120: Shared DNS resolver for DMARC TXT lookups (avoids per-call allocation)
+// #120:Shared DNS resolver for DMARC TXT lookups (avoids per-call allocation)
         let dns_resolver = TokioAsyncResolver::tokio(
             ResolverConfig::default(),
             ResolverOpts::default(),
@@ -136,7 +136,7 @@ impl EmailAuthenticator {
             .time_to_live(Duration::from_secs(300))
             .build();
 
-        // #120: DMARC policy cache – avoids repeated TXT lookups
+// #120:DMARC policy cache – avoids repeated TXT lookups
         let dmarc_cache = Cache::builder()
             .max_capacity(5_000)
             .time_to_live(Duration::from_secs(300))
@@ -152,7 +152,7 @@ impl EmailAuthenticator {
         })
     }
 
-    /// Authenticate an inbound email.  Runs SPF + DKIM concurrently, then DMARC.
+/// Authenticate an inbound email. Runs SPF + DKIM concurrently, then DMARC.
     pub async fn authenticate(
         &self,
         raw_message: &[u8],
@@ -166,10 +166,10 @@ impl EmailAuthenticator {
             .unwrap_or(mail_from)
             .to_lowercase();
 
-        // Parse message synchronously (AuthenticatedMessage::parse is sync)
+// Parse message synchronously (AuthenticatedMessage::parse is sync)
         let authenticated_msg = AuthenticatedMessage::parse(raw_message);
 
-        // #121: Run SPF + DKIM concurrently using tokio::join!
+// #121:Run SPF + DKIM concurrently using tokio::join!
         let (spf, dkim_outcomes) = tokio::join!(
             self.check_spf(client_ip, helo_hostname, mail_from, &from_domain),
             async {
@@ -186,10 +186,10 @@ impl EmailAuthenticator {
             }
         );
 
-        // DMARC evaluation
+// DMARC evaluation
         let dmarc = self.check_dmarc(&from_domain, &spf, &dkim_outcomes).await;
 
-        // Build Authentication-Results header
+// Build Authentication-Results header
         let auth_results_header =
             self.build_auth_results_header(&spf, &dkim_outcomes, &dmarc);
 
@@ -201,21 +201,21 @@ impl EmailAuthenticator {
         })
     }
 
-    /// Decide whether to accept, quarantine or reject based on authentication + config.
+/// Decide whether to accept, quarantine or reject based on authentication + config.
     pub fn should_accept(&self, results: &AuthenticationResults) -> MessageDisposition {
-        // SPF hard fail + strict
+// SPF hard fail + strict
         if self.config.require_spf && results.spf.result == SpfVerdict::Fail {
             return MessageDisposition::Reject;
         }
 
-        // DKIM required but none passed
+// DKIM required but none passed
         if self.config.require_dkim
             && !results.dkim.iter().any(|d| d.result == DkimVerdict::Pass)
         {
             return MessageDisposition::Reject;
         }
 
-        // DMARC enforcement
+// DMARC enforcement
         if self.config.enforce_dmarc && results.dmarc.result == DmarcVerdict::Fail {
             return match results.dmarc.policy {
                 DmarcPolicy::Reject => MessageDisposition::Reject,
@@ -233,7 +233,7 @@ impl EmailAuthenticator {
         MessageDisposition::Accept
     }
 
-    // ── internal checks ────────────────────────────────────────────────────────
+// ── internal checks ────────────────────────────────────────────────────────
 
     async fn check_spf(
         &self,
@@ -242,8 +242,8 @@ impl EmailAuthenticator {
         mail_from: &str,
         from_domain: &str,
     ) -> SpfOutcome {
-        // #122: Cache key includes helo + mail_from (not just domain) so SPF results
-        // are correct for empty MAIL FROM (HELO identity) and per-sender subdomains
+// #122:Cache key includes helo + mail_from (not just domain) so SPF results
+// are correct for empty MAIL FROM (HELO identity) and per-sender subdomains
         let cache_key = format!("{client_ip}:{helo}:{mail_from}");
         if let Some(cached) = self.spf_cache.get(&cache_key) {
             return SpfOutcome {
@@ -299,10 +299,10 @@ impl EmailAuthenticator {
         let spf_aligned = spf.result == SpfVerdict::Pass;
         let dkim_aligned = dkim.iter().any(|d| d.result == DkimVerdict::Pass);
 
-        // #120: Fetch actual DMARC policy from DNS (p=reject/quarantine/none)
+// #120:Fetch actual DMARC policy from DNS (p=reject/quarantine/none)
         let policy = self.lookup_dmarc_policy(from_domain).await;
 
-        // DMARC passes if either SPF or DKIM passes with alignment
+// DMARC passes if either SPF or DKIM passes with alignment
         let result = if spf_aligned || dkim_aligned {
             DmarcVerdict::Pass
         } else {
@@ -323,7 +323,7 @@ impl EmailAuthenticator {
         }
     }
 
-    /// #120: Look up DMARC DNS TXT record and parse p= policy, with fallback to parent domain.
+/// #120:Look up DMARC DNS TXT record and parse p= policy, with fallback to parent domain.
     async fn lookup_dmarc_policy(&self, domain: &str) -> DmarcPolicy {
         if let Some(cached) = self.dmarc_cache.get(domain) {
             return cached;
@@ -332,7 +332,7 @@ impl EmailAuthenticator {
         let policy = match self.fetch_dmarc_txt(domain).await {
             Some(p) => p,
             None => {
-                // Try organizational/parent domain if subdomain record absent
+// Try organizational/parent domain if subdomain record absent
                 if let Some(dot_idx) = domain.find('.') {
                     let parent = &domain[dot_idx + 1..];
                     if parent.contains('.') {
@@ -350,7 +350,7 @@ impl EmailAuthenticator {
         policy
     }
 
-    /// Fetch and parse a single _dmarc.{domain} TXT record.
+/// Fetch and parse a single _dmarc.{domain} TXT record.
     async fn fetch_dmarc_txt(&self, domain: &str) -> Option<DmarcPolicy> {
         let dmarc_domain = format!("_dmarc.{domain}");
         match self.dns_resolver.txt_lookup(&dmarc_domain).await {
@@ -375,14 +375,14 @@ impl EmailAuthenticator {
     ) -> String {
         let mut parts = vec![format!("Authentication-Results: {}", self.hostname)];
 
-        // SPF
+// SPF
         parts.push(format!(
             ";\r\n\tspf={} smtp.mailfrom={}",
             verdict_str_spf(spf.result),
             spf.domain,
         ));
 
-        // DKIM
+// DKIM
         for d in dkim {
             if d.domain.is_empty() {
                 continue;
@@ -395,7 +395,7 @@ impl EmailAuthenticator {
             ));
         }
 
-        // DMARC
+// DMARC
         parts.push(format!(
             ";\r\n\tdmarc={} header.from={}",
             verdict_str_dmarc(dmarc.result),
@@ -464,7 +464,7 @@ fn verdict_str_dmarc(v: DmarcVerdict) -> &'static str {
     }
 }
 
-/// #120: Parse p= policy from a raw DMARC TXT record string.
+/// #120:Parse p= policy from a raw DMARC TXT record string.
 fn parse_dmarc_policy_record(txt: &str) -> Option<DmarcPolicy> {
     let trimmed = txt.trim();
     if !trimmed.starts_with("v=DMARC1") {

@@ -8,71 +8,71 @@ pub type ProcessorResult<T> = Result<T, ProcessorError>;
 /// Errors that can occur during processor operations.
 #[derive(Debug, Error)]
 pub enum ProcessorError {
-    /// Database error.
+/// Database error.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    /// Redis error.
+/// Redis error.
     #[error("redis error: {0}")]
     Redis(#[from] redis::RedisError),
 
-    /// Redis pool error.
+/// Redis pool error.
     #[error("redis pool error: {0}")]
     RedisPool(#[from] deadpool_redis::PoolError),
 
-    /// HTTP request error (webhook delivery).
+/// HTTP request error (webhook delivery).
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
-    /// JSON serialization/deserialization error.
+/// JSON serialization/deserialization error.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// DNS resolution error.
+/// DNS resolution error.
     #[error("dns error: {0}")]
     Dns(String),
 
-    /// SSRF protection triggered.
+/// SSRF protection triggered.
     #[error("ssrf blocked: {0}")]
     SsrfBlocked(String),
 
-    /// Circuit breaker is open.
+/// Circuit breaker is open.
     #[error("circuit breaker open for {0}")]
     CircuitOpen(String),
 
-    /// Rate limit exceeded.
+/// Rate limit exceeded.
     #[error("rate limit exceeded: {0}")]
     RateLimited(String),
 
-    /// Invalid configuration.
+/// Invalid configuration.
     #[error("config error: {0}")]
     Config(String),
 
-    /// Email transport error.
+/// Email transport error.
     #[error("email transport error: {0}")]
     Transport(String),
 
-    /// DKIM signing error.
+/// DKIM signing error.
     #[error("dkim error: {0}")]
     Dkim(String),
 
-    /// Classification error.
+/// Classification error.
     #[error("classification error: {0}")]
     Classification(String),
 
-    /// Suppression check error.
+/// Suppression check error.
     #[error("suppression error: {0}")]
     Suppression(String),
 
-    /// Job processing error.
+/// Job processing error.
     #[error("job error: {0}")]
     Job(String),
 
-    /// Task cancelled/shutdown.
+/// Task cancelled/shutdown.
     #[error("processor shutdown")]
     Shutdown,
 
-    /// Generic internal error.
+/// Generic internal error.
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }

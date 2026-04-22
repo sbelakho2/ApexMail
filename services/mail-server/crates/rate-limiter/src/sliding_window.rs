@@ -10,7 +10,6 @@ use crate::config::SlidingWindowConfig;
 use crate::types::Decision;
 
 /// In-memory sliding window rate limiter.
-///
 /// Uses two consecutive fixed windows and interpolates the count
 /// based on the current position within the window.
 pub struct SlidingWindowCounter {
@@ -20,13 +19,13 @@ pub struct SlidingWindowCounter {
 }
 
 struct WindowState {
-    /// Count in the previous window.
+/// Count in the previous window.
     prev_count: u64,
-    /// Count in the current window.
+/// Count in the current window.
     curr_count: u64,
-    /// When the current window started.
+/// When the current window started.
     curr_window_start: Instant,
-    /// Window duration.
+/// Window duration.
     window: Duration,
 }
 
@@ -40,25 +39,25 @@ impl WindowState {
         }
     }
 
-    /// Rotate windows if the current one has expired.
+/// Rotate windows if the current one has expired.
     fn maybe_rotate(&mut self, now: Instant) {
         let elapsed = now.duration_since(self.curr_window_start);
 
         if elapsed >= self.window * 2 {
-            // Been idle for 2+ windows — reset everything
+// Been idle for 2+ windows — reset everything
             self.prev_count = 0;
             self.curr_count = 0;
             self.curr_window_start = now;
         } else if elapsed >= self.window {
-            // Rotate: current → previous
+// Rotate:current → previous
             self.prev_count = self.curr_count;
             self.curr_count = 0;
-            // Advance window start by one window duration
+// Advance window start by one window duration
             self.curr_window_start += self.window;
         }
     }
 
-    /// Calculate the weighted count using linear interpolation.
+/// Calculate the weighted count using linear interpolation.
     fn weighted_count(&self, now: Instant) -> f64 {
         let elapsed = now
             .duration_since(self.curr_window_start)
@@ -66,14 +65,14 @@ impl WindowState {
         let window_secs = self.window.as_secs_f64();
         let pct_into_window = (elapsed / window_secs).min(1.0);
 
-        // Weight of previous window decreases as we move through current window
+// Weight of previous window decreases as we move through current window
         let prev_weight = 1.0 - pct_into_window;
         (self.prev_count as f64 * prev_weight) + self.curr_count as f64
     }
 }
 
 impl SlidingWindowCounter {
-    /// Create a new sliding window counter.
+/// Create a new sliding window counter.
     pub fn new(config: &SlidingWindowConfig) -> Self {
         let window = Duration::from_millis(config.window_ms);
         Self {
@@ -83,7 +82,7 @@ impl SlidingWindowCounter {
         }
     }
 
-    /// Create with simple parameters.
+/// Create with simple parameters.
     pub fn from_params(window: Duration, max_events: u64) -> Self {
         Self {
             state: RwLock::new(WindowState::new(window)),
@@ -92,7 +91,7 @@ impl SlidingWindowCounter {
         }
     }
 
-    /// Record an event and check if it's within limits.
+/// Record an event and check if it's within limits.
     pub fn check_and_increment(&self) -> Decision {
         let now = Instant::now();
         let mut state = self.state.write();
@@ -114,7 +113,7 @@ impl SlidingWindowCounter {
         }
     }
 
-    /// Read-only check without incrementing.
+/// Read-only check without incrementing.
     pub fn peek(&self) -> Decision {
         let now = Instant::now();
         let mut state = self.state.write();
@@ -133,7 +132,7 @@ impl SlidingWindowCounter {
         }
     }
 
-    /// Current approximate event count.
+/// Current approximate event count.
     pub fn current_count(&self) -> u64 {
         let now = Instant::now();
         let mut state = self.state.write();
@@ -141,13 +140,13 @@ impl SlidingWindowCounter {
         state.weighted_count(now).ceil() as u64
     }
 
-    /// Reset the counter.
+/// Reset the counter.
     pub fn reset(&self) {
         let mut state = self.state.write();
         *state = WindowState::new(self.window);
     }
 
-    /// Max events allowed.
+/// Max events allowed.
     pub fn limit(&self) -> u64 {
         self.max_events
     }

@@ -1,7 +1,6 @@
 //! ATO Engine — orchestrates all ATO protection components
 //!
-//! Evaluates login events against:
-//! 1. Failed attempt lockout
+//! Evaluates login events against://! 1. Failed attempt lockout
 //! 2. Impossible travel detection
 //! 3. Device fingerprint novelty
 //! 4. Behavioral profiling
@@ -34,29 +33,29 @@ fn global_lockout_registry() -> LockoutRegistry {
 /// Risk evaluation result
 #[derive(Debug, Clone)]
 pub struct AtoVerdict {
-    /// Composite risk score (0.0 = safe, 10.0 = maximum risk)
+/// Composite risk score (0.0 = safe, 10.0 = maximum risk)
     pub risk_score: f64,
-    /// Recommended action
+/// Recommended action
     pub action: AtoAction,
-    /// Whether the device is new for this user
+/// Whether the device is new for this user
     pub new_device: bool,
-    /// Whether impossible travel was detected
+/// Whether impossible travel was detected
     pub impossible_travel: bool,
-    /// Individual risk factors
+/// Individual risk factors
     pub factors: Vec<RiskFactor>,
 }
 
 /// Recommended action based on risk assessment
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtoAction {
-    /// Allow the login
+/// Allow the login
     Allow,
-    /// Require step-up MFA (e.g., TOTP, push notification)
+/// Require step-up MFA (e.g., TOTP, push notification)
     RequireMfa,
-    /// Block the login attempt
+/// Block the login attempt
     Block,
-    /// Require CAPTCHA or admin unlock — escalated lockout after repeated lockout events
-    /// This is more severe than Block and indicates repeated abuse patterns
+/// Require CAPTCHA or admin unlock — escalated lockout after repeated lockout events
+/// This is more severe than Block and indicates repeated abuse patterns
     RequireCaptcha,
 }
 
@@ -74,41 +73,41 @@ impl std::fmt::Display for AtoAction {
 /// Individual risk factor
 #[derive(Debug, Clone)]
 pub struct RiskFactor {
-    /// Factor identifier
+/// Factor identifier
     pub id: &'static str,
-    /// Description
+/// Description
     pub description: String,
-    /// Risk contribution
+/// Risk contribution
     pub risk: f64,
 }
 
 /// Continuous session activity event for post-login risk evaluation.
 #[derive(Debug, Clone)]
 pub struct SessionActivityEvent {
-    /// User identifier for the active session.
+/// User identifier for the active session.
     pub user_id: String,
-    /// Session identifier associated with this activity.
+/// Session identifier associated with this activity.
     pub session_id: String,
-    /// Whether the client IP changed within the same session.
+/// Whether the client IP changed within the same session.
     pub ip_changed: bool,
-    /// Whether the User-Agent changed within the same session.
+/// Whether the User-Agent changed within the same session.
     pub user_agent_changed: bool,
-    /// Whether the TLS fingerprint changed within the same session.
+/// Whether the TLS fingerprint changed within the same session.
     pub tls_fingerprint_changed: bool,
-    /// Whether the event represents a privileged action.
+/// Whether the event represents a privileged action.
     pub privileged_action: bool,
-    /// Optional in-session geovelocity estimate in km/h.
+/// Optional in-session geovelocity estimate in km/h.
     pub geo_velocity_kmh: Option<f64>,
 }
 
 /// Session-level risk verdict.
 #[derive(Debug, Clone)]
 pub struct SessionRiskVerdict {
-    /// Composite session risk score (0.0-10.0).
+/// Composite session risk score (0.0-10.0).
     pub risk_score: f64,
-    /// Recommended response action for this session activity.
+/// Recommended response action for this session activity.
     pub action: AtoAction,
-    /// Session risk factors that contributed to the score.
+/// Session risk factors that contributed to the score.
     pub factors: Vec<RiskFactor>,
 }
 
@@ -116,24 +115,24 @@ pub struct SessionRiskVerdict {
 pub struct AtoEngine {
     config: AtoConfig,
     store: SessionStore,
-    /// Per-user TLS fingerprint history — detects bot stack changes
+/// Per-user TLS fingerprint history — detects bot stack changes
     tls_histories: Arc<DashMap<String, UserTlsHistory>>,
-    /// Per-user lockout event timestamps — for escalation tracking (legacy in-memory path)
-    /// When a user hits the max_failed_attempts threshold, the timestamp is recorded.
-    /// After lockout_escalation_threshold events within lockout_escalation_window,
-    /// escalate to RequireCaptcha action.
+/// Per-user lockout event timestamps — for escalation tracking (legacy in-memory path)
+/// When a user hits the max_failed_attempts threshold, the timestamp is recorded.
+/// After lockout_escalation_threshold events within lockout_escalation_window,
+/// escalate to RequireCaptcha action.
     lockout_events: Arc<DashMap<String, Vec<DateTime<Utc>>>>,
-    /// Pluggable lockout backend for shared state across nodes.
-    /// When `config.redis_lockout_url` is set, this is a `RedisLockoutBackend`.
-    /// Otherwise it falls back to [`InMemoryLockoutBackend`].
+/// Pluggable lockout backend for shared state across nodes.
+/// When `config.redis_lockout_url` is set, this is a `RedisLockoutBackend`.
+/// Otherwise it falls back to [`InMemoryLockoutBackend`].
     lockout_backend: Arc<dyn LockoutBackend>,
-    /// Per-IP call counter for self-protecting rate limit.
-    /// Maps IP → (epoch_second, count) to enforce `config.rate_limit_rps`.
+/// Per-IP call counter for self-protecting rate limit.
+/// Maps IP → (epoch_second, count) to enforce `config.rate_limit_rps`.
     ip_call_counts: Arc<DashMap<String, (u64, AtomicU64)>>,
 }
 
 impl AtoEngine {
-    /// Create engine with default config
+/// Create engine with default config
     pub fn new() -> Self {
         let config = AtoConfig::default();
         let store = SessionStore::new(config.max_history_per_user);
@@ -156,7 +155,7 @@ impl AtoEngine {
         }
     }
 
-    /// Create engine with custom config
+/// Create engine with custom config
     pub fn with_config(config: AtoConfig) -> Self {
         let store = SessionStore::new(config.max_history_per_user);
         let lockout_events = if config.use_process_global_lockout_registry {
@@ -178,14 +177,13 @@ impl AtoEngine {
         }
     }
 
-    /// Evaluate a login event and return a risk verdict.
-    ///
-    /// When `config.rate_limit_rps > 0`, this method enforces a per-IP
-    /// calls-per-second limit. If the caller exceeds the limit, an immediate
-    /// `Block` verdict is returned to prevent resource exhaustion from
-    /// brute-force floods targeting the auth endpoint.
+/// Evaluate a login event and return a risk verdict.
+/// When `config.rate_limit_rps > 0`, this method enforces a per-IP
+/// calls-per-second limit. If the caller exceeds the limit, an immediate
+/// `Block` verdict is returned to prevent resource exhaustion from
+/// brute-force floods targeting the auth endpoint.
     pub fn evaluate(&self, event: &LoginEvent) -> AtoVerdict {
-        // 0. Self-protecting rate limit (per-IP, per-second)
+// 0. Self-protecting rate limit (per-IP, per-second)
         if self.config.rate_limit_rps > 0 {
             let now_epoch = Utc::now().timestamp() as u64;
             let mut entry = self.ip_call_counts
@@ -195,7 +193,7 @@ impl AtoEngine {
             let (ref mut epoch_sec, ref counter) = *entry;
 
             if *epoch_sec != now_epoch {
-                // New second — reset counter
+// New second — reset counter
                 *epoch_sec = now_epoch;
                 counter.store(1, Ordering::Release);
             } else {
@@ -224,19 +222,19 @@ impl AtoEngine {
         let mut impossible_travel = false;
         let mut escalated_lockout = false;
 
-        // 1. Check failed attempt lockout with escalation tracking
+// 1. Check failed attempt lockout with escalation tracking
         let recent_failures = self.store.recent_failures(
             &event.user_id,
             self.config.failed_attempt_window_secs,
         );
         if recent_failures >= self.config.max_failed_attempts {
-            // This is a lockout event - record it for escalation tracking
+// This is a lockout event - record it for escalation tracking
             let now = Utc::now();
             let escalation_cutoff = now - chrono::Duration::seconds(
                 self.config.lockout_escalation_window_secs as i64
             );
             
-            // Record via pluggable backend (Redis or in-memory)
+// Record via pluggable backend (Redis or in-memory)
             self.lockout_backend.record_lockout(
                 &event.user_id,
                 self.config.lockout_escalation_window_secs,
@@ -246,13 +244,13 @@ impl AtoEngine {
                 .entry(event.user_id.clone())
                 .or_insert_with(Vec::new);
             
-            // Clean up old lockout events outside the escalation window
+// Clean up old lockout events outside the escalation window
             entry.retain(|ts| *ts > escalation_cutoff);
             
-            // Record this lockout event in the local DashMap too
+// Record this lockout event in the local DashMap too
             entry.push(now);
             
-            // Use the higher of local count and backend count for consistency
+// Use the higher of local count and backend count for consistency
             let local_count = entry.len() as u32;
             let backend_count = self.lockout_backend.recent_lockouts(
                 &event.user_id,
@@ -260,7 +258,7 @@ impl AtoEngine {
             );
             let lockout_count = local_count.max(backend_count);
             
-            // Check if we should escalate to RequireCaptcha
+// Check if we should escalate to RequireCaptcha
             if lockout_count >= self.config.lockout_escalation_threshold {
                 escalated_lockout = true;
                 factors.push(RiskFactor {
@@ -297,7 +295,7 @@ impl AtoEngine {
             risk_score += failure_risk * self.config.weight_failures;
         }
 
-        // 2. Impossible travel detection (BEFORE recording the new event)
+// 2. Impossible travel detection (BEFORE recording the new event)
         if let (Some(lat), Some(lon)) = (event.latitude, event.longitude) {
             if let Some(history) = self.store.get_history(&event.user_id) {
                 if let Some(last) = history.last_successful() {
@@ -334,9 +332,9 @@ impl AtoEngine {
                 }
             }
         } else {
-            // No geo coordinates available for this login — check if IP is different
-            // from the last successful login. If so, apply a moderate penalty because
-            // we cannot verify geographic feasibility.
+// No geo coordinates available for this login — check if IP is different
+// from the last successful login. If so, apply a moderate penalty because
+// we cannot verify geographic feasibility.
             if let Some(history) = self.store.get_history(&event.user_id) {
                 if let Some(last) = history.last_successful() {
                     if last.ip_address != event.ip_address {
@@ -355,7 +353,7 @@ impl AtoEngine {
             }
         }
 
-        // 3. Record the event and check device novelty
+// 3. Record the event and check device novelty
         let new_device = self.store.record_login(event);
         if new_device {
             factors.push(RiskFactor {
@@ -366,7 +364,7 @@ impl AtoEngine {
             risk_score += 3.0 * self.config.weight_device;
         }
 
-        // 4. Behavioral analysis
+// 4. Behavioral analysis
         if let Some(history) = self.store.get_history(&event.user_id) {
             let login_hour = event.timestamp.format("%H").to_string()
                 .parse::<u32>()
@@ -382,7 +380,7 @@ impl AtoEngine {
             }));
         }
 
-        // 5. TLS fingerprint anomaly detection
+// 5. TLS fingerprint anomaly detection
         if let Some(ref tls_fp) = event.tls_fingerprint {
             let mut entry = self.tls_histories
                 .entry(event.user_id.clone())
@@ -399,16 +397,16 @@ impl AtoEngine {
                     ),
                     risk: fp_risk,
                 });
-                // Weight equally to device fingerprint
+// Weight equally to device fingerprint
                 risk_score += fp_risk * self.config.weight_device;
             }
         }
 
-        // Cap risk score at 10.0
+// Cap risk score at 10.0
         risk_score = risk_score.min(10.0);
 
-        // Determine action
-        // Escalated lockout requires CAPTCHA/admin unlock (not a timed block)
+// Determine action
+// Escalated lockout requires CAPTCHA/admin unlock (not a timed block)
         let action = if escalated_lockout {
             AtoAction::RequireCaptcha
         } else if risk_score >= self.config.block_threshold {
@@ -428,16 +426,15 @@ impl AtoEngine {
         }
     }
 
-    /// Get the session store (for testing/inspection)
+/// Get the session store (for testing/inspection)
     pub fn store(&self) -> &SessionStore {
         &self.store
     }
 
-    /// Evict stale entries from the per-IP rate limit map.
-    ///
-    /// Call periodically (e.g., every 60 seconds) to prevent unbounded growth
-    /// of `ip_call_counts`. Entries whose epoch second is older than `max_age_secs`
-    /// seconds ago are removed.
+/// Evict stale entries from the per-IP rate limit map.
+/// Call periodically (e.g., every 60 seconds) to prevent unbounded growth
+/// of `ip_call_counts`. Entries whose epoch second is older than `max_age_secs`
+/// seconds ago are removed.
     pub fn evict_stale_rate_limits(&self, max_age_secs: u64) -> usize {
         let cutoff = Utc::now().timestamp() as u64 - max_age_secs;
         let before = self.ip_call_counts.len();
@@ -453,12 +450,11 @@ impl AtoEngine {
         removed
     }
 
-    /// Evict TLS history entries for users whose last activity is older than
-    /// `max_age_secs` seconds ago.
-    ///
-    /// `tls_histories` has no self-evicting mechanism; without this call the
-    /// map grows indefinitely as new users authenticate.  Call periodically
-    /// (e.g., every 300 seconds) to prevent memory exhaustion.
+/// Evict TLS history entries for users whose last activity is older than
+/// `max_age_secs` seconds ago.
+/// `tls_histories` has no self-evicting mechanism; without this call the
+/// map grows indefinitely as new users authenticate. Call periodically
+/// (e.g., every 300 seconds) to prevent memory exhaustion.
     pub fn evict_stale_tls_histories(&self, max_age_secs: i64) -> usize {
         let cutoff = Utc::now() - chrono::Duration::seconds(max_age_secs);
         let before = self.tls_histories.len();
@@ -474,17 +470,16 @@ impl AtoEngine {
         removed
     }
 
-    /// Evict per-user lockout event lists whose most recent event is older than
-    /// `max_age_secs` seconds ago.
-    ///
-    /// The `lockout_events` map accretes entries for users who are locked out
-    /// but never attempt to authenticate again (their per-login cleanup never
-    /// runs).  Call periodically to bound memory usage.
+/// Evict per-user lockout event lists whose most recent event is older than
+/// `max_age_secs` seconds ago.
+/// The `lockout_events` map accretes entries for users who are locked out
+/// but never attempt to authenticate again (their per-login cleanup never
+/// runs). Call periodically to bound memory usage.
     pub fn evict_stale_lockout_events(&self, max_age_secs: i64) -> usize {
         let cutoff = Utc::now() - chrono::Duration::seconds(max_age_secs);
         let before = self.lockout_events.len();
         self.lockout_events.retain(|_, events| {
-            // Keep the entry only if at least one event is still within the window.
+// Keep the entry only if at least one event is still within the window.
             events.iter().any(|ts| *ts >= cutoff)
         });
         let removed = before - self.lockout_events.len();
@@ -498,19 +493,17 @@ impl AtoEngine {
         removed
     }
 
-    /// Spawn a background Tokio task that periodically evicts stale in-memory
-    /// state from all three unbounded DashMaps.
-    ///
-    /// The returned [`tokio::task::JoinHandle`] can be awaited or aborted by
-    /// the caller.  `interval_secs` controls how often the cleanup runs;
-    /// 60 seconds is a reasonable default.  The method requires `Arc<Self>`
-    /// because the background task must hold an independent reference to the
-    /// engine after this method returns.
-    ///
-    /// # Eviction windows
-    ///   * `ip_call_counts`   — entries older than 2× interval (2 × rate-limit windows)
-    ///   * `lockout_events`   — entries whose newest event is older than 1 hour
-    ///   * `tls_histories`    — entries not seen in 24 hours
+/// Spawn a background Tokio task that periodically evicts stale in-memory
+/// state from all three unbounded DashMaps.
+/// The returned [`tokio::task::JoinHandle`] can be awaited or aborted by
+/// the caller. `interval_secs` controls how often the cleanup runs;
+/// 60 seconds is a reasonable default. The method requires `Arc<Self>`
+/// because the background task must hold an independent reference to the
+/// engine after this method returns.
+/// # Eviction windows
+/// * `ip_call_counts` — entries older than 2× interval (2 × rate-limit windows)
+/// * `lockout_events` — entries whose newest event is older than 1 hour
+/// * `tls_histories` — entries not seen in 24 hours
     pub fn run_cleanup_loop(
         self: Arc<Self>,
         interval_secs: u64,
@@ -518,7 +511,7 @@ impl AtoEngine {
         tokio::spawn(async move {
             let interval = tokio::time::Duration::from_secs(interval_secs);
             let mut ticker = tokio::time::interval(interval);
-            // Skip the first (immediate) tick so we don't evict on startup.
+// Skip the first (immediate) tick so we don't evict on startup.
             ticker.tick().await;
             loop {
                 ticker.tick().await;
@@ -537,7 +530,7 @@ impl AtoEngine {
         })
     }
 
-    /// Evaluate in-session behavior to support continuous authentication decisions.
+/// Evaluate in-session behavior to support continuous authentication decisions.
     pub fn evaluate_session_activity(&self, event: &SessionActivityEvent) -> SessionRiskVerdict {
         let mut factors = Vec::new();
         let mut risk_score: f64 = 0.0;
@@ -592,11 +585,11 @@ impl AtoEngine {
                 risk_score += 8.0;
             }
         } else if event.ip_changed {
-            // Geo-velocity was not computed even though IP changed —
-            // this means the GeoIP lookup failed or was unavailable.
-            // Apply a moderate risk penalty because we CANNOT verify
-            // travel speed. An attacker who hides their geo-location
-            // should not get a free pass on impossible-travel checks.
+// Geo-velocity was not computed even though IP changed —
+// this means the GeoIP lookup failed or was unavailable.
+// Apply a moderate risk penalty because we CANNOT verify
+// travel speed. An attacker who hides their geo-location
+// should not get a free pass on impossible-travel checks.
             let geo_unknown_penalty = 2.0;
             factors.push(RiskFactor {
                 id: "SESSION_GEO_UNKNOWN",
@@ -631,9 +624,8 @@ impl AtoEngine {
 
 #[cfg(feature = "events")]
 impl AtoEngine {
-    /// Evaluate a login event and also produce a normalized security event.
-    ///
-    /// Requires the `events` feature flag (which enables the `mail-common` dep).
+/// Evaluate a login event and also produce a normalized security event.
+/// Requires the `events` feature flag (which enables the `mail-common` dep).
     pub fn evaluate_with_event(
         &self,
         event: &LoginEvent,
@@ -724,7 +716,7 @@ mod tests {
         let event = login_event("user1", "1.2.3.4", 40.7128, -74.006);
         let verdict = engine.evaluate(&event);
         assert!(verdict.new_device, "First login should be new device");
-        // New device alone shouldn't block
+// New device alone shouldn't block
         assert_ne!(verdict.action, AtoAction::Block);
     }
 
@@ -740,13 +732,13 @@ mod tests {
     #[test]
     fn test_failed_attempts_lockout() {
         let engine = AtoEngine::new();
-        // Record multiple failures
+// Record multiple failures
         for _ in 0..6 {
             let mut fail = login_event("user1", "1.2.3.4", 40.7128, -74.006);
             fail.success = false;
             engine.evaluate(&fail);
         }
-        // Now a successful attempt should be blocked
+// Now a successful attempt should be blocked
         let event = login_event("user1", "1.2.3.4", 40.7128, -74.006);
         let verdict = engine.evaluate(&event);
         assert_eq!(verdict.action, AtoAction::Block,
@@ -758,11 +750,11 @@ mod tests {
     fn test_impossible_travel() {
         let engine = AtoEngine::new();
 
-        // Login from NYC
+// Login from NYC
         let nyc = login_event("user1", "1.2.3.4", 40.7128, -74.006);
         engine.evaluate(&nyc);
 
-        // Immediately login from Tokyo (impossible)
+// Immediately login from Tokyo (impossible)
         let tokyo = login_event("user1", "5.6.7.8", 35.6762, 139.6503);
         let verdict = engine.evaluate(&tokyo);
         assert!(verdict.impossible_travel, "Should detect impossible travel");

@@ -14,30 +14,30 @@ use parking_lot::RwLock;
 /// Traffic observation sample
 #[derive(Debug, Clone)]
 pub struct TrafficObservation {
-    /// When this observation was taken
+/// When this observation was taken
     pub timestamp: Instant,
-    /// Requests per second at sample time
+/// Requests per second at sample time
     pub requests_per_second: f64,
-    /// Error rate (fraction, 0.0-1.0) at sample time
+/// Error rate (fraction, 0.0-1.0) at sample time
     pub error_rate: f64,
-    /// P99 latency in milliseconds at sample time
+/// P99 latency in milliseconds at sample time
     pub latency_p99_ms: f64,
-    /// CPU usage fraction (0.0-1.0) at sample time
+/// CPU usage fraction (0.0-1.0) at sample time
     pub cpu_usage: f64,
 }
 
 /// Attack state tracking
 #[derive(Debug, Clone)]
 struct AttackDetection {
-    /// Is the system under active attack?
+/// Is the system under active attack?
     is_under_attack: bool,
-    /// When the attack started
+/// When the attack started
     attack_started: Option<Instant>,
-    /// Baseline RPS (from pre-attack traffic)
+/// Baseline RPS (from pre-attack traffic)
     baseline_rps: f64,
-    /// Baseline error rate
+/// Baseline error rate
     baseline_error_rate: f64,
-    /// Consecutive anomaly alerts
+/// Consecutive anomaly alerts
     consecutive_alerts: u32,
 }
 
@@ -56,29 +56,29 @@ impl Default for AttackDetection {
 /// Configuration for the adaptive rate limiter
 #[derive(Debug, Clone)]
 pub struct AdaptiveConfig {
-    /// Window size for baseline observation history
+/// Window size for baseline observation history
     pub baseline_window: Duration,
-    /// Z-score threshold for anomaly detection
+/// Z-score threshold for anomaly detection
     pub z_threshold: f64,
-    /// Z-score to use when standard deviation is zero (all observations identical)
-    /// Default is 10.0, which will trigger anomaly detection for any deviation
+/// Z-score to use when standard deviation is zero (all observations identical)
+/// Default is 10.0, which will trigger anomaly detection for any deviation
     pub zero_std_z_score: f64,
-    /// Z-score threshold for attack recovery (attack ends when z < this value)
-    /// Default is 1.0, meaning traffic must return to within 1 std dev of baseline
+/// Z-score threshold for attack recovery (attack ends when z < this value)
+/// Default is 1.0, meaning traffic must return to within 1 std dev of baseline
     pub recovery_z_threshold: f64,
-    /// Minimum threshold (never go below this value)
+/// Minimum threshold (never go below this value)
     pub min_threshold: u64,
-    /// Maximum threshold (never go above this value)
+/// Maximum threshold (never go above this value)
     pub max_threshold: u64,
-    /// Number of consecutive alerts before declaring attack
+/// Number of consecutive alerts before declaring attack
     pub consecutive_alert_trigger: u32,
-    /// Cooldown period after attack subsides before restoring limits
+/// Cooldown period after attack subsides before restoring limits
     pub cooldown: Duration,
-    /// EMA alpha factor for smooth threshold adjustment (0-1)
+/// EMA alpha factor for smooth threshold adjustment (0-1)
     pub ema_alpha: f64,
-    /// Factor of baseline to use under attack (e.g., 0.5 = 50%)
+/// Factor of baseline to use under attack (e.g., 0.5 = 50%)
     pub attack_factor: f64,
-    /// Headroom factor for normal operation (e.g., 1.5 = 50% headroom)
+/// Headroom factor for normal operation (e.g., 1.5 = 50% headroom)
     pub headroom_factor: f64,
 }
 
@@ -102,20 +102,20 @@ impl Default for AdaptiveConfig {
 
 /// Adaptive rate limiter that adjusts thresholds based on traffic patterns
 pub struct AdaptiveRateLimiter {
-    /// Current threshold value
+/// Current threshold value
     threshold: AtomicU64,
-    /// Historical observations
+/// Historical observations
     observations: RwLock<VecDeque<TrafficObservation>>,
-    /// Configuration
+/// Configuration
     config: AdaptiveConfig,
-    /// Attack detection state
+/// Attack detection state
     attack_state: RwLock<AttackDetection>,
-    /// Atomic flag for quick attack check
+/// Atomic flag for quick attack check
     under_attack_flag: AtomicBool,
 }
 
 impl AdaptiveRateLimiter {
-    /// Create a new adaptive rate limiter
+/// Create a new adaptive rate limiter
     pub fn new(config: AdaptiveConfig) -> Self {
         let initial_threshold = config.max_threshold / 2;
         Self {
@@ -127,40 +127,40 @@ impl AdaptiveRateLimiter {
         }
     }
 
-    /// Get the current rate limit threshold
+/// Get the current rate limit threshold
     pub fn current_threshold(&self) -> u64 {
         self.threshold.load(Ordering::Relaxed)
     }
 
-    /// Check if the system is under attack
+/// Check if the system is under attack
     pub fn is_under_attack(&self) -> bool {
         self.under_attack_flag.load(Ordering::Relaxed)
     }
 
-    /// Update the limiter with a new traffic observation.
-    /// This is the main entry point for the online learning loop.
+/// Update the limiter with a new traffic observation.
+/// This is the main entry point for the online learning loop.
     pub fn update(&self, observation: TrafficObservation) {
         let mut observations = self.observations.write();
 
-        // Remove old observations outside the baseline window
+// Remove old observations outside the baseline window
         let cutoff = Instant::now() - self.config.baseline_window;
         while observations.front().map_or(false, |o| o.timestamp < cutoff) {
             observations.pop_front();
         }
 
-        // Not enough data yet for statistical analysis - provide conservative cold-start protection
-        // But only if adaptation is enabled (ema_alpha > 0). If ema_alpha is 0, user wants
-        // no automatic adaptation at all, so we respect that even during cold-start.
+// Not enough data yet for statistical analysis - provide conservative cold-start protection
+// But only if adaptation is enabled (ema_alpha > 0). If ema_alpha is 0, user wants
+// no automatic adaptation at all, so we respect that even during cold-start.
         if observations.len() < 10 {
             if self.config.ema_alpha > 0.0 {
-                // During cold-start, use a conservative adaptive threshold based on observed traffic.
-                // This prevents attackers from exploiting the learning window.
+// During cold-start, use a conservative adaptive threshold based on observed traffic.
+// This prevents attackers from exploiting the learning window.
                 let current_rps = observation.requests_per_second as u64;
-                // Set threshold to 2x current RPS (conservative headroom) clamped to bounds
+// Set threshold to 2x current RPS (conservative headroom) clamped to bounds
                 let cold_start_threshold = (current_rps.saturating_mul(2))
                     .clamp(self.config.min_threshold, self.config.max_threshold);
                 
-                // Only lower threshold if it would be more restrictive than current
+// Only lower threshold if it would be more restrictive than current
                 let current = self.threshold.load(Ordering::Relaxed);
                 if cold_start_threshold < current {
                     self.threshold.store(cold_start_threshold, Ordering::Relaxed);
@@ -171,7 +171,7 @@ impl AdaptiveRateLimiter {
             return;
         }
 
-        // Compute baseline statistics
+// Compute baseline statistics
         let rps_values: Vec<f64> = observations.iter().map(|o| o.requests_per_second).collect();
         let rps_mean = rps_values.iter().sum::<f64>() / rps_values.len() as f64;
         let rps_std = {
@@ -183,17 +183,17 @@ impl AdaptiveRateLimiter {
             variance.sqrt()
         };
 
-        // Compute Z-score for current observation
-        // When std is zero (all observations identical), any deviation from the mean
-        // is infinitely anomalous. We use a configurable sentinel z-score in that case,
-        // because std=0 + non-zero deviation means a definite pattern break.
+// Compute Z-score for current observation
+// When std is zero (all observations identical), any deviation from the mean
+// is infinitely anomalous. We use a configurable sentinel z-score in that case,
+// because std=0 + non-zero deviation means a definite pattern break.
         let z_score = if rps_std > 0.0 {
             (observation.requests_per_second - rps_mean) / rps_std
         } else {
-            // Zero standard deviation: if observation differs from mean, it's maximally anomalous
+// Zero standard deviation:if observation differs from mean, it's maximally anomalous
             let deviation = (observation.requests_per_second - rps_mean).abs();
             if deviation > 0.0 {
-                // Use configurable z-score to trigger anomaly detection
+// Use configurable z-score to trigger anomaly detection
                 self.config.zero_std_z_score * (observation.requests_per_second - rps_mean).signum()
             } else {
                 0.0 // Exactly at mean, no anomaly
@@ -203,13 +203,13 @@ impl AdaptiveRateLimiter {
         let mut attack_state = self.attack_state.write();
 
         if z_score > self.config.z_threshold {
-            // Potential attack — increment alert counter
+// Potential attack — increment alert counter
             attack_state.consecutive_alerts += 1;
 
             if attack_state.consecutive_alerts >= self.config.consecutive_alert_trigger
                 && !attack_state.is_under_attack
             {
-                // Declare attack mode
+// Declare attack mode
                 attack_state.is_under_attack = true;
                 attack_state.attack_started = Some(Instant::now());
                 attack_state.baseline_rps = rps_mean;
@@ -221,7 +221,7 @@ impl AdaptiveRateLimiter {
 
                 self.under_attack_flag.store(true, Ordering::Relaxed);
 
-                // Tighten threshold to attack_factor * baseline
+// Tighten threshold to attack_factor * baseline
                 let raw = rps_mean * self.config.attack_factor;
                 let new_threshold = if raw.is_finite() { raw as u64 } else { self.config.min_threshold };
                 self.threshold.store(
@@ -230,17 +230,17 @@ impl AdaptiveRateLimiter {
                 );
             }
         } else if attack_state.is_under_attack {
-            // Check if attack has subsided
+// Check if attack has subsided
             if let Some(started) = attack_state.attack_started {
                 if started.elapsed() > self.config.cooldown && z_score < self.config.recovery_z_threshold {
-                    // Attack subsided — restore normal operation
+// Attack subsided — restore normal operation
                     attack_state.is_under_attack = false;
                     attack_state.attack_started = None;
                     attack_state.consecutive_alerts = 0;
 
                     self.under_attack_flag.store(false, Ordering::Relaxed);
 
-                    // Gradually restore threshold
+// Gradually restore threshold
                     let raw = rps_mean * self.config.headroom_factor;
                     let new_threshold = if raw.is_finite() { raw as u64 } else { self.config.min_threshold };
                     self.threshold.store(
@@ -250,13 +250,13 @@ impl AdaptiveRateLimiter {
                 }
             }
         } else {
-            // Normal operation — smoothly adjust threshold
+// Normal operation — smoothly adjust threshold
             attack_state.consecutive_alerts = 0;
 
             let current_threshold = self.threshold.load(Ordering::Relaxed) as f64;
             let ideal_threshold = rps_mean * self.config.headroom_factor;
 
-            // EMA adjustment with proper rounding to avoid truncation bias
+// EMA adjustment with proper rounding to avoid truncation bias
             let new_threshold =
                 current_threshold * (1.0 - self.config.ema_alpha) + ideal_threshold * self.config.ema_alpha;
 
@@ -270,7 +270,7 @@ impl AdaptiveRateLimiter {
         observations.push_back(observation);
     }
 
-    /// Get baseline statistics from the observation window
+/// Get baseline statistics from the observation window
     pub fn baseline_stats(&self) -> Option<BaselineStats> {
         let observations = self.observations.read();
         if observations.len() < 10 {
@@ -302,7 +302,7 @@ impl AdaptiveRateLimiter {
         })
     }
 
-    /// Get the attack detection state
+/// Get the attack detection state
     pub fn attack_info(&self) -> AttackInfo {
         let state = self.attack_state.read();
         AttackInfo {
@@ -313,7 +313,7 @@ impl AdaptiveRateLimiter {
         }
     }
 
-    /// Reset the adaptive limiter to initial state
+/// Reset the adaptive limiter to initial state
     pub fn reset(&self) {
         self.observations.write().clear();
         let initial = self.config.max_threshold / 2;
@@ -326,28 +326,28 @@ impl AdaptiveRateLimiter {
 /// Baseline traffic statistics
 #[derive(Debug, Clone)]
 pub struct BaselineStats {
-    /// Mean requests per second
+/// Mean requests per second
     pub rps_mean: f64,
-    /// RPS standard deviation
+/// RPS standard deviation
     pub rps_std: f64,
-    /// Mean error rate
+/// Mean error rate
     pub error_rate_mean: f64,
-    /// Mean P99 latency
+/// Mean P99 latency
     pub latency_p99_mean: f64,
-    /// Number of samples
+/// Number of samples
     pub sample_count: usize,
 }
 
 /// Attack detection info
 #[derive(Debug, Clone)]
 pub struct AttackInfo {
-    /// Is under attack
+/// Is under attack
     pub is_under_attack: bool,
-    /// Baseline RPS before attack
+/// Baseline RPS before attack
     pub baseline_rps: f64,
-    /// Consecutive alert count
+/// Consecutive alert count
     pub consecutive_alerts: u32,
-    /// Duration of current attack (if any)
+/// Duration of current attack (if any)
     pub attack_duration: Option<Duration>,
 }
 
@@ -393,19 +393,19 @@ mod tests {
         let limiter = AdaptiveRateLimiter::new(default_config());
         let initial = limiter.current_threshold();
 
-        // Feed < 10 observations — cold-start protection should provide
-        // conservative protection by adjusting threshold based on observed traffic.
-        // With RPS=100, cold-start sets threshold to min(2*100=200, current)
+// Feed < 10 observations — cold-start protection should provide
+// conservative protection by adjusting threshold based on observed traffic.
+// With RPS=100, cold-start sets threshold to min(2*100=200, current)
         for _ in 0..9 {
             limiter.update(make_observation(100.0));
         }
         
-        // Cold-start protection should have tightened the threshold
+// Cold-start protection should have tightened the threshold
         let threshold = limiter.current_threshold();
         assert!(threshold <= initial, 
             "Cold-start protection should provide conservative threshold: {} should be <= {}", 
             threshold, initial);
-        // Specifically, it should be clamped to 2*100=200
+// Specifically, it should be clamped to 2*100=200
         assert!(threshold <= 200, 
             "Cold-start threshold should be <= 2*RPS (200): {}", threshold);
     }
@@ -414,15 +414,15 @@ mod tests {
     fn test_normal_traffic_adjusts_threshold() {
         let limiter = AdaptiveRateLimiter::new(default_config());
 
-        // Feed 20 stable observations
+// Feed 20 stable observations
         for _ in 0..20 {
             limiter.update(make_observation(100.0));
         }
 
-        // Threshold should adjust toward 100 * 1.5 = 150
+// Threshold should adjust toward 100 * 1.5 = 150
         let threshold = limiter.current_threshold();
-        // After EMA: 5000*(0.9) + 150*(0.1) = 4515, then further iterations bring it down
-        // It should be moving toward 150 but slowly
+// After EMA:5000*(0.9) + 150*(0.1) = 4515, then further iterations bring it down
+// It should be moving toward 150 but slowly
         assert!(threshold < 5000, "Threshold should decrease toward ideal: {}", threshold);
     }
 
@@ -432,27 +432,27 @@ mod tests {
         config.consecutive_alert_trigger = 2;
         let limiter = AdaptiveRateLimiter::new(config);
 
-        // Feed normal traffic baseline
+// Feed normal traffic baseline
         for _ in 0..15 {
             limiter.update(make_observation(100.0));
         }
 
         assert!(!limiter.is_under_attack());
 
-        // Spike to trigger attack: baseline ~100, std ~0, so any value >> 100 triggers z > 3
-        // With zero std, need non-zero std. Let's add some variance first.
+// Spike to trigger attack:baseline ~100, std ~0, so any value >> 100 triggers z > 3
+// With zero std, need non-zero std. Let's add some variance first.
         let limiter2 = AdaptiveRateLimiter::new(AdaptiveConfig {
             consecutive_alert_trigger: 2,
             cooldown: Duration::from_millis(100),
             ..default_config()
         });
 
-        // Feed slightly varying traffic to get non-zero std
+// Feed slightly varying traffic to get non-zero std
         for i in 0..20 {
             limiter2.update(make_observation(100.0 + (i as f64 % 3.0)));
         }
 
-        // Now spike well above 3 standard deviations
+// Now spike well above 3 standard deviations
         limiter2.update(make_observation(1000.0));
         limiter2.update(make_observation(1000.0));
 
@@ -473,13 +473,13 @@ mod tests {
         };
         let limiter = AdaptiveRateLimiter::new(config);
 
-        // Build baseline around 100 rps
+// Build baseline around 100 rps
         for i in 0..20 {
             limiter.update(make_observation(100.0 + (i as f64 % 5.0)));
         }
         let pre_attack = limiter.current_threshold();
 
-        // Trigger attack
+// Trigger attack
         limiter.update(make_observation(2000.0));
         limiter.update(make_observation(2000.0));
 
@@ -502,20 +502,20 @@ mod tests {
         };
         let limiter = AdaptiveRateLimiter::new(config);
 
-        // Build baseline
+// Build baseline
         for i in 0..20 {
             limiter.update(make_observation(100.0 + (i as f64 % 5.0)));
         }
 
-        // Trigger attack
+// Trigger attack
         limiter.update(make_observation(2000.0));
         limiter.update(make_observation(2000.0));
         assert!(limiter.is_under_attack());
 
-        // Wait for cooldown
+// Wait for cooldown
         std::thread::sleep(Duration::from_millis(20));
 
-        // Feed normal traffic with z < 1
+// Feed normal traffic with z < 1
         for _ in 0..5 {
             limiter.update(make_observation(100.0));
         }
@@ -527,7 +527,7 @@ mod tests {
     fn test_baseline_stats() {
         let limiter = AdaptiveRateLimiter::new(default_config());
 
-        // No data yet
+// No data yet
         assert!(limiter.baseline_stats().is_none());
 
         for i in 0..15 {
@@ -563,10 +563,10 @@ mod tests {
         };
         let limiter = AdaptiveRateLimiter::new(config);
 
-        // Initial is clamped to max/2 = 100
+// Initial is clamped to max/2 = 100
         assert_eq!(limiter.current_threshold(), 100);
 
-        // Feed very low traffic
+// Feed very low traffic
         for _ in 0..20 {
             limiter.update(make_observation(1.0));
         }

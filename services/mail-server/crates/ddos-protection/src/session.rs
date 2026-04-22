@@ -12,48 +12,48 @@ use crate::RequestContext;
 
 /// Session tracker for behavioral analysis
 pub struct SessionTracker {
-    /// Active sessions
+/// Active sessions
     sessions: Arc<DashMap<SessionKey, Arc<RwLock<Session>>>>,
-    /// Session window duration
+/// Session window duration
     window: Duration,
-    /// Maximum sessions to track
+/// Maximum sessions to track
     max_sessions: usize,
 }
 
 /// Session identification key
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionKey {
-    /// Client IP
+/// Client IP
     pub ip: IpAddr,
-    /// Optional: API key ID for authenticated sessions
+/// Optional:API key ID for authenticated sessions
     pub api_key_id: Option<String>,
 }
 
 /// Session state
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// Session key
+/// Session key
     pub key: SessionKey,
-    /// When session started
+/// When session started
     pub started_at: Instant,
-    /// Last activity time
+/// Last activity time
     pub last_activity: Instant,
-    /// Total requests in session
+/// Total requests in session
     pub request_count: u64,
-    /// Error count (4xx/5xx responses)
+/// Error count (4xx/5xx responses)
     pub error_count: u64,
-    /// Recent endpoint hashes (windowed, bounded memory)
+/// Recent endpoint hashes (windowed, bounded memory)
     pub recent_endpoints: VecDeque<u64>,
-    /// Request sequence (endpoint hashes)
+/// Request sequence (endpoint hashes)
     pub request_sequence: VecDeque<u64>,
-    /// Inter-arrival times (milliseconds)
+/// Inter-arrival times (milliseconds)
     pub inter_arrival_times: VecDeque<u64>,
-    /// Request durations (milliseconds)
+/// Request durations (milliseconds)
     pub request_durations: VecDeque<u64>,
 }
 
 impl Session {
-    /// Create a new session
+/// Create a new session
     fn new(key: SessionKey) -> Self {
         let now = Instant::now();
         Self {
@@ -69,14 +69,14 @@ impl Session {
         }
     }
     
-    /// Record a request
+/// Record a request
     fn record_request(&mut self, endpoint_hash: u64, is_error: bool) {
         let now = Instant::now();
         
-        // Only record inter-arrival time after the first request.
-        // The first call has no valid prior request to measure from —
-        // using the session creation time would pollute the IAT analysis
-        // with a meaningless near-zero value.
+// Only record inter-arrival time after the first request.
+// The first call has no valid prior request to measure from —
+// using the session creation time would pollute the IAT analysis
+// with a meaningless near-zero value.
         if self.request_count > 0 {
             let inter_arrival = now.duration_since(self.last_activity).as_millis() as u64;
             if self.inter_arrival_times.len() >= 100 {
@@ -85,19 +85,19 @@ impl Session {
             self.inter_arrival_times.push_back(inter_arrival);
         }
         
-        // Request sequence
+// Request sequence
         if self.request_sequence.len() >= 100 {
             self.request_sequence.pop_front();
         }
         self.request_sequence.push_back(endpoint_hash);
         
-        // Update counters
+// Update counters
         self.request_count += 1;
         if is_error {
             self.error_count += 1;
         }
         
-        // Windowed endpoint tracking (bounded memory)
+// Windowed endpoint tracking (bounded memory)
         if self.recent_endpoints.len() >= 100 {
             self.recent_endpoints.pop_front();
         }
@@ -106,7 +106,7 @@ impl Session {
         self.last_activity = now;
     }
     
-    /// Record request duration
+/// Record request duration
     pub fn record_duration(&mut self, duration_ms: u64) {
         if self.request_durations.len() >= 100 {
             self.request_durations.pop_front();
@@ -114,17 +114,17 @@ impl Session {
         self.request_durations.push_back(duration_ms);
     }
     
-    /// Session age
+/// Session age
     pub fn age(&self) -> Duration {
         self.started_at.elapsed()
     }
     
-    /// Time since last activity
+/// Time since last activity
     pub fn idle_time(&self) -> Duration {
         self.last_activity.elapsed()
     }
     
-    /// Requests per minute
+/// Requests per minute
     pub fn requests_per_minute(&self) -> f64 {
         let age_secs = self.age().as_secs_f64();
         if age_secs < 1.0 {
@@ -133,7 +133,7 @@ impl Session {
         (self.request_count as f64 / age_secs) * 60.0
     }
     
-    /// Error rate
+/// Error rate
     pub fn error_rate(&self) -> f64 {
         if self.request_count == 0 {
             return 0.0;
@@ -141,7 +141,7 @@ impl Session {
         self.error_count as f64 / self.request_count as f64
     }
     
-    /// Endpoint diversity (unique endpoints / total in window)
+/// Endpoint diversity (unique endpoints / total in window)
     pub fn endpoint_diversity(&self) -> f64 {
         if self.recent_endpoints.is_empty() {
             return 1.0;
@@ -150,7 +150,7 @@ impl Session {
         unique.len() as f64 / self.recent_endpoints.len() as f64
     }
     
-    /// Coefficient of variation for inter-arrival times
+/// Coefficient of variation for inter-arrival times
     pub fn inter_arrival_cov(&self) -> f64 {
         if self.inter_arrival_times.len() < 10 {
             return 1.0;
@@ -173,7 +173,7 @@ impl Session {
         std_dev / mean
     }
     
-    /// Average request duration
+/// Average request duration
     pub fn avg_duration(&self) -> f64 {
         if self.request_durations.is_empty() {
             return 0.0;
@@ -184,7 +184,7 @@ impl Session {
 }
 
 impl SessionTracker {
-    /// Create a new session tracker
+/// Create a new session tracker
     pub fn new(window: Duration, max_sessions: usize) -> Self {
         Self {
             sessions: Arc::new(DashMap::with_capacity(max_sessions / 4)),
@@ -193,7 +193,7 @@ impl SessionTracker {
         }
     }
     
-    /// Track a request and return session info
+/// Track a request and return session info
     pub fn track(&self, ctx: &RequestContext) -> SessionInfo {
         let key = SessionKey {
             ip: ctx.ip,
@@ -208,7 +208,7 @@ impl SessionTracker {
             .clone();
         
         let mut session_guard = session.write();
-        session_guard.record_request(endpoint_hash, false);  // Error recorded separately
+        session_guard.record_request(endpoint_hash, false); // Error recorded separately
         
         SessionInfo {
             key: key.clone(),
@@ -221,7 +221,7 @@ impl SessionTracker {
         }
     }
     
-    /// Record an error for a session
+/// Record an error for a session
     pub fn record_error(&self, ctx: &RequestContext) {
         let key = SessionKey {
             ip: ctx.ip,
@@ -233,7 +233,7 @@ impl SessionTracker {
         }
     }
     
-    /// Record request duration
+/// Record request duration
     pub fn record_duration(&self, ctx: &RequestContext, duration_ms: u64) {
         let key = SessionKey {
             ip: ctx.ip,
@@ -245,7 +245,7 @@ impl SessionTracker {
         }
     }
     
-    /// Get session info if exists
+/// Get session info if exists
     pub fn get_session(&self, ip: &IpAddr, api_key_id: Option<&str>) -> Option<SessionInfo> {
         let key = SessionKey {
             ip: *ip,
@@ -267,24 +267,24 @@ impl SessionTracker {
         })
     }
     
-    /// Get number of active sessions
+/// Get number of active sessions
     pub fn active_count(&self) -> usize {
         self.sessions.len()
     }
     
-    /// Cleanup expired sessions
+/// Cleanup expired sessions
     pub fn cleanup(&self, _now: Instant) {
-        // Remove idle sessions
+// Remove idle sessions
         self.sessions.retain(|_, session| {
             let s = session.read();
             s.idle_time() < self.window
         });
         
-        // Evict if over capacity
+// Evict if over capacity
         if self.sessions.len() > self.max_sessions {
-            // Remove oldest sessions
+// Remove oldest sessions
             let mut to_remove: Vec<SessionKey> = Vec::new();
-            let target = self.max_sessions * 9 / 10;  // Remove 10%
+            let target = self.max_sessions * 9 / 10; // Remove 10%
             
             for entry in self.sessions.iter() {
                 if self.sessions.len() <= target {
@@ -306,19 +306,19 @@ impl SessionTracker {
 /// Summary info about a session
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
-    /// Session key
+/// Session key
     pub key: SessionKey,
-    /// Total requests
+/// Total requests
     pub request_count: u64,
-    /// Requests per minute
+/// Requests per minute
     pub requests_per_minute: f64,
-    /// Error rate (0-1)
+/// Error rate (0-1)
     pub error_rate: f64,
-    /// Endpoint diversity (0-1)
+/// Endpoint diversity (0-1)
     pub endpoint_diversity: f64,
-    /// Inter-arrival time coefficient of variation
+/// Inter-arrival time coefficient of variation
     pub inter_arrival_cov: f64,
-    /// Session age in seconds
+/// Session age in seconds
     pub age_secs: u64,
 }
 
@@ -366,7 +366,7 @@ mod tests {
             api_key_id: None,
         });
         
-        // Add some requests
+// Add some requests
         for i in 0..10 {
             session.record_request(i, false);
             std::thread::sleep(std::time::Duration::from_millis(10));

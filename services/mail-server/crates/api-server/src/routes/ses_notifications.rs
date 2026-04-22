@@ -1,8 +1,7 @@
 //! AWS SES bounce/complaint notification handler.
 //!
 //! SES sends event notifications via **Amazon SNS** as HTTP POST requests.
-//! This module:
-//! 1. Handles SNS subscription confirmation (auto-confirms).
+//! This module://! 1. Handles SNS subscription confirmation (auto-confirms).
 //! 2. Processes SES bounce notifications → auto-suppresses hard bounces.
 //! 3. Processes SES complaint notifications → auto-suppresses complainants.
 //! 4. Processes SES delivery notifications → updates message status.
@@ -37,17 +36,17 @@ pub fn router() -> Router<AppState> {
 #[serde(rename_all = "PascalCase")]
 #[allow(dead_code)]
 struct SnsMessage {
-    /// "Notification", "SubscriptionConfirmation", "UnsubscribeConfirmation"
+/// "Notification", "SubscriptionConfirmation", "UnsubscribeConfirmation"
     #[serde(rename = "Type")]
     message_type: String,
-    /// For SubscriptionConfirmation — URL to GET to confirm.
+/// For SubscriptionConfirmation — URL to GET to confirm.
     #[serde(alias = "SubscribeURL")]
     subscribe_url: Option<String>,
-    /// JSON-encoded SES event payload (for Notification type).
+/// JSON-encoded SES event payload (for Notification type).
     message: Option<String>,
-    /// SNS message ID.
+/// SNS message ID.
     message_id: Option<String>,
-    /// Topic ARN for validation.
+/// Topic ARN for validation.
     topic_arn: Option<String>,
 }
 
@@ -56,7 +55,7 @@ struct SnsMessage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SesEvent {
-    /// "Bounce", "Complaint", "Delivery", "Send", "Reject", "Open", "Click"
+/// "Bounce", "Complaint", "Delivery", "Send", "Reject", "Open", "Click"
     event_type: String,
     mail: Option<SesMail>,
     bounce: Option<SesBounce>,
@@ -71,7 +70,7 @@ struct SesMail {
     message_id: Option<String>,
     source: Option<String>,
     destination: Option<Vec<String>>,
-    /// Custom headers we attached (e.g. X-ApexMail-MessageId, X-ApexMail-TenantId)
+/// Custom headers we attached (e.g. X-ApexMail-MessageId, X-ApexMail-TenantId)
     headers: Option<Vec<SesHeader>>,
     common_headers: Option<SesCommonHeaders>,
 }
@@ -143,14 +142,14 @@ async fn handle_sns_notification(
     _headers: HeaderMap,
     body: String,
 ) -> Result<StatusCode, ApiError> {
-    // SNS sends Content-Type: text/plain with a JSON body.
+// SNS sends Content-Type:text/plain with a JSON body.
     let sns_msg: SnsMessage = serde_json::from_str(&body).map_err(|e| {
         warn!(error = %e, "Failed to parse SNS message");
         ApiError::Validation(vec![format!("Invalid SNS message: {e}")])
     })?;
 
-    // ── Topic ARN validation ────────────────────────────────
-    // Only process messages from configured SNS topic ARNs.
+// ── Topic ARN validation ────────────────────────────────
+// Only process messages from configured SNS topic ARNs.
     let allowed_arns_raw = std::env::var("SNS_ALLOWED_TOPIC_ARNS").unwrap_or_default();
     let allowed_arns: Vec<&str> = allowed_arns_raw
         .split(',')
@@ -185,7 +184,6 @@ async fn handle_sns_notification(
 }
 
 /// Auto-confirm SNS subscription by fetching the subscribe URL.
-///
 /// Validates the URL is from a legitimate AWS SNS domain to prevent SSRF.
 async fn handle_subscription_confirmation(
     state: &AppState,
@@ -195,9 +193,8 @@ async fn handle_subscription_confirmation(
         ApiError::Validation(vec!["Missing SubscribeURL in confirmation".into()])
     })?;
 
-    // SSRF defence: only allow URLs from official AWS SNS endpoints.
-    // Legitimate SubscribeURLs look like:
-    //   https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&...
+// SSRF defence:only allow URLs from official AWS SNS endpoints.
+// Legitimate SubscribeURLs look like:// https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&...
     let parsed = url::Url::parse(url).map_err(|_| {
         ApiError::Validation(vec!["Invalid SubscribeURL".into()])
     })?;
@@ -297,7 +294,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     format!("ses_soft_bounce:{bounce_sub_type}")
                 };
 
-                // Auto-suppress hard bounces
+// Auto-suppress hard bounces
                 if is_permanent {
                     let _ = sqlx::query(
                         "INSERT INTO suppression_list (id, email, reason, source, created_at)
@@ -313,7 +310,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     info!(email = %apexmail_lib::pii::redact_email(&email), reason = %reason, "Auto-suppressed hard-bounced address");
                 }
 
-                // Update message status if we have the internal ID
+// Update message status if we have the internal ID
                 if let Some(ref msg_id) = apexmail_message_id {
                     let status = if is_permanent { "bounced" } else { "deferred" };
                     if let Err(e) = sqlx::query(
@@ -330,7 +327,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     }
                 }
 
-                // Queue webhook event for the tenant
+// Queue webhook event for the tenant
                 if let Some(ref tid) = tenant_id {
                     let payload = serde_json::json!({
                         "event": "email.bounced",
@@ -377,7 +374,7 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
             if let Some(email) = &recipient.email_address {
                 let reason = format!("ses_complaint:{feedback_type}");
 
-                // Always suppress — complaints are serious
+// Always suppress — complaints are serious
                 let _ = sqlx::query(
                     "INSERT INTO suppression_list (id, email, reason, source, created_at)
                      VALUES (gen_random_uuid(), $1, $2, 'ses_complaint', NOW())
@@ -391,7 +388,7 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
 
                 info!(email = %apexmail_lib::pii::redact_email(&email), reason = %reason, "Auto-suppressed complained address");
 
-                // Update message status
+// Update message status
                 if let Some(ref msg_id) = apexmail_message_id {
                     if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = 'complained', updated_at = NOW()
@@ -405,7 +402,7 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                     }
                 }
 
-                // Queue webhook
+// Queue webhook
                 if let Some(ref tid) = tenant_id {
                     let payload = serde_json::json!({
                         "event": "email.complained",
@@ -441,7 +438,7 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
         "SES delivery confirmed"
     );
 
-    // Update message status to 'delivered'
+// Update message status to 'delivered'
     if let Some(ref msg_id) = apexmail_message_id {
         if let Err(e) = sqlx::query(
             "UPDATE messages SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
@@ -455,7 +452,7 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
         }
     }
 
-    // Queue webhook
+// Queue webhook
     if let Some(ref tid) = tenant_id {
         let payload = serde_json::json!({
             "event": "email.delivered",
@@ -617,7 +614,7 @@ mod tests {
         let msg: SnsMessage = serde_json::from_str(&sns_json).unwrap();
         assert_eq!(msg.message_type, "Notification");
         assert!(msg.message.is_some());
-        // Parse the inner SES event
+// Parse the inner SES event
         let event: SesEvent = serde_json::from_str(msg.message.as_ref().unwrap()).unwrap();
         assert_eq!(event.event_type, "Send");
     }

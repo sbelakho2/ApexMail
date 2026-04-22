@@ -1,7 +1,7 @@
 //! Prometheus-compatible metrics collection.
 //!
 //! Provides in-memory counters, histograms, and gauges with thread-safe
-//! access via `DashMap` and `parking_lot`.  The `export_prometheus` method
+//! access via `DashMap` and `parking_lot`. The `export_prometheus` method
 //! renders all recorded metrics in the Prometheus text exposition format.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +21,7 @@ use crate::types::MetricType;
 /// Atomic counter that only increments.
 #[derive(Debug)]
 struct CounterInner {
-    /// Stored as u64 bits representing an f64 to allow atomic ops.
+/// Stored as u64 bits representing an f64 to allow atomic ops.
     bits: AtomicU64,
 }
 
@@ -115,7 +115,7 @@ impl HistogramInner {
                 self.counts[i].fetch_add(1, Ordering::Relaxed);
             }
         }
-        // Add to sum (CAS loop for f64)
+// Add to sum (CAS loop for f64)
         loop {
             let old_bits = self.sum.load(Ordering::Relaxed);
             let old = f64::from_bits(old_bits);
@@ -186,7 +186,7 @@ pub struct MetricsCollector {
 }
 
 impl MetricsCollector {
-    /// Create a new collector with the given default histogram buckets.
+/// Create a new collector with the given default histogram buckets.
     pub fn new(default_buckets: Vec<f64>) -> Self {
         Self {
             metrics: DashMap::new(),
@@ -195,9 +195,9 @@ impl MetricsCollector {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Registration helpers
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Registration helpers
+// -----------------------------------------------------------------------
 
     fn ensure_counter(&self, name: &str, help: &str) {
         self.metrics
@@ -235,11 +235,11 @@ impl MetricsCollector {
             });
     }
 
-    // -----------------------------------------------------------------------
-    // Public API
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------
 
-    /// Increment a counter metric by `value` (auto-registers if needed).
+/// Increment a counter metric by `value` (auto-registers if needed).
     pub fn record_counter(&self, name: &str, value: f64, help: &str) {
         self.ensure_counter(name, help);
         if let Some(entry) = self.metrics.get(name) {
@@ -249,7 +249,7 @@ impl MetricsCollector {
         }
     }
 
-    /// Observe a value on a histogram metric (auto-registers if needed).
+/// Observe a value on a histogram metric (auto-registers if needed).
     pub fn record_histogram(&self, name: &str, value: f64, help: &str) {
         self.ensure_histogram(name, help);
         if let Some(entry) = self.metrics.get(name) {
@@ -259,7 +259,7 @@ impl MetricsCollector {
         }
     }
 
-    /// Set a gauge metric to `value` (auto-registers if needed).
+/// Set a gauge metric to `value` (auto-registers if needed).
     pub fn record_gauge(&self, name: &str, value: f64, help: &str) {
         self.ensure_gauge(name, help);
         if let Some(entry) = self.metrics.get(name) {
@@ -269,7 +269,7 @@ impl MetricsCollector {
         }
     }
 
-    /// Increment (or decrement if negative) a gauge by `delta`.
+/// Increment (or decrement if negative) a gauge by `delta`.
     pub fn adjust_gauge(&self, name: &str, delta: f64, help: &str) {
         self.ensure_gauge(name, help);
         if let Some(entry) = self.metrics.get(name) {
@@ -279,7 +279,7 @@ impl MetricsCollector {
         }
     }
 
-    /// Return a summary of all registered metrics.
+/// Return a summary of all registered metrics.
     pub fn get_summary(&self) -> Vec<MetricSummary> {
         self.metrics
             .iter()
@@ -300,7 +300,7 @@ impl MetricsCollector {
             .collect()
     }
 
-    /// Render all metrics in Prometheus text exposition format.
+/// Render all metrics in Prometheus text exposition format.
     pub fn export_prometheus(&self) -> String {
         let mut out = String::new();
 
@@ -341,7 +341,7 @@ impl MetricsCollector {
         out
     }
 
-    /// How long the collector has been alive.
+/// How long the collector has been alive.
     pub fn uptime_secs(&self) -> u64 {
         (Utc::now() - self.created_at).num_seconds().max(0) as u64
     }
@@ -376,7 +376,7 @@ mod tests {
         mc.adjust_gauge("temperature", 1.0, "Current temp");
         let summaries = mc.get_summary();
         let temp = summaries.iter().find(|s| s.name == "temperature").unwrap();
-        // set(36.6) then add(1.0) => only add runs because set already created
+// set(36.6) then add(1.0) => only add runs because set already created
         assert!((temp.value - 37.6).abs() < f64::EPSILON);
     }
 
@@ -389,7 +389,7 @@ mod tests {
         let prom = mc.export_prometheus();
         assert!(prom.contains("latency_sum"));
         assert!(prom.contains("latency_count 3"));
-        // The 0.05 observation should appear in all buckets, 0.3 in ≥0.5 and ≥1.0
+// The 0.05 observation should appear in all buckets, 0.3 in ≥0.5 and ≥1.0
         assert!(prom.contains("latency_bucket{le=\"0.1\"} 1"));
         assert!(prom.contains("latency_bucket{le=\"0.5\"} 2"));
         assert!(prom.contains("latency_bucket{le=\"1\"} 3"));

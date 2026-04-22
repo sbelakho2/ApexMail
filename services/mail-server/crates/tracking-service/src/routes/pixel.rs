@@ -1,10 +1,10 @@
 //! Open-tracking pixel endpoints.
 //!
-//! GET  `{pixel_path}/:tracking_id`  — canonical pixel URL (path param).
-//! GET  `/o.gif`                      — alternative via `?t=` query param.
+//! GET `{pixel_path}/:tracking_id` — canonical pixel URL (path param).
+//! GET `/o.gif` — alternative via `?t=` query param.
 //!
 //! Both endpoints ALWAYS return the transparent GIF (even for invalid tokens)
-//! so that email clients display images correctly.  Event recording is
+//! so that email clients display images correctly. Event recording is
 //! fire-and-forget in a detached Tokio task — never blocks the response.
 
 use std::net::SocketAddr;
@@ -34,7 +34,6 @@ fn pixel_response() -> Response {
         .header("expires", "0")
         .header("vary", "*")
         .header("x-content-type-options", "nosniff")
-        // FIX-500-454: Prevent search-engine indexing of tracking URLs
         .header("x-robots-tag", "noindex, nofollow")
         .body(axum::body::Body::from(TRANSPARENT_GIF))
         .unwrap_or_default()
@@ -79,7 +78,7 @@ async fn record_open(
     addr: SocketAddr,
     state: &AppState,
 ) {
-    // E-148: Validate length before any decryption attempt.
+// E-148:Validate length before any decryption attempt.
     if tracking_id.len() < 10 || tracking_id.len() > 4096 {
         debug!(len = tracking_id.len(), "Pixel: invalid trackingId length");
         return;
@@ -92,7 +91,7 @@ async fn record_open(
 
     let ip = extract_client_ip(headers, addr.ip(), state);
 
-    // E-190: Bot check — skip recording for known scanner/proxy UAs.
+// E-190:Bot check — skip recording for known scanner/proxy UAs.
     let is_bot = state.bot_detector.is_bot(user_agent.as_deref(), Some(&ip));
     if is_bot {
         info!(

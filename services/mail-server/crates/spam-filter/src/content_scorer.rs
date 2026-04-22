@@ -1,7 +1,6 @@
 //! Content scoring via pattern-based analysis
 //!
-//! Uses Aho-Corasick multi-pattern matching to detect:
-//! - Spam phrases (urgency, financial lures, pharma)
+//! Uses Aho-Corasick multi-pattern matching to detect://! - Spam phrases (urgency, financial lures, pharma)
 //! - Obfuscation patterns (zero-width characters, homoglyphs)
 //! - Suspicious formatting (ALL CAPS ratio, HTML-to-text ratio)
 
@@ -11,20 +10,20 @@ use std::sync::OnceLock;
 /// Result of content scoring
 #[derive(Debug, Clone)]
 pub struct ContentScore {
-    /// Total penalty from content analysis
+/// Total penalty from content analysis
     pub score: f64,
-    /// Individual content findings
+/// Individual content findings
     pub findings: Vec<ContentFinding>,
 }
 
 /// A single content finding
 #[derive(Debug, Clone)]
 pub struct ContentFinding {
-    /// Finding identifier
+/// Finding identifier
     pub id: &'static str,
-    /// Description
+/// Description
     pub description: String,
-    /// Penalty
+/// Penalty
     pub penalty: f64,
 }
 
@@ -40,7 +39,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
     static INSTANCE: OnceLock<Option<SpamPhraseSet>> = OnceLock::new();
     INSTANCE.get_or_init(|| {
         let patterns: Vec<(&str, f64, &str, &str)> = vec![
-            // ═══ Urgency / pressure (30 patterns) ═══
+// ═══ Urgency / pressure (30 patterns) ═══
             ("act now", 1.5, "URGENCY_ACT_NOW", "Urgency phrase: act now"),
             ("limited time", 1.5, "URGENCY_LIMITED_TIME", "Urgency phrase: limited time"),
             ("expire", 1.0, "URGENCY_EXPIRE", "Urgency: expiration"),
@@ -72,7 +71,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("supplies are limited", 1.5, "URGENCY_SUPPLIES_LTD", "Urgency: supplies limited"),
             ("this won't last", 1.5, "URGENCY_WONT_LAST", "Urgency: this won't last"),
 
-            // ═══ Financial lures (35 patterns) ═══
+// ═══ Financial lures (35 patterns) ═══
             ("you have won", 3.0, "FINANCIAL_WON", "Financial lure: you have won"),
             ("congratulations", 1.0, "FINANCIAL_CONGRATS", "Financial lure: congratulations"),
             ("million dollars", 3.0, "FINANCIAL_MILLION", "Financial lure: million dollars"),
@@ -109,7 +108,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("residual income", 1.5, "FINANCIAL_RESIDUAL", "Financial: residual income"),
             ("bitcoin profit", 2.5, "FINANCIAL_BITCOIN", "Financial: bitcoin profit"),
 
-            // ═══ Pharma / health spam (25 patterns) ═══
+// ═══ Pharma / health spam (25 patterns) ═══
             ("viagra", 2.0, "PHARMA_VIAGRA", "Pharma spam: viagra"),
             ("cialis", 2.0, "PHARMA_CIALIS", "Pharma spam: cialis"),
             ("pharmacy", 1.0, "PHARMA_GENERIC", "Pharma spam indicator"),
@@ -136,7 +135,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("pain relief", 0.8, "PHARMA_PAIN", "Pharma: pain relief"),
             ("sleep aid", 0.5, "PHARMA_SLEEP", "Pharma: sleep aid"),
 
-            // ═══ Credential phishing (40 patterns) ═══
+// ═══ Credential phishing (40 patterns) ═══
             ("verify your account", 2.5, "PHISH_VERIFY", "Phishing: verify your account"),
             ("confirm your identity", 2.5, "PHISH_CONFIRM", "Phishing: confirm identity"),
             ("click here to login", 2.5, "PHISH_LOGIN", "Phishing: click here to login"),
@@ -178,7 +177,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("apple id", 1.5, "PHISH_APPLE_ID", "Phishing: apple id"),
             ("microsoft account", 1.0, "PHISH_MICROSOFT", "Phishing: microsoft account"),
 
-            // ═══ Advance-fee / 419 scams (20 patterns) ═══
+// ═══ Advance-fee / 419 scams (20 patterns) ═══
             ("dear friend", 2.0, "AFF_DEAR_FRIEND", "AFF scam: dear friend"),
             ("please help", 1.0, "AFF_PLEASE_HELP", "AFF scam: please help"),
             ("confidential transaction", 3.0, "AFF_CONFIDENTIAL", "AFF scam: confidential transaction"),
@@ -200,7 +199,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("moneygram", 2.0, "AFF_MONEYGRAM", "AFF scam: moneygram"),
             ("bitcoin wallet", 2.0, "AFF_BITCOIN_WALLET", "AFF scam: bitcoin wallet"),
 
-            // ═══ Adult / dating spam (15 patterns) ═══
+// ═══ Adult / dating spam (15 patterns) ═══
             ("hot singles", 2.5, "ADULT_SINGLES", "Adult spam: hot singles"),
             ("meet singles", 2.0, "ADULT_MEET", "Adult spam: meet singles"),
             ("adult friend", 2.0, "ADULT_FRIEND", "Adult spam: adult friend"),
@@ -217,7 +216,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("married but looking", 2.5, "ADULT_MARRIED", "Adult spam: married but looking"),
             ("secret lover", 2.0, "ADULT_SECRET", "Adult spam: secret lover"),
 
-            // ═══ Sextortion / blackmail (12 patterns) ═══
+// ═══ Sextortion / blackmail (12 patterns) ═══
             ("i know your password", 5.0, "SEXTORT_PASSWORD", "Sextortion: i know your password"),
             ("browsing habits", 3.0, "SEXTORT_BROWSING", "Sextortion: browsing habits"),
             ("your webcam", 3.0, "SEXTORT_WEBCAM", "Sextortion: your webcam"),
@@ -231,14 +230,14 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("if you don't pay", 3.0, "SEXTORT_DONT_PAY", "Sextortion: if you don't pay"),
             ("proof of payment", 2.5, "SEXTORT_PROOF", "Sextortion: proof of payment"),
 
-            // ═══ Unsubscribe tricks (5 patterns) ═══
+// ═══ Unsubscribe tricks (5 patterns) ═══
             ("click below to unsubscribe", 0.5, "UNSUB_BELOW", "Suspicious unsubscribe"),
             ("to stop receiving", 0.3, "UNSUB_STOP", "Generic unsubscribe language"),
             ("opt out", 0.3, "UNSUB_OPT_OUT", "Unsubscribe: opt out"),
             ("remove me from", 0.3, "UNSUB_REMOVE", "Unsubscribe: remove"),
             ("email preferences", 0.2, "UNSUB_PREFS", "Unsubscribe: preferences"),
 
-            // ═══ COVID / health scare (10 patterns) ═══
+// ═══ COVID / health scare (10 patterns) ═══
             ("covid cure", 3.0, "COVID_CURE", "COVID scam: cure"),
             ("vaccine available", 1.5, "COVID_VACCINE", "COVID scam: vaccine"),
             ("pandemic relief", 2.0, "COVID_RELIEF", "COVID scam: pandemic relief"),
@@ -250,7 +249,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("sanitizer deal", 1.5, "COVID_SANITIZER", "COVID scam: sanitizer"),
             ("exposure notification", 1.5, "COVID_EXPOSURE", "COVID scam: exposure notification"),
 
-            // ═══ Tech support / impersonation (15 patterns) ═══
+// ═══ Tech support / impersonation (15 patterns) ═══
             ("technical support", 1.0, "TECHSUP_GENERIC", "Tech support scam"),
             ("computer virus detected", 2.5, "TECHSUP_VIRUS", "Tech support: virus detected"),
             ("your computer is infected", 2.5, "TECHSUP_INFECTED", "Tech support: infected"),
@@ -267,7 +266,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("norton security", 1.0, "TECHSUP_NORTON", "Tech support: norton security"),
             ("mcafee renewal", 1.5, "TECHSUP_MCAFEE", "Tech support: mcafee renewal"),
 
-            // ═══ Job / employment scams (10 patterns) ═══
+// ═══ Job / employment scams (10 patterns) ═══
             ("home-based business", 2.0, "JOB_HOME_BIZ", "Job scam: home-based business"),
             ("data entry job", 1.5, "JOB_DATA_ENTRY", "Job scam: data entry"),
             ("earn per click", 2.0, "JOB_PER_CLICK", "Job scam: earn per click"),
@@ -279,7 +278,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("unlimited earning", 2.0, "JOB_UNLIMITED", "Job scam: unlimited earning"),
             ("mlm opportunity", 2.0, "JOB_MLM", "Job scam: MLM opportunity"),
 
-            // ═══ Legal / threats (8 patterns) ═══
+// ═══ Legal / threats (8 patterns) ═══
             ("legal action", 1.5, "LEGAL_ACTION", "Legal threat: legal action"),
             ("lawsuit", 1.5, "LEGAL_LAWSUIT", "Legal threat: lawsuit"),
             ("subpoena", 2.0, "LEGAL_SUBPOENA", "Legal threat: subpoena"),
@@ -289,7 +288,7 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
             ("tax fraud", 2.0, "LEGAL_TAX_FRAUD", "Legal threat: tax fraud"),
             ("debt collection", 1.5, "LEGAL_DEBT", "Legal threat: debt collection"),
 
-            // ═══ Unsubscribe tricks ═══
+// ═══ Unsubscribe tricks ═══
             ("click below to unsubscribe", 0.5, "UNSUB_BELOW", "Suspicious unsubscribe"),
             ("to stop receiving", 0.3, "UNSUB_STOP", "Generic unsubscribe language"),
         ];
@@ -340,7 +339,6 @@ where
 }
 
 /// Normalize leet-speak and common character substitutions.
-///
 /// Maps common obfuscation characters to their ASCII equivalents so that
 /// phrases like "V1@gr@" are matched against "viagra" by the Aho-Corasick
 /// automaton. Runs in a single pass over the input string.
@@ -371,7 +369,7 @@ pub fn normalize_leet_speak(text: &str) -> String {
             'с' => 'c', // Cyrillic с
             'х' => 'x', // Cyrillic х
             '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}' => {
-                // Strip zero-width characters
+// Strip zero-width characters
                 continue;
             }
             other => other,
@@ -385,17 +383,17 @@ pub fn normalize_leet_speak(text: &str) -> String {
 pub fn score_content(body: &str) -> ContentScore {
     let mut findings = Vec::new();
 
-    // 1. Aho-Corasick phrase matching (raw + leet-speak–normalized)
+// 1. Aho-Corasick phrase matching (raw + leet-speak–normalized)
     if let Some(phrases) = spam_phrase_set() {
         let mut matched = vec![false; phrases.ids.len()];
 
-        // Pass 1: match against the raw (lowercased) body
+// Pass 1:match against the raw (lowercased) body
         for mat in phrases.automaton.find_iter(body) {
             let idx = mat.pattern().as_usize();
             matched[idx] = true;
         }
 
-        // Pass 2: match against leet-speak–normalized text
+// Pass 2:match against leet-speak–normalized text
         let normalized = normalize_leet_speak(body);
         if normalized != body {
             for mat in phrases.automaton.find_iter(&normalized) {
@@ -404,7 +402,7 @@ pub fn score_content(body: &str) -> ContentScore {
             }
         }
 
-        // Collect deduplicated findings
+// Collect deduplicated findings
         for (idx, &hit) in matched.iter().enumerate() {
             if hit {
                 findings.push(ContentFinding {
@@ -416,7 +414,7 @@ pub fn score_content(body: &str) -> ContentScore {
         }
     }
 
-    // 2. ALL-CAPS ratio
+// 2. ALL-CAPS ratio
     let alpha_chars: Vec<char> = body.chars().filter(|c| c.is_alphabetic()).collect();
     if alpha_chars.len() > 20 {
         let upper_count = alpha_chars.iter().filter(|c| c.is_uppercase()).count();
@@ -436,7 +434,7 @@ pub fn score_content(body: &str) -> ContentScore {
         }
     }
 
-    // 3. Excessive exclamation marks
+// 3. Excessive exclamation marks
     let exclamation_count = body.chars().filter(|c| *c == '!').count();
     if exclamation_count > 5 {
         let penalty = (exclamation_count as f64 * 0.2).min(3.0);
@@ -447,7 +445,7 @@ pub fn score_content(body: &str) -> ContentScore {
         });
     }
 
-    // 4. Zero-width / invisible character obfuscation
+// 4. Zero-width / invisible character obfuscation
     let invisible_count = body.chars().filter(|c| {
         matches!(*c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}')
     }).count();
@@ -459,7 +457,7 @@ pub fn score_content(body: &str) -> ContentScore {
         });
     }
 
-    // 5. HTML heavy (img tags, excessive links)
+// 5. HTML heavy (img tags, excessive links)
     let img_count = body.to_lowercase().matches("<img").count();
     if img_count > 3 {
         findings.push(ContentFinding {
@@ -478,7 +476,7 @@ pub fn score_content(body: &str) -> ContentScore {
         });
     }
 
-    // 6. Very short body (often spam/phish with just a link)
+// 6. Very short body (often spam/phish with just a link)
     let text_len = body.trim().len();
     if text_len > 0 && text_len < 20 {
         findings.push(ContentFinding {

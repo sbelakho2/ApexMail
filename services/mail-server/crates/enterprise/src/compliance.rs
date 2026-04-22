@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::types::*;
 
-/// Compliance Service: HIPAA/SOC2/GDPR/CCPA/ISO27001
+/// Compliance Service:HIPAA/SOC2/GDPR/CCPA/ISO27001
 pub struct ComplianceService {
     db: PgPool,
 }
@@ -15,16 +15,14 @@ impl ComplianceService {
         Self { db }
     }
 
-    /// Enable compliance frameworks for an account
-    /// 
-    /// When `hipaa_enabled` is true, both `encryption_at_rest` and `encryption_in_transit` 
-    /// are enabled. For more granular control, use separate configuration methods.
+/// Enable compliance frameworks for an account
+/// When `hipaa_enabled` is true, both `encryption_at_rest` and `encryption_in_transit` /// are enabled. For more granular control, use separate configuration methods.
     pub async fn enable(&self, tenant_id: Uuid, frameworks: Vec<String>, hipaa_enabled: bool) -> Result<ApiResult<ComplianceConfig>, String> {
         let id = Uuid::new_v4();
         let now = Utc::now();
         
-        // #261: HIPAA requires both encryption types. Set them based on HIPAA flag,
-        // but allow separate configuration for non-HIPAA compliance frameworks.
+// #261:HIPAA requires both encryption types. Set them based on HIPAA flag,
+// but allow separate configuration for non-HIPAA compliance frameworks.
         let encryption_at_rest = hipaa_enabled || frameworks.iter().any(|f| f == "soc2" || f == "iso27001");
         let encryption_in_transit = true; // Always require encryption in transit
         
@@ -45,7 +43,7 @@ impl ComplianceService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get compliance configuration for an account
+/// Get compliance configuration for an account
     pub async fn get_config(&self, tenant_id: Uuid) -> Result<ApiResult<ComplianceConfig>, String> {
         let row = sqlx::query_as::<_, ComplianceConfig>(
             "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1"
@@ -61,7 +59,7 @@ impl ComplianceService {
         }
     }
 
-    /// Sign a Business Associate Agreement (HIPAA)
+/// Sign a Business Associate Agreement (HIPAA)
     pub async fn sign_baa(&self, tenant_id: Uuid, signatory_name: &str, signatory_title: &str, signatory_email: &str) -> Result<ApiResult<ComplianceConfig>, String> {
         let row = sqlx::query_as::<_, ComplianceConfig>(
             "UPDATE ent_compliance_configs SET baa_signed = true, baa_signed_at = NOW(),
@@ -82,7 +80,7 @@ impl ComplianceService {
         }
     }
 
-    /// Enable zero-retention mode
+/// Enable zero-retention mode
     pub async fn enable_zero_retention(&self, tenant_id: Uuid) -> Result<ApiResult<ComplianceConfig>, String> {
         let row = sqlx::query_as::<_, ComplianceConfig>(
             "UPDATE ent_compliance_configs SET zero_retention_mode = true, updated_at = NOW()
@@ -102,7 +100,7 @@ impl ComplianceService {
         }
     }
 
-    /// Log an audit event
+/// Log an audit event
     pub async fn log_audit(
         &self, tenant_id: Uuid, user_id: Option<&str>, action: &str,
         resource_type: &str, resource_id: Option<&str>,
@@ -125,12 +123,12 @@ impl ComplianceService {
         Ok(())
     }
 
-    /// Query audit logs with filtering
+/// Query audit logs with filtering
     pub async fn get_audit_logs(
         &self, tenant_id: Uuid, action: Option<&str>, resource_type: Option<&str>,
         limit: i64, offset: i64,
     ) -> Result<ApiResult<Vec<AuditLogEntry>>, String> {
-        // Build dynamic query
+// Build dynamic query
         let mut query = String::from("SELECT * FROM ent_compliance_audit_logs WHERE tenant_id = $1");
         let mut param_idx = 2;
 
@@ -155,7 +153,7 @@ impl ComplianceService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Create a data access request (GDPR SAR)
+/// Create a data access request (GDPR SAR)
     pub async fn request_data_access(
         &self, tenant_id: Uuid, requester_id: &str, requester_email: &str,
         request_type: &str, resource_type: Option<&str>, justification: Option<&str>,
@@ -178,7 +176,7 @@ impl ComplianceService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Approve a data access request
+/// Approve a data access request
     pub async fn approve_data_access(&self, id: Uuid, approved_by: &str, duration_minutes: i32) -> Result<ApiResult<DataAccessRequest>, String> {
         let access_token = crate::sso::generate_random_token(48);
         let expires_at = Utc::now() + chrono::Duration::minutes(duration_minutes as i64);
@@ -202,7 +200,7 @@ impl ComplianceService {
         }
     }
 
-    /// Request data deletion (GDPR right to be forgotten)
+/// Request data deletion (GDPR right to be forgotten)
     pub async fn request_data_deletion(
         &self, tenant_id: Uuid, requester_id: &str, requester_email: &str,
         identifiers: Option<serde_json::Value>,
@@ -222,7 +220,7 @@ impl ComplianceService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Generate compliance report for an account
+/// Generate compliance report for an account
     pub async fn generate_report(&self, tenant_id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let config = sqlx::query_as::<_, ComplianceConfig>(
             "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1"
@@ -237,7 +235,7 @@ impl ComplianceService {
             None => return Ok(ApiResult::err("Compliance not configured", "NOT_FOUND")),
         };
 
-        // Aggregate audit log counts
+// Aggregate audit log counts
         let audit_count: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM ent_compliance_audit_logs WHERE tenant_id = $1"
         )
@@ -273,7 +271,7 @@ impl ComplianceService {
         Ok(ApiResult::ok(report))
     }
 
-    /// Get compliance status summary
+/// Get compliance status summary
     pub async fn get_status(&self, tenant_id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let config = sqlx::query_as::<_, ComplianceConfig>(
             "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1"

@@ -42,9 +42,9 @@ type S = Arc<AppState>;
 
 pub fn create_router(state: S) -> Router {
     Router::new()
-        // Health
+// Health
         .route("/health", get(health_check))
-        // Risk Scoring
+// Risk Scoring
         .route("/risk/assess/:tenant_id", post(risk_assess))
         .route("/risk/profile/:tenant_id", get(risk_profile))
         .route("/risk/force-reassess/:tenant_id", post(risk_force_reassess))
@@ -52,13 +52,13 @@ pub fn create_router(state: S) -> Router {
         .route("/risk/flags/:tenant_id/resolve", post(risk_resolve_flag))
         .route("/risk/critical", get(risk_critical_tenants))
         .route("/risk/stats", get(risk_stats))
-        // Content Scanning
+// Content Scanning
         .route("/scan", post(scan_content))
         .route("/scan/spam", post(scan_spam))
         .route("/scan/phishing", post(scan_phishing))
         .route("/scan/malware", post(scan_malware))
         .route("/scan/policy/:tenant_id", post(scan_policy))
-        // Audit
+// Audit
         .route("/audit/log", post(audit_create))
         .route("/audit/logs", get(audit_query))
         .route("/audit/verify/:tenant_id", get(audit_verify_chain))
@@ -66,7 +66,7 @@ pub fn create_router(state: S) -> Router {
         .route("/audit/stats/:tenant_id", get(audit_stats))
         .route("/audit/archive", post(audit_archive))
         .route("/audit/webhooks", post(audit_register_webhook))
-        // Secrets
+// Secrets
         .route("/secrets", post(secret_create))
         .route("/secrets/:secret_id", get(secret_get))
         .route("/secrets/:secret_id", put(secret_update))
@@ -77,7 +77,7 @@ pub fn create_router(state: S) -> Router {
         .route("/secrets/:secret_id/versions", get(secret_versions))
         .route("/secrets/:secret_id/rollback/:version", post(secret_rollback))
         .route("/secrets/tenant/:tenant_id", get(secrets_list))
-        // GDPR
+// GDPR
         .route("/gdpr/request", post(gdpr_submit_request))
         .route("/gdpr/request/:request_id/verify", post(gdpr_verify_request))
         .route("/gdpr/consent", post(gdpr_record_consent))
@@ -385,7 +385,7 @@ async fn scan_policy(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    // #283: enforce path tenant_id over body tenant_id
+// #283:enforce path tenant_id over body tenant_id
     let mut scoped = body.content.clone();
     scoped.tenant_id = tenant_id;
     match state.content_scanner.scan_email(&scoped).await {
@@ -544,7 +544,7 @@ async fn audit_export(
         return (e.0, err_json(e.1)).into_response();
     }
 
-    // First fetch the entries
+// First fetch the entries
     let query = AuditLogQuery {
         tenant_id: Some(tenant_id),
         user_id: None,
@@ -651,7 +651,7 @@ async fn secret_create(
     }
     match state.secret_manager.create_secret(&body).await {
         Ok(secret) => {
-            // Return secret without encrypted value for security
+// Return secret without encrypted value for security
             let resp = serde_json::json!({
                 "id": secret.id,
                 "name": secret.name,

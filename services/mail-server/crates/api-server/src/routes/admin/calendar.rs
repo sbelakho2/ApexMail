@@ -1,6 +1,6 @@
 //! Calendar endpoints.
 //!
-//! Migrated from: apps/control-plane/src/app/api/calendar/route.ts
+//! Migrated from:apps/control-plane/src/app/api/calendar/route.ts
 
 use axum::extract::State;
 use axum::routing::get;

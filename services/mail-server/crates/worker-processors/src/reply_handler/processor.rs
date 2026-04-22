@@ -26,7 +26,7 @@ pub struct ReplyHandler {
 }
 
 impl ReplyHandler {
-    /// Create a new reply handler.
+/// Create a new reply handler.
     pub fn new(db: PgPool, config: ReplyHandlerConfig) -> Self {
         Self {
             db,
@@ -37,7 +37,7 @@ impl ReplyHandler {
         }
     }
 
-    /// Start the processor.
+/// Start the processor.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
         info!(
             concurrency = self.config.base.concurrency,
@@ -50,13 +50,13 @@ impl ReplyHandler {
         Ok(())
     }
 
-    /// Stop the processor gracefully.
+/// Stop the processor gracefully.
     pub async fn stop(&self) -> ProcessorResult<()> {
         info!("Stopping reply handler");
         self.is_running.store(false, Ordering::SeqCst);
         self.shutdown_notify.notify_waiters();
 
-        // Wait for active jobs
+// Wait for active jobs
         let max_wait = Duration::from_secs(30);
         let start = Instant::now();
 
@@ -68,10 +68,10 @@ impl ReplyHandler {
         Ok(())
     }
 
-    /// Main poll loop.
+/// Main poll loop.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
-            // Check capacity
+// Check capacity
             let available =
                 self.config.base.concurrency.saturating_sub(self.active_jobs.load(Ordering::SeqCst));
             if available == 0 {
@@ -102,7 +102,7 @@ impl ReplyHandler {
         }
     }
 
-    /// Fetch unprocessed inbound messages.
+/// Fetch unprocessed inbound messages.
     async fn fetch_messages(&self, limit: usize) -> ProcessorResult<Vec<InboundMessage>> {
         let messages = sqlx::query_as::<_, InboundMessage>(
             r#"
@@ -131,7 +131,7 @@ impl ReplyHandler {
         Ok(messages)
     }
 
-    /// Process a single inbound message.
+/// Process a single inbound message.
     async fn process_message(&self, msg: InboundMessage) -> ProcessorResult<()> {
         self.active_jobs.fetch_add(1, Ordering::SeqCst);
         let start = Instant::now();
@@ -151,10 +151,10 @@ impl ReplyHandler {
     }
 
     async fn process_message_inner(&self, msg: &InboundMessage) -> ProcessorResult<()> {
-        // Get text content
+// Get text content
         let body = msg.body_text.as_deref().unwrap_or("");
 
-        // Classify the reply
+// Classify the reply
         let classification = classify(&msg.subject, body);
 
         debug!(
@@ -164,14 +164,14 @@ impl ReplyHandler {
             "Classified reply"
         );
 
-        // Execute suggested action if auto_execute is set
+// Execute suggested action if auto_execute is set
         let action_taken = if classification.suggested_action.auto_execute {
             self.execute_action(msg, &classification).await?
         } else {
             None
         };
 
-        // Update the message record
+// Update the message record
         sqlx::query(
             r#"
             UPDATE inbound_messages
@@ -192,7 +192,7 @@ impl ReplyHandler {
         .execute(&self.db)
         .await?;
 
-        // If there's a lead, update lead status
+// If there's a lead, update lead status
         if let Some(ref lead_id) = msg.lead_id {
             self.update_lead_status(lead_id, &classification).await?;
         }
@@ -200,7 +200,7 @@ impl ReplyHandler {
         Ok(())
     }
 
-    /// Execute the suggested action.
+/// Execute the suggested action.
     async fn execute_action(
         &self,
         msg: &InboundMessage,
@@ -229,7 +229,7 @@ impl ReplyHandler {
                 Ok(Some(format!("snoozed_for_{}_days", days)))
             }
             ActionType::Suppress => {
-                // Add to suppressions
+// Add to suppressions
                 sqlx::query(
                     r#"
                     INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
@@ -247,7 +247,7 @@ impl ReplyHandler {
                 Ok(Some("suppressed".to_string()))
             }
             ActionType::Unsubscribe => {
-                // Add to suppressions with unsubscribe reason
+// Add to suppressions with unsubscribe reason
                 sqlx::query(
                     r#"
                     INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
@@ -276,7 +276,7 @@ impl ReplyHandler {
                 Ok(Some("flagged_for_sales".to_string()))
             }
             ActionType::Escalate => {
-                // Log escalation (would typically create a task or notification)
+// Log escalation (would typically create a task or notification)
                 warn!(
                     msg_id = %msg.id,
                     from = %msg.from_email,
@@ -291,7 +291,7 @@ impl ReplyHandler {
         }
     }
 
-    /// Update lead status based on classification.
+/// Update lead status based on classification.
     async fn update_lead_status(
         &self,
         lead_id: &str,

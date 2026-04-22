@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::types::{Plan, PlanFeatures, QuotaLimit, RateLimitTier, SupportLevel};
 
 /// Static seed data for default plans.
+#[derive(Debug, Clone)]
 pub struct PlanSeed {
     pub name: &'static str,
     pub display_name: &'static str,
@@ -77,6 +78,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
             sort_order: 2,
             features: PlanFeatures {
                 dedicated_ip: true,
+                dedicated_ip_count: 1,
                 api_access: true,
                 webhooks_enabled: true,
                 advanced_analytics: true,
@@ -232,6 +234,23 @@ pub fn default_plans() -> Vec<PlanSeed> {
     ]
 }
 
+pub fn builtin_plan_seed(plan_name: Option<&str>) -> PlanSeed {
+    let preferred = plan_name.unwrap_or("free");
+    let plans = default_plans();
+
+    plans
+        .iter()
+        .find(|plan| plan.name == preferred)
+        .cloned()
+        .or_else(|| plans.iter().find(|plan| plan.name == "free").cloned())
+        .expect("builtin free plan must exist")
+}
+
+pub fn builtin_quota_limits(plan_name: Option<&str>) -> (i64, i64) {
+    let plan = builtin_plan_seed(plan_name);
+    (plan.email_limit, plan.api_call_limit)
+}
+
 // ---------------------------------------------------------------------------
 // Database helpers
 // ---------------------------------------------------------------------------
@@ -300,7 +319,6 @@ pub async fn get_active_plans(pool: &PgPool) -> Result<Vec<Plan>, sqlx::Error> {
         FROM plans
         WHERE is_active = true
         ORDER BY sort_order ASC
-        LIMIT 100
         "#,
     )
     .fetch_all(pool)
@@ -333,18 +351,18 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
 /// Derive quota/rate-limit info for a tenant from their current plan.
 pub async fn get_quota_for_tenant(
     pool: &PgPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
 ) -> Result<Option<QuotaLimit>, sqlx::Error> {
     let row: Option<TenantPlanRow> = sqlx::query_as(
         r#"
         SELECT
             t.id    as tenant_id,
-            p.name  as plan_name,
+            t.plan  as plan_name,
             p.email_limit,
             p.api_call_limit,
             p.features
         FROM tenants t
-        JOIN plans p ON t.plan = p.name
+        LEFT JOIN plans p ON t.plan = p.name
         WHERE t.id = $1
         "#,
     )
@@ -354,12 +372,19 @@ pub async fn get_quota_for_tenant(
 
     let Some(row) = row else { return Ok(None) };
 
-    let features: PlanFeatures = serde_json::from_value(
-        row.features.unwrap_or_default(),
-    )
-    .unwrap_or_default();
+    let fallback_plan = builtin_plan_seed(Some(&row.plan_name));
+    let plan_found = row.email_limit.is_some() || row.api_call_limit.is_some() || row.features.is_some();
+    let effective_plan_name = if plan_found {
+        row.plan_name.clone()
+    } else {
+        fallback_plan.name.to_string()
+    };
+    let features = row
+        .features
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| fallback_plan.features.clone());
 
-    let tier = match row.plan_name.as_str() {
+    let tier = match effective_plan_name.as_str() {
         "free" => RateLimitTier::Free,
         "starter" | "pro" | "payg" => RateLimitTier::Standard,
         "growth" | "scale" => RateLimitTier::High,
@@ -369,9 +394,9 @@ pub async fn get_quota_for_tenant(
 
     Ok(Some(QuotaLimit {
         tenant_id: row.tenant_id,
-        plan_name: row.plan_name,
-        emails_per_month: row.email_limit,
-        api_calls_per_month: row.api_call_limit,
+        plan_name: effective_plan_name,
+        emails_per_month: row.email_limit.unwrap_or(fallback_plan.email_limit),
+        api_calls_per_month: row.api_call_limit.unwrap_or(fallback_plan.api_call_limit),
         max_sending_domains: features.max_sending_domains,
         max_team_members: features.max_team_members,
         max_subaccounts: features.max_subaccounts,
@@ -389,7 +414,7 @@ pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
         return 0;
     }
     let overage = emails_sent - email_limit;
-    // 0.04 cents per email → ceil(overage * 4 / 100)
+// 0.04 cents per email → ceil(overage * 4 / 100)
     (overage.saturating_mul(4) + 99) / 100
 }
 
@@ -444,10 +469,10 @@ impl PlanRow {
 
 #[derive(sqlx::FromRow)]
 struct TenantPlanRow {
-    tenant_id: Uuid,
+    tenant_id: String,
     plan_name: String,
-    email_limit: i64,
-    api_call_limit: i64,
+    email_limit: Option<i64>,
+    api_call_limit: Option<i64>,
     features: Option<serde_json::Value>,
 }
 
@@ -468,6 +493,22 @@ mod tests {
     }
 
     #[test]
+    fn pro_plan_includes_one_dedicated_ip() {
+        let pro_plan = default_plans()
+            .into_iter()
+            .find(|plan| plan.name == "pro")
+            .expect("pro plan must exist");
+
+        assert!(pro_plan.features.dedicated_ip);
+        assert_eq!(pro_plan.features.dedicated_ip_count, 1);
+    }
+
+    #[test]
+    fn builtin_quota_limits_fall_back_to_free() {
+        assert_eq!(builtin_quota_limits(Some("does-not-exist")), (3_000, 50_000));
+    }
+
+    #[test]
     fn overage_unlimited_is_zero() {
         assert_eq!(calculate_overage_cost(999_999, -1), 0);
     }
@@ -479,7 +520,7 @@ mod tests {
 
     #[test]
     fn overage_above_limit() {
-        // 1 000 overage emails * 0.04 cents = 40 cents
+// 1 000 overage emails * 0.04 cents = 40 cents
         assert_eq!(calculate_overage_cost(4_000, 3_000), 40);
     }
 

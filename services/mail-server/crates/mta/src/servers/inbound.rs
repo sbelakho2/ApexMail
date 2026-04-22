@@ -46,9 +46,9 @@ pub struct InboundServer {
     redis: deadpool_redis::Pool,
     authenticator: Arc<EmailAuthenticator>,
     hostname: String,
-    /// Per‑IP connection counter.
+/// Per‑IP connection counter.
     connections: Arc<DashMap<IpAddr, u32>>,
-    /// Rate limiter per IP (token bucket).
+/// Rate limiter per IP (token bucket).
     #[allow(unused)]
     ip_limiters: Arc<DashMap<IpAddr, Arc<RateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>>>,
     shutdown: Arc<Notify>,
@@ -76,7 +76,7 @@ impl InboundServer {
         }
     }
 
-    /// Start listening on both plain (STARTTLS) and implicit‑TLS ports.
+/// Start listening on both plain (STARTTLS) and implicit‑TLS ports.
     pub async fn start(self: Arc<Self>, tls: Option<TlsAcceptor>) -> anyhow::Result<()> {
         let plain_addr = format!("{}:{}", self.config.host, self.config.port);
         let plain_listener = TcpListener::bind(&plain_addr).await?;
@@ -116,7 +116,7 @@ impl InboundServer {
             None
         };
 
-        // Plain listener loop
+// Plain listener loop
         loop {
             tokio::select! {
                 res = plain_listener.accept() => {
@@ -141,18 +141,18 @@ impl InboundServer {
         Ok(())
     }
 
-    /// Graceful shutdown.
+/// Graceful shutdown.
     pub fn stop(&self) {
         self.shutdown.notify_waiters();
     }
 
-    // ── session handlers ───────────────────────────────────────────────────────
+// ── session handlers ───────────────────────────────────────────────────────
 
     async fn handle_session_plain(
         self: Arc<Self>,
         socket: TcpStream,
         peer: SocketAddr,
-        tls: Option<TlsAcceptor>,  // #136: renamed from _tls, now used for STARTTLS
+        tls: Option<TlsAcceptor>, // #136:renamed from _tls, now used for STARTTLS
     ) {
         let ip = peer.ip();
         if !self.check_rate_limit(ip) {
@@ -177,7 +177,7 @@ impl InboundServer {
         let mut stream = BufStream::new(socket);
         let starttls_requested = self.run_session_loop(&mut stream, &mut ctx, allow_starttls).await;
 
-        // #136: Handle STARTTLS upgrade if requested
+// #136:Handle STARTTLS upgrade if requested
         if starttls_requested {
             if let Some(acceptor) = tls {
                 let inner = stream.into_inner();
@@ -196,13 +196,13 @@ impl InboundServer {
         self.track_connection(ip, false);
     }
 
-    /// Generic session loop over any AsyncRead+AsyncWrite stream (plain or TLS).
-    /// Returns true if client requested STARTTLS (caller should upgrade and re-enter).
+/// Generic session loop over any AsyncRead+AsyncWrite stream (plain or TLS).
+/// Returns true if client requested STARTTLS (caller should upgrade and re-enter).
     async fn run_session_loop<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         self: &Arc<Self>,
         stream: &mut BufStream<S>,
         ctx: &mut SessionContext,
-        allow_starttls: bool,  // #136: whether STARTTLS upgrade is available
+        allow_starttls: bool, // #136:whether STARTTLS upgrade is available
     ) -> bool {
         let greeting = format!("220 {} ESMTP ApexMail MTA\r\n", self.hostname);
         if let Err(e) = write_line_buf(stream, &greeting).await {
@@ -225,7 +225,7 @@ impl InboundServer {
 
             let cmd = line.trim().to_uppercase();
 
-            // #136: Handle STARTTLS before generic command dispatch
+// #136:Handle STARTTLS before generic command dispatch
             if cmd.starts_with("STARTTLS") {
                 if allow_starttls {
                     let _ = write_line_buf(stream, "220 Ready to start TLS\r\n").await;
@@ -247,11 +247,11 @@ impl InboundServer {
                 break;
             }
 
-            // DATA handling
+// DATA handling
             if cmd.starts_with("DATA") && response.starts_with("354") {
                 let mut message = BytesMut::new();
                 let mut too_large = false;
-                // #137: Track total DATA deadline (10 min) to prevent slow-loris attacks
+// #137:Track total DATA deadline (10 min) to prevent slow-loris attacks
                 let data_deadline = tokio::time::Instant::now() + Duration::from_secs(600);
                 let mut data_timed_out = false;
                 loop {
@@ -271,7 +271,7 @@ impl InboundServer {
                             if line.trim() == "." {
                                 break;
                             }
-                            // #141: Check size BEFORE extending to prevent temporary overallocation
+// #141:Check size BEFORE extending to prevent temporary overallocation
                             if !too_large {
                                 let data_slice = if line.starts_with("..") {
                                     &line[1..]
@@ -291,7 +291,7 @@ impl InboundServer {
                 }
 
                 if data_timed_out {
-                    // #137: Total DATA timeout exceeded
+// #137:Total DATA timeout exceeded
                     let _ = write_line_buf(stream, "421 Data timeout exceeded\r\n").await;
                     break;
                 }
@@ -340,11 +340,11 @@ impl InboundServer {
         };
 
         let mut stream = BufStream::new(tls_stream);
-        self.run_session_loop(&mut stream, &mut ctx, false).await;  // #136: already on TLS
+        self.run_session_loop(&mut stream, &mut ctx, false).await; // #136:already on TLS
         self.track_connection(ip, false);
     }
 
-    // ── commands ───────────────────────────────────────────────────────────────
+// ── commands ───────────────────────────────────────────────────────────────
 
     async fn handle_command(
         &self,
@@ -409,7 +409,7 @@ impl InboundServer {
         }
     }
 
-    // ── message processing ─────────────────────────────────────────────────────
+// ── message processing ─────────────────────────────────────────────────────
 
     async fn process_message(
         &self,
@@ -420,7 +420,7 @@ impl InboundServer {
         let mail_from = ctx.mail_from.as_deref().unwrap_or("<>");
         let helo = &ctx.helo_hostname;
 
-        // 1. Email authentication
+// 1. Email authentication
         let auth_results = self
             .authenticator
             .authenticate(raw, ctx.client_ip, helo, mail_from)
@@ -437,10 +437,10 @@ impl InboundServer {
             crate::auth::MessageDisposition::Accept => {}
         }
 
-        // 2. Detect VERP reply
+// 2. Detect VERP reply
         let is_verp = ctx.rcpt_to.iter().any(|r| r.contains("bounces+"));
 
-        // 3. Store message in database
+// 3. Store message in database
         let rcpts_json = serde_json::to_value(&ctx.rcpt_to)?;
         sqlx::query(
             r#"INSERT INTO inbound_messages (
@@ -462,7 +462,7 @@ impl InboundServer {
         .execute(&self.pool)
         .await?;
 
-        // 4. Queue webhook notification
+// 4. Queue webhook notification
         self.queue_inbound_webhook(&message_id, mail_from, &ctx.rcpt_to)
             .await?;
 
@@ -493,7 +493,7 @@ impl InboundServer {
         });
 
         let mut conn = self.redis.get().await?;
-        // #139: LPUSH returns list length (i64), not String
+// #139:LPUSH returns list length (i64), not String
         if let Err(e) = redis::cmd("LPUSH")
             .arg("mta:webhook_queue")
             .arg(payload.to_string())
@@ -506,7 +506,7 @@ impl InboundServer {
         Ok(())
     }
 
-    // ── rate limiting ──────────────────────────────────────────────────────────
+// ── rate limiting ──────────────────────────────────────────────────────────
 
     fn check_rate_limit(&self, ip: IpAddr) -> bool {
         if !self.rate_limit_config.enabled {
@@ -520,8 +520,8 @@ impl InboundServer {
         if connect {
             *self.connections.entry(ip).or_insert(0) += 1;
         } else {
-            // #140: Atomic decrement then conditional removal – avoids race
-            // between count reaching zero and another thread incrementing
+// #140:Atomic decrement then conditional removal – avoids race
+// between count reaching zero and another thread incrementing
             self.connections.entry(ip).and_modify(|c| *c = c.saturating_sub(1));
             self.connections.remove_if(&ip, |_, c| *c == 0);
         }
@@ -536,7 +536,7 @@ fn extract_address(line: &str) -> String {
             return line[start + 1..end].to_string();
         }
     }
-    // Fallback: last token
+// Fallback:last token
     line.split_whitespace()
         .last()
         .unwrap_or("")
@@ -544,7 +544,7 @@ fn extract_address(line: &str) -> String {
         .to_string()
 }
 
-/// #138: Write all bytes to a raw TcpStream, handling partial writes.
+/// #138:Write all bytes to a raw TcpStream, handling partial writes.
 async fn write_line_tcp(socket: &TcpStream, data: &str) -> std::io::Result<()> {
     let bytes = data.as_bytes();
     let mut written = 0;

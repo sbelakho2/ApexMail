@@ -7,7 +7,7 @@ use ai_service::{config::AiConfig, routes};
 
 #[tokio::main]
 async fn main() {
-    // Initialise structured logging
+// Initialise structured logging
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

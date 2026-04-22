@@ -14,7 +14,7 @@ pub struct CachedDnsResolver {
 }
 
 impl CachedDnsResolver {
-    /// Create a new cached resolver.
+/// Create a new cached resolver.
     pub fn new(config: &DnsConfig) -> Result<Self, DnsError> {
         Ok(Self {
             lookup: DnsLookup::from_config(config)?,
@@ -22,12 +22,12 @@ impl CachedDnsResolver {
         })
     }
 
-    /// Create with default configuration.
+/// Create with default configuration.
     pub fn default_resolver() -> Result<Self, DnsError> {
         Self::new(&DnsConfig::default())
     }
 
-    /// Lookup MX records with caching.
+/// Lookup MX records with caching.
     pub async fn mx(&self, domain: &str) -> Result<Vec<MxRecord>, DnsError> {
         let cache_key = format!("mx:{domain}");
 
@@ -72,7 +72,7 @@ impl CachedDnsResolver {
         }
     }
 
-    /// Lookup SPF record with caching.
+/// Lookup SPF record with caching.
     pub async fn spf(&self, domain: &str) -> Result<Option<SpfRecord>, DnsError> {
         let cache_key = format!("spf:{domain}");
 
@@ -92,7 +92,7 @@ impl CachedDnsResolver {
         }
     }
 
-    /// Lookup DKIM record with caching.
+/// Lookup DKIM record with caching.
     pub async fn dkim(
         &self,
         selector: &str,
@@ -116,7 +116,7 @@ impl CachedDnsResolver {
         }
     }
 
-    /// Lookup DMARC record with caching.
+/// Lookup DMARC record with caching.
     pub async fn dmarc(&self, domain: &str) -> Result<Option<DmarcPolicy>, DnsError> {
         let cache_key = format!("dmarc:{domain}");
 
@@ -136,7 +136,7 @@ impl CachedDnsResolver {
         }
     }
 
-    /// Validate domain can receive email (with cache).
+/// Validate domain can receive email (with cache).
     pub async fn can_receive_email(&self, domain: &str) -> Result<bool, DnsError> {
         let cache_key = format!("can_receive:{domain}");
 
@@ -150,26 +150,26 @@ impl CachedDnsResolver {
         Ok(result)
     }
 
-    /// Invalidate all cached records for a domain.
-    /// #184: DKIM cache key uses `dkim:{selector}._domainkey.{domain}` format,
-    /// so we cannot simply invalidate `dkim:{domain}`. Instead, perform a broader
-    /// invalidation of all keys matching the domain suffix.
+/// Invalidate all cached records for a domain.
+/// #184:DKIM cache key uses `dkim:{selector}._domainkey.{domain}` format,
+/// so we cannot simply invalidate `dkim:{domain}`. Instead, perform a broader
+/// invalidation of all keys matching the domain suffix.
     pub fn invalidate_domain(&self, domain: &str) {
         debug!(domain, "Invalidating DNS cache for domain");
         for prefix in &["mx", "spf", "dmarc", "can_receive"] {
             self.cache.invalidate(&format!("{prefix}:{domain}"));
         }
-        // DKIM keys are stored as `dkim:{selector}._domainkey.{domain}`,
-        // so we need to invalidate by suffix match
+// DKIM keys are stored as `dkim:{selector}._domainkey.{domain}`,
+// so we need to invalidate by suffix match
         self.cache.invalidate_by_domain_suffix(domain);
     }
 
-    /// Clear entire cache.
+/// Clear entire cache.
     pub fn clear_cache(&self) {
         self.cache.clear();
     }
 
-    /// Cache statistics.
+/// Cache statistics.
     pub fn cache_size(&self) -> u64 {
         self.cache.len()
     }
@@ -202,7 +202,7 @@ mod tests {
         assert!(resolver.is_ok());
         if let Ok(resolver) = resolver {
             resolver.invalidate_domain("example.com");
-            // Should not panic
+// Should not panic
             assert_eq!(resolver.cache_size(), 0);
         }
     }

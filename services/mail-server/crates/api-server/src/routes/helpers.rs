@@ -13,7 +13,6 @@ pub fn default_limit() -> i64 {
 }
 
 /// Extract a named cookie value from the request headers.
-///
 /// Handles multiple `Cookie` headers correctly (per RFC 6265).
 pub fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     headers

@@ -1,15 +1,15 @@
 //! Axum routes for the billing service.
 //!
 //! ```text
-//! GET  /plans              – list active plans
-//! GET  /plans/:name        – get plan by name
-//! GET  /usage              – usage summary for current period
-//! POST /usage/record       – record a metering event
-//! GET  /invoices           – list invoices (paginated)
-//! GET  /invoices/:id       – get invoice by ID
-//! GET  /subscription       – get active subscription
-//! GET  /quota              – check quota status
-//! GET  /health             – liveness probe
+//! GET /plans – list active plans
+//! GET /plans/:name – get plan by name
+//! GET /usage – usage summary for current period
+//! POST /usage/record – record a metering event
+//! GET /invoices – list invoices (paginated)
+//! GET /invoices/:id – get invoice by ID
+//! GET /subscription – get active subscription
+//! GET /quota – check quota status
+//! GET /health – liveness probe
 //! ```
 
 use std::sync::Arc;
@@ -36,21 +36,21 @@ use crate::{invoices, plans, subscriptions, types::MeterEventType, usage, AppSta
 pub fn router(state: Arc<AppState>) -> Router {
     let shared = state.clone();
     Router::new()
-        // Plans
+// Plans
         .route("/plans", get(list_plans))
         .route("/plans/{name}", get(get_plan))
-        // Usage
+// Usage
         .route("/usage", get(get_usage))
         .route("/usage/record", post(record_usage))
         .route("/usage/record-checked", post(record_usage_checked))
-        // Invoices
+// Invoices
         .route("/invoices", get(list_invoices))
         .route("/invoices/{id}", get(get_invoice))
-        // Subscription
+// Subscription
         .route("/subscription", get(get_subscription))
-        // Quota
+// Quota
         .route("/quota", get(check_quota))
-        // Health
+// Health
         .route("/health", get(health))
         .with_state(state)
         .layer(middleware::from_fn_with_state(shared, require_service_auth))
@@ -110,7 +110,7 @@ async fn get_usage(
         .and_time(chrono::NaiveTime::MIN)
         .and_utc();
     let period_end = period_start + chrono::Months::new(1);
-    let summary = usage::get_usage(&state.db, q.tenant_id, period_start, period_end).await?;
+    let summary = usage::get_usage(&state.db, &q.tenant_id.to_string(), period_start, period_end).await?;
     Ok(Json(summary))
 }
 
@@ -136,7 +136,7 @@ async fn record_usage(
     let recorded = usage::record_usage(
         &state.db,
         &state.redis,
-        body.tenant_id,
+        &body.tenant_id.to_string(),
         body.event_type,
         body.quantity,
         body.event_id,
@@ -150,7 +150,6 @@ async fn record_usage(
 }
 
 /// POST /usage/record-checked
-///
 /// Atomically check quota and record a metering event in a single operation.
 /// Avoids the TOCTOU window of separate `GET /quota` + `POST /usage/record`.
 async fn record_usage_checked(
@@ -160,7 +159,7 @@ async fn record_usage_checked(
     let result = usage::record_with_quota_check(
         &state.db,
         &state.redis,
-        body.tenant_id,
+        &body.tenant_id.to_string(),
         body.event_type,
         body.quantity,
         body.event_id,
@@ -251,7 +250,7 @@ async fn check_quota(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let status = usage::check_quota(&state.db, &state.redis, q.tenant_id).await?;
+    let status = usage::check_quota(&state.db, &state.redis, &q.tenant_id.to_string()).await?;
     Ok(Json(status))
 }
 
@@ -290,15 +289,47 @@ impl From<subscriptions::SubscriptionError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let msg = match &self {
-            ApiError::Plans(e) => e.to_string(),
-            ApiError::Usage(e) => e.to_string(),
-            ApiError::Invoice(e) => e.to_string(),
-            ApiError::Subscription(e) => e.to_string(),
+        let (status, msg) = match &self {
+            ApiError::Plans(sqlx::Error::RowNotFound) => {
+                (StatusCode::NOT_FOUND, "plan not found".to_string())
+            }
+            ApiError::Plans(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::Usage(usage::UsageError::Db(sqlx::Error::RowNotFound)) => {
+                (StatusCode::NOT_FOUND, "billing resource not found".to_string())
+            }
+            ApiError::Usage(usage::UsageError::Redis(_))
+            | ApiError::Usage(usage::UsageError::RedisCmd(_)) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "billing cache unavailable".to_string())
+            }
+            ApiError::Usage(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::Invoice(invoices::InvoiceError::Db(sqlx::Error::RowNotFound)) => {
+                (StatusCode::NOT_FOUND, "invoice not found".to_string())
+            }
+            ApiError::Invoice(invoices::InvoiceError::NoBillingAddress) => {
+                (StatusCode::NOT_FOUND, "billing address not found for tenant".to_string())
+            }
+            ApiError::Invoice(invoices::InvoiceError::PdfGeneration(e)) => {
+                (StatusCode::SERVICE_UNAVAILABLE, format!("PDF generation error: {e}"))
+            }
+            ApiError::Invoice(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::Subscription(subscriptions::SubscriptionError::PlanNotFound(name)) => {
+                (StatusCode::NOT_FOUND, format!("plan not found: {name}"))
+            }
+            ApiError::Subscription(subscriptions::SubscriptionError::NotFound) => {
+                (StatusCode::NOT_FOUND, "active subscription not found".to_string())
+            }
+            ApiError::Subscription(subscriptions::SubscriptionError::Db(sqlx::Error::RowNotFound)) => {
+                (StatusCode::NOT_FOUND, "active subscription not found".to_string())
+            }
+            ApiError::Subscription(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };
-        tracing::error!(error = %msg, "billing API error");
+        if status.is_server_error() {
+            tracing::error!(error = %msg, status = %status, "billing API error");
+        } else {
+            tracing::warn!(error = %msg, status = %status, "billing API error");
+        }
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             Json(serde_json::json!({ "error": msg })),
         )
             .into_response()
@@ -351,6 +382,7 @@ fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subscriptions::SubscriptionError;
 
     #[test]
     fn default_qty_is_one() {
@@ -364,9 +396,24 @@ mod tests {
 
     #[test]
     fn api_error_into_response_plans() {
-        // Just verify the conversion compiles and doesn't panic.
         let err = ApiError::Plans(sqlx::Error::RowNotFound);
         let resp = err.into_response();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn api_error_into_response_subscription_plan_not_found() {
+        let err = ApiError::Subscription(SubscriptionError::PlanNotFound("gold".into()));
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn api_error_into_response_usage_redis() {
+        let io_error = std::io::Error::other("redis unavailable");
+        let redis_error = redis::RedisError::from(io_error);
+        let err = ApiError::Usage(usage::UsageError::RedisCmd(redis_error));
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

@@ -19,6 +19,7 @@ enterprise = { path = "../enterprise" }
 pattern-matcher = { path = "../pattern-matcher" }
 apexmail-rate-limiter = { path = "../rate-limiter" }
 template-renderer = { path = "../template-renderer" }
+ui-foundation = { path = "../ui-foundation" }
 
 # Security crates for integration testing
 waf-engine = { path = "../waf-engine" }
@@ -38,6 +39,10 @@ http-body-util = "0.1"
 serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+reqwest.workspace = true
+aws-config.workspace = true
+aws-sdk-sesv2.workspace = true
+deadpool-redis.workspace = true
 hyper = "1"
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
 dashmap = { workspace = true }

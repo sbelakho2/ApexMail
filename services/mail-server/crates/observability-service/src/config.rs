@@ -62,14 +62,14 @@ pub struct AlertConfig {
 /// Root configuration for the observability service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservabilityConfig {
-    /// HTTP listen port.
+/// HTTP listen port.
     pub port: u16,
-    /// Runtime environment (`development`, `staging`, `production`).
+/// Runtime environment (`development`, `staging`, `production`).
     pub environment: String,
-    /// Application version tag.
+/// Application version tag.
     pub version: String,
 
-    // Database
+// Database
     pub db_host: String,
     pub db_port: u16,
     pub database: String,
@@ -77,18 +77,18 @@ pub struct ObservabilityConfig {
     pub db_password: String,
     pub db_pool_max: u32,
 
-    // Redis
+// Redis
     pub redis_host: String,
     pub redis_port: u16,
     pub redis_password: Option<String>,
 
-    // Sub-configs
+// Sub-configs
     pub tracing: TracingConfig,
     pub metrics: MetricsConfig,
     pub logging: LoggingConfig,
     pub alerting: AlertConfig,
 
-    /// Log retention in days.
+/// Log retention in days.
     pub log_retention_days: u32,
 }
 
@@ -167,7 +167,7 @@ impl Default for ObservabilityConfig {
 }
 
 impl ObservabilityConfig {
-    /// Build a config from environment variables (falls back to defaults).
+/// Build a config from environment variables (falls back to defaults).
     pub fn from_env() -> Result<Self, String> {
         fn env_or(key: &str, default: &str) -> String {
             std::env::var(key).unwrap_or_else(|_| default.to_string())

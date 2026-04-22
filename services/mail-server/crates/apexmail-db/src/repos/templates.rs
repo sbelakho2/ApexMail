@@ -9,7 +9,7 @@ use crate::types::Template;
 pub struct TemplatesRepo;
 
 impl TemplatesRepo {
-    /// Create a new template.
+/// Create a new template.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -33,7 +33,7 @@ impl TemplatesRepo {
         .await
     }
 
-    /// Find a template by ID.
+/// Find a template by ID.
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -48,8 +48,8 @@ impl TemplatesRepo {
         .await
     }
 
-    /// List templates for a tenant with pagination.
-    /// #224: Added limit/offset and excluded html_body for listing (use find_by_id for full)
+/// List templates for a tenant with pagination.
+/// #224:Added limit/offset and excluded html_body for listing (use find_by_id for full)
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -68,7 +68,7 @@ impl TemplatesRepo {
         .await
     }
 
-    /// Update a template (bumps version).
+/// Update a template (bumps version).
     pub async fn update(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -93,7 +93,7 @@ impl TemplatesRepo {
         .await
     }
 
-    /// Delete a template.
+/// Delete a template.
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM templates WHERE id = $1 AND tenant_id = $2")
             .bind(id)
@@ -103,7 +103,7 @@ impl TemplatesRepo {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Find a template by name (e.g. for slug-based references).
+/// Find a template by name (e.g. for slug-based references).
     pub async fn find_by_name(
         pool: &PgPool,
         tenant_id: Uuid,

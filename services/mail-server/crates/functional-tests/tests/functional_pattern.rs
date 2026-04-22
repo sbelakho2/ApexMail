@@ -1,4 +1,4 @@
-//! Functional tests for pattern-matcher: PatternMatcher and RuleSet.
+//! Functional tests for pattern-matcher:PatternMatcher and RuleSet.
 
 use pattern_matcher::matcher::build_matcher;
 use pattern_matcher::rules::{Rule, RuleCategory, RuleSet, Severity};
@@ -57,7 +57,7 @@ fn case_insensitive_matching() {
 #[test]
 fn ruleset_total_score() {
     let rs = RuleSet::new(spam_rules());
-    // "buy now and free money" should match SPAM-001 (3) + SPAM-002 (5) = 8
+// "buy now and free money" should match SPAM-001 (3) + SPAM-002 (5) = 8
     let score = rs.total_score("Buy now and get free money!");
     assert!((score - 8.0).abs() < f64::EPSILON, "expected 8.0, got {}", score);
 }

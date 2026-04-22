@@ -1,4 +1,4 @@
-//! Functional tests for template-renderer: transpiler, sandbox, plaintext.
+//! Functional tests for template-renderer:transpiler, sandbox, plaintext.
 //! Tests that don't require a database.
 
 use template_renderer::transpiler;

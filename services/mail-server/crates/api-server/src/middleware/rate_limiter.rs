@@ -1,7 +1,7 @@
 //! Fixed-window (and sliding-window approximation) rate limiter backed by Redis.
 //!
 //! Keys are per-tenant. On Redis failure the behaviour depends on the
-//! environment: fail-open in development, fail-closed (503) in production.
+//! environment:fail-open in development, fail-closed (503) in production.
 
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
@@ -16,7 +16,6 @@ use crate::state::AppState;
 // ─── Fixed-window rate limiter (middleware function) ────────────
 
 /// Axum middleware that enforces per-tenant fixed-window rate limits.
-///
 /// Inject via `axum::middleware::from_fn_with_state`.
 pub async fn rate_limit_middleware(
     State(state): State<AppState>,
@@ -24,7 +23,7 @@ pub async fn rate_limit_middleware(
     next: Next,
 ) -> Response
 {
-    // Extract tenant_id from AuthUser (set by require_auth middleware).
+// Extract tenant_id from AuthUser (set by require_auth middleware).
     let tenant_id = req
         .extensions()
         .get::<AuthUser>()
@@ -76,7 +75,7 @@ pub async fn rate_limit_middleware(
                 )
                     .into_response()
             } else {
-                // Fail open in development
+// Fail open in development
                 tracing::warn!("rate limiter Redis unavailable — failing open (dev mode)");
                 next.run(req).await
             }
@@ -96,7 +95,6 @@ enum RateLimitOutcome {
     RedisDown,
 }
 
-// Fix #18: Safe system time that doesn't panic if clock is before epoch.
 fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -123,9 +121,8 @@ async fn check_rate_limit(
             RateLimitOutcome::RedisDown
         })?;
 
-    // Fix #17/#19: Atomic Lua script — INCR + EXPIRE in a single round-trip.
-    // This prevents the race where a crash between INCR and EXPIRE leaves
-    // a key without TTL (permanent rate limit).
+// This prevents the race where a crash between INCR and EXPIRE leaves
+// a key without TTL (permanent rate limit).
     let ttl_secs = (window_ms / 1000).max(1) as i64;
     let script = redis::Script::new(
         r#"
@@ -158,9 +155,8 @@ async fn check_rate_limit(
 // ─── Public (IP-based) rate limiter for unauthenticated endpoints ────────
 
 /// Stricter rate limiter for public auth endpoints (login, register, SSO).
-///
 /// Keys by source IP (from `X-Forwarded-For` first hop, falling back to the
-/// path itself as a global rate-limiter).  Limits: 20 requests per 60-second
+/// path itself as a global rate-limiter). Limits:20 requests per 60-second
 /// window per IP — enough for legitimate users, tight enough to mitigate
 /// credential-stuffing and registration spam.
 pub async fn public_rate_limit_middleware(
@@ -297,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_sliding_window_math() {
-        // Pure math check: 50% through window, prev=100, curr=50 → estimated 100
+// Pure math check:50% through window, prev=100, curr=50 → estimated 100
         let prev_count = 100_f64;
         let curr_count = 50_f64;
         let position = 0.5_f64;

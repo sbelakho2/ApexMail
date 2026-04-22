@@ -3,13 +3,13 @@
 use std::time::Duration;
 
 /// Parse a human-readable duration string into a Duration.
-/// Supported suffixes: s (seconds), m (minutes), h (hours), d (days).
+/// Supported suffixes:s (seconds), m (minutes), h (hours), d (days).
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("Empty duration string".to_string());
     }
-    // #217: Handle input with no suffix (e.g., "5") with a clear error message
+// #217:Handle input with no suffix (e.g., "5") with a clear error message
     if s.len() < 2 {
         return Err(format!("Duration '{}' must have a suffix (s/m/h/d)", s));
     }

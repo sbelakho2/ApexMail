@@ -11,7 +11,7 @@ use crate::types::*;
 
 pub type RedisPool = deadpool_redis::Pool;
 
-/// SSO Service: SAML 2.0 + OIDC authentication
+/// SSO Service:SAML 2.0 + OIDC authentication
 pub struct SSOService {
     db: PgPool,
     redis: Option<RedisPool>,
@@ -27,7 +27,7 @@ impl SSOService {
         Self { db, redis: Some(redis), config }
     }
 
-    /// Configure SSO for a tenant (SAML or OIDC)
+/// Configure SSO for a tenant (SAML or OIDC)
     pub async fn configure(&self, req: SSOConfigureRequest) -> Result<ApiResult<SSOConfiguration>, String> {
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -56,7 +56,7 @@ impl SSOService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get SSO configuration for a tenant
+/// Get SSO configuration for a tenant
     pub async fn get_configuration(&self, tenant_id: Uuid) -> Result<ApiResult<SSOConfiguration>, String> {
         let row = sqlx::query_as::<_, SSOConfiguration>(
             "SELECT * FROM ent_sso_configurations WHERE tenant_id = $1"
@@ -72,7 +72,7 @@ impl SSOService {
         }
     }
 
-    /// Get SSO configuration by domain
+/// Get SSO configuration by domain
     pub async fn get_config_by_domain(&self, domain: &str) -> Result<Option<SSOConfiguration>, String> {
         sqlx::query_as::<_, SSOConfiguration>(
             "SELECT * FROM ent_sso_configurations WHERE domain = $1 AND enabled = true"
@@ -83,7 +83,7 @@ impl SSOService {
         .map_err(|e| format!("Get config by domain: {e}"))
     }
 
-    /// Initiate SAML login — returns redirect URL
+/// Initiate SAML login — returns redirect URL
     pub async fn initiate_saml_login(&self, domain: &str) -> Result<ApiResult<SSOLoginRedirect>, String> {
         let config = self.get_config_by_domain(domain).await?;
         let config = match config {
@@ -96,7 +96,7 @@ impl SSOService {
         let entity_id = config.entity_id.unwrap_or_else(|| self.config.sso.saml.entity_id.clone());
         let acs_url = self.config.sso.saml.acs_url.clone();
 
-        // #257: Build a minimally valid SAML AuthnRequest XML document.
+// #257:Build a minimally valid SAML AuthnRequest XML document.
         let issue_instant = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let saml_request_xml = format!(
             r#"<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{}" Version="2.0" IssueInstant="{}" Destination="{}" AssertionConsumerServiceURL="{}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"><saml:Issuer>{}</saml:Issuer></samlp:AuthnRequest>"#,
@@ -122,12 +122,12 @@ impl SSOService {
         Ok(ApiResult::ok(SSOLoginRedirect { redirect_url, request_id }))
     }
 
-    /// Handle SAML callback — validate assertion and create session
+/// Handle SAML callback — validate assertion and create session
     pub async fn handle_saml_callback(&self, tenant_id: Uuid, email: &str, display_name: Option<&str>, external_user_id: &str, groups: Option<serde_json::Value>, attributes: Option<serde_json::Value>) -> Result<ApiResult<SSOCallbackResult>, String> {
         self.create_sso_session(tenant_id, "saml", email, display_name, external_user_id, groups, attributes).await
     }
 
-    /// Initiate OIDC login — returns authorization redirect URL
+/// Initiate OIDC login — returns authorization redirect URL
     pub async fn initiate_oidc_login(&self, domain: &str) -> Result<ApiResult<SSOLoginRedirect>, String> {
         let config = self.get_config_by_domain(domain).await?;
         let config = match config {
@@ -143,7 +143,7 @@ impl SSOService {
         let client_id = config.oidc_client_id.unwrap_or_default();
         let redirect_uri = self.config.sso.oidc.redirect_uri.clone();
 
-        // Store state + code_verifier in Redis with 10-minute TTL
+// Store state + code_verifier in Redis with 10-minute TTL
         if let Some(ref redis) = self.redis {
             let mut conn = redis.get().await.map_err(|e| format!("Redis connection: {e}"))?;
             let key = format!("oidc_state:{}", state);
@@ -157,7 +157,7 @@ impl SSOService {
                 .await
                 .map_err(|e| format!("Redis set: {e}"))?;
         } else {
-            // Fallback: store in DB for environments without Redis
+// Fallback:store in DB for environments without Redis
             sqlx::query(
                 "INSERT INTO sso_oidc_state (state, code_verifier, domain, tenant_id, expires_at)
                  VALUES ($1, $2, $3, $4, NOW() + INTERVAL '10 minutes')"
@@ -185,22 +185,22 @@ impl SSOService {
         Ok(ApiResult::ok(SSOLoginRedirect { redirect_url, request_id: state }))
     }
 
-    /// Validate and retrieve OIDC state for token exchange
+/// Validate and retrieve OIDC state for token exchange
     pub async fn validate_oidc_state(&self, state: &str) -> Result<Option<OidcStateData>, String> {
-        // Try Redis first
+// Try Redis first
         if let Some(ref redis) = self.redis {
             let mut conn = redis.get().await.map_err(|e| format!("Redis connection: {e}"))?;
             let key = format!("oidc_state:{}", state);
             let value: Option<String> = conn.get(&key).await.map_err(|e| format!("Redis get: {e}"))?;
             
             if let Some(json) = value {
-                // Delete the state (single-use)
+// Delete the state (single-use)
                 let _: () = conn.del(&key).await.map_err(|e| format!("Redis del: {e}"))?;
                 
                 let parsed: serde_json::Value = serde_json::from_str(&json)
                     .map_err(|e| format!("Parse state: {e}"))?;
                 
-                // #258: Return error instead of silently falling back to empty string
+// #258:Return error instead of silently falling back to empty string
                 let code_verifier = parsed["code_verifier"]
                     .as_str()
                     .filter(|s| !s.is_empty())
@@ -221,7 +221,7 @@ impl SSOService {
             }
         }
         
-        // Fallback: check DB
+// Fallback:check DB
         let row = sqlx::query_as::<_, OidcStateRow>(
             "DELETE FROM sso_oidc_state WHERE state = $1 AND expires_at > NOW() RETURNING *"
         )
@@ -237,18 +237,18 @@ impl SSOService {
         }))
     }
 
-    /// Handle OIDC callback
+/// Handle OIDC callback
     pub async fn handle_oidc_callback(&self, tenant_id: Uuid, email: &str, display_name: Option<&str>, external_user_id: &str, groups: Option<serde_json::Value>) -> Result<ApiResult<SSOCallbackResult>, String> {
         self.create_sso_session(tenant_id, "oidc", email, display_name, external_user_id, groups, None).await
     }
 
-    /// Create or update SSO session
+/// Create or update SSO session
     async fn create_sso_session(
         &self, tenant_id: Uuid, provider_type: &str, email: &str,
         display_name: Option<&str>, external_user_id: &str,
         groups: Option<serde_json::Value>, attributes: Option<serde_json::Value>,
     ) -> Result<ApiResult<SSOCallbackResult>, String> {
-        // #255: Check if user already exists to correctly report is_new_user
+// #255:Check if user already exists to correctly report is_new_user
         let existing_user: Option<(Uuid,)> = sqlx::query_as(
             "SELECT id FROM ent_sso_sessions WHERE tenant_id = $1 AND external_user_id = $2 LIMIT 1"
         )
@@ -260,7 +260,7 @@ impl SSOService {
         
         let is_new_user = existing_user.is_none();
         
-        // #256: Get session duration from SSO config instead of hardcoded 8h
+// #256:Get session duration from SSO config instead of hardcoded 8h
         let session_hours = sqlx::query_scalar::<_, i32>(
             "SELECT session_duration_hours FROM ent_sso_configurations WHERE tenant_id = $1"
         )
@@ -302,7 +302,7 @@ impl SSOService {
         }))
     }
 
-    /// Validate session token
+/// Validate session token
     pub async fn validate_session(&self, session_token: &str) -> Result<Option<SSOSession>, String> {
         let session = sqlx::query_as::<_, SSOSession>(
             "SELECT * FROM ent_sso_sessions WHERE session_token = $1 AND expires_at > NOW()"
@@ -324,7 +324,7 @@ impl SSOService {
         Ok(session)
     }
 
-    /// Cleanup expired sessions
+/// Cleanup expired sessions
     pub async fn cleanup_expired_sessions(&self) -> Result<u64, String> {
         let result = sqlx::query("DELETE FROM ent_sso_sessions WHERE expires_at < NOW()")
             .execute(&self.db)
@@ -350,7 +350,7 @@ pub fn generate_pkce_verifier() -> String {
         .collect()
 }
 
-/// Generate PKCE code challenge: base64url(sha256(verifier))
+/// Generate PKCE code challenge:base64url(sha256(verifier))
 pub fn generate_pkce_challenge(verifier: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn test_pkce_challenge_is_base64url() {
         let c = generate_pkce_challenge("some_verifier");
-        // Base64url should not contain + or /
+// Base64url should not contain + or /
         assert!(!c.contains('+'));
         assert!(!c.contains('/'));
         assert!(!c.contains('='));

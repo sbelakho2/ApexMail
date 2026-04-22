@@ -1,9 +1,8 @@
 //! Axum routes for the PDF renderer service.
 //!
-//! Routes:
-//! - `POST /v1/pdf/render` — render template → PDF bytes (streaming)
+//! Routes://! - `POST /v1/pdf/render` — render template → PDF bytes (streaming)
 //! - `POST /v1/pdf/render/json` — render template → JSON with base64 PDF
-//! - `GET  /health` — health check
+//! - `GET /health` — health check
 
 use std::time::Duration;
 
@@ -90,13 +89,10 @@ async fn health() -> impl IntoResponse {
 }
 
 /// Render a PDF and stream it as `application/pdf`.
-///
-/// Request body:
-/// ```json
-/// { "template": "invoice", "data": { ... } }
+/// Request body:/// ```json
+/// { "template":"invoice", "data":{ ... } }
 /// ```
-///
-/// Response: raw PDF bytes with `Content-Type: application/pdf`
+/// Response:raw PDF bytes with `Content-Type:application/pdf`
 async fn render_pdf_stream(Json(req): Json<RenderRequest>) -> Result<Response, PdfApiError> {
     info!(template = %req.template, "PDF render request (stream)");
 
@@ -121,7 +117,6 @@ async fn render_pdf_stream(Json(req): Json<RenderRequest>) -> Result<Response, P
 }
 
 /// Render a PDF and return it as base64-encoded JSON.
-///
 /// Useful for clients that can't handle binary responses directly.
 async fn render_pdf_json(Json(req): Json<RenderRequest>) -> Result<Json<RenderResponse>, PdfApiError> {
     info!(template = %req.template, "PDF render request (JSON)");
@@ -161,5 +156,44 @@ impl IntoResponse for PdfApiError {
         };
 
         (status, Json(json!({ "error": message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn health_route_skips_service_auth() {
+        let app = pdf_router(String::new());
+
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn render_route_requires_service_token() {
+        let app = pdf_router("super-secret".into());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pdf/render")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"template":"invoice","data":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

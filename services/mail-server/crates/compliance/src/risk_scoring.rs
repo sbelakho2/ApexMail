@@ -1,9 +1,9 @@
 //! Risk scoring engine — assesses tenant risk profiles using 10 weighted
 //! factors computed from parallel DB queries and external blocklist checks.
 //!
-//! Risk levels: Low (<25), Medium (25–49), High (50–74), Critical (≥75).
+//! Risk levels:Low (<25), Medium (25–49), High (50–74), Critical (≥75).
 //! Sending limits are scaled by a per-level multiplier (1.0 / 0.75 / 0.5 / 0.1).
-//! Reassessment cadence adapts: 24h / 6h / 1h / 15min.
+//! Reassessment cadence adapts:24h / 6h / 1h / 15min.
 
 use chrono::{Duration, Utc};
 use serde_json::json;
@@ -17,37 +17,37 @@ use crate::types::*;
 /// Collected raw metrics used to compute risk factors.
 #[derive(Debug, Default)]
 struct TenantMetrics {
-    /// Days since tenant was created.
+/// Days since tenant was created.
     account_age_days: i64,
-    /// Number of verified (DKIM/SPF-confirmed) domains.
+/// Number of verified (DKIM/SPF-confirmed) domains.
     verified_domains: i64,
-    /// Number of failed payments in the last 90 days.
+/// Number of failed payments in the last 90 days.
     payment_failures: i64,
-    /// Total messages sent (lifetime).
+/// Total messages sent (lifetime).
     total_messages: i64,
-    /// Messages sent in last 24 hours.
+/// Messages sent in last 24 hours.
     messages_24h: i64,
-    /// Messages sent in last 7 days.
+/// Messages sent in last 7 days.
     messages_7d: i64,
-    /// Average daily sending rate over 7 days.
+/// Average daily sending rate over 7 days.
     avg_daily_7d: f64,
-    /// Hard bounce rate (%).
+/// Hard bounce rate (%).
     bounce_rate: f64,
-    /// Spam complaint rate (%).
+/// Spam complaint rate (%).
     spam_rate: f64,
-    /// Unsubscribe rate (%).
+/// Unsubscribe rate (%).
     unsub_rate: f64,
-    /// Open rate from campaign stats (%).
+/// Open rate from campaign stats (%).
     open_rate: f64,
-    /// Click rate from campaign stats (%).
+/// Click rate from campaign stats (%).
     click_rate: f64,
-    /// Abuse report count (all time).
+/// Abuse report count (all time).
     abuse_reports: i64,
-    /// Content violations (all time).
+/// Content violations (all time).
     content_violations: i64,
-    /// Phishing detections (all time).
+/// Phishing detections (all time).
     phishing_detections: i64,
-    /// Whether the tenant appears on any active blocklist.
+/// Whether the tenant appears on any active blocklist.
     blocklisted: bool,
 }
 
@@ -61,9 +61,9 @@ impl RiskScoringEngine {
         Self { db, config }
     }
 
-    // ── Public API ───────────────────────────────────────────
+// ── Public API ───────────────────────────────────────────
 
-    /// Full assessment: collect metrics, compute factors & flags, persist.
+/// Full assessment:collect metrics, compute factors & flags, persist.
     pub async fn assess_tenant(
         &self,
         tenant_id: &str,
@@ -95,7 +95,7 @@ impl RiskScoringEngine {
         Ok(profile)
     }
 
-    /// Retrieve a previously-persisted profile.
+/// Retrieve a previously-persisted profile.
     pub async fn get_profile(
         &self,
         tenant_id: &str,
@@ -116,7 +116,7 @@ impl RiskScoringEngine {
         }
     }
 
-    /// Force reassessment regardless of next_assessment_at.
+/// Force reassessment regardless of next_assessment_at.
     pub async fn force_reassessment(
         &self,
         tenant_id: &str,
@@ -124,7 +124,7 @@ impl RiskScoringEngine {
         self.assess_tenant(tenant_id).await
     }
 
-    /// Manually update sending limits for a tenant (admin override).
+/// Manually update sending limits for a tenant (admin override).
     pub async fn update_limits(
         &self,
         tenant_id: &str,
@@ -146,7 +146,7 @@ impl RiskScoringEngine {
         Ok(())
     }
 
-    /// Resolve a risk flag with a resolution note.
+/// Resolve a risk flag with a resolution note.
     pub async fn resolve_flag(
         &self,
         tenant_id: &str,
@@ -164,7 +164,7 @@ impl RiskScoringEngine {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        // Also update the profile's flags JSONB (mark resolved_at).
+// Also update the profile's flags JSONB (mark resolved_at).
         if let Some(mut profile) = self.get_profile(tenant_id).await? {
             for flag in &mut profile.flags {
                 if &flag.flag_type == flag_type && flag.resolved_at.is_none() {
@@ -177,7 +177,7 @@ impl RiskScoringEngine {
         Ok(())
     }
 
-    /// All tenants at critical risk level.
+/// All tenants at critical risk level.
     pub async fn get_critical_risk_tenants(
         &self,
     ) -> Result<Vec<TenantRiskProfile>, String> {
@@ -194,7 +194,7 @@ impl RiskScoringEngine {
         rows.into_iter().map(|r| r.into_profile()).collect()
     }
 
-    /// Aggregate risk stats.
+/// Aggregate risk stats.
     pub async fn get_risk_stats(
         &self,
     ) -> Result<serde_json::Value, String> {
@@ -234,7 +234,7 @@ impl RiskScoringEngine {
         }))
     }
 
-    // ── Internal ─────────────────────────────────────────────
+// ── Internal ─────────────────────────────────────────────
 
     async fn collect_metrics(
         &self,
@@ -690,12 +690,12 @@ fn list_quality_score(bounce_rate: f64, spam_rate: f64) -> f64 {
     combined.clamp(0.0, 100.0)
 }
 
-/// Low engagement → higher risk (inverted: high engagement = low risk).
+/// Low engagement → higher risk (inverted:high engagement = low risk).
 fn engagement_score(open_rate: f64, click_rate: f64) -> f64 {
     if open_rate <= 0.0 && click_rate <= 0.0 {
         50.0 // no data = moderate risk
     } else {
-        // Good engagement: open_rate ~20-30%, click ~2-5% → low risk
+// Good engagement:open_rate ~20-30%, click ~2-5% → low risk
         let open_factor = if open_rate >= 20.0 { 0.0 } else { (20.0 - open_rate) / 20.0 * 50.0 };
         let click_factor = if click_rate >= 3.0 { 0.0 } else { (3.0 - click_rate) / 3.0 * 50.0 };
         ((open_factor + click_factor) / 2.0).clamp(0.0, 100.0)
@@ -794,7 +794,7 @@ mod tests {
         assert_eq!(sending_pattern_score(0, 0.0), 0.0);
         assert_eq!(sending_pattern_score(100, 100.0), 0.0); // ratio=1.0
         assert_eq!(sending_pattern_score(150, 100.0), 0.0); // ratio=1.5
-        assert!(sending_pattern_score(300, 100.0) > 0.0);   // ratio=3.0
+        assert!(sending_pattern_score(300, 100.0) > 0.0); // ratio=3.0
         assert_eq!(sending_pattern_score(500, 100.0), 100.0); // ratio=5.0
     }
 
@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn test_engagement_score() {
         assert_eq!(engagement_score(0.0, 0.0), 50.0); // no data
-        assert_eq!(engagement_score(25.0, 5.0), 0.0);  // great engagement
+        assert_eq!(engagement_score(25.0, 5.0), 0.0); // great engagement
         let low = engagement_score(5.0, 0.5);
         assert!(low > 30.0);
     }
@@ -841,7 +841,7 @@ mod tests {
             factor(RiskFactorType::SpamComplaints, 50.0, 1.5, String::new()),
             factor(RiskFactorType::BounceRate, 30.0, 1.2, String::new()),
         ];
-        // (50*1.5 + 30*1.2) / (1.5+1.2) = (75+36)/2.7 = 111/2.7 ≈ 41.11 → 41
+// (50*1.5 + 30*1.2) / (1.5+1.2) = (75+36)/2.7 = 111/2.7 ≈ 41.11 → 41
         let avg = weighted_average(&factors);
         assert_eq!(avg, 41.0);
     }
@@ -853,10 +853,10 @@ mod tests {
 
     #[test]
     fn test_risk_level_determines_limits() {
-        // Low → multiplier 1.0, no forced DOI
+// Low → multiplier 1.0, no forced DOI
         let cfg = ComplianceConfig::from_env();
         let engine = RiskScoringEngine::new(
-            // We only test compute_limits which doesn't touch DB.
+// We only test compute_limits which doesn't touch DB.
             unsafe_dummy_pool(),
             cfg,
         );
@@ -912,7 +912,7 @@ mod tests {
         assert!(flags.iter().any(|f| f.flag_type == RiskFlagType::PhishingContent));
     }
 
-    /// Shared Tokio runtime for tests that need `connect_lazy` (sqlx 0.8 requires it).
+/// Shared Tokio runtime for tests that need `connect_lazy` (sqlx 0.8 requires it).
     fn test_runtime() -> &'static tokio::runtime::Runtime {
         use std::sync::OnceLock;
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -924,7 +924,7 @@ mod tests {
         })
     }
 
-    /// Create a dummy PgPool for tests that only exercise non-DB methods.
+/// Create a dummy PgPool for tests that only exercise non-DB methods.
     fn unsafe_dummy_pool() -> PgPool {
         use sqlx::postgres::PgPoolOptions;
         let _guard = test_runtime().enter();

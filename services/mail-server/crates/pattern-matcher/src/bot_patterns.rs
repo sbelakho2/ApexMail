@@ -6,7 +6,7 @@ use crate::matcher::PatternMatcher;
 /// social crawlers, email gateways, and automation tools).
 pub fn bot_ua_patterns() -> Vec<(&'static str, &'static str)> {
     vec![
-        // Search engine bots
+// Search engine bots
         ("googlebot", "bot:google"),
         ("google-inspectiontool", "bot:google"),
         ("bingbot", "bot:bing"),
@@ -15,7 +15,7 @@ pub fn bot_ua_patterns() -> Vec<(&'static str, &'static str)> {
         ("baiduspider", "bot:baidu"),
         ("duckduckbot", "bot:duckduckgo"),
         ("slurp", "bot:yahoo"),
-        // Social crawlers
+// Social crawlers
         ("facebookexternalhit", "crawler:facebook"),
         ("twitterbot", "crawler:twitter"),
         ("linkedinbot", "crawler:linkedin"),
@@ -24,7 +24,7 @@ pub fn bot_ua_patterns() -> Vec<(&'static str, &'static str)> {
         ("slackbot", "crawler:slack"),
         ("discordbot", "crawler:discord"),
         ("pinterestbot", "crawler:pinterest"),
-        // Email gateways
+// Email gateways
         ("barracuda", "gateway:barracuda"),
         ("mimecast", "gateway:mimecast"),
         ("proofpoint", "gateway:proofpoint"),
@@ -33,11 +33,11 @@ pub fn bot_ua_patterns() -> Vec<(&'static str, &'static str)> {
         ("forcepoint", "gateway:forcepoint"),
         ("sophos", "gateway:sophos"),
         ("spamhaus", "gateway:spamhaus"),
-        // Email clients
+// Email clients
         ("thunderbird", "client:thunderbird"),
         ("microsoft outlook", "client:outlook"),
         ("apple mail", "client:apple"),
-        // Automation / CLI tools
+// Automation / CLI tools
         ("curl/", "tool:curl"),
         ("wget/", "tool:wget"),
         ("python-requests", "tool:python"),
@@ -54,34 +54,34 @@ pub fn bot_ua_patterns() -> Vec<(&'static str, &'static str)> {
         ("selenium", "tool:selenium"),
         ("puppeteer", "tool:puppeteer"),
         ("playwright", "tool:playwright"),
-        // Preview services
+// Preview services
         ("embedly", "preview:embedly"),
         ("quora link preview", "preview:quora"),
         ("redditbot", "preview:reddit"),
         ("rogerbot", "preview:moz"),
         ("showyoubot", "preview:showyou"),
         ("outbrain", "preview:outbrain"),
-        // SEO tools
+// SEO tools
         ("semrush", "seo:semrush"),
         ("ahrefs", "seo:ahrefs"),
         ("majestic", "seo:majestic"),
         ("dotbot", "seo:moz"),
         ("seokicks", "seo:seokicks"),
-        // Monitoring
+// Monitoring
         ("uptimerobot", "monitor:uptimerobot"),
         ("pingdom", "monitor:pingdom"),
         ("site24x7", "monitor:site24x7"),
         ("statuspage", "monitor:statuspage"),
         ("newrelic", "monitor:newrelic"),
         ("datadog", "monitor:datadog"),
-        // Security scanners
+// Security scanners
         ("nmap", "scanner:nmap"),
         ("nikto", "scanner:nikto"),
         ("sqlmap", "scanner:sqlmap"),
         ("dirbuster", "scanner:dirbuster"),
         ("wpscan", "scanner:wpscan"),
         ("nuclei", "scanner:nuclei"),
-        // Generic bot indicators
+// Generic bot indicators
         ("bot/", "generic:bot"),
         ("spider/", "generic:spider"),
         ("crawler", "generic:crawler"),

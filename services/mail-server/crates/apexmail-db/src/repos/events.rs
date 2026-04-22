@@ -16,7 +16,7 @@ pub struct EventTypeCount {
 pub struct EventsRepo;
 
 impl EventsRepo {
-    /// Create a new event.
+/// Create a new event.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -40,7 +40,7 @@ impl EventsRepo {
         .await
     }
 
-    /// List events for a specific message.
+/// List events for a specific message.
     pub async fn list_by_message(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -56,7 +56,7 @@ impl EventsRepo {
         .await
     }
 
-    /// List events for a tenant with pagination.
+/// List events for a tenant with pagination.
     pub async fn list_by_tenant(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -74,8 +74,8 @@ impl EventsRepo {
         .await
     }
 
-    /// Count events by type for a tenant within a time window.
-    /// #222: Added time bound to prevent expensive full table scans
+/// Count events by type for a tenant within a time window.
+/// #222:Added time bound to prevent expensive full table scans
     pub async fn count_by_type(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -93,7 +93,7 @@ impl EventsRepo {
         .await
     }
 
-    /// Event type stats with time window.
+/// Event type stats with time window.
     pub async fn stats_by_type(
         pool: &PgPool,
         tenant_id: Uuid,

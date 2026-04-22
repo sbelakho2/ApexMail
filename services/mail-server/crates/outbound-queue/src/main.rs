@@ -30,41 +30,41 @@ use crate::smtp_sender::SmtpSender;
 #[command(name = "outbound-queue")]
 #[command(about = "Outbound Queue - High-performance email delivery service")]
 struct Cli {
-    /// gRPC listen address
+/// gRPC listen address
     #[arg(short, long, default_value = "0.0.0.0:50052")]
     listen: String,
     
-    /// Database URL
+/// Database URL
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
     
-    /// Default from domain
+/// Default from domain
     #[arg(long, default_value = "apexmail.ee")]
     from_domain: String,
     
-    /// DKIM selector
+/// DKIM selector
     #[arg(long, default_value = "apexmail2026")]
     dkim_selector: String,
     
-    /// DKIM private key path
+/// DKIM private key path
     #[arg(long)]
     dkim_key_path: Option<String>,
     
-    /// Number of worker threads for queue processing
+/// Number of worker threads for queue processing
     #[arg(long, default_value = "4")]
     workers: usize,
     
-    /// Batch size for queue processing
+/// Batch size for queue processing
     #[arg(long, default_value = "100")]
     batch_size: usize,
     
-    /// Outbound IP addresses for self-hosted sending (comma-separated).
-    /// When provided, these IPs are added to the IP pool for source-binding
-    /// and round-robin rotation.
+/// Outbound IP addresses for self-hosted sending (comma-separated).
+/// When provided, these IPs are added to the IP pool for source-binding
+/// and round-robin rotation.
     #[arg(long, env = "OUTBOUND_IPS", value_delimiter = ',')]
     outbound_ips: Vec<String>,
 
-    /// Log level
+/// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
 }
@@ -73,7 +73,7 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     
-    // Initialize logging
+// Initialize logging
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
     
@@ -87,14 +87,14 @@ async fn main() -> Result<()> {
     info!("From domain: {}", cli.from_domain);
     info!("DKIM selector: {}", cli.dkim_selector);
     
-    // Connect to database
+// Connect to database
     let pool = sqlx::PgPool::connect(&cli.database_url).await?;
     info!("Connected to database");
     
-    // Create SMTP sender
+// Create SMTP sender
     let mut smtp_sender = SmtpSender::new(cli.from_domain.clone());
 
-    // Wire IP pool if outbound IPs are configured (self-hosted path)
+// Wire IP pool if outbound IPs are configured (self-hosted path)
     if !cli.outbound_ips.is_empty() {
         let mut pool = IpPool::new();
         for ip_str in &cli.outbound_ips {
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
         smtp_sender.set_ip_pool(pool);
         info!(count = cli.outbound_ips.len(), "IP pool initialised for source-bound sending");
 
-        // Start background DNSBL monitoring for our outbound IPs
+// Start background DNSBL monitoring for our outbound IPs
         let dnsbl_ips: Vec<std::net::IpAddr> = cli.outbound_ips.iter()
             .filter_map(|s| s.trim().parse().ok())
             .collect();
@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
                             debug!(ip = %ip, "DNSBL check clean");
                         }
                     }
-                    // Check every 15 minutes
+// Check every 15 minutes
                     tokio::time::sleep(std::time::Duration::from_secs(900)).await;
                 }
             });
@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
         }
     }
     
-    // Create queue
+// Create queue
     let queue_config = QueueConfig {
         worker_count: cli.workers,
         batch_size: cli.batch_size,
@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
     };
     let mut queue = EmailQueue::new(pool.clone(), queue_config, smtp_sender);
     
-    // Load DKIM signer if configured
+// Load DKIM signer if configured
     if let Some(ref key_path) = cli.dkim_key_path {
         match DkimSigner::from_file(&cli.from_domain, &cli.dkim_selector, key_path).await {
             Ok(signer) => {
@@ -162,22 +162,22 @@ async fn main() -> Result<()> {
         }
     }
     
-    // Initialize queue tables
+// Initialize queue tables
     queue.initialize().await?;
     
     let queue = Arc::new(queue);
     
-    // Start queue processor
+// Start queue processor
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
     let processor_queue = Arc::clone(&queue);
     let processor_handle = tokio::spawn(async move {
         processor_queue.start_processing(shutdown_rx).await;
     });
     
-    // Create gRPC service
+// Create gRPC service
     let service = OutboundServiceImpl::new(Arc::clone(&queue));
     
-    // Start gRPC server
+// Start gRPC server
     let addr = cli.listen.parse()?;
     info!("Starting gRPC server on {}", addr);
     
@@ -192,7 +192,7 @@ async fn main() -> Result<()> {
         })
         .await?;
     
-    // #119: Graceful drain — wait for processor to finish in-flight emails with a timeout
+// #119:Graceful drain — wait for processor to finish in-flight emails with a timeout
     info!("Waiting for in-flight emails to drain (up to 30s)...");
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
         Err(_) => tracing::warn!("Queue processor drain timed out after 30s; some emails may still be in-flight"),
     }
     
-    // Close database pool gracefully
+// Close database pool gracefully
     pool.close().await;
     
     info!("Outbound Queue Service stopped");

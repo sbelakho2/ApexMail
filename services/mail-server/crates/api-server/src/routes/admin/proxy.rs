@@ -1,6 +1,6 @@
 //! SSRF-safe proxy endpoint.
 //!
-//! Migrated from: apps/control-plane/src/app/api/proxy/route.ts
+//! Migrated from:apps/control-plane/src/app/api/proxy/route.ts
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -57,17 +57,17 @@ async fn proxy_request(
 ) -> Result<Json<ProxyResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // Validate URL
+// Validate URL
     let parsed = url::Url::parse(&body.url)
         .map_err(|_| ApiError::Validation(vec!["Invalid URL".into()]))?;
 
-    // Enforce HTTPS in production
+// Enforce HTTPS in production
     if state.config.environment.is_production() && parsed.scheme() != "https" {
         return Err(ApiError::Validation(vec!["Only HTTPS URLs are allowed in production".into()]));
     }
 
-    // Check allowlist — in production, an empty allowlist means NO proxying
-    // is permitted.
+// Check allowlist — in production, an empty allowlist means NO proxying
+// is permitted.
     let allowlist_str = std::env::var("CONTROL_PLANE_PROXY_ALLOWLIST").unwrap_or_default();
     let allowlist: Vec<&str> = allowlist_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
 
@@ -84,13 +84,13 @@ async fn proxy_request(
         }
     }
 
-    // SSRF: Block private/RFC1918/link-local/cloud-metadata IPs and hostnames.
+// SSRF:Block private/RFC1918/link-local/cloud-metadata IPs and hostnames.
     if let Some(host) = parsed.host_str() {
         let host_lower = host.to_lowercase();
-        // Strip brackets from IPv6 for matching.
+// Strip brackets from IPv6 for matching.
         let bare = host_lower.trim_start_matches('[').trim_end_matches(']');
 
-        // Blocked hostnames and literal IP addresses.
+// Blocked hostnames and literal IP addresses.
         let blocked_hosts = [
             "localhost",
             "127.0.0.1",
@@ -99,33 +99,33 @@ async fn proxy_request(
             "0",
             "0.0.0.0",
         ];
-        // Cloud metadata endpoints.
+// Cloud metadata endpoints.
         let blocked_prefixes = [
-            "169.254.",          // AWS/GCP metadata + link-local
-            "10.",               // RFC1918
-            "192.168.",          // RFC1918
-            "fc00:",             // IPv6 ULA
-            "fd",               // IPv6 ULA
-            "fe80:",             // IPv6 link-local
-            "::ffff:127.",      // IPv4-mapped loopback
-            "::ffff:10.",       // IPv4-mapped RFC1918
-            "::ffff:192.168.",  // IPv4-mapped RFC1918
+            "169.254.", // AWS/GCP metadata + link-local
+            "10.", // RFC1918
+            "192.168.", // RFC1918
+            "fc00:", // IPv6 ULA
+            "fd", // IPv6 ULA
+            "fe80:", // IPv6 link-local
+            "::ffff:127.", // IPv4-mapped loopback
+            "::ffff:10.", // IPv4-mapped RFC1918
+            "::ffff:192.168.", // IPv4-mapped RFC1918
             "::ffff:169.254.", // IPv4-mapped link-local
-            "100.64.",          // Carrier-grade NAT (RFC6598)
+            "100.64.", // Carrier-grade NAT (RFC6598)
         ];
         let is_blocked = blocked_hosts.contains(&bare)
             || blocked_prefixes.iter().any(|p| bare.starts_with(p))
-            // RFC1918 172.16.0.0/12
+// RFC1918 172.16.0.0/12
             || (bare.starts_with("172.")
                 && bare
                     .split('.')
                     .nth(1)
                     .and_then(|s| s.parse::<u8>().ok())
                     .map_or(false, |second| (16..=31).contains(&second)))
-            // Cloud metadata exact IPs
+// Cloud metadata exact IPs
             || bare == "169.254.169.254"
             || bare == "metadata.google.internal"
-            // Decimal/octal IP tricks (reject any all-digit hostnames)
+// Decimal/octal IP tricks (reject any all-digit hostnames)
             || bare.chars().all(|c| c.is_ascii_digit());
         if is_blocked {
             return Err(ApiError::Validation(vec!["Private/internal URLs are not allowed".into()]));
@@ -143,7 +143,7 @@ async fn proxy_request(
         _ => return Err(ApiError::Validation(vec!["Unsupported HTTP method".into()])),
     };
 
-    // Forward only allowed headers
+// Forward only allowed headers
     if let Some(headers) = &body.headers {
         if let Some(obj) = headers.as_object() {
             for (key, value) in obj {
@@ -156,7 +156,7 @@ async fn proxy_request(
         }
     }
 
-    // Forward body for mutation methods
+// Forward body for mutation methods
     if let Some(body_data) = &body.body {
         request = request.json(body_data);
     }

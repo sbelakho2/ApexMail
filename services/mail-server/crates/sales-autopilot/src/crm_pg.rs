@@ -1,6 +1,6 @@
 //! PostgreSQL-backed CRM service.
 //!
-//! Production counterpart to the in-memory `CrmService`.  Uses `sqlx` for
+//! Production counterpart to the in-memory `CrmService`. Uses `sqlx` for
 //! async queries against a real Postgres database, ensuring leads survive
 //! process restarts.
 
@@ -12,7 +12,6 @@ use crate::crm::CrmService as InMemoryCrmService;
 use crate::types::{Lead, LeadStatus, SalesError};
 
 /// PostgreSQL-backed CRM service.
-///
 /// Falls back to the in-memory `CrmService` scoring logic for the
 /// deterministic `score_lead` function (pure computation).
 pub struct SqlxCrmService {
@@ -24,7 +23,7 @@ impl SqlxCrmService {
         Self { pool }
     }
 
-    /// Ensure the leads table exists.
+/// Ensure the leads table exists.
     pub async fn initialize(&self) -> Result<(), SalesError> {
         sqlx::query(r#"
             CREATE TABLE IF NOT EXISTS sales_leads (
@@ -60,7 +59,7 @@ impl SqlxCrmService {
         Ok(())
     }
 
-    /// Insert a new lead.
+/// Insert a new lead.
     pub async fn create_lead(
         &self,
         email: String,
@@ -100,7 +99,7 @@ impl SqlxCrmService {
         })
     }
 
-    /// Retrieve a lead by id.
+/// Retrieve a lead by id.
     pub async fn get_lead(&self, id: Uuid) -> Result<Lead, SalesError> {
         let row = sqlx::query("SELECT * FROM sales_leads WHERE id = $1")
             .bind(id)
@@ -112,7 +111,7 @@ impl SqlxCrmService {
             .ok_or(SalesError::LeadNotFound(id))
     }
 
-    /// List leads, optionally filtering by status and/or source.
+/// List leads, optionally filtering by status and/or source.
     pub async fn list_leads(
         &self,
         status: Option<LeadStatus>,
@@ -130,7 +129,7 @@ impl SqlxCrmService {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        // Build query based on which filters are present
+// Build query based on which filters are present
         let rows = match (&status_str, source) {
             (Some(s), Some(src)) => {
                 sqlx::query(&sql)
@@ -162,7 +161,7 @@ impl SqlxCrmService {
         Ok(rows.iter().map(row_to_lead).collect())
     }
 
-    /// Transition a lead to a new status.
+/// Transition a lead to a new status.
     pub async fn update_lead_status(
         &self,
         id: Uuid,
@@ -182,7 +181,7 @@ impl SqlxCrmService {
             .ok_or(SalesError::LeadNotFound(id))
     }
 
-    /// Full-text search over lead name, email, and company.
+/// Full-text search over lead name, email, and company.
     pub async fn search_leads(&self, query: &str) -> Result<Vec<Lead>, SalesError> {
         let pattern = format!("%{}%", query.to_lowercase());
 
@@ -201,12 +200,12 @@ impl SqlxCrmService {
         Ok(rows.iter().map(row_to_lead).collect())
     }
 
-    /// Re-export the pure scoring function.
+/// Re-export the pure scoring function.
     pub fn score_lead(engagement: f64, company_size: f64, recency: f64) -> u8 {
         InMemoryCrmService::score_lead(engagement, company_size, recency)
     }
 
-    /// Update a lead's score in the database.
+/// Update a lead's score in the database.
     pub async fn set_lead_score(&self, id: Uuid, score: u8) -> Result<(), SalesError> {
         let result = sqlx::query("UPDATE sales_leads SET score = $2 WHERE id = $1")
             .bind(id)
@@ -221,7 +220,7 @@ impl SqlxCrmService {
         Ok(())
     }
 
-    /// Delete a lead.
+/// Delete a lead.
     pub async fn delete_lead(&self, id: Uuid) -> Result<(), SalesError> {
         let result = sqlx::query("DELETE FROM sales_leads WHERE id = $1")
             .bind(id)
@@ -271,9 +270,9 @@ fn row_to_lead(row: &sqlx::postgres::PgRow) -> Lead {
 mod tests {
     use super::*;
 
-    // -----------------------------------------------------------------------
-    // parse_lead_status — exhaustive coverage
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// parse_lead_status — exhaustive coverage
+// -----------------------------------------------------------------------
 
     #[test]
     fn test_parse_lead_status_known_values() {
@@ -293,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_parse_lead_status_case_sensitive() {
-        // Upper-case variants should default to New (not match)
+// Upper-case variants should default to New (not match)
         assert_eq!(parse_lead_status("Contacted"), LeadStatus::New);
         assert_eq!(parse_lead_status("QUALIFIED"), LeadStatus::New);
         assert_eq!(parse_lead_status("Lost"), LeadStatus::New);
@@ -301,19 +300,19 @@ mod tests {
 
     #[test]
     fn test_parse_lead_status_with_whitespace() {
-        // Leading/trailing whitespace should NOT match
+// Leading/trailing whitespace should NOT match
         assert_eq!(parse_lead_status(" contacted "), LeadStatus::New);
         assert_eq!(parse_lead_status("qualified\n"), LeadStatus::New);
     }
 
     #[test]
     fn test_parse_lead_status_sql_injection_attempt() {
-        assert_eq!(parse_lead_status("'; DROP TABLE sales_leads;--"), LeadStatus::New);
+        assert_eq!(parse_lead_status("'; DROP TABLE sales_leads; --"), LeadStatus::New);
     }
 
-    // -----------------------------------------------------------------------
-    // score_lead delegation — boundary values
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// score_lead delegation — boundary values
+// -----------------------------------------------------------------------
 
     #[test]
     fn test_score_lead_delegation() {
@@ -324,44 +323,44 @@ mod tests {
 
     #[test]
     fn test_score_lead_clamping() {
-        // Values above 1.0 should be clamped
+// Values above 1.0 should be clamped
         assert_eq!(SqlxCrmService::score_lead(2.0, 2.0, 2.0), 100);
-        // Negative values should be clamped to 0.0
+// Negative values should be clamped to 0.0
         assert_eq!(SqlxCrmService::score_lead(-1.0, -1.0, -1.0), 0);
     }
 
     #[test]
     fn test_score_lead_individual_dimensions() {
-        // Only engagement: 1.0 * 40 = 40
+// Only engagement:1.0 * 40 = 40
         assert_eq!(SqlxCrmService::score_lead(1.0, 0.0, 0.0), 40);
-        // Only company_size: 1.0 * 30 = 30
+// Only company_size:1.0 * 30 = 30
         assert_eq!(SqlxCrmService::score_lead(0.0, 1.0, 0.0), 30);
-        // Only recency: 1.0 * 30 = 30
+// Only recency:1.0 * 30 = 30
         assert_eq!(SqlxCrmService::score_lead(0.0, 0.0, 1.0), 30);
     }
 
     #[test]
     fn test_score_lead_rounding() {
-        // 0.33 * 40 + 0.33 * 30 + 0.33 * 30 = 13.2 + 9.9 + 9.9 = 33.0
+// 0.33 * 40 + 0.33 * 30 + 0.33 * 30 = 13.2 + 9.9 + 9.9 = 33.0
         assert_eq!(SqlxCrmService::score_lead(0.33, 0.33, 0.33), 33);
     }
 
     #[test]
     fn test_score_lead_nan_and_inf() {
-        // NaN should be clamped to 0 by clamp (actually NaN.clamp returns NaN in Rust)
-        // But the conversion to u8 should handle it gracefully
-        // This test documents the behaviour
+// NaN should be clamped to 0 by clamp (actually NaN.clamp returns NaN in Rust)
+// But the conversion to u8 should handle it gracefully
+// This test documents the behaviour
         let score = SqlxCrmService::score_lead(f64::NAN, 0.5, 0.5);
         assert!(score <= 100); // Whatever the result, it shouldn't panic
     }
 
-    // -----------------------------------------------------------------------
-    // SqlxCrmService::new
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// SqlxCrmService::new
+// -----------------------------------------------------------------------
 
-    // NOTE: We cannot test methods that require a database connection in
-    // unit tests.  The following tests validate pure logic only.  Integration
-    // tests with a real Postgres instance should be in the integration-tests
-    // crate.
+// NOTE:We cannot test methods that require a database connection in
+// unit tests. The following tests validate pure logic only. Integration
+// tests with a real Postgres instance should be in the integration-tests
+// crate.
 }
 

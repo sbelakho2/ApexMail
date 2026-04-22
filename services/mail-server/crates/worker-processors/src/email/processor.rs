@@ -49,28 +49,27 @@ pub struct EmailProcessor {
     active_jobs: AtomicUsize,
     shutdown_notify: Arc<Notify>,
 
-    // Caches
+// Caches
     suppression_cache: Cache<String, CachedSuppression>,
     #[allow(unused)]
     warmup_day_cache: Cache<String, i32>,
     dkim_keys: RwLock<HashMap<String, DkimConfig>>,
     domain_cache: Cache<String, Domain>,
 
-    // Circuit breakers for SMTP endpoints
+// Circuit breakers for SMTP endpoints
     smtp_circuit_breaker: CircuitBreaker,
 
-    // Error rate tracking
+// Error rate tracking
     recent_outcomes: Mutex<Vec<(SendOutcome, Instant)>>,
     error_cooldown_until: AtomicI64,
 
-    // Warmup counters (domain_id -> today's send count)
+// Warmup counters (domain_id -> today's send count)
     warmup_counters: RwLock<HashMap<String, i64>>,
 }
 
 impl EmailProcessor {
-    /// Create a new email processor.
-    ///
-    /// This is async because SES transport requires AWS SDK initialisation.
+/// Create a new email processor.
+/// This is async because SES transport requires AWS SDK initialisation.
     pub async fn new(db: PgPool, redis: RedisPool, config: EmailConfig) -> ProcessorResult<Self> {
         let transport = create_transport_from_config(&config).await?;
 
@@ -109,37 +108,37 @@ impl EmailProcessor {
         })
     }
 
-    /// Start the processor.
+/// Start the processor.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
         info!(
             concurrency = self.config.base.concurrency,
             "Starting email processor"
         );
 
-        // Verify transport
+// Verify transport
         self.transport.verify().await?;
         info!("Email transport verified");
 
-        // Load DKIM keys
+// Load DKIM keys
         if self.config.dkim.enabled {
             self.load_dkim_keys().await?;
         }
 
         self.is_running.store(true, Ordering::SeqCst);
 
-        // Run poll loop
+// Run poll loop
         self.poll_loop().await;
 
         Ok(())
     }
 
-    /// Stop the processor gracefully.
+/// Stop the processor gracefully.
     pub async fn stop(&self) -> ProcessorResult<()> {
         info!("Stopping email processor");
         self.is_running.store(false, Ordering::SeqCst);
         self.shutdown_notify.notify_waiters();
 
-        // Wait for active jobs
+// Wait for active jobs
         let max_wait = Duration::from_secs(30);
         let start = Instant::now();
 
@@ -147,17 +146,17 @@ impl EmailProcessor {
             sleep(Duration::from_millis(100)).await;
         }
 
-        // Close transport
+// Close transport
         self.transport.close().await?;
 
         info!("Email processor stopped");
         Ok(())
     }
 
-    /// Main poll loop.
+/// Main poll loop.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
-            // Check error rate cooldown
+// Check error rate cooldown
             let cooldown_until = self.error_cooldown_until.load(Ordering::SeqCst);
             let now = Utc::now().timestamp_millis();
             if now < cooldown_until {
@@ -170,7 +169,7 @@ impl EmailProcessor {
                 continue;
             }
 
-            // Check capacity
+// Check capacity
             let available_slots =
                 self.config.base.concurrency.saturating_sub(self.active_jobs.load(Ordering::SeqCst));
             if available_slots == 0 {
@@ -178,7 +177,7 @@ impl EmailProcessor {
                 continue;
             }
 
-            // Fetch jobs
+// Fetch jobs
             match self.fetch_jobs(available_slots).await {
                 Ok(jobs) if jobs.is_empty() => {
                     tokio::select! {
@@ -187,26 +186,25 @@ impl EmailProcessor {
                     }
                 }
                 Ok(jobs) => {
-                    // Batch suppression check
+// Batch suppression check
                     let suppressions = self.batch_suppression_check(&jobs).await;
 
-                    // Fix #94: Process jobs concurrently using tokio::spawn
                     let mut handles = Vec::with_capacity(jobs.len());
                     for job in jobs {
                         let suppression = suppressions.get(&format!("{}:{}", job.tenant_id, job.to));
                         if let Some(reason) = suppression {
-                            // Skip suppressed recipients
+// Skip suppressed recipients
                             if let Err(e) = self.handle_suppressed(&job, reason).await {
                                 error!(job_id = %job.id, error = %e, "Failed to handle suppression");
                             }
                             continue;
                         }
 
-                        // Process non-suppressed jobs concurrently
+// Process non-suppressed jobs concurrently
                         handles.push(self.process_job(job));
                     }
 
-                    // Await all concurrently
+// Await all concurrently
                     let results = futures::future::join_all(handles).await;
                     for result in results {
                         if let Err(e) = result {
@@ -214,7 +212,7 @@ impl EmailProcessor {
                         }
                     }
 
-                    // Short delay before next batch
+// Short delay before next batch
                     sleep(Duration::from_millis(100)).await;
                 }
                 Err(e) => {
@@ -225,9 +223,8 @@ impl EmailProcessor {
         }
     }
 
-    /// Fetch jobs from the queue.
+/// Fetch jobs from the queue.
     async fn fetch_jobs(&self, limit: usize) -> ProcessorResult<Vec<EmailJob>> {
-        // Fix #63: Use saturating_as to prevent truncation on large timeouts.
         let visibility_ms = self.config.base.visibility_timeout.as_millis();
         let visibility_ms_i64 = if visibility_ms > i64::MAX as u128 {
             i64::MAX
@@ -265,11 +262,11 @@ impl EmailProcessor {
         Ok(jobs)
     }
 
-    /// Batch suppression check for efficiency.
+/// Batch suppression check for efficiency.
     async fn batch_suppression_check(&self, jobs: &[EmailJob]) -> HashMap<String, String> {
         let mut result = HashMap::new();
 
-        // Group by tenant
+// Group by tenant
         let mut by_tenant: HashMap<String, Vec<&str>> = HashMap::new();
         for job in jobs {
             by_tenant
@@ -279,7 +276,7 @@ impl EmailProcessor {
         }
 
         for (tenant_id, emails) in by_tenant {
-            // Check cache first
+// Check cache first
             let mut uncached: Vec<&str> = Vec::new();
             for email in &emails {
                 let cache_key = format!("{}:{}", tenant_id, email);
@@ -292,10 +289,9 @@ impl EmailProcessor {
                 }
             }
 
-            // Query database for uncached
+// Query database for uncached
             if !uncached.is_empty() {
-                // Fix #64: Properly handle DB errors - fail safe by treating as suppressed
-                // to avoid sending to potentially suppressed recipients.
+// to avoid sending to potentially suppressed recipients.
                 let db_result = sqlx::query_as::<_, (String, String)>(
                     r#"
                     SELECT email, reason
@@ -313,7 +309,7 @@ impl EmailProcessor {
                     Err(e) => {
                         tracing::error!(tenant_id = %tenant_id, error = %e, 
                             "Failed to check suppressions; treating all as suppressed for safety");
-                        // Fail safe: treat all uncached emails as suppressed
+// Fail safe:treat all uncached emails as suppressed
                         for email in &uncached {
                             let cache_key = format!("{}:{}", tenant_id, email);
                             result.insert(cache_key, "suppression_check_failed".to_string());
@@ -322,11 +318,11 @@ impl EmailProcessor {
                     }
                 };
 
-                // Build set of suppressed emails
+// Build set of suppressed emails
                 let suppressed_emails: std::collections::HashSet<String> =
                     suppressions.iter().map(|(e, _)| e.clone()).collect();
 
-                // Cache and collect positive results
+// Cache and collect positive results
                 for (email, reason) in suppressions {
                     let cache_key = format!("{}:{}", tenant_id, email);
                     self.suppression_cache.insert(
@@ -340,7 +336,7 @@ impl EmailProcessor {
                     result.insert(cache_key, reason);
                 }
 
-                // Cache negative results
+// Cache negative results
                 for email in &uncached {
                     if !suppressed_emails.contains(*email) {
                         let cache_key = format!("{}:{}", tenant_id, email);
@@ -360,7 +356,7 @@ impl EmailProcessor {
         result
     }
 
-    /// Process a single job.
+/// Process a single job.
     async fn process_job(&self, job: EmailJob) -> ProcessorResult<()> {
         self.active_jobs.fetch_add(1, Ordering::SeqCst);
         let start = Instant::now();
@@ -370,7 +366,7 @@ impl EmailProcessor {
 
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
 
-        // Record outcome for error rate tracking
+// Record outcome for error rate tracking
         let outcome = match &result {
             Ok(_) => SendOutcome::Success,
             Err(ProcessorError::Transport(msg)) if msg.contains("Soft bounce") => {
@@ -396,12 +392,12 @@ impl EmailProcessor {
     }
 
     async fn process_job_inner(&self, job: &EmailJob) -> ProcessorResult<()> {
-        // Check circuit breaker
+// Check circuit breaker
         if !self.smtp_circuit_breaker.is_allowed() {
             return Err(ProcessorError::CircuitOpen("SMTP circuit breaker open".into()));
         }
 
-        // Check warmup limits
+// Check warmup limits
         if self.config.warmup.enabled {
             if !self.check_warmup_limit(job).await? {
                 self.requeue_job(job, "warmup_limit").await?;
@@ -409,13 +405,13 @@ impl EmailProcessor {
             }
         }
 
-        // Get domain
+// Get domain
         let domain = self.get_domain(&job.domain_id, &job.tenant_id).await?;
 
-        // Prepare email
+// Prepare email
         let email = self.prepare_email(job, &domain)?;
 
-        // Send email
+// Send email
         match self.transport.send(&email).await {
             Ok(result) => {
                 self.smtp_circuit_breaker.record_success();
@@ -424,7 +420,7 @@ impl EmailProcessor {
             Err(e) => {
                 self.smtp_circuit_breaker.record_failure();
 
-                // Check if retryable
+// Check if retryable
                 let err_str = e.to_string();
                 if err_str.contains("Soft bounce") || err_str.contains("temporary") {
                     self.handle_soft_bounce(job, &e).await?;
@@ -441,7 +437,7 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// Check warmup limits for a domain.
+/// Check warmup limits for a domain.
     async fn check_warmup_limit(&self, job: &EmailJob) -> ProcessorResult<bool> {
         let domain = self.get_domain(&job.domain_id, &job.tenant_id).await?;
 
@@ -451,7 +447,7 @@ impl EmailProcessor {
 
         let limits = WarmupLimits::for_day(domain.warmup_day);
 
-        // Get and increment current count
+// Get and increment current count
         let mut counters = self.warmup_counters.write().unwrap_or_else(|e| e.into_inner());
         let current = counters.entry(job.domain_id.clone()).or_insert(0);
 
@@ -463,7 +459,7 @@ impl EmailProcessor {
         Ok(true)
     }
 
-    /// Get domain configuration.
+/// Get domain configuration.
     async fn get_domain(&self, domain_id: &str, tenant_id: &str) -> ProcessorResult<Domain> {
         let cache_key = format!("{}:{}", tenant_id, domain_id);
 
@@ -490,11 +486,11 @@ impl EmailProcessor {
         Ok(domain)
     }
 
-    /// Prepare email for sending.
+/// Prepare email for sending.
     fn prepare_email(&self, job: &EmailJob, domain: &Domain) -> ProcessorResult<PreparedEmail> {
         let mut html = job.html.clone();
 
-        // Add tracking if enabled
+// Add tracking if enabled
         if self.config.tracking.enabled {
             if let Some(ref h) = html {
                 let tracked = add_tracking_pixel(h, job, &self.config.tracking);
@@ -503,7 +499,7 @@ impl EmailProcessor {
             }
         }
 
-        // Build headers
+// Build headers
         let mut headers = vec![
             ("X-ApexMail-Message-ID".to_string(), job.message_id.clone()),
             ("X-ApexMail-Tenant-ID".to_string(), job.tenant_id.clone()),
@@ -513,7 +509,6 @@ impl EmailProcessor {
             headers.push(("X-ApexMail-Campaign-ID".to_string(), campaign_id.clone()));
         }
 
-        // Fix #77: Protected headers that cannot be overwritten by custom headers
         const PROTECTED_HEADERS: &[&str] = &[
             "from", "to", "cc", "bcc", "subject", "date", "message-id",
             "dkim-signature", "arc-seal", "arc-message-signature", "arc-authentication-results",
@@ -522,7 +517,7 @@ impl EmailProcessor {
             "x-originating-ip", "x-mailer", "mime-version", "content-type", "content-transfer-encoding",
         ];
 
-        // Add custom headers from job (filtering protected headers)
+// Add custom headers from job (filtering protected headers)
         if let Some(ref job_headers) = job.headers {
             if let Some(obj) = job_headers.as_object() {
                 for (key, value) in obj {
@@ -538,8 +533,7 @@ impl EmailProcessor {
             }
         }
 
-        // DKIM config
-        // Fix #99: Consult pre-loaded dkim_keys map as fallback when domain doesn't have DKIM config
+// DKIM config
         let dkim = if self.config.dkim.enabled {
             domain.dkim_private_key.as_ref().map(|key| DkimConfig {
                 selector: domain
@@ -549,7 +543,7 @@ impl EmailProcessor {
                 domain: domain.domain.clone(),
                 private_key: key.clone(),
             }).or_else(|| {
-                // Fallback: check pre-loaded dkim_keys map
+// Fallback:check pre-loaded dkim_keys map
                 let dkim_keys = self.dkim_keys.read().unwrap_or_else(|e| e.into_inner());
                 dkim_keys.get(&domain.id).cloned()
             })
@@ -557,7 +551,7 @@ impl EmailProcessor {
             None
         };
 
-        // Parse attachments
+// Parse attachments
         let attachments = job
             .attachments
             .as_ref()
@@ -593,7 +587,7 @@ impl EmailProcessor {
         })
     }
 
-    /// Handle successful send.
+/// Handle successful send.
     async fn handle_success(&self, job: &EmailJob, result: &SendResult) -> ProcessorResult<()> {
         sqlx::query(
             r#"
@@ -607,7 +601,7 @@ impl EmailProcessor {
         .execute(&self.db)
         .await?;
 
-        // Record sent event
+// Record sent event
         sqlx::query(
             r#"
             INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient_email, created_at)
@@ -626,7 +620,7 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// Handle suppressed recipient.
+/// Handle suppressed recipient.
     async fn handle_suppressed(&self, job: &EmailJob, reason: &str) -> ProcessorResult<()> {
         sqlx::query(
             r#"
@@ -641,14 +635,13 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// Handle soft bounce (retry later).
+/// Handle soft bounce (retry later).
     async fn handle_soft_bounce(&self, job: &EmailJob, error: &ProcessorError) -> ProcessorResult<()> {
         if job.attempt >= self.config.base.max_retries as i32 {
             return self.handle_hard_bounce(job, error).await;
         }
 
         let next_attempt = job.attempt + 1;
-        // Fix #65: Use saturating_pow to prevent overflow for large attempt counts.
         let backoff_multiplier = 2_i64.saturating_pow(job.attempt.min(30) as u32);
         let retry_at = Utc::now() + chrono::Duration::seconds(
             (self.config.base.retry_delay.as_secs() as i64).saturating_mul(backoff_multiplier)
@@ -672,7 +665,7 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// Handle hard bounce (permanent failure).
+/// Handle hard bounce (permanent failure).
     async fn handle_hard_bounce(&self, job: &EmailJob, error: &ProcessorError) -> ProcessorResult<()> {
         sqlx::query(
             r#"
@@ -684,7 +677,7 @@ impl EmailProcessor {
         .execute(&self.db)
         .await?;
 
-        // Add to suppressions
+// Add to suppressions
         sqlx::query(
             r#"
             INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
@@ -698,7 +691,7 @@ impl EmailProcessor {
         .execute(&self.db)
         .await?;
 
-        // Record bounce event
+// Record bounce event
         sqlx::query(
             r#"
             INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient_email, created_at)
@@ -717,10 +710,10 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// Handle generic error.
+/// Handle generic error.
     async fn handle_error(&self, job: &EmailJob, error: &ProcessorError) -> ProcessorResult<()> {
         if job.attempt >= self.config.base.max_retries as i32 {
-            // Move to DLQ
+// Move to DLQ
             sqlx::query(
                 r#"
                 INSERT INTO email_dlq (id, job_id, tenant_id, message_id, error_message, created_at)
@@ -751,7 +744,7 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// Requeue a job for later processing.
+/// Requeue a job for later processing.
     async fn requeue_job(&self, job: &EmailJob, reason: &str) -> ProcessorResult<()> {
         let retry_at = Utc::now() + chrono::Duration::minutes(5);
 
@@ -773,24 +766,24 @@ impl EmailProcessor {
         Ok(())
     }
 
-    /// Record send outcome for error rate tracking.
+/// Record send outcome for error rate tracking.
     fn record_outcome(&self, outcome: SendOutcome) {
         let now = Instant::now();
 
         let mut outcomes = self.recent_outcomes.lock().unwrap_or_else(|e| e.into_inner());
         outcomes.push((outcome, now));
 
-        // Evict old entries (>60s)
+// Evict old entries (>60s)
         outcomes.retain(|(_, t)| now.duration_since(*t) < Duration::from_secs(60));
 
-        // Also cap at window size
+// Also cap at window size
         let len = outcomes.len();
         if len > ERROR_WINDOW_SIZE {
             let drain_count = len - ERROR_WINDOW_SIZE;
             outcomes.drain(0..drain_count);
         }
 
-        // Check error rate
+// Check error rate
         let len = outcomes.len();
         if len >= ERROR_WINDOW_SIZE {
             let failures = outcomes
@@ -810,7 +803,7 @@ impl EmailProcessor {
         }
     }
 
-    /// Load DKIM keys from database.
+/// Load DKIM keys from database.
     async fn load_dkim_keys(&self) -> ProcessorResult<()> {
         let keys: Vec<(String, String, String, String)> = sqlx::query_as(
             r#"

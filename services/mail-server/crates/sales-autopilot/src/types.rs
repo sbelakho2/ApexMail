@@ -73,9 +73,9 @@ pub struct Lead {
     pub name: String,
     pub company: String,
     pub title: String,
-    /// Lead score 0–100, calculated from engagement + firmographics.
+/// Lead score 0–100, calculated from engagement + firmographics.
     pub score: u8,
-    /// Where this lead was acquired (e.g. "product_hunt", "manual").
+/// Where this lead was acquired (e.g. "product_hunt", "manual").
     pub source: String,
     pub status: LeadStatus,
     pub created_at: DateTime<Utc>,
@@ -88,9 +88,9 @@ pub struct Company {
     pub name: String,
     pub domain: String,
     pub industry: String,
-    /// A human-readable employee band such as "50-200".
+/// A human-readable employee band such as "50-200".
     pub size: String,
-    /// e.g. "$1M-$10M"
+/// e.g. "$1M-$10M"
     pub revenue_range: String,
     pub enriched_at: DateTime<Utc>,
 }
@@ -101,7 +101,7 @@ pub struct Campaign {
     pub id: Uuid,
     pub name: String,
     pub template_id: String,
-    /// Audience filter description (e.g. JSON filter).
+/// Audience filter description (e.g. JSON filter).
     pub audience: String,
     pub status: CampaignStatus,
     pub sent: u64,
@@ -176,7 +176,7 @@ pub enum SalesError {
     Internal(#[from] anyhow::Error),
 }
 
-// Convenience: allow axum handlers to return SalesError as a 4xx/5xx.
+// Convenience:allow axum handlers to return SalesError as a 4xx/5xx.
 impl axum::response::IntoResponse for SalesError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
@@ -290,9 +290,9 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Additional comprehensive tests
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Additional comprehensive tests
+// -----------------------------------------------------------------------
 
     #[test]
     fn lead_status_all_variants_round_trip() {
@@ -306,7 +306,7 @@ mod tests {
             let json = serde_json::to_string(&status).unwrap();
             let parsed: LeadStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, status);
-            // Display matches serde name
+// Display matches serde name
             let display = status.to_string();
             assert!(json.contains(&display));
         }
@@ -347,7 +347,7 @@ mod tests {
         let lead_max = Lead { score: 100, ..lead.clone() };
         assert_eq!(lead_max.score, 100);
         
-        // u8 can hold 255 but semantically score is 0-100
+// u8 can hold 255 but semantically score is 0-100
         let lead_over = Lead { score: 255, ..lead };
         let json = serde_json::to_value(&lead_over).unwrap();
         assert_eq!(json["score"], 255);

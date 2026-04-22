@@ -54,6 +54,8 @@ rand = { workspace = true }
 # Internal crates
 ops-service = { path = "../ops-service" }
 billing-service = { path = "../billing-service" }
+ui-foundation = { path = "../ui-foundation" }
+mail-common = { path = "../mail-common" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

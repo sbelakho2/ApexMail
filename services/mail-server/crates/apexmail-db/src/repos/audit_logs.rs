@@ -9,7 +9,7 @@ use crate::types::AuditLog;
 pub struct AuditRepo;
 
 impl AuditRepo {
-    /// Record an audit event.
+/// Record an audit event.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -37,7 +37,7 @@ impl AuditRepo {
         .await
     }
 
-    /// List audit logs for a tenant with pagination.
+/// List audit logs for a tenant with pagination.
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,

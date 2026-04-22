@@ -97,7 +97,7 @@ impl SubjectLineAnalyzer {
         Self
     }
 
-    /// Analyze a subject line and return scored results.
+/// Analyze a subject line and return scored results.
     pub fn analyze(&self, subject: &str) -> SubjectLineScore {
         let lower = subject.to_lowercase();
         let tokens = tokenize(&lower);
@@ -213,24 +213,24 @@ pub fn personalization_check(subject: &str) -> f64 {
     score.min(100.0)
 }
 
-/// Score clarity: penalize all caps, excessive punctuation.
+/// Score clarity:penalize all caps, excessive punctuation.
 pub fn score_clarity(subject: &str) -> f64 {
     let mut score = 100.0;
 
-    // Penalize ALL CAPS
+// Penalize ALL CAPS
     let upper_ratio = subject.chars().filter(|c| c.is_uppercase()).count() as f64
         / subject.len().max(1) as f64;
     if upper_ratio > 0.5 {
         score -= 30.0;
     }
 
-    // Penalize excessive punctuation
+// Penalize excessive punctuation
     let punct_count = subject.chars().filter(|c| *c == '!' || *c == '?').count();
     if punct_count > 2 {
         score -= (punct_count as f64 - 2.0) * 10.0;
     }
 
-    // Penalize very short subjects
+// Penalize very short subjects
     if subject.len() < 10 {
         score -= 20.0;
     }
@@ -238,7 +238,7 @@ pub fn score_clarity(subject: &str) -> f64 {
     score.max(0.0)
 }
 
-/// Spam score: check for spam tokens and bigrams.
+/// Spam score:check for spam tokens and bigrams.
 pub fn spam_check(lower: &str) -> f64 {
     let mut spam_hits = 0.0;
 
@@ -254,7 +254,7 @@ pub fn spam_check(lower: &str) -> f64 {
         }
     }
 
-    // Also check for excessive caps or special chars
+// Also check for excessive caps or special chars
     if lower.contains("!!!") {
         spam_hits += 2.0;
     }
@@ -390,7 +390,7 @@ mod tests {
     fn test_predicted_open_rate_range() {
         let analyzer = SubjectLineAnalyzer::new();
         let result = analyzer.analyze("Your exclusive weekly newsletter is ready");
-        // Should be between 10% and 30% for a decent subject
+// Should be between 10% and 30% for a decent subject
         assert!(result.predicted_open_rate > 0.10);
         assert!(result.predicted_open_rate < 0.40);
     }

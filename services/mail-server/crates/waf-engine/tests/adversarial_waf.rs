@@ -38,7 +38,7 @@ fn is_blocked(engine: &WafEngine, req: &HttpRequest<'_>) -> bool {
 
 // ── SQL Injection evasion tests ───────────────────────────────────────────────
 
-/// P0 FIX regression: `UNION ALL SELECT` MUST be blocked.
+/// P0 regression:`UNION ALL SELECT` MUST be blocked.
 /// Before the fix, the 2-token window only checked [UNION, SELECT],
 /// so inserting ALL in between bypassed detection entirely.
 #[test]
@@ -48,7 +48,7 @@ fn test_sqli_union_all_select_bypass_regression() {
         client_ip: client_ip(),
         method: "GET",
         path: "/search",
-        query_string: Some("q=1+UNION+ALL+SELECT+null,null,null--"),
+        query_string: Some("q=1+UNION+ALL+SELECT+null,null,null --"),
         headers: &[],
         body: None,
     };
@@ -65,12 +65,12 @@ fn test_sqli_union_select() {
         path: "/login",
         query_string: None,
         headers: &[],
-        body: Some("user=admin'/**/UNION/**/SELECT/**/password/**/FROM/**/users--"),
+        body: Some("user=admin'/**/UNION/**/SELECT/**/password/**/FROM/**/users --"),
     };
     assert!(is_blocked(&e, &req), "Comment-padded UNION SELECT must be blocked");
 }
 
-/// Case variation: `uNiOn AlL sElEcT`.
+/// Case variation:`uNiOn AlL sElEcT`.
 #[test]
 fn test_sqli_union_all_select_mixed_case() {
     let e = engine();
@@ -78,14 +78,14 @@ fn test_sqli_union_all_select_mixed_case() {
         client_ip: client_ip(),
         method: "GET",
         path: "/api",
-        query_string: Some("id=1+uNiOn+AlL+sElEcT+1,2,3--"),
+        query_string: Some("id=1+uNiOn+AlL+sElEcT+1,2,3 --"),
         headers: &[],
         body: None,
     };
     assert!(is_blocked(&e, &req), "Mixed-case UNION ALL SELECT must be blocked");
 }
 
-/// Tautology injection: `1=1`.
+/// Tautology injection:`1=1`.
 #[test]
 fn test_sqli_tautology() {
     let e = engine();
@@ -110,14 +110,14 @@ fn test_sqli_stacked_query() {
         path: "/update",
         query_string: None,
         headers: &[],
-        body: Some("id=1;DROP TABLE users--"),
+        body: Some("id=1;DROP TABLE users --"),
     };
     assert!(is_blocked(&e, &req), "Stacked query must be blocked");
 }
 
 // ── Allowlist bypass tests ────────────────────────────────────────────────────
 
-/// P1 FIX regression: path allowlist must NOT skip query param inspection.
+/// P1 regression:path allowlist must NOT skip query param inspection.
 /// Before the fix `/health?id=1+OR+1=1` scored 0. Now it should be blocked.
 #[test]
 fn test_path_allowlist_does_not_bypass_query_params_regression() {
@@ -161,11 +161,11 @@ fn test_ip_allowlist_is_full_bypass() {
         client_ip: ip,
         method: "GET",
         path: "/internal",
-        query_string: Some("id=1+UNION+ALL+SELECT+null--"),
+        query_string: Some("id=1+UNION+ALL+SELECT+null --"),
         headers: &[],
         body: None,
     };
-    // IP-allowlisted traffic gets a full bypass (scanner, health-checker)
+// IP-allowlisted traffic gets a full bypass (scanner, health-checker)
     let info = e.inspect(&req);
     assert!(
         !matches!(info.decision, WafDecision::Block(_)),
@@ -282,9 +282,8 @@ fn test_clean_request_not_blocked() {
 }
 
 // ── CMDI no-space bypass regressions (P1 fix) ────────────────────────────────
-//
 // Before the fix, every metachar check required a trailing space ("| ", "& ").
-// Attackers routinely omit the space: `|whoami`, `&cat /etc/passwd`.
+// Attackers routinely omit the space:`|whoami`, `&cat /etc/passwd`.
 // All tests below would have PASSED (attack allowed through) before the patch.
 
 /// `|whoami` — pipe directly followed by command, no space.
@@ -359,7 +358,7 @@ fn test_cmdi_double_amp_curl_blocked() {
     );
 }
 
-/// False-positive guard: pipes in non-dangerous context must NOT be blocked.
+/// False-positive guard:pipes in non-dangerous context must NOT be blocked.
 /// `report|summary` contains `|` but `summary` is not a dangerous command.
 #[test]
 fn test_cmdi_pipe_nondangerous_not_blocked() {
@@ -379,7 +378,6 @@ fn test_cmdi_pipe_nondangerous_not_blocked() {
 }
 
 // ── SQL hex literal tautology bypass regressions ─────────────────────────────
-//
 // Before the fix, `0x31` lexed as NumberLiteral(0) + Identifier(x31).
 // The tautology check never fired because no two equal NumberLiterals appeared.
 // After the fix hex literals parse to their numeric value (0x31 → 49.0).
@@ -392,7 +390,7 @@ fn test_sqli_hex_tautology_blocked() {
         client_ip: client_ip(),
         method: "GET",
         path: "/products",
-        query_string: Some("id=1'+OR+0x31=0x31--"),
+        query_string: Some("id=1'+OR+0x31=0x31 --"),
         headers: &[],
         body: None,
     };
@@ -412,7 +410,7 @@ fn test_sqli_hex_tautology_0xff_blocked() {
         path: "/auth",
         query_string: None,
         headers: &[],
-        body: Some("user=admin'/**/OR/**/0xFF=0xFF--&pass=x"),
+        body: Some("user=admin'/**/OR/**/0xFF=0xFF --&pass=x"),
     };
     assert!(
         is_blocked(&e, &req),
@@ -421,8 +419,7 @@ fn test_sqli_hex_tautology_0xff_blocked() {
 }
 
 // ── SQL stacked query interleaved-token bypass regressions ────────────────────
-//
-// Before the fix, detect_stacked_queries used a 2-token window: [Semicolon, DROP].
+// Before the fix, detect_stacked_queries used a 2-token window:[Semicolon, DROP].
 // Inserting a parenthesis `; (DROP ...)` caused the window to see [Semicolon, OpenParen]
 // which didn't match, then [OpenParen, DROP] which also didn't match.
 // The forward-scan state machine now catches any dangerous keyword AFTER a semicolon.
@@ -481,9 +478,8 @@ fn test_sqli_stacked_select_blocked() {
     );
 }
 
-// ── XSS data: URI with JavaScript MIME type bypass regressions ───────────────
-//
-// Before the fix only `data:text/html` was in the data: URI blocklist.
+// ── XSS data:URI with JavaScript MIME type bypass regressions ───────────────
+// Before the fix only `data:text/html` was in the data:URI blocklist.
 // `data:text/javascript` and `data:application/javascript` were allowed through.
 
 /// `<a href="data:text/javascript,alert(1)">` — JS payload via data URI.
@@ -541,7 +537,6 @@ fn test_xss_data_vbscript_blocked() {
 }
 
 // ── SQL string comparison tautology bypass regressions ───────────────────────
-//
 // Before the fix, `detect_tautology` only caught Str=Str with equal values.
 // `'z'>'a'` (always true lexicographically) and `'a'!='b'` slipped through.
 
@@ -553,7 +548,7 @@ fn test_sqli_string_tautology_gt_blocked() {
         client_ip: client_ip(),
         method: "GET",
         path: "/search",
-        query_string: Some("q=alice'+OR+'z'>'a'--"),
+        query_string: Some("q=alice'+OR+'z'>'a' --"),
         headers: &[],
         body: None,
     };
@@ -573,7 +568,7 @@ fn test_sqli_string_tautology_gte_blocked() {
         path: "/login",
         query_string: None,
         headers: &[],
-        body: Some("user=admin'+OR+'Z'>='A'--&pass=anything"),
+        body: Some("user=admin'+OR+'Z'>='A' --&pass=anything"),
     };
     assert!(
         is_blocked(&e, &req),
@@ -589,7 +584,7 @@ fn test_sqli_string_tautology_neq_blocked() {
         client_ip: client_ip(),
         method: "GET",
         path: "/api/records",
-        query_string: Some("filter=active'+OR+'x'!='y'--"),
+        query_string: Some("filter=active'+OR+'x'!='y' --"),
         headers: &[],
         body: None,
     };
@@ -609,7 +604,7 @@ fn test_sqli_string_tautology_eq_same_blocked() {
         path: "/auth",
         query_string: None,
         headers: &[],
-        body: Some("pass=x'+OR+'admin'='admin'--"),
+        body: Some("pass=x'+OR+'admin'='admin' --"),
     };
     assert!(
         is_blocked(&e, &req),

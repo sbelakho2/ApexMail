@@ -7,7 +7,7 @@ use billing_service::types::InvoiceLineItem;
 
 #[test]
 fn fuzz_payg_cost_never_negative() {
-    // Any positive email/API count must produce non-negative cost.
+// Any positive email/API count must produce non-negative cost.
     let pricing = PaygPricing::default();
     let mut rng = rand::thread_rng();
     use rand::Rng;
@@ -27,14 +27,14 @@ fn fuzz_payg_cost_never_negative() {
             total >= 0,
             "Total negative for emails={emails}, api={api_calls}: {total}"
         );
-        // Total must equal sum of parts for integer cents.
+// Total must equal sum of parts for integer cents.
         assert!(
             total == email_cost + api_cost,
             "Total {total} != email {email_cost} + api {api_cost}"
         );
     }
 
-    // Also check overage cost
+// Also check overage cost
     for _ in 0..5_000 {
         let sent: i64 = rng.gen_range(0..10_000_000);
         let limit: i64 = if rng.gen_bool(0.1) { -1 } else { rng.gen_range(0..5_000_000) };
@@ -45,7 +45,7 @@ fn fuzz_payg_cost_never_negative() {
 
 #[test]
 fn fuzz_plan_quotas_consistent() {
-    // All plans must have non-negative quotas (or -1 for unlimited).
+// All plans must have non-negative quotas (or -1 for unlimited).
     let plans = default_plans();
     assert!(!plans.is_empty(), "Should have at least one plan");
     for plan in &plans {
@@ -84,7 +84,7 @@ fn fuzz_plan_quotas_consistent() {
 
 #[test]
 fn fuzz_vat_never_exceeds_100_percent() {
-    // Any input should produce a reasonable VAT (0-100%).
+// Any input should produce a reasonable VAT (0-100%).
     let countries = ["EE", "DE", "FR", "US", "JP", "GB", "XX", "", "AU", "BR"];
     let mut rng = rand::thread_rng();
     use rand::Rng;
@@ -105,7 +105,7 @@ fn fuzz_vat_never_exceeds_100_percent() {
             amount >= 0,
             "VAT amount negative: {amount} for subtotal={subtotal}, country={country}"
         );
-        // VAT amount should never exceed the subtotal (at 100% max)
+// VAT amount should never exceed the subtotal (at 100% max)
         assert!(
             amount <= subtotal,
             "VAT {amount} exceeds subtotal {subtotal} for country={country}"
@@ -115,7 +115,7 @@ fn fuzz_vat_never_exceeds_100_percent() {
 
 #[test]
 fn fuzz_invoice_total_consistent() {
-    // Line items sum should be consistent.
+// Line items sum should be consistent.
     let mut rng = rand::thread_rng();
     use rand::Rng;
     for _ in 0..1_000 {
@@ -141,7 +141,7 @@ fn fuzz_invoice_total_consistent() {
             computed_subtotal, expected_subtotal,
             "Line items sum mismatch"
         );
-        // Each item amount = quantity * unit_price
+// Each item amount = quantity * unit_price
         for item in &items {
             assert_eq!(
                 item.amount,

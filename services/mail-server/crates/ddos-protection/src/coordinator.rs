@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub struct RegionId(pub String);
 
 impl RegionId {
-    /// Create new region ID
+/// Create new region ID
     pub fn new(id: &str) -> Self {
         Self(id.to_string())
     }
@@ -24,14 +24,14 @@ impl RegionId {
 /// Node identifier within a region
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId {
-    /// Region
+/// Region
     pub region: RegionId,
-    /// Node name
+/// Node name
     pub node: String,
 }
 
 impl NodeId {
-    /// Create new node ID
+/// Create new node ID
     pub fn new(region: &str, node: &str) -> Self {
         Self {
             region: RegionId::new(region),
@@ -39,7 +39,7 @@ impl NodeId {
         }
     }
     
-    /// Parse from string (region:node format)
+/// Parse from string (region:node format)
     pub fn parse(s: &str) -> Option<Self> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() == 2 {
@@ -49,7 +49,7 @@ impl NodeId {
         }
     }
     
-    /// Convert to string
+/// Convert to string
     pub fn to_string(&self) -> String {
         format!("{}:{}", self.region.0, self.node)
     }
@@ -58,26 +58,26 @@ impl NodeId {
 /// Threat event for cross-region sharing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatEvent {
-    /// Event ID (for deduplication)
+/// Event ID (for deduplication)
     pub event_id: String,
-    /// Source node
+/// Source node
     pub source: NodeId,
-    /// Timestamp
+/// Timestamp
     pub timestamp: u64,
-    /// Event type
+/// Event type
     pub event_type: ThreatEventType,
-    /// Affected IP addresses
+/// Affected IP addresses
     pub affected_ips: Vec<IpAddr>,
-    /// Threat score (0-100)
+/// Threat score (0-100)
     pub threat_score: u8,
-    /// TTL in seconds
+/// TTL in seconds
     pub ttl_secs: u32,
-    /// Additional metadata
+/// Additional metadata
     pub metadata: HashMap<String, String>,
 }
 
 impl ThreatEvent {
-    /// Create a new threat event
+/// Create a new threat event
     pub fn new(source: NodeId, event_type: ThreatEventType) -> Self {
         Self {
             event_id: generate_event_id(),
@@ -91,31 +91,31 @@ impl ThreatEvent {
         }
     }
     
-    /// Add affected IP
+/// Add affected IP
     pub fn with_ip(mut self, ip: IpAddr) -> Self {
         self.affected_ips.push(ip);
         self
     }
     
-    /// Add affected IPs
+/// Add affected IPs
     pub fn with_ips(mut self, ips: Vec<IpAddr>) -> Self {
         self.affected_ips.extend(ips);
         self
     }
     
-    /// Set threat score
+/// Set threat score
     pub fn with_score(mut self, score: u8) -> Self {
         self.threat_score = score;
         self
     }
     
-    /// Add metadata
+/// Add metadata
     pub fn with_metadata(mut self, key: &str, value: &str) -> Self {
         self.metadata.insert(key.to_string(), value.to_string());
         self
     }
     
-    /// Check if event has expired
+/// Check if event has expired
     pub fn is_expired(&self) -> bool {
         current_timestamp() > self.timestamp + self.ttl_secs as u64
     }
@@ -124,47 +124,47 @@ impl ThreatEvent {
 /// Types of threat events
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThreatEventType {
-    /// DDoS attack detected
+/// DDoS attack detected
     DdosAttack {
-        /// Attack pattern identifier
+/// Attack pattern identifier
         pattern: String,
-        /// Requests per second observed
+/// Requests per second observed
         rps: u32,
     },
-    /// Brute force attempt
+/// Brute force attempt
     BruteForce {
-        /// Target endpoint
+/// Target endpoint
         endpoint: String,
-        /// Number of attempts
+/// Number of attempts
         attempts: u32,
     },
-    /// Credential stuffing
+/// Credential stuffing
     CredentialStuffing {
-        /// Number of unique credentials tried
+/// Number of unique credentials tried
         credential_count: u32,
     },
-    /// Malicious fingerprint detected
+/// Malicious fingerprint detected
     MaliciousFingerprint {
-        /// Fingerprint hash
+/// Fingerprint hash
         fingerprint: String,
     },
-    /// IP added to blocklist
+/// IP added to blocklist
     BlocklistAdd {
-        /// Reason for blocking
+/// Reason for blocking
         reason: String,
     },
-    /// IP removed from blocklist
+/// IP removed from blocklist
     BlocklistRemove {
-        /// Reason for removal
+/// Reason for removal
         reason: String,
     },
-    /// Rate limit breach
+/// Rate limit breach
     RateLimitBreach {
-        /// Limit that was breached
+/// Limit that was breached
         limit_name: String,
-        /// Current rate
+/// Current rate
         current_rate: u32,
-        /// Limit value
+/// Limit value
         limit: u32,
     },
 }
@@ -172,29 +172,29 @@ pub enum ThreatEventType {
 /// G-Counter CRDT for distributed counting
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GCounter {
-    /// Per-node counters
+/// Per-node counters
     counters: HashMap<String, u64>,
 }
 
 impl GCounter {
-    /// Create new G-Counter
+/// Create new G-Counter
     pub fn new() -> Self {
         Self::default()
     }
     
-    /// Increment counter for a node
+/// Increment counter for a node
     pub fn increment(&mut self, node_id: &str, delta: u64) {
         let entry = self.counters.entry(node_id.to_string()).or_insert(0);
         *entry = entry.saturating_add(delta);
     }
     
-    /// Get total value
-    /// Uses saturating arithmetic to prevent overflow when summing large counters
+/// Get total value
+/// Uses saturating arithmetic to prevent overflow when summing large counters
     pub fn value(&self) -> u64 {
         self.counters.values().fold(0u64, |acc, &v| acc.saturating_add(v))
     }
     
-    /// Merge with another G-Counter
+/// Merge with another G-Counter
     pub fn merge(&mut self, other: &GCounter) {
         for (node, &count) in &other.counters {
             let entry = self.counters.entry(node.clone()).or_insert(0);
@@ -202,7 +202,7 @@ impl GCounter {
         }
     }
     
-    /// Get value for a specific node
+/// Get value for a specific node
     pub fn node_value(&self, node_id: &str) -> u64 {
         self.counters.get(node_id).copied().unwrap_or(0)
     }
@@ -211,34 +211,34 @@ impl GCounter {
 /// PN-Counter CRDT for distributed counters that can increase and decrease
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PNCounter {
-    /// Positive counter
+/// Positive counter
     positive: GCounter,
-    /// Negative counter
+/// Negative counter
     negative: GCounter,
 }
 
 impl PNCounter {
-    /// Create new PN-Counter
+/// Create new PN-Counter
     pub fn new() -> Self {
         Self::default()
     }
     
-    /// Increment
+/// Increment
     pub fn increment(&mut self, node_id: &str, delta: u64) {
         self.positive.increment(node_id, delta);
     }
     
-    /// Decrement
+/// Decrement
     pub fn decrement(&mut self, node_id: &str, delta: u64) {
         self.negative.increment(node_id, delta);
     }
     
-    /// Get current value
-    /// Uses saturating arithmetic to prevent overflow when values exceed i64::MAX
+/// Get current value
+/// Uses saturating arithmetic to prevent overflow when values exceed i64::MAX
     pub fn value(&self) -> i64 {
         let pos = self.positive.value();
         let neg = self.negative.value();
-        // Safely compute pos - neg with clamping to i64 range
+// Safely compute pos - neg with clamping to i64 range
         if pos >= neg {
             let diff = pos - neg;
             if diff > i64::MAX as u64 {
@@ -256,7 +256,7 @@ impl PNCounter {
         }
     }
     
-    /// Merge with another PN-Counter
+/// Merge with another PN-Counter
     pub fn merge(&mut self, other: &PNCounter) {
         self.positive.merge(&other.positive);
         self.negative.merge(&other.negative);
@@ -266,14 +266,14 @@ impl PNCounter {
 /// OR-Set CRDT for distributed sets with add/remove semantics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ORSet<T: Clone + Eq + std::hash::Hash> {
-    /// Elements with their unique tags
+/// Elements with their unique tags
     elements: HashMap<T, HashSet<String>>,
-    /// Tombstones (removed tags)
+/// Tombstones (removed tags)
     tombstones: HashSet<String>,
 }
 
 impl<T: Clone + Eq + std::hash::Hash + Serialize> ORSet<T> {
-    /// Create new OR-Set
+/// Create new OR-Set
     pub fn new() -> Self {
         Self {
             elements: HashMap::new(),
@@ -281,27 +281,27 @@ impl<T: Clone + Eq + std::hash::Hash + Serialize> ORSet<T> {
         }
     }
     
-    /// Add element
+/// Add element
     pub fn add(&mut self, element: T, node_id: &str) {
         let tag = generate_unique_tag(node_id);
         self.elements.entry(element).or_insert_with(HashSet::new).insert(tag);
     }
     
-    /// Remove element (all instances)
+/// Remove element (all instances)
     pub fn remove(&mut self, element: &T) {
         if let Some(tags) = self.elements.remove(element) {
             self.tombstones.extend(tags);
         }
     }
     
-    /// Check if element is present
+/// Check if element is present
     pub fn contains(&self, element: &T) -> bool {
         self.elements.get(element)
             .map(|tags| tags.iter().any(|t| !self.tombstones.contains(t)))
             .unwrap_or(false)
     }
     
-    /// Get all elements
+/// Get all elements
     pub fn elements(&self) -> Vec<T> {
         self.elements.iter()
             .filter(|(_, tags)| tags.iter().any(|t| !self.tombstones.contains(t)))
@@ -309,9 +309,9 @@ impl<T: Clone + Eq + std::hash::Hash + Serialize> ORSet<T> {
             .collect()
     }
     
-    /// Merge with another OR-Set
+/// Merge with another OR-Set
     pub fn merge(&mut self, other: &ORSet<T>) {
-        // Merge elements
+// Merge elements
         for (element, tags) in &other.elements {
             let entry = self.elements.entry(element.clone()).or_insert_with(HashSet::new);
             for tag in tags {
@@ -319,16 +319,16 @@ impl<T: Clone + Eq + std::hash::Hash + Serialize> ORSet<T> {
             }
         }
         
-        // Merge tombstones
+// Merge tombstones
         self.tombstones.extend(other.tombstones.clone());
     }
     
-    /// Size
+/// Size
     pub fn len(&self) -> usize {
         self.elements().len()
     }
     
-    /// Is empty
+/// Is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -336,29 +336,29 @@ impl<T: Clone + Eq + std::hash::Hash + Serialize> ORSet<T> {
 
 /// Distributed IP blocklist using OR-Set
 pub struct DistributedBlocklist {
-    /// The OR-Set for blocked IPs
+/// The OR-Set for blocked IPs
     blocked: ORSet<IpAddr>,
-    /// Block metadata (expiration, reason)
+/// Block metadata (expiration, reason)
     metadata: HashMap<IpAddr, BlockMetadata>,
-    /// Local node ID
+/// Local node ID
     node_id: NodeId,
 }
 
 /// Metadata for a blocked IP
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockMetadata {
-    /// When the block expires
+/// When the block expires
     pub expires_at: u64,
-    /// Reason for blocking
+/// Reason for blocking
     pub reason: String,
-    /// Threat score
+/// Threat score
     pub threat_score: u8,
-    /// Source node that initiated the block
+/// Source node that initiated the block
     pub source: NodeId,
 }
 
 impl DistributedBlocklist {
-    /// Create new distributed blocklist
+/// Create new distributed blocklist
     pub fn new(node_id: NodeId) -> Self {
         Self {
             blocked: ORSet::new(),
@@ -367,7 +367,7 @@ impl DistributedBlocklist {
         }
     }
     
-    /// Block an IP
+/// Block an IP
     pub fn block(&mut self, ip: IpAddr, reason: &str, ttl_secs: u32, threat_score: u8) {
         self.blocked.add(ip, &self.node_id.to_string());
         self.metadata.insert(ip, BlockMetadata {
@@ -378,19 +378,19 @@ impl DistributedBlocklist {
         });
     }
     
-    /// Unblock an IP
+/// Unblock an IP
     pub fn unblock(&mut self, ip: &IpAddr) {
         self.blocked.remove(ip);
         self.metadata.remove(ip);
     }
     
-    /// Check if an IP is blocked
+/// Check if an IP is blocked
     pub fn is_blocked(&self, ip: &IpAddr) -> bool {
         if !self.blocked.contains(ip) {
             return false;
         }
         
-        // Check expiration
+// Check expiration
         if let Some(meta) = self.metadata.get(ip) {
             if current_timestamp() > meta.expires_at {
                 return false; // Expired
@@ -400,7 +400,7 @@ impl DistributedBlocklist {
         true
     }
     
-    /// Get block metadata
+/// Get block metadata
     pub fn get_metadata(&self, ip: &IpAddr) -> Option<&BlockMetadata> {
         if self.is_blocked(ip) {
             self.metadata.get(ip)
@@ -409,11 +409,11 @@ impl DistributedBlocklist {
         }
     }
     
-    /// Merge with remote blocklist
+/// Merge with remote blocklist
     pub fn merge(&mut self, other: &DistributedBlocklist) {
         self.blocked.merge(&other.blocked);
         
-        // Merge metadata, preferring higher threat scores
+// Merge metadata, preferring higher threat scores
         for (ip, meta) in &other.metadata {
             self.metadata.entry(*ip)
                 .and_modify(|existing| {
@@ -425,7 +425,7 @@ impl DistributedBlocklist {
         }
     }
     
-    /// Clean expired entries
+/// Clean expired entries
     pub fn cleanup_expired(&mut self) {
         let now = current_timestamp();
         let expired: Vec<IpAddr> = self.metadata.iter()
@@ -439,12 +439,12 @@ impl DistributedBlocklist {
         }
     }
     
-    /// Get all blocked IPs
+/// Get all blocked IPs
     pub fn blocked_ips(&self) -> Vec<IpAddr> {
         self.blocked.elements()
     }
     
-    /// Count blocked IPs
+/// Count blocked IPs
     pub fn count(&self) -> usize {
         self.blocked.len()
     }
@@ -452,18 +452,18 @@ impl DistributedBlocklist {
 
 /// Distributed rate limiting coordinator
 pub struct RateLimitCoordinator {
-    /// Per-key counters
+/// Per-key counters
     counters: HashMap<String, PNCounter>,
-    /// Local node ID
+/// Local node ID
     node_id: NodeId,
-    /// Window duration
+/// Window duration
     window: Duration,
-    /// Window start time
+/// Window start time
     window_start: Instant,
 }
 
 impl RateLimitCoordinator {
-    /// Create new coordinator
+/// Create new coordinator
     pub fn new(node_id: NodeId, window: Duration) -> Self {
         Self {
             counters: HashMap::new(),
@@ -473,7 +473,7 @@ impl RateLimitCoordinator {
         }
     }
     
-    /// Increment counter for a key
+/// Increment counter for a key
     pub fn increment(&mut self, key: &str, delta: u64) {
         self.maybe_rotate_window();
         
@@ -482,7 +482,7 @@ impl RateLimitCoordinator {
         counter.increment(&self.node_id.to_string(), delta);
     }
     
-    /// Get current count for a key
+/// Get current count for a key
     pub fn get_count(&mut self, key: &str) -> i64 {
         self.maybe_rotate_window();
         
@@ -491,19 +491,19 @@ impl RateLimitCoordinator {
             .unwrap_or(0)
     }
     
-    /// Check if rate limit exceeded
+/// Check if rate limit exceeded
     pub fn is_limited(&mut self, key: &str, limit: u64) -> bool {
         self.get_count(key) as u64 >= limit
     }
     
-    /// Merge with remote coordinator state
+/// Merge with remote coordinator state
     pub fn merge(&mut self, key: &str, remote_counter: &PNCounter) {
         let counter = self.counters.entry(key.to_string())
             .or_insert_with(PNCounter::new);
         counter.merge(remote_counter);
     }
     
-    /// Rotate window if needed
+/// Rotate window if needed
     fn maybe_rotate_window(&mut self) {
         if self.window_start.elapsed() >= self.window {
             self.counters.clear();
@@ -511,7 +511,7 @@ impl RateLimitCoordinator {
         }
     }
     
-    /// Get counter for serialization
+/// Get counter for serialization
     pub fn get_counter(&self, key: &str) -> Option<&PNCounter> {
         self.counters.get(key)
     }
@@ -519,54 +519,54 @@ impl RateLimitCoordinator {
 
 /// Coordinator hub managing all distributed state
 pub struct CoordinatorHub {
-    /// Local node ID
+/// Local node ID
     node_id: NodeId,
-    /// Distributed blocklist
+/// Distributed blocklist
     blocklist: Arc<RwLock<DistributedBlocklist>>,
-    /// Rate limit coordinator
+/// Rate limit coordinator
     rate_limiter: Arc<RwLock<RateLimitCoordinator>>,
-    /// Event ID cache for deduplication
+/// Event ID cache for deduplication
     seen_events: Arc<RwLock<HashSet<String>>>,
-    /// Configuration
+/// Configuration
     config: CoordinatorConfig,
 }
 
 /// Coordinator configuration
 #[derive(Debug, Clone)]
 pub struct CoordinatorConfig {
-    /// Redis URL for communication
+/// Redis URL for communication
     pub redis_url: String,
-    /// Stream name for events
+/// Stream name for events
     pub stream_name: String,
-    /// Consumer group
+/// Consumer group
     pub consumer_group: String,
-    /// Rate limit window
+/// Rate limit window
     pub rate_limit_window: Duration,
-    /// Sync interval
+/// Sync interval
     pub sync_interval: Duration,
-    /// Event retention
+/// Event retention
     pub event_retention: Duration,
 
-    // ---- Retry / Backoff ----
+// ---- Retry / Backoff ----
 
-    /// Maximum number of retries for a failed Redis operation before giving up
-    /// (default: 3).  The coordinator will use exponential backoff with jitter
-    /// between retries.
+/// Maximum number of retries for a failed Redis operation before giving up
+/// (default:3). The coordinator will use exponential backoff with jitter
+/// between retries.
     pub max_retries: u32,
 
-    /// Base delay for exponential backoff (default: 100 ms).  Each retry waits
-    /// `base_retry_delay × 2^(attempt - 1)` plus random jitter.
+/// Base delay for exponential backoff (default:100 ms). Each retry waits
+/// `base_retry_delay × 2^(attempt - 1)` plus random jitter.
     pub base_retry_delay: Duration,
 
-    // ---- Circuit Breaker ----
+// ---- Circuit Breaker ----
 
-    /// Number of consecutive Redis failures before the circuit opens and
-    /// operations are short-circuited for `circuit_breaker_recovery` duration
-    /// (default: 5).  This prevents cascading latency when Redis is down.
+/// Number of consecutive Redis failures before the circuit opens and
+/// operations are short-circuited for `circuit_breaker_recovery` duration
+/// (default:5). This prevents cascading latency when Redis is down.
     pub circuit_breaker_threshold: u32,
 
-    /// Duration the circuit stays open before attempting a probe request
-    /// (default: 30 s).
+/// Duration the circuit stays open before attempting a probe request
+/// (default:30 s).
     pub circuit_breaker_recovery: Duration,
 }
 
@@ -588,7 +588,7 @@ impl Default for CoordinatorConfig {
 }
 
 impl CoordinatorHub {
-    /// Create new coordinator hub
+/// Create new coordinator hub
     pub fn new(node_id: NodeId, config: CoordinatorConfig) -> Self {
         let blocklist = DistributedBlocklist::new(node_id.clone());
         let rate_limiter = RateLimitCoordinator::new(node_id.clone(), config.rate_limit_window);
@@ -602,50 +602,50 @@ impl CoordinatorHub {
         }
     }
     
-    /// Get node ID
+/// Get node ID
     pub fn node_id(&self) -> &NodeId {
         &self.node_id
     }
     
-    /// Block an IP across all regions
+/// Block an IP across all regions
     pub async fn block_ip(&self, ip: IpAddr, reason: &str, ttl_secs: u32, threat_score: u8) {
         let mut blocklist = self.blocklist.write().await;
         blocklist.block(ip, reason, ttl_secs, threat_score);
     }
     
-    /// Check if IP is blocked
+/// Check if IP is blocked
     pub async fn is_blocked(&self, ip: &IpAddr) -> bool {
         let blocklist = self.blocklist.read().await;
         blocklist.is_blocked(ip)
     }
     
-    /// Unblock an IP
+/// Unblock an IP
     pub async fn unblock_ip(&self, ip: &IpAddr) {
         let mut blocklist = self.blocklist.write().await;
         blocklist.unblock(ip);
     }
     
-    /// Increment rate limit counter
+/// Increment rate limit counter
     pub async fn increment_rate(&self, key: &str, delta: u64) {
         let mut limiter = self.rate_limiter.write().await;
         limiter.increment(key, delta);
     }
     
-    /// Check if rate limited
+/// Check if rate limited
     pub async fn is_rate_limited(&self, key: &str, limit: u64) -> bool {
         let mut limiter = self.rate_limiter.write().await;
         limiter.is_limited(key, limit)
     }
     
-    /// Get current rate
+/// Get current rate
     pub async fn get_rate(&self, key: &str) -> i64 {
         let mut limiter = self.rate_limiter.write().await;
         limiter.get_count(key)
     }
     
-    /// Process incoming threat event
+/// Process incoming threat event
     pub async fn process_event(&self, event: ThreatEvent) -> bool {
-        // Check for duplicate
+// Check for duplicate
         {
             let mut seen = self.seen_events.write().await;
             if seen.contains(&event.event_id) {
@@ -654,17 +654,17 @@ impl CoordinatorHub {
             seen.insert(event.event_id.clone());
         }
         
-        // Ignore expired events
+// Ignore expired events
         if event.is_expired() {
             return false;
         }
         
-        // Ignore events from self
+// Ignore events from self
         if event.source == self.node_id {
             return false;
         }
         
-        // Process based on event type
+// Process based on event type
         match &event.event_type {
             ThreatEventType::BlocklistAdd { reason } => {
                 let mut blocklist = self.blocklist.write().await;
@@ -681,7 +681,7 @@ impl CoordinatorHub {
             ThreatEventType::DdosAttack { .. } | 
             ThreatEventType::BruteForce { .. } |
             ThreatEventType::CredentialStuffing { .. } => {
-                // Block the affected IPs with propagated threat score
+// Block the affected IPs with propagated threat score
                 if event.threat_score > 70 {
                     let mut blocklist = self.blocklist.write().await;
                     for ip in &event.affected_ips {
@@ -700,12 +700,12 @@ impl CoordinatorHub {
         true
     }
     
-    /// Create threat event for broadcasting
+/// Create threat event for broadcasting
     pub fn create_event(&self, event_type: ThreatEventType) -> ThreatEvent {
         ThreatEvent::new(self.node_id.clone(), event_type)
     }
     
-    /// Get coordinator statistics
+/// Get coordinator statistics
     pub async fn stats(&self) -> CoordinatorStats {
         let blocklist = self.blocklist.read().await;
         let seen = self.seen_events.read().await;
@@ -717,27 +717,27 @@ impl CoordinatorHub {
         }
     }
     
-    /// Clean up expired state
+/// Clean up expired state
     pub async fn cleanup(&self) {
-        // Cleanup blocklist
+// Cleanup blocklist
         {
             let mut blocklist = self.blocklist.write().await;
             blocklist.cleanup_expired();
         }
         
-        // Cleanup seen events (keep last hour)
-        // In real implementation, this would use timestamps
+// Cleanup seen events (keep last hour)
+// In real implementation, this would use timestamps
     }
 }
 
 /// Coordinator statistics
 #[derive(Debug, Clone)]
 pub struct CoordinatorStats {
-    /// Number of blocked IPs
+/// Number of blocked IPs
     pub blocked_ips: usize,
-    /// Number of seen events (for dedup)
+/// Number of seen events (for dedup)
     pub seen_events: usize,
-    /// Local node ID
+/// Local node ID
     pub node_id: String,
 }
 
@@ -767,20 +767,20 @@ fn generate_unique_tag(node_id: &str) -> String {
 /// Threat intelligence service for cross-region IP block sharing.
 /// Uses the coordinator hub to propagate block events across all nodes.
 pub struct ThreatIntelService {
-    /// Coordinator hub
+/// Coordinator hub
     hub: Arc<CoordinatorHub>,
 }
 
 impl ThreatIntelService {
-    /// Create a new threat intel service
+/// Create a new threat intel service
     pub fn new(hub: Arc<CoordinatorHub>) -> Self {
         Self { hub }
     }
     
-    /// Publish an IP block event to other regions
+/// Publish an IP block event to other regions
     pub async fn publish_ip_block(&self, ip_str: &str, duration: Duration) -> Result<(), String> {
         let ip: IpAddr = ip_str.parse().map_err(|e| format!("Invalid IP: {}", e))?;
-        // E-106 fix: Clamp to u32::MAX to prevent overflow for durations > ~136 years
+// E-106 fix:Clamp to u32::MAX to prevent overflow for durations > ~136 years
         let duration_secs = duration.as_secs().min(u32::MAX as u64) as u32;
         self.hub.block_ip(ip, "threat_intel", duration_secs, 80).await;
         Ok(())
@@ -877,7 +877,7 @@ mod tests {
         let config = CoordinatorConfig::default();
         let hub = CoordinatorHub::new(node1.clone(), config);
         
-        // Create event from different node
+// Create event from different node
         let event = ThreatEvent::new(node2, ThreatEventType::BlocklistAdd {
             reason: "attack detected".to_string(),
         })
@@ -887,7 +887,7 @@ mod tests {
         let processed = hub.process_event(event).await;
         assert!(processed);
         
-        // IP should now be blocked
+// IP should now be blocked
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         assert!(hub.is_blocked(&ip).await);
     }

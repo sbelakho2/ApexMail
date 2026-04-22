@@ -128,7 +128,6 @@ async fn list_tickets(
     )
     .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 100))
-    // Fix #58: Clamp offset to valid range.
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
@@ -172,7 +171,7 @@ async fn update_ticket(
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| ApiError::NotFound("ticket not found".into()))?;;
+    .ok_or_else(|| ApiError::NotFound("ticket not found".into()))?;
 
     let status = body.status.unwrap_or(existing.status);
     let priority = body.priority.unwrap_or(existing.priority);
@@ -268,16 +267,16 @@ async fn list_ticket_messages(
     let limit = q.limit.min(200).max(1);
     let offset = q.offset.max(0);
 
-    // Verify ticket belongs to tenant
-    let exists: Option<bool> = sqlx::query_scalar!(
+// Verify ticket belongs to tenant
+    let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1 AND tenant_id = $2)",
-        ticket_id,
-        auth.tenant_id.to_string(),
     )
+    .bind(&ticket_id)
+    .bind(auth.tenant_id.to_string())
     .fetch_one(&state.db)
     .await?;
 
-    if !exists.unwrap_or(false) {
+    if !exists {
         return Err(ApiError::NotFound("ticket not found".into()));
     }
 
@@ -330,16 +329,16 @@ async fn create_ticket_message(
 ) -> Result<(StatusCode, Json<TicketMessageResponse>), ApiError> {
     require_scopes(&auth, &["support:write"])?;
 
-    // Verify ticket belongs to tenant
-    let exists: Option<bool> = sqlx::query_scalar!(
+// Verify ticket belongs to tenant
+    let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1 AND tenant_id = $2)",
-        ticket_id,
-        auth.tenant_id.to_string(),
     )
+    .bind(&ticket_id)
+    .bind(auth.tenant_id.to_string())
     .fetch_one(&state.db)
     .await?;
 
-    if !exists.unwrap_or(false) {
+    if !exists {
         return Err(ApiError::NotFound("ticket not found".into()));
     }
 
@@ -359,7 +358,7 @@ async fn create_ticket_message(
     .execute(&state.db)
     .await?;
 
-    // Update ticket updated_at
+// Update ticket updated_at
     sqlx::query(
         "UPDATE support_tickets SET updated_at = NOW() WHERE id = $1",
     )
@@ -391,7 +390,7 @@ mod tests {
     #[test]
     fn test_ticket_response_serialisation() {
         let resp = TicketResponse {
-            id: String::nil(),
+            id: String::new(),
             subject: "Test".into(),
             description: "desc".into(),
             priority: "high".into(),

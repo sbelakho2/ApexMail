@@ -35,7 +35,7 @@ impl VectorStore {
         }
     }
 
-    /// Add a vector to the store, evicting LRU entries if needed.
+/// Add a vector to the store, evicting LRU entries if needed.
     pub fn add(
         &self,
         text: String,
@@ -51,7 +51,7 @@ impl VectorStore {
 
         let mut store = self.inner.write();
 
-        // Evict if at threshold
+// Evict if at threshold
         if store.vectors.len() >= self.eviction_threshold {
             self.evict_lru(&mut store);
         }
@@ -81,7 +81,7 @@ impl VectorStore {
         Ok(id)
     }
 
-    /// Add multiple vectors in batch.
+/// Add multiple vectors in batch.
     pub fn add_batch(
         &self,
         items: Vec<(String, Vec<f32>, serde_json::Value)>,
@@ -93,7 +93,7 @@ impl VectorStore {
         Ok(ids)
     }
 
-    /// Get a vector by ID (updates last_accessed for LRU).
+/// Get a vector by ID (updates last_accessed for LRU).
     pub fn get(&self, id: Uuid) -> Option<EmbeddingVector> {
         let mut store = self.inner.write();
         if let Some(v) = store.vectors.get_mut(&id) {
@@ -104,13 +104,13 @@ impl VectorStore {
         }
     }
 
-    /// Remove a vector by ID.
+/// Remove a vector by ID.
     pub fn remove(&self, id: Uuid) -> bool {
         let mut store = self.inner.write();
         store.vectors.remove(&id).is_some()
     }
 
-    /// Search for the top-K most similar vectors using a min-heap.
+/// Search for the top-K most similar vectors using a min-heap.
     pub fn search(&self, query_vector: &[f32], top_k: usize) -> Vec<SearchResult> {
         if query_vector.len() != self.dimension {
             return vec![];
@@ -142,8 +142,8 @@ impl VectorStore {
             }
         }
 
-        // Convert heap to sorted results (highest score first)
-        // into_sorted_vec() returns ascending per Ord; our reversed Ord means highest-actual-score first
+// Convert heap to sorted results (highest score first)
+// into_sorted_vec returns ascending per Ord; our reversed Ord means highest-actual-score first
         let results: Vec<SearchResult> = heap
             .into_sorted_vec()
             .into_iter()
@@ -158,7 +158,7 @@ impl VectorStore {
         results
     }
 
-    /// Get store statistics.
+/// Get store statistics.
     pub fn stats(&self) -> StoreStats {
         let store = self.inner.read();
         let vectors = &store.vectors;
@@ -166,7 +166,7 @@ impl VectorStore {
         let oldest = vectors.values().map(|v| v.last_accessed).min();
         let newest = vectors.values().map(|v| v.last_accessed).max();
 
-        // Estimate memory: per vector = dimension * 4 bytes (f32) + overhead
+// Estimate memory:per vector = dimension * 4 bytes (f32) + overhead
         let vec_mem = vectors.len() * (self.dimension * 4 + 256);
 
         StoreStats {
@@ -178,7 +178,7 @@ impl VectorStore {
         }
     }
 
-    /// Export store to NDJSON writer.
+/// Export store to NDJSON writer.
     pub fn export_ndjson<W: Write>(&self, writer: &mut W) -> Result<usize, EmbeddingError> {
         let store = self.inner.read();
         let mut count = 0;
@@ -190,7 +190,7 @@ impl VectorStore {
         Ok(count)
     }
 
-    /// Import vectors from NDJSON reader.
+/// Import vectors from NDJSON reader.
     pub fn import_ndjson<R: BufRead>(&self, reader: R) -> Result<usize, EmbeddingError> {
         let mut parsed = Vec::new();
         for line in reader.lines() {
@@ -255,7 +255,7 @@ impl PartialOrd for MinScoreEntry {
 
 impl Ord for MinScoreEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap behavior
+// Reverse ordering for min-heap behavior
         other
             .score
             .partial_cmp(&self.score)
@@ -320,7 +320,7 @@ mod tests {
         let results = store.search(&query, 2);
 
         assert_eq!(results.len(), 2);
-        // Most similar should be "a" (identical direction)
+// Most similar should be "a" (identical direction)
         assert_eq!(results[0].text, "a");
         assert!(results[0].score > 0.9);
     }
@@ -391,14 +391,14 @@ mod tests {
 
     #[test]
     fn test_lru_eviction() {
-        // eviction_threshold = 3, max = 5 → when reaching 3 entries, evict 10% (at least 0, but we round)
+// eviction_threshold = 3, max = 5 → when reaching 3 entries, evict 10% (at least 0, but we round)
         let store = VectorStore::new(2, 100, 3);
         store.add("a".into(), vec![1.0, 0.0], serde_json::json!({})).unwrap();
         store.add("b".into(), vec![0.0, 1.0], serde_json::json!({})).unwrap();
         store.add("c".into(), vec![1.0, 1.0], serde_json::json!({})).unwrap();
-        // This should trigger eviction of LRU entries, then succeed
-        // (eviction_threshold/10 = 0, so no entries get evicted, but it shouldn't error since we're at threshold not max)
-        // Actually with max=100 and threshold=3, after eviction count stays under max
+// This should trigger eviction of LRU entries, then succeed
+// (eviction_threshold/10 = 0, so no entries get evicted, but it shouldn't error since we're at threshold not max)
+// Actually with max=100 and threshold=3, after eviction count stays under max
         let stats = store.stats();
         assert!(stats.total_vectors <= 100);
     }

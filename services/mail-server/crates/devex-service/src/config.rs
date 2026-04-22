@@ -47,7 +47,7 @@ impl Default for DevExConfig {
 }
 
 impl DevExConfig {
-    /// Load configuration from environment variables, falling back to defaults.
+/// Load configuration from environment variables, falling back to defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
         let node_env = env::var("NODE_ENV").unwrap_or_else(|_| "development".into());
 
@@ -55,7 +55,7 @@ impl DevExConfig {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
             .unwrap_or_else(|_| vec!["*".into()]);
 
-        // Security: disallow wildcard CORS in production
+// Security:disallow wildcard CORS in production
         if node_env != "development" && cors_origins.contains(&"*".to_string()) {
             return Err(ConfigError::SecurityViolation(
                 "Wildcard CORS origins are not allowed outside development".into(),
@@ -134,12 +134,12 @@ impl DevExConfig {
         Ok(())
     }
 
-    /// Check whether a given API version string is currently supported (not deprecated).
+/// Check whether a given API version string is currently supported (not deprecated).
     pub fn is_version_supported(&self, version: &str) -> bool {
         self.supported_api_versions.iter().any(|v| v == version)
     }
 
-    /// Check whether a given API version string is deprecated.
+/// Check whether a given API version string is deprecated.
     pub fn is_version_deprecated(&self, version: &str) -> bool {
         self.deprecated_api_versions.iter().any(|v| v == version)
     }

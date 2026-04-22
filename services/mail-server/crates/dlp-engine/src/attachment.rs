@@ -3,13 +3,12 @@
 //! Extracts text from common email attachment formats and runs DLP
 //! scanning (PII, entropy, content policy) on the extracted content.
 //!
-//! Supported formats:
-//! - **Plain text** (`.txt`, `.csv`, `.log`, `.json`, `.xml`, `.html`, `.md`)
+//! Supported formats://! - **Plain text** (`.txt`, `.csv`, `.log`, `.json`, `.xml`, `.html`, `.md`)
 //! - **OOXML** (`.docx`, `.xlsx`, `.pptx`) — extracts from inner XML parts
 //! - **PDF** — extracts text streams between `BT`/`ET` operators
 //! - **RTF** — strips RTF control words, extracts plain text
 //!
-//! Heavy lifting for PDF/OOXML intentionally stays zero-dep: we do a
+//! Heavy lifting for PDF/OOXML intentionally stays zero-dep:we do a
 //! best-effort text extraction rather than full rendering.
 
 use crate::engine::{DlpAction, DlpEngine, DlpVerdict};
@@ -17,20 +16,20 @@ use crate::engine::{DlpAction, DlpEngine, DlpVerdict};
 /// File extension / MIME classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentKind {
-    /// Plain UTF-8 text
+/// Plain UTF-8 text
     PlainText,
-    /// OOXML (ZIP-based) document
+/// OOXML (ZIP-based) document
     Ooxml,
-    /// PDF
+/// PDF
     Pdf,
-    /// RTF
+/// RTF
     Rtf,
-    /// Unknown / unscannable binary
+/// Unknown / unscannable binary
     Unknown,
 }
 
 impl AttachmentKind {
-    /// Infer kind from filename extension.
+/// Infer kind from filename extension.
     pub fn from_filename(name: &str) -> Self {
         let lower = name.to_lowercase();
         if lower.ends_with(".txt")
@@ -63,12 +62,12 @@ impl AttachmentKind {
         }
     }
 
-    /// Infer kind from the first few bytes (magic bytes).
+/// Infer kind from the first few bytes (magic bytes).
     pub fn from_magic(data: &[u8]) -> Self {
         if data.starts_with(b"%PDF") {
             Self::Pdf
         } else if data.starts_with(b"PK\x03\x04") {
-            // ZIP-based — could be OOXML
+// ZIP-based — could be OOXML
             Self::Ooxml
         } else if data.starts_with(b"{\\rtf") {
             Self::Rtf
@@ -83,15 +82,15 @@ impl AttachmentKind {
 /// Attachment DLP verdict with extraction metadata.
 #[derive(Debug, Clone)]
 pub struct AttachmentVerdict {
-    /// The underlying DLP verdict (PII, entropy, policy).
+/// The underlying DLP verdict (PII, entropy, policy).
     pub dlp_verdict: DlpVerdict,
-    /// What kind of attachment was processed.
+/// What kind of attachment was processed.
     pub kind: AttachmentKind,
-    /// Number of characters of text extracted from the attachment.
+/// Number of characters of text extracted from the attachment.
     pub extracted_text_len: usize,
-    /// Whether the extraction was partial (e.g. binary fallback).
+/// Whether the extraction was partial (e.g. binary fallback).
     pub partial_extraction: bool,
-    /// Human-readable extraction note (e.g. "Extracted 2 XML parts from OOXML").
+/// Human-readable extraction note (e.g. "Extracted 2 XML parts from OOXML").
     pub extraction_note: String,
 }
 
@@ -107,7 +106,7 @@ fn extract_text(data: &[u8], kind: AttachmentKind) -> (String, bool, String) {
         AttachmentKind::Pdf => extract_pdf_text(data),
         AttachmentKind::Rtf => extract_rtf_text(data),
         AttachmentKind::Unknown => {
-            // Try UTF-8 best-effort
+// Try UTF-8 best-effort
             let text = String::from_utf8_lossy(data);
             let partial = text.contains('\u{FFFD}');
             (
@@ -130,16 +129,15 @@ fn extract_plaintext(data: &[u8]) -> (String, bool, String) {
 }
 
 /// Zero-dep OOXML text extraction.
-///
 /// OOXML files are ZIP archives. We scan for XML content parts and extract
 /// text between `<w:t>`, `<a:t>`, `<t>` tags. This is a best-effort parser
 /// that handles the common case without a full XML library.
 fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
-    // Scan for PK local file headers and look for .xml entries
+// Scan for PK local file headers and look for .xml entries
     let mut text = String::new();
     let mut parts_found = 0u32;
 
-    // Simple ZIP scan: find local file headers (PK\x03\x04)
+// Simple ZIP scan:find local file headers (PK\x03\x04)
     let mut pos = 0;
     while pos + 30 < data.len() {
         if data[pos..].starts_with(b"PK\x03\x04") {
@@ -165,14 +163,14 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
             let header_end = pos + 30 + fname_len + extra_len;
             if pos + 30 + fname_len <= data.len() {
                 let fname = String::from_utf8_lossy(&data[pos + 30..pos + 30 + fname_len]);
-                // Only scan uncompressed XML content parts (compression == 0)
+// Only scan uncompressed XML content parts (compression == 0)
                 if compression == 0
                     && (fname.ends_with(".xml") || fname.contains("sharedStrings"))
                     && header_end + compressed_size <= data.len()
                 {
                     let xml_bytes = &data[header_end..header_end + compressed_size];
                     if let Ok(xml_str) = std::str::from_utf8(xml_bytes) {
-                        // Extract text between common content tags
+// Extract text between common content tags
                         extract_xml_text_content(xml_str, &mut text);
                         parts_found += 1;
                     }
@@ -196,13 +194,13 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
 /// Extract text content from XML by finding text between `>` and `<` within
 /// known content tags.
 fn extract_xml_text_content(xml: &str, out: &mut String) {
-    // Simple state machine: when we see a tag like <w:t>, <a:t>, <t>, <si>,
-    // collect text until closing </...>
+// Simple state machine:when we see a tag like <w:t>, <a:t>, <t>, <si>,
+// collect text until closing </...>
     let content_start_tags = ["<w:t", "<a:t", "<t>", "<t "];
     let mut remaining = xml;
 
     while !remaining.is_empty() {
-        // Find next content start tag
+// Find next content start tag
         let next = content_start_tags
             .iter()
             .filter_map(|tag| remaining.find(tag).map(|pos| (pos, *tag)))
@@ -212,7 +210,7 @@ fn extract_xml_text_content(xml: &str, out: &mut String) {
             break;
         };
 
-        // Find end of opening tag
+// Find end of opening tag
         let after_tag = &remaining[start_pos..];
         let Some(gt_pos) = after_tag.find('>') else {
             break;
@@ -221,7 +219,7 @@ fn extract_xml_text_content(xml: &str, out: &mut String) {
         let text_start = start_pos + gt_pos + 1;
         let text_region = &remaining[text_start..];
 
-        // Find next < (closing tag)
+// Find next < (closing tag)
         let text_end = text_region.find('<').unwrap_or(text_region.len());
         let extracted = &text_region[..text_end];
         if !extracted.is_empty() {
@@ -236,7 +234,6 @@ fn extract_xml_text_content(xml: &str, out: &mut String) {
 }
 
 /// Zero-dep PDF text extraction.
-///
 /// Scans for text objects between BT (Begin Text) and ET (End Text) operators
 /// and extracts string operands from Tj and TJ operators. This handles
 /// the most common PDF text representation (literal strings in parentheses).
@@ -245,7 +242,7 @@ fn extract_pdf_text(data: &[u8]) -> (String, bool, String) {
     let mut text = String::new();
     let mut partial = false;
 
-    // Find text objects
+// Find text objects
     let mut remaining = content.as_ref();
     let mut text_objects = 0u32;
 
@@ -254,7 +251,7 @@ fn extract_pdf_text(data: &[u8]) -> (String, bool, String) {
         let et_pos = after_bt.find("ET").unwrap_or(after_bt.len());
         let text_object = &after_bt[..et_pos];
 
-        // Extract strings from Tj/TJ operators (parenthesized strings)
+// Extract strings from Tj/TJ operators (parenthesized strings)
         extract_pdf_strings(text_object, &mut text);
         text_objects += 1;
 
@@ -274,7 +271,7 @@ fn extract_pdf_strings(text_object: &str, out: &mut String) {
     let mut chars = text_object.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '(' {
-            // Collect until matching close paren (handle nesting)
+// Collect until matching close paren (handle nesting)
             let mut depth = 1u32;
             let mut s = String::new();
             while let Some(nc) = chars.next() {
@@ -287,7 +284,7 @@ fn extract_pdf_strings(text_object: &str, out: &mut String) {
                         }
                     }
                     '\\' => {
-                        // Escape sequence — take next char literally
+// Escape sequence — take next char literally
                         if let Some(esc) = chars.next() {
                             match esc {
                                 'n' => s.push('\n'),
@@ -311,7 +308,6 @@ fn extract_pdf_strings(text_object: &str, out: &mut String) {
 }
 
 /// Zero-dep RTF text extraction.
-///
 /// Strips RTF control words (`\keyword`) and groups, extracting the remaining
 /// plain-text content.
 fn extract_rtf_text(data: &[u8]) -> (String, bool, String) {
@@ -335,7 +331,7 @@ fn extract_rtf_text(data: &[u8]) -> (String, bool, String) {
             '{' => depth += 1,
             '}' => depth = (depth - 1).max(0),
             '\\' => {
-                // Skip control word
+// Skip control word
                 let mut word = String::new();
                 while let Some(&nc) = chars.peek() {
                     if nc.is_ascii_alphabetic() {
@@ -345,7 +341,7 @@ fn extract_rtf_text(data: &[u8]) -> (String, bool, String) {
                         break;
                     }
                 }
-                // Skip optional numeric parameter
+// Skip optional numeric parameter
                 while let Some(&nc) = chars.peek() {
                     if nc.is_ascii_digit() || nc == '-' {
                         chars.next();
@@ -353,11 +349,11 @@ fn extract_rtf_text(data: &[u8]) -> (String, bool, String) {
                         break;
                     }
                 }
-                // Skip single trailing space
+// Skip single trailing space
                 if let Some(&' ') = chars.peek() {
                     chars.next();
                 }
-                // Some control words insert whitespace
+// Some control words insert whitespace
                 if word == "par" || word == "line" || word == "tab" {
                     text.push(' ');
                 }
@@ -379,25 +375,22 @@ fn extract_rtf_text(data: &[u8]) -> (String, bool, String) {
 // ---------------------------------------------------------------------------
 
 impl DlpEngine {
-    /// Scan an email attachment for sensitive data.
-    ///
-    /// This method:
-    /// 1. Determines the attachment kind from filename + magic bytes
-    /// 2. Extracts text content from the attachment
-    /// 3. Runs full DLP scanning (PII, entropy, content policy) on extracted text
-    /// 4. Returns an `AttachmentVerdict` with the findings and extraction metadata
-    ///
-    /// # Arguments
-    /// * `data` - Raw attachment bytes
-    /// * `filename` - Optional filename (used for kind detection)
-    /// * `recipient_domain` - Optional recipient domain for allowlist checks
+/// Scan an email attachment for sensitive data.
+/// This method:/// 1. Determines the attachment kind from filename + magic bytes
+/// 2. Extracts text content from the attachment
+/// 3. Runs full DLP scanning (PII, entropy, content policy) on extracted text
+/// 4. Returns an `AttachmentVerdict` with the findings and extraction metadata
+/// # Arguments
+/// * `data` - Raw attachment bytes
+/// * `filename` - Optional filename (used for kind detection)
+/// * `recipient_domain` - Optional recipient domain for allowlist checks
     pub fn scan_attachment(
         &self,
         data: &[u8],
         filename: Option<&str>,
         recipient_domain: Option<&str>,
     ) -> AttachmentVerdict {
-        // Determine file kind
+// Determine file kind
         let kind = match filename {
             Some(name) => {
                 let by_ext = AttachmentKind::from_filename(name);
@@ -410,13 +403,13 @@ impl DlpEngine {
             None => AttachmentKind::from_magic(data),
         };
 
-        // Extract text
+// Extract text
         let (text, partial, note) = extract_text(data, kind);
         let extracted_len = text.len();
 
-        // Run DLP scan on extracted text
+// Run DLP scan on extracted text
         let dlp_verdict = if text.is_empty() {
-            // Nothing to scan — return clean verdict
+// Nothing to scan — return clean verdict
             DlpVerdict {
                 risk_score: 0.0,
                 action: DlpAction::Allow,
@@ -492,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_pdf_text_extraction() {
-        // Minimal PDF-like content with text objects
+// Minimal PDF-like content with text objects
         let pdf = b"%PDF-1.4\nBT\n/F1 12 Tf\n(SSN: 123-45-6789) Tj\nET";
         let (text, _partial, _note) = extract_pdf_text(pdf);
         assert!(text.contains("SSN: 123-45-6789"), "Extracted: {}", text);
@@ -556,7 +549,7 @@ mod tests {
         let result = engine.scan_attachment(data, Some("report.txt"), Some("internal.example.com"));
 
         assert_eq!(result.dlp_verdict.action, DlpAction::Allow);
-        // But findings are still present for audit
+// But findings are still present for audit
         assert!(!result.dlp_verdict.pii_findings.is_empty()
             || !result.dlp_verdict.policy_matches.is_empty());
     }
@@ -568,7 +561,7 @@ mod tests {
         let result = engine.scan_attachment(env_content, Some(".env"), None);
 
         assert_eq!(result.kind, AttachmentKind::PlainText);
-        // Should detect high-entropy secrets
+// Should detect high-entropy secrets
         assert!(result.dlp_verdict.risk_score > 0.0, "Should detect secrets in .env file");
     }
 

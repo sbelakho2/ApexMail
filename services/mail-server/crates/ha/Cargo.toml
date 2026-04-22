@@ -34,6 +34,7 @@ deadpool-redis = { workspace = true }
 redis      = { workspace = true }
 reqwest    = { workspace = true }
 bytes      = { workspace = true }
+aes-gcm    = { workspace = true }
 flate2 = "1.1"
 sysinfo = "0.33"
 observability-service = { path = "../observability-service" }

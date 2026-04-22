@@ -9,7 +9,7 @@ use crate::types::Contact;
 pub struct ContactsRepo;
 
 impl ContactsRepo {
-    /// Create a new contact.
+/// Create a new contact.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -33,7 +33,7 @@ impl ContactsRepo {
         .await
     }
 
-    /// Find a contact by ID.
+/// Find a contact by ID.
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -48,7 +48,7 @@ impl ContactsRepo {
         .await
     }
 
-    /// Find a contact by email.
+/// Find a contact by email.
     pub async fn find_by_email(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -63,7 +63,7 @@ impl ContactsRepo {
         .await
     }
 
-    /// List contacts for a tenant.
+/// List contacts for a tenant.
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -80,7 +80,7 @@ impl ContactsRepo {
         .await
     }
 
-    /// Update a contact.
+/// Update a contact.
     pub async fn update(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -104,7 +104,7 @@ impl ContactsRepo {
         .await
     }
 
-    /// Delete a contact.
+/// Delete a contact.
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM contacts WHERE id = $1 AND tenant_id = $2")
             .bind(id)
@@ -114,13 +114,13 @@ impl ContactsRepo {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Bulk-create contacts (skip conflicts on email within tenant).
+/// Bulk-create contacts (skip conflicts on email within tenant).
     pub async fn bulk_create(
         pool: &PgPool,
         tenant_id: Uuid,
         entries: &[(&str, Option<&str>)], // (email, name)
     ) -> Result<Vec<Contact>, sqlx::Error> {
-        // #214: Return early on empty input to avoid invalid SQL
+// #214:Return early on empty input to avoid invalid SQL
         if entries.is_empty() {
             return Ok(Vec::new());
         }

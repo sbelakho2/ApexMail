@@ -1,6 +1,6 @@
 //! Fuzz / property-based tests for security crates.
 //!
-//! Guarantees: no panics on arbitrary input, no infinite loops (bounded by iteration count),
+//! Guarantees:no panics on arbitrary input, no infinite loops (bounded by iteration count),
 //! deterministic scoring properties, and basic invariant checking.
 
 use fuzz_tests::*;
@@ -134,7 +134,7 @@ mod waf_fuzz {
         let engine = make_engine();
         let large_string = "a".repeat(100_000);
         let attacks = vec![
-            "' OR 1=1--",
+            "' OR 1=1 --",
             "<script>alert(1)</script>",
             "../../../etc/passwd",
             "; cat /etc/passwd",
@@ -186,7 +186,7 @@ mod ids_fuzz {
                 "tcp",
                 &payload,
             );
-            // Alert list invariant: all alerts must have non-empty message
+// Alert list invariant:all alerts must have non-empty message
             for alert in &alerts {
                 assert!(alert.id > 0, "Alert must have a valid ID");
             }
@@ -216,7 +216,7 @@ mod ids_fuzz {
     #[test]
     fn fuzz_ids_large_payload_no_hang() {
         let engine = make_engine();
-        // 1MB payload should complete without hanging or panicking
+// 1MB payload should complete without hanging or panicking
         let large = vec![0x41u8; 1_024 * 1_024];
         let _ = engine.inspect(
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -231,7 +231,7 @@ mod ids_fuzz {
         let engine = make_engine();
         let mut rng = rand::thread_rng();
 
-        // All possible byte values
+// All possible byte values
         for _ in 0..1_000 {
             let len = rng.gen_range(1..200);
             let payload: Vec<u8> = (0..len).map(|_| rng.gen::<u8>()).collect();
@@ -263,7 +263,7 @@ mod spam_fuzz {
             let body = random_ascii(body_len);
             let headers: Vec<(String, String)> = vec![];
             let verdict = engine.analyze(&body, &headers, None);
-            // Score should always be finite
+// Score should always be finite
             assert!(verdict.score.is_finite(), "Spam score must be finite");
         }
     }
@@ -342,7 +342,7 @@ mod dlp_fuzz {
             let body_len = rng.gen_range(0..1_000);
             let body = random_ascii(body_len);
             let verdict = engine.scan(&body, None);
-            // Findings must be non-negative
+// Findings must be non-negative
             assert!(verdict.pii_findings.len() < 10_000, "Shouldn't produce unreasonable findings");
         }
     }
@@ -364,7 +364,7 @@ mod dlp_fuzz {
     fn fuzz_dlp_known_patterns_no_panic() {
         let engine = DlpEngine::new();
 
-        // Strings that mimic PII patterns
+// Strings that mimic PII patterns
         let test_strings = [
             "My SSN is 123-45-6789",
             "Credit card: 4111-1111-1111-1111",
@@ -373,7 +373,7 @@ mod dlp_fuzz {
             "AKIAIOSFODNN7EXAMPLE", // AWS key-like
             "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345", // GitHub token-like
             &"a]".repeat(10_000), // Pathological regex input
-            &"\x00".repeat(100),  // Null bytes
+            &"\x00".repeat(100), // Null bytes
         ];
 
         for s in &test_strings {
@@ -430,7 +430,7 @@ mod sandbox_fuzz {
             let data = random_bytes(500);
             let filename = format!("test.{}", ext);
             let result = engine.analyze(&data, Some(&filename));
-            // Should not panic — may reject or quarantine
+// Should not panic — may reject or quarantine
             let _ = result;
         }
     }
@@ -439,7 +439,7 @@ mod sandbox_fuzz {
     fn fuzz_sandbox_zip_magic_bytes() {
         let engine = SandboxEngine::new();
 
-        // ZIP magic header followed by random data
+// ZIP magic header followed by random data
         let mut data = vec![0x50, 0x4B, 0x03, 0x04];
         let mut rng = rand::thread_rng();
         for _ in 0..500 {
@@ -447,14 +447,14 @@ mod sandbox_fuzz {
         }
         let _ = engine.analyze(&data, Some("archive.zip"));
 
-        // PE magic
+// PE magic
         let mut pe_data = vec![0x4D, 0x5A];
         for _ in 0..500 {
             pe_data.push(rng.gen::<u8>());
         }
         let _ = engine.analyze(&pe_data, Some("program.exe"));
 
-        // PDF magic
+// PDF magic
         let mut pdf_data = b"%PDF-1.4\n".to_vec();
         for _ in 0..500 {
             pdf_data.push(rng.gen::<u8>());
@@ -466,11 +466,11 @@ mod sandbox_fuzz {
     fn fuzz_sandbox_empty_and_large() {
         let engine = SandboxEngine::new();
 
-        // Empty
+// Empty
         let _ = engine.analyze(&[], None);
         let _ = engine.analyze(&[], Some("empty.txt"));
 
-        // Moderately large (100KB)
+// Moderately large (100KB)
         let large = vec![0x41u8; 100 * 1024];
         let _ = engine.analyze(&large, Some("large.bin"));
     }
@@ -556,7 +556,7 @@ mod ato_fuzz {
                 success: true,
                 tls_fingerprint: None,
             };
-            // Must not panic
+// Must not panic
             let _ = engine.evaluate(&event);
         }
     }
@@ -577,7 +577,7 @@ mod threat_intel_fuzz {
 
         for _ in 0..5_000 {
             let ip = if rng.gen_bool(0.5) {
-                // Valid-shaped IP
+// Valid-shaped IP
                 format!(
                     "{}.{}.{}.{}",
                     rng.gen_range(0..256),
@@ -586,7 +586,7 @@ mod threat_intel_fuzz {
                     rng.gen_range(0..256)
                 )
             } else {
-                // Garbage
+// Garbage
                 random_ascii(rng.gen_range(0..50))
             };
             let _ = engine.check_ip(&ip);
@@ -675,11 +675,11 @@ mod stix_fuzz {
 
     #[test]
     fn fuzz_stix_bundle_parse_almost_valid() {
-        // JSON objects that are almost valid STIX bundles
+// JSON objects that are almost valid STIX bundles
         let almost_valid = [
-            r#"{"type":"bundle","id":"bundle--1","objects":[]}"#,
-            r#"{"type":"bundle","id":"","objects":[{"type":"indicator","id":"ind--1"}]}"#,
-            r#"{"type":"bundle","id":"x","objects":[{"type":"unknown","id":"u--1"}]}"#,
+            r#"{"type":"bundle","id":"bundle --1","objects":[]}"#,
+            r#"{"type":"bundle","id":"","objects":[{"type":"indicator","id":"ind --1"}]}"#,
+            r#"{"type":"bundle","id":"x","objects":[{"type":"unknown","id":"u --1"}]}"#,
             r#"{"type":"bundle","id":"x"}"#,
             r#"{}"#,
             r#"[]"#,
@@ -693,7 +693,7 @@ mod stix_fuzz {
 }
 
 // ===========================================================================
-// Cross-crate: Combined security pipeline fuzz
+// Cross-crate:Combined security pipeline fuzz
 // ===========================================================================
 
 mod combined_fuzz {
@@ -706,12 +706,11 @@ mod combined_fuzz {
 
     #[test]
     fn fuzz_email_delivery_pipeline() {
-        // Simulate the security checks an email goes through:
-        // 1. WAF inspect the API call
-        // 2. Threat-intel check sender IP/domain
-        // 3. Spam filter on body
-        // 4. DLP scan on body
-        // 5. Sandbox analyze attachment
+// Simulate the security checks an email goes through:// 1. WAF inspect the API call
+// 2. Threat-intel check sender IP/domain
+// 3. Spam filter on body
+// 4. DLP scan on body
+// 5. Sandbox analyze attachment
 
         let waf = WafEngine::new(WafConfig::default());
         let ti = ThreatIntelEngine::new();
@@ -722,7 +721,7 @@ mod combined_fuzz {
         let mut rng = rand::thread_rng();
 
         for _ in 0..1_000 {
-            // 1. WAF
+// 1. WAF
             let body = random_ascii(rng.gen_range(10..500));
             let req = HttpRequest {
                 client_ip: IpAddr::V4(Ipv4Addr::new(
@@ -739,7 +738,7 @@ mod combined_fuzz {
             };
             let _ = waf.inspect(&req);
 
-            // 2. Threat-intel
+// 2. Threat-intel
             let sender_ip = format!(
                 "{}.{}.{}.{}",
                 rng.gen_range(1..255),
@@ -749,14 +748,14 @@ mod combined_fuzz {
             );
             let _ = ti.check_ip(&sender_ip);
 
-            // 3. Spam
+// 3. Spam
             let email_body = random_ascii(rng.gen_range(50..500));
             let _ = spam.analyze(&email_body, &[], None);
 
-            // 4. DLP
+// 4. DLP
             let _ = dlp.scan(&email_body, Some("recipient.com"));
 
-            // 5. Sandbox
+// 5. Sandbox
             let attachment = random_bytes(rng.gen_range(0..1_000));
             let _ = sandbox_eng.analyze(&attachment, Some("attachment.pdf"));
         }
@@ -764,7 +763,7 @@ mod combined_fuzz {
 }
 
 // ===========================================================================
-// Helper: random_bytes (not in main fuzz_tests lib)
+// Helper:random_bytes (not in main fuzz_tests lib)
 // ===========================================================================
 
 fn random_bytes(len: usize) -> Vec<u8> {

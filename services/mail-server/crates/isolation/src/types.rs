@@ -350,7 +350,7 @@ pub struct TokenBucketConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuditEventType {
-    // Auth
+// Auth
     AuthLogin,
     AuthLogout,
     AuthFailed,
@@ -359,44 +359,44 @@ pub enum AuditEventType {
     AuthPasswordChanged,
     AuthApiKeyCreated,
     AuthApiKeyRevoked,
-    // Org
+// Org
     OrgCreated,
     OrgUpdated,
     OrgSuspended,
     OrgReactivated,
     OrgDeleted,
-    // Workspace
+// Workspace
     WorkspaceCreated,
     WorkspaceUpdated,
     WorkspaceDeleted,
-    // Member
+// Member
     MemberInvited,
     MemberAdded,
     MemberRemoved,
     MemberRoleChanged,
-    // Data
+// Data
     DataCreated,
     DataRead,
     DataUpdated,
     DataDeleted,
     DataExported,
     DataImported,
-    // Security
+// Security
     SecurityPermissionGranted,
     SecurityPermissionRevoked,
     SecurityAccessDenied,
     SecuritySuspiciousActivity,
     SecurityRateLimited,
-    // Billing
+// Billing
     BillingPlanChanged,
     BillingPaymentSuccess,
     BillingPaymentFailed,
-    // Email
+// Email
     EmailSent,
     EmailFailed,
     EmailBounced,
     EmailComplained,
-    // Settings
+// Settings
     SettingsChanged,
     WebhookConfigured,
     DomainAdded,

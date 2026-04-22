@@ -149,7 +149,7 @@ impl DatabaseConfig {
 
     pub fn url(&self) -> String {
         let ssl = if self.ssl { "?sslmode=require" } else { "" };
-        // URL-encode user and password to handle special characters
+// URL-encode user and password to handle special characters
         let encoded_user = urlencoding::encode(&self.user);
         let encoded_password = urlencoding::encode(&self.password);
         format!(
@@ -192,7 +192,7 @@ pub struct SamlConfig {
     pub acs_url: String,
     pub slo_url: String,
     pub certificate: String,
-    /// Private key wrapped in SecretString for secure zeroize on drop
+/// Private key wrapped in SecretString for secure zeroize on drop
     pub private_key: SecretString,
     pub allow_sha1: bool,
 }
@@ -274,17 +274,17 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load configuration from environment variables.
+/// Load configuration from environment variables.
     pub fn from_env() -> Result<Self, String> {
         let node_env = env::var("NODE_ENV").unwrap_or_default();
         let is_production = node_env == "production" || node_env == "prod";
         
-        // JWT secret with production enforcement
+// JWT secret with production enforcement
         let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| {
             "dev-secret-change-in-production-please-32ch".into()
         });
         
-        // Validate JWT secret in production
+// Validate JWT secret in production
         if is_production {
             if env::var("JWT_SECRET").is_err() {
                 return Err("JWT_SECRET environment variable must be set in production".into());
@@ -310,8 +310,7 @@ impl Config {
             db: DatabaseConfig::from_env(),
             redis: RedisConfig::from_env(),
             sso: {
-                let base_url = env::var("BASE_URL").unwrap_or_else(|_| format!("http://{}:{}", 
-                    env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
+                let base_url = env::var("BASE_URL").unwrap_or_else(|_| format!("http://{}:{}",                     env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
                     env::var("PORT").ok().and_then(|v| v.parse::<u16>().ok()).unwrap_or(3000)
                 ));
                 SSOConfig {
@@ -395,7 +394,7 @@ impl Config {
             return Err("CORS_ORIGINS must not be empty".into());
         }
 
-        // Validate SSO secrets when their features are enabled
+// Validate SSO secrets when their features are enabled
         if self.sso.saml.enabled && self.sso.saml.private_key.expose_secret().is_empty() {
             return Err("SAML_PRIVATE_KEY must be set when SAML_ENABLED=true".into());
         }
@@ -424,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        // Clear env to ensure defaults
+// Clear env to ensure defaults
         for key in &["PORT", "HOST", "DB_HOST", "DB_PORT", "JWT_SECRET"] {
             env::remove_var(key);
         }

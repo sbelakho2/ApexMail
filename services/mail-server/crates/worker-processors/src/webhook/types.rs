@@ -38,7 +38,7 @@ pub struct WebhookDeliveryResult {
     pub response_time_ms: u64,
     pub error: Option<String>,
     pub response_body: Option<String>,
-    /// Retry-After header value in milliseconds (from 429/503 responses).
+/// Retry-After header value in milliseconds (from 429/503 responses).
     pub retry_after_ms: Option<u64>,
 }
 
@@ -102,7 +102,7 @@ pub const BLOCKED_HOSTNAMES: &[&str] = &[
     "instance-data",
     "kubernetes.default",
     "kubernetes.default.svc",
-    // AWS metadata
+// AWS metadata
     "169.254.169.254",
 ];
 
@@ -114,7 +114,7 @@ pub struct PendingSuccess {
 }
 
 impl WebhookJob {
-    /// Get custom headers as HashMap.
+/// Get custom headers as HashMap.
     pub fn get_headers(&self) -> HashMap<String, String> {
         self.headers
             .as_ref()
@@ -122,9 +122,8 @@ impl WebhookJob {
             .unwrap_or_default()
     }
 
-    /// Calculate next retry delay with exponential backoff.
+/// Calculate next retry delay with exponential backoff.
     pub fn next_retry_delay_ms(&self) -> i64 {
-        // Fix #71: Validate backoff_multiplier to prevent NaN/Inf or 0.0 (no backoff) 
         let multiplier = if self.backoff_multiplier.is_finite() && self.backoff_multiplier > 0.0 {
             self.backoff_multiplier
         } else {
@@ -137,7 +136,7 @@ impl WebhookJob {
 }
 
 impl WebhookDeliveryResult {
-    /// Create a successful result.
+/// Create a successful result.
     pub fn success(status_code: u16, response_time_ms: u64, response_body: Option<String>) -> Self {
         Self {
             success: true,
@@ -149,7 +148,7 @@ impl WebhookDeliveryResult {
         }
     }
 
-    /// Create a failed result.
+/// Create a failed result.
     pub fn failure(
         status_code: Option<u16>,
         response_time_ms: u64,
@@ -167,7 +166,7 @@ impl WebhookDeliveryResult {
         }
     }
 
-    /// Check if status code is retryable.
+/// Check if status code is retryable.
     pub fn is_retryable(&self) -> bool {
         match self.status_code {
             Some(code) => code >= 500 || code == 408 || code == 429,
@@ -220,7 +219,7 @@ pub fn truncate_payload(payload: &serde_json::Value, max_bytes: usize) -> serde_
     };
 
     if serialized.len() > max_bytes {
-        // Aggressive truncation
+// Aggressive truncation
         truncate_value(&truncated, 256)
     } else {
         truncated

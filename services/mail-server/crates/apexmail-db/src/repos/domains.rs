@@ -9,7 +9,7 @@ use crate::types::Domain;
 pub struct DomainsRepo;
 
 impl DomainsRepo {
-    /// Create a new domain for a tenant.
+/// Create a new domain for a tenant.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -28,7 +28,7 @@ impl DomainsRepo {
         .await
     }
 
-    /// Find a domain by ID (scoped to tenant).
+/// Find a domain by ID (scoped to tenant).
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -43,7 +43,7 @@ impl DomainsRepo {
         .await
     }
 
-    /// Find a domain by name across all tenants (for inbound routing).
+/// Find a domain by name across all tenants (for inbound routing).
     pub async fn find_by_name(pool: &PgPool, name: &str) -> Result<Option<Domain>, sqlx::Error> {
         sqlx::query_as::<_, Domain>(
             "SELECT * FROM domains WHERE name = $1"
@@ -53,8 +53,8 @@ impl DomainsRepo {
         .await
     }
 
-    /// List domains for a tenant with pagination.
-    /// #227: Added limit/offset parameters
+/// List domains for a tenant with pagination.
+/// #227:Added limit/offset parameters
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -73,7 +73,7 @@ impl DomainsRepo {
         .await
     }
 
-    /// Update domain verification status.
+/// Update domain verification status.
     pub async fn update_verification(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -98,7 +98,7 @@ impl DomainsRepo {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Delete a domain.
+/// Delete a domain.
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
             .bind(id)

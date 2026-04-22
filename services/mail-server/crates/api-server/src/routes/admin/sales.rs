@@ -1,13 +1,12 @@
 //! Sales suite endpoints.
 //!
-//! Migrated from:
-//!   - apps/control-plane/src/app/api/sales/leads/route.ts
-//!   - apps/control-plane/src/app/api/sales/leads/update/route.ts
-//!   - apps/control-plane/src/app/api/sales/leads/enrich/route.ts
-//!   - apps/control-plane/src/app/api/sales/campaigns/route.ts
-//!   - apps/control-plane/src/app/api/sales/discovery/run/route.ts
-//!   - apps/control-plane/src/app/api/sales/outreach/start/route.ts
-//!   - apps/control-plane/src/app/api/sales/settings/route.ts
+//! Migrated from://! - apps/control-plane/src/app/api/sales/leads/route.ts
+//! - apps/control-plane/src/app/api/sales/leads/update/route.ts
+//! - apps/control-plane/src/app/api/sales/leads/enrich/route.ts
+//! - apps/control-plane/src/app/api/sales/campaigns/route.ts
+//! - apps/control-plane/src/app/api/sales/discovery/run/route.ts
+//! - apps/control-plane/src/app/api/sales/outreach/start/route.ts
+//! - apps/control-plane/src/app/api/sales/settings/route.ts
 
 use axum::extract::{Query, State};
 use axum::routing::{get, patch, post};
@@ -86,13 +85,13 @@ async fn list_leads(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-    // Count total
+// Count total
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sales_leads")
         .fetch_one(&state.db)
         .await
         .unwrap_or(0);
 
-    // Fetch leads
+// Fetch leads
     let rows: Vec<(
         String, String, String, Option<String>, Option<String>,
         String, String, Option<i32>, Option<String>,
@@ -133,7 +132,7 @@ async fn list_leads(
         })
         .collect();
 
-    // Aggregate stats
+// Aggregate stats
     let provider_stats: Vec<(String, String)> = sqlx::query_as(
         "SELECT COALESCE(source, 'unknown'), COUNT(*)::text FROM sales_leads GROUP BY source",
     )
@@ -209,7 +208,7 @@ async fn update_leads(
         }
     }
 
-    // Build dynamic SET clause
+// Build dynamic SET clause
     let mut sets: Vec<String> = Vec::new();
     let mut bind_idx = 2u32; // $1 = ids array
 
@@ -287,7 +286,7 @@ async fn enrich_leads(
         return Err(ApiError::Validation(vec!["1-50 lead IDs allowed".into()]));
     }
 
-    // Proxy to autopilot backend
+// Proxy to autopilot backend
     let url = "http://localhost:3010/api/v1/operator/enrich";
     let response = state
         .http_client
@@ -485,7 +484,7 @@ async fn start_outreach(
         return Err(ApiError::Validation(vec!["1-100 lead IDs allowed".into()]));
     }
 
-    // In-memory rate limiter
+// In-memory rate limiter
     {
         if let Ok(mut guard) = OUTREACH_LIMITER.lock() {
             let now = Instant::now();
@@ -580,7 +579,7 @@ async fn save_settings(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // Ensure table exists
+// Ensure table exists
     if let Err(e) = sqlx::query(
         "CREATE TABLE IF NOT EXISTS sales_settings (
             id SERIAL PRIMARY KEY,
@@ -596,7 +595,7 @@ async fn save_settings(
         tracing::warn!(error = %e, "Failed to ensure sales_settings table exists");
     }
 
-    // Upsert settings (single row)
+// Upsert settings (single row)
     sqlx::query(
         "INSERT INTO sales_settings (id, scoring_weights, schedule, notifications, updated_at)
          VALUES (1, $1, $2, $3, NOW())

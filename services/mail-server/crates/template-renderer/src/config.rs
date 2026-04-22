@@ -25,26 +25,26 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SandboxConfig {
-    /// Max execution time in milliseconds
+/// Max execution time in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    /// Max memory in bytes for sandbox
+/// Max memory in bytes for sandbox
     #[serde(default = "default_max_memory")]
     pub max_memory_bytes: usize,
-    /// Max template source length
+/// Max template source length
     #[serde(default = "default_max_source_len")]
     pub max_source_length: usize,
-    /// Max rendered HTML length
+/// Max rendered HTML length
     #[serde(default = "default_max_output_len")]
     pub max_output_length: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
-    /// Max cached compiled templates
+/// Max cached compiled templates
     #[serde(default = "default_cache_max")]
     pub max_entries: u64,
-    /// TTL in seconds
+/// TTL in seconds
     #[serde(default = "default_cache_ttl")]
     pub ttl_secs: u64,
 }

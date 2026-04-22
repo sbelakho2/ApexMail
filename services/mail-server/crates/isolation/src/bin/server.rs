@@ -20,7 +20,7 @@ use isolation::tenant::TenantService;
 #[derive(Parser)]
 #[command(name = "isolation-server")]
 struct Cli {
-    /// Override port (default from ISOLATION_PORT or 4500)
+/// Override port (default from ISOLATION_PORT or 4500)
     #[arg(short, long)]
     port: Option<u16>,
 }
@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
     let port = cli.port.unwrap_or(config.port);
 
-    // Database pool
+// Database pool
     let db_url = format!(
         "postgres://{}:{}@{}:{}/{}",
         config.database.user,
@@ -59,13 +59,13 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to database");
 
-    // Redis pool
+// Redis pool
     let redis_cfg = DpRedisConfig::from_url(config.redis.url());
     let redis = redis_cfg.create_pool(Some(Runtime::Tokio1))?;
 
     info!("Redis pool created");
 
-    // Build services
+// Build services
     let tenant = TenantService::new(db.clone(), config.clone());
     let mut isolation = DataIsolationService::new(db.clone());
     if let Err(e) = isolation.initialize().await {
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
     });
 
-    // Build router with middleware
+// Build router with middleware
     let cors = if config.cors.origins.iter().any(|o| o == "*") {
         tower_http::cors::CorsLayer::permissive()
     } else {
@@ -107,13 +107,13 @@ async fn main() -> anyhow::Result<()> {
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors);
 
-    // Start background cron jobs
+// Start background cron jobs
     let cron_state = state.clone();
     let cron_handle = tokio::spawn(async move {
         run_cron_jobs(cron_state).await;
     });
 
-    // Start HTTP server
+// Start HTTP server
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Isolation server listening on {}", addr);
@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Shutting down...");
     cron_handle.abort();
 
-    // Flush remaining audit events
+// Flush remaining audit events
     state.audit.flush().await.ok();
 
     db.close().await;
@@ -162,8 +162,7 @@ async fn shutdown_signal() {
     info!("Shutdown signal received");
 }
 
-/// Background cron jobs:
-/// 1. Audit buffer flush — every 5s
+/// Background cron jobs:/// 1. Audit buffer flush — every 5s
 /// 2. Audit log cleanup — daily (every 24h)
 /// 3. Encryption key rotation check — every 60min
 async fn run_cron_jobs(state: Arc<AppState>) {
@@ -186,8 +185,8 @@ async fn run_cron_jobs(state: Arc<AppState>) {
                 }
             }
             _ = rotation_ticker.tick() => {
-                // Check for keys needing rotation — iterate known orgs
-                // In production, this would query the DB for stale keys
+// Check for keys needing rotation — iterate known orgs
+// In production, this would query the DB for stale keys
                 info!("Key rotation check completed");
             }
         }

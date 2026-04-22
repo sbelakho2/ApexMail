@@ -14,91 +14,85 @@ use std::sync::Arc;
 /// Final verdict for an attachment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxVerdict {
-    /// Unique analysis ID
+/// Unique analysis ID
     pub analysis_id: String,
-    /// SHA-256 of the file
+/// SHA-256 of the file
     pub sha256: String,
-    /// File size
+/// File size
     pub size: u64,
-    /// Detected file type
+/// Detected file type
     pub file_type: String,
-    /// Original filename (if known)
+/// Original filename (if known)
     pub filename: Option<String>,
-    /// Decision: allow, quarantine, reject
+/// Decision:allow, quarantine, reject
     pub decision: String,
-    /// Risk score
+/// Risk score
     pub risk_score: f64,
-    /// Detailed reasons
+/// Detailed reasons
     pub reasons: Vec<String>,
-    /// Individual findings
+/// Individual findings
     pub findings: Vec<VerdictFinding>,
-    /// Analysis timestamp (ISO 8601)
+/// Analysis timestamp (ISO 8601)
     pub timestamp: String,
 }
 
 /// A finding included in the verdict
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerdictFinding {
-    /// Finding ID
+/// Finding ID
     pub id: String,
-    /// Description
+/// Description
     pub description: String,
-    /// Risk contribution
+/// Risk contribution
     pub risk: f64,
 }
 
 /// Dynamic-analysis engine result.
 #[derive(Debug, Clone)]
 pub struct DynamicAnalysisFinding {
-    /// Dynamic finding identifier.
+/// Dynamic finding identifier.
     pub id: String,
-    /// Human-readable behavior description.
+/// Human-readable behavior description.
     pub description: String,
-    /// Risk contribution from dynamic analysis.
+/// Risk contribution from dynamic analysis.
     pub risk: f64,
-    /// Decision requested by the dynamic analyzer.
+/// Decision requested by the dynamic analyzer.
     pub decision: DynamicDecision,
 }
 
 /// Decision returned by dynamic analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DynamicDecision {
-    /// Dynamic analysis observed no blocking behavior.
+/// Dynamic analysis observed no blocking behavior.
     Allow,
-    /// Dynamic analysis recommends escalating to quarantine.
+/// Dynamic analysis recommends escalating to quarantine.
     Flag,
-    /// Dynamic analysis recommends outright rejection.
+/// Dynamic analysis recommends outright rejection.
     Reject,
 }
 
 /// Optional dynamic analyzer (detonation / behavioral emulation).
-///
 /// **No concrete implementation is provided by this crate.** This trait is an
 /// integration hook for callers that have access to a sandboxing backend such
 /// as a micro-VM detonation chamber, YARA/ClamAV scan integration, or
-/// behavioral emulation engine. To use it:
-///
-/// 1. Implement `DynamicAnalyzer` for your backend.
+/// behavioral emulation engine. To use it:/// 1. Implement `DynamicAnalyzer` for your backend.
 /// 2. Pass it to [`SandboxEngine::with_dynamic_analyzer`].
 /// 3. If `analyze` returns `Some(finding)`, the finding's risk is added to the
-///    static verdict and the decision is escalated according to
-///    [`DynamicDecision`].
-///
+/// static verdict and the decision is escalated according to
+/// [`DynamicDecision`].
 /// **Known limitation — recursive archives:** The current static inspector
 /// does not recurse into nested ZIP/RAR archives or decompress PDF object
 /// streams. A `DynamicAnalyzer` implementation can compensate by unpacking
 /// and re-scanning inner payloads.
-///
 /// **Known limitation — image-based payloads:** Steganographic or image-rendered
 /// content (e.g., phishing screenshots) is not inspected. An OCR-equipped
 /// dynamic analyzer can fill this gap.
 pub trait DynamicAnalyzer: Send + Sync {
-    /// Run dynamic analysis on the attachment and optionally return a finding.
+/// Run dynamic analysis on the attachment and optionally return a finding.
     fn analyze(&self, data: &[u8], filename: Option<&str>) -> Option<DynamicAnalysisFinding>;
 }
 
 /// The sandbox engine.
-///
 /// Orchestrates static file inspection via [`file_inspector`] and policy
 /// evaluation via [`policy`], then optionally merges results from a
 /// [`DynamicAnalyzer`] implementation to produce a final [`SandboxVerdict`].
@@ -108,7 +102,7 @@ pub struct SandboxEngine {
 }
 
 impl SandboxEngine {
-    /// Create engine with default config
+/// Create engine with default config
     pub fn new() -> Self {
         Self {
             config: SandboxConfig::default(),
@@ -116,7 +110,7 @@ impl SandboxEngine {
         }
     }
 
-    /// Create engine with custom config
+/// Create engine with custom config
     pub fn with_config(config: SandboxConfig) -> Self {
         Self {
             config,
@@ -124,7 +118,7 @@ impl SandboxEngine {
         }
     }
 
-    /// Create engine with optional dynamic analyzer.
+/// Create engine with optional dynamic analyzer.
     pub fn with_dynamic_analyzer(config: SandboxConfig, analyzer: Arc<dyn DynamicAnalyzer>) -> Self {
         Self {
             config,
@@ -132,16 +126,14 @@ impl SandboxEngine {
         }
     }
 
-    /// Analyze a single attachment
-    ///
-    /// # Arguments
-    /// * `data` - Raw file bytes
-    /// * `filename` - Optional original filename
-    ///
-    /// # Returns
-    /// A `SandboxVerdict` with the analysis results
+/// Analyze a single attachment
+/// # Arguments
+/// * `data` - Raw file bytes
+/// * `filename` - Optional original filename
+/// # Returns
+/// A `SandboxVerdict` with the analysis results
     pub fn analyze(&self, data: &[u8], filename: Option<&str>) -> Result<SandboxVerdict, SandboxError> {
-        // Pre-check: file size
+// Pre-check:file size
         if data.len() as u64 > self.config.max_file_size {
             return Err(SandboxError::FileTooLarge {
                 size: data.len() as u64,
@@ -149,13 +141,13 @@ impl SandboxEngine {
             });
         }
 
-        // Step 1: File inspection (static analysis)
+// Step 1:File inspection (static analysis)
         let inspection: FileInspection = file_inspector::inspect_file(data, filename);
 
-        // Step 2: Policy evaluation
+// Step 2:Policy evaluation
         let policy_result: PolicyResult = policy::evaluate_policy(&inspection, &self.config);
 
-        // Step 3: Build verdict
+// Step 3:Build verdict
         let mut verdict = SandboxVerdict {
             analysis_id: uuid::Uuid::new_v4().to_string(),
             sha256: inspection.sha256.clone(),
@@ -204,7 +196,7 @@ impl SandboxEngine {
         Ok(verdict)
     }
 
-    /// Analyze multiple attachments in batch
+/// Analyze multiple attachments in batch
     pub fn analyze_batch(
         &self,
         attachments: &[(&[u8], Option<&str>)],
@@ -215,12 +207,12 @@ impl SandboxEngine {
             .collect()
     }
 
-    /// Check if a verdict resulted in rejection
+/// Check if a verdict resulted in rejection
     pub fn is_rejected(verdict: &SandboxVerdict) -> bool {
         verdict.decision == PolicyDecision::Reject.to_string()
     }
 
-    /// Check if any verdict in a batch resulted in rejection
+/// Check if any verdict in a batch resulted in rejection
     pub fn any_rejected(verdicts: &[Result<SandboxVerdict, SandboxError>]) -> bool {
         verdicts.iter().any(|v| {
             matches!(v, Ok(v) if Self::is_rejected(v))
@@ -231,9 +223,8 @@ impl SandboxEngine {
 
 #[cfg(feature = "events")]
 impl SandboxEngine {
-    /// Analyze an attachment and also produce a normalized security event.
-    ///
-    /// Requires the `events` feature flag (which enables the `mail-common` dep).
+/// Analyze an attachment and also produce a normalized security event.
+/// Requires the `events` feature flag (which enables the `mail-common` dep).
     pub fn analyze_with_event(
         &self,
         data: &[u8],

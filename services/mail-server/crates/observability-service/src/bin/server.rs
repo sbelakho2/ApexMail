@@ -13,7 +13,7 @@ use observability_service::trace_collector::TraceCollector;
 
 #[tokio::main]
 async fn main() {
-    // Initialise tracing
+// Initialise tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

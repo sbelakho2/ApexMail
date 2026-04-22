@@ -2,13 +2,13 @@
 //! portability, rectification, restriction, objection), consent
 //! management, double opt-in, and queue-based bulk processing.
 //!
-//! Request flow: pending_verification → verified → processing → completed/rejected/expired
-//! Verification: SHA-256 token hash ↔ stored hash.
-//! Erasure (Art.17): Delete from 7 tables, clear 3 Redis keys, create
+//! Request flow:pending_verification → verified → processing → completed/rejected/expired
+//! Verification:SHA-256 token hash ↔ stored hash.
+//! Erasure (Art.17):Delete from 7 tables, clear 3 Redis keys, create
 //! deletion confirmation certificate.
-//! Access/Portability: Collect from 5 tables, sanitize, store export.
-//! Consent: Upsert on (tenant_id, subscriber_id, consent_type). Marketing
-//! cascade: withdrawing marketing revokes analytics and profiling.
+//! Access/Portability:Collect from 5 tables, sanitize, store export.
+//! Consent:Upsert on (tenant_id, subscriber_id, consent_type). Marketing
+//! cascade:withdrawing marketing revokes analytics and profiling.
 
 use chrono::{Duration, TimeDelta, Utc};
 use deadpool_redis::Pool as RedisPool;
@@ -31,9 +31,9 @@ impl GdprAutomation {
         Self { db, redis, config }
     }
 
-    // ── Request Lifecycle ────────────────────────────────────
+// ── Request Lifecycle ────────────────────────────────────
 
-    /// Submit a new data-subject request. Returns request + verification token.
+/// Submit a new data-subject request. Returns request + verification token.
     pub async fn submit_request(
         &self,
         tenant_id: &str,
@@ -83,7 +83,7 @@ impl GdprAutomation {
         Ok((request, token))
     }
 
-    /// Verify a data-subject request using the token.
+/// Verify a data-subject request using the token.
     pub async fn verify_request(
         &self,
         request_id: &str,
@@ -119,19 +119,19 @@ impl GdprAutomation {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        // Enqueue for processing
+// Enqueue for processing
         self.enqueue_request(request_id).await?;
 
         info!(request_id, "GDPR request verified");
         Ok(true)
     }
 
-    /// Process a single request (called from queue worker).
+/// Process a single request (called from queue worker).
     pub async fn process_request(
         &self,
         request_id: &str,
     ) -> Result<DataSubjectRequestResult, String> {
-        // Mark as processing
+// Mark as processing
         sqlx::query(
             "UPDATE data_subject_requests SET status = 'processing', processed_at = NOW()
              WHERE id = $1",
@@ -197,7 +197,7 @@ impl GdprAutomation {
         result
     }
 
-    // ── Access Request (Article 15) ────────────────────────
+// ── Access Request (Article 15) ────────────────────────
 
     async fn process_access_request(
         &self,
@@ -207,7 +207,7 @@ impl GdprAutomation {
         let email = &request.email;
         let tid = &request.tenant_id;
 
-        // Collect subscriber profile
+// Collect subscriber profile
         let profile: Option<(serde_json::Value,)> = sqlx::query_as(
             "SELECT row_to_json(s) FROM subscribers s
              WHERE email = $1 AND tenant_id = $2",
@@ -222,7 +222,7 @@ impl GdprAutomation {
             data.insert("profile".into(), sanitize_pii(p));
         }
 
-        // Collect sending history
+// Collect sending history
         let history: Vec<(serde_json::Value,)> = sqlx::query_as(
             "SELECT row_to_json(m) FROM message_events m
              WHERE recipient_email = $1 AND tenant_id = $2
@@ -237,7 +237,7 @@ impl GdprAutomation {
         let events: Vec<serde_json::Value> = history.into_iter().map(|(v,)| v).collect();
         data.insert("message_history".into(), serde_json::Value::Array(events));
 
-        // Collect consent records
+// Collect consent records
         let consents: Vec<(serde_json::Value,)> = sqlx::query_as(
             "SELECT row_to_json(c) FROM consent_records c
              WHERE email = $1 AND tenant_id = $2",
@@ -251,7 +251,7 @@ impl GdprAutomation {
         let consent_vals: Vec<serde_json::Value> = consents.into_iter().map(|(v,)| v).collect();
         data.insert("consents".into(), serde_json::Value::Array(consent_vals));
 
-        // Store export
+// Store export
         let export_json = serde_json::to_string_pretty(&serde_json::Value::Object(data.clone()))
             .map_err(|e| format!("JSON: {e}"))?;
 
@@ -286,7 +286,7 @@ impl GdprAutomation {
         })
     }
 
-    // ── Erasure Request (Article 17) ───────────────────────
+// ── Erasure Request (Article 17) ───────────────────────
 
     async fn process_erasure_request(
         &self,
@@ -296,46 +296,46 @@ impl GdprAutomation {
         let email = &request.email;
         let mut total_deleted: i64 = 0;
 
-        // #284: Run erasure operations in a single transaction to avoid partial deletion.
+// #284:Run erasure operations in a single transaction to avoid partial deletion.
         let mut tx = self.db.begin().await.map_err(|e| format!("DB: {e}"))?;
 
-        // 1. Delete subscriber profile
+// 1. Delete subscriber profile
         let r = sqlx::query("DELETE FROM subscribers WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
             .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-        // 2. Delete message events
+// 2. Delete message events
         let r = sqlx::query("DELETE FROM message_events WHERE recipient_email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
             .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-        // 3. Delete engagement events
+// 3. Delete engagement events
         let r = sqlx::query("DELETE FROM engagement_events WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
             .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-        // 4. Delete consent records
+// 4. Delete consent records
         let r = sqlx::query("DELETE FROM consent_records WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
             .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-        // 5. Delete from suppression list
+// 5. Delete from suppression list
         let r = sqlx::query("DELETE FROM suppression_list WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
             .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-        // 6. Delete tracking data
+// 6. Delete tracking data
         let r = sqlx::query("DELETE FROM tracking_events WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
             .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-        // 7. Delete analytics data
+// 7. Delete analytics data
         let r = sqlx::query("DELETE FROM subscriber_analytics WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
             .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
@@ -343,10 +343,10 @@ impl GdprAutomation {
 
         tx.commit().await.map_err(|e| format!("DB: {e}"))?;
 
-        // Clear Redis keys
+// Clear Redis keys
         self.clear_redis_keys(tid, email).await?;
 
-        // Create deletion confirmation
+// Create deletion confirmation
         let confirmation = serde_json::json!({
             "certificate_id": Uuid::new_v4().to_string(),
             "request_id": request.id,
@@ -369,23 +369,23 @@ impl GdprAutomation {
         })
     }
 
-    // ── Portability Request (Article 20) ───────────────────
+// ── Portability Request (Article 20) ───────────────────
 
     async fn process_portability_request(
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-        // Portability = access export in machine-readable format
+// Portability = access export in machine-readable format
         self.process_access_request(request).await
     }
 
-    // ── Rectification (Article 16) ─────────────────────────
+// ── Rectification (Article 16) ─────────────────────────
 
     async fn process_rectification_request(
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-        // Rectification requires manual admin review
+// Rectification requires manual admin review
         info!(request_id = %request.id, "Rectification request queued for manual review");
         Ok(DataSubjectRequestResult {
             data: None,
@@ -398,13 +398,13 @@ impl GdprAutomation {
         })
     }
 
-    // ── Restriction of Processing (Article 18) ────────────
+// ── Restriction of Processing (Article 18) ────────────
 
     async fn process_restriction_request(
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-        // Add to suppression list to prevent future processing
+// Add to suppression list to prevent future processing
         sqlx::query(
             "INSERT INTO suppression_list (id, tenant_id, email, reason, created_at)
              VALUES ($1, $2, $3, 'gdpr_restriction', NOW())
@@ -429,13 +429,13 @@ impl GdprAutomation {
         })
     }
 
-    // ── Objection (Article 21) ────────────────────────────
+// ── Objection (Article 21) ────────────────────────────
 
     async fn process_objection_request(
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-        // Similar to restriction — suppress + withdraw consents
+// Similar to restriction — suppress + withdraw consents
         let r = sqlx::query(
             "UPDATE consent_records SET granted = false, revoked_at = NOW()
              WHERE email = $1 AND tenant_id = $2 AND granted = true",
@@ -470,10 +470,10 @@ impl GdprAutomation {
         })
     }
 
-    // ── Consent Management ────────────────────────────────
+// ── Consent Management ────────────────────────────────
 
-    /// Record or update a consent. If consent_type is marketing and granted=false,
-    /// cascade to analytics and profiling.
+/// Record or update a consent. If consent_type is marketing and granted=false,
+/// cascade to analytics and profiling.
     pub fn record_consent<'a>(
         &'a self,
         tenant_id: &'a str,
@@ -524,7 +524,7 @@ impl GdprAutomation {
         .await
         .map_err(|e| format!("DB: {e}"))?;
 
-        // Marketing cascade: withdrawing marketing also withdraws analytics + profiling
+// Marketing cascade:withdrawing marketing also withdraws analytics + profiling
         if !granted && consent_type == ConsentType::Marketing {
             for cascade_type in &[ConsentType::Analytics, ConsentType::Profiling] {
                 if let Err(e) = self
@@ -576,7 +576,7 @@ impl GdprAutomation {
         }) // Box::pin
     }
 
-    /// Initiate double opt-in: store pending consent + return token.
+/// Initiate double opt-in:store pending consent + return token.
     pub async fn initiate_double_opt_in(
         &self,
         tenant_id: &str,
@@ -611,7 +611,7 @@ impl GdprAutomation {
         Ok(token)
     }
 
-    /// Confirm double opt-in with token.
+/// Confirm double opt-in with token.
     pub async fn confirm_double_opt_in(
         &self,
         tenant_id: &str,
@@ -638,7 +638,7 @@ impl GdprAutomation {
         };
 
         if expires_at < Utc::now() {
-            // Token expired — clean up
+// Token expired — clean up
             sqlx::query(
                 "DELETE FROM double_opt_in_tokens
                  WHERE tenant_id = $1 AND subscriber_id = $2 AND consent_type = $3",
@@ -656,7 +656,7 @@ impl GdprAutomation {
             return Ok(false);
         }
 
-        // Token valid — record consent, delete token
+// Token valid — record consent, delete token
         self.record_consent(
             tenant_id,
             subscriber_id,
@@ -683,7 +683,7 @@ impl GdprAutomation {
         Ok(true)
     }
 
-    /// Get all consent records for a subscriber.
+/// Get all consent records for a subscriber.
     pub async fn get_consent_records(
         &self,
         tenant_id: &str,
@@ -706,9 +706,9 @@ impl GdprAutomation {
         rows.into_iter().map(|r| r.into_record()).collect()
     }
 
-    // ── Queue Processing ──────────────────────────────────
+// ── Queue Processing ──────────────────────────────────
 
-    /// Enqueue a request for background processing via Redis.
+/// Enqueue a request for background processing via Redis.
     async fn enqueue_request(&self, request_id: &str) -> Result<(), String> {
         let mut conn = self.redis.get().await
             .map_err(|e| format!("Redis: {e}"))?;
@@ -721,7 +721,7 @@ impl GdprAutomation {
         Ok(())
     }
 
-    /// Process next batch of requests from the queue.
+/// Process next batch of requests from the queue.
     pub async fn process_queue_batch(
         &self,
         max_items: usize,
@@ -755,9 +755,9 @@ impl GdprAutomation {
         Ok(results)
     }
 
-    // ── Expiry ────────────────────────────────────────────
+// ── Expiry ────────────────────────────────────────────
 
-    /// Expire requests that passed their deadline.
+/// Expire requests that passed their deadline.
     pub async fn expire_overdue_requests(&self) -> Result<u64, String> {
         let result = sqlx::query(
             "UPDATE data_subject_requests
@@ -776,7 +776,7 @@ impl GdprAutomation {
         Ok(count)
     }
 
-    /// Expire stale double-opt-in tokens.
+/// Expire stale double-opt-in tokens.
     pub async fn expire_stale_opt_in_tokens(&self) -> Result<u64, String> {
         let result = sqlx::query(
             "DELETE FROM double_opt_in_tokens WHERE expires_at < NOW()",
@@ -788,7 +788,7 @@ impl GdprAutomation {
         Ok(result.rows_affected())
     }
 
-    /// Data retention: delete old consent records and exports.
+/// Data retention:delete old consent records and exports.
     pub async fn enforce_retention(&self) -> Result<(u64, u64), String> {
         let cutoff = Utc::now() - Duration::days(self.config.data_retention_days);
 
@@ -816,7 +816,7 @@ impl GdprAutomation {
         Ok((consents, exports))
     }
 
-    // ── Stats ─────────────────────────────────────────────
+// ── Stats ─────────────────────────────────────────────
 
     pub async fn get_request_stats(
         &self,
@@ -848,7 +848,7 @@ impl GdprAutomation {
         }))
     }
 
-    // ── Internal Helpers ──────────────────────────────────
+// ── Internal Helpers ──────────────────────────────────
 
     async fn fetch_request(
         &self,

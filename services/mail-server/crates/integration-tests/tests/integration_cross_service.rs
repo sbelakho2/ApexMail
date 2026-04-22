@@ -17,15 +17,15 @@ fn billing_plans_feature_compatibility() {
     let free = plans.iter().find(|p| p.name == "free").unwrap();
     let enterprise = plans.iter().find(|p| p.name == "enterprise").unwrap();
 
-    // Free plan should NOT have SSO; enterprise SHOULD
+// Free plan should NOT have SSO; enterprise SHOULD
     assert!(!free.features.sso_enabled);
     assert!(enterprise.features.sso_enabled);
 
-    // Free plan has limited team members (1); enterprise has unlimited (-1)
+// Free plan has limited team members (1); enterprise has unlimited (-1)
     assert_eq!(free.features.max_team_members, 1);
     assert_eq!(enterprise.features.max_team_members, -1); // -1 = unlimited
 
-    // API access should be available on both
+// API access should be available on both
     assert!(free.features.api_access);
     assert!(enterprise.features.api_access);
 }
@@ -39,7 +39,7 @@ fn pattern_matcher_and_compliance_risk_scoring() {
     use compliance::types::RiskLevel;
     use pattern_matcher::{PatternMatcher, Rule, RuleCategory, RuleSet, Severity};
 
-    // Build a rule set with spam patterns
+// Build a rule set with spam patterns
     let rules = vec![
         Rule::new("free money", "SPAM-001", RuleCategory::Spam, Severity::High, 8),
         Rule::new(
@@ -52,7 +52,7 @@ fn pattern_matcher_and_compliance_risk_scoring() {
     ];
     let ruleset = RuleSet::new(rules);
 
-    // Evaluate against suspicious content
+// Evaluate against suspicious content
     let text = "Claim your free money now and verify your account!";
     let matches = ruleset.evaluate(text);
     assert_eq!(matches.len(), 2);
@@ -60,11 +60,11 @@ fn pattern_matcher_and_compliance_risk_scoring() {
     let total_score = ruleset.total_score(text);
     assert!(total_score >= 18.0); // 8 + 10
 
-    // Map score to compliance risk level
+// Map score to compliance risk level
     let risk = RiskLevel::from_score(total_score);
     assert!(risk == RiskLevel::Low || risk == RiskLevel::Medium);
 
-    // Verify critical detection
+// Verify critical detection
     assert!(ruleset.has_critical(text));
 }
 
@@ -74,7 +74,7 @@ fn pattern_matcher_and_compliance_risk_scoring() {
 
 #[test]
 fn template_types_compose_with_api_types() {
-    // Verify template-renderer types serialize correctly for API consumption
+// Verify template-renderer types serialize correctly for API consumption
     use template_renderer::types::{RenderMetadata, RenderResult};
 
     let result = RenderResult {
@@ -107,7 +107,7 @@ fn ai_content_score_with_sales_campaign() {
     let optimizer = ContentOptimizer::new();
     let campaigns = CampaignManager::new(10);
 
-    // Create a campaign
+// Create a campaign
     let campaign = campaigns
         .create_campaign(
             "Q1 Outreach".into(),
@@ -117,7 +117,7 @@ fn ai_content_score_with_sales_campaign() {
         .unwrap();
     assert_eq!(campaign.name, "Q1 Outreach");
 
-    // Score candidate subject lines for the campaign
+// Score candidate subject lines for the campaign
     let subjects = vec![
         "🔥 Limited time offer today!",
         "Hi {{name}}, quick question",
@@ -130,11 +130,11 @@ fn ai_content_score_with_sales_campaign() {
         .map(|s| optimizer.score_subject_line(s))
         .collect();
 
-    // Personalised subject should score well
+// Personalised subject should score well
     let personalized_idx = 1;
     assert!(scores[personalized_idx] > 0);
 
-    // All scores should be within valid range
+// All scores should be within valid range
     for &score in &scores {
         assert!(score <= 100);
     }
@@ -151,12 +151,12 @@ fn rate_limiter_decision_types() {
     let config = RateLimitConfig::new(100).with_burst(10);
     let limiter = GovernorLimiter::new(&config);
 
-    // First request should be allowed
+// First request should be allowed
     let decision = limiter.check();
     assert!(decision.is_allowed());
     assert!(decision.remaining() > 0);
 
-    // Batch check
+// Batch check
     let batch = limiter.check_n(5);
     assert!(batch.is_allowed());
 }
@@ -174,7 +174,7 @@ fn observability_metrics_from_ops_health_checks() {
     let metrics = MetricsCollector::new(vec![10.0, 50.0, 100.0, 500.0]);
     let checker = HealthChecker::new(100);
 
-    // Simulate health check results from ops service
+// Simulate health check results from ops service
     checker.record_check(HealthCheck {
         service: "api-server".into(),
         status: ServiceStatus::Operational,
@@ -188,7 +188,7 @@ fn observability_metrics_from_ops_health_checks() {
         timestamp: chrono::Utc::now(),
     });
 
-    // Record health check latencies in observability metrics
+// Record health check latencies in observability metrics
     let checks = checker.latest_checks();
     for check in &checks {
         metrics.record_histogram(
@@ -213,7 +213,7 @@ fn observability_metrics_from_ops_health_checks() {
 fn enterprise_sso_types_serialize_correctly() {
     use enterprise::types::{SSOConfigureRequest, SSOConfiguration};
 
-    // Verify SSO types can round-trip through JSON (API compat)
+// Verify SSO types can round-trip through JSON (API compat)
     let req = SSOConfigureRequest {
         tenant_id: uuid::Uuid::new_v4(),
         provider_type: "saml".into(),
@@ -234,7 +234,7 @@ fn enterprise_sso_types_serialize_correctly() {
     assert_eq!(json["provider_type"], "saml");
     assert_eq!(json["domain"], "acme.com");
 
-    // Deserialize back
+// Deserialize back
     let req2: SSOConfigureRequest = serde_json::from_value(json).unwrap();
     assert_eq!(req2.provider_type, "saml");
     assert_eq!(req2.tenant_id, req.tenant_id);
@@ -249,7 +249,7 @@ fn analytics_types_with_billing_usage() {
     use analytics::types::{AnalyticsQuery, DeliverabilityMetrics};
     use billing_service::types::PlanFeatures;
 
-    // Verify analytics types work with billing plan features
+// Verify analytics types work with billing plan features
     let query = AnalyticsQuery {
         tenant_id: "tenant-123".into(),
         start_date: chrono::Utc::now() - chrono::Duration::days(30),
@@ -269,11 +269,11 @@ fn analytics_types_with_billing_usage() {
         ..PlanFeatures::default()
     };
 
-    // Gate analytics features based on plan
+// Gate analytics features based on plan
     assert!(features.advanced_analytics);
     assert!(features.send_time_optimization);
 
-    // Deliverability metrics type check
+// Deliverability metrics type check
     let metrics = DeliverabilityMetrics {
         delivery_rate: 0.98,
         bounce_rate: 0.02,
@@ -297,25 +297,25 @@ fn devex_webhook_signing_verification() {
     let secret = "whsec_test_secret_123";
     let tester = WebhookTester::new(secret.to_string()).expect("webhook tester");
 
-    // Build a test payload
+// Build a test payload
     let payload = WebhookTester::build_test_payload("email.delivered");
     assert_eq!(payload["type"], "email.delivered");
     assert!(payload["test"].as_bool().unwrap());
     assert!(payload["data"]["email_id"].is_string());
 
-    // Sign the payload
+// Sign the payload
     let body = serde_json::to_vec(&payload).unwrap();
     let signature = tester.sign_payload(&body);
 
-    // Signature format: t=<timestamp>,v1=<hex>
+// Signature format:t=<timestamp>,v1=<hex>
     assert!(signature.starts_with("t="));
     assert!(signature.contains(",v1="));
 
-    // Verify the signature with the same secret
+// Verify the signature with the same secret
     let verified = WebhookTester::verify_signature(secret, &body, &signature);
     assert!(verified);
 
-    // Verify fails with wrong secret
+// Verify fails with wrong secret
     let wrong = WebhookTester::verify_signature("wrong_secret", &body, &signature);
     assert!(!wrong);
 }
@@ -333,18 +333,18 @@ fn billing_quota_with_rate_limiting() {
     let free_plan = plans.iter().find(|p| p.name == "free").unwrap();
     let pro_plan = plans.iter().find(|p| p.name == "pro").unwrap();
 
-    // Free plan: lower rate limit
+// Free plan:lower rate limit
     let free_rps = (free_plan.api_call_limit as f64 / 86400.0).max(1.0) as u32;
     let free_limiter = GovernorLimiter::from_params(free_rps, free_rps * 2);
 
-    // Pro plan: higher rate limit
+// Pro plan:higher rate limit
     let pro_rps = (pro_plan.api_call_limit as f64 / 86400.0).max(1.0) as u32;
     let pro_limiter = GovernorLimiter::from_params(pro_rps, pro_rps * 2);
 
-    // Pro plan should have higher burst capacity
+// Pro plan should have higher burst capacity
     assert!(pro_rps >= free_rps);
 
-    // Both should allow initial requests
+// Both should allow initial requests
     assert!(free_limiter.check().is_allowed());
     assert!(pro_limiter.check().is_allowed());
 }

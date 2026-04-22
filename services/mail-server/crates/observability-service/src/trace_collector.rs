@@ -12,7 +12,6 @@ use crate::types::TraceSpan;
 // ---------------------------------------------------------------------------
 
 /// Thread-safe in-memory trace span store.
-///
 /// Caps total stored spans at `max_spans`; when full, the oldest spans are
 /// evicted on each insert to prevent unbounded memory growth.
 #[derive(Debug)]
@@ -22,12 +21,12 @@ pub struct TraceCollector {
 }
 
 impl TraceCollector {
-    /// Create a new, empty collector with the given capacity limit.
+/// Create a new, empty collector with the given capacity limit.
     pub fn new() -> Self {
         Self::with_capacity(500_000)
     }
 
-    /// Create a collector that retains at most `max_spans` spans.
+/// Create a collector that retains at most `max_spans` spans.
     pub fn with_capacity(max_spans: usize) -> Self {
         Self {
             spans: RwLock::new(Vec::new()),
@@ -35,18 +34,18 @@ impl TraceCollector {
         }
     }
 
-    /// Record a span into the store.
-    ///
-    /// If the store is at capacity, the oldest span is dropped first.
+/// Record a span into the store.
+/// If the store is at capacity, the oldest span is dropped first.
     pub fn record_span(&self, span: TraceSpan) {
         let mut guard = self.spans.write();
         if guard.len() >= self.max_spans {
-            guard.drain(..guard.len() / 10); // evict oldest 10%
+            let prune_count = guard.len() / 10;
+            guard.drain(..prune_count); // evict oldest 10%
         }
         guard.push(span);
     }
 
-    /// Return all spans belonging to the given `trace_id`.
+/// Return all spans belonging to the given `trace_id`.
     pub fn get_trace(&self, trace_id: &str) -> Vec<TraceSpan> {
         self.spans
             .read()
@@ -56,7 +55,7 @@ impl TraceCollector {
             .collect()
     }
 
-    /// Return the most recent `limit` spans ordered by `start_time` descending.
+/// Return the most recent `limit` spans ordered by `start_time` descending.
     pub fn list_recent(&self, limit: usize) -> Vec<TraceSpan> {
         let guard = self.spans.read();
         let mut sorted: Vec<&TraceSpan> = guard.iter().collect();
@@ -64,8 +63,8 @@ impl TraceCollector {
         sorted.into_iter().take(limit).cloned().collect()
     }
 
-    /// Search spans matching an optional operation name filter and/or
-    /// minimum duration in milliseconds.
+/// Search spans matching an optional operation name filter and/or
+/// minimum duration in milliseconds.
     pub fn search(
         &self,
         operation_filter: Option<&str>,
@@ -87,8 +86,8 @@ impl TraceCollector {
             .collect()
     }
 
-    /// Compute the average duration (in ms) for all spans matching `operation`.
-    /// Returns `None` if there are no matching spans with a recorded duration.
+/// Compute the average duration (in ms) for all spans matching `operation`.
+/// Returns `None` if there are no matching spans with a recorded duration.
     pub fn avg_duration(&self, operation: &str) -> Option<f64> {
         let guard = self.spans.read();
         let durations: Vec<f64> = guard
@@ -105,12 +104,12 @@ impl TraceCollector {
         }
     }
 
-    /// Total number of stored spans.
+/// Total number of stored spans.
     pub fn len(&self) -> usize {
         self.spans.read().len()
     }
 
-    /// Whether the store is empty.
+/// Whether the store is empty.
     pub fn is_empty(&self) -> bool {
         self.spans.read().is_empty()
     }
@@ -174,15 +173,15 @@ mod tests {
         tc.record_span(make_span("t2", "GET /api", 500));
         tc.record_span(make_span("t3", "POST /api", 200));
 
-        // Operation filter only
+// Operation filter only
         let results = tc.search(Some("GET"), None);
         assert_eq!(results.len(), 2);
 
-        // Duration filter only
+// Duration filter only
         let results = tc.search(None, Some(100));
         assert_eq!(results.len(), 2); // 500 and 200
 
-        // Both filters
+// Both filters
         let results = tc.search(Some("GET"), Some(100));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].duration_ms, Some(500));
@@ -198,7 +197,7 @@ mod tests {
         let avg = tc.avg_duration("GET /api").unwrap();
         assert!((avg - 200.0).abs() < f64::EPSILON);
 
-        // Non-existent operation
+// Non-existent operation
         assert!(tc.avg_duration("PUT /nope").is_none());
     }
 }

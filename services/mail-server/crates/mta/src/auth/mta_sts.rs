@@ -8,12 +8,12 @@ use tracing::debug;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 
-// #134: Shared DNS resolver – avoids creating a new resolver per verification call
+// #134:Shared DNS resolver – avoids creating a new resolver per verification call
 static MTA_STS_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
     TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
 });
 
-// #135: Shared HTTP client with timeout – avoids per-call TLS handshake overhead
+// #135:Shared HTTP client with timeout – avoids per-call TLS handshake overhead
 static MTA_STS_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -76,10 +76,10 @@ pub async fn verify_mta_sts(domain: &str) -> MtaStsVerificationResult {
         recommendations: Vec::new(),
     };
 
-    // #134: Use shared resolver instead of creating new one per call
+// #134:Use shared resolver instead of creating new one per call
     let resolver = &*MTA_STS_RESOLVER;
 
-    // 1. Check DNS TXT record at _mta-sts.<domain>
+// 1. Check DNS TXT record at _mta-sts.<domain>
     let sts_name = format!("_mta-sts.{domain}");
     match resolver.txt_lookup(&sts_name).await {
         Ok(records) => {
@@ -104,9 +104,9 @@ pub async fn verify_mta_sts(domain: &str) -> MtaStsVerificationResult {
         return result;
     }
 
-    // 2. Fetch policy from https://mta-sts.<domain>/.well-known/mta-sts.txt
+// 2. Fetch policy from https://mta-sts.<domain>/.well-known/mta-sts.txt
     let policy_url = format!("https://mta-sts.{domain}/.well-known/mta-sts.txt");
-    // #135: Use shared HTTP client instead of creating a new one per call
+// #135:Use shared HTTP client instead of creating a new one per call
     let Some(client) = MTA_STS_CLIENT.as_ref() else {
         result.errors.push("MTA-STS HTTP client unavailable".to_string());
         return result;
@@ -178,7 +178,7 @@ pub fn generate_tlsrpt_record(reporting_emails: &[&str]) -> String {
 
 /// Verify TLSRPT record for a domain.
 pub async fn verify_tlsrpt(domain: &str) -> Option<TlsRptRecord> {
-    // #134: Use shared resolver
+// #134:Use shared resolver
     let resolver = &*MTA_STS_RESOLVER;
 
     let name = format!("_smtp._tls.{domain}");

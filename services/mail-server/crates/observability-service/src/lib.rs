@@ -1,7 +1,6 @@
 //! # Observability Service
 //!
-//! ApexMail observability platform providing:
-//! - **Prometheus metrics** collection (counters, histograms, gauges)
+//! ApexMail observability platform providing://! - **Prometheus metrics** collection (counters, histograms, gauges)
 //! - **Distributed tracing** with span collection and search
 //! - **OpenTelemetry OTLP export** for distributed tracing backends
 //! - **Log aggregation** with structured query and error-rate analysis

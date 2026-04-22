@@ -25,7 +25,7 @@ use mail_proto::generated::{
     StoreMessageRequest,
 };
 
-// #156: Shared DNS resolver — avoids re-reading /etc/resolv.conf per message
+// #156:Shared DNS resolver — avoids re-reading /etc/resolv.conf per message
 static EDGE_RESOLVER: LazyLock<Option<Resolver>> = LazyLock::new(|| {
     match build_dns_resolver() {
         Ok(resolver) => Some(resolver),
@@ -117,7 +117,7 @@ static COMMAND_RATE_TRACKER: LazyLock<DashMap<IpAddr, VecDeque<Instant>>> =
     LazyLock::new(|| DashMap::with_capacity(1024));
 
 /// Spawn a background task that periodically evicts stale entries from the
-/// rate tracker.  Call once at server startup.
+/// rate tracker. Call once at server startup.
 #[allow(dead_code)]
 pub fn spawn_rate_tracker_cleanup() {
     tokio::spawn(async {
@@ -136,13 +136,13 @@ fn evict_stale_rate_entries() {
     let now = Instant::now();
     let window_start = now - COMMAND_RATE_WINDOW;
 
-    // Phase 1 — remove fully-expired entries
+// Phase 1 — remove fully-expired entries
     COMMAND_RATE_TRACKER.retain(|_ip, timestamps| {
-        // Drop entries if the newest timestamp is outside the window
+// Drop entries if the newest timestamp is outside the window
         timestamps.back().map_or(false, |t| *t >= window_start)
     });
 
-    // Phase 2 — if still over capacity, drop entries with fewest recent commands
+// Phase 2 — if still over capacity, drop entries with fewest recent commands
     let len = COMMAND_RATE_TRACKER.len();
     if len > MAX_RATE_TRACKER_ENTRIES {
         let excess = len - MAX_RATE_TRACKER_ENTRIES;
@@ -150,7 +150,7 @@ fn evict_stale_rate_entries() {
             .iter()
             .map(|r| (*r.key(), r.value().len()))
             .collect();
-        // Sort ascending by number of recent commands — evict least-active first
+// Sort ascending by number of recent commands — evict least-active first
         entries.sort_by_key(|&(_, count)| count);
         for (ip, _) in entries.into_iter().take(excess) {
             COMMAND_RATE_TRACKER.remove(&ip);
@@ -177,18 +177,18 @@ pub struct SmtpConfig {
     pub max_recipients: usize,
     pub enable_starttls: bool,
     pub tls_acceptor: Option<TlsAcceptor>,
-    /// Domains this server accepts mail for
+/// Domains this server accepts mail for
     #[allow(dead_code)]
     pub local_domains: Vec<String>,
-    /// Lowercased local domains for fast lookup
+/// Lowercased local domains for fast lookup
     pub local_domains_lower: HashSet<String>,
-    /// Maximum SMTP line length (including CRLF)
+/// Maximum SMTP line length (including CRLF)
     pub max_line_length: usize,
-    /// Maximum wait time for each SMTP command/data line
+/// Maximum wait time for each SMTP command/data line
     pub command_timeout: Duration,
-    /// Maximum total SMTP session duration
+/// Maximum total SMTP session duration
     pub session_timeout: Duration,
-    /// #157: Cached gRPC channel to mailstore — reused across messages
+/// #157:Cached gRPC channel to mailstore — reused across messages
     grpc_channel: tokio::sync::RwLock<Option<CachedChannel>>,
     pub metrics: Arc<SmtpMetrics>,
 }
@@ -199,7 +199,7 @@ struct CachedChannel {
 }
 
 impl SmtpConfig {
-    /// Create a new SmtpConfig.
+/// Create a new SmtpConfig.
     pub fn new(
         hostname: String,
         mailstore_addr: String,
@@ -234,8 +234,8 @@ impl SmtpConfig {
         }
     }
 
-    /// #157: Get or create a shared gRPC mailstore client.
-    /// Re-uses the underlying HTTP/2 channel across messages.
+/// #157:Get or create a shared gRPC mailstore client.
+/// Re-uses the underlying HTTP/2 channel across messages.
     pub async fn grpc_client(
         &self,
         endpoint: &str,
@@ -582,7 +582,7 @@ pub async fn handle_connection(
     let session_deadline = Instant::now() + config.session_timeout;
     config.metrics.record_session_start();
     
-    // Send greeting
+// Send greeting
     let greeting = format!("220 {} ESMTP ready\r\n", config.hostname);
     stream.write_all(greeting.as_bytes()).await?;
     stream.flush().await?;
@@ -817,13 +817,13 @@ async fn allow_command_from_peer(peer_ip: IpAddr) -> bool {
     let now = Instant::now();
     let window_start = now - COMMAND_RATE_WINDOW;
 
-    // DashMap entry API — only locks the shard for this IP, not the entire map
+// DashMap entry API — only locks the shard for this IP, not the entire map
     let mut entry = COMMAND_RATE_TRACKER
         .entry(peer_ip)
         .or_insert_with(VecDeque::new);
     let timestamps = entry.value_mut();
 
-    // Purge expired timestamps from the front
+// Purge expired timestamps from the front
     while let Some(front) = timestamps.front() {
         if *front < window_start {
             timestamps.pop_front();
@@ -1063,11 +1063,11 @@ fn extract_size_param(args: &str) -> Option<u64> {
 }
 
 fn extract_address(s: &str) -> Option<String> {
-    // Handle <address> format (including null sender <>)
+// Handle <address> format (including null sender <>)
     if s.starts_with('<') {
         if let Some(end) = s.find('>') {
             let inner = &s[1..end];
-            // Empty <> is the null sender — valid in SMTP MAIL FROM
+// Empty <> is the null sender — valid in SMTP MAIL FROM
             if inner.is_empty() {
                 return Some(String::new());
             }
@@ -1078,11 +1078,11 @@ fn extract_address(s: &str) -> Option<String> {
 
             return Some(inner.to_string());
         }
-        // Malformed: '<' without '>'
+// Malformed:'<' without '>'
         return None;
     }
     
-    // Handle bare address token up to first whitespace, strip trailing params.
+// Handle bare address token up to first whitespace, strip trailing params.
     let addr = s.split_whitespace().next()?;
     let addr = addr.trim_end_matches(|c| c == '>' || c == ',' || c == ';');
     if addr.is_empty() {
@@ -1103,8 +1103,8 @@ fn is_valid_addr_spec(addr: &str) -> bool {
 
 fn is_local_domain(addr: &str, config: &SmtpConfig) -> bool {
     let domain = addr.split('@').nth(1).unwrap_or("").to_lowercase();
-    // #160: Removed unconditional localhost acceptance — prevents relay to
-    // internal services. Localhost must be explicitly configured if needed.
+// #160:Removed unconditional localhost acceptance — prevents relay to
+// internal services. Localhost must be explicitly configured if needed.
     config.local_domains_lower.contains(&domain)
 }
 
@@ -1123,27 +1123,27 @@ async fn process_message(
         .ok_or_else(|| anyhow::anyhow!("EHLO/HELO missing before DATA"))?;
     let message_data = &state.data_buffer;
     
-    // Extract sender domain for SPF checks
+// Extract sender domain for SPF checks
     let from_domain = from_addr
         .split('@')
         .nth(1)
         .unwrap_or("")
         .to_lowercase();
 
-    // Extract header From domain for DMARC alignment
+// Extract header From domain for DMARC alignment
     let header_from_domain = extract_header_from_domain(message_data);
     
-    // Parse the peer IP address
+// Parse the peer IP address
     let peer_ip: std::net::IpAddr = peer_addr.ip();
     
-    // #156: Use shared DNS resolver instead of creating one per message
+// #156:Use shared DNS resolver instead of creating one per message
     let resolver = if dns_circuit_allows_queries().await {
         EDGE_RESOLVER.as_ref()
     } else {
         None
     };
     
-    // ── SPF and DKIM verification (parallel) ───────────────────────────
+// ── SPF and DKIM verification (parallel) ───────────────────────────
     let spf_future = async {
         if resolver.is_none() {
             "temperror".to_string()
@@ -1223,11 +1223,11 @@ async fn process_message(
 
     let (spf_result, dkim_result) = tokio::join!(spf_future, dkim_future);
     
-    // ── #158: DMARC evaluation with DNS record lookup ──────────────────
+// ── #158:DMARC evaluation with DNS record lookup ──────────────────
     let spf_aligned = spf_result == "pass";
     let dkim_aligned = dkim_result == "pass";
 
-    // Determine raw DMARC alignment result
+// Determine raw DMARC alignment result
     let dmarc_aligned = if !from_domain.is_empty() {
         if spf_aligned || dkim_aligned {
             "pass"
@@ -1240,7 +1240,7 @@ async fn process_message(
         "none"
     };
 
-    // #158: Fetch the actual DMARC DNS record to determine the domain's policy
+// #158:Fetch the actual DMARC DNS record to determine the domain's policy
     let dmarc_policy = if !header_from_domain.is_empty() {
         if let Some(resolver) = resolver {
             fetch_dmarc_policy(resolver, &header_from_domain).await
@@ -1256,7 +1256,7 @@ async fn process_message(
         dns_circuit_record(dns_ok).await;
     }
 
-    // Apply DMARC policy to determine final action
+// Apply DMARC policy to determine final action
     let dmarc_result = dmarc_aligned;
 
     info!(
@@ -1269,8 +1269,8 @@ async fn process_message(
         "Authentication-Results summary"
     );
 
-    // #159: SPF hard-fail rejection is now deferred to DMARC policy.
-    // Only reject if the DMARC policy mandates it (p=reject or p=quarantine).
+// #159:SPF hard-fail rejection is now deferred to DMARC policy.
+// Only reject if the DMARC policy mandates it (p=reject or p=quarantine).
     let mut custom_flags = Vec::new();
     if dmarc_result == "fail" {
         match dmarc_policy.policy.as_str() {
@@ -1296,7 +1296,7 @@ async fn process_message(
                 custom_flags.push("dmarc=quarantine".to_string());
             }
             _ => {
-                // p=none or no policy — accept the message
+// p=none or no policy — accept the message
                 info!(
                     peer = %peer_addr,
                     from = %mail_common::pii::redact_email(&from_addr),
@@ -1314,7 +1314,7 @@ async fn process_message(
         );
     }
     
-    // ── Build Authentication-Results header ────────────────────────────
+// ── Build Authentication-Results header ────────────────────────────
     let safe_from_addr = sanitize_header_value(from_addr);
     let safe_from_domain = sanitize_header_value(&header_from_domain);
     let auth_results_header = format!(
@@ -1327,12 +1327,12 @@ async fn process_message(
         safe_from_domain,
     );
     
-    // Prepend Authentication-Results header to the message
+// Prepend Authentication-Results header to the message
     let mut final_message = auth_results_header.into_bytes();
     final_message.extend_from_slice(message_data);
     let final_message = Bytes::from(final_message);
     
-    // ── #157: Store via mailstore gRPC — use shared client ─────────────
+// ── #157:Store via mailstore gRPC — use shared client ─────────────
     let allow_insecure_mailstore = std::env::var("SMTP_EDGE_ALLOW_INSECURE_MAILSTORE")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
@@ -1475,7 +1475,7 @@ fn organizational_domain(domain: &str) -> Option<String> {
     Some(labels[labels.len() - 2..].join("."))
 }
 
-/// #158: Fetch the DMARC policy from DNS for a given domain.
+/// #158:Fetch the DMARC policy from DNS for a given domain.
 /// Queries `_dmarc.{domain}` TXT record, falls back to parent domains.
 async fn fetch_dmarc_policy(resolver: &Resolver, domain: &str) -> DmarcPolicyResult {
     if let Some(record) = query_dmarc_txt(resolver, domain).await {
@@ -1589,9 +1589,9 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    // -----------------------------------------------------------------------
-    // SmtpMetrics
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// SmtpMetrics
+// -----------------------------------------------------------------------
 
     #[test]
     fn metrics_initial_state_is_zero() {
@@ -1622,9 +1622,9 @@ mod tests {
         assert_eq!(s.deliveries_oversized, 1);
     }
 
-    // -----------------------------------------------------------------------
-    // Rate tracker — allow_command_from_peer
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Rate tracker — allow_command_from_peer
+// -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn rate_tracker_allows_first_command() {
@@ -1641,7 +1641,7 @@ mod tests {
         for _ in 0..MAX_COMMANDS_PER_WINDOW {
             assert!(allow_command_from_peer(ip).await);
         }
-        // Exactly at limit — next should be rejected
+// Exactly at limit — next should be rejected
         assert!(!allow_command_from_peer(ip).await);
     }
 
@@ -1655,7 +1655,7 @@ mod tests {
         for _ in 0..MAX_COMMANDS_PER_WINDOW {
             assert!(allow_command_from_peer(ip_a).await);
         }
-        // ip_a exhausted, ip_b should still be allowed
+// ip_a exhausted, ip_b should still be allowed
         assert!(!allow_command_from_peer(ip_a).await);
         assert!(allow_command_from_peer(ip_b).await);
     }
@@ -1668,19 +1668,19 @@ mod tests {
         assert!(COMMAND_RATE_TRACKER.contains_key(&ip));
     }
 
-    // -----------------------------------------------------------------------
-    // Eviction
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Eviction
+// -----------------------------------------------------------------------
 
     #[test]
     fn eviction_removes_empty_entries() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 99, 1, 1));
-        // Insert an entry with an empty VecDeque
+// Insert an entry with an empty VecDeque
         COMMAND_RATE_TRACKER.insert(ip, VecDeque::new());
         assert!(COMMAND_RATE_TRACKER.contains_key(&ip));
 
         evict_stale_rate_entries();
-        // Empty deque => back() returns None => should be evicted
+// Empty deque => back returns None => should be evicted
         assert!(!COMMAND_RATE_TRACKER.contains_key(&ip));
     }
 
@@ -1693,18 +1693,18 @@ mod tests {
 
         evict_stale_rate_entries();
         assert!(COMMAND_RATE_TRACKER.contains_key(&ip));
-        // Cleanup
+// Cleanup
         COMMAND_RATE_TRACKER.remove(&ip);
     }
 
     #[test]
     fn eviction_phase2_trims_over_capacity() {
-        // Instead of creating 100K+ unique IPs (slow), we verify the eviction
-        // logic by checking that after inserting known entries and calling
-        // evict, entries with stale timestamps are removed.
+// Instead of creating 100K+ unique IPs (slow), we verify the eviction
+// logic by checking that after inserting known entries and calling
+// evict, entries with stale timestamps are removed.
         let base_ip = |i: u8| IpAddr::V4(Ipv4Addr::new(10, 98, 0, i));
 
-        // Insert 5 entries: 3 with only expired timestamps, 2 with fresh
+// Insert 5 entries:3 with only expired timestamps, 2 with fresh
         for i in 0..3u8 {
             COMMAND_RATE_TRACKER.insert(base_ip(i), VecDeque::new());
         }
@@ -1716,26 +1716,26 @@ mod tests {
 
         evict_stale_rate_entries();
 
-        // Stale (empty) entries should be gone
+// Stale (empty) entries should be gone
         for i in 0..3u8 {
             assert!(!COMMAND_RATE_TRACKER.contains_key(&base_ip(i)),
                 "Stale entry {} should have been evicted", i);
         }
-        // Fresh entries should remain
+// Fresh entries should remain
         for i in 3..5u8 {
             assert!(COMMAND_RATE_TRACKER.contains_key(&base_ip(i)),
                 "Fresh entry {} should still exist", i);
         }
 
-        // Cleanup
+// Cleanup
         for i in 0..5u8 {
             COMMAND_RATE_TRACKER.remove(&base_ip(i));
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Helper functions
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------
 
     #[test]
     fn reset_data_buffer_shrinks_large_buffers() {
@@ -1803,9 +1803,9 @@ mod tests {
         assert!(parent_domains("localhost").is_empty());
     }
 
-    // -----------------------------------------------------------------------
-    // SmtpConfig
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// SmtpConfig
+// -----------------------------------------------------------------------
 
     #[test]
     fn smtp_config_local_domains_lowered() {
@@ -1827,9 +1827,9 @@ mod tests {
         assert!(!cfg.local_domains_lower.contains("Example.COM"));
     }
 
-    // -----------------------------------------------------------------------
-    // Constants sanity
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Constants sanity
+// -----------------------------------------------------------------------
 
     #[test]
     fn rate_constants_are_sane() {
@@ -1845,9 +1845,9 @@ mod tests {
         assert!(DATA_BUFFER_DEFAULT_CAPACITY < DATA_BUFFER_SHRINK_THRESHOLD);
     }
 
-    // -----------------------------------------------------------------------
-    // DmarcPolicyResult
-    // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// DmarcPolicyResult
+// -----------------------------------------------------------------------
 
     #[test]
     fn dmarc_policy_result_none_default() {

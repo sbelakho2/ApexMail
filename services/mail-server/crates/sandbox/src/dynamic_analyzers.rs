@@ -1,13 +1,12 @@
 //! Dynamic analyzers — concrete implementations of [`DynamicAnalyzer`]
 //!
-//! Ships two ready-to-use analyzers:
-//!
+//! Ships two ready-to-use analyzers://!
 //! 1. [`YaraSignatureAnalyzer`] — Pattern-based malware detection using
-//!    Aho-Corasick multi-pattern matching against YARA-like rules compiled
-//!    at initialization time. No external dependency required.
+//! Aho-Corasick multi-pattern matching against YARA-like rules compiled
+//! at initialization time. No external dependency required.
 //!
 //! 2. [`ClamAvSocketAnalyzer`] — Integration point for ClamAV via its Unix
-//!    socket protocol (`INSTREAM`). Requires a running ClamAV daemon.
+//! socket protocol (`INSTREAM`). Requires a running ClamAV daemon.
 //!
 //! Both implement [`DynamicAnalyzer`] and can be provided to
 //! [`SandboxEngine::with_dynamic_analyzer`].
@@ -21,38 +20,34 @@ use std::sync::OnceLock;
 /// A malware indicator rule used by [`YaraSignatureAnalyzer`].
 #[derive(Debug, Clone)]
 pub struct MalwareRule {
-    /// Rule identifier (e.g., "RULE_EICAR_TEST")
+/// Rule identifier (e.g., "RULE_EICAR_TEST")
     pub id: String,
-    /// Human-readable description
+/// Human-readable description
     pub description: String,
-    /// Binary patterns — ALL must be present for a match (AND logic)
+/// Binary patterns — ALL must be present for a match (AND logic)
     pub patterns: Vec<Vec<u8>>,
-    /// Risk contribution when the rule fires
+/// Risk contribution when the rule fires
     pub risk: f64,
-    /// Decision to recommend
+/// Decision to recommend
     pub decision: DynamicDecision,
 }
 
 /// Compiled rule set for efficient multi-pattern scanning.
 struct CompiledRuleSet {
-    /// Aho-Corasick automaton over all patterns from all rules
+/// Aho-Corasick automaton over all patterns from all rules
     automaton: AhoCorasick,
-    /// Maps pattern index → (rule_index, pattern_index_within_rule)
+/// Maps pattern index → (rule_index, pattern_index_within_rule)
     pattern_map: Vec<(usize, usize)>,
-    /// Original rules
+/// Original rules
     rules: Vec<MalwareRule>,
 }
 
 /// Pattern-based malware detection using YARA-like signature rules.
-///
 /// Compiles all rule patterns into a single Aho-Corasick automaton for O(n)
 /// scanning. A rule fires when **all** of its patterns are found in the input
 /// (AND logic, matching YARA's `all of them` semantics).
-///
 /// ## Built-in Rules
-///
-/// The default instance includes rules for:
-/// - EICAR test string
+/// The default instance includes rules for:/// - EICAR test string
 /// - PE executable with suspicious imports (VirtualAlloc + CreateRemoteThread)
 /// - PowerShell download cradles
 /// - Macro auto-execution triggers
@@ -69,7 +64,7 @@ pub struct YaraSignatureAnalyzer {
 /// Get the default built-in malware rules.
 fn builtin_malware_rules() -> Vec<MalwareRule> {
     vec![
-        // ── Test / Canary ──
+// ── Test / Canary ──
         MalwareRule {
             id: "RULE_EICAR_TEST".into(),
             description: "EICAR anti-malware test string detected".into(),
@@ -79,7 +74,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 10.0,
             decision: DynamicDecision::Reject,
         },
-        // ── PE with suspicious API imports ──
+// ── PE with suspicious API imports ──
         MalwareRule {
             id: "RULE_PE_SUSPICIOUS_IMPORTS".into(),
             description: "PE executable with process injection API imports".into(),
@@ -100,7 +95,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
-        // ── PowerShell cradles ──
+// ── PowerShell cradles ──
         MalwareRule {
             id: "RULE_POWERSHELL_DOWNLOAD".into(),
             description: "PowerShell download cradle detected".into(),
@@ -132,7 +127,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
-        // ── Macro auto-execution ──
+// ── Macro auto-execution ──
         MalwareRule {
             id: "RULE_VBA_AUTOOPEN".into(),
             description: "VBA macro with AutoOpen/AutoExec trigger".into(),
@@ -162,7 +157,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
-        // ── Ransomware indicators ──
+// ── Ransomware indicators ──
         MalwareRule {
             id: "RULE_RANSOM_NOTE".into(),
             description: "Ransomware payment demand indicators".into(),
@@ -183,7 +178,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
-        // ── Shellcode detection ──
+// ── Shellcode detection ──
         MalwareRule {
             id: "RULE_SHELLCODE_NOP_SLED".into(),
             description: "NOP sled shellcode pattern".into(),
@@ -202,7 +197,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 6.0,
             decision: DynamicDecision::Flag,
         },
-        // ── PDF malware ──
+// ── PDF malware ──
         MalwareRule {
             id: "RULE_PDF_JS_LAUNCH".into(),
             description: "PDF with JavaScript and Launch action (dropper)".into(),
@@ -224,7 +219,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
-        // ── C2 / Beacon ──
+// ── C2 / Beacon ──
         MalwareRule {
             id: "RULE_COBALT_STRIKE_BEACON".into(),
             description: "Cobalt Strike beacon configuration indicators".into(),
@@ -234,7 +229,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
-        // ── WebShell ──
+// ── WebShell ──
         MalwareRule {
             id: "RULE_PHP_WEBSHELL".into(),
             description: "PHP webshell indicators (eval + base64_decode)".into(),
@@ -254,7 +249,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
-        // ── Crypto miner ──
+// ── Crypto miner ──
         MalwareRule {
             id: "RULE_CRYPTO_MINER".into(),
             description: "Cryptocurrency miner indicators".into(),
@@ -274,7 +269,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
-        // ── Exploit kit ──
+// ── Exploit kit ──
         MalwareRule {
             id: "RULE_RTF_OLE_EXPLOIT".into(),
             description: "RTF document with embedded OLE exploit object".into(),
@@ -285,7 +280,7 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
-        // ── Batch/CMD malware ──
+// ── Batch/CMD malware ──
         MalwareRule {
             id: "RULE_CMD_CERTUTIL_DECODE".into(),
             description: "Certutil-based payload decode (LOLBin abuse)".into(),
@@ -310,12 +305,12 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
 }
 
 impl YaraSignatureAnalyzer {
-    /// Create analyzer with built-in malware rules.
+/// Create analyzer with built-in malware rules.
     pub fn new() -> Option<Self> {
         Self::with_rules(builtin_malware_rules())
     }
 
-    /// Create analyzer with custom rules.
+/// Create analyzer with custom rules.
     pub fn with_rules(rules: Vec<MalwareRule>) -> Option<Self> {
         if rules.is_empty() {
             let empty_patterns: Vec<&[u8]> = Vec::new();
@@ -352,7 +347,7 @@ impl YaraSignatureAnalyzer {
         })
     }
 
-    /// Number of loaded rules.
+/// Number of loaded rules.
     pub fn rule_count(&self) -> usize {
         self.compiled.rules.len()
     }
@@ -370,7 +365,7 @@ impl DynamicAnalyzer for YaraSignatureAnalyzer {
             return None;
         }
 
-        // Track which patterns matched for each rule
+// Track which patterns matched for each rule
         let _rule_count = self.compiled.rules.len();
         let mut rule_pattern_hits: Vec<Vec<bool>> = self
             .compiled
@@ -384,7 +379,7 @@ impl DynamicAnalyzer for YaraSignatureAnalyzer {
             rule_pattern_hits[rule_idx][pat_idx] = true;
         }
 
-        // Find the highest-risk fully-matched rule
+// Find the highest-risk fully-matched rule
         let mut best_finding: Option<DynamicAnalysisFinding> = None;
 
         for (idx, rule) in self.compiled.rules.iter().enumerate() {
@@ -412,32 +407,27 @@ impl DynamicAnalyzer for YaraSignatureAnalyzer {
 // ─── ClamAV Socket Analyzer ─────────────────────────────────────────────────
 
 /// ClamAV integration via Unix socket (`clamd` INSTREAM protocol).
-///
 /// Sends attachment data to a running ClamAV daemon and interprets the
 /// response. Requires `clamd` listening on the configured socket path.
-///
 /// ## Protocol
-///
 /// 1. Send `zINSTREAM\0`
-/// 2. For each chunk: send 4-byte big-endian length + data
+/// 2. For each chunk:send 4-byte big-endian length + data
 /// 3. Send 4-byte zero length to signal end
-/// 4. Read response line: `stream: OK` or `stream: <virus> FOUND`
-///
+/// 4. Read response line:`stream:OK` or `stream:<virus> FOUND`
 /// ## Known limitations
-///
-/// - **Blocking I/O**: Uses `std::net::UnixStream` synchronously. For async
-///   use, wrap in `tokio::task::spawn_blocking`.
-/// - **No connection pooling**: Opens a new socket per scan. For high throughput,
-///   implement a connection pool or use ClamAV's milter interface.
+/// - **Blocking I/O**:Uses `std::net::UnixStream` synchronously. For async
+/// use, wrap in `tokio::task::spawn_blocking`.
+/// - **No connection pooling**:Opens a new socket per scan. For high throughput,
+/// implement a connection pool or use ClamAV's milter interface.
 pub struct ClamAvSocketAnalyzer {
-    /// Path to the ClamAV Unix socket (e.g., `/var/run/clamav/clamd.ctl`)
+/// Path to the ClamAV Unix socket (e.g., `/var/run/clamav/clamd.ctl`)
     socket_path: String,
-    /// Maximum data size to send (default: 25MB)
+/// Maximum data size to send (default:25MB)
     max_scan_size: usize,
 }
 
 impl ClamAvSocketAnalyzer {
-    /// Create a new ClamAV analyzer with the given socket path.
+/// Create a new ClamAV analyzer with the given socket path.
     pub fn new(socket_path: String) -> Self {
         Self {
             socket_path,
@@ -445,7 +435,7 @@ impl ClamAvSocketAnalyzer {
         }
     }
 
-    /// Create with a custom max scan size.
+/// Create with a custom max scan size.
     pub fn with_max_size(socket_path: String, max_scan_size: usize) -> Self {
         Self {
             socket_path,
@@ -471,7 +461,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             });
         }
 
-        // Attempt connection to ClamAV socket
+// Attempt connection to ClamAV socket
         #[cfg(unix)]
         {
             let stream = match std::os::unix::net::UnixStream::connect(&self.socket_path) {
@@ -486,19 +476,19 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 }
             };
 
-            // Set a reasonable timeout
+// Set a reasonable timeout
             let timeout = std::time::Duration::from_secs(30);
             let _ = stream.set_read_timeout(Some(timeout));
             let _ = stream.set_write_timeout(Some(timeout));
 
             let mut stream = std::io::BufWriter::new(stream);
 
-            // Send INSTREAM command
+// Send INSTREAM command
             if stream.write_all(b"zINSTREAM\0").is_err() {
                 return None;
             }
 
-            // Send data in 8KB chunks
+// Send data in 8KB chunks
             let chunk_size = 8192;
             for chunk in data.chunks(chunk_size) {
                 let len = (chunk.len() as u32).to_be_bytes();
@@ -507,7 +497,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 }
             }
 
-            // Send zero-length terminator
+// Send zero-length terminator
             if stream.write_all(&[0, 0, 0, 0]).is_err() {
                 return None;
             }
@@ -516,7 +506,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 return None;
             }
 
-            // Read response
+// Read response
             let mut inner = stream.into_inner().ok()?;
             let mut response = String::new();
             if inner.read_to_string(&mut response).is_err() {
@@ -526,7 +516,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             let response = response.trim();
 
             if response.contains("FOUND") {
-                // Extract virus name: "stream: Eicar-Signature FOUND"
+// Extract virus name:"stream:Eicar-Signature FOUND"
                 let virus_name = response
                     .strip_prefix("stream: ")
                     .and_then(|s| s.strip_suffix(" FOUND"))
@@ -548,7 +538,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 return None; // Clean
             }
 
-            // Unexpected response
+// Unexpected response
             tracing::warn!(
                 response = %response,
                 "Unexpected ClamAV response"
@@ -639,7 +629,7 @@ mod tests {
         let vba = b"Attribute VB_Name = \"Module1\"\nSub Auto_Open()\n  Shell \"cmd.exe /c calc\"\nEnd Sub";
         let finding = analyzer.analyze(vba, Some("macro.vba"));
         assert!(finding.is_some());
-        // Should match the highest-risk rule among matching rules
+// Should match the highest-risk rule among matching rules
         let f = finding.expect("finding");
         assert!(f.risk >= 7.0);
     }
@@ -647,10 +637,10 @@ mod tests {
     #[test]
     fn test_yara_requires_all_patterns() {
         let analyzer = YaraSignatureAnalyzer::default();
-        // Only one of two patterns for PE_SUSPICIOUS_IMPORTS
+// Only one of two patterns for PE_SUSPICIOUS_IMPORTS
         let partial = b"VirtualAlloc is used in this documentation text";
         let finding = analyzer.analyze(partial, Some("readme.txt"));
-        // Should NOT match because CreateRemoteThread is missing
+// Should NOT match because CreateRemoteThread is missing
         assert!(finding.is_none(), "Partial pattern match should not trigger rule");
     }
 

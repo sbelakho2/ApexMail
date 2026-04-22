@@ -4,9 +4,9 @@ use crate::types::AiError;
 
 /// Predictive analytics engine using simple statistical models.
 pub struct AnalyticsPredictor {
-    /// Baseline open-rate intercept.
+/// Baseline open-rate intercept.
     base_open_rate: f64,
-    /// Baseline click-rate intercept.
+/// Baseline click-rate intercept.
     base_click_rate: f64,
 }
 
@@ -24,16 +24,14 @@ impl AnalyticsPredictor {
         }
     }
 
-    /// Predict the open rate for a subject line sent at a given hour/day.
-    ///
-    /// Uses a simple heuristic model:
-    /// - Subject length sweet-spot bonus (30-60 chars)
-    /// - Hour-of-day factor (business hours boost)
-    /// - Day-of-week factor (Tue-Thu boost)
+/// Predict the open rate for a subject line sent at a given hour/day.
+/// Uses a simple heuristic model:/// - Subject length sweet-spot bonus (30-60 chars)
+/// - Hour-of-day factor (business hours boost)
+/// - Day-of-week factor (Tue-Thu boost)
     pub fn predict_open_rate(&self, subject: &str, hour: u8, day_of_week: u8) -> f64 {
         let len = subject.len() as f64;
 
-        // Length factor — sweet spot 30-60 chars
+// Length factor — sweet spot 30-60 chars
         let len_factor = if (30.0..=60.0).contains(&len) {
             1.1
         } else if len < 15.0 || len > 100.0 {
@@ -42,7 +40,7 @@ impl AnalyticsPredictor {
             1.0
         };
 
-        // Hour factor — peak 9-11 and 14-16
+// Hour factor — peak 9-11 and 14-16
         let hour_factor = match hour {
             9..=11 => 1.15,
             14..=16 => 1.10,
@@ -50,7 +48,7 @@ impl AnalyticsPredictor {
             _ => 0.85,
         };
 
-        // Day factor — Tue(1), Wed(2), Thu(3) best (0=Mon)
+// Day factor — Tue(1), Wed(2), Thu(3) best (0=Mon)
         let day_factor = match day_of_week {
             1..=3 => 1.12,
             0 | 4 => 1.0,
@@ -61,12 +59,11 @@ impl AnalyticsPredictor {
         rate.clamp(0.0, 1.0)
     }
 
-    /// Predict click-through rate given CTA text and its position.
-    ///
-    /// Position: 0 = above-fold (best), higher = further down.
+/// Predict click-through rate given CTA text and its position.
+/// Position:0 = above-fold (best), higher = further down.
     pub fn predict_click_rate(&self, cta_text: &str, position: u32) -> f64 {
         let word_count = cta_text.split_whitespace().count();
-        // Short CTAs (2-5 words) perform best
+// Short CTAs (2-5 words) perform best
         let word_factor = if (2..=5).contains(&word_count) {
             1.2
         } else if word_count == 1 {
@@ -75,7 +72,7 @@ impl AnalyticsPredictor {
             0.85
         };
 
-        // Urgency keywords boost
+// Urgency keywords boost
         let lower = cta_text.to_lowercase();
         let urgency_factor = if lower.contains("now")
             || lower.contains("today")
@@ -87,17 +84,17 @@ impl AnalyticsPredictor {
             1.0
         };
 
-        // Position decay
+// Position decay
         let pos_factor = 1.0 / (1.0 + 0.15 * position as f64);
 
         let rate = self.base_click_rate * word_factor * urgency_factor * pos_factor;
         rate.clamp(0.0, 1.0)
     }
 
-    /// Predict unsubscribe risk given send frequency (per week) and
-    /// engagement score (0.0 – 1.0).
+/// Predict unsubscribe risk given send frequency (per week) and
+/// engagement score (0.0 – 1.0).
     pub fn predict_unsubscribe_risk(&self, frequency: f64, engagement: f64) -> f64 {
-        // High frequency + low engagement → high risk
+// High frequency + low engagement → high risk
         let freq_factor = if frequency > 5.0 {
             1.6
         } else if frequency > 3.0 {
@@ -110,9 +107,8 @@ impl AnalyticsPredictor {
         (base_risk * freq_factor * eng_factor * 10.0).clamp(0.0, 1.0)
     }
 
-    /// Simple k-means clustering of engagement scores.
-    ///
-    /// Returns a `Vec<usize>` of cluster assignments (0..k) for each score.
+/// Simple k-means clustering of engagement scores.
+/// Returns a `Vec<usize>` of cluster assignments (0..k) for each score.
     pub fn segment_users(&self, engagement_scores: &[f64], k: usize) -> Result<Vec<usize>, AiError> {
         if k == 0 || engagement_scores.is_empty() {
             return Err(AiError::InvalidInput("k and scores must be non-empty".into()));
@@ -122,7 +118,7 @@ impl AnalyticsPredictor {
             return Err(AiError::InvalidInput("k must be <= number of scores".into()));
         }
 
-        // Initialise centroids evenly spaced
+// Initialise centroids evenly spaced
         let mut centroids: Vec<f64> = (0..k)
             .map(|i| {
                 let idx = i * n / k;
@@ -134,7 +130,7 @@ impl AnalyticsPredictor {
         let max_iters = 100;
 
         for _ in 0..max_iters {
-            // Assign each point to the nearest centroid
+// Assign each point to the nearest centroid
             let mut changed = false;
             for (i, &score) in engagement_scores.iter().enumerate() {
                 let best = centroids
@@ -154,7 +150,7 @@ impl AnalyticsPredictor {
                 break;
             }
 
-            // Recompute centroids
+// Recompute centroids
             for c in 0..k {
                 let (sum, count) = engagement_scores
                     .iter()
@@ -207,10 +203,10 @@ mod tests {
         let scores = vec![0.1, 0.12, 0.15, 0.5, 0.55, 0.9, 0.92, 0.95];
         let assignments = p.segment_users(&scores, 3).unwrap();
         assert_eq!(assignments.len(), 8);
-        // Points close together should be in the same cluster
+// Points close together should be in the same cluster
         assert_eq!(assignments[0], assignments[1]);
         assert_eq!(assignments[5], assignments[6]);
-        // Low-engagement and high-engagement should differ
+// Low-engagement and high-engagement should differ
         assert_ne!(assignments[0], assignments[7]);
     }
 }

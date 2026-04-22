@@ -40,14 +40,14 @@ type S = Arc<AppState>;
 
 pub fn create_router(state: S) -> Router {
     Router::new()
-        // Health
+// Health
         .route("/health", get(health_check))
-        // Organizations
+// Organizations
         .route("/organizations", post(org_create))
         .route("/organizations/:org_id", get(org_get))
         .route("/organizations/:org_id", put(org_update))
         .route("/organizations/:org_id/suspend", post(org_suspend))
-        // Workspaces
+// Workspaces
         .route(
             "/organizations/:org_id/workspaces",
             post(workspace_create),
@@ -59,7 +59,7 @@ pub fn create_router(state: S) -> Router {
         .route("/workspaces/:workspace_id", get(workspace_get))
         .route("/workspaces/:workspace_id", put(workspace_update))
         .route("/workspaces/:workspace_id", delete(workspace_delete))
-        // Members
+// Members
         .route(
             "/workspaces/:workspace_id/members",
             post(member_add),
@@ -72,13 +72,13 @@ pub fn create_router(state: S) -> Router {
             "/workspaces/:workspace_id/members/:user_id/access",
             get(member_access),
         )
-        // Quota
+// Quota
         .route("/workspaces/:workspace_id/quota", get(quota_check))
         .route(
             "/workspaces/:workspace_id/quota",
             put(quota_update),
         )
-        // Rate Limit
+// Rate Limit
         .route(
             "/workspaces/:workspace_id/rate-limit",
             get(rate_limit_status),
@@ -87,17 +87,17 @@ pub fn create_router(state: S) -> Router {
             "/workspaces/:workspace_id/rate-limit/reset",
             post(rate_limit_reset),
         )
-        // Encryption
+// Encryption
         .route("/encryption/rotate/:org_id", post(encryption_rotate))
         .route("/encryption/policy", post(encryption_create_policy))
-        // Isolation
+// Isolation
         .route("/isolation/check-access", post(isolation_check_access))
         .route(
             "/isolation/migrate/:org_id",
             post(isolation_migrate),
         )
         .route("/isolation/rls/:workspace_id", post(isolation_setup_rls))
-        // Audit
+// Audit
         .route("/audit/query", get(audit_query))
         .route("/audit/stats/:org_id", get(audit_stats))
         .route("/audit/export/:org_id", get(audit_export))
@@ -503,7 +503,7 @@ async fn quota_check(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-    // Check all quota metrics
+// Check all quota metrics
     let mut results = serde_json::Map::new();
     for metric in ["emails_per_month", "storage_bytes", "api_requests_per_minute", "webhooks_per_month", "contacts", "templates", "domains"] {
         match state.tenant.check_quota(&workspace_id, metric, 1).await {
@@ -731,7 +731,7 @@ async fn isolation_migrate(
     let target = IsolationLevel::parse(&body.target_level)
         .unwrap_or(IsolationLevel::DedicatedSchema);
 
-    // Need current level from org
+// Need current level from org
     let current = match state.tenant.get_organization(&org_id).await {
         Ok(org) => org.isolation_level,
         Err(e) => return (StatusCode::NOT_FOUND, err_json(&e.to_string())),
@@ -914,8 +914,8 @@ mod tests {
 
     #[test]
     fn test_health_returns_ok() {
-        // Verify the router builds without panic
-        // (actual handler tested in integration)
+// Verify the router builds without panic
+// (actual handler tested in integration)
         let _router: Router<()> = Router::new().route("/health", get(health_check));
     }
 

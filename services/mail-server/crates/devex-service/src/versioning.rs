@@ -19,7 +19,7 @@ impl Default for VersionRegistry {
 }
 
 impl VersionRegistry {
-    /// Build the registry with the canonical version history.
+/// Build the registry with the canonical version history.
     pub fn new() -> Self {
         let versions = vec![
             ApiVersion {
@@ -160,12 +160,12 @@ impl VersionRegistry {
         Self { versions }
     }
 
-    /// Return all known versions, newest first.
+/// Return all known versions, newest first.
     pub fn list_versions(&self) -> &[ApiVersion] {
         &self.versions
     }
 
-    /// Look up a specific version by its `YYYY-MM` string.
+/// Look up a specific version by its `YYYY-MM` string.
     pub fn get_version(&self, version: &str) -> Result<&ApiVersion, DevExError> {
         self.versions
             .iter()
@@ -173,7 +173,7 @@ impl VersionRegistry {
             .ok_or_else(|| DevExError::VersionNotFound(version.to_string()))
     }
 
-    /// Check if a version is deprecated or sunset.
+/// Check if a version is deprecated or sunset.
     pub fn is_deprecated(&self, version: &str) -> bool {
         self.versions.iter().any(|v| {
             v.version == version
@@ -181,10 +181,9 @@ impl VersionRegistry {
         })
     }
 
-    /// Compare two version strings chronologically.
-    ///
-    /// Returns `Ordering::Less` if `a` was released before `b`,
-    /// `Ordering::Greater` if after, and `Ordering::Equal` if same.
+/// Compare two version strings chronologically.
+/// Returns `Ordering::Less` if `a` was released before `b`,
+/// `Ordering::Greater` if after, and `Ordering::Equal` if same.
     pub fn compare_versions(&self, a: &str, b: &str) -> std::cmp::Ordering {
         let parse = |v: &str| -> (i32, u32) {
             let parts: Vec<&str> = v.split('-').collect();
@@ -198,7 +197,7 @@ impl VersionRegistry {
     }
 }
 
-/// Helper: build a `DateTime<Utc>` from y/m/d.
+/// Helper:build a `DateTime<Utc>` from y/m/d.
 fn date(year: i32, month: u32, day: u32) -> DateTime<Utc> {
     NaiveDate::from_ymd_opt(year, month, day)
         .and_then(|d| d.and_hms_opt(0, 0, 0))

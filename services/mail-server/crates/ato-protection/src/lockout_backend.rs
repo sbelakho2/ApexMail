@@ -9,7 +9,7 @@
 //! ```rust,no_run
 //! use ato_protection::lockout_backend::{InMemoryLockoutBackend, LockoutBackend};
 //!
-//! let backend = InMemoryLockoutBackend::new();
+//! let backend = InMemoryLockoutBackend::new;
 //! backend.record_lockout("user123", 86400);
 //! let count = backend.recent_lockouts("user123", 86400);
 //! assert_eq!(count, 1);
@@ -21,23 +21,20 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 /// Trait for storing and querying lockout events.
-///
 /// Implementations must be `Send + Sync` for use in async contexts.
-///
 /// # Contract
-///
 /// - `record_lockout` stores a lockout timestamp for the given user.
 /// - `recent_lockouts` returns the count of lockout events within
-///   `window_secs` seconds.
+/// `window_secs` seconds.
 /// - `clear` removes all lockout events for a user (e.g., after admin unlock).
 pub trait LockoutBackend: Send + Sync {
-    /// Record a lockout event for `user_id` with the given TTL window.
+/// Record a lockout event for `user_id` with the given TTL window.
     fn record_lockout(&self, user_id: &str, window_secs: u64);
 
-    /// Count lockout events for `user_id` within the last `window_secs`.
+/// Count lockout events for `user_id` within the last `window_secs`.
     fn recent_lockouts(&self, user_id: &str, window_secs: u64) -> u32;
 
-    /// Clear all lockout events for `user_id`.
+/// Clear all lockout events for `user_id`.
     fn clear(&self, user_id: &str);
 }
 
@@ -53,10 +50,8 @@ fn global_lockout_registry() -> LockoutRegistry {
 }
 
 /// Process-local in-memory lockout backend.
-///
 /// Optionally shares state across all instances in the same process via a
 /// global `OnceLock` registry (controlled by `use_global`).
-///
 /// **Limitation:** State is lost on process restart and is not visible to
 /// other nodes. For multi-node deployments, use [`RedisLockoutBackend`].
 pub struct InMemoryLockoutBackend {
@@ -64,14 +59,14 @@ pub struct InMemoryLockoutBackend {
 }
 
 impl InMemoryLockoutBackend {
-    /// Create a new instance with a process-global shared store.
+/// Create a new instance with a process-global shared store.
     pub fn new() -> Self {
         Self {
             store: global_lockout_registry(),
         }
     }
 
-    /// Create a new instance with its own isolated store (not shared globally).
+/// Create a new instance with its own isolated store (not shared globally).
     pub fn isolated() -> Self {
         Self {
             store: Arc::new(DashMap::new()),
@@ -90,7 +85,7 @@ impl LockoutBackend for InMemoryLockoutBackend {
         let now = Utc::now();
         let cutoff = now - chrono::Duration::seconds(window_secs as i64);
         let mut entry = self.store.entry(user_id.to_string()).or_default();
-        // Evict stale entries while we're here
+// Evict stale entries while we're here
         entry.retain(|ts| *ts > cutoff);
         entry.push(now);
     }
@@ -111,38 +106,31 @@ impl LockoutBackend for InMemoryLockoutBackend {
 // ─── Redis Backend ───────────────────────────────────────────────────────────
 
 /// Redis-backed lockout backend for multi-node deployments.
-///
 /// Stores lockout events as sorted-set members keyed by
 /// `ato:lockout:{user_id}` with score = Unix timestamp.
-///
 /// **Requires the `redis-lockout` feature flag** which brings in the `redis`
 /// crate dependency. Without it, this struct is available but all operations
 /// are no-ops that log warnings.
-///
 /// ## Configuration
-///
 /// ```rust,no_run
 /// use ato_protection::lockout_backend::RedisLockoutBackend;
-///
 /// let backend = RedisLockoutBackend::new("redis://127.0.0.1:6379".into());
 /// ```
-///
 /// ## Known limitations
-///
-/// - **Blocking I/O**: Redis calls currently use synchronous I/O on the calling
-///   thread. For high-throughput deployments, wrap in `tokio::task::spawn_blocking`.
-/// - **No TLS**: The connection string must use `redis://` (not `rediss://`).
-///   TLS support is planned.
+/// - **Blocking I/O**:Redis calls currently use synchronous I/O on the calling
+/// thread. For high-throughput deployments, wrap in `tokio::task::spawn_blocking`.
+/// - **No TLS**:The connection string must use `redis://` (not `rediss://`).
+/// TLS support is planned.
 pub struct RedisLockoutBackend {
-    /// Redis connection URL (e.g., `redis://127.0.0.1:6379`)
+/// Redis connection URL (e.g., `redis://127.0.0.1:6379`)
     url: String,
-    /// Key prefix for lockout sorted sets (used when redis-lockout feature is enabled)
+/// Key prefix for lockout sorted sets (used when redis-lockout feature is enabled)
     #[allow(dead_code)]
     key_prefix: String,
 }
 
 impl RedisLockoutBackend {
-    /// Create a new Redis lockout backend.
+/// Create a new Redis lockout backend.
     pub fn new(url: String) -> Self {
         Self {
             url,
@@ -150,7 +138,7 @@ impl RedisLockoutBackend {
         }
     }
 
-    /// Create with a custom key prefix.
+/// Create with a custom key prefix.
     pub fn with_prefix(url: String, prefix: String) -> Self {
         Self {
             url,
@@ -162,7 +150,7 @@ impl RedisLockoutBackend {
         format!("{}{}", self.key_prefix, user_id)
     }
 
-    /// Get the configured Redis URL.
+/// Get the configured Redis URL.
     pub fn url(&self) -> &str {
         &self.url
     }
@@ -173,10 +161,9 @@ impl RedisLockoutBackend {
 /// while only gaining actual Redis functionality when the feature is enabled.
 impl LockoutBackend for RedisLockoutBackend {
     fn record_lockout(&self, user_id: &str, _window_secs: u64) {
-        // When the `redis-lockout` feature is enabled, this would:
-        //   ZADD <key> <timestamp> <uuid>
-        //   ZREMRANGEBYSCORE <key> -inf <cutoff>
-        //   EXPIRE <key> <window_secs>
+// When the `redis-lockout` feature is enabled, this would:// ZADD <key> <timestamp> <uuid>
+// ZREMRANGEBYSCORE <key> -inf <cutoff>
+// EXPIRE <key> <window_secs>
         tracing::warn!(
             user_id = %user_id,
             redis_url = %self.url,
@@ -185,9 +172,8 @@ impl LockoutBackend for RedisLockoutBackend {
     }
 
     fn recent_lockouts(&self, user_id: &str, _window_secs: u64) -> u32 {
-        // When the `redis-lockout` feature is enabled, this would:
-        //   ZRANGEBYSCORE <key> <cutoff> +inf
-        //   return count
+// When the `redis-lockout` feature is enabled, this would:// ZRANGEBYSCORE <key> <cutoff> +inf
+// return count
         tracing::warn!(
             user_id = %user_id,
             redis_url = %self.url,

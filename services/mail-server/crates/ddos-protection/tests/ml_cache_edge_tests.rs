@@ -12,7 +12,7 @@ use std::thread;
 mod cache_edge_cases {
     use super::*;
 
-    /// Empty cache operations
+/// Empty cache operations
     #[test]
     fn test_empty_cache_get() {
         let cache = MlScoreCache::with_defaults();
@@ -20,7 +20,7 @@ mod cache_edge_cases {
         assert!(result.is_none());
     }
 
-    /// Cache with zero TTL should expire immediately
+/// Cache with zero TTL should expire immediately
     #[test]
     fn test_zero_ttl() {
         let config = MlCacheConfig {
@@ -30,12 +30,12 @@ mod cache_edge_cases {
         };
         let cache = MlScoreCache::new(config);
         cache.put_by_ip("192.168.1.1", 0.5, false);
-        // Should be expired immediately
+// Should be expired immediately
         let result = cache.get_by_ip("192.168.1.1");
         assert!(result.is_none());
     }
 
-    /// Disabled cache should not store
+/// Disabled cache should not store
     #[test]
     fn test_disabled_cache() {
         let config = MlCacheConfig {
@@ -47,7 +47,7 @@ mod cache_edge_cases {
         assert!(cache.get_by_ip("192.168.1.1").is_none());
     }
 
-    /// Cache should handle IPv6 addresses
+/// Cache should handle IPv6 addresses
     #[test]
     fn test_ipv6_address() {
         let cache = MlScoreCache::with_defaults();
@@ -58,7 +58,7 @@ mod cache_edge_cases {
         assert_eq!(result.unwrap().score, 0.7);
     }
 
-    /// Cache key with special characters
+/// Cache key with special characters
     #[test]
     fn test_special_key_chars() {
         let cache = MlScoreCache::with_defaults();
@@ -68,7 +68,7 @@ mod cache_edge_cases {
         assert!(result.is_some());
     }
 
-    /// Cache eviction when full
+/// Cache eviction when full
     #[test]
     fn test_cache_eviction() {
         let config = MlCacheConfig {
@@ -78,17 +78,17 @@ mod cache_edge_cases {
         };
         let cache = MlScoreCache::new(config);
         
-        // Fill beyond capacity
+// Fill beyond capacity
         for i in 0..20 {
             cache.put_by_ip(&format!("192.168.1.{}", i), 0.5, false);
         }
         
-        // Cache should have evicted some entries
+// Cache should have evicted some entries
         let stats = cache.stats();
         assert!(stats.ip_cache_size <= 20); // Under capacity limit
     }
 
-    /// Boundary scores (0.0 and 1.0)
+/// Boundary scores (0.0 and 1.0)
     #[test]
     fn test_boundary_scores() {
         let cache = MlScoreCache::with_defaults();
@@ -100,12 +100,12 @@ mod cache_edge_cases {
         assert_eq!(cache.get_by_ip("max").unwrap().score, 1.0);
     }
 
-    /// Negative score (invalid but should handle gracefully)
+/// Negative score (invalid but should handle gracefully)
     #[test]
     fn test_edge_scores() {
         let cache = MlScoreCache::with_defaults();
         
-        // These are out of expected range but should not panic
+// These are out of expected range but should not panic
         cache.put_by_ip("negative", -0.5, false);
         cache.put_by_ip("over_one", 1.5, true);
         
@@ -113,7 +113,7 @@ mod cache_edge_cases {
         assert!(cache.get_by_ip("over_one").is_some());
     }
 
-    /// Empty string key
+/// Empty string key
     #[test]
     fn test_empty_key() {
         let cache = MlScoreCache::with_defaults();
@@ -122,7 +122,7 @@ mod cache_edge_cases {
         assert!(result.is_some());
     }
 
-    /// Very long key
+/// Very long key
     #[test]
     fn test_very_long_key() {
         let cache = MlScoreCache::with_defaults();
@@ -131,13 +131,13 @@ mod cache_edge_cases {
         assert!(cache.get_by_session(&long_key).is_some());
     }
 
-    /// Hit count increases on repeated access
+/// Hit count increases on repeated access
     #[test]
     fn test_hit_count_tracking() {
         let cache = MlScoreCache::with_defaults();
         cache.put_by_ip("test_ip", 0.5, false);
         
-        // Access multiple times
+// Access multiple times
         for _ in 0..10 {
             let _ = cache.get_by_ip("test_ip");
         }
@@ -150,13 +150,13 @@ mod cache_edge_cases {
 mod concurrent_cache_tests {
     use super::*;
 
-    /// Concurrent reads and writes should not corrupt data
+/// Concurrent reads and writes should not corrupt data
     #[test]
     fn test_concurrent_read_write() {
         let cache = Arc::new(MlScoreCache::with_defaults());
         let mut handles = vec![];
 
-        // Writers
+// Writers
         for i in 0..10 {
             let c = Arc::clone(&cache);
             handles.push(thread::spawn(move || {
@@ -166,7 +166,7 @@ mod concurrent_cache_tests {
             }));
         }
 
-        // Readers
+// Readers
         for i in 0..10 {
             let c = Arc::clone(&cache);
             handles.push(thread::spawn(move || {
@@ -180,17 +180,17 @@ mod concurrent_cache_tests {
             h.join().expect("Thread panicked");
         }
 
-        // Cache should be in valid state
+// Cache should be in valid state
         let stats = cache.stats();
         assert!(stats.misses > 0 || stats.hits > 0);
     }
 
-    /// Concurrent cleanup should not deadlock
+/// Concurrent cleanup should not deadlock
     #[test]
     fn test_concurrent_cleanup() {
         let cache = Arc::new(MlScoreCache::with_defaults());
         
-        // Pre-fill cache
+// Pre-fill cache
         for i in 0..1000 {
             cache.put_by_ip(&format!("ip_{}", i), 0.5, false);
         }
@@ -209,7 +209,7 @@ mod concurrent_cache_tests {
         }
     }
 
-    /// Rapid store/get same key
+/// Rapid store/get same key
     #[test]
     fn test_rapid_same_key_operations() {
         let cache = Arc::new(MlScoreCache::with_defaults());
@@ -230,7 +230,7 @@ mod concurrent_cache_tests {
             h.join().expect("Thread panicked");
         }
 
-        // Final value should exist
+// Final value should exist
         assert!(cache.get_by_ip("shared_key").is_some());
     }
 }
@@ -238,7 +238,7 @@ mod concurrent_cache_tests {
 mod expiration_edge_cases {
     use super::*;
 
-    /// Cache entry expires after exactly TTL
+/// Cache entry expires after exactly TTL
     #[test]
     fn test_expiration_timing() {
         let config = MlCacheConfig {
@@ -251,13 +251,13 @@ mod expiration_edge_cases {
         cache.put_by_ip("test", 0.5, false);
         assert!(cache.get_by_ip("test").is_some());
         
-        // Wait for expiration
+// Wait for expiration
         thread::sleep(Duration::from_millis(150));
         
         assert!(cache.get_by_ip("test").is_none());
     }
 
-    /// Many entries expiring simultaneously
+/// Many entries expiring simultaneously
     #[test]
     fn test_bulk_expiration() {
         let config = MlCacheConfig {
@@ -267,17 +267,17 @@ mod expiration_edge_cases {
         };
         let cache = MlScoreCache::new(config);
         
-        // Add many entries
+// Add many entries
         for i in 0..5000 {
             cache.put_by_ip(&format!("ip_{}", i), 0.5, false);
         }
         
-        // Wait for expiration
+// Wait for expiration
         thread::sleep(Duration::from_millis(100));
         
-        // Cleanup should not panic with many expired entries
+// Cleanup should not panic with many expired entries
         cache.cleanup_expired();
-        // After cleanup, entries should be removed
+// After cleanup, entries should be removed
         let stats = cache.stats();
         assert!(stats.ip_cache_size < 1000); // Most should be removed
     }

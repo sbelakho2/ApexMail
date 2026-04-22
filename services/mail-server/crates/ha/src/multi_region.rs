@@ -18,6 +18,78 @@ pub struct MultiRegionService {
     rr_counter: AtomicU64,
 }
 
+fn select_active_region<'a>(
+    active: &[&'a RegionInfo],
+    routing_mode: &RoutingMode,
+    rr_counter: &AtomicU64,
+) -> Result<&'a RegionInfo, String> {
+    if active.is_empty() {
+        return Err("No active regions available".into());
+    }
+
+    match routing_mode {
+        RoutingMode::ActivePassive => active
+            .iter()
+            .find(|r| r.is_primary)
+            .copied()
+            .or_else(|| active.first().copied())
+            .ok_or_else(|| "no primary or fallback region found".to_string()),
+        RoutingMode::RoundRobin => {
+            let idx = (rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % active.len();
+            active
+                .get(idx)
+                .copied()
+                .ok_or_else(|| "round-robin index out of bounds".to_string())
+        }
+        RoutingMode::LatencyBased => active
+            .iter()
+            .min_by(|a, b| {
+                a.latency_ms
+                    .unwrap_or(f64::MAX)
+                    .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
+            .ok_or_else(|| "no region with latency data available".to_string()),
+        RoutingMode::Weighted => {
+            let total_weight: i32 = active.iter().map(|r| r.weight.max(1)).sum();
+            let pick = (Utc::now().timestamp_millis() as i32).rem_euclid(total_weight);
+            let mut cumulative = 0;
+
+            for region in active {
+                cumulative += region.weight.max(1);
+                if pick < cumulative {
+                    return Ok(*region);
+                }
+            }
+
+            active
+                .first()
+                .copied()
+                .ok_or_else(|| "weighted selection failed".to_string())
+        }
+        RoutingMode::GeoProximity => active
+            .iter()
+            .min_by(|a, b| {
+                a.latency_ms
+                    .unwrap_or(f64::MAX)
+                    .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
+            .ok_or_else(|| "no region with latency data available".to_string()),
+        RoutingMode::ActiveActive => active
+            .iter()
+            .max_by(|a, b| {
+                a.health_score
+                    .partial_cmp(&b.health_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
+            .ok_or_else(|| "no region with health score available".to_string()),
+    }
+}
+
 impl MultiRegionService {
     pub fn new(pool: PgPool, config: Arc<Config>) -> Self {
         Self {
@@ -27,9 +99,9 @@ impl MultiRegionService {
         }
     }
 
-    // ── Region CRUD ────────────────────────────────────────
+// ── Region CRUD ────────────────────────────────────────
 
-    /// Register or update a region.
+/// Register or update a region.
     pub async fn register_region(
         &self,
         name: &str,
@@ -66,7 +138,7 @@ impl MultiRegionService {
         })
     }
 
-    /// Get all regions.
+/// Get all regions.
     pub async fn list_regions(&self, limit: i64, offset: i64) -> Result<Vec<RegionInfo>, String> {
         let rows: Vec<RegionRow> = sqlx::query_as::<_, RegionRow>(
             "SELECT id, name, endpoint, status, role, is_primary, health_score,
@@ -83,7 +155,7 @@ impl MultiRegionService {
         Ok(rows.into_iter().map(|r| r.into_info()).collect())
     }
 
-    /// Get a single region by name.
+/// Get a single region by name.
     pub async fn get_region(&self, name: &str) -> Result<Option<RegionInfo>, String> {
         let row: Option<RegionRow> = sqlx::query_as::<_, RegionRow>(
             "SELECT id, name, endpoint, status, role, is_primary, health_score,
@@ -99,7 +171,7 @@ impl MultiRegionService {
         Ok(row.map(|r| r.into_info()))
     }
 
-    /// Update region health score and latency.
+/// Update region health score and latency.
     pub async fn update_health(
         &self,
         region_name: &str,
@@ -129,7 +201,7 @@ impl MultiRegionService {
         Ok(())
     }
 
-    /// Remove a region.
+/// Remove a region.
     pub async fn remove_region(&self, name: &str) -> Result<bool, String> {
         let res = sqlx::query("DELETE FROM ha_regions WHERE name = $1")
             .bind(name)
@@ -139,9 +211,9 @@ impl MultiRegionService {
         Ok(res.rows_affected() > 0)
     }
 
-    // ── Routing ────────────────────────────────────────────
+// ── Routing ────────────────────────────────────────────
 
-    /// Select the best region for a request based on the current routing mode.
+/// Select the best region for a request based on the current routing mode.
     pub async fn route_request(
         &self,
         source_region: Option<&str>,
@@ -155,7 +227,7 @@ impl MultiRegionService {
             return Err("No active regions available".into());
         }
 
-        // Check geo routing rules first
+// Check geo routing rules first
         if let Some(src) = source_region {
             if let Ok(Some(rule)) = self.find_matching_rule(src).await {
                 if let Some(target) = active.iter().find(|r| r.name == rule.target_region) {
@@ -164,66 +236,15 @@ impl MultiRegionService {
             }
         }
 
-        // Safety: `active` is guaranteed non-empty — we returned early above.
-        // We still propagate errors defensively rather than panicking.
-        let selected = match &self.config.multi_region.routing_mode {
-            RoutingMode::ActivePassive => {
-                active.iter().find(|r| r.is_primary)
-                    .or(active.first())
-                    .ok_or_else(|| "no primary or fallback region found".to_string())?
-            }
-            RoutingMode::RoundRobin => {
-                let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % active.len();
-                active.get(idx)
-                    .ok_or_else(|| "round-robin index out of bounds".to_string())?
-            }
-            RoutingMode::LatencyBased => {
-                active.iter()
-                    .min_by(|a, b| {
-                        a.latency_ms.unwrap_or(f64::MAX)
-                            .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .ok_or_else(|| "no region with latency data available".to_string())?
-            }
-            RoutingMode::Weighted => {
-                let total_weight: i32 = active.iter().map(|r| r.weight.max(1)).sum();
-                let pick = (Utc::now().timestamp_millis() as i32).rem_euclid(total_weight);
-                let mut cumulative = 0;
-                let mut chosen: Option<&&RegionInfo> = None;
-                for r in &active {
-                    cumulative += r.weight.max(1);
-                    if pick < cumulative {
-                        chosen = Some(r);
-                        break;
-                    }
-                }
-                chosen
-                    .or(active.first().as_ref())
-                    .ok_or_else(|| "weighted selection failed".to_string())?
-            }
-            RoutingMode::GeoProximity => {
-                // Fall back to latency-based when geo info not directly applicable
-                active.iter()
-                    .min_by(|a, b| {
-                        a.latency_ms.unwrap_or(f64::MAX)
-                            .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .ok_or_else(|| "no region with latency data available".to_string())?
-            }
-            RoutingMode::ActiveActive => {
-                active.iter()
-                    .max_by(|a, b| a.health_score.partial_cmp(&b.health_score)
-                        .unwrap_or(std::cmp::Ordering::Equal))
-                    .ok_or_else(|| "no region with health score available".to_string())?
-            }
-        };
-
-        Ok(selected.clone())
+        Ok(select_active_region(
+            &active,
+            &self.config.multi_region.routing_mode,
+            &self.rr_counter,
+        )?
+        .clone())
     }
 
-    // ── Geo Routing Rules ──────────────────────────────────
+// ── Geo Routing Rules ──────────────────────────────────
 
     pub async fn add_geo_rule(
         &self,
@@ -287,9 +308,9 @@ impl MultiRegionService {
         Ok(row.map(|r| r.into_rule()))
     }
 
-    // ── Region Fencing (STONITH) ───────────────────────────
+// ── Region Fencing (STONITH) ───────────────────────────
 
-    /// Fence a region to prevent it from serving traffic.
+/// Fence a region to prevent it from serving traffic.
     pub async fn fence_region(&self, region_name: &str, reason: &str) -> Result<(), String> {
         info!(region = region_name, reason, "Fencing region");
 
@@ -301,7 +322,7 @@ impl MultiRegionService {
         .await
         .map_err(|e| format!("Fence region: {e}"))?;
 
-        // Publish to Redis
+// Publish to Redis
         let url = self.config.redis.url();
         if let Ok(client) = redis::Client::open(url.as_str()) {
             if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
@@ -319,7 +340,7 @@ impl MultiRegionService {
         Ok(())
     }
 
-    /// Unfence a region.
+/// Unfence a region.
     pub async fn unfence_region(&self, region_name: &str) -> Result<(), String> {
         sqlx::query("UPDATE ha_regions SET status = 'standby' WHERE name = $1")
             .bind(region_name)
@@ -331,9 +352,9 @@ impl MultiRegionService {
         Ok(())
     }
 
-    // ── Traffic Distribution ───────────────────────────────
+// ── Traffic Distribution ───────────────────────────────
 
-    /// Get current traffic distribution across regions (from Redis metrics).
+/// Get current traffic distribution across regions (from Redis metrics).
     pub async fn get_traffic_distribution(&self) -> Result<Vec<TrafficDistribution>, String> {
         let regions = self.list_regions(10_000, 0).await?;
         let total_weight: f64 = regions.iter().map(|r| r.weight.max(1) as f64).sum();
@@ -349,7 +370,7 @@ impl MultiRegionService {
         }).collect())
     }
 
-    /// Update region weight.
+/// Update region weight.
     pub async fn set_weight(&self, region_name: &str, weight: i32) -> Result<(), String> {
         sqlx::query("UPDATE ha_regions SET weight = $2 WHERE name = $1")
             .bind(region_name).bind(weight)
@@ -520,7 +541,7 @@ mod tests {
         let total: i32 = weights.iter().sum();
         assert_eq!(total, 5);
 
-        // pick=0 → cumulative crosses at idx 0 (3 >= 1)
+// pick=0 → cumulative crosses at idx 0 (3 >= 1)
         let pick = 0;
         let mut cumulative = 0;
         let mut chosen = 0;
@@ -533,7 +554,7 @@ mod tests {
         }
         assert_eq!(chosen, 0);
 
-        // pick=4 → cumulative crosses at idx 2 (5 >= 5)
+// pick=4 → cumulative crosses at idx 2 (5 >= 5)
         let pick = 4;
         let mut cumulative = 0;
         let mut chosen = 0;
@@ -545,5 +566,47 @@ mod tests {
             }
         }
         assert_eq!(chosen, 2);
+    }
+
+    #[test]
+    fn test_select_active_region_round_robin_advances() {
+        let regions = vec![
+            RegionInfo {
+                id: Uuid::new_v4(), name: "r1".into(), endpoint: "".into(),
+                status: "active".into(), role: "primary".into(), is_primary: true,
+                health_score: 100.0, latency_ms: Some(10.0), replication_lag_ms: None,
+                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+            },
+            RegionInfo {
+                id: Uuid::new_v4(), name: "r2".into(), endpoint: "".into(),
+                status: "active".into(), role: "secondary".into(), is_primary: false,
+                health_score: 95.0, latency_ms: Some(15.0), replication_lag_ms: None,
+                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+            },
+        ];
+        let active: Vec<&RegionInfo> = regions.iter().collect();
+        let rr_counter = AtomicU64::new(0);
+
+        let first = select_active_region(&active, &RoutingMode::RoundRobin, &rr_counter).unwrap();
+        let second = select_active_region(&active, &RoutingMode::RoundRobin, &rr_counter).unwrap();
+
+        assert_eq!(first.name, "r1");
+        assert_eq!(second.name, "r2");
+    }
+
+    #[test]
+    fn test_select_active_region_weighted_single_region() {
+        let regions = vec![RegionInfo {
+            id: Uuid::new_v4(), name: "solo".into(), endpoint: "".into(),
+            status: "active".into(), role: "primary".into(), is_primary: true,
+            health_score: 100.0, latency_ms: Some(5.0), replication_lag_ms: None,
+            weight: 0, last_health_check: None, availability_zone: None, metadata: None,
+        }];
+        let active: Vec<&RegionInfo> = regions.iter().collect();
+        let rr_counter = AtomicU64::new(0);
+
+        let selected = select_active_region(&active, &RoutingMode::Weighted, &rr_counter).unwrap();
+
+        assert_eq!(selected.name, "solo");
     }
 }

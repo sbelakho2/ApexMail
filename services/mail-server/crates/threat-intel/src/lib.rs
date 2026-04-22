@@ -1,14 +1,12 @@
 //! # Threat Intelligence — Feed Ingestion & Reputation
 //!
 //! Aggregates threat intelligence from multiple sources to provide
-//! real-time IP/domain reputation scoring for the mail pipeline:
-//!
+//! real-time IP/domain reputation scoring for the mail pipeline://!
 //! 1. **Feed ingestion** — Parses Spamhaus DROP, AbuseIPDB CSV, Cymru bogon lists,
-//!    and other standard formats
+//! and other standard formats
 //! 2. **IP blocklist** — Efficient in-memory IP set (v4/v6) with CIDR support
 //! 3. **Domain blocklist** — Exact + wildcard domain matching
-//! 4. **Reputation scoring** — Multi-source composite score  
-//! 5. **TTL management** — Automatic expiration of stale entries
+//! 4. **Reputation scoring** — Multi-source composite score //! 5. **TTL management** — Automatic expiration of stale entries
 //!
 //! ## Design
 //!
@@ -35,19 +33,19 @@ use thiserror::Error;
 /// Threat intel errors
 #[derive(Debug, Error)]
 pub enum ThreatIntelError {
-    /// Feed parsing error
+/// Feed parsing error
     #[error("Feed parse error: {0}")]
     ParseError(String),
 
-    /// Network error during feed fetch
+/// Network error during feed fetch
     #[error("Fetch error: {0}")]
     FetchError(String),
 
-    /// Invalid IP address
+/// Invalid IP address
     #[error("Invalid IP: {0}")]
     InvalidIp(String),
 
-    /// Invalid CIDR notation
+/// Invalid CIDR notation
     #[error("Invalid CIDR: {0}")]
     InvalidCidr(String),
 }

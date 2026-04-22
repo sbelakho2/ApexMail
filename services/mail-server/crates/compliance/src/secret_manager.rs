@@ -1,11 +1,11 @@
 //! Secret management — AES-256-GCM encrypted secret storage with access control,
 //! version history, auto-rotation, and type-specific secret generation.
 //!
-//! Encryption: AES-256-GCM with a 32-byte key derived via SHA-256 of the master
-//! key + salt. 12-byte random nonce per encryption. Storage format: base64 of
+//! Encryption:AES-256-GCM with a 32-byte key derived via SHA-256 of the master
+//! key + salt. 12-byte random nonce per encryption. Storage format:base64 of
 //! `nonce (12) || ciphertext || tag (16)`.
 //!
-//! Access control: 3-level hierarchy (read=1, write=2, admin=3). Creator always
+//! Access control:3-level hierarchy (read=1, write=2, admin=3). Creator always
 //! has admin. Grants have optional expiry and revocation.
 
 use aes_gcm::{
@@ -27,7 +27,7 @@ use crate::types::*;
 pub struct SecretManager {
     db: PgPool,
     config: SecretsConfig,
-    /// 32-byte derived encryption key
+/// 32-byte derived encryption key
     cipher_key: [u8; 32],
 }
 
@@ -41,9 +41,9 @@ impl SecretManager {
         })
     }
 
-    // ── CRUD ────────────────────────────────────────────────
+// ── CRUD ────────────────────────────────────────────────
 
-    /// Create a new secret. If `value` is None, auto-generates based on type.
+/// Create a new secret. If `value` is None, auto-generates based on type.
     pub async fn create_secret(
         &self,
         input: &SecretCreateInput,
@@ -89,11 +89,11 @@ impl SecretManager {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        // Grant creator admin access
+// Grant creator admin access
         self.grant_access_internal(&id, &input.created_by, AccessLevel::Admin, &input.created_by, None)
             .await?;
 
-        // Save initial version
+// Save initial version
         self.save_version(&id, 1, &encrypted).await?;
 
         let secret = Secret {
@@ -116,7 +116,7 @@ impl SecretManager {
         Ok(secret)
     }
 
-    /// Get a secret (decrypted) if the user has read access.
+/// Get a secret (decrypted) if the user has read access.
     pub async fn get_secret(
         &self,
         secret_id: &str,
@@ -129,7 +129,7 @@ impl SecretManager {
         let row = self.fetch_secret_row(secret_id).await?;
         match row {
             Some(s) => {
-                // Check expiry
+// Check expiry
                 if let Some(exp) = s.expires_at {
                     if exp < Utc::now() {
                         return Err("Secret has expired".into());
@@ -143,7 +143,7 @@ impl SecretManager {
         }
     }
 
-    /// Get a secret by tenant + name.
+/// Get a secret by tenant + name.
     pub async fn get_secret_by_name(
         &self,
         tenant_id: &str,
@@ -165,7 +165,7 @@ impl SecretManager {
         }
     }
 
-    /// Update secret metadata (not the value — use rotate for that).
+/// Update secret metadata (not the value — use rotate for that).
     pub async fn update_secret(
         &self,
         secret_id: &str,
@@ -216,7 +216,7 @@ impl SecretManager {
             .ok_or_else(|| "Secret not found".into())
     }
 
-    /// Rotate a secret (generate or set new value).
+/// Rotate a secret (generate or set new value).
     pub async fn rotate_secret(
         &self,
         secret_id: &str,
@@ -272,7 +272,7 @@ impl SecretManager {
         Ok((updated, value))
     }
 
-    /// Delete a secret (archive first).
+/// Delete a secret (archive first).
     pub async fn delete_secret(
         &self,
         secret_id: &str,
@@ -282,7 +282,7 @@ impl SecretManager {
             return Err("Access denied to delete secret".into());
         }
 
-        // Archive
+// Archive
         sqlx::query(
             "INSERT INTO secrets_archive SELECT * FROM secrets WHERE id = $1",
         )
@@ -291,7 +291,7 @@ impl SecretManager {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        // Delete versions, access, then secret
+// Delete versions, access, then secret
         sqlx::query("DELETE FROM secret_versions WHERE secret_id = $1")
             .bind(secret_id)
             .execute(&self.db)
@@ -315,7 +315,7 @@ impl SecretManager {
         Ok(())
     }
 
-    /// List secrets for a tenant (no decrypted values).
+/// List secrets for a tenant (no decrypted values).
     pub async fn list_secrets(
         &self,
         tenant_id: &str,
@@ -357,7 +357,7 @@ impl SecretManager {
         rows.into_iter().map(|r| r.into_secret()).collect()
     }
 
-    // ── Access Control ──────────────────────────────────────
+// ── Access Control ──────────────────────────────────────
 
     pub async fn grant_access(
         &self,
@@ -428,7 +428,7 @@ impl SecretManager {
         }
     }
 
-    // ── Version History ─────────────────────────────────────
+// ── Version History ─────────────────────────────────────
 
     pub async fn get_version_history(
         &self,
@@ -491,9 +491,9 @@ impl SecretManager {
             .ok_or_else(|| "Secret not found after rollback".into())
     }
 
-    // ── Auto-Rotation ───────────────────────────────────────
+// ── Auto-Rotation ───────────────────────────────────────
 
-    /// Get secrets due for rotation.
+/// Get secrets due for rotation.
     pub async fn get_secrets_for_rotation(&self) -> Result<Vec<Secret>, String> {
         let rows: Vec<SecretRow> = sqlx::query_as(
             "SELECT id, tenant_id, name, type, encrypted_value, version,
@@ -510,7 +510,7 @@ impl SecretManager {
         rows.into_iter().map(|r| r.into_secret()).collect()
     }
 
-    /// Process all auto-rotations.
+/// Process all auto-rotations.
     pub async fn process_auto_rotations(
         &self,
     ) -> Result<AutoRotationResult, String> {
@@ -535,7 +535,7 @@ impl SecretManager {
         Ok(AutoRotationResult { rotated, errors })
     }
 
-    // ── Internal Helpers ────────────────────────────────────
+// ── Internal Helpers ────────────────────────────────────
 
     async fn grant_access_internal(
         &self,
@@ -673,7 +673,7 @@ impl SecretManager {
             .encrypt(nonce, plaintext.as_bytes())
             .map_err(|e| format!("Encryption failed: {e}"))?;
 
-        // Pack: nonce (12) || ciphertext+tag
+// Pack:nonce (12) || ciphertext+tag
         let mut packed = Vec::with_capacity(12 + ciphertext.len());
         packed.extend_from_slice(&nonce_bytes);
         packed.extend_from_slice(&ciphertext);
@@ -712,7 +712,7 @@ fn derive_key(master_key: &str) -> Result<[u8; 32], String> {
     let salt = std::env::var("SECRETS_KDF_SALT")
         .unwrap_or_else(|_| "apexmail-compliance-kdf-v1".to_string());
 
-    // HKDF-Extract(salt, ikm)
+// HKDF-Extract(salt, ikm)
     let mut extract = <HmacSha256 as Mac>::new_from_slice(salt.as_bytes()).or_else(|e| {
         warn!(error = %e, "Invalid KDF salt; falling back to static salt");
         <HmacSha256 as Mac>::new_from_slice(b"apexmail-compliance-kdf-v1")
@@ -721,7 +721,7 @@ fn derive_key(master_key: &str) -> Result<[u8; 32], String> {
     extract.update(master_key.as_bytes());
     let prk = extract.finalize().into_bytes();
 
-    // HKDF-Expand(prk, info, 32)
+// HKDF-Expand(prk, info, 32)
     let info = b"apexmail-secret-manager-encryption-key-v1";
     let mut expand = <HmacSha256 as Mac>::new_from_slice(&prk)
         .map_err(|e| format!("KDF PRK init: {e}"))?;
@@ -880,9 +880,9 @@ mod tests {
         let plaintext = "same-value";
         let e1 = mgr.encrypt(plaintext).unwrap();
         let e2 = mgr.encrypt(plaintext).unwrap();
-        // Different nonces → different ciphertext
+// Different nonces → different ciphertext
         assert_ne!(e1, e2);
-        // Both decrypt to same value
+// Both decrypt to same value
         assert_eq!(mgr.decrypt(&e1).unwrap(), plaintext);
         assert_eq!(mgr.decrypt(&e2).unwrap(), plaintext);
     }
@@ -894,7 +894,7 @@ mod tests {
         };
         let encrypted = mgr.encrypt("secret").unwrap();
         let mut bytes = B64.decode(&encrypted).unwrap();
-        // Tamper with ciphertext
+// Tamper with ciphertext
         if let Some(b) = bytes.last_mut() {
             *b ^= 0xFF;
         }
@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn test_generate_encryption_key() {
         let val = generate_secret_value(SecretType::EncryptionKey);
-        // Base64 encoded
+// Base64 encoded
         assert!(B64.decode(&val).is_ok());
     }
 

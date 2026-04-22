@@ -20,14 +20,14 @@ use compliance::secret_manager::SecretManager;
 #[derive(Parser)]
 #[command(name = "compliance-server")]
 struct Cli {
-    /// Override port (default from COMPLIANCE_PORT or 3011)
+/// Override port (default from COMPLIANCE_PORT or 3011)
     #[arg(short, long)]
     port: Option<u16>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Init tracing
+// Init tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     let config = ComplianceConfig::from_env();
     let port = cli.port.unwrap_or(config.port);
 
-    // Database pool
+// Database pool
     let db = PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -52,13 +52,13 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to database");
 
-    // Redis pool
+// Redis pool
     let redis_cfg = RedisConfig::from_url(&config.redis_url);
     let redis = redis_cfg.create_pool(Some(Runtime::Tokio1))?;
 
     info!("Redis pool created");
 
-    // Build services
+// Build services
     let risk_engine = RiskScoringEngine::new(db.clone(), config.clone());
     let content_scanner = ContentScanner::new(db.clone(), config.content.clone());
     let audit_logger = AuditLogger::new(db.clone(), config.audit.clone());
@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
     });
 
-    // Build router with middleware
+// Build router with middleware
     let cors = if config.cors_origin == "*" {
         tower_http::cors::CorsLayer::permissive()
     } else {
@@ -96,13 +96,13 @@ async fn main() -> anyhow::Result<()> {
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors);
 
-    // Start background cron jobs
+// Start background cron jobs
     let cron_state = state.clone();
     let cron_handle = tokio::spawn(async move {
         run_cron_jobs(cron_state).await;
     });
 
-    // Start HTTP server
+// Start HTTP server
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Compliance server listening on {}", addr);
@@ -148,8 +148,7 @@ async fn shutdown_signal() {
     info!("Shutdown signal received");
 }
 
-/// 5 background cron jobs:
-/// 1. GDPR queue processing — every 30s
+/// 5 background cron jobs:/// 1. GDPR queue processing — every 30s
 /// 2. Secret auto-rotation — every 60min
 /// 3. GDPR request expiry — every 5min
 /// 4. Audit archival — daily (every 24h)
@@ -182,13 +181,13 @@ async fn run_cron_jobs(state: Arc<AppState>) {
                 }
             }
             _ = expiry_ticker.tick() => {
-                // Expire overdue GDPR requests
+// Expire overdue GDPR requests
                 match state.gdpr.expire_overdue_requests().await {
                     Ok(n) if n > 0 => info!(count = n, "Expired overdue GDPR requests"),
                     Err(e) => error!(error = %e, "GDPR expiry check failed"),
                     _ => {}
                 }
-                // Expire stale double-opt-in tokens
+// Expire stale double-opt-in tokens
                 match state.gdpr.expire_stale_opt_in_tokens().await {
                     Ok(n) if n > 0 => info!(count = n, "Expired stale DOI tokens"),
                     Err(e) => error!(error = %e, "DOI token expiry failed"),

@@ -21,7 +21,7 @@ pub struct SubmissionSession {
     peer_addr: SocketAddr,
     state: Arc<ServerState>,
     
-    // Session state
+// Session state
     authenticated: bool,
     auth_account_id: Option<Uuid>,
     auth_email: Option<String>,
@@ -31,7 +31,7 @@ pub struct SubmissionSession {
 }
 
 const MAX_MESSAGE_SIZE: usize = 25 * 1024 * 1024; // 25 MB
-/// #171: Maximum recipients per message
+/// #171:Maximum recipients per message
 static MAX_RECIPIENTS: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("SUBMISSION_MAX_RECIPIENTS")
         .ok()
@@ -99,12 +99,12 @@ impl SubmissionSession {
         }
     }
     
-    /// Run the SMTP session
+/// Run the SMTP session
     pub async fn run(&mut self) -> Result<()> {
-        // Send greeting
+// Send greeting
         self.send_response(220, &format!("{} ESMTP ApexMail Submission", self.state.hostname)).await?;
         
-        // Command loop
+// Command loop
         let mut line = String::new();
         loop {
             line.clear();
@@ -117,8 +117,8 @@ impl SubmissionSession {
                     let line = line.trim().to_string();
                     debug!(peer = %self.peer_addr, command = %line, "Received command");
                     
-                    // #166: handle_command returns Ok(true) for QUIT to avoid
-                    // the error handler sending a spurious "500 Internal error".
+// #166:handle_command returns Ok(true) for QUIT to avoid
+// the error handler sending a spurious "500 Internal error".
                     match self.handle_command(&line).await {
                         Ok(true) => break, // QUIT
                         Ok(false) => {}
@@ -138,7 +138,7 @@ impl SubmissionSession {
         Ok(())
     }
     
-    /// Handle an SMTP command. Returns Ok(true) when session should end (QUIT).
+/// Handle an SMTP command. Returns Ok(true) when session should end (QUIT).
     async fn handle_command(&mut self, line: &str) -> Result<bool> {
         let parts: Vec<&str> = line.splitn(2, ' ').collect();
         let command = parts[0].to_uppercase();
@@ -161,9 +161,9 @@ impl SubmissionSession {
         }
     }
     
-    /// Handle EHLO/HELO
+/// Handle EHLO/HELO
     async fn handle_ehlo(&mut self, _domain: &str) -> Result<()> {
-        // #167: SIZE must match MAX_MESSAGE_SIZE (25 MB), was advertising 50 MB
+// #167:SIZE must match MAX_MESSAGE_SIZE (25 MB), was advertising 50 MB
         let mut extensions = vec![
             format!("{}", self.state.hostname),
             format!("SIZE {}", MAX_MESSAGE_SIZE),
@@ -172,17 +172,17 @@ impl SubmissionSession {
             "PIPELINING".to_string(),
         ];
         
-        // Add AUTH if not authenticated
+// Add AUTH if not authenticated
         if !self.authenticated {
             extensions.push("AUTH PLAIN LOGIN".to_string());
         }
         
-        // Add STARTTLS
+// Add STARTTLS
         if self.state.enable_starttls {
             extensions.push("STARTTLS".to_string());
         }
         
-        // Send multi-line response
+// Send multi-line response
         for (i, ext) in extensions.iter().enumerate() {
             let prefix = if i == extensions.len() - 1 { "250 " } else { "250-" };
             self.send_line(&format!("{}{}", prefix, ext)).await?;
@@ -191,7 +191,7 @@ impl SubmissionSession {
         Ok(())
     }
     
-    /// Handle AUTH
+/// Handle AUTH
     async fn handle_auth(&mut self, args: &str) -> Result<()> {
         if self.authenticated {
             self.send_response(503, "Already authenticated").await?;
@@ -207,7 +207,7 @@ impl SubmissionSession {
                 let credentials = match initial_response {
                     Some(creds) if !creds.is_empty() => creds.to_string(),
                     _ => {
-                        // Request credentials
+// Request credentials
                         self.send_response(334, "").await?;
                         let mut creds = String::new();
                         self.stream.read_line(&mut creds).await?;
@@ -219,14 +219,13 @@ impl SubmissionSession {
                 self.complete_auth(result).await
             }
             "LOGIN" => {
-                // Request username
+// Request username
                 self.send_response(334, "VXNlcm5hbWU6").await?; // "Username:" in base64
                 let mut username = String::new();
                 self.stream.read_line(&mut username).await?;
                 let username = username.trim().to_string();
                 
-                // Request password  
-                self.send_response(334, "UGFzc3dvcmQ6").await?; // "Password:" in base64
+// Request password                 self.send_response(334, "UGFzc3dvcmQ6").await?; // "Password:" in base64
                 let mut password = String::new();
                 self.stream.read_line(&mut password).await?;
                 let password = password.trim().to_string();
@@ -241,7 +240,7 @@ impl SubmissionSession {
         }
     }
     
-    /// Complete authentication
+/// Complete authentication
     async fn complete_auth(&mut self, result: AuthResult) -> Result<()> {
         if result.success {
             self.authenticated = true;
@@ -263,22 +262,22 @@ impl SubmissionSession {
         }
     }
     
-    /// Handle MAIL FROM
+/// Handle MAIL FROM
     async fn handle_mail(&mut self, args: &str) -> Result<()> {
-        // Check authentication if required
+// Check authentication if required
         if self.state.require_auth && !self.authenticated {
             self.send_response(530, "Authentication required").await?;
             return Ok(());
         }
         
-        // Parse MAIL FROM:<address>
+// Parse MAIL FROM:<address>
         let args_upper = args.to_uppercase();
         if !args_upper.starts_with("FROM:") {
             self.send_response(501, "Syntax error").await?;
             return Ok(());
         }
         
-        // #169: Extract address properly, handling ESMTP parameters after '>'
+// #169:Extract address properly, handling ESMTP parameters after '>'
         let rest = args[5..].trim();
         let from = extract_address(rest).unwrap_or_default();
         if from.is_empty() {
@@ -286,17 +285,17 @@ impl SubmissionSession {
             return Ok(());
         }
         
-        // Verify sender matches authenticated user (optional)
+// Verify sender matches authenticated user (optional)
         if self.authenticated {
             if let Some(ref auth_email) = self.auth_email {
                 if from != auth_email.as_str() && !from.ends_with(&format!("@{}", self.state.hostname)) {
                     warn!(
                         peer = %self.peer_addr,
-                        from = %mail_common::pii::redact_email(from),
+                        from = %mail_common::pii::redact_email(&from),
                         auth_email = %mail_common::pii::redact_email(auth_email),
                         "Sender mismatch"
                     );
-                    // Allow it but log - could be sending on behalf of
+// Allow it but log - could be sending on behalf of
                 }
             }
         }
@@ -306,27 +305,27 @@ impl SubmissionSession {
         self.send_response(250, "OK").await
     }
     
-    /// Handle RCPT TO
+/// Handle RCPT TO
     async fn handle_rcpt(&mut self, args: &str) -> Result<()> {
         if self.mail_from.is_none() {
             self.send_response(503, "MAIL first").await?;
             return Ok(());
         }
         
-        // #171: Enforce maximum recipient limit
+// #171:Enforce maximum recipient limit
         if self.rcpt_to.len() >= *MAX_RECIPIENTS {
             self.send_response(452, "Too many recipients").await?;
             return Ok(());
         }
         
-        // Parse RCPT TO:<address>
+// Parse RCPT TO:<address>
         let args_upper = args.to_uppercase();
         if !args_upper.starts_with("TO:") {
             self.send_response(501, "Syntax error").await?;
             return Ok(());
         }
         
-        // #172: Extract address properly, handling ESMTP parameters after '>'
+// #172:Extract address properly, handling ESMTP parameters after '>'
         let rest = args[3..].trim();
         let to = extract_address(rest).unwrap_or_default();
         
@@ -339,7 +338,7 @@ impl SubmissionSession {
         self.send_response(250, "OK").await
     }
     
-    /// Handle DATA
+/// Handle DATA
     async fn handle_data(&mut self) -> Result<()> {
         if self.mail_from.is_none() {
             self.send_response(503, "MAIL first").await?;
@@ -353,12 +352,12 @@ impl SubmissionSession {
         
         self.send_response(354, "Start mail input; end with <CRLF>.<CRLF>").await?;
         
-        // Read message data
+// Read message data
         self.data_buffer.clear();
         let mut line = String::new();
         let mut too_large = false;
         
-        // #170: Total 10-minute deadline for DATA phase to prevent slow-loris
+// #170:Total 10-minute deadline for DATA phase to prevent slow-loris
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
         
         loop {
@@ -386,7 +385,7 @@ impl SubmissionSession {
                     if line.trim() == "." {
                         break;
                     }
-                    // Handle dot-stuffing
+// Handle dot-stuffing
                     let data = if line.starts_with("..") { &line[1..] } else { &line };
                     if !too_large {
                         if self.data_buffer.len() + data.as_bytes().len() > MAX_MESSAGE_SIZE {
@@ -409,12 +408,12 @@ impl SubmissionSession {
             return Ok(());
         }
 
-        // Submit message to outbound queue
+// Submit message to outbound queue
         self.submit_message().await
     }
     
-    /// #168: Split raw message into headers + body so outbound doesn't duplicate headers.
-    /// Submit message to outbound queue
+/// #168:Split raw message into headers + body so outbound doesn't duplicate headers.
+/// Submit message to outbound queue
     async fn submit_message(&mut self) -> Result<()> {
         let from = self.mail_from.as_ref()
             .ok_or_else(|| anyhow::anyhow!("No MAIL FROM set before submitting message"))?
@@ -422,8 +421,8 @@ impl SubmissionSession {
         let to = self.rcpt_to.clone();
         let raw = String::from_utf8_lossy(&self.data_buffer).to_string();
         
-        // #168: Separate headers from body to avoid outbound re-prepending them.
-        // The raw message has headers separated from body by a blank line.
+// #168:Separate headers from body to avoid outbound re-prepending them.
+// The raw message has headers separated from body by a blank line.
         let (headers_part, body_part) = if let Some(sep) = raw.find("\r\n\r\n") {
             (&raw[..sep], &raw[sep + 4..])
         } else if let Some(sep) = raw.find("\n\n") {
@@ -434,7 +433,7 @@ impl SubmissionSession {
         
         info!(
             peer = %self.peer_addr,
-            from = %mail_common::pii::redact_email(from),
+            from = %mail_common::pii::redact_email(&from),
             to = %mail_common::pii::redact_email_list(&to),
             size = self.data_buffer.len(),
             "Submitting message"
@@ -442,14 +441,14 @@ impl SubmissionSession {
         
         let message_id = Uuid::new_v4();
         
-        // Parse subject from headers
+// Parse subject from headers
         let subject = headers_part.lines()
             .find(|l| l.to_lowercase().starts_with("subject:"))
             .map(|l| l[8..].trim().to_string())
             .unwrap_or_else(|| "(no subject)".to_string());
         
-        // Store headers separately and body as text_body so outbound
-        // can reconstruct without duplicating headers.
+// Store headers separately and body as text_body so outbound
+// can reconstruct without duplicating headers.
         sqlx::query(r#"
             INSERT INTO email_queue (
                 id, from_address, to_addresses, subject, 
@@ -468,14 +467,14 @@ impl SubmissionSession {
         
         info!(
             message_id = %message_id,
-            from = %mail_common::pii::redact_email(from),
+            from = %mail_common::pii::redact_email(&from),
             to = %mail_common::pii::redact_email_list(&to),
             "Message queued"
         );
         
         self.send_response(250, &format!("OK, message queued as {}", message_id)).await?;
         
-        // Reset session state
+// Reset session state
         self.mail_from = None;
         self.rcpt_to.clear();
         self.data_buffer.clear();
@@ -483,7 +482,7 @@ impl SubmissionSession {
         Ok(())
     }
     
-    /// Handle RSET
+/// Handle RSET
     async fn handle_rset(&mut self) -> Result<()> {
         self.mail_from = None;
         self.rcpt_to.clear();
@@ -491,19 +490,19 @@ impl SubmissionSession {
         self.send_response(250, "OK").await
     }
     
-    /// Handle NOOP
+/// Handle NOOP
     async fn handle_noop(&mut self) -> Result<()> {
         self.send_response(250, "OK").await
     }
     
-    /// Handle QUIT — #166: Returns Ok(()) instead of Err("QUIT") to avoid
-    /// the error handler sending a spurious "500 Internal error" after "221 Bye".
+/// Handle QUIT — #166:Returns Ok() instead of Err("QUIT") to avoid
+/// the error handler sending a spurious "500 Internal error" after "221 Bye".
     async fn handle_quit(&mut self) -> Result<()> {
         self.send_response(221, &format!("{} Bye", self.state.hostname)).await?;
         Ok(())
     }
     
-    /// Handle STARTTLS
+/// Handle STARTTLS
     async fn handle_starttls(&mut self) -> Result<()> {
         if !self.state.enable_starttls {
             self.send_response(502, "STARTTLS not available").await?;
@@ -537,7 +536,7 @@ impl SubmissionSession {
         let tls_stream = acceptor.accept(tcp_stream).await?;
         self.stream = SessionStream::Tls(BufStream::new(tls_stream));
 
-        // Reset session state per RFC after TLS negotiation
+// Reset session state per RFC after TLS negotiation
         self.authenticated = false;
         self.auth_account_id = None;
         self.auth_email = None;
@@ -548,12 +547,12 @@ impl SubmissionSession {
         Ok(())
     }
     
-    /// Send an SMTP response
+/// Send an SMTP response
     async fn send_response(&mut self, code: u16, message: &str) -> Result<()> {
         self.send_line(&format!("{} {}", code, message)).await
     }
     
-    /// Send a line
+/// Send a line
     async fn send_line(&mut self, line: &str) -> Result<()> {
         self.stream.write_all(line.as_bytes()).await?;
         self.stream.write_all(b"\r\n").await?;
@@ -562,7 +561,57 @@ impl SubmissionSession {
     }
 }
 
-/// #169/#172: Extract email address from SMTP command argument,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    async fn connected_streams() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (server, client)
+    }
+
+    fn test_state() -> Arc<ServerState> {
+        Arc::new(ServerState {
+            hostname: "apexmail.test".into(),
+            require_auth: true,
+            enable_starttls: false,
+            outbound_url: "http://127.0.0.1:0".into(),
+            db_pool: PgPoolOptions::new()
+                .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:5435/apexmail")
+                .unwrap(),
+            tls_acceptor: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn handle_mail_allows_authenticated_sender_mismatch() {
+        let (server_stream, mut client_stream) = connected_streams().await;
+        let peer_addr = "127.0.0.1:2525".parse().unwrap();
+        let mut session = SubmissionSession::new(server_stream, peer_addr, test_state());
+        session.authenticated = true;
+        session.auth_email = Some("auth@apexmail.test".into());
+
+        session
+            .handle_mail("FROM:<external@example.com>")
+            .await
+            .unwrap();
+
+        assert_eq!(session.mail_from.as_deref(), Some("external@example.com"));
+
+        let mut buf = [0u8; 128];
+        let n = client_stream.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(response.contains("250 OK"));
+    }
+}
+
+/// #169/#172:Extract email address from SMTP command argument,
 /// properly handling angle brackets and ESMTP parameters after '>'.
 fn extract_address(s: &str) -> Option<String> {
     let s = s.trim();
@@ -573,7 +622,7 @@ fn extract_address(s: &str) -> Option<String> {
         }
         return None; // malformed
     }
-    // Bare address: take up to first whitespace
+// Bare address:take up to first whitespace
     let addr = s.split_whitespace().next()?;
     if addr.is_empty() {
         return None;

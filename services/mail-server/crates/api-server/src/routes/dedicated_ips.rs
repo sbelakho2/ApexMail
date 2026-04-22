@@ -1,7 +1,6 @@
 //! Dedicated IP management routes.
 //!
-//! Provides full lifecycle management for dedicated sending IPs:
-//! allocation (via Hetzner Cloud), warmup, monitoring, and release.
+//! Provides full lifecycle management for dedicated sending IPs://! allocation (via Hetzner Cloud), warmup, monitoring, and release.
 //!
 //! ## Plan gating
 //!
@@ -137,8 +136,7 @@ const ADD_ON_PRICE_CENTS: i32 = 3000;
 // ─── Handlers ──────────────────────────────────────────────────
 
 /// `POST /v1/dedicated-ips` — Allocate a new dedicated IP for the tenant.
-///
-/// Plan-gated: checks subscription → plan → `dedicated_ip` feature flag.
+/// Plan-gated:checks subscription → plan → `dedicated_ip` feature flag.
 /// IPs within `dedicated_ip_count` are `included`; extras are `pending_charge`.
 async fn allocate_ip(
     State(state): State<AppState>,
@@ -149,7 +147,7 @@ async fn allocate_ip(
 
     let region = body.and_then(|b| b.0.region);
 
-    // Delegate to Hetzner IP provider (handles plan check, floating IP creation)
+// Delegate to Hetzner IP provider (handles plan check, floating IP creation)
     let ip_provider = state
         .ip_provider
         .as_ref()
@@ -160,11 +158,15 @@ async fn allocate_ip(
         .await
         .map_err(ip_provider_to_api_error)?;
 
-    // Fetch the just-created DB row for the full response
+// Fetch the just-created DB row for the full response
     let row = sqlx::query_as::<_, DedicatedIpRow>(
         "SELECT id, ip_address, rdns_hostname, region, status,
                 warmup_progress, warmup_started_at, warmup_completed_at,
-                billing_status, allocated_at, created_at, updated_at
+                billing_status, allocated_at, created_at, updated_at,
+                0::bigint as emails_sent_total,
+                0::bigint as bounces_total,
+                0::bigint as complaints_total,
+                false as blocklisted
          FROM dedicated_ips
          WHERE tenant_id = $1 AND ip_address = $2
          ORDER BY created_at DESC LIMIT 1",
@@ -185,7 +187,6 @@ async fn allocate_ip(
 }
 
 /// `GET /v1/dedicated-ips` — List tenant's dedicated IPs with allocation summary.
-///
 /// Returns the enriched `ListResponse` envelope expected by the console.
 async fn list_ips(
     State(state): State<AppState>,
@@ -197,7 +198,7 @@ async fn list_ips(
     let limit = clamp_limit(params.limit, 200);
     let offset = params.offset.clamp(0, 100_000);
 
-    // Count total IPs (non-retired) for pagination
+// Count total IPs (non-retired) for pagination
     let (total,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM dedicated_ips
          WHERE tenant_id = $1 AND status != 'retired'",
@@ -206,15 +207,41 @@ async fn list_ips(
     .fetch_one(&state.db)
     .await?;
 
-    // Fetch IPs (include retired for history, most recent first)
+// Fetch IPs (include retired for history, most recent first)
     let rows = sqlx::query_as::<_, DedicatedIpRow>(
-        "SELECT id, ip_address, rdns_hostname, region, status,
-                warmup_progress, warmup_started_at, warmup_completed_at,
-                billing_status, allocated_at, created_at, updated_at
-         FROM dedicated_ips
-         WHERE tenant_id = $1
-         ORDER BY created_at DESC
-         LIMIT $2 OFFSET $3",
+         "SELECT d.id, d.ip_address, d.rdns_hostname, d.region, d.status,
+              d.warmup_progress, d.warmup_started_at, d.warmup_completed_at,
+              d.billing_status, d.allocated_at, d.created_at, d.updated_at,
+              COALESCE(stats.emails_sent_total, 0)::bigint as emails_sent_total,
+              COALESCE(bounces.bounces_total, 0)::bigint as bounces_total,
+              COALESCE(complaints.complaints_total, 0)::bigint as complaints_total,
+              COALESCE(bounces.blocklisted, false) as blocklisted
+          FROM dedicated_ips d
+          LEFT JOIN (
+              SELECT ip_address::text as ip_address,
+                  COALESCE(SUM(messages_sent), 0)::bigint as emails_sent_total
+              FROM self_hosted_send_stats
+              WHERE tenant_id = $1
+              GROUP BY ip_address::text
+          ) stats ON stats.ip_address = d.ip_address
+          LEFT JOIN (
+              SELECT source_ip::text as ip_address,
+                  COUNT(*)::bigint as bounces_total,
+                  BOOL_OR(bounce_type = 'block') as blocklisted
+              FROM self_hosted_bounces
+              WHERE tenant_id = $1
+              GROUP BY source_ip::text
+          ) bounces ON bounces.ip_address = d.ip_address
+          LEFT JOIN (
+              SELECT source_ip::text as ip_address,
+                  COUNT(*)::bigint as complaints_total
+              FROM self_hosted_complaints
+              WHERE tenant_id = $1
+              GROUP BY source_ip::text
+          ) complaints ON complaints.ip_address = d.ip_address
+          WHERE d.tenant_id = $1
+          ORDER BY d.created_at DESC
+          LIMIT $2 OFFSET $3",
     )
     .bind(&auth.tenant_id)
     .bind(limit)
@@ -222,7 +249,7 @@ async fn list_ips(
     .fetch_all(&state.db)
     .await?;
 
-    // Build allocation summary from the tenant's plan
+// Build allocation summary from the tenant's plan
     let allocation = build_allocation_summary(&state, &auth.tenant_id).await?;
 
     let ips: Vec<DedicatedIpResponse> = rows.into_iter().map(|r| r.into_response()).collect();
@@ -240,7 +267,6 @@ async fn list_ips(
 }
 
 /// `DELETE /v1/dedicated-ips/:id` — Release a dedicated IP.
-///
 /// Deletes the Hetzner floating IP, marks billing as `pending_cancel`,
 /// and retires the DB record. If this was the tenant's last dedicated IP,
 /// the routing cache trigger reverts them to SES shared sending.
@@ -271,7 +297,6 @@ async fn release_ip(
 }
 
 /// `POST /v1/dedicated-ips/:id/warmup` — Start or resume IP warmup.
-///
 /// Updates the warmup tracking in the database. Warmup is enforced by
 /// the outbound-queue's IP rotation and warmup schedule.
 async fn start_warmup(
@@ -291,9 +316,7 @@ async fn start_warmup(
         .await
         .map_err(ip_provider_to_api_error)?;
 
-    use crate::ip_provider::warmup_schedule::FULL_WARMUP_DAYS;
-    let remaining_days = (FULL_WARMUP_DAYS as i32 - status.warmup_day).max(0) as i64;
-    let est_completion = Utc::now() + chrono::Duration::days(remaining_days);
+    let est_completion = warmup_estimated_completion(status.warmup_started_at);
 
     Ok(Json(WarmupResponse {
         id: id.to_string(),
@@ -315,10 +338,9 @@ async fn build_allocation_summary(
         "SELECT
             COALESCE((p.features->>'dedicated_ip')::boolean, false),
             COALESCE((p.features->>'dedicated_ip_count')::int, 0)
-         FROM subscriptions s
-         JOIN plans p ON p.name = s.plan_name
-         WHERE s.tenant_id = $1 AND s.status = 'active'
-         ORDER BY s.created_at DESC LIMIT 1",
+         FROM tenants t
+         LEFT JOIN plans p ON p.name = t.plan
+         WHERE t.id = $1",
     )
     .bind(tenant_id)
     .fetch_optional(&state.db)
@@ -329,10 +351,6 @@ async fn build_allocation_summary(
         None => return Ok(None),
     };
 
-    if !allowed {
-        return Ok(None);
-    }
-
     let (active,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM dedicated_ips
          WHERE tenant_id = $1 AND status NOT IN ('retired', 'releasing')",
@@ -341,12 +359,57 @@ async fn build_allocation_summary(
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Some(AllocationResponse {
+    Ok(Some(allocation_response(allowed, included, active)))
+}
+
+fn allocation_response(allowed: bool, included: i32, active: i64) -> AllocationResponse {
+    AllocationResponse {
         included,
         active,
-        add_on_available: true,
+        add_on_available: allowed,
         add_on_price_monthly: ADD_ON_PRICE_CENTS,
-    }))
+    }
+}
+
+fn warmup_estimated_completion(warmup_started_at: DateTime<Utc>) -> DateTime<Utc> {
+    use crate::ip_provider::warmup_schedule::FULL_WARMUP_DAYS;
+
+    warmup_started_at + chrono::Duration::days(i64::from(FULL_WARMUP_DAYS))
+}
+
+fn calculate_reputation_score(
+    emails_sent_total: i64,
+    bounces_total: i64,
+    complaints_total: i64,
+    blocklisted: bool,
+) -> f64 {
+    let sent = emails_sent_total.max(0) as f64;
+    let bounce_rate = if sent > 0.0 {
+        bounces_total.max(0) as f64 / sent * 100.0
+    } else {
+        0.0
+    };
+    let complaint_rate = if sent > 0.0 {
+        complaints_total.max(0) as f64 / sent * 100.0
+    } else {
+        0.0
+    };
+
+    let mut score = 100.0;
+
+    if bounce_rate > 2.0 {
+        score -= (bounce_rate - 2.0) * 10.0 * 0.3;
+    }
+
+    if complaint_rate > 0.1 {
+        score -= (complaint_rate - 0.1) * 100.0 * 0.4;
+    }
+
+    if blocklisted {
+        score -= 30.0;
+    }
+
+    score.clamp(0.0, 100.0)
 }
 
 /// Convert IP provider errors to API errors.
@@ -401,10 +464,21 @@ struct DedicatedIpRow {
     allocated_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    emails_sent_total: i64,
+    bounces_total: i64,
+    complaints_total: i64,
+    blocklisted: bool,
 }
 
 impl DedicatedIpRow {
     fn into_response(self) -> DedicatedIpResponse {
+        let reputation_score = calculate_reputation_score(
+            self.emails_sent_total,
+            self.bounces_total,
+            self.complaints_total,
+            self.blocklisted,
+        );
+
         DedicatedIpResponse {
             id: self.id,
             ip_address: self.ip_address,
@@ -417,13 +491,13 @@ impl DedicatedIpRow {
                 current_daily_limit: None, // Populated by warmup sync job
             },
             reputation: ReputationDetail {
-                score: 100.0, // Default score; updated by reputation monitoring
-                blocklisted: false,
+                score: reputation_score,
+                blocklisted: self.blocklisted,
             },
             stats: IpStats {
-                emails_sent_total: 0, // Populated from analytics aggregation
-                bounces_total: 0,
-                complaints_total: 0,
+                emails_sent_total: self.emails_sent_total,
+                bounces_total: self.bounces_total,
+                complaints_total: self.complaints_total,
             },
             created_at: self.created_at.to_rfc3339(),
             updated_at: self.updated_at.to_rfc3339(),
@@ -447,7 +521,7 @@ mod tests {
     #[test]
     fn test_ip_response_serialisation() {
         let resp = DedicatedIpResponse {
-            id: String::nil(),
+            id: String::new(),
             ip_address: "1.2.3.4".into(),
             ptr_record: Some("mail.example.com".into()),
             status: "active".into(),
@@ -479,7 +553,7 @@ mod tests {
     #[test]
     fn test_warmup_response_serialisation() {
         let resp = WarmupResponse {
-            id: String::nil(),
+            id: String::new(),
             ip_address: "1.2.3.4".into(),
             warmup_status: "warming".into(),
             warmup_progress: 0.5,
@@ -513,6 +587,32 @@ mod tests {
     }
 
     #[test]
+    fn test_allocation_response_for_ineligible_plan_keeps_zero_entitlement_visible() {
+        let resp = allocation_response(false, 0, 0);
+
+        assert_eq!(resp.included, 0);
+        assert_eq!(resp.active, 0);
+        assert!(!resp.add_on_available);
+        assert_eq!(resp.add_on_price_monthly, ADD_ON_PRICE_CENTS);
+    }
+
+    #[test]
+    fn test_warmup_estimated_completion_preserves_original_start_time() {
+        let started_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T13:45:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let estimated = warmup_estimated_completion(started_at);
+
+        assert_eq!(
+            estimated,
+            started_at
+                + chrono::Duration::days(i64::from(crate::ip_provider::warmup_schedule::FULL_WARMUP_DAYS))
+        );
+        assert_eq!(estimated.time(), started_at.time());
+    }
+
+    #[test]
     fn test_ip_provider_to_api_error_plan_not_eligible() {
         let err = ip_provider_to_api_error(IpProviderError::PlanNotEligible);
         match err {
@@ -530,5 +630,283 @@ mod tests {
             ApiError::ServiceUnavailable(msg) => assert!(msg.contains("fsn1")),
             other => panic!("expected ServiceUnavailable, got {other:?}"),
         }
+    }
+
+    // ── Aggressive fail-first tests ────────────────────────────
+
+    #[test]
+    fn test_all_ip_provider_error_variants_map_correctly() {
+        // Every IpProviderError variant must map to a distinct ApiError
+        let plan_err = ip_provider_to_api_error(IpProviderError::PlanNotEligible);
+        assert!(matches!(plan_err, ApiError::Forbidden(_)));
+
+        let limit_err = ip_provider_to_api_error(IpProviderError::LimitReached {
+            tenant_id: "t1".into(),
+            limit: 5,
+        });
+        assert!(matches!(limit_err, ApiError::BadRequest(_)));
+
+        let not_found_err = ip_provider_to_api_error(IpProviderError::IpNotFound {
+            ip: "1.2.3.4".into(),
+        });
+        assert!(matches!(not_found_err, ApiError::NotFound(_)));
+
+        let hetzner_err = ip_provider_to_api_error(IpProviderError::HetznerApi("timeout".into()));
+        assert!(matches!(hetzner_err, ApiError::Internal(_)));
+
+        let not_configured = ip_provider_to_api_error(IpProviderError::NotConfigured);
+        assert!(matches!(not_configured, ApiError::ServiceUnavailable(_)));
+
+        let db_err = ip_provider_to_api_error(IpProviderError::Database("conn refused".into()));
+        assert!(matches!(db_err, ApiError::Internal(_)));
+    }
+
+    #[test]
+    fn test_plan_not_eligible_message_mentions_upgrade() {
+        let err = ip_provider_to_api_error(IpProviderError::PlanNotEligible);
+        match err {
+            ApiError::Forbidden(msg) => {
+                assert!(msg.to_lowercase().contains("upgrade"),
+                    "PlanNotEligible must mention upgrade: {msg}");
+            }
+            other => panic!("expected Forbidden, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_limit_reached_includes_limit_number() {
+        let err = ip_provider_to_api_error(IpProviderError::LimitReached {
+            tenant_id: "tenant_abc".into(),
+            limit: 42,
+        });
+        match err {
+            ApiError::BadRequest(msg) => {
+                assert!(msg.contains("42"), "LimitReached must include limit number: {msg}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_allocate_ip_request_defaults_region_to_none() {
+        let req: AllocateIpRequest = serde_json::from_str("{}").unwrap();
+        assert!(req.region.is_none());
+    }
+
+    #[test]
+    fn test_allocate_ip_request_accepts_region() {
+        let req: AllocateIpRequest = serde_json::from_str(r#"{"region":"us-east"}"#).unwrap();
+        assert_eq!(req.region.as_deref(), Some("us-east"));
+    }
+
+    #[test]
+    fn test_add_on_price_is_30_dollars() {
+        assert_eq!(ADD_ON_PRICE_CENTS, 3000,
+            "add-on price must be $30.00 = 3000 cents");
+    }
+
+    #[test]
+    fn test_dedicated_ip_response_camel_case() {
+        let resp = DedicatedIpResponse {
+            id: "test".into(),
+            ip_address: "1.2.3.4".into(),
+            ptr_record: None,
+            status: "active".into(),
+            warmup: WarmupDetail {
+                started_at: None,
+                completed_at: None,
+                progress_percent: 0.0,
+                current_daily_limit: None,
+            },
+            reputation: ReputationDetail {
+                score: 100.0,
+                blocklisted: false,
+            },
+            stats: IpStats {
+                emails_sent_total: 0,
+                bounces_total: 0,
+                complaints_total: 0,
+            },
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        // Verify camelCase field names match what the frontend expects
+        assert!(json.get("ipAddress").is_some(), "must be ipAddress");
+        assert!(json.get("ptrRecord").is_some(), "must be ptrRecord");
+        assert!(json.get("createdAt").is_some(), "must be createdAt");
+        assert!(json.get("updatedAt").is_some(), "must be updatedAt");
+        // snake_case must NOT be present
+        assert!(json.get("ip_address").is_none(), "must not be snake_case");
+        assert!(json.get("ptr_record").is_none(), "must not be snake_case");
+    }
+
+    #[test]
+    fn test_pagination_meta_has_more_calculation() {
+        let meta = PaginationMeta {
+            total: 150,
+            limit: 50,
+            offset: 0,
+            has_more: true,
+        };
+        assert!(meta.has_more);
+        assert_eq!(meta.total, 150);
+
+        let meta_no_more = PaginationMeta {
+            total: 50,
+            limit: 50,
+            offset: 0,
+            has_more: false,
+        };
+        assert!(!meta_no_more.has_more);
+    }
+
+    #[test]
+    fn test_list_ips_query_defaults() {
+        let q: ListIpsQuery = serde_json::from_str("{}").unwrap();
+        assert_eq!(q.limit, default_limit());
+        assert_eq!(q.offset, 0);
+    }
+
+    #[test]
+    fn test_warmup_detail_progress_is_percentage() {
+        // warmup_progress stored as 0.0-1.0, converted to 0-100%
+        let row = DedicatedIpRow {
+            id: "test".into(),
+            ip_address: "1.2.3.4".into(),
+            rdns_hostname: None,
+            region: "fsn1".into(),
+            status: "warming".into(),
+            warmup_progress: 0.5,
+            warmup_started_at: None,
+            warmup_completed_at: None,
+            billing_status: None,
+            allocated_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            emails_sent_total: 0,
+            bounces_total: 0,
+            complaints_total: 0,
+            blocklisted: false,
+        };
+        let resp = row.into_response();
+        assert_eq!(resp.warmup.progress_percent, 50.0,
+            "0.5 progress must display as 50%");
+    }
+
+    #[test]
+    fn test_reputation_defaults_perfect_score() {
+        let row = DedicatedIpRow {
+            id: "test".into(),
+            ip_address: "1.2.3.4".into(),
+            rdns_hostname: None,
+            region: "fsn1".into(),
+            status: "active".into(),
+            warmup_progress: 0.0,
+            warmup_started_at: None,
+            warmup_completed_at: None,
+            billing_status: None,
+            allocated_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            emails_sent_total: 0,
+            bounces_total: 0,
+            complaints_total: 0,
+            blocklisted: false,
+        };
+        let resp = row.into_response();
+
+        // New IPs should have perfect default reputation
+        assert_eq!(resp.reputation.score, 100.0);
+        assert!(!resp.reputation.blocklisted);
+    }
+
+    // ── Aggressive fail-first: reputation edge cases ────────────
+
+    #[test]
+    fn test_reputation_score_clamped_at_zero() {
+        // Extreme bounce + complaint + blocklisted should still be >= 0
+        let score = calculate_reputation_score(100, 100, 100, true);
+        assert!(score >= 0.0, "reputation must never go below 0: got {score}");
+    }
+
+    #[test]
+    fn test_reputation_score_clamped_at_100() {
+        let score = calculate_reputation_score(0, 0, 0, false);
+        assert_eq!(score, 100.0, "no activity must yield perfect score");
+    }
+
+    #[test]
+    fn test_reputation_blocklisted_deducts_30_points() {
+        let clean = calculate_reputation_score(1000, 0, 0, false);
+        let blocked = calculate_reputation_score(1000, 0, 0, true);
+        let diff = clean - blocked;
+        assert_eq!(diff, 30.0, "blocklist must deduct exactly 30 points");
+    }
+
+    #[test]
+    fn test_reputation_high_bounce_rate_penalizes() {
+        let good = calculate_reputation_score(1000, 10, 0, false); // 1% bounce
+        let bad = calculate_reputation_score(1000, 100, 0, false); // 10% bounce
+        assert!(bad < good, "high bounce rate must reduce reputation");
+    }
+
+    #[test]
+    fn test_reputation_high_complaint_rate_penalizes() {
+        let good = calculate_reputation_score(10000, 0, 5, false); // 0.05%
+        let bad = calculate_reputation_score(10000, 0, 50, false); // 0.5%
+        assert!(bad < good, "high complaint rate must reduce reputation");
+    }
+
+    #[test]
+    fn test_reputation_zero_sent_yields_perfect_score() {
+        let score = calculate_reputation_score(0, 0, 0, false);
+        assert_eq!(score, 100.0, "no emails sent = perfect reputation");
+    }
+
+    #[test]
+    fn test_allocation_response_add_on_price_matches_constant() {
+        let resp = allocation_response(true, 3, 5);
+        assert_eq!(resp.add_on_price_monthly, ADD_ON_PRICE_CENTS);
+        assert!(resp.add_on_available);
+        assert_eq!(resp.included, 3);
+        assert_eq!(resp.active, 5);
+    }
+
+    #[test]
+    fn test_list_ips_query_deser_defaults() {
+        let q: ListIpsQuery = serde_json::from_str("{}").unwrap();
+        assert_eq!(q.limit, default_limit());
+        assert_eq!(q.offset, 0);
+    }
+
+    #[test]
+    fn test_reputation_uses_aggregated_delivery_stats() {
+        let row = DedicatedIpRow {
+            id: "test".into(),
+            ip_address: "1.2.3.4".into(),
+            rdns_hostname: None,
+            region: "fsn1".into(),
+            status: "active".into(),
+            warmup_progress: 1.0,
+            warmup_started_at: None,
+            warmup_completed_at: None,
+            billing_status: None,
+            allocated_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            emails_sent_total: 1_000,
+            bounces_total: 50,
+            complaints_total: 2,
+            blocklisted: true,
+        };
+
+        let resp = row.into_response();
+
+        assert_eq!(resp.stats.emails_sent_total, 1_000);
+        assert_eq!(resp.stats.bounces_total, 50);
+        assert_eq!(resp.stats.complaints_total, 2);
+        assert!(resp.reputation.blocklisted);
+        assert!(resp.reputation.score < 100.0);
     }
 }

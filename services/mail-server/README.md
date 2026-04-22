@@ -89,7 +89,7 @@ concurrent_deliveries = 10
 
 ### Login CAPTCHA (mCaptcha)
 
-`mCaptcha` enforcement for interactive login flows is configured at the application layer (`apps/web` and `apps/control-plane`), not in this Rust mail server runtime.
+`mCaptcha` enforcement for interactive login flows is configured in the Rust UI/application layer (`api-server` plus `ui-foundation`), not in the SMTP/mail transport runtime itself.
 
 Use these docs for setup and behavior:
 

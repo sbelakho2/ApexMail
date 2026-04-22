@@ -1,7 +1,6 @@
 //! Benchmarks for WAF engine performance — critical hot path.
 //!
-//! Measures throughput for:
-//! - Clean requests (fast path)
+//! Measures throughput for://! - Clean requests (fast path)
 //! - SQLi payloads
 //! - XSS payloads
 //! - Path traversal
@@ -37,13 +36,13 @@ fn bench_clean_request(c: &mut Criterion) {
     let mut group = c.benchmark_group("waf_clean_requests");
     group.throughput(Throughput::Elements(1));
 
-    // Simple GET
+// Simple GET
     group.bench_function("simple_get", |b| {
         let req = make_clean_request("/api/v1/users", None);
         b.iter(|| engine.inspect(black_box(&req)))
     });
 
-    // GET with query string
+// GET with query string
     group.bench_function("get_with_query", |b| {
         let req = HttpRequest {
             client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -56,7 +55,7 @@ fn bench_clean_request(c: &mut Criterion) {
         b.iter(|| engine.inspect(black_box(&req)))
     });
 
-    // POST with JSON body
+// POST with JSON body
     group.bench_function("post_json_small", |b| {
         let body = r#"{"name":"John","email":"john@example.com"}"#;
         let req = HttpRequest {
@@ -70,7 +69,7 @@ fn bench_clean_request(c: &mut Criterion) {
         b.iter(|| engine.inspect(black_box(&req)))
     });
 
-    // POST with larger JSON body
+// POST with larger JSON body
     group.bench_function("post_json_1kb", |b| {
         let body = format!(r#"{{"data":"{}"}}"#, "x".repeat(1000));
         let req = HttpRequest {
@@ -98,13 +97,13 @@ fn bench_sqli_detection(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     let sqli_payloads = [
-        ("classic_union", "' UNION SELECT * FROM users--"),
-        ("boolean_blind", "' OR 1=1--"),
-        ("time_blind", "'; WAITFOR DELAY '0:0:5'--"),
-        ("stacked", "'; DROP TABLE users;--"),
+        ("classic_union", "' UNION SELECT * FROM users --"),
+        ("boolean_blind", "' OR 1=1 --"),
+        ("time_blind", "'; WAITFOR DELAY '0:0:5' --"),
+        ("stacked", "'; DROP TABLE users; --"),
         ("comment_bypass", "/*!50000UNION*/SELECT"),
         ("hex_encoded", "0x27206f722031"),
-        ("nested", "' OR/**/1=1/**/--"),
+        ("nested", "' OR/**/1=1/**/ --"),
     ];
 
     for (name, payload) in sqli_payloads {
@@ -272,7 +271,7 @@ fn bench_header_inspection(c: &mut Criterion) {
     let mut group = c.benchmark_group("waf_headers");
     group.throughput(Throughput::Elements(1));
 
-    // Varying number of headers
+// Varying number of headers
     for num_headers in [5, 10, 20, 50] {
         let headers: Vec<(String, String)> = (0..num_headers)
             .map(|i| (format!("x-custom-{}", i), format!("value-{}", i)))
@@ -295,7 +294,7 @@ fn bench_header_inspection(c: &mut Criterion) {
         );
     }
 
-    // Malicious headers
+// Malicious headers
     group.bench_function("xss_in_header", |b| {
         let headers = vec![
             ("x-forwarded-for".into(), "192.168.1.1".into()),

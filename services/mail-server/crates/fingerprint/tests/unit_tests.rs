@@ -1,19 +1,19 @@
 //! Comprehensive unit tests for Fingerprint crate
 
 /// ============================================================================
-/// UNIT TESTS: JA4 TLS Fingerprinting
+/// UNIT TESTS:JA4 TLS Fingerprinting
 /// ============================================================================
 #[cfg(test)]
 mod ja4_tests {
     use sha2::{Sha256, Digest};
     
-    /// GREASE (Generate Random Extensions And Sustain Extensibility) values
-    /// are used to prevent middleboxes from becoming dependent on specific values
+/// GREASE (Generate Random Extensions And Sustain Extensibility) values
+/// are used to prevent middleboxes from becoming dependent on specific values
     fn is_grease_value(value: u16) -> bool {
         (value & 0x0f0f) == 0x0a0a
     }
     
-    /// Create truncated SHA256 hash for JA4 format
+/// Create truncated SHA256 hash for JA4 format
     fn truncate_hash(input: &str, hex_len: usize) -> String {
         let mut hasher = Sha256::new();
         hasher.update(input.as_bytes());
@@ -23,7 +23,7 @@ mod ja4_tests {
     
     #[test]
     fn test_grease_values_comprehensive() {
-        // All valid GREASE values
+// All valid GREASE values
         let grease_values = [
             0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a,
             0x5a5a, 0x6a6a, 0x7a7a, 0x8a8a, 0x9a9a,
@@ -37,7 +37,7 @@ mod ja4_tests {
     
     #[test]
     fn test_common_cipher_suites_not_grease() {
-        // Common TLS 1.3 cipher suites
+// Common TLS 1.3 cipher suites
         let ciphers = [
             0x1301, // TLS_AES_128_GCM_SHA256
             0x1302, // TLS_AES_256_GCM_SHA384
@@ -90,7 +90,7 @@ mod ja4_tests {
     
     #[test]
     fn test_hash_collision_resistance() {
-        // Different inputs should produce different hashes
+// Different inputs should produce different hashes
         let h1 = truncate_hash("input_a", 12);
         let h2 = truncate_hash("input_b", 12);
         let h3 = truncate_hash("input_ab", 12);
@@ -102,19 +102,18 @@ mod ja4_tests {
     
     #[test]
     fn test_ja4_format_construction() {
-        // JA4 format: t13d1516h2_8daaf6152771_02713d6af862
-        // t = protocol (t=TCP, q=QUIC)
-        // 13 = TLS version (13 = 1.3)
-        // d = SNI (d=domain, i=IP)
-        // 15 = cipher count
-        // 16 = extension count  
-        // h2 = ALPN (h2, h1, etc.)
-        // _ = separator
-        // next 12 chars = truncated hash of sorted ciphers
-        // _ = separator
-        // next 12 chars = truncated hash of sorted extensions
+// JA4 format:t13d1516h2_8daaf6152771_02713d6af862
+// t = protocol (t=TCP, q=QUIC)
+// 13 = TLS version (13 = 1.3)
+// d = SNI (d=domain, i=IP)
+// 15 = cipher count
+// 16 = extension count // h2 = ALPN (h2, h1, etc.)
+// _ = separator
+// next 12 chars = truncated hash of sorted ciphers
+// _ = separator
+// next 12 chars = truncated hash of sorted extensions
         
-        // Simulated JA4 construction
+// Simulated JA4 construction
         let protocol = 't';
         let tls_version = "13";
         let sni_type = 'd';
@@ -147,7 +146,7 @@ mod ja4_tests {
     
     #[test]
     fn test_tls_version_map() {
-        // Version mapping for JA4
+// Version mapping for JA4
         let versions = [
             (0x0301, "10"), // TLS 1.0
             (0x0302, "11"), // TLS 1.1
@@ -169,7 +168,7 @@ mod ja4_tests {
 }
 
 /// ============================================================================
-/// UNIT TESTS: HTTP/2 Fingerprinting
+/// UNIT TESTS:HTTP/2 Fingerprinting
 /// ============================================================================
 #[cfg(test)]
 mod http2_tests {
@@ -203,7 +202,7 @@ mod http2_tests {
     fn parse_settings_frame(payload: &[u8]) -> BTreeMap<u16, u32> {
         let mut settings = BTreeMap::new();
         
-        // Each setting is 6 bytes: 2 bytes identifier, 4 bytes value
+// Each setting is 6 bytes:2 bytes identifier, 4 bytes value
         for chunk in payload.chunks_exact(6) {
             let id = u16::from_be_bytes([chunk[0], chunk[1]]);
             let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
@@ -216,12 +215,12 @@ mod http2_tests {
     fn create_fingerprint(settings: &BTreeMap<u16, u32>, window_update: Option<u32>) -> String {
         let mut parts = Vec::new();
         
-        // Add settings in order
+// Add settings in order
         for (&id, &value) in settings {
             parts.push(format!("{}:{}", id, value));
         }
         
-        // Add window update if present
+// Add window update if present
         if let Some(wu) = window_update {
             parts.push(format!("w:{}", wu));
         }
@@ -231,7 +230,7 @@ mod http2_tests {
     
     #[test]
     fn test_parse_settings_single() {
-        // INITIAL_WINDOW_SIZE (0x4) = 65535
+// INITIAL_WINDOW_SIZE (0x4) = 65535
         let payload = [0x00, 0x04, 0x00, 0x00, 0xff, 0xff];
         let settings = parse_settings_frame(&payload);
         
@@ -241,13 +240,13 @@ mod http2_tests {
     
     #[test]
     fn test_parse_settings_multiple() {
-        // Multiple settings
+// Multiple settings
         let mut payload = Vec::new();
-        // HEADER_TABLE_SIZE (0x1) = 4096
+// HEADER_TABLE_SIZE (0x1) = 4096
         payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x10, 0x00]);
-        // MAX_CONCURRENT_STREAMS (0x3) = 100
+// MAX_CONCURRENT_STREAMS (0x3) = 100
         payload.extend_from_slice(&[0x00, 0x03, 0x00, 0x00, 0x00, 0x64]);
-        // INITIAL_WINDOW_SIZE (0x4) = 65535
+// INITIAL_WINDOW_SIZE (0x4) = 65535
         payload.extend_from_slice(&[0x00, 0x04, 0x00, 0x00, 0xff, 0xff]);
         
         let settings = parse_settings_frame(&payload);
@@ -280,14 +279,14 @@ mod http2_tests {
     
     #[test]
     fn test_known_browser_patterns() {
-        // Chrome typical settings
+// Chrome typical settings
         let chrome_settings: Vec<(u16, u32)> = vec![
-            (0x1, 65536),      // HEADER_TABLE_SIZE
-            (0x2, 0),          // ENABLE_PUSH (disabled)
-            (0x3, 1000),       // MAX_CONCURRENT_STREAMS
-            (0x4, 6291456),    // INITIAL_WINDOW_SIZE
-            (0x5, 16384),      // MAX_FRAME_SIZE
-            (0x6, 262144),     // MAX_HEADER_LIST_SIZE
+            (0x1, 65536), // HEADER_TABLE_SIZE
+            (0x2, 0), // ENABLE_PUSH (disabled)
+            (0x3, 1000), // MAX_CONCURRENT_STREAMS
+            (0x4, 6291456), // INITIAL_WINDOW_SIZE
+            (0x5, 16384), // MAX_FRAME_SIZE
+            (0x6, 262144), // MAX_HEADER_LIST_SIZE
         ];
         
         for (id, value) in &chrome_settings {
@@ -306,7 +305,7 @@ mod http2_tests {
 }
 
 /// ============================================================================
-/// UNIT TESTS: Fingerprint Database
+/// UNIT TESTS:Fingerprint Database
 /// ============================================================================
 #[cfg(test)]
 mod database_tests {
@@ -434,7 +433,7 @@ mod database_tests {
 }
 
 /// ============================================================================
-/// UNIT TESTS: Combined Fingerprint
+/// UNIT TESTS:Combined Fingerprint
 /// ============================================================================
 #[cfg(test)]
 mod combined_tests {

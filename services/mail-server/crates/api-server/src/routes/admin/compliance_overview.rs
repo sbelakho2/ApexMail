@@ -1,6 +1,6 @@
 //! Compliance overview endpoint.
 //!
-//! Migrated from: apps/control-plane/src/app/api/compliance/overview/route.ts
+//! Migrated from:apps/control-plane/src/app/api/compliance/overview/route.ts
 
 use super::super::helpers::table_exists;
 use axum::extract::State;
@@ -82,7 +82,7 @@ async fn get_compliance_overview(
     let has_alerts = table_exists(db, "system_alerts").await;
     let has_domains = table_exists(db, "domains").await;
 
-    // Risk summary
+// Risk summary
     let mut risk_summary = RiskSummary { low: 0, medium: 0, high: 0, critical: 0 };
     if has_alerts {
         let rows: Vec<(String, String)> = sqlx::query_as(
@@ -112,7 +112,7 @@ async fn get_compliance_overview(
         }
     }
 
-    // GDPR requests summary
+// GDPR requests summary
     let mut gdpr_requests = GdprRequestSummary { pending: 0, processing: 0, completed: 0, overdue: 0 };
     if has_gdpr {
         let rows: Vec<(String, String)> = sqlx::query_as(
@@ -134,7 +134,7 @@ async fn get_compliance_overview(
         }
     }
 
-    // Audit stats
+// Audit stats
     let audit_row: (String, String) = sqlx::query_as(
         "SELECT COUNT(*) FILTER (WHERE timestamp >= CURRENT_DATE)::text,
                 COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '7 days')::text
@@ -161,7 +161,7 @@ async fn get_compliance_overview(
         alerts_triggered,
     };
 
-    // Policy compliance (domains)
+// Policy compliance (domains)
     let policy_compliance = if has_domains {
         let row: Option<(String, String, String, String, String)> = sqlx::query_as(
             "SELECT COUNT(*)::text,
@@ -189,7 +189,7 @@ async fn get_compliance_overview(
         vec![]
     };
 
-    // Recent alerts
+// Recent alerts
     let recent_alerts = if has_alerts {
         let rows: Vec<(String, String, Option<String>, String, Option<serde_json::Value>, chrono::DateTime<chrono::Utc>)> =
             sqlx::query_as(

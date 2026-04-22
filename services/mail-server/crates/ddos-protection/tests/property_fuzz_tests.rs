@@ -54,7 +54,7 @@ fn hash_ep(path: &str) -> u64 {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 1: Reputation score is always in [0, 100]
+// INVARIANT 1:Reputation score is always in [0, 100]
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -64,7 +64,7 @@ fn property_reputation_score_always_bounded() {
     for _ in 0..1000 {
         let mut rep = ReputationScore::default();
 
-        // Apply random sequence of operations
+// Apply random sequence of operations
         for _ in 0..50 {
             match rng.next_u64() % 6 {
                 0 => rep.record_challenge_passed(),
@@ -77,13 +77,13 @@ fn property_reputation_score_always_bounded() {
             }
 
             assert!(rep.score <= 100, "Score exceeded 100: {}", rep.score);
-            // score is u8, so it can't go below 0 (saturating_sub guarantees this)
+// score is u8, so it can't go below 0 (saturating_sub guarantees this)
         }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 2: SMTP state machine never enters impossible states
+// INVARIANT 2:SMTP state machine never enters impossible states
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -102,9 +102,9 @@ fn property_smtp_state_machine_always_valid() {
         "STARTTLS",
         "AUTH PLAIN dGVzdA==",
         "VRFY user@test.com",
-        "XYZZY",         // Unknown
-        "",               // Empty
-        &long_cmd,        // Very long
+        "XYZZY", // Unknown
+        "", // Empty
+        &long_cmd, // Very long
     ];
     let command_refs = &commands;
 
@@ -132,10 +132,10 @@ fn property_smtp_state_machine_always_valid() {
 
             let result = prot.process_command(cmd);
 
-            // The result must be Ok or a known error — never panic
+// The result must be Ok or a known error — never panic
             match result {
                 Ok(_action) => {
-                    // After QUIT, state must be Quit (even under tarpit)
+// After QUIT, state must be Quit (even under tarpit)
                     if cmd.to_uppercase().starts_with("QUIT") {
                         assert_eq!(
                             prot.state(),
@@ -147,17 +147,17 @@ fn property_smtp_state_machine_always_valid() {
                     }
                 }
                 Err(SmtpProtectionError::TooManyCommands) => {
-                    // Expected after hitting limit
+// Expected after hitting limit
                     break;
                 }
                 Err(SmtpProtectionError::TooManyRecipients) => {
-                    // Expected after hitting recipient limit
+// Expected after hitting recipient limit
                 }
                 Err(SmtpProtectionError::Timeout(_)) => {
-                    // State timeout — shouldn't normally happen in fast tests
+// State timeout — shouldn't normally happen in fast tests
                 }
                 Err(SmtpProtectionError::InvalidSequence { .. }) => {
-                    // Expected in strict mode
+// Expected in strict mode
                 }
                 Err(other) => {
                     panic!(
@@ -171,7 +171,7 @@ fn property_smtp_state_machine_always_valid() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 3: Adaptive threshold always within [min, max]
+// INVARIANT 3:Adaptive threshold always within [min, max]
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -197,7 +197,7 @@ fn property_adaptive_threshold_always_bounded() {
         };
         let limiter = AdaptiveRateLimiter::new(config.clone());
 
-        // Feed random observations
+// Feed random observations
         for _ in 0..200 {
             let rps = rng.next_f64() * 10000.0;
             limiter.update(TrafficObservation {
@@ -221,7 +221,7 @@ fn property_adaptive_threshold_always_bounded() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 4: Bot probability always in [0.0, 1.0]
+// INVARIANT 4:Bot probability always in [0.0, 1.0]
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -248,7 +248,7 @@ fn property_bot_probability_always_in_unit_range() {
             assessment.bot_probability
         );
 
-        // Individual signals should also be bounded
+// Individual signals should also be bounded
         if assessment.has_sufficient_data {
             let s = &assessment.signals;
             assert!(s.timing_regularity >= 0.0 && s.timing_regularity <= 1.0);
@@ -261,14 +261,14 @@ fn property_bot_probability_always_in_unit_range() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 5: SMTP command parsing is total (parses any input without panic)
+// INVARIANT 5:SMTP command parsing is total (parses any input without panic)
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
 fn property_smtp_parse_never_panics() {
     let mut rng = Rng::new(999);
 
-    // Fixed known-tricky inputs
+// Fixed known-tricky inputs
     let tricky_inputs = [
         "",
         " ",
@@ -276,37 +276,37 @@ fn property_smtp_parse_never_panics() {
         "\n",
         "\r\n",
         "A",
-        "EHLO",           // Missing argument
-        "EHLO ",          // Empty argument
-        "EHLO\x00test",   // Null byte
-        "MAIL FROM:",     // Empty after colon
+        "EHLO", // Missing argument
+        "EHLO ", // Empty argument
+        "EHLO\x00test", // Null byte
+        "MAIL FROM:", // Empty after colon
         "RCPT TO:",
-        "AUTH",            // Missing auth type
+        "AUTH", // Missing auth type
         &"X".repeat(10000), // Very long
-        "\0\0\0",         // Null bytes
-        "日本語",          // Unicode
-        "EHLO 🚀.com",    // Emoji domain
+        "\0\0\0", // Null bytes
+        "日本語", // Unicode
+        "EHLO 🚀.com", // Emoji domain
     ];
 
     for input in &tricky_inputs {
         let _result = parse_smtp_command(input);
-        // Must not panic
+// Must not panic
     }
 
-    // Random byte sequences
+// Random byte sequences
     for _ in 0..5000 {
         let len = rng.range(0, 500) as usize;
         let bytes: Vec<u8> = (0..len).map(|_| (rng.next_u64() % 128) as u8).collect();
 
         if let Ok(s) = String::from_utf8(bytes) {
             let _result = parse_smtp_command(&s);
-            // Must not panic
+// Must not panic
         }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 6: IP extraction always returns a valid IP
+// INVARIANT 6:IP extraction always returns a valid IP
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -336,14 +336,14 @@ fn property_ip_extraction_always_returns_valid_ip() {
         let direct = rng.next_ip();
 
         let result = extract_client_ip(x_real_ip, xff, cf, direct);
-        // Result should always be a valid IpAddr (it's typed, so it always is)
-        // Verify it's either from a header or the direct IP
+// Result should always be a valid IpAddr (it's typed, so it always is)
+// Verify it's either from a header or the direct IP
         let _ = result.to_string(); // Should not panic
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 7: Sequence entropy is non-negative
+// INVARIANT 7:Sequence entropy is non-negative
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -369,7 +369,7 @@ fn property_sequence_entropy_non_negative() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 8: SMTP data recording never loses track of bytes
+// INVARIANT 8:SMTP data recording never loses track of bytes
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -388,7 +388,7 @@ fn property_smtp_data_recording_consistency() {
             config,
         );
 
-        // Set up valid session to reach DATA state
+// Set up valid session to reach DATA state
         prot.process_command("EHLO test.com").unwrap();
         prot.process_command("MAIL FROM:<a@b.com>").unwrap();
         prot.process_command("RCPT TO:<c@d.com>").unwrap();
@@ -412,16 +412,16 @@ fn property_smtp_data_recording_consistency() {
             }
         }
 
-        // If we hit the limit, total should be near max_size
+// If we hit the limit, total should be near max_size
         if hit_limit {
-            // The last chunk pushed us over
+// The last chunk pushed us over
             assert!(total_recorded <= max_size);
         }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 9: Connection tracker count never goes negative
+// INVARIANT 9:Connection tracker count never goes negative
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -451,7 +451,7 @@ fn property_connection_count_never_negative() {
             _ => unreachable!(),
         }
 
-        // Count should never be negative (u64, so it wraps — check for very large values)
+// Count should never be negative (u64, so it wraps — check for very large values)
         for check_ip in &ips {
             let count = tracker.active_count(check_ip);
             assert!(
@@ -465,7 +465,7 @@ fn property_connection_count_never_negative() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 10: Slowloris detection is monotonic — lower rates always flagged
+// INVARIANT 10:Slowloris detection is monotonic — lower rates always flagged
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -476,7 +476,7 @@ fn property_slowloris_lower_rates_always_caught() {
     };
     let prot = SmtpConnectionProtection::new("10.0.0.1".parse().unwrap(), 50, config);
 
-    // Any rate below min should be caught (after grace period)
+// Any rate below min should be caught (after grace period)
     for rate in (0..500).step_by(50) {
         let bytes = rate * 2;
         let elapsed = Duration::from_secs(2);
@@ -491,7 +491,7 @@ fn property_slowloris_lower_rates_always_caught() {
         );
     }
 
-    // Rates at or above min should pass
+// Rates at or above min should pass
     for rate in (500..2000).step_by(100) {
         let bytes = rate * 2;
         let elapsed = Duration::from_secs(2);
@@ -508,7 +508,7 @@ fn property_slowloris_lower_rates_always_caught() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INVARIANT 11: ReputationScore::level() is consistent with score
+// INVARIANT 11:ReputationScore::level is consistent with score
 // ═══════════════════════════════════════════════════════════════
 
 #[test]

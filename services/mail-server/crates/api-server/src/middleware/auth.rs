@@ -1,8 +1,7 @@
 //! Authentication extractors for Axum.
 //!
-//! Supports two authentication methods:
-//! 1. **API Key** — `X-API-Key` header, SHA-256 hashed, DB lookup (Redis-cached 60 s).
-//! 2. **JWT Bearer** — `Authorization: Bearer <token>`, RS256, extracts claims.
+//! Supports two authentication methods://! 1. **API Key** — `X-API-Key` header, SHA-256 hashed, DB lookup (Redis-cached 60 s).
+//! 2. **JWT Bearer** — `Authorization:Bearer <token>`, RS256, extracts claims.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -10,7 +9,6 @@ use chrono::{DateTime, Utc};
 use deadpool_redis::redis::{self, AsyncCommands};
 use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -18,10 +16,7 @@ use crate::state::AppState;
 // ─── AuthUser ──────────────────────────────────────────────────
 
 /// Authenticated identity extracted from the request.
-///
-/// IDs are stored as strings (VARCHAR(26) in the database, prefixed format:
-/// `usr_*`, `ten_*`, `key_*`).  The Uuid import is retained only for the
-/// API-key row struct that the DB layer still returns as Uuid.
+/// IDs are stored as strings (VARCHAR(26) in the database).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthUser {
     pub tenant_id: String,
@@ -34,7 +29,7 @@ pub struct AuthUser {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JwtClaims {
-    pub sub: String,          // user_id
+    pub sub: String, // user_id
     pub tenant_id: String,
     pub scopes: Vec<String>,
     pub exp: i64,
@@ -43,11 +38,19 @@ pub struct JwtClaims {
 
 // ─── Constants ─────────────────────────────────────────────────
 
-// SEC-008 FIX: Reduced from 60s to 10s for better security/performance tradeoff
 // Revoked API keys will be invalid within 10 seconds instead of 60
 const API_KEY_CACHE_TTL: u64 = 10; // seconds
 const TOKEN_BLACKLIST_PREFIX: &str = "apexmail:token_blacklist:";
 const API_KEY_CACHE_PREFIX: &str = "apexmail:api_key_cache:";
+const USER_STATUS_CACHE_TTL: u64 = 15; // seconds
+const USER_STATUS_CACHE_PREFIX: &str = "apexmail:user_status:";
+const USER_STATUS_CACHE_MISSING: &str = "__missing__";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CachedUserStatus {
+    Missing,
+    Present(String),
+}
 
 // ─── Extractor ─────────────────────────────────────────────────
 
@@ -61,7 +64,7 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
 
-        // 1. Try X-API-Key header first
+// 1. Try X-API-Key header first
         if let Some(api_key) = headers
             .get("x-api-key")
             .and_then(|v| v.to_str().ok())
@@ -69,7 +72,7 @@ impl FromRequestParts<AppState> for AuthUser {
             return authenticate_api_key(api_key, state).await;
         }
 
-        // 2. Fall back to Bearer JWT
+// 2. Fall back to Bearer JWT
         if let Some(auth_header) = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -88,21 +91,12 @@ impl FromRequestParts<AppState> for AuthUser {
 // ─── API Key authentication ────────────────────────────────────
 
 async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, ApiError> {
-    // ── Control-plane static key (no DB lookup) ────────────
+// ── Control-plane static key (no DB lookup) ────────────
     if let Some(ref cp_key) = state.config.control_plane_api_key {
-        // Constant-time comparison via HMAC equality to prevent timing attacks
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(b"cp-key-compare").unwrap();
-        mac.update(cp_key.as_bytes());
-        let expected = mac.finalize().into_bytes();
-        let mut mac2 = HmacSha256::new_from_slice(b"cp-key-compare").unwrap();
-        mac2.update(key.as_bytes());
-        if mac2.verify(&expected).is_ok() {
+        if apexmail_lib::timing_safe_compare(cp_key, key) {
             tracing::debug!("authenticated via control-plane static API key");
             return Ok(AuthUser {
-                tenant_id: "system".into(), // sentinel: system-level admin
+                tenant_id: "system".into(), // sentinel:system-level admin
                 user_id: None,
                 api_key_id: None,
                 scopes: vec!["*".into()],
@@ -110,18 +104,30 @@ async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, A
         }
     }
 
-    // Fix #10: Use HMAC-SHA256 with the configured secret instead of plain SHA-256.
-    // This prevents offline brute-force if the database is compromised.
+// This prevents offline brute-force if the database is compromised.
     let key_hash = apexmail_lib::hash_api_key_with_secret(key, &state.config.api_key_hash_secret);
+    let legacy_hash = apexmail_lib::hash_api_key(key);
 
-    // Check Redis cache first
+// Check Redis cache first
     if let Ok(cached) = lookup_cached_api_key(&key_hash, state).await {
+        if let Some(api_key_id) = cached.api_key_id.as_deref() {
+            touch_api_key_last_used(api_key_id, &key_hash, state).await?;
+        }
         return Ok(cached);
     }
 
-    // DB look-up (try HMAC hash first, fall back to legacy SHA-256 for migration)
+    if legacy_hash != key_hash {
+        if let Ok(cached) = lookup_cached_api_key(&legacy_hash, state).await {
+            if let Some(api_key_id) = cached.api_key_id.as_deref() {
+                touch_api_key_last_used(api_key_id, &legacy_hash, state).await?;
+            }
+            return Ok(cached);
+        }
+    }
+
+// DB look-up (try HMAC hash first, fall back to legacy SHA-256 for migration)
     let row = sqlx::query_as::<_, ApiKeyRow>(
-        "SELECT id, tenant_id, scopes, expires_at FROM api_keys WHERE key_hash = $1",
+        "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
     )
     .bind(&key_hash)
     .fetch_optional(&state.db)
@@ -131,13 +137,12 @@ async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, A
         ApiError::Internal("authentication error".into())
     })?;
 
-    // Fall back to legacy SHA-256 hash for keys created before migration
+// Fall back to legacy SHA-256 hash for keys created before migration
     let row = match row {
         Some(r) => r,
         None => {
-            let legacy_hash = apexmail_lib::hash_api_key(key);
             sqlx::query_as::<_, ApiKeyRow>(
-                "SELECT id, tenant_id, scopes, expires_at FROM api_keys WHERE key_hash = $1",
+                "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
             )
             .bind(&legacy_hash)
             .fetch_optional(&state.db)
@@ -150,48 +155,63 @@ async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, A
         }
     };
 
-    // Check expiry
+// Check expiry
     if let Some(exp) = row.expires_at {
         if exp < Utc::now() {
             return Err(ApiError::Unauthorized("API key expired".into()));
         }
     }
 
-    // Fix #13: Proper error for scope deserialization.
     let scopes: Vec<String> = serde_json::from_value(row.scopes.clone()).map_err(|e| {
         tracing::warn!(error = %e, api_key_id = %row.id, "malformed scopes in api_keys table");
         ApiError::Internal("invalid API key scopes configuration".into())
     })?;
 
     let auth_user = AuthUser {
-        tenant_id: row.tenant_id.to_string(),
+        tenant_id: row.tenant_id.clone(),
         user_id: None,
-        api_key_id: Some(row.id.to_string()),
+        api_key_id: Some(row.id.clone()),
         scopes,
     };
 
-    // Cache in Redis (fire-and-forget)
-    cache_api_key(&key_hash, &auth_user, state).await;
+// Cache in Redis (fire-and-forget)
+    cache_api_key(&row.key_hash, &auth_user, state).await;
 
-    // Update last_used_at (fire-and-forget)
-    let db = state.db.clone();
-    let id = row.id;
-    tokio::spawn(async move {
-        let _ = sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
-            .bind(id)
-            .execute(&db)
-            .await;
-    });
+    touch_api_key_last_used(&row.id, &row.key_hash, state).await?;
 
     Ok(auth_user)
 }
 
 #[derive(Debug, sqlx::FromRow)]
 struct ApiKeyRow {
-    id: Uuid,
-    tenant_id: Uuid,
+    id: String,
+    tenant_id: String,
+    key_hash: String,
     scopes: serde_json::Value,
     expires_at: Option<DateTime<Utc>>,
+}
+
+async fn touch_api_key_last_used(
+    api_key_id: &str,
+    key_hash: &str,
+    state: &AppState,
+) -> Result<(), ApiError> {
+    let result = sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
+        .bind(api_key_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, api_key_id, "failed to update API key last_used_at");
+            ApiError::Internal("authentication error".into())
+        })?;
+
+    if result.rows_affected() == 0 {
+        tracing::warn!(api_key_id, "api key disappeared during last_used_at update; evicting cache entry");
+        invalidate_api_key_cache(key_hash, state).await;
+        return Err(ApiError::Unauthorized("invalid API key".into()));
+    }
+
+    Ok(())
 }
 
 async fn lookup_cached_api_key(key_hash: &str, state: &AppState) -> Result<AuthUser, ()> {
@@ -205,7 +225,7 @@ async fn lookup_cached_api_key(key_hash: &str, state: &AppState) -> Result<AuthU
     match cached {
         Some(json) => serde_json::from_str(&json).map_err(|e| {
             tracing::warn!(error = %e, cache_key, "corrupted JSON in API key cache — evicting");
-            // Best-effort eviction of poisoned cache entry
+// Best-effort eviction of poisoned cache entry
             tokio::spawn({
                 let pool = state.redis.clone();
                 let key = cache_key.clone();
@@ -229,11 +249,98 @@ async fn cache_api_key(key_hash: &str, user: &AuthUser, state: &AppState) {
     }
 }
 
+pub(crate) async fn invalidate_api_key_cache(key_hash: &str, state: &AppState) {
+    let cache_key = format!("{API_KEY_CACHE_PREFIX}{key_hash}");
+    if let Ok(mut conn) = state.redis.get().await {
+        let _: Result<(), _> = redis::AsyncCommands::del(&mut *conn, &cache_key).await;
+    }
+}
+
+fn user_status_cache_key(tenant_id: &str, user_id: &str) -> String {
+    format!("{USER_STATUS_CACHE_PREFIX}{tenant_id}:{user_id}")
+}
+
+fn parse_cached_user_status(value: &str) -> CachedUserStatus {
+    if value == USER_STATUS_CACHE_MISSING {
+        CachedUserStatus::Missing
+    } else {
+        CachedUserStatus::Present(value.to_owned())
+    }
+}
+
+async fn lookup_cached_user_status(
+    tenant_id: &str,
+    user_id: &str,
+    state: &AppState,
+) -> Result<Option<CachedUserStatus>, ()> {
+    let cache_key = user_status_cache_key(tenant_id, user_id);
+    let mut conn = state.redis.get().await.map_err(|e| {
+        tracing::warn!(error = %e, tenant_id, user_id, "redis pool error in user status cache lookup");
+    })?;
+    let cached: Option<String> = conn.get(&cache_key).await.map_err(|e| {
+        tracing::warn!(error = %e, tenant_id, user_id, "redis GET error in user status cache lookup");
+    })?;
+    Ok(cached.as_deref().map(parse_cached_user_status))
+}
+
+async fn cache_user_status(
+    tenant_id: &str,
+    user_id: &str,
+    status: Option<&str>,
+    state: &AppState,
+) {
+    let cache_key = user_status_cache_key(tenant_id, user_id);
+    let cached_value = status.unwrap_or(USER_STATUS_CACHE_MISSING);
+    if let Ok(mut conn) = state.redis.get().await {
+        let _: Result<(), _> = conn.set_ex(&cache_key, cached_value, USER_STATUS_CACHE_TTL).await;
+    }
+}
+
+pub(crate) async fn invalidate_user_status_cache(user_id: &str, tenant_id: &str, state: &AppState) {
+    let cache_key = user_status_cache_key(tenant_id, user_id);
+    if let Ok(mut conn) = state.redis.get().await {
+        let _: Result<(), _> = redis::AsyncCommands::del(&mut *conn, &cache_key).await;
+    }
+}
+
+pub(crate) async fn invalidate_tenant_user_status_cache(tenant_id: &str, state: &AppState) {
+    let pattern = format!("{USER_STATUS_CACHE_PREFIX}{tenant_id}:*");
+    let Ok(mut conn) = state.redis.get().await else {
+        return;
+    };
+
+    let mut cursor: u64 = 0;
+    let mut cache_keys: Vec<String> = Vec::new();
+    loop {
+        let scan_result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(100u64)
+            .query_async(&mut *conn)
+            .await;
+
+        let Ok((next_cursor, batch)) = scan_result else {
+            break;
+        };
+
+        cache_keys.extend(batch);
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    if !cache_keys.is_empty() {
+        let _: Result<u64, _> = redis::cmd("DEL").arg(&cache_keys).query_async(&mut *conn).await;
+    }
+}
+
 // ─── JWT authentication ────────────────────────────────────────
 
 async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, ApiError> {
-    // Check token blacklist
-    // Fix #11: fail-closed — if Redis is down in production, reject the token.
+// Check token blacklist
     if is_token_blacklisted(token, state).await? {
         return Err(ApiError::Unauthorized("token has been revoked".into()));
     }
@@ -257,27 +364,41 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
         return Err(ApiError::Unauthorized("missing tenant ID in token".into()));
     }
 
-    // Fix #12: Verify the user still exists and is active in the database.
-    let user_active: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM users WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(&user_id)
-    .bind(&tenant_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "user existence check failed");
-        ApiError::Internal("authentication error".into())
-    })?;
-
-    match user_active {
-        None => return Err(ApiError::Unauthorized("user no longer exists".into())),
-        Some((status,)) if status != "active" => {
-            return Err(ApiError::Unauthorized(
-                format!("user account is {status}"),
-            ));
+    let user_status = match lookup_cached_user_status(&tenant_id, &user_id, state).await {
+        Ok(Some(CachedUserStatus::Missing)) => {
+            return Err(ApiError::Unauthorized("user no longer exists".into()));
         }
-        _ => {}
+        Ok(Some(CachedUserStatus::Present(status))) => status,
+        _ => {
+            let user_status: Option<(String,)> = sqlx::query_as(
+                "SELECT status FROM users WHERE id = $1 AND tenant_id = $2",
+            )
+            .bind(&user_id)
+            .bind(&tenant_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "user existence check failed");
+                ApiError::Internal("authentication error".into())
+            })?;
+
+            match user_status {
+                None => {
+                    cache_user_status(&tenant_id, &user_id, None, state).await;
+                    return Err(ApiError::Unauthorized("user no longer exists".into()));
+                }
+                Some((status,)) => {
+                    cache_user_status(&tenant_id, &user_id, Some(&status), state).await;
+                    status
+                }
+            }
+        }
+    };
+
+    if user_status != "active" {
+        return Err(ApiError::Unauthorized(
+            format!("user account is {user_status}"),
+        ));
     }
 
     Ok(AuthUser {
@@ -289,8 +410,6 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
 }
 
 /// Check if a JWT has been blacklisted (revoked).
-///
-/// Fix #11: Returns `Err` when Redis is unreachable so the caller can fail-closed.
 async fn is_token_blacklisted(token: &str, state: &AppState) -> Result<bool, ApiError> {
     use sha2::{Sha256, Digest};
     let hash = hex::encode(Sha256::digest(token.as_bytes()));
@@ -309,7 +428,6 @@ async fn is_token_blacklisted(token: &str, state: &AppState) -> Result<bool, Api
 // ─── Auth middleware (used by app.rs via from_fn_with_state) ───
 
 /// Middleware that rejects unauthenticated requests before they hit the route handler.
-///
 /// Extracts `AuthUser` via the `FromRequestParts` impl above, then inserts
 /// the identity into request extensions so downstream handlers can retrieve
 /// it cheaply with `Extension<AuthUser>`.
@@ -318,11 +436,11 @@ pub async fn require_auth(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    // Extract the auth user from the request parts.
+// Extract the auth user from the request parts.
     let (mut parts, body) = req.into_parts();
     let auth_user = AuthUser::from_request_parts(&mut parts, &state).await?;
 
-    // Insert the authenticated identity into extensions for downstream use.
+// Insert the authenticated identity into extensions for downstream use.
     parts.extensions.insert(auth_user);
 
     req = axum::http::Request::from_parts(parts, body);
@@ -333,7 +451,7 @@ pub async fn require_auth(
 
 /// Helper to check scopes after extracting AuthUser manually.
 pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError> {
-    // Wildcard scope
+// Wildcard scope
     if user.scopes.iter().any(|s| s == "*") {
         return Ok(());
     }
@@ -396,8 +514,8 @@ mod tests {
     #[test]
     fn test_jwt_claims_roundtrip() {
         let claims = JwtClaims {
-            sub: Uuid::new_v4().to_string(),
-            tenant_id: Uuid::new_v4().to_string(),
+            sub: "usr_test_roundtrip_001".into(),
+            tenant_id: "ten_test_roundtrip_001".into(),
             scopes: vec!["messages:send".into()],
             exp: 9999999999,
             iat: 1000000000,
@@ -405,5 +523,161 @@ mod tests {
         let json = serde_json::to_string(&claims).unwrap();
         let decoded: JwtClaims = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.scopes, claims.scopes);
+    }
+
+// ── RBAC Security Regression Tests ─────────────────────────
+
+    #[test]
+    fn test_require_scopes_empty_scopes_denies_all() {
+        let user = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: Some("usr_test_001".into()),
+            api_key_id: None,
+            scopes: vec![],
+        };
+        assert!(require_scopes(&user, &["messages:read"]).is_err(),
+            "empty scopes must deny access");
+    }
+
+    #[test]
+    fn test_require_scopes_partial_match_denies() {
+        let user = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: None,
+            api_key_id: Some("key_test_001".into()),
+            scopes: vec!["messages:read".into()],
+        };
+// Requires both scopes, user only has one
+        assert!(require_scopes(&user, &["messages:read", "messages:send"]).is_err(),
+            "partial scope match must deny access");
+    }
+
+    #[test]
+    fn test_require_scopes_similar_name_no_match() {
+        let user = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: None,
+            api_key_id: Some("key_test_001".into()),
+            scopes: vec!["messages:read_all".into()],
+        };
+// "messages:read_all" must NOT match "messages:read"
+        assert!(require_scopes(&user, &["messages:read"]).is_err(),
+            "similar scope name must not match");
+    }
+
+    #[test]
+    fn test_require_scopes_wildcard_grants_everything() {
+        let user = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: Some("usr_test_001".into()),
+            api_key_id: None,
+            scopes: vec!["*".into()],
+        };
+// Wildcard should grant any scope
+        assert!(require_scopes(&user, &["scim:write", "admin:delete", "billing:manage"]).is_ok());
+    }
+
+    #[test]
+    fn test_require_scopes_no_requirements_passes() {
+        let user = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: Some("usr_test_001".into()),
+            api_key_id: None,
+            scopes: vec![],
+        };
+// Empty required scopes should pass
+        assert!(require_scopes(&user, &[]).is_ok());
+    }
+
+    #[test]
+    fn test_viewer_role_scopes_cannot_send_messages() {
+// Viewer role should not have messages:send scope
+        let viewer = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: Some("usr_test_001".into()),
+            api_key_id: None,
+            scopes: vec![
+                "messages:read".into(),
+                "domains:read".into(),
+                "templates:read".into(),
+                "events:read".into(),
+                "analytics:read".into(),
+                "contacts:read".into(),
+            ],
+        };
+        assert!(require_scopes(&viewer, &["messages:send"]).is_err(),
+            "viewer must not be able to send messages");
+        assert!(require_scopes(&viewer, &["domains:write"]).is_err(),
+            "viewer must not be able to modify domains");
+        assert!(require_scopes(&viewer, &["templates:write"]).is_err(),
+            "viewer must not be able to modify templates");
+    }
+
+    #[test]
+    fn test_developer_role_scopes_cannot_manage_webhooks() {
+// Developer role should lack webhook/campaign/automation scopes
+        let developer = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: Some("usr_test_001".into()),
+            api_key_id: None,
+            scopes: vec![
+                "messages:send".into(),
+                "messages:read".into(),
+                "domains:read".into(),
+                "templates:read".into(),
+                "templates:write".into(),
+                "events:read".into(),
+                "analytics:read".into(),
+                "contacts:read".into(),
+                "contacts:write".into(),
+            ],
+        };
+        assert!(require_scopes(&developer, &["webhooks:write"]).is_err(),
+            "developer must not be able to manage webhooks");
+        assert!(require_scopes(&developer, &["campaigns:write"]).is_err(),
+            "developer must not be able to manage campaigns");
+    }
+
+    #[test]
+    fn test_auth_user_serialization_roundtrip() {
+        let user = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: Some("usr_test_001".into()),
+            api_key_id: None,
+            scopes: vec!["messages:send".into(), "messages:read".into()],
+        };
+        let json = serde_json::to_string(&user).unwrap();
+        let decoded: AuthUser = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.tenant_id, user.tenant_id);
+        assert_eq!(decoded.scopes, user.scopes);
+    }
+
+    #[test]
+    fn test_auth_user_api_key_has_no_user_id() {
+        let user = AuthUser {
+            tenant_id: "ten_test_001".into(),
+            user_id: None,
+            api_key_id: Some("key_test_001".into()),
+            scopes: vec!["messages:send".into()],
+        };
+        assert!(user.user_id.is_none(), "API key auth must not have user_id");
+        assert!(user.api_key_id.is_some(), "API key auth must have api_key_id");
+    }
+
+    #[test]
+    fn test_user_status_cache_key_is_scoped_by_tenant_and_user() {
+        assert_eq!(
+            user_status_cache_key("ten_test_001", "usr_test_001"),
+            "apexmail:user_status:ten_test_001:usr_test_001"
+        );
+    }
+
+    #[test]
+    fn test_parse_cached_user_status_handles_missing_sentinel() {
+        assert_eq!(parse_cached_user_status(USER_STATUS_CACHE_MISSING), CachedUserStatus::Missing);
+        assert_eq!(
+            parse_cached_user_status("active"),
+            CachedUserStatus::Present("active".into())
+        );
     }
 }

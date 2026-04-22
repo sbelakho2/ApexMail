@@ -33,7 +33,7 @@ impl EmbeddingService {
         })
     }
 
-    /// Generate an embedding for a single text input.
+/// Generate an embedding for a single text input.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         if text.is_empty() {
             return Err(EmbeddingError::EmptyText);
@@ -45,13 +45,13 @@ impl EmbeddingService {
         })
     }
 
-    /// Generate embeddings for a batch of texts with concurrency control.
+/// Generate embeddings for a batch of texts with concurrency control.
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
 
-        // Acquire semaphore permit
+// Acquire semaphore permit
         let _permit = self.semaphore.acquire().await.map_err(|e| {
             EmbeddingError::InferenceError(format!("Semaphore error: {}", e))
         })?;
@@ -81,18 +81,18 @@ impl EmbeddingService {
             .map(|e| (e.index, e.embedding))
             .collect();
 
-        // Sort by index to maintain order
+// Sort by index to maintain order
         embeddings.sort_by_key(|(idx, _)| *idx);
 
         let vectors: Vec<Vec<f32>> = embeddings
             .into_iter()
             .map(|(_, v)| {
-                // Apply L2 normalization
+// Apply L2 normalization
                 l2_normalize(v)
             })
             .collect();
 
-        // Validate dimensions
+// Validate dimensions
         for v in &vectors {
             if v.len() != self.config.dimension {
                 return Err(EmbeddingError::DimensionMismatch {

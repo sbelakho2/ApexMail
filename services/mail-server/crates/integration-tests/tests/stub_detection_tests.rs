@@ -1,7 +1,6 @@
 //! # Stub and Bug Detection Tests
 //!
-//! These tests are specifically designed to detect:
-//! 1. **Stub implementations** - functions that exist but don't actually work
+//! These tests are specifically designed to detect://! 1. **Stub implementations** - functions that exist but don't actually work
 //! 2. **Incomplete wiring** - components registered but not actually called
 //! 3. **Silent failures** - operations that fail but don't report errors
 //! 4. **Race conditions** - timing-dependent bugs in concurrent code
@@ -19,18 +18,18 @@ use std::time::{Duration, Instant};
 // ===========================================================================
 
 /// Tests that security headers are actually injected into responses.
-/// Detects stub: If headers are missing, the middleware is either not wired
+/// Detects stub:If headers are missing, the middleware is either not wired
 /// or returns without actually modifying headers.
 #[cfg(test)]
 mod security_header_tests {
     #[test]
     fn test_hsts_header_value_not_empty() {
-        // HSTS must have a non-zero max-age
+// HSTS must have a non-zero max-age
         let hsts = "max-age=31536000; includeSubDomains";
         assert!(hsts.contains("max-age="));
         assert!(!hsts.contains("max-age=0"), "HSTS max-age must not be zero");
         
-        // Parse max-age value
+// Parse max-age value
         let max_age: u64 = hsts
             .split(';')
             .find(|s| s.contains("max-age"))
@@ -55,7 +54,7 @@ mod security_header_tests {
 
     #[test]
     fn test_xss_protection_is_disabled() {
-        // Modern browsers should have XSS Auditor disabled as it can cause vulnerabilities
+// Modern browsers should have XSS Auditor disabled as it can cause vulnerabilities
         let xss = "0";
         assert_eq!(xss, "0", "X-XSS-Protection should be 0 to disable XSS Auditor");
     }
@@ -73,12 +72,12 @@ mod security_header_tests {
 // ===========================================================================
 
 /// Tests that rate limiting actually blocks requests after threshold.
-/// Detects stub: If all requests pass, rate limiter is not working.
+/// Detects stub:If all requests pass, rate limiter is not working.
 #[cfg(test)]
 mod rate_limiter_stub_tests {
     use super::*;
 
-    /// Simulates rate limit tracking to verify behavior.
+/// Simulates rate limit tracking to verify behavior.
     struct TestRateLimiter {
         requests: AtomicU64,
         limit: u64,
@@ -106,15 +105,15 @@ mod rate_limiter_stub_tests {
     fn test_rate_limiter_actually_limits() {
         let limiter = TestRateLimiter::new(5);
         
-        // First 5 requests should pass
+// First 5 requests should pass
         for i in 1..=5 {
             assert!(limiter.check(), "Request {i} should be allowed");
         }
         
-        // 6th request should be blocked
+// 6th request should be blocked
         assert!(!limiter.check(), "Request 6 should be blocked - rate limiter must actually limit!");
         
-        // Verify the count is accurate
+// Verify the count is accurate
         assert_eq!(limiter.request_count(), 6, "All requests should be counted");
     }
 
@@ -122,7 +121,7 @@ mod rate_limiter_stub_tests {
     fn test_rate_limiter_not_pass_through() {
         let limiter = TestRateLimiter::new(0);
         
-        // Even first request should fail with limit=0
+// Even first request should fail with limit=0
         assert!(!limiter.check(), "Rate limiter with limit=0 must block all requests");
     }
 
@@ -143,7 +142,7 @@ mod rate_limiter_stub_tests {
 // ===========================================================================
 
 /// Tests that circuit breaker actually opens after failures.
-/// Detects stub: If circuit never opens, it's not protecting against cascading failures.
+/// Detects stub:If circuit never opens, it's not protecting against cascading failures.
 #[cfg(test)]
 mod circuit_breaker_stub_tests {
     use super::*;
@@ -194,7 +193,7 @@ mod circuit_breaker_stub_tests {
         assert!(cb.is_allowed(), "Circuit should start closed");
         assert_eq!(cb.state(), CircuitState::Closed);
         
-        // Record failures up to threshold
+// Record failures up to threshold
         cb.record_failure();
         assert!(cb.is_allowed(), "Should still be closed after 1 failure");
         
@@ -212,7 +211,7 @@ mod circuit_breaker_stub_tests {
         
         cb.record_failure();
         
-        // Verify multiple checks all return false
+// Verify multiple checks all return false
         for _ in 0..10 {
             assert!(!cb.is_allowed(), "Open circuit must block ALL requests");
         }
@@ -224,7 +223,7 @@ mod circuit_breaker_stub_tests {
 // ===========================================================================
 
 /// Tests that health endpoints actually check dependencies.
-/// Detects stub: If health always returns OK, it's not checking anything.
+/// Detects stub:If health always returns OK, it's not checking anything.
 #[cfg(test)]
 mod health_check_stub_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -293,12 +292,12 @@ mod health_check_stub_tests {
 // ===========================================================================
 
 /// Tests that encryption actually transforms data.
-/// Detects stub: If encrypted == plaintext, encryption is not working.
+/// Detects stub:If encrypted == plaintext, encryption is not working.
 #[cfg(test)]
 mod encryption_stub_tests {
     use std::collections::HashSet;
 
-    // Simple XOR "encryption" for testing (NOT cryptographically secure)
+// Simple XOR "encryption" for testing (NOT cryptographically secure)
     fn test_encrypt(data: &[u8], key: u8) -> Vec<u8> {
         data.iter().map(|b| b ^ key).collect()
     }
@@ -351,13 +350,13 @@ mod encryption_stub_tests {
 
     #[test]
     fn test_encryption_produces_unique_output_per_run() {
-        // This tests that a proper encryption uses random IVs/nonces
-        // For our simple XOR test, we simulate this check
+// This tests that a proper encryption uses random IVs/nonces
+// For our simple XOR test, we simulate this check
         let plaintext = b"secret";
         let mut results = HashSet::new();
         
-        // With proper encryption, encrypting the same data multiple times
-        // should produce different ciphertext (due to random IV/nonce)
+// With proper encryption, encrypting the same data multiple times
+// should produce different ciphertext (due to random IV/nonce)
         for key in 0u8..10 {
             let encrypted = test_encrypt(plaintext, key);
             results.insert(encrypted);
@@ -372,7 +371,7 @@ mod encryption_stub_tests {
 // ===========================================================================
 
 /// Tests that audit logging actually records events.
-/// Detects stub: If no entries are recorded, audit logging is broken.
+/// Detects stub:If no entries are recorded, audit logging is broken.
 #[cfg(test)]
 mod audit_log_stub_tests {
     use super::*;
@@ -471,7 +470,7 @@ mod audit_log_stub_tests {
 // ===========================================================================
 
 /// Tests that graceful shutdown actually drains connections.
-/// Detects stub: If shutdown is immediate, connections are being dropped.
+/// Detects stub:If shutdown is immediate, connections are being dropped.
 #[cfg(test)]
 mod graceful_shutdown_stub_tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -540,7 +539,7 @@ mod graceful_shutdown_stub_tests {
     fn test_shutdown_waits_for_active_connections() {
         let shutdown = GracefulShutdown::new();
         
-        // Simulate active connection
+// Simulate active connection
         assert!(shutdown.start_request());
         
         shutdown.initiate_shutdown();
@@ -550,7 +549,7 @@ mod graceful_shutdown_stub_tests {
             "Must NOT terminate while connections are active - would drop requests!"
         );
         
-        // Connection finishes
+// Connection finishes
         shutdown.end_request();
         
         assert!(
@@ -592,7 +591,7 @@ mod graceful_shutdown_stub_tests {
 // ===========================================================================
 
 /// Tests that input validation actually rejects bad input.
-/// Detects stub: If all input passes, validation is not working.
+/// Detects stub:If all input passes, validation is not working.
 #[cfg(test)]
 mod input_validation_stub_tests {
     fn validate_email(email: &str) -> bool {
@@ -648,7 +647,7 @@ mod input_validation_stub_tests {
                 "' OR '1'='1",
                 "'; DROP TABLE",
                 "UNION SELECT",
-                "--",
+                " --",
                 "/*",
             ];
             let lower = input.to_lowercase();
@@ -666,7 +665,7 @@ mod input_validation_stub_tests {
 // ===========================================================================
 
 /// Tests that timeouts actually terminate operations.
-/// Detects stub: If operations run forever, timeout is not enforced.
+/// Detects stub:If operations run forever, timeout is not enforced.
 #[cfg(test)]
 mod timeout_stub_tests {
     use std::time::{Duration, Instant};
@@ -713,7 +712,7 @@ mod timeout_stub_tests {
 // ===========================================================================
 
 /// Tests for race conditions in concurrent code.
-/// Detects bugs: Data races, lost updates, torn reads.
+/// Detects bugs:Data races, lost updates, torn reads.
 #[cfg(test)]
 mod concurrency_bug_tests {
     use std::sync::atomic::{AtomicU64, Ordering};

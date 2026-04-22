@@ -10,9 +10,9 @@ use crate::config::DnsConfig;
 /// Cached DNS results.
 #[derive(Debug, Clone)]
 pub enum CachedResult {
-    /// Positive result: list of record strings.
+/// Positive result:list of record strings.
     Records(Vec<String>),
-    /// Negative result: NXDOMAIN or empty.
+/// Negative result:NXDOMAIN or empty.
     NxDomain,
 }
 
@@ -24,7 +24,7 @@ pub struct DnsCache {
 }
 
 impl DnsCache {
-    /// Create from config.
+/// Create from config.
     pub fn new(config: &DnsConfig) -> Self {
         let cache = Cache::builder()
             .max_capacity(config.max_cache_entries)
@@ -43,20 +43,20 @@ impl DnsCache {
         }
     }
 
-    /// Create with default config.
+/// Create with default config.
     pub fn default_cache() -> Self {
         Self::new(&DnsConfig::default())
     }
 
-    /// Get cached result.
+/// Get cached result.
     pub fn get(&self, key: &str) -> Option<CachedResult> {
         let _guard = self.consistency_lock.read();
-        // Check positive cache first
+// Check positive cache first
         if let Some(result) = self.cache.get(key) {
             debug!(key, "DNS cache hit");
             return Some(result);
         }
-        // Check negative cache
+// Check negative cache
         if self.negative_cache.get(key).is_some() {
             debug!(key, "DNS negative cache hit");
             return Some(CachedResult::NxDomain);
@@ -64,7 +64,7 @@ impl DnsCache {
         None
     }
 
-    /// Insert a positive result.
+/// Insert a positive result.
     pub fn insert(&self, key: impl Into<String>, records: Vec<String>) {
         let _guard = self.consistency_lock.write();
         let key = key.into();
@@ -73,7 +73,7 @@ impl DnsCache {
         self.cache.insert(key, CachedResult::Records(records));
     }
 
-    /// Insert a negative (NXDOMAIN) result.
+/// Insert a negative (NXDOMAIN) result.
     pub fn insert_negative(&self, key: impl Into<String>) {
         let _guard = self.consistency_lock.write();
         let key = key.into();
@@ -82,37 +82,37 @@ impl DnsCache {
         self.negative_cache.insert(key, ());
     }
 
-    /// Remove a cached entry.
+/// Remove a cached entry.
     pub fn invalidate(&self, key: &str) {
         let _guard = self.consistency_lock.write();
         self.cache.invalidate(key);
         self.negative_cache.invalidate(key);
     }
 
-    /// #184: Invalidate all entries whose key contains the given substring.
-    /// Used for DKIM keys stored as `dkim:{selector}._domainkey.{domain}`.
+/// #184:Invalidate all entries whose key contains the given substring.
+/// Used for DKIM keys stored as `dkim:{selector}._domainkey.{domain}`.
     pub fn invalidate_by_domain_suffix(&self, domain: &str) {
         let _guard = self.consistency_lock.write();
         let suffix = format!("._domainkey.{domain}");
-        // Moka doesn't expose key iteration, so we rely on in-memory
-        // tracking. For now, since DKIM entries have short TTLs,
-        // just clear the negative cache for the domain and rely on
-        // natural TTL expiry for positive DKIM cache entries.
-        // Callers that know the selector should invalidate directly.
+// Moka doesn't expose key iteration, so we rely on in-memory
+// tracking. For now, since DKIM entries have short TTLs,
+// just clear the negative cache for the domain and rely on
+// natural TTL expiry for positive DKIM cache entries.
+// Callers that know the selector should invalidate directly.
         self.negative_cache.invalidate(&format!("dkim:{suffix}"));
     }
 
-    /// Number of entries in the positive cache.
+/// Number of entries in the positive cache.
     pub fn len(&self) -> u64 {
         self.cache.entry_count()
     }
 
-    /// Whether the positive cache is empty.
+/// Whether the positive cache is empty.
     pub fn is_empty(&self) -> bool {
         self.cache.entry_count() == 0
     }
 
-    /// Clear all caches.
+/// Clear all caches.
     pub fn clear(&self) {
         let _guard = self.consistency_lock.write();
         self.cache.invalidate_all();
@@ -171,8 +171,8 @@ mod tests {
         cache.insert("a", vec!["1".into()]);
         cache.insert("b", vec!["2".into()]);
         cache.clear();
-        // moka might not immediately reflect, but clear should work
-        // Just verify it doesn't crash
+// moka might not immediately reflect, but clear should work
+// Just verify it doesn't crash
         assert!(cache.get("a").is_none() || true);
     }
 
@@ -181,8 +181,8 @@ mod tests {
         let cache = DnsCache::default_cache();
         assert!(cache.is_empty());
         cache.insert("key", vec!["val".into()]);
-        // moka is eventually consistent; entry_count might not be instant
-        // but the API should work
+// moka is eventually consistent; entry_count might not be instant
+// but the API should work
         assert!(cache.len() <= 1);
     }
 }

@@ -1,4 +1,4 @@
-//! Data isolation: connection scoping, RLS, access policies, migration.
+//! Data isolation:connection scoping, RLS, access policies, migration.
 
 use regex::Regex;
 use sqlx::PgPool;
@@ -41,16 +41,16 @@ impl DataIsolationService {
         }
     }
 
-    /// Load access policies from DB on startup.
+/// Load access policies from DB on startup.
     pub async fn initialize(&mut self) -> anyhow::Result<()> {
         self.policies = self.load_policies().await?;
         info!(count = self.policies.len(), "Data access policies loaded");
         Ok(())
     }
 
-    /// Validate a SQL query for safety in a tenant-isolated context.
+/// Validate a SQL query for safety in a tenant-isolated context.
     pub fn validate_query_access(&self, query: &str, ctx: &IsolationContext) -> bool {
-        // Block dangerous patterns
+// Block dangerous patterns
         for pattern in DANGEROUS_PATTERNS.iter() {
             if pattern.is_match(query) {
                 warn!(
@@ -62,7 +62,7 @@ impl DataIsolationService {
             }
         }
 
-        // #292: stronger table + predicate checks for SELECT/UPDATE/DELETE with JOIN/CTE-aware parsing.
+// #292:stronger table + predicate checks for SELECT/UPDATE/DELETE with JOIN/CTE-aware parsing.
         let upper = query.to_uppercase();
         let tenanted_tables = ["EMAILS", "CONTACTS", "TEMPLATES", "CAMPAIGNS", "WEBHOOKS"];
         let touches_tenanted_table = tenanted_tables.iter().any(|table| {
@@ -94,7 +94,7 @@ impl DataIsolationService {
         true
     }
 
-    /// Check if a user has access to a specific resource.
+/// Check if a user has access to a specific resource.
     pub async fn check_resource_access(
         &self,
         ctx: &IsolationContext,
@@ -102,7 +102,7 @@ impl DataIsolationService {
         resource_id: &str,
         action: &str,
     ) -> anyhow::Result<bool> {
-        // Verify workspace ownership
+// Verify workspace ownership
         let owns = self.verify_resource_ownership(ctx, resource, resource_id).await?;
         if !owns {
             self.audit_access_attempt(ctx, &ctx.workspace_id, resource, action, false)
@@ -110,7 +110,7 @@ impl DataIsolationService {
             return Ok(false);
         }
 
-        // Evaluate policies
+// Evaluate policies
         let allowed = self.evaluate_policies(ctx, resource, action);
 
         if !allowed {
@@ -121,13 +121,13 @@ impl DataIsolationService {
         Ok(allowed)
     }
 
-    /// Set up Row-Level Security on the given table.
+/// Set up Row-Level Security on the given table.
     pub async fn setup_rls(
         &self,
         table_name: &str,
         schema_name: &str,
     ) -> anyhow::Result<()> {
-        // #293: fail-closed identifier validation for dynamic DDL.
+// #293:fail-closed identifier validation for dynamic DDL.
         let table = validate_sql_ident(table_name)?;
         let schema = validate_sql_ident(schema_name)?;
         let table_quoted = quote_sql_ident(&table);
@@ -140,7 +140,7 @@ impl DataIsolationService {
         .execute(&self.db)
         .await?;
 
-        // SELECT policy
+// SELECT policy
         sqlx::query(&format!(
             "CREATE POLICY workspace_isolation_select ON {}.{} FOR SELECT
                USING (workspace_id = current_setting('app.current_workspace_id'))",
@@ -149,7 +149,7 @@ impl DataIsolationService {
         .execute(&self.db)
         .await?;
 
-        // INSERT policy
+// INSERT policy
         sqlx::query(&format!(
             "CREATE POLICY workspace_isolation_insert ON {}.{} FOR INSERT
                WITH CHECK (workspace_id = current_setting('app.current_workspace_id'))",
@@ -158,7 +158,7 @@ impl DataIsolationService {
         .execute(&self.db)
         .await?;
 
-        // UPDATE policy
+// UPDATE policy
         sqlx::query(&format!(
             "CREATE POLICY workspace_isolation_update ON {}.{} FOR UPDATE
                USING (workspace_id = current_setting('app.current_workspace_id'))",
@@ -167,7 +167,7 @@ impl DataIsolationService {
         .execute(&self.db)
         .await?;
 
-        // DELETE policy
+// DELETE policy
         sqlx::query(&format!(
             "CREATE POLICY workspace_isolation_delete ON {}.{} FOR DELETE
                USING (workspace_id = current_setting('app.current_workspace_id'))",
@@ -180,7 +180,7 @@ impl DataIsolationService {
         Ok(())
     }
 
-    /// Migrate a workspace between isolation levels.
+/// Migrate a workspace between isolation levels.
     pub async fn migrate_isolation_level(
         &self,
         workspace_id: &str,
@@ -212,7 +212,7 @@ impl DataIsolationService {
             }
         }
 
-        // Update isolation config
+// Update isolation config
         sqlx::query(
             "UPDATE iso_isolation_configs SET current_level=$1, migration_status='completed', updated_at=NOW()
              WHERE workspace_id=$2"
@@ -226,7 +226,7 @@ impl DataIsolationService {
         Ok(())
     }
 
-    // ── Private ────────────────────────────────────────────
+// ── Private ────────────────────────────────────────────
 
     async fn load_policies(&self) -> anyhow::Result<Vec<DataAccessPolicy>> {
         let rows: Vec<(String, String, String, serde_json::Value, serde_json::Value, String)> =
@@ -283,11 +283,11 @@ impl DataIsolationService {
             .collect();
 
         if matching.is_empty() {
-            // Default allow if no policies defined for this resource
+// Default allow if no policies defined for this resource
             return true;
         }
 
-        // Check for deny first
+// Check for deny first
         for policy in &matching {
             if policy.effect == PolicyEffect::Deny
                 && self.evaluate_conditions(ctx, &policy.conditions)
@@ -296,7 +296,7 @@ impl DataIsolationService {
             }
         }
 
-        // Check for allow
+// Check for allow
         for policy in &matching {
             if policy.effect == PolicyEffect::Allow
                 && self.evaluate_conditions(ctx, &policy.conditions)
@@ -395,7 +395,7 @@ impl DataIsolationService {
 
         let tables = ["emails", "contacts", "templates", "campaigns", "webhooks"];
         for table in tables {
-            // Create table in new schema
+// Create table in new schema
             sqlx::query(&format!(
                 "CREATE TABLE IF NOT EXISTS {}.{} (LIKE public.{} INCLUDING ALL)",
                 schema_quoted,
@@ -405,7 +405,7 @@ impl DataIsolationService {
             .execute(&mut **tx)
             .await?;
 
-            // Copy data
+// Copy data
             sqlx::query(&format!(
                 "INSERT INTO {}.{} SELECT * FROM public.{} WHERE workspace_id = $1",
                 schema_quoted,
@@ -416,7 +416,7 @@ impl DataIsolationService {
             .execute(&mut **tx)
             .await?;
 
-            // Delete from shared
+// Delete from shared
             sqlx::query(&format!(
                 "DELETE FROM public.{} WHERE workspace_id = $1",
                 quote_sql_ident(table)
@@ -426,7 +426,7 @@ impl DataIsolationService {
             .await?;
         }
 
-        // Update workspace schema_name
+// Update workspace schema_name
         sqlx::query("UPDATE iso_workspaces SET schema_name=$1 WHERE id=$2")
             .bind(&schema)
             .bind(workspace_id)
@@ -441,7 +441,7 @@ impl DataIsolationService {
         workspace_id: &str,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> anyhow::Result<()> {
-        // Get current schema
+// Get current schema
         let row: Option<(Option<String>,)> = sqlx::query_as(
             "SELECT schema_name FROM iso_workspaces WHERE id=$1"
         )
@@ -469,7 +469,7 @@ impl DataIsolationService {
             .await?;
         }
 
-        // Drop the schema
+// Drop the schema
         sqlx::query(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE",
             schema_quoted
@@ -519,7 +519,7 @@ fn resource_to_table(resource: &str) -> String {
         "campaign" => "campaigns".into(),
         "webhook" => "webhooks".into(),
         "api_key" => "api_keys".into(),
-        // Reject unknown resources instead of blindly pluralising user input
+// Reject unknown resources instead of blindly pluralising user input
         other => {
             tracing::error!(resource = %other, "Unknown resource type in data isolation — refusing to guess table name");
             "__unknown__".into()
@@ -534,7 +534,7 @@ fn get_context_value(ctx: &IsolationContext, field: &str) -> Option<String> {
         "user_id" => Some(ctx.user_id.clone()),
         "isolation_level" => Some(ctx.isolation_level.to_string()),
         _ => {
-            // Check permissions
+// Check permissions
             if field == "permissions" {
                 Some(ctx.permissions.join(","))
             } else {
@@ -599,7 +599,7 @@ mod tests {
             policies: vec![],
         };
         let ctx = make_ctx();
-        // SELECT on tenanted table without workspace_id filter
+// SELECT on tenanted table without workspace_id filter
         assert!(!svc.validate_query_access("SELECT * FROM emails WHERE subject LIKE '%test%'", &ctx));
     }
 

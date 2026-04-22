@@ -151,7 +151,7 @@ async fn get_trust(
         }
         state.trust_cache.remove(&tenant_id);
     }
-    // Query real metrics from the analytics database
+// Query real metrics from the analytics database
     let metrics_row: Option<(f64, f64, f64, i64, i32)> = sqlx::query_as(
         "WITH recent_stats AS (
             SELECT
@@ -190,7 +190,7 @@ async fn get_trust(
             volume: volume as u64,
         },
         None => {
-            // Fallback for new tenants with no data
+// Fallback for new tenants with no data
             TenantMetrics {
                 tenant_id,
                 bounce_rate: 0.0,
@@ -204,7 +204,7 @@ async fn get_trust(
 
     let score = TrustScorer::compute_score(&metrics);
 
-    // Store the computed score in trust_metrics table for historical tracking
+// Store the computed score in trust_metrics table for historical tracking
     if let Err(error) = sqlx::query(
         "INSERT INTO trust_metrics (tenant_id, trust_score, bounce_rate, complaint_rate, engagement_rate, send_volume, computed_at)
          VALUES ($1, $2, $3, $4, $5, $6, NOW())
@@ -272,24 +272,26 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
+    use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use tower::ServiceExt; // for `oneshot`
 
     async fn test_state() -> Result<AppState, sqlx::Error> {
-        let db_url = std::env::var("TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://localhost/apexmail_test".to_string());
+        let db_url = std::env::var("TEST_DATABASE_URL").ok();
         let db = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
-            .connect_lazy(&db_url)
+            .connect_lazy(
+                db_url
+                    .as_deref()
+                    .unwrap_or("postgres://localhost/apexmail_test"),
+            )
             ?;
-
         Ok(AppState {
             db: db.clone(),
             health: HealthChecker::new(100),
-            incidents: IncidentManager::new(db.clone()),
+            incidents: IncidentManager::new_in_memory(),
             slo: SloTracker::new(),
-            warmup: IpWarmupManager::new(db),
+            warmup: IpWarmupManager::new_in_memory(),
             api_key: "test-key".into(),
             trust_cache: Arc::new(DashMap::new()),
         })
@@ -338,11 +340,23 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
 
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let req = Request::builder()
+            .uri("/incidents")
+            .header("x-api-key", "test-key")
+            .body(Body::empty())
+            .unwrap();
+
         let resp = app.oneshot(req).await.unwrap();
-        assert!(
-            matches!(resp.status(), StatusCode::CREATED | StatusCode::INTERNAL_SERVER_ERROR),
-            "expected CREATED with test DB, or INTERNAL_SERVER_ERROR without DB"
-        );
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["count"], serde_json::json!(1));
+        assert_eq!(payload["incidents"][0]["title"], serde_json::json!("Test incident"));
+        assert_eq!(payload["incidents"][0]["severity"], serde_json::json!("P2"));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! Functional tests for apexmail-lib: crypto, IDs, validation, time, error codes.
+//! Functional tests for apexmail-lib:crypto, IDs, validation, time, error codes.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -75,15 +75,15 @@ fn api_key_prefixes() {
 
 #[test]
 fn validate_email_edge_cases() {
-    // Valid
+// Valid
     assert!(apexmail_lib::validation::is_valid_email("user@example.com"));
     assert!(apexmail_lib::validation::is_valid_email("a@b.cc"));
     assert!(apexmail_lib::validation::is_valid_email("test+tag@sub.domain.co.uk"));
-    // Invalid
+// Invalid
     assert!(!apexmail_lib::validation::is_valid_email(""));
     assert!(!apexmail_lib::validation::is_valid_email("noatsign"));
     assert!(!apexmail_lib::validation::is_valid_email("@no-local.com"));
-    // Very long (> 320 chars)
+// Very long (> 320 chars)
     let long_local = "a".repeat(310);
     let long_email = format!("{}@example.com", long_local);
     assert!(!apexmail_lib::validation::is_valid_email(&long_email));

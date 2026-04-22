@@ -17,21 +17,21 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InferenceConfig {
-    /// URL of the inference server (llama-server or ONNX sidecar)
+/// URL of the inference server (llama-server or ONNX sidecar)
     pub url: String,
-    /// Model identifier
+/// Model identifier
     #[serde(default = "default_model")]
     pub model: String,
-    /// Embedding dimension
+/// Embedding dimension
     #[serde(default = "default_dimension")]
     pub dimension: usize,
-    /// Max concurrent embedding requests
+/// Max concurrent embedding requests
     #[serde(default = "default_concurrency")]
     pub max_concurrency: usize,
-    /// Request timeout in milliseconds
+/// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    /// Pooling strategy
+/// Pooling strategy
     #[serde(default)]
     pub pooling: PoolingStrategy,
 }
@@ -47,10 +47,10 @@ pub enum PoolingStrategy {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StoreConfig {
-    /// Max vectors in the store
+/// Max vectors in the store
     #[serde(default = "default_max_vectors")]
     pub max_vectors: usize,
-    /// LRU eviction after this many entries
+/// LRU eviction after this many entries
     #[serde(default = "default_eviction_threshold")]
     pub eviction_threshold: usize,
 }

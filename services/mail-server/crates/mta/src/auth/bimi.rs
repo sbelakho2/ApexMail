@@ -14,7 +14,7 @@ use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 use x509_parser::prelude::*;
 
-// #131: Shared DNS resolver – avoids creating a new resolver per verify_bimi call
+// #131:Shared DNS resolver – avoids creating a new resolver per verify_bimi call
 static BIMI_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
     TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
 });
@@ -28,7 +28,7 @@ static BIMI_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     .ok()
 });
 
-// #128: Maximum logo download size (256 KB) to prevent OOM from malicious URLs
+// #128:Maximum logo download size (256 KB) to prevent OOM from malicious URLs
 const MAX_LOGO_SIZE: usize = 256 * 1024;
 const MAX_CERT_SIZE: usize = 512 * 1024;
 
@@ -87,9 +87,9 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
         recommendations: Vec::new(),
     };
 
-    // 1. Check DMARC enforcement (required for BIMI)
+// 1. Check DMARC enforcement (required for BIMI)
     let dmarc_name = format!("_dmarc.{domain}");
-    // #131: Use shared resolver instead of creating new one per call
+// #131:Use shared resolver instead of creating new one per call
     let resolver = &*BIMI_RESOLVER;
 
     match resolver.txt_lookup(&dmarc_name).await {
@@ -108,7 +108,7 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
         }
     }
 
-    // 2. Look up BIMI record
+// 2. Look up BIMI record
     let bimi_name = format!("{selector}._bimi.{domain}");
     match resolver.txt_lookup(&bimi_name).await {
         Ok(records) => {
@@ -118,7 +118,7 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
                     let parsed = parse_bimi_record(&txt, selector);
                     result.supported = true;
 
-                    // 3. Validate logo if present
+// 3. Validate logo if present
                     if let Some(ref url) = parsed.logo_url {
                         result.logo_valid = validate_bimi_logo_url(url).await;
                         if !result.logo_valid {
@@ -126,7 +126,7 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
                         }
                     }
 
-                    // 4. Check VMC certificate
+// 4. Check VMC certificate
                     if let Some(ref cert_url) = parsed.certificate_url {
                         result.certificate_valid = validate_vmc_certificate(cert_url).await;
                     } else {
@@ -170,17 +170,17 @@ pub fn generate_bimi_record(logo_url: &str, certificate_url: Option<&str>) -> St
 
 /// Validate a BIMI logo URL (basic checks).
 pub async fn validate_bimi_logo_url(url: &str) -> bool {
-    // Must be HTTPS
+// Must be HTTPS
     if !url.starts_with("https://") {
         return false;
     }
 
-    // Must end in .svg
+// Must end in .svg
     if !url.to_lowercase().ends_with(".svg") {
         return false;
     }
 
-    // Try to fetch and validate SVG
+// Try to fetch and validate SVG
     let Some(client) = BIMI_CLIENT.as_ref() else {
         return false;
     };
@@ -201,14 +201,14 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
                 return false;
             }
 
-            // #128: Check Content-Length before downloading
+// #128:Check Content-Length before downloading
             if let Some(len) = resp.content_length() {
                 if len > MAX_LOGO_SIZE as u64 {
                     return false;
                 }
             }
 
-            // #128: Download with size limit to prevent OOM
+// #128:Download with size limit to prevent OOM
             match resp.bytes().await {
                 Ok(bytes) => {
                     if bytes.len() > MAX_LOGO_SIZE {
@@ -225,8 +225,8 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
 }
 
 /// Validate SVG content for BIMI compliance (SVG Tiny PS).
-/// #129: Comprehensive validation replacing fragile string matching.
-/// #130: Robust external reference detection.
+/// #129:Comprehensive validation replacing fragile string matching.
+/// #130:Robust external reference detection.
 pub fn validate_svg_content(svg: &str) -> bool {
     let mut reader = Reader::from_str(svg);
     reader.config_mut().trim_text(true);

@@ -10,10 +10,9 @@ use crate::types::{HealthCheck, ServiceStatus, StatusPage};
 pub struct StatusPageGenerator;
 
 impl StatusPageGenerator {
-    /// Build a status page from the provided checks.
-    ///
-    /// The `overall_status` is the *worst* status observed across all services.
-    /// If the input slice is empty the overall status is [`ServiceStatus::Operational`].
+/// Build a status page from the provided checks.
+/// The `overall_status` is the *worst* status observed across all services.
+/// If the input slice is empty the overall status is [`ServiceStatus::Operational`].
     pub fn generate_page(checks: &[HealthCheck]) -> StatusPage {
         let overall_status = checks
             .iter()

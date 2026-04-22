@@ -1,6 +1,6 @@
 //! Session introspection endpoint.
 //!
-//! Migrated from: apps/web/src/app/api/auth/session/route.ts
+//! Migrated from:apps/web/src/app/api/auth/session/route.ts
 //! Provides current session state including impersonation status.
 
 use super::helpers::extract_cookie;
@@ -46,7 +46,7 @@ async fn get_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    // Check for E2E bypass (non-production only)
+// Check for E2E bypass (non-production only)
     if !state.config.environment.is_production() {
         if let Ok(e2e_mode) = std::env::var("E2E_TEST_MODE") {
             if e2e_mode == "true" {
@@ -75,7 +75,7 @@ async fn get_session(
         user: None,
     };
 
-    // Check for impersonation session cookie
+// Check for impersonation session cookie
     let impersonation_token = extract_cookie(&headers, "impersonation_session");
     if let Some(token) = impersonation_token {
         if let Ok(payload) = verify_session_token(&token, &state.config.session_secret) {
@@ -93,7 +93,7 @@ async fn get_session(
         }
     }
 
-    // Check regular user session if no impersonation
+// Check regular user session if no impersonation
     if !response.authenticated {
         let user_token = extract_cookie(&headers, "am_session")
             .or_else(|| {
@@ -105,7 +105,7 @@ async fn get_session(
             });
 
         if let Some(token) = user_token {
-            // Validate JWT against our public key
+// Validate JWT against our public key
             let key = jsonwebtoken::DecodingKey::from_rsa_pem(
                 state.config.jwt_public_key_pem.as_bytes(),
             );
@@ -118,7 +118,7 @@ async fn get_session(
                     let claims = token_data.claims;
                     let user_id = claims.sub.clone();
                     if !user_id.is_empty() {
-                        // Check user still exists and is active
+// Check user still exists and is active
                         let user: Option<(String, String, Option<String>, String)> =
                             sqlx::query_as(
                                 "SELECT id, email, name, role FROM users WHERE id = $1 AND status = 'active'",
@@ -173,14 +173,14 @@ fn verify_session_token(token: &str, secret: &str) -> Result<SessionPayload, Api
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    // Token format: base64url(payload).base64url(signature)
+// Token format:base64url(payload).base64url(signature)
     let parts: Vec<&str> = token.rsplitn(2, '.').collect();
     if parts.len() != 2 {
         return Err(ApiError::Unauthorized("invalid session token format".into()));
     }
     let (sig_part, payload_part) = (parts[0], parts[1]);
 
-    // Verify HMAC
+// Verify HMAC
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .map_err(|_| ApiError::Internal("HMAC key error".into()))?;
     mac.update(payload_part.as_bytes());
@@ -194,7 +194,7 @@ fn verify_session_token(token: &str, secret: &str) -> Result<SessionPayload, Api
     mac.verify_slice(&sig_bytes)
         .map_err(|_| ApiError::Unauthorized("invalid session token signature".into()))?;
 
-    // Decode payload
+// Decode payload
     let payload_bytes = base64::Engine::decode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
         payload_part,
@@ -204,7 +204,7 @@ fn verify_session_token(token: &str, secret: &str) -> Result<SessionPayload, Api
     let payload: SessionPayload = serde_json::from_slice(&payload_bytes)
         .map_err(|_| ApiError::Unauthorized("invalid session token payload".into()))?;
 
-    // Check expiry
+// Check expiry
     if let Some(exp) = payload.exp {
         let now_ms = chrono::Utc::now().timestamp_millis();
         if now_ms > exp {

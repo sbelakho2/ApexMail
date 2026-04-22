@@ -109,13 +109,13 @@ impl ReplyTrackingService {
         Self { pool, cache }
     }
 
-    /// Process a reply event.
+/// Process a reply event.
     pub async fn process_reply(&self, event: &ReplyEvent) -> anyhow::Result<ProcessedReply> {
         let is_auto = detect_auto_reply(&event.subject, &event.headers);
         let sentiment = analyze_sentiment(&event.body);
         let thread_depth = self.get_thread_depth(&event.in_reply_to).await?;
 
-        // Store in DB
+// Store in DB
         sqlx::query(
             "INSERT INTO reply_events (message_id, in_reply_to, tenant_id, recipient, \
              subject, is_auto_reply, sentiment, thread_depth, timestamp) \
@@ -133,7 +133,7 @@ impl ReplyTrackingService {
         .execute(&self.pool)
         .await?;
 
-        // Invalidate cache for this tenant
+// Invalidate cache for this tenant
         self.cache.invalidate(&event.tenant_id);
 
         Ok(ProcessedReply {
@@ -144,7 +144,7 @@ impl ReplyTrackingService {
         })
     }
 
-    /// Get reply metrics for a tenant.
+/// Get reply metrics for a tenant.
     pub async fn get_metrics(
         &self,
         tenant_id: &str,
@@ -238,14 +238,14 @@ pub fn detect_auto_reply(
     subject: &str,
     headers: &std::collections::HashMap<String, String>,
 ) -> bool {
-    // Check subject patterns
+// Check subject patterns
     for pattern in AUTO_REPLY_PATTERNS.iter() {
         if pattern.is_match(subject) {
             return true;
         }
     }
 
-    // Check headers
+// Check headers
     for (header_name, header_value) in AUTO_REPLY_HEADERS.iter() {
         if let Some(val) = headers.get(*header_name) {
             if header_value.is_empty() || val.to_lowercase().contains(header_value) {
@@ -259,7 +259,7 @@ pub fn detect_auto_reply(
 
 /// Analyze sentiment of reply body.
 pub fn analyze_sentiment(body: &str) -> ReplySentiment {
-    // Check specific categories first (most specific)
+// Check specific categories first (most specific)
     for p in UNSUB_PATTERNS.iter() {
         if p.is_match(body) {
             return ReplySentiment::Unsubscribe;
@@ -272,7 +272,7 @@ pub fn analyze_sentiment(body: &str) -> ReplySentiment {
         }
     }
 
-    // Count positive/negative/inquiry signal strength
+// Count positive/negative/inquiry signal strength
     let positive_count: usize = POSITIVE_PATTERNS.iter().map(|p| p.find_iter(body).count()).sum();
     let negative_count: usize = NEGATIVE_PATTERNS.iter().map(|p| p.find_iter(body).count()).sum();
     let inquiry_count: usize = INQUIRY_PATTERNS.iter().map(|p| p.find_iter(body).count()).sum();

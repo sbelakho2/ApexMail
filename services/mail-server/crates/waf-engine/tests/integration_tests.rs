@@ -8,10 +8,10 @@ use waf_engine::json_graphql::{extract_json_values, extract_graphql_values};
 mod waf_pipeline_integration {
     use super::*;
 
-    /// Test the full WAF inspection pipeline: fast-path -> JSON parsing -> detection
+/// Test the full WAF inspection pipeline:fast-path -> JSON parsing -> detection
     #[test]
     fn test_full_pipeline_json_request() {
-        // A realistic JSON API request with embedded attack
+// A realistic JSON API request with embedded attack
         let request_body = r#"{
             "user": {
                 "name": "John Doe",
@@ -20,15 +20,15 @@ mod waf_pipeline_integration {
             }
         }"#;
         
-        // Step 1: Fast-path check
+// Step 1:Fast-path check
         let fast_result = fast_path_check(request_body);
         assert!(fast_result.has_sqli_patterns, "Fast path should detect SQLi keywords");
         
-        // Step 2: Since fast-path flagged it, do deep JSON inspection
+// Step 2:Since fast-path flagged it, do deep JSON inspection
         let json_result = extract_json_values(request_body);
         assert!(json_result.parsed_ok, "JSON should parse successfully");
         
-        // Step 3: Check extracted values for the attack
+// Step 3:Check extracted values for the attack
         let sqli_values: Vec<_> = json_result.string_values.iter()
             .filter(|v| v.value.to_lowercase().contains("select"))
             .collect();
@@ -38,7 +38,7 @@ mod waf_pipeline_integration {
 
     #[test]
     fn test_full_pipeline_graphql_request() {
-        // A realistic GraphQL request with potential injection
+// A realistic GraphQL request with potential injection
         let request_body = r#"{
             "query": "query GetUser($id: ID!) { user(id: $id) { name email } }",
             "variables": {
@@ -46,15 +46,15 @@ mod waf_pipeline_integration {
             }
         }"#;
         
-        // Step 1: Fast-path check
+// Step 1:Fast-path check
         let fast_result = fast_path_check(request_body);
         assert!(fast_result.has_sqli_patterns, "Fast path should detect DROP TABLE");
         
-        // Step 2: GraphQL inspection
+// Step 2:GraphQL inspection
         let gql_result = extract_graphql_values(request_body);
         assert!(gql_result.looks_like_graphql, "Should recognize as GraphQL");
         
-        // Step 3: Check variables for injection
+// Step 3:Check variables for injection
         let dangerous_vars: Vec<_> = gql_result.variables.iter()
             .filter(|v| v.value.contains("DROP"))
             .collect();
@@ -74,18 +74,18 @@ mod waf_pipeline_integration {
             }
         }"#;
         
-        // Fast-path intentionally flags input with quotes for deeper inspection
-        // This is by design - it's a pre-filter, not a final determination
+// Fast-path intentionally flags input with quotes for deeper inspection
+// This is by design - it's a pre-filter, not a final determination
         let _fast_result = fast_path_check(request_body);
-        // The fast path will likely flag this due to quotes in JSON
-        // The important thing is that deep inspection clears it
+// The fast path will likely flag this due to quotes in JSON
+// The important thing is that deep inspection clears it
         
-        // JSON inspection should succeed and extract benign values
+// JSON inspection should succeed and extract benign values
         let json_result = extract_json_values(request_body);
         assert!(json_result.parsed_ok);
         
-        // Verify extracted values are actually clean (no attack in the values)
-        // Note: fast_path_check will flag quotes, but actual values don't contain attacks
+// Verify extracted values are actually clean (no attack in the values)
+// Note:fast_path_check will flag quotes, but actual values don't contain attacks
         for value in &json_result.string_values {
             assert!(!value.value.to_lowercase().contains("select "));
             assert!(!value.value.to_lowercase().contains("union "));
@@ -99,7 +99,7 @@ mod nested_attack_detection {
 
     #[test]
     fn test_deeply_nested_attack() {
-        // Attack hidden deep in JSON structure
+// Attack hidden deep in JSON structure
         let payload = r#"{
             "level1": {
                 "level2": {
@@ -115,7 +115,7 @@ mod nested_attack_detection {
         let json_result = extract_json_values(payload);
         assert!(json_result.parsed_ok);
         
-        // Should find the attack at the deep level
+// Should find the attack at the deep level
         let xss_values: Vec<_> = json_result.string_values.iter()
             .filter(|v| v.value.contains("<script>"))
             .collect();
@@ -140,7 +140,7 @@ mod nested_attack_detection {
         let json_result = extract_json_values(payload);
         assert!(json_result.parsed_ok);
         
-        // Should find the attack in the array
+// Should find the attack in the array
         let sqli_values: Vec<_> = json_result.string_values.iter()
             .filter(|v| v.value.contains("DELETE"))
             .collect();
@@ -171,7 +171,7 @@ mod graphql_attack_vectors {
         let gql_result = extract_graphql_values(payload);
         assert!(gql_result.looks_like_graphql);
         
-        // The XSS should be in variables
+// The XSS should be in variables
         let has_xss = gql_result.variables.iter()
             .any(|v| v.value.contains("onerror"));
         assert!(has_xss, "Should detect XSS in GraphQL variables");
@@ -179,7 +179,7 @@ mod graphql_attack_vectors {
 
     #[test]
     fn test_raw_graphql_introspection() {
-        // Introspection query sent as raw GraphQL
+// Introspection query sent as raw GraphQL
         let payload = "{ __schema { types { name } queryType { name } mutationType { name } } }";
         
         let gql_result = extract_graphql_values(payload);
@@ -189,7 +189,7 @@ mod graphql_attack_vectors {
 
     #[test]
     fn test_graphql_batch_operations() {
-        // Multiple operations in one query
+// Multiple operations in one query
         let payload = r#"{
             "query": "query A { user { id } } query B { posts { title } }"
         }"#;
@@ -204,37 +204,37 @@ mod evasion_detection {
 
     #[test]
     fn test_json_key_as_attack_vector() {
-        // Attack in the key itself, not the value
-        // Note: Current implementation may not catch this - documenting for future
+// Attack in the key itself, not the value
+// Note:Current implementation may not catch this - documenting for future
         let payload = r#"{"<script>evil()</script>": "innocentvalue"}"#;
         
-        // Fast path should still catch it
+// Fast path should still catch it
         let fast_result = fast_path_check(payload);
         assert!(fast_result.has_xss_patterns, "Should detect XSS in key");
     }
 
     #[test]
     fn test_unicode_in_json() {
-        // Unicode escapes in JSON that decode to dangerous content
+// Unicode escapes in JSON that decode to dangerous content
         let payload = r#"{"message": "\u003cscript\u003ealert(1)\u003c/script\u003e"}"#;
         
         let json_result = extract_json_values(payload);
         assert!(json_result.parsed_ok);
         
-        // Check if the decoded value contains the attack
-        // Note: depends on whether our parser decodes unicode escapes
+// Check if the decoded value contains the attack
+// Note:depends on whether our parser decodes unicode escapes
     }
 
     #[test]
     fn test_mixed_content_types() {
-        // Request that could be interpreted as JSON or GraphQL
+// Request that could be interpreted as JSON or GraphQL
         let payload = r#"{"query":"{ user { name } }"}"#;
         
-        // Should be recognized as GraphQL
+// Should be recognized as GraphQL
         let gql_result = extract_graphql_values(payload);
         assert!(gql_result.looks_like_graphql);
         
-        // But also parseable as JSON
+// But also parseable as JSON
         let json_result = extract_json_values(payload);
         assert!(json_result.parsed_ok);
     }
@@ -246,7 +246,7 @@ mod performance_edge_cases {
 
     #[test]
     fn test_pipeline_performance_large_json() {
-        // Large but clean JSON - should be fast
+// Large but clean JSON - should be fast
         let mut json = String::from(r#"{"items": ["#);
         for i in 0..1000 {
             if i > 0 {
@@ -263,16 +263,16 @@ mod performance_edge_cases {
         
         let elapsed = start.elapsed();
         
-        // Should complete quickly (< 1 second for 1000 items)
+// Should complete quickly (< 1 second for 1000 items)
         assert!(elapsed.as_millis() < 1000, "Processing took too long: {:?}", elapsed);
-        // Fast path will flag due to quotes, but JSON parsing should succeed
+// Fast path will flag due to quotes, but JSON parsing should succeed
         assert!(json_result.parsed_ok);
         assert!(json_result.string_values.len() == 1000, "Should extract all item names");
     }
 
     #[test]
     fn test_many_small_requests() {
-        // Simulate many small requests
+// Simulate many small requests
         let payloads: Vec<String> = (0..100)
             .map(|i| format!(r#"{{"id": {}, "action": "view"}}"#, i))
             .collect();
@@ -282,7 +282,7 @@ mod performance_edge_cases {
             let _json = extract_json_values(payload);
         }
         
-        // Just ensure no crashes or resource exhaustion
+// Just ensure no crashes or resource exhaustion
     }
 }
 
@@ -301,7 +301,7 @@ mod error_handling {
         ];
         
         for payload in malformed_payloads {
-            // Should not panic
+// Should not panic
             let result = extract_json_values(payload);
             assert!(!result.parsed_ok || result.string_values.is_empty(),
                 "Should fail gracefully for: {}", payload);
@@ -319,9 +319,9 @@ mod error_handling {
         ];
         
         for payload in malformed_payloads {
-            // Should not panic
+// Should not panic
             let result = extract_graphql_values(payload);
-            // May or may not be recognized as GraphQL, but shouldn't crash
+// May or may not be recognized as GraphQL, but shouldn't crash
             let _ = result.looks_like_graphql;
         }
     }

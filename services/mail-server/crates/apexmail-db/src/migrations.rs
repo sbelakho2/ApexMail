@@ -212,7 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_support_tickets_tenant ON support_tickets(tenant_
 CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(tenant_id, status);
 
 -- ── Status Page Incidents ───────────────────────────────────────
--- #211: Missing tables that repos query
+-- #211:Missing tables that repos query
 CREATE TABLE IF NOT EXISTS status_page_incidents (
     id              TEXT PRIMARY KEY,
     title           TEXT        NOT NULL,

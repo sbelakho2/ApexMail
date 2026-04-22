@@ -281,8 +281,11 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
 
     fn app() -> Router {
-        let state = default_app_state();
-        // Register a model so prediction works
+        let mut state = default_app_state();
+        Arc::get_mut(&mut state)
+            .expect("exclusive test state")
+            .service_token = "test-key".into();
+// Register a model so prediction works
         state.inference.register_model(Model {
             id: "m1".into(),
             name: "test".into(),
@@ -317,6 +320,7 @@ mod tests {
         let req = Request::builder()
             .uri("/suggest")
             .method("POST")
+            .header("x-api-key", "test-key")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
@@ -331,6 +335,7 @@ mod tests {
         let req = Request::builder()
             .uri("/content/score")
             .method("POST")
+            .header("x-api-key", "test-key")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();

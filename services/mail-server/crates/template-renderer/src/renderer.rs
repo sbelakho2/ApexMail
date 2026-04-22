@@ -1,4 +1,4 @@
-//! Full template rendering pipeline: transpile → sandbox → render → plaintext.
+//! Full template rendering pipeline:transpile → sandbox → render → plaintext.
 
 use std::time::Instant;
 
@@ -36,7 +36,7 @@ impl TemplateRenderer {
         }
     }
 
-    /// Render a template from source string.
+/// Render a template from source string.
     pub fn render_source(
         &self,
         source: &str,
@@ -44,17 +44,17 @@ impl TemplateRenderer {
     ) -> Result<RenderResult, TemplateError> {
         let start = Instant::now();
 
-        // Execute in sandbox
+// Execute in sandbox
         let sandbox_result = self.sandbox.execute(source, options)?;
 
-        // Generate plaintext if requested
+// Generate plaintext if requested
         let plaintext = if options.generate_plaintext {
             Some(html_to_plaintext(&sandbox_result.html))
         } else {
             None
         };
 
-        // Resolve subject placeholders
+// Resolve subject placeholders
         let subject = options
             .subject
             .as_ref()
@@ -75,15 +75,15 @@ impl TemplateRenderer {
         })
     }
 
-    /// Render a stored template by ID, using cache when available.
+/// Render a stored template by ID, using cache when available.
     pub async fn render_template(
         &self,
         tenant_id: Uuid,
         template_id: Uuid,
         options: &RenderOptions,
     ) -> Result<RenderResult, TemplateError> {
-        // #191: Hash the props JSON for a stable cache key regardless of key ordering.
-        // serde_json::Value Display can produce different strings for logically-equal JSON.
+// #191:Hash the props JSON for a stable cache key regardless of key ordering.
+// serde_json::Value Display can produce different strings for logically-equal JSON.
         use sha2::{Sha256, Digest};
         let props_hash = {
             let canonical = serde_json::to_string(&options.props).unwrap_or_default();
@@ -92,7 +92,7 @@ impl TemplateRenderer {
         };
         let cache_key = format!("{}:{}", template_id, props_hash);
 
-        // Check cache
+// Check cache
         if let Some(cached) = self.cache.get(&cache_key) {
             info!(template_id = %template_id, "Cache hit");
             return Ok(RenderResult {
@@ -104,36 +104,36 @@ impl TemplateRenderer {
             });
         }
 
-        // Load template from DB
+// Load template from DB
         let template = self.load_template(tenant_id, template_id).await?;
 
-        // Render
+// Render
         let result = self.render_source(&template.source, options)?;
 
-        // Store in cache
+// Store in cache
         self.cache.insert(cache_key, result.clone());
 
         Ok(result)
     }
 
-    /// Validate template source without rendering.
+/// Validate template source without rendering.
     pub fn validate(&self, source: &str) -> ValidationResult {
         transpiler::validate_source(source, self.config.sandbox.max_source_length)
     }
 
-    /// Get a starter template for new email designs.
+/// Get a starter template for new email designs.
     pub fn starter_template(&self) -> &'static str {
         STARTER_TEMPLATE
     }
 
-    /// Store a template in the database.
+/// Store a template in the database.
     pub async fn save_template(
         &self,
         tenant_id: Uuid,
         name: &str,
         source: &str,
     ) -> Result<Template, TemplateError> {
-        // Validate first
+// Validate first
         let validation = self.validate(source);
         if !validation.valid {
             let msg = validation
@@ -166,7 +166,7 @@ impl TemplateRenderer {
         Ok(row.into_template())
     }
 
-    /// Load a template from DB.
+/// Load a template from DB.
     async fn load_template(
         &self,
         tenant_id: Uuid,
@@ -250,8 +250,8 @@ mod tests {
 
     #[test]
     fn test_render_source_simple() {
-        // We can't use PgPool in unit tests, but we can test the rendering pipeline
-        // by testing the sandbox and transpiler directly
+// We can't use PgPool in unit tests, but we can test the rendering pipeline
+// by testing the sandbox and transpiler directly
         let config = test_config();
         let sandbox = Sandbox::new(config.sandbox);
         let source = "<h1>{{ title }}</h1><p>{{ body }}</p>";
@@ -279,7 +279,7 @@ mod tests {
         let result = sandbox.execute(source, &opts).unwrap();
         assert_eq!(result.html, "<p>Hi</p>");
 
-        // Verify subject resolution
+// Verify subject resolution
         let resolved_subject =
             transpiler::resolve_placeholders("Hello {{ name }}!", &opts.props);
         assert_eq!(resolved_subject, "Hello Alice!");

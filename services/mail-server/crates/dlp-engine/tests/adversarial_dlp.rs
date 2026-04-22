@@ -3,13 +3,12 @@
 //! Tests are designed to CATCH false negatives (missed PII) and
 //! false positives (benign content mis-classified).
 //!
-//! Coverage:
-//! - Luhn-valid credit card: must detect
-//! - Luhn-invalid number: must NOT detect (false-positive guard)
+//! Coverage://! - Luhn-valid credit card:must detect
+//! - Luhn-invalid number:must NOT detect (false-positive guard)
 //! - SSN formats
 //! - High-entropy secrets (API keys, tokens)
 //! - Multiple PII types in one email (cumulative risk)
-//! - Clean email: must be allowed with zero findings
+//! - Clean email:must be allowed with zero findings
 
 use dlp_engine::engine::{DlpAction, DlpEngine};
 use dlp_engine::pii::PiiType;
@@ -34,7 +33,7 @@ fn test_cc_luhn_valid_visa_detected() {
 #[test]
 fn test_cc_mastercard_detected() {
     let e = engine();
-    // Luhn-valid Mastercard test number
+// Luhn-valid Mastercard test number
     let verdict = e.scan_body("Billing info: 5425233430109903");
     let cc = verdict.pii_findings.iter().any(|f| matches!(f.pii_type, PiiType::CreditCard));
     assert!(cc, "Mastercard number must be detected");
@@ -44,7 +43,7 @@ fn test_cc_mastercard_detected() {
 #[test]
 fn test_cc_luhn_invalid_not_detected() {
     let e = engine();
-    // Last digit changed to make Luhn fail
+// Last digit changed to make Luhn fail
     let verdict = e.scan_body("Order ref: 4532015112830367");
     let cc = verdict.pii_findings.iter().any(|f| matches!(f.pii_type, PiiType::CreditCard));
     assert!(!cc, "Luhn-invalid number must NOT trigger CC detection (false-positive guard)");
@@ -85,7 +84,7 @@ fn test_ssn_embedded_no_label() {
 #[test]
 fn test_aws_secret_key_entropy_detected() {
     let e = engine();
-    // Fake but plausible AWS secret access key format (40 chars, mixed alphanumeric)
+// Fake but plausible AWS secret access key format (40 chars, mixed alphanumeric)
     let verdict = e.scan_body("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
     assert!(
         !verdict.entropy_findings.is_empty(),
@@ -94,12 +93,12 @@ fn test_aws_secret_key_entropy_detected() {
 }
 
 /// A realistic API token (mixed-case + digits + key prefix) must trigger entropy.
-/// The scanner requires BOTH entropy >= 4.5 AND looks_like_secret().
+/// The scanner requires BOTH entropy >= 4.5 AND looks_like_secret.
 /// A pure lowercase hex string fails both criteria — use a mixed-case token.
 #[test]
 fn test_api_token_entropy_detected() {
     let e = engine();
-    // sk_ prefix triggers looks_like_secret(); mixed case + digits gives > 4.5 bits entropy
+// sk_ prefix triggers looks_like_secret; mixed case + digits gives > 4.5 bits entropy
     let verdict = e.scan_body("token: sk_live_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789");
     assert!(
         !verdict.entropy_findings.is_empty(),
@@ -130,7 +129,7 @@ fn test_multiple_pii_types_cumulative() {
         verdict.pii_findings.len() >= 2,
         "Both CC and SSN must generate separate findings. Got: {:?}", verdict.pii_findings
     );
-    // Combined risk should be higher than either alone
+// Combined risk should be higher than either alone
     let solo_cc = engine().scan_body("CC: 4532015112830366").risk_score;
     let solo_ssn = engine().scan_body("SSN: 078-05-1120").risk_score;
     assert!(

@@ -9,7 +9,7 @@ use crate::types::Suppression;
 pub struct SuppressionsRepo;
 
 impl SuppressionsRepo {
-    /// Add an email to the suppression list.
+/// Add an email to the suppression list.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -32,7 +32,7 @@ impl SuppressionsRepo {
         .await
     }
 
-    /// Find suppression entry by email.
+/// Find suppression entry by email.
     pub async fn find_by_email(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -48,8 +48,8 @@ impl SuppressionsRepo {
         .await
     }
 
-    /// List suppressions for a tenant with pagination.
-    /// #221: Added limit/offset parameters to prevent unbounded queries
+/// List suppressions for a tenant with pagination.
+/// #221:Added limit/offset parameters to prevent unbounded queries
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -69,7 +69,7 @@ impl SuppressionsRepo {
         .await
     }
 
-    /// Remove an email from the suppression list.
+/// Remove an email from the suppression list.
     pub async fn delete(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -83,7 +83,7 @@ impl SuppressionsRepo {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Check whether an email is suppressed (fast boolean check).
+/// Check whether an email is suppressed (fast boolean check).
     pub async fn is_suppressed(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -99,13 +99,13 @@ impl SuppressionsRepo {
         Ok(row.0)
     }
 
-    /// Bulk-create suppressions (upsert).
+/// Bulk-create suppressions (upsert).
     pub async fn bulk_create(
         pool: &PgPool,
         tenant_id: Uuid,
         entries: &[(&str, &str, &str)], // (email, reason, source)
     ) -> Result<Vec<Suppression>, sqlx::Error> {
-        // #213: Return early on empty input to avoid invalid SQL
+// #213:Return early on empty input to avoid invalid SQL
         if entries.is_empty() {
             return Ok(Vec::new());
         }

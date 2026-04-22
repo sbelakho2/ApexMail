@@ -9,6 +9,7 @@ use ha::health_check::HealthCheckService;
 use ha::multi_region::MultiRegionService;
 use ha::replication::ReplicationService;
 use ha::routes::{build_router, AppState};
+use ha::types::HealthStatus;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = Arc::new(Config::from_env());
     info!(port = config.port, version = config.version, "Starting HA service");
 
-    // Build DB pool
+// Build DB pool
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(config.database.pool_max)
         .idle_timeout(std::time::Duration::from_millis(config.database.idle_timeout_ms))
@@ -31,9 +32,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .connect(&config.database.primary_url())
         .await?;
 
-    // Build shared state
+// Build shared state
     let config_for_services = Arc::clone(&config);
-    // BackupService::new() returns Result to validate encryption key at startup
+// BackupService::new returns Result to validate encryption key at startup
     let backup_service = BackupService::new(pool.clone(), Arc::clone(&config_for_services))
         .map_err(|e| anyhow::anyhow!("Failed to initialize backup service: {}", e))?;
     let state = Arc::new(AppState {
@@ -47,7 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         config: config_for_services,
     });
 
-    // Background cron: health checks
+// Background cron:health checks
     {
         let s = state.clone();
         let interval = config.health.interval_ms;
@@ -55,13 +56,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval));
             loop {
                 tick.tick().await;
-                let _ = s.health.check_all().await
-                    .map_err(|e| tracing::warn!(error = %e, "Health check failed"));
+                let health = s.health.check_all().await;
+                if health.overall != HealthStatus::Healthy {
+                    tracing::warn!(status = %health.overall, region = %health.region, "Health check reported non-healthy state");
+                }
             }
         });
     }
 
-    // Background cron: replication lag recording
+// Background cron:replication lag recording
     {
         let s = state.clone();
         tokio::spawn(async move {
@@ -75,7 +78,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // Background cron: backup retention cleanup (daily)
+// Background cron:backup retention cleanup (daily)
     {
         let s = state.clone();
         tokio::spawn(async move {
@@ -94,7 +97,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // Background cron: replication lag history cleanup (hourly)
+// Background cron:replication lag history cleanup (hourly)
     {
         let s = state.clone();
         tokio::spawn(async move {
@@ -108,7 +111,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // Start HTTP server
+// Start HTTP server
     let app = build_router(state);
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = TcpListener::bind(&addr).await?;

@@ -31,7 +31,7 @@ pub async fn create_pool_from_config(
     password: &str,
     max_connections: u32,
 ) -> Result<DatabasePool, sqlx::Error> {
-    // #210: URL-encode user and password to handle special characters safely
+// #210:URL-encode user and password to handle special characters safely
     let encoded_user = urlencoding::encode(user);
     let encoded_password = urlencoding::encode(password);
     let url = format!(

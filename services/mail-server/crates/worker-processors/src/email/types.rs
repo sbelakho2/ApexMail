@@ -105,15 +105,15 @@ pub enum SendOutcome {
 /// Warmup schedule entry.
 #[derive(Debug, Clone)]
 pub struct WarmupLimits {
-    /// Daily send limit for this warmup day.
+/// Daily send limit for this warmup day.
     pub daily_limit: i64,
-    /// Hourly send limit (daily_limit / 24, roughly).
+/// Hourly send limit (daily_limit / 24, roughly).
     pub hourly_limit: i64,
 }
 
 impl WarmupLimits {
-    /// Get warmup limits for a given warmup day.
-    /// Standard warmup schedule: exponential growth over ~30 days.
+/// Get warmup limits for a given warmup day.
+/// Standard warmup schedule:exponential growth over ~30 days.
     pub fn for_day(day: i32) -> Self {
         let daily_limit = match day {
             0 => 50,

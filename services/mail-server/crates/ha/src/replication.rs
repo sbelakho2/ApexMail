@@ -19,9 +19,9 @@ impl ReplicationService {
         Self { pool, config }
     }
 
-    // ── Replica Status ─────────────────────────────────────
+// ── Replica Status ─────────────────────────────────────
 
-    /// Query pg_stat_replication for all connected replicas.
+/// Query pg_stat_replication for all connected replicas.
     pub async fn get_replicas(&self) -> Result<Vec<ReplicaInfo>, String> {
         let rows: Vec<ReplicaRow> = sqlx::query_as::<_, ReplicaRow>(
             "SELECT pid, application_name, client_addr::text,
@@ -37,7 +37,7 @@ impl ReplicationService {
         Ok(rows.into_iter().map(|r| r.into_info()).collect())
     }
 
-    /// Get replication lag for a specific replica by application name.
+/// Get replication lag for a specific replica by application name.
     pub async fn get_lag(&self, app_name: &str) -> Result<Option<f64>, String> {
         let row: Option<(Option<f64>,)> = sqlx::query_as(
             "SELECT EXTRACT(EPOCH FROM replay_lag) * 1000 AS lag_ms
@@ -51,7 +51,7 @@ impl ReplicationService {
         Ok(row.and_then(|(ms,)| ms))
     }
 
-    /// Record current lag into history table.
+/// Record current lag into history table.
     pub async fn record_lag(&self) -> Result<(), String> {
         let replicas = self.get_replicas().await?;
         for replica in &replicas {
@@ -67,7 +67,7 @@ impl ReplicationService {
             .await
             .map_err(|e| format!("Record lag: {e}"))?;
 
-            // Check thresholds
+// Check thresholds
             if lag_ms > self.config.replication.critical_lag_ms as f64 {
                 warn!(replica = replica.application_name, lag_ms, "CRITICAL replication lag");
             } else if lag_ms > self.config.replication.warning_lag_ms as f64 {
@@ -77,9 +77,9 @@ impl ReplicationService {
         Ok(())
     }
 
-    // ── Replication Slots ──────────────────────────────────
+// ── Replication Slots ──────────────────────────────────
 
-    /// List all replication slots.
+/// List all replication slots.
     pub async fn get_slots(&self) -> Result<Vec<ReplicationSlot>, String> {
         let rows: Vec<SlotRow> = sqlx::query_as::<_, SlotRow>(
             "SELECT slot_name, plugin, slot_type, active,
@@ -101,9 +101,9 @@ impl ReplicationService {
         }).collect())
     }
 
-    /// Create a new replication slot.
+/// Create a new replication slot.
     pub async fn create_slot(&self, name: &str, slot_type: &str) -> Result<(), String> {
-        // Validate name
+// Validate name
         if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err("Invalid slot name".into());
         }
@@ -122,7 +122,7 @@ impl ReplicationService {
         Ok(())
     }
 
-    /// Drop a replication slot.
+/// Drop a replication slot.
     pub async fn drop_slot(&self, name: &str) -> Result<(), String> {
         if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err("Invalid slot name".into());
@@ -137,9 +137,9 @@ impl ReplicationService {
         Ok(())
     }
 
-    // ── Promotion ──────────────────────────────────────────
+// ── Promotion ──────────────────────────────────────────
 
-    /// Promote a standby to primary (requires connection to the standby).
+/// Promote a standby to primary (requires connection to the standby).
     pub async fn promote_standby(&self) -> Result<bool, String> {
         let result = sqlx::query_scalar::<_, bool>(
             "SELECT pg_promote(wait := true)"
@@ -157,9 +157,9 @@ impl ReplicationService {
         }
     }
 
-    // ── Sync Mode Toggle ───────────────────────────────────
+// ── Sync Mode Toggle ───────────────────────────────────
 
-    /// Switch between sync and async replication.
+/// Switch between sync and async replication.
     pub async fn set_sync_mode(&self, synchronous: bool) -> Result<(), String> {
         let sql = if synchronous {
             "ALTER SYSTEM SET synchronous_standby_names = '*'"
@@ -171,7 +171,7 @@ impl ReplicationService {
             .await
             .map_err(|e| format!("Set sync mode: {e}"))?;
 
-        // Reload configuration
+// Reload configuration
         sqlx::query("SELECT pg_reload_conf()")
             .execute(&self.pool)
             .await
@@ -181,9 +181,9 @@ impl ReplicationService {
         Ok(())
     }
 
-    // ── Stats ──────────────────────────────────────────────
+// ── Stats ──────────────────────────────────────────────
 
-    /// Aggregate replication statistics.
+/// Aggregate replication statistics.
     pub async fn get_stats(&self) -> Result<ReplicationStats, String> {
         let replicas = self.get_replicas().await?;
         let slots = self.get_slots().await?;
@@ -222,7 +222,7 @@ impl ReplicationService {
         })
     }
 
-    /// Get lag history for the last N minutes.
+/// Get lag history for the last N minutes.
     pub async fn get_lag_history(&self, minutes: i64) -> Result<Vec<serde_json::Value>, String> {
         let rows: Vec<LagHistoryRow> = sqlx::query_as::<_, LagHistoryRow>(
             "SELECT replica_name, lag_ms, lag_bytes, recorded_at
@@ -245,7 +245,7 @@ impl ReplicationService {
         }).collect())
     }
 
-    /// Cleanup old lag history records.
+/// Cleanup old lag history records.
     pub async fn cleanup_lag_history(&self, retain_hours: i64) -> Result<u64, String> {
         let res = sqlx::query(
             "DELETE FROM ha_replication_lag_history WHERE recorded_at < NOW() - make_interval(hours => $1)"
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_stats_empty_replicas() {
-        // Stats computation logic without DB
+// Stats computation logic without DB
         let replicas: Vec<ReplicaInfo> = vec![];
         let lag_values: Vec<f64> = replicas.iter().filter_map(|r| r.lag_ms).collect();
         let avg = if lag_values.is_empty() { 0.0 } else {

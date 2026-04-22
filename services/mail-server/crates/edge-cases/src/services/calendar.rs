@@ -145,7 +145,7 @@ impl CalendarService {
         Self { pool }
     }
 
-    /// Create a calendar invite.
+/// Create a calendar invite.
     pub fn create_invite(
         &self,
         summary: &str,
@@ -193,12 +193,12 @@ impl CalendarService {
         })
     }
 
-    /// Parse ICS content.
+/// Parse ICS content.
     pub fn parse_ics(&self, content: &str) -> anyhow::Result<ParsedCalendar> {
         parse_ics_content(content)
     }
 
-    /// Check if content type is calendar.
+/// Check if content type is calendar.
     pub fn is_calendar_content_type(content_type: &str) -> bool {
         let lower = content_type.to_lowercase();
         crate::config::CALENDAR_CONTENT_TYPES
@@ -206,7 +206,7 @@ impl CalendarService {
             .any(|ct| lower.contains(ct))
     }
 
-    /// Store event in DB.
+/// Store event in DB.
     pub async fn store_event(
         &self,
         message_id: &str,
@@ -241,7 +241,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
     let mut lines = Vec::new();
     lines.push("BEGIN:VCALENDAR".to_string());
     lines.push("VERSION:2.0".to_string());
-    lines.push("PRODID:-//ApexMail//Calendar//EN".to_string());
+    lines.push("PRODID:- //ApexMail//Calendar//EN".to_string());
     lines.push(format!("METHOD:{}", event.method.as_str()));
     lines.push("CALSCALE:GREGORIAN".to_string());
 
@@ -270,7 +270,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
     lines.push(format!("CREATED:{}", format_datetime(&event.created)));
     lines.push(format!("LAST-MODIFIED:{}", format_datetime(&event.last_modified)));
 
-    // Organizer
+// Organizer
     if let Some(ref name) = event.organizer.name {
         lines.push(format!(
             "ORGANIZER;CN={}:mailto:{}",
@@ -280,7 +280,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         lines.push(format!("ORGANIZER:mailto:{}", event.organizer.email));
     }
 
-    // Attendees
+// Attendees
     for att in &event.attendees {
         let mut params = Vec::new();
         if let Some(ref name) = att.name {
@@ -296,26 +296,26 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         ));
     }
 
-    // URL (validate scheme)
+// URL (validate scheme)
     if let Some(ref url) = event.url {
         if url.starts_with("http://") || url.starts_with("https://") {
             lines.push(format!("URL:{url}"));
         }
     }
 
-    // Categories
+// Categories
     if let Some(ref cats) = event.categories {
         if !cats.is_empty() {
             lines.push(format!("CATEGORIES:{}", cats.join(",")));
         }
     }
 
-    // Priority
+// Priority
     if let Some(pri) = event.priority {
         lines.push(format!("PRIORITY:{pri}"));
     }
 
-    // Recurrence
+// Recurrence
     if let Some(ref rrule) = event.recurrence {
         lines.push(generate_rrule(rrule));
     }
@@ -430,7 +430,7 @@ fn format_date_only(dt: &DateTime<Utc>) -> String {
 // ── ICS parsing ────────────────────────────────────────────────────────────────
 
 fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
-    // Unfold continuation lines
+// Unfold continuation lines
     let unfolded = content
         .replace("\r\n ", "")
         .replace("\r\n\t", "");
@@ -463,7 +463,7 @@ fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
             continue;
         }
 
-        // Extract property name and value
+// Extract property name and value
         let (prop_with_params, value) = match line.split_once(':') {
             Some((p, v)) => (p, v),
             None => continue,
@@ -528,19 +528,19 @@ fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
 
 fn parse_ics_datetime(value: &str) -> Option<DateTime<Utc>> {
     let clean = value.trim();
-    // YYYYMMDDTHHMMSSZ
+// YYYYMMDDTHHMMSSZ
     if clean.len() == 16 && clean.ends_with('Z') {
         return chrono::NaiveDateTime::parse_from_str(&clean[..15], "%Y%m%dT%H%M%S")
             .ok()
             .map(|n| n.and_utc());
     }
-    // YYYYMMDDTHHMMSS
+// YYYYMMDDTHHMMSS
     if clean.len() == 15 {
         return chrono::NaiveDateTime::parse_from_str(clean, "%Y%m%dT%H%M%S")
             .ok()
             .map(|n| n.and_utc());
     }
-    // YYYYMMDD (date only)
+// YYYYMMDD (date only)
     if clean.len() == 8 {
         return NaiveDate::parse_from_str(clean, "%Y%m%d")
             .ok()
@@ -619,9 +619,9 @@ impl CalendarEventBuilder {
 }
 
 /// Parse an RRULE string into a RecurrenceRule struct.
-/// Example: "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR;COUNT=10"
+/// Example:"FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR;COUNT=10"
 fn parse_rrule(rrule: &str) -> Option<RecurrenceRule> {
-    // Remove the "RRULE:" prefix if present
+// Remove the "RRULE:" prefix if present
     let s = rrule.strip_prefix("RRULE:").unwrap_or(rrule);
 
     let mut freq = None;
@@ -665,7 +665,7 @@ fn parse_rrule(rrule: &str) -> Option<RecurrenceRule> {
         }
     }
 
-    // FREQ is required
+// FREQ is required
     let freq = freq?;
 
     Some(RecurrenceRule {
@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_parse_ics() {
-        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:uid123\r\nSUMMARY:Test Event\r\nDTSTART:20250315T100000Z\r\nDTEND:20250315T110000Z\r\nORGANIZER:mailto:org@test.com\r\nATTENDEE:mailto:att@test.com\r\nEND:VEVENT\r\nEND:VCALENDAR";
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nPRODID:- //Test//EN\r\nBEGIN:VEVENT\r\nUID:uid123\r\nSUMMARY:Test Event\r\nDTSTART:20250315T100000Z\r\nDTEND:20250315T110000Z\r\nORGANIZER:mailto:org@test.com\r\nATTENDEE:mailto:att@test.com\r\nEND:VEVENT\r\nEND:VCALENDAR";
         let result = parse_ics_content(ics).unwrap();
         assert_eq!(result.method, CalendarMethod::Request);
         assert_eq!(result.events.len(), 1);
@@ -874,7 +874,7 @@ mod tests {
             recurrence: None,
         };
         let html = generate_html_preview(&event);
-        // Should properly escape HTML
+// Should properly escape HTML
         assert!(html.contains("Test &lt;Event&gt;"));
         assert!(html.contains("org@test.com"));
     }

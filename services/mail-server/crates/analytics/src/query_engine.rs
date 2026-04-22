@@ -13,7 +13,7 @@ impl QueryEngine {
         Self { pool }
     }
 
-    /// Time-series data grouped by period.
+/// Time-series data grouped by period.
     pub async fn get_time_series(&self, query: &AnalyticsQuery) -> anyhow::Result<Vec<TimeSeriesPoint>> {
         let group_by = query.group_by.as_deref().unwrap_or("day");
         let trunc = time_trunc_expression(group_by);
@@ -55,7 +55,7 @@ impl QueryEngine {
             .collect())
     }
 
-    /// Aggregation by dimension.
+/// Aggregation by dimension.
     pub async fn get_aggregation(
         &self,
         query: &AnalyticsQuery,
@@ -94,7 +94,7 @@ impl QueryEngine {
             .collect())
     }
 
-    /// Funnel analysis: queued → sent → delivered → opened → clicked.
+/// Funnel analysis:queued → sent → delivered → opened → clicked.
     pub async fn get_funnel_analysis(
         &self,
         query: &AnalyticsQuery,
@@ -136,7 +136,7 @@ impl QueryEngine {
         Ok(result)
     }
 
-    /// Deliverability metrics.
+/// Deliverability metrics.
     pub async fn get_deliverability_metrics(
         &self,
         query: &AnalyticsQuery,
@@ -175,7 +175,7 @@ impl QueryEngine {
         })
     }
 
-    /// Engagement histogram.
+/// Engagement histogram.
     pub async fn get_engagement_histogram(
         &self,
         query: &AnalyticsQuery,
@@ -216,7 +216,7 @@ impl QueryEngine {
             .collect())
     }
 
-    /// Real-time stats from Redis.
+/// Real-time stats from Redis.
     pub async fn get_realtime_stats(
         &self,
         redis: &deadpool_redis::Pool,

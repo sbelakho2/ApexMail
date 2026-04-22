@@ -1,9 +1,7 @@
 -- Dedicated IP management schema
--- Supports the full lifecycle: inventory → allocation → warmup → active → release
---
--- Two tables:
--- 1. ses_ip_inventory: AWS-provisioned IPs available for assignment
--- 2. dedicated_ips: Per-tenant IP assignments with SES pool tracking
+-- Supports the full lifecycle:inventory → allocation → warmup → active → release
+-- Two tables:-- 1. ses_ip_inventory:AWS-provisioned IPs available for assignment
+-- 2. dedicated_ips:Per-tenant IP assignments with SES pool tracking
 
 -- =============================================================================
 -- SES IP Inventory
@@ -15,14 +13,14 @@ CREATE TABLE IF NOT EXISTS ses_ip_inventory (
     ip_address    INET PRIMARY KEY,
     aws_region    TEXT NOT NULL DEFAULT 'us-east-1',
 
-    -- Assignment tracking
+-- Assignment tracking
     assignment_status TEXT NOT NULL DEFAULT 'available'
         CHECK (assignment_status IN ('available', 'assigned', 'releasing', 'decommissioned')),
     assigned_tenant_id UUID,
     assigned_at   TIMESTAMPTZ,
     last_released_at TIMESTAMPTZ,
 
-    -- Metadata
+-- Metadata
     provisioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     notes         TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -45,20 +43,20 @@ CREATE TABLE IF NOT EXISTS dedicated_ips (
     ip_address        TEXT NOT NULL,
     region            TEXT NOT NULL DEFAULT 'us-east-1',
 
-    -- SES integration
+-- SES integration
     ses_pool_name     TEXT,
-    ptr_record        TEXT,  -- Reverse DNS (e.g. mail.customer.com)
+    ptr_record        TEXT, -- Reverse DNS (e.g. mail.customer.com)
 
-    -- Lifecycle status
+-- Lifecycle status
     status            TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'warming', 'active', 'suspended', 'releasing', 'retired')),
 
-    -- Warmup tracking (synced from SES)
+-- Warmup tracking (synced from SES)
     warmup_progress   DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     warmup_started_at TIMESTAMPTZ,
     warmup_completed_at TIMESTAMPTZ,
 
-    -- Billing integration
+-- Billing integration
     billing_status    TEXT NOT NULL DEFAULT 'pending_charge'
         CHECK (billing_status IN ('included', 'pending_charge', 'active', 'pending_cancel', 'canceled')),
     stripe_subscription_item_id TEXT,
@@ -67,7 +65,7 @@ CREATE TABLE IF NOT EXISTS dedicated_ips (
     billing_started_at TIMESTAMPTZ,
     billing_ended_at   TIMESTAMPTZ,
 
-    -- Timestamps
+-- Timestamps
     allocated_at      TIMESTAMPTZ DEFAULT NOW(),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -115,7 +113,7 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant
     ON subscriptions(tenant_id, status);
 
 -- =============================================================================
--- Trigger: auto-update updated_at
+-- Trigger:auto-update updated_at
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION update_updated_at_column()

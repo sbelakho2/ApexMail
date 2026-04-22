@@ -88,9 +88,9 @@ async fn send_time_optimization(
     let tz = params.timezone.clone().unwrap_or_else(|| "UTC".into());
     let recipient = params.recipient.as_deref();
 
-    // Query historical engagement data - when did recipients open emails most
+// Query historical engagement data - when did recipients open emails most
     let hour_data: Vec<(i32, i64)> = if let Some(email) = recipient {
-        // For specific recipient, analyze their personal open patterns
+// For specific recipient, analyze their personal open patterns
         sqlx::query_as(
             "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, COUNT(*) as opens
              FROM events
@@ -103,7 +103,7 @@ async fn send_time_optimization(
             .fetch_all(&state.db)
             .await?
     } else {
-        // For tenant-wide, analyze all open patterns
+// For tenant-wide, analyze all open patterns
         sqlx::query_as(
             "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, COUNT(*) as opens
              FROM events
@@ -116,7 +116,6 @@ async fn send_time_optimization(
             .await?
     };
 
-    // Fix #54: Include timezone in cache key to avoid returning wrong cached results.
     let cache_key = format!("send_time:{}:{}:{}", auth.tenant_id, recipient.unwrap_or("all"), &tz);
     let cached: Option<(i32, f64)> = sqlx::query_as(
         "SELECT recommended_hour, confidence FROM ai_send_time_cache
@@ -143,7 +142,7 @@ async fn send_time_optimization(
         };
         let confidence = confidence.min(0.95);
 
-        // Cache the result
+// Cache the result
         if let Err(e) = sqlx::query(
             "INSERT INTO ai_send_time_cache (cache_key, tenant_id, recipient_email, recommended_hour, confidence, expires_at)
              VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '24 hours')
@@ -166,7 +165,7 @@ async fn send_time_optimization(
         );
         (best_hour, confidence, reasoning)
     } else {
-        // Fallback to industry defaults when no data
+// Fallback to industry defaults when no data
         (14, 0.5, "No historical data available. Using industry best practice (mid-afternoon).".into())
     };
 
@@ -189,28 +188,27 @@ async fn subject_analysis(
     let subject = &params.subject;
     let word_count = subject.split_whitespace().count();
     let has_personalization = subject.contains("{{") || subject.contains("{%");
-    // Fix #55: Proper emoji detection using Unicode emoji ranges.
     let has_emoji = subject.chars().any(|c| {
         let cp = c as u32;
-        // Common emoji ranges: emoticons, dingbats, symbols, flags, etc.
+// Common emoji ranges:emoticons, dingbats, symbols, flags, etc.
         matches!(cp,
-            0x1F600..=0x1F64F |  // Emoticons
-            0x1F300..=0x1F5FF |  // Misc Symbols and Pictographs
-            0x1F680..=0x1F6FF |  // Transport and Map
-            0x1F700..=0x1F77F |  // Alchemical Symbols
-            0x1F780..=0x1F7FF |  // Geometric Shapes Extended
-            0x1F800..=0x1F8FF |  // Supplemental Arrows-C
-            0x1F900..=0x1F9FF |  // Supplemental Symbols and Pictographs
-            0x1FA00..=0x1FA6F |  // Chess Symbols
-            0x1FA70..=0x1FAFF |  // Symbols and Pictographs Extended-A
-            0x2600..=0x26FF   |  // Misc symbols (weather, zodiac, etc.)
-            0x2700..=0x27BF   |  // Dingbats
-            0x231A..=0x231B   |  // Watch, Hourglass
-            0x23E9..=0x23F3   |  // Media control symbols
-            0x23F8..=0x23FA   |  // More media controls
-            0x25AA..=0x25AB   |  // Squares
-            0x25B6 | 0x25C0   |  // Play buttons
-            0x25FB..=0x25FE      // Squares
+            0x1F600..=0x1F64F | // Emoticons
+            0x1F300..=0x1F5FF | // Misc Symbols and Pictographs
+            0x1F680..=0x1F6FF | // Transport and Map
+            0x1F700..=0x1F77F | // Alchemical Symbols
+            0x1F780..=0x1F7FF | // Geometric Shapes Extended
+            0x1F800..=0x1F8FF | // Supplemental Arrows-C
+            0x1F900..=0x1F9FF | // Supplemental Symbols and Pictographs
+            0x1FA00..=0x1FA6F | // Chess Symbols
+            0x1FA70..=0x1FAFF | // Symbols and Pictographs Extended-A
+            0x2600..=0x26FF   | // Misc symbols (weather, zodiac, etc.)
+            0x2700..=0x27BF   | // Dingbats
+            0x231A..=0x231B   | // Watch, Hourglass
+            0x23E9..=0x23F3   | // Media control symbols
+            0x23F8..=0x23FA   | // More media controls
+            0x25AA..=0x25AB   | // Squares
+            0x25B6 | 0x25C0   | // Play buttons
+            0x25FB..=0x25FE // Squares
         )
     });
     let has_spam_words = ["free", "urgent", "act now", "limited time"]
@@ -254,7 +252,7 @@ async fn churn_prediction(
 ) -> Result<Json<ChurnPredictionResponse>, ApiError> {
     require_scopes(&auth, &["ai:read"])?;
 
-    // Simple heuristic: contacts with no events in the last 90 days
+// Simple heuristic:contacts with no events in the last 90 days
     let at_risk = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(DISTINCT c.id) FROM contacts c
          LEFT JOIN events e ON e.recipient = c.email AND e.tenant_id = c.tenant_id
@@ -300,15 +298,15 @@ async fn bot_detection(
     let mut confidence = 0.0_f64;
     let mut is_bot = false;
 
-    // Check by IP address patterns
+// Check by IP address patterns
     if let Some(ip) = &params.ip_address {
-        // Check if IP is from known data center ranges
+// Check if IP is from known data center ranges
         if ip.starts_with("10.") || ip.starts_with("192.168.") || ip.starts_with("172.16.") {
             signals.push("private IP range".into());
             confidence += 0.2;
         }
 
-        // Query event patterns for this IP to detect bot-like behavior
+// Query event patterns for this IP to detect bot-like behavior
         let ip_stats: Option<(i64, i64, Option<f64>)> = sqlx::query_as(
             "SELECT
                 COUNT(*) as event_count,
@@ -325,12 +323,12 @@ async fn bot_detection(
             .flatten();
 
         if let Some((event_count, unique_recipients, time_span)) = ip_stats {
-            // High velocity from single IP
+// High velocity from single IP
             if event_count > 100 && time_span.unwrap_or(3600.0) < 60.0 {
                 signals.push(format!("{} events in <60 seconds", event_count));
                 confidence += 0.4;
             }
-            // Same IP hitting many recipients
+// Same IP hitting many recipients
             if unique_recipients > 50 && event_count > 100 {
                 signals.push(format!("{} unique recipients from single IP", unique_recipients));
                 confidence += 0.3;
@@ -338,7 +336,7 @@ async fn bot_detection(
         }
     }
 
-    // Check by event ID to get user-agent and timing patterns
+// Check by event ID to get user-agent and timing patterns
     if let Some(event_id) = params.event_id {
         let event_data: Option<(Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT user_agent, ip_address, timestamp FROM events WHERE id = $1 AND tenant_id = $2"
@@ -351,7 +349,7 @@ async fn bot_detection(
             .flatten();
 
         if let Some((user_agent, _ip, timestamp)) = event_data {
-            // Check user agent against known bot patterns
+// Check user agent against known bot patterns
             if let Some(ua) = user_agent {
                 let ua_lower = ua.to_lowercase();
                 let bot_patterns = [
@@ -380,14 +378,14 @@ async fn bot_detection(
                     }
                 }
 
-                // Check for suspicious UA characteristics
+// Check for suspicious UA characteristics
                 if ua.is_empty() || ua.len() < 10 {
                     signals.push("missing or minimal user agent".into());
                     confidence += 0.3;
                 }
             }
 
-            // Check for impossibly fast opens after send (< 1 second usually indicates prefetching)
+// Check for impossibly fast opens after send (< 1 second usually indicates prefetching)
             let send_time: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
                 "SELECT sent_at FROM messages WHERE id = (SELECT message_id FROM events WHERE id = $1)"
             )

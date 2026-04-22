@@ -1,7 +1,6 @@
 //! Tenant trust scoring.
 //!
-//! Computes a 0–100 score based on sending behaviour metrics:
-//! bounce rate, complaint rate, engagement rate, account age, and volume.
+//! Computes a 0–100 score based on sending behaviour metrics://! bounce rate, complaint rate, engagement rate, account age, and volume.
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -12,15 +11,15 @@ use crate::types::{TrustFactors, TrustScore};
 #[derive(Debug, Clone)]
 pub struct TenantMetrics {
     pub tenant_id: Uuid,
-    /// Fraction of bounced emails (0.0–1.0).
+/// Fraction of bounced emails (0.0–1.0).
     pub bounce_rate: f64,
-    /// Fraction of complaint reports (0.0–1.0).
+/// Fraction of complaint reports (0.0–1.0).
     pub complaint_rate: f64,
-    /// Fraction of opens + clicks vs. delivered (0.0–1.0).
+/// Fraction of opens + clicks vs. delivered (0.0–1.0).
     pub engagement_rate: f64,
-    /// Account age in days.
+/// Account age in days.
     pub age_days: u64,
-    /// Total emails sent in the evaluation window.
+/// Total emails sent in the evaluation window.
     pub volume: u64,
 }
 
@@ -28,14 +27,12 @@ pub struct TenantMetrics {
 pub struct TrustScorer;
 
 impl TrustScorer {
-    /// Compute a trust score in the range 0–100.
-    ///
-    /// Scoring weights (total = 100):
-    ///  - Bounce rate:     30 pts (lower is better)
-    ///  - Complaint rate:  25 pts (lower is better)
-    ///  - Engagement rate: 20 pts (higher is better)
-    ///  - Account age:     15 pts (older is better, cap at 365 d)
-    ///  - Volume:          10 pts (higher is better, cap at 100 k)
+/// Compute a trust score in the range 0–100.
+/// Scoring weights (total = 100):/// - Bounce rate:30 pts (lower is better)
+/// - Complaint rate:25 pts (lower is better)
+/// - Engagement rate:20 pts (higher is better)
+/// - Account age:15 pts (older is better, cap at 365 d)
+/// - Volume:10 pts (higher is better, cap at 100 k)
     pub fn compute_score(metrics: &TenantMetrics) -> TrustScore {
         let bounce_score = Self::inverse_score(metrics.bounce_rate, 0.10) * 30.0;
         let complaint_score = Self::inverse_score(metrics.complaint_rate, 0.01) * 25.0;
@@ -60,7 +57,7 @@ impl TrustScorer {
         }
     }
 
-    /// Returns 1.0 when `rate` is 0 and approaches 0.0 as `rate` reaches `bad_threshold`.
+/// Returns 1.0 when `rate` is 0 and approaches 0.0 as `rate` reaches `bad_threshold`.
     fn inverse_score(rate: f64, bad_threshold: f64) -> f64 {
         if bad_threshold <= 0.0 {
             return if rate <= 0.0 { 1.0 } else { 0.0 };

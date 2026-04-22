@@ -7,15 +7,14 @@ use uuid::Uuid;
 use crate::types::*;
 
 /// Sanitize CSS to prevent XSS attacks
-/// #254: Removes dangerous patterns that could execute JavaScript
+/// #254:Removes dangerous patterns that could execute JavaScript
 fn sanitize_css(css: &str) -> String {
-    // Remove dangerous patterns that could enable XSS via CSS
+// Remove dangerous patterns that could enable XSS via CSS
     let dangerous_patterns = [
-        "expression(",     // IE CSS expressions
-        "javascript:",     // JavaScript URLs  
-        "behavior:",       // IE behaviors
-        "-moz-binding:",   // Firefox XBL bindings
-        "@import",         // External CSS imports
+        "expression(", // IE CSS expressions
+        "javascript:", // JavaScript URLs         "behavior:", // IE behaviors
+        "-moz-binding:", // Firefox XBL bindings
+        "@import", // External CSS imports
     ];
     
     let mut sanitized = css.to_string();
@@ -23,15 +22,15 @@ fn sanitize_css(css: &str) -> String {
     
     for pattern in dangerous_patterns {
         if lower.contains(&pattern.to_lowercase()) {
-            // Log warning and remove pattern
+// Log warning and remove pattern
             tracing::warn!(pattern = pattern, "Removed dangerous CSS pattern");
             sanitized = sanitized.replace(pattern, "");
-            // Also handle case variations
+// Also handle case variations
             sanitized = sanitized.to_lowercase().replace(&pattern.to_lowercase(), "");
         }
     }
     
-    // Remove HTML tags embedded in CSS
+// Remove HTML tags embedded in CSS
     static TAG_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"<[^>]*>").ok());
     if let Some(tag_regex) = TAG_REGEX.as_ref() {
         sanitized = tag_regex.replace_all(&sanitized, "").to_string();
@@ -40,7 +39,7 @@ fn sanitize_css(css: &str) -> String {
     sanitized
 }
 
-/// White-Label Service: custom branding, domain management, DNS / email templates
+/// White-Label Service:custom branding, domain management, DNS / email templates
 pub struct WhiteLabelService {
     db: PgPool,
 }
@@ -50,8 +49,8 @@ impl WhiteLabelService {
         Self { db }
     }
 
-    /// Update (upsert) white-label configuration
-    /// #254: Now sanitizes custom_css to prevent XSS
+/// Update (upsert) white-label configuration
+/// #254:Now sanitizes custom_css to prevent XSS
     pub async fn update_config(
         &self, tenant_id: Uuid, company_name: Option<&str>,
         logo_url: Option<&str>, favicon_url: Option<&str>,
@@ -59,7 +58,7 @@ impl WhiteLabelService {
         custom_css: Option<&str>, footer_text: Option<&str>,
         support_email: Option<&str>, support_url: Option<&str>,
     ) -> Result<ApiResult<WhiteLabelConfigRow>, String> {
-        // #254: Sanitize custom_css to prevent stored XSS
+// #254:Sanitize custom_css to prevent stored XSS
         let sanitized_css = custom_css.map(sanitize_css);
         let css_ref = sanitized_css.as_deref();
         
@@ -93,7 +92,7 @@ impl WhiteLabelService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get white-label configuration
+/// Get white-label configuration
     pub async fn get_config(&self, tenant_id: Uuid) -> Result<ApiResult<WhiteLabelConfigRow>, String> {
         let row = sqlx::query_as::<_, WhiteLabelConfigRow>(
             "SELECT * FROM ent_whitelabel_config WHERE tenant_id = $1"
@@ -109,7 +108,7 @@ impl WhiteLabelService {
         }
     }
 
-    /// Add a custom domain for white-labeling
+/// Add a custom domain for white-labeling
     pub async fn add_domain(
         &self, tenant_id: Uuid, domain: &str, domain_type: &str,
     ) -> Result<ApiResult<WhiteLabelDomain>, String> {
@@ -132,7 +131,7 @@ impl WhiteLabelService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Verify a domain (check DNS records)
+/// Verify a domain (check DNS records)
     pub async fn verify_domain(&self, id: Uuid) -> Result<ApiResult<WhiteLabelDomain>, String> {
         let domain_row = sqlx::query_as::<_, WhiteLabelDomain>(
             "SELECT * FROM ent_whitelabel_domains WHERE id = $1"
@@ -147,7 +146,7 @@ impl WhiteLabelService {
             None => return Ok(ApiResult::err("Domain not found", "NOT_FOUND")),
         };
 
-        // Perform DNS verification (simplified — in production uses trust-dns-resolver)
+// Perform DNS verification (simplified — in production uses trust-dns-resolver)
         let verified = check_dns_records(&domain.domain).await;
         let status = if verified { "verified" } else { "failed" };
 
@@ -163,7 +162,7 @@ impl WhiteLabelService {
         Ok(ApiResult::ok(updated))
     }
 
-    /// List domains for a tenant
+/// List domains for a tenant
     pub async fn list_domains(
         &self,
         tenant_id: Uuid,
@@ -183,8 +182,8 @@ impl WhiteLabelService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Remove a domain.
-    /// #250: Requires tenant ownership verification to prevent IDOR.
+/// Remove a domain.
+/// #250:Requires tenant ownership verification to prevent IDOR.
     pub async fn remove_domain(&self, id: Uuid, tenant_id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let result = sqlx::query("DELETE FROM ent_whitelabel_domains WHERE id = $1 AND tenant_id = $2")
             .bind(id)
@@ -200,7 +199,7 @@ impl WhiteLabelService {
         }
     }
 
-    /// Update (upsert) email templates for white-labeling
+/// Update (upsert) email templates for white-labeling
     pub async fn update_email_templates(
         &self, tenant_id: Uuid, template_type: &str,
         subject_template: Option<&str>, html_template: Option<&str>,
@@ -226,7 +225,7 @@ impl WhiteLabelService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get email templates
+/// Get email templates
     pub async fn get_email_templates(
         &self, tenant_id: Uuid,
     ) -> Result<ApiResult<Vec<WhiteLabelEmailTemplate>>, String> {
@@ -243,7 +242,7 @@ impl WhiteLabelService {
 }
 
 /// Generate DNS records required for a domain type
-/// #260: Returns placeholder for DKIM public key - caller must generate actual keys
+/// #260:Returns placeholder for DKIM public key - caller must generate actual keys
 pub fn generate_dns_records(domain: &str, domain_type: &str) -> Vec<DNSRecord> {
     match domain_type {
         "tracking" => vec![DNSRecord {
@@ -266,7 +265,7 @@ pub fn generate_dns_records(domain: &str, domain_type: &str) -> Vec<DNSRecord> {
                 ttl: 3600,
             }];
 
-            // #260: Use configured DKIM public key instead of placeholder text.
+// #260:Use configured DKIM public key instead of placeholder text.
             match std::env::var("DEFAULT_DKIM_PUBLIC_KEY") {
                 Ok(public_key) if !public_key.trim().is_empty() => {
                     records.push(DNSRecord {
@@ -299,12 +298,12 @@ pub fn generate_dns_records(domain: &str, domain_type: &str) -> Vec<DNSRecord> {
 }
 
 /// Check DNS records for a domain
-/// #259: Uses TCP resolvability via `lookup_host` as baseline DNS verification.
+/// #259:Uses TCP resolvability via `lookup_host` as baseline DNS verification.
 /// For strict record-by-record checking, extend using trust-dns-resolver.
 async fn check_dns_records(domain: &str) -> bool {
-    // #259: Perform a real network DNS resolution instead of always returning false.
-    // This checks resolvability as a baseline verification step.
-    // For stricter verification, each DNS record should be checked via trust-dns-resolver.
+// #259:Perform a real network DNS resolution instead of always returning false.
+// This checks resolvability as a baseline verification step.
+// For stricter verification, each DNS record should be checked via trust-dns-resolver.
     match tokio::net::lookup_host((domain, 80)).await {
         Ok(mut addrs) => addrs.next().is_some(),
         Err(e) => {

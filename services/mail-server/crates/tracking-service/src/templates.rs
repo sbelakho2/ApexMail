@@ -79,7 +79,7 @@ pub fn render_success_page(email: &str) -> String {
 pub fn render_confirmation_page(token: &str, email: &str, unsub_path: &str) -> String {
     let email_safe = escape_html(email);
     let token_safe = escape_html(token);
-    // #196: Escape unsub_path for safe use in HTML href attributes
+// #196:Escape unsub_path for safe use in HTML href attributes
     let unsub_path = escape_html(unsub_path);
     format!(r#"<!DOCTYPE html>
 <html lang="en">
@@ -128,7 +128,7 @@ pub fn render_preferences_page(
 ) -> String {
     let email_safe = escape_html(email);
     let token_safe = escape_html(token);
-    // #196: Escape prefs_path for safe use in HTML form action attributes
+// #196:Escape prefs_path for safe use in HTML form action attributes
     let prefs_path = escape_html(prefs_path);
 
     let category_html: String = categories.iter().map(|cat| {

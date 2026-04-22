@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::types::*;
 
-/// Template Approval Service: multi-stage review with spam scoring
+/// Template Approval Service:multi-stage review with spam scoring
 pub struct TemplateApprovalService {
     db: PgPool,
     auto_approve_threshold: i32,
@@ -16,7 +16,7 @@ impl TemplateApprovalService {
         Self { db, auto_approve_threshold, auto_reject_threshold }
     }
 
-    /// Submit a template for approval, including spam scoring
+/// Submit a template for approval, including spam scoring
     pub async fn submit(
         &self, tenant_id: Uuid, name: &str, subject: &str,
         html_content: &str, text_content: Option<&str>, submitted_by: &str,
@@ -24,7 +24,7 @@ impl TemplateApprovalService {
         let id = Uuid::new_v4();
         let spam_result = calculate_spam_score(html_content, subject);
 
-        // Auto-approve or auto-reject based on score thresholds
+// Auto-approve or auto-reject based on score thresholds
         let status = if spam_result.score <= self.auto_approve_threshold as f64 {
             "approved"
         } else if spam_result.score >= self.auto_reject_threshold as f64 {
@@ -53,7 +53,7 @@ impl TemplateApprovalService {
         Ok(ApiResult::ok(row))
     }
 
-    /// Get a template submission by ID
+/// Get a template submission by ID
     pub async fn get_submission(&self, id: Uuid) -> Result<ApiResult<TemplateSubmission>, String> {
         let row = sqlx::query_as::<_, TemplateSubmission>(
             "SELECT * FROM ent_template_submissions WHERE id = $1"
@@ -69,7 +69,7 @@ impl TemplateApprovalService {
         }
     }
 
-    /// List submissions for a tenant
+/// List submissions for a tenant
     pub async fn list_submissions(
         &self, tenant_id: Uuid, status: Option<&str>, limit: i64, offset: i64,
     ) -> Result<ApiResult<Vec<TemplateSubmission>>, String> {
@@ -92,7 +92,7 @@ impl TemplateApprovalService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Approve a template
+/// Approve a template
     pub async fn approve(
         &self, id: Uuid, reviewed_by: &str, notes: Option<&str>,
     ) -> Result<ApiResult<TemplateSubmission>, String> {
@@ -114,7 +114,7 @@ impl TemplateApprovalService {
         }
     }
 
-    /// Reject a template
+/// Reject a template
     pub async fn reject(
         &self, id: Uuid, reviewed_by: &str, reason: &str,
     ) -> Result<ApiResult<TemplateSubmission>, String> {
@@ -136,7 +136,7 @@ impl TemplateApprovalService {
         }
     }
 
-    /// Request changes on a template
+/// Request changes on a template
     pub async fn request_changes(
         &self, id: Uuid, reviewed_by: &str, notes: &str,
     ) -> Result<ApiResult<TemplateSubmission>, String> {
@@ -155,7 +155,7 @@ impl TemplateApprovalService {
         }
     }
 
-    /// Get approval stats for a tenant
+/// Get approval stats for a tenant
     pub async fn get_stats(
         &self, tenant_id: Uuid,
     ) -> Result<ApiResult<serde_json::Value>, String> {
@@ -203,7 +203,7 @@ pub fn calculate_spam_score(html: &str, subject: &str) -> SpamScoreResult {
     let combined = format!("{} {}", subject, html);
     let lower = combined.to_lowercase();
 
-    // 1. Trigger words (+5 each)
+// 1. Trigger words (+5 each)
     let mut trigger_count = 0;
     for word in TRIGGER_WORDS {
         if lower.contains(word) {
@@ -220,7 +220,7 @@ pub fn calculate_spam_score(html: &str, subject: &str) -> SpamScoreResult {
         });
     }
 
-    // 2. ALL CAPS > 30% of subject (+10)
+// 2. ALL CAPS > 30% of subject (+10)
     let alpha_chars: Vec<char> = subject.chars().filter(|c| c.is_alphabetic()).collect();
     if !alpha_chars.is_empty() {
         let upper_count = alpha_chars.iter().filter(|c| c.is_uppercase()).count();
@@ -235,7 +235,7 @@ pub fn calculate_spam_score(html: &str, subject: &str) -> SpamScoreResult {
         }
     }
 
-    // 3. Excessive punctuation (!! or ??) (+5 each occurrence)
+// 3. Excessive punctuation (!! or ??) (+5 each occurrence)
     let excl_runs = html.matches("!!").count() + subject.matches("!!").count();
     let quest_runs = html.matches("??").count() + subject.matches("??").count();
     let punct_count = excl_runs + quest_runs;
@@ -249,7 +249,7 @@ pub fn calculate_spam_score(html: &str, subject: &str) -> SpamScoreResult {
         });
     }
 
-    // 4. URL count > 3 (+2 each extra)
+// 4. URL count > 3 (+2 each extra)
     let url_count = count_urls(html);
     if url_count > 3 {
         let extra = (url_count - 3) as f64;
@@ -262,7 +262,7 @@ pub fn calculate_spam_score(html: &str, subject: &str) -> SpamScoreResult {
         });
     }
 
-    // 5. Image-to-text ratio > 60% (+10)
+// 5. Image-to-text ratio > 60% (+10)
     let img_ratio = image_to_text_ratio(html);
     if img_ratio > 60.0 {
         score += 10.0;
@@ -273,7 +273,7 @@ pub fn calculate_spam_score(html: &str, subject: &str) -> SpamScoreResult {
         });
     }
 
-    // 6. Missing unsubscribe link (+15)
+// 6. Missing unsubscribe link (+15)
     if !lower.contains("unsubscribe") {
         score += 15.0;
         details.push(SpamScoreDetail {
@@ -283,7 +283,7 @@ pub fn calculate_spam_score(html: &str, subject: &str) -> SpamScoreResult {
         });
     }
 
-    // 7. Deceptive subject patterns (+10)
+// 7. Deceptive subject patterns (+10)
     let deceptive_patterns = ["re:", "fw:", "fwd:"];
     let subj_lower = subject.to_lowercase();
     for pattern in deceptive_patterns {
@@ -454,12 +454,12 @@ mod tests {
 
     #[test]
     fn test_spam_verdict_thresholds() {
-        // score 0 → clean
+// score 0 → clean
         let r1 = calculate_spam_score("<p>Simple text. Unsubscribe</p>", "Hello");
         assert!(r1.score <= 10.0);
 
-        // Stack enough to be high score (>30)
-        // Missing unsubscribe (15) + deceptive subject (10) + trigger words (~10) > 30
+// Stack enough to be high score (>30)
+// Missing unsubscribe (15) + deceptive subject (10) + trigger words (~10) > 30
         let r2 = calculate_spam_score(
             "<p>FREE WINNER click here</p>",
             "Re: Urgent!!!",

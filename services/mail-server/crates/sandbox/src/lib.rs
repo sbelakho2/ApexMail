@@ -6,15 +6,13 @@
 //!
 //! ## Architecture
 //!
-//! The sandbox operates at multiple levels:
-//!
+//! The sandbox operates at multiple levels://!
 //! 1. **Static analysis** — File magic detection, extension validation, hash computation
 //! 2. **Content inspection** — Archive enumeration, embedded macro detection, OLE parsing
 //! 3. **Policy engine** — Configurable allowlists/blocklists, size limits, nesting depth limits
 //! 4. **Verdict generation** — Risk scoring and actionable classification
 //!
-//! On Linux, this module can additionally leverage:
-//! - **Namespaces** (mount, PID, network, user) for filesystem isolation
+//! On Linux, this module can additionally leverage://! - **Namespaces** (mount, PID, network, user) for filesystem isolation
 //! - **cgroups v2** for memory/CPU limits on analysis processes
 //! - **seccomp-BPF** for syscall filtering
 //!
@@ -40,33 +38,33 @@ use thiserror::Error;
 /// Sandbox errors
 #[derive(Debug, Error)]
 pub enum SandboxError {
-    /// I/O error during file operations
+/// I/O error during file operations
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// File exceeds maximum allowed size
+/// File exceeds maximum allowed size
     #[error("File too large: {size} bytes (max: {max})")]
     FileTooLarge {
-        /// Actual size
+/// Actual size
         size: u64,
-        /// Maximum allowed
+/// Maximum allowed
         max: u64,
     },
 
-    /// Nesting depth exceeded (zip bomb detection)
+/// Nesting depth exceeded (zip bomb detection)
     #[error("Nesting depth exceeded: {depth} (max: {max})")]
     NestingDepthExceeded {
-        /// Actual depth
+/// Actual depth
         depth: u32,
-        /// Maximum allowed  
-        max: u32,
+/// Maximum allowed
+    max: u32,
     },
 
-    /// Policy violation
+/// Policy violation
     #[error("Policy violation: {0}")]
     PolicyViolation(String),
 
-    /// Internal analysis error
+/// Internal analysis error
     #[error("Analysis error: {0}")]
     AnalysisError(String),
 }

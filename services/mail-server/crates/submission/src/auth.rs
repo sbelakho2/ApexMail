@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-/// #174: Rate limiter for authentication attempts per IP.
+/// #174:Rate limiter for authentication attempts per IP.
 /// Tracks failure count per IP; rejects after MAX_AUTH_FAILURES within the TTL window.
 const MAX_AUTH_FAILURES: u32 = 5;
 static AUTH_FAIL_CACHE: LazyLock<Cache<IpAddr, u32>> = LazyLock::new(|| {
@@ -34,9 +34,9 @@ pub struct AuthResult {
 }
 
 /// Authenticate with PLAIN mechanism
-/// Format: \0username\0password (base64 encoded)
+/// Format:\0username\0password (base64 encoded)
 pub async fn auth_plain(credentials: &str, pool: &PgPool, peer_ip: IpAddr) -> Result<AuthResult> {
-    // #174: Check rate limit before processing
+// #174:Check rate limit before processing
     if is_rate_limited(peer_ip) {
         warn!(peer = %peer_ip, "Auth rate limited");
         return Ok(AuthResult {
@@ -53,7 +53,7 @@ pub async fn auth_plain(credentials: &str, pool: &PgPool, peer_ip: IpAddr) -> Re
     let decoded_str = String::from_utf8_lossy(&decoded);
     let parts: Vec<&str> = decoded_str.split('\0').collect();
     
-    // PLAIN format: [authzid]\0authcid\0passwd
+// PLAIN format:[authzid]\0authcid\0passwd
     let (username, password) = match parts.as_slice() {
         [_, user, pass] => (*user, *pass),
         [user, pass] => (*user, *pass),
@@ -69,16 +69,16 @@ pub async fn auth_plain(credentials: &str, pool: &PgPool, peer_ip: IpAddr) -> Re
     if !result.success {
         record_auth_failure(peer_ip);
     } else {
-        // Reset on success
+// Reset on success
         AUTH_FAIL_CACHE.invalidate(&peer_ip);
     }
     Ok(result)
 }
 
 /// Authenticate with LOGIN mechanism
-/// Two-step: username then password (both base64 encoded)
+/// Two-step:username then password (both base64 encoded)
 pub async fn auth_login(username_b64: &str, password_b64: &str, pool: &PgPool, peer_ip: IpAddr) -> Result<AuthResult> {
-    // #174: Check rate limit before processing
+// #174:Check rate limit before processing
     if is_rate_limited(peer_ip) {
         warn!(peer = %peer_ip, "Auth rate limited");
         return Ok(AuthResult {
@@ -110,7 +110,7 @@ pub async fn auth_login(username_b64: &str, password_b64: &str, pool: &PgPool, p
 async fn verify_credentials(username: &str, password: &str, pool: &PgPool) -> Result<AuthResult> {
     debug!(username = %username, "Verifying credentials");
     
-    // Look up user in database
+// Look up user in database
     let row = sqlx::query(r#"
         SELECT id, email, password_hash, is_active 
         FROM mail_accounts 
@@ -146,7 +146,7 @@ async fn verify_credentials(username: &str, password: &str, pool: &PgPool) -> Re
     
     let stored_hash: String = sqlx::Row::get(&row, "password_hash");
     
-    // Verify password hash using Argon2.
+// Verify password hash using Argon2.
     let password_valid = verify_password_hash(password, &stored_hash);
     
     if password_valid {
@@ -171,7 +171,7 @@ async fn verify_credentials(username: &str, password: &str, pool: &PgPool) -> Re
     }
 }
 
-/// #173: Verify password against hash
+/// #173:Verify password against hash
 /// Supports bcrypt ($2a$, $2b$, $2y$) and argon2 ($argon2id$, $argon2i$, $argon2d$)
 fn verify_password_hash(password: &str, hash: &str) -> bool {
     if hash.starts_with("$argon2") {
@@ -184,7 +184,7 @@ fn verify_password_hash(password: &str, hash: &str) -> bool {
             .is_ok();
     }
 
-    // #173: Actual bcrypt support for $2a$, $2b$, $2y$ prefixed hashes
+// #173:Actual bcrypt support for $2a$, $2b$, $2y$ prefixed hashes
     if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$") {
         return bcrypt::verify(password, hash).unwrap_or(false);
     }
@@ -193,12 +193,12 @@ fn verify_password_hash(password: &str, hash: &str) -> bool {
     false
 }
 
-/// #174: Check if an IP is rate-limited for authentication.
+/// #174:Check if an IP is rate-limited for authentication.
 fn is_rate_limited(ip: IpAddr) -> bool {
     AUTH_FAIL_CACHE.get(&ip).unwrap_or(0) >= MAX_AUTH_FAILURES
 }
 
-/// #174: Record an authentication failure for the given IP.
+/// #174:Record an authentication failure for the given IP.
 fn record_auth_failure(ip: IpAddr) {
     let count = AUTH_FAIL_CACHE.get(&ip).unwrap_or(0);
     AUTH_FAIL_CACHE.insert(ip, count + 1);

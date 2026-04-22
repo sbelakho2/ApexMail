@@ -9,7 +9,7 @@ use crate::types::Message;
 pub struct MessagesRepo;
 
 impl MessagesRepo {
-    /// Create a new message.
+/// Create a new message.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -47,7 +47,7 @@ impl MessagesRepo {
         .await
     }
 
-    /// Find a message by ID (scoped to tenant).
+/// Find a message by ID (scoped to tenant).
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -62,7 +62,7 @@ impl MessagesRepo {
         .await
     }
 
-    /// List messages for a tenant with optional status filter and pagination.
+/// List messages for a tenant with optional status filter and pagination.
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -97,7 +97,7 @@ impl MessagesRepo {
         }
     }
 
-    /// Update message status.
+/// Update message status.
     pub async fn update_status(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -115,7 +115,7 @@ impl MessagesRepo {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Cancel a queued or scheduled message.
+/// Cancel a queued or scheduled message.
     pub async fn cancel(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -132,18 +132,18 @@ impl MessagesRepo {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Batch-create multiple messages in a single INSERT.
+/// Batch-create multiple messages in a single INSERT.
     pub async fn batch_create(
         pool: &PgPool,
         tenant_id: Uuid,
         messages: &[(String, serde_json::Value, String, Option<String>, Option<String>)],
     ) -> Result<Vec<Message>, sqlx::Error> {
-        // #212: Return early on empty input to avoid invalid SQL
+// #212:Return early on empty input to avoid invalid SQL
         if messages.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Build a multi-row INSERT dynamically.
+// Build a multi-row INSERT dynamically.
         let mut query = String::from(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, created_at) VALUES "
         );
@@ -164,7 +164,7 @@ impl MessagesRepo {
         }
         query.push_str(" RETURNING *");
 
-        // Build the query dynamically and bind params.
+// Build the query dynamically and bind params.
         let mut q = sqlx::query_as::<_, Message>(&query);
         for (from, to, subject, html, text) in messages {
             q = q

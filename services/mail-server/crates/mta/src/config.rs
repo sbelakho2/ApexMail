@@ -274,7 +274,7 @@ fn default_shutdown_timeout() -> u64 { 30 }
 fn default_true() -> bool { true }
 
 impl MtaConfig {
-    /// Load configuration from environment variables.
+/// Load configuration from environment variables.
     pub fn from_env() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
         let cfg = Self {
@@ -357,11 +357,11 @@ impl MtaConfig {
         Ok(cfg)
     }
 
-    /// #155: Validate all config values to catch misconfiguration early.
+/// #155:Validate all config values to catch misconfiguration early.
     pub fn validate(&self) -> anyhow::Result<()> {
         let mut errors: Vec<String> = Vec::new();
 
-        // --- ports must be 1..=65535 (already u16, but 0 is invalid) ---
+// --- ports must be 1..=65535 (already u16, but 0 is invalid) ---
         let port_checks: &[(&str, u16)] = &[
             ("inbound.port", self.inbound.port),
             ("inbound.secure_port", self.inbound.secure_port),
@@ -376,7 +376,7 @@ impl MtaConfig {
             }
         }
 
-        // ports must not collide (among enabled listeners)
+// ports must not collide (among enabled listeners)
         {
             let mut active_ports: Vec<(&str, u16)> = Vec::new();
             if self.inbound.enabled {
@@ -408,7 +408,7 @@ impl MtaConfig {
             }
         }
 
-        // --- numeric bounds ---
+// --- numeric bounds ---
         if self.database.max_connections == 0 {
             errors.push("database.max_connections must be > 0".into());
         }
@@ -439,7 +439,7 @@ impl MtaConfig {
             errors.push("graceful_shutdown_timeout must be > 0".into());
         }
 
-        // --- TLS config coherence ---
+// --- TLS config coherence ---
         if self.inbound.tls.enabled {
             if self.inbound.tls.cert_path.is_none() {
                 errors.push("TLS enabled but tls.cert_path is not set".into());
@@ -449,7 +449,7 @@ impl MtaConfig {
             }
         }
 
-        // --- required non-empty strings ---
+// --- required non-empty strings ---
         if self.database.connection_string.is_empty() {
             errors.push("database.connection_string must not be empty".into());
         }

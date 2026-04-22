@@ -1,6 +1,6 @@
 //! Redis-backed idempotency for mutation endpoints.
 //!
-//! Key format: `apexmail:idempotency:{tenant_id}:{key}`
+//! Key format:`apexmail:idempotency:{tenant_id}:{key}`
 //! Stores the full serialised response for 24 h by default.
 
 use axum::body::to_bytes;
@@ -29,9 +29,7 @@ struct CachedResponse {
 // ─── Middleware ─────────────────────────────────────────────────
 
 /// Axum middleware that implements idempotency semantics.
-///
-/// If the request contains an `Idempotency-Key` header the middleware will:
-/// 1. Look up the key in Redis. On hit, return the cached response.
+/// If the request contains an `Idempotency-Key` header the middleware will:/// 1. Look up the key in Redis. On hit, return the cached response.
 /// 2. On miss, let the request through, capture the response, and store it.
 pub async fn idempotency_middleware(
     State(state): State<AppState>,
@@ -43,8 +41,7 @@ pub async fn idempotency_middleware(
         None => return next.run(req).await,
     };
 
-    // Fix #15: Extract tenant_id from AuthUser (set by require_auth middleware)
-    // instead of raw Uuid. Previously always fell through to "global".
+// instead of raw Uuid. Previously always fell through to "global".
     let tenant_id = req
         .extensions()
         .get::<AuthUser>()
@@ -54,16 +51,16 @@ pub async fn idempotency_middleware(
     let cache_key = format!("apexmail:idempotency:{tenant_id}:{idempotency_key}");
     let ttl = state.config.idempotency_ttl_seconds;
 
-    // 1. Check cache
+// 1. Check cache
     if let Some(cached) = lookup_cached(&state, &cache_key).await {
         tracing::debug!(cache_key, "returning cached idempotent response");
         return cached_to_response(cached);
     }
 
-    // 2. Execute the real handler
+// 2. Execute the real handler
     let response = next.run(req).await;
 
-    // 3. Store the response
+// 3. Store the response
     store_response(&state, &cache_key, ttl, response).await
 }
 
@@ -110,8 +107,7 @@ async fn store_response(state: &AppState, cache_key: &str, ttl: u64, resp: Respo
     let body_bytes = match to_bytes(body, MAX_BODY_SIZE).await {
         Ok(b) => b,
         Err(e) => {
-            // Fix #16: Body too large to cache — reconstruct a proper error
-            // response instead of returning an empty body.
+// response instead of returning an empty body.
             tracing::warn!(cache_key, error = %e, "response body too large to cache for idempotency");
             return (
                 parts.status,

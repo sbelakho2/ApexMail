@@ -1,4 +1,4 @@
-//! Functional tests for billing-service: plans, overage, VAT, types.
+//! Functional tests for billing-service:plans, overage, VAT, types.
 
 use billing_service::plans::{calculate_overage_cost, default_plans};
 use billing_service::invoices::calculate_vat;
@@ -63,9 +63,9 @@ fn overage_unlimited_is_zero() {
 
 #[test]
 fn overage_above_limit() {
-    // 1000 overage * 0.04 cents = 40 cents
+// 1000 overage * 0.04 cents = 40 cents
     assert_eq!(calculate_overage_cost(4_000, 3_000), 40);
-    // 10_000 overage * 0.04 = 400 cents
+// 10_000 overage * 0.04 = 400 cents
     assert_eq!(calculate_overage_cost(13_000, 3_000), 400);
 }
 

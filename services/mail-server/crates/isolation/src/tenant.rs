@@ -1,4 +1,4 @@
-//! Tenant management: organizations, workspaces, members, quotas.
+//! Tenant management:organizations, workspaces, members, quotas.
 
 use chrono::Utc;
 use dashmap::DashMap;
@@ -154,7 +154,7 @@ impl TenantService {
         }
     }
 
-    // ── Organization CRUD ──────────────────────────────────
+// ── Organization CRUD ──────────────────────────────────
 
     pub async fn create_organization(
         &self,
@@ -170,7 +170,7 @@ impl TenantService {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        // Check slug uniqueness
+// Check slug uniqueness
         let existing: Option<(String,)> = sqlx::query_as(
             "SELECT id FROM iso_organizations WHERE slug = $1"
         )
@@ -214,8 +214,8 @@ impl TenantService {
             .execute(&mut *tx)
             .await?;
 
-        // Organization ownership is tracked via owner_id on iso_organizations.
-        // Workspace membership is created when a concrete workspace is created.
+// Organization ownership is tracked via owner_id on iso_organizations.
+// Workspace membership is created when a concrete workspace is created.
 
         tx.commit().await?;
 
@@ -312,7 +312,7 @@ impl TenantService {
         Ok(())
     }
 
-    // ── Workspace CRUD ─────────────────────────────────────
+// ── Workspace CRUD ─────────────────────────────────────
 
     pub async fn create_workspace(
         &self,
@@ -324,7 +324,7 @@ impl TenantService {
     ) -> anyhow::Result<Workspace> {
         let org = self.get_organization(organization_id).await?;
 
-        // Check workspace count limit
+// Check workspace count limit
         let count: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM iso_workspaces WHERE organization_id=$1 AND status != 'deleted'"
         )
@@ -336,7 +336,7 @@ impl TenantService {
             anyhow::bail!("Maximum workspace limit ({}) reached", self.config.tenant.max_workspaces_per_org);
         }
 
-        // Check slug uniqueness within org
+// Check slug uniqueness within org
         let slug_exists: Option<(String,)> = sqlx::query_as(
             "SELECT id FROM iso_workspaces WHERE organization_id=$1 AND slug=$2"
         )
@@ -376,7 +376,7 @@ impl TenantService {
             .execute(&mut *tx)
             .await?;
 
-        // Add creator as admin
+// Add creator as admin
         sqlx::query(
             "INSERT INTO iso_workspace_members (id, workspace_id, user_id, role, permissions, created_at, updated_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7)"
@@ -458,7 +458,7 @@ impl TenantService {
             .execute(&self.db)
             .await?;
 
-        // Schedule cleanup with 30-day delay
+// Schedule cleanup with 30-day delay
         let cleanup_at = now + chrono::Duration::days(30);
         sqlx::query(
             "INSERT INTO iso_cleanup_queue (id, workspace_id, scheduled_at, created_by, created_at)
@@ -490,7 +490,7 @@ impl TenantService {
         rows.into_iter().map(|r| r.into_workspace()).collect()
     }
 
-    // ── Members ────────────────────────────────────────────
+// ── Members ────────────────────────────────────────────
 
     pub async fn add_workspace_member(
         &self,
@@ -499,7 +499,7 @@ impl TenantService {
         role: &TenantRole,
         inviter_id: &str,
     ) -> anyhow::Result<()> {
-        // Check member count
+// Check member count
         let count: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM iso_workspace_members WHERE workspace_id=$1"
         )
@@ -566,7 +566,7 @@ impl TenantService {
         }
     }
 
-    // ── Quota ──────────────────────────────────────────────
+// ── Quota ──────────────────────────────────────────────
 
     pub async fn check_quota(
         &self,
@@ -632,7 +632,7 @@ impl TenantService {
         Ok(())
     }
 
-    // ── Cache Helpers ─────────────────────────────────────
+// ── Cache Helpers ─────────────────────────────────────
 
     fn get_cached_org(&self, id: &str) -> Option<Organization> {
         let entry = self.org_cache.get(id)?;
@@ -679,7 +679,7 @@ impl TenantService {
     }
 
 
-    // ── Schema Helpers ─────────────────────────────────────
+// ── Schema Helpers ─────────────────────────────────────
 
     async fn create_workspace_schema(&self, schema_name: &str) -> anyhow::Result<()> {
         let safe = validated_identifier(&sanitize_identifier(schema_name))?;
@@ -687,7 +687,7 @@ impl TenantService {
             .execute(&self.db)
             .await?;
 
-        // Create standard tables in the schema
+// Create standard tables in the schema
         for table_sql in &[
             format!(r#"CREATE TABLE IF NOT EXISTS "{}".emails (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, subject TEXT, body TEXT, created_at TIMESTAMPTZ DEFAULT NOW())"#, safe),
             format!(r#"CREATE TABLE IF NOT EXISTS "{}".contacts (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, email TEXT NOT NULL, name TEXT, created_at TIMESTAMPTZ DEFAULT NOW())"#, safe),
@@ -714,7 +714,7 @@ mod tests {
     fn test_validate_identifier_invalid() {
         assert!(!validate_identifier("123abc"));
         assert!(!validate_identifier("with space"));
-        assert!(!validate_identifier("drop--table"));
+        assert!(!validate_identifier("drop --table"));
         assert!(!validate_identifier(""));
     }
 
@@ -795,7 +795,7 @@ mod tests {
             updated_at: Utc::now(),
         };
         let org = row.into_org().unwrap();
-        // Falls back to defaults
+// Falls back to defaults
         assert_eq!(org.status, TenantStatus::Pending);
         assert_eq!(org.isolation_level, IsolationLevel::Shared);
     }

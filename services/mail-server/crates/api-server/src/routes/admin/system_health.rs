@@ -1,6 +1,6 @@
 //! System health endpoint — queues, workers, MTA nodes, alerts.
 //!
-//! Migrated from: apps/control-plane/src/app/api/system/health/route.ts (119 lines)
+//! Migrated from:apps/control-plane/src/app/api/system/health/route.ts (119 lines)
 
 use axum::extract::State;
 use axum::routing::get;
@@ -71,7 +71,7 @@ async fn system_health(
 ) -> Result<Json<SystemHealthResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // ── Queues ─────────────────────────────────────────────────
+// ── Queues ─────────────────────────────────────────────────
     let queue_rows = sqlx::query_as::<_, (String, i64, i64)>(
         "SELECT queue_name,
                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as depth,
@@ -90,7 +90,7 @@ async fn system_health(
         })
         .collect();
 
-    // ── Workers (derived from queue_jobs.worker_id) ────────────
+// ── Workers (derived from queue_jobs.worker_id) ────────────
     let worker_rows = sqlx::query_as::<_, (String, String, Option<chrono::DateTime<chrono::Utc>>)>(
         "SELECT DISTINCT worker_id, queue_name, MAX(updated_at)
          FROM queue_jobs WHERE worker_id IS NOT NULL
@@ -115,7 +115,7 @@ async fn system_health(
         })
         .collect();
 
-    // ── MTA nodes from ip_pool_addresses ───────────────────────
+// ── MTA nodes from ip_pool_addresses ───────────────────────
     let mta_rows = sqlx::query_as::<_, (
         String, String, Option<String>, String, Option<i32>, Option<i64>, Option<i64>, bool,
     )>(
@@ -135,7 +135,7 @@ async fn system_health(
         })
         .collect();
 
-    // ── Alerts ─────────────────────────────────────────────────
+// ── Alerts ─────────────────────────────────────────────────
     let alert_rows = sqlx::query_as::<_, (
         String, String, String, String, chrono::DateTime<chrono::Utc>, bool,
     )>(

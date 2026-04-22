@@ -8,24 +8,24 @@ use crate::reputation::{self, ReputationClass, ReputationScore, SourceScore};
 /// Threat intel lookup result
 #[derive(Debug, Clone)]
 pub struct ThreatVerdict {
-    /// IP reputation (if IP was checked)
+/// IP reputation (if IP was checked)
     pub ip_reputation: Option<ReputationScore>,
-    /// Domain reputation (if domain was checked)
+/// Domain reputation (if domain was checked)
     pub domain_reputation: Option<ReputationScore>,
-    /// Combined action recommendation
+/// Combined action recommendation
     pub action: ThreatAction,
-    /// Summary
+/// Summary
     pub summary: String,
 }
 
 /// Recommended action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreatAction {
-    /// No threat detected
+/// No threat detected
     Allow,
-    /// Suspicious — flag for monitoring
+/// Suspicious — flag for monitoring
     Flag,
-    /// Known threat — block
+/// Known threat — block
     Block,
 }
 
@@ -47,7 +47,7 @@ pub struct ThreatIntelEngine {
 }
 
 impl ThreatIntelEngine {
-    /// Create engine with default config
+/// Create engine with default config
     pub fn new() -> Self {
         let config = ThreatIntelConfig::default();
         Self {
@@ -57,7 +57,7 @@ impl ThreatIntelEngine {
         }
     }
 
-    /// Create engine with custom config
+/// Create engine with custom config
     pub fn with_config(config: ThreatIntelConfig) -> Self {
         Self {
             ip_blocklist: IpBlocklist::new(config.max_ip_entries),
@@ -66,17 +66,17 @@ impl ThreatIntelEngine {
         }
     }
 
-    /// Get a reference to the IP blocklist for loading feeds
+/// Get a reference to the IP blocklist for loading feeds
     pub fn ip_blocklist(&self) -> &IpBlocklist {
         &self.ip_blocklist
     }
 
-    /// Get a reference to the domain blocklist for loading feeds
+/// Get a reference to the domain blocklist for loading feeds
     pub fn domain_blocklist(&self) -> &DomainBlocklist {
         &self.domain_blocklist
     }
 
-    /// Look up an IP address for threat intelligence
+/// Look up an IP address for threat intelligence
     pub fn check_ip(&self, ip_str: &str) -> ThreatVerdict {
         let mut sources = Vec::new();
         let mut trust_scores = Vec::new();
@@ -94,7 +94,7 @@ impl ThreatIntelEngine {
             trust_scores.push(trust);
         }
 
-        // Use trust-weighted reputation scoring by default
+// Use trust-weighted reputation scoring by default
         let ip_rep = reputation::compute_reputation_weighted(
             ip_str,
             sources,
@@ -123,7 +123,7 @@ impl ThreatIntelEngine {
         }
     }
 
-    /// Look up a domain for threat intelligence
+/// Look up a domain for threat intelligence
     pub fn check_domain(&self, domain: &str) -> ThreatVerdict {
         let mut sources = Vec::new();
         let mut trust_scores = Vec::new();
@@ -141,7 +141,7 @@ impl ThreatIntelEngine {
             trust_scores.push(trust);
         }
 
-        // Use trust-weighted reputation scoring by default
+// Use trust-weighted reputation scoring by default
         let domain_rep = reputation::compute_reputation_weighted(
             domain,
             sources,
@@ -170,7 +170,7 @@ impl ThreatIntelEngine {
         }
     }
 
-    /// Check both IP and domain, returning the worst verdict
+/// Check both IP and domain, returning the worst verdict
     pub fn check(&self, ip_str: Option<&str>, domain: Option<&str>) -> ThreatVerdict {
         let ip_verdict = ip_str.map(|ip| self.check_ip(ip));
         let domain_verdict = domain.map(|d| self.check_domain(d));
@@ -198,12 +198,12 @@ impl ThreatIntelEngine {
         }
     }
 
-    /// Purge all expired entries from both blocklists
+/// Purge all expired entries from both blocklists
     pub fn purge_expired(&self) -> usize {
         self.ip_blocklist.purge_expired() + self.domain_blocklist.purge_expired()
     }
 
-    /// Statistics about current blocklist sizes
+/// Statistics about current blocklist sizes
     pub fn stats(&self) -> ThreatIntelStats {
         ThreatIntelStats {
             ip_exact_entries: self.ip_blocklist.exact_count(),
@@ -212,11 +212,10 @@ impl ThreatIntelEngine {
         }
     }
 
-    /// Check whether blocklist memory pressure is above the configured
-    /// threshold and, if so, trigger an immediate purge of expired entries.
-    ///
-    /// Returns the number of entries purged. Call this after every feed
-    /// refresh to prevent OOM when feeds grow unexpectedly.
+/// Check whether blocklist memory pressure is above the configured
+/// threshold and, if so, trigger an immediate purge of expired entries.
+/// Returns the number of entries purged. Call this after every feed
+/// refresh to prevent OOM when feeds grow unexpectedly.
     pub fn purge_if_pressure(&self) -> usize {
         let threshold = self.config.purge_pressure_threshold;
         let ip_load = (self.ip_blocklist.exact_count() + self.ip_blocklist.cidr_count()) as f64
@@ -251,26 +250,25 @@ impl ThreatIntelEngine {
         (adjusted, monitor_only)
     }
 
-    /// Get the configured trust score for a named feed (default 5.0 if unknown).
+/// Get the configured trust score for a named feed (default 5.0 if unknown).
     fn feed_trust_score(&self, source_name: &str) -> f64 {
         self.config
             .feeds
             .iter()
             .find(|f| f.enabled && f.name.eq_ignore_ascii_case(source_name))
             .map(|f| f.trust_score.clamp(0.0, 10.0))
-            // Unknown (unconfigured) feeds receive full trust so that trust-
-            // weighting only reduces scores when explicitly configured.
-            // Operators must actively set a low trust_score to down-weight a
-            // feed; omitting a feed should never silently suppress blocking.
+// Unknown (unconfigured) feeds receive full trust so that trust-
+// weighting only reduces scores when explicitly configured.
+// Operators must actively set a low trust_score to down-weight a
+// feed; omitting a feed should never silently suppress blocking.
             .unwrap_or(10.0)
     }
 }
 
 #[cfg(feature = "events")]
 impl ThreatIntelEngine {
-    /// Check IP/domain and also produce a normalized security event.
-    ///
-    /// Requires the `events` feature flag (which enables the `mail-common` dep).
+/// Check IP/domain and also produce a normalized security event.
+/// Requires the `events` feature flag (which enables the `mail-common` dep).
     pub fn check_with_event(
         &self,
         ip_str: Option<&str>,
@@ -342,11 +340,11 @@ impl Default for ThreatIntelEngine {
 /// Blocklist statistics
 #[derive(Debug, Clone)]
 pub struct ThreatIntelStats {
-    /// Number of exact IP entries
+/// Number of exact IP entries
     pub ip_exact_entries: usize,
-    /// Number of CIDR range entries
+/// Number of CIDR range entries
     pub ip_cidr_entries: usize,
-    /// Number of domain entries
+/// Number of domain entries
     pub domain_entries: usize,
 }
 
@@ -425,7 +423,7 @@ mod tests {
     fn test_combined_check_worst_wins() {
         let engine = ThreatIntelEngine::new();
         engine.domain_blocklist().add("evil.com", domain_entry("evil.com"));
-        // IP is clean, domain is blocked → Block wins
+// IP is clean, domain is blocked → Block wins
         let verdict = engine.check(Some("8.8.8.8"), Some("evil.com"));
         assert_eq!(verdict.action, ThreatAction::Block);
     }

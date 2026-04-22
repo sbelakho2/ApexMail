@@ -108,16 +108,16 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
 
     if EU_COUNTRIES.contains(&country) {
         if vat_number.is_some() {
-            // EU B2B reverse charge
+// EU B2B reverse charge
             return (0, 0);
         }
-        // EU B2C – charge destination VAT rate when known
+// EU B2C – charge destination VAT rate when known
         let rate = EU_VAT_RATES.get(&country).copied().unwrap_or(ESTONIA_VAT_RATE);
         let amt = ((subtotal * rate as i64) + 50) / 100;
         return (rate, amt);
     }
 
-    // Non-EU
+// Non-EU
     (0, 0)
 }
 
@@ -148,7 +148,7 @@ pub struct CreateInvoiceInput {
 pub struct NewLineItem {
     pub description: String,
     pub quantity: i64,
-    /// Unit price in cents.
+/// Unit price in cents.
     pub unit_price: i64,
 }
 
@@ -157,7 +157,7 @@ pub async fn create_invoice(
     pool: &PgPool,
     input: CreateInvoiceInput,
 ) -> Result<Invoice, InvoiceError> {
-    // Fetch billing address country + VAT number for VAT calculation.
+// Fetch billing address country + VAT number for VAT calculation.
     let addr: BillingAddrRow = sqlx::query_as(
         "SELECT country, vat_number FROM billing_addresses WHERE tenant_id = $1",
     )
@@ -253,15 +253,14 @@ pub async fn create_invoice(
 
 /// Generate a PDF for an invoice by calling the pdf-renderer service, upload
 /// to object storage, and update the `pdf_url` column.
-///
-/// This is called automatically after `create_invoice()` and can also be
+/// This is called automatically after `create_invoice` and can also be
 /// called on-demand to re-generate a PDF for an existing invoice.
 pub async fn generate_invoice_pdf(
     pool: &PgPool,
     http_client: &reqwest::Client,
     invoice: &Invoice,
 ) -> Result<String, InvoiceError> {
-    // Build the JSON payload expected by the invoice.typ template
+// Build the JSON payload expected by the invoice.typ template
     let pdf_data = serde_json::json!({
         "invoice_number": invoice.invoice_number,
         "status": format!("{:?}", invoice.status).to_lowercase(),
@@ -282,7 +281,7 @@ pub async fn generate_invoice_pdf(
         "data": pdf_data,
     });
 
-    // Call pdf-renderer service
+// Call pdf-renderer service
     let resp = http_client
         .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
         .json(&render_request)
@@ -304,16 +303,16 @@ pub async fn generate_invoice_pdf(
         .await
         .map_err(|e| InvoiceError::PdfGeneration(format!("Failed to read PDF bytes: {e}")))?;
 
-    // Construct S3/R2 object key
+// Construct S3/R2 object key
     let pdf_key = format!(
         "invoices/{}/{}.pdf",
         invoice.tenant_id, invoice.invoice_number
     );
 
-    // Upload to S3/R2 object storage
+// Upload to S3/R2 object storage
     let pdf_url = s3_put_object(http_client, &pdf_key, &pdf_bytes, "application/pdf").await?;
 
-    // Update the invoice record with the PDF URL
+// Update the invoice record with the PDF URL
     sqlx::query("UPDATE invoices SET pdf_url = $1, updated_at = NOW() WHERE id = $2")
         .bind(&pdf_url)
         .bind(invoice.id)
@@ -503,35 +502,35 @@ async fn s3_put_object(
     let date_stamp = now.format("%Y%m%d").to_string();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
 
-    // SHA-256 of request body
+// SHA-256 of request body
     let payload_hash = hex_encode(&Sha256::digest(body));
 
-    // Host: virtual-hosted style for broad S3 compatibility
+// Host:virtual-hosted style for broad S3 compatibility
     let raw_host = endpoint
         .trim_start_matches("https://")
         .trim_start_matches("http://");
     let host = format!("{bucket}.{raw_host}");
     let canonical_uri = format!("/{key}");
 
-    // Canonical headers (must be sorted)
+// Canonical headers (must be sorted)
     let canonical_headers = format!(
         "content-type:{content_type}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
     );
     let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
 
-    // Canonical request
+// Canonical request
     let canonical_request = format!(
         "PUT\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
     );
 
-    // String to sign
+// String to sign
     let credential_scope = format!("{date_stamp}/{region}/s3/aws4_request");
     let canonical_hash = hex_encode(&Sha256::digest(canonical_request.as_bytes()));
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}"
     );
 
-    // Derive signing key: HMAC chain date → region → service → aws4_request
+// Derive signing key:HMAC chain date → region → service → aws4_request
     let k_date = HmacSha256::new_from_slice(format!("AWS4{secret_key}").as_bytes())
         .expect("HMAC key length")
         .chain_update(date_stamp.as_bytes())
@@ -553,7 +552,7 @@ async fn s3_put_object(
         .finalize()
         .into_bytes();
 
-    // Final signature
+// Final signature
     let signature = hex_encode(
         &HmacSha256::new_from_slice(&k_signing)
             .expect("HMAC key length")
@@ -590,7 +589,7 @@ async fn s3_put_object(
         )));
     }
 
-    // Return public URL
+// Return public URL
     let public_url = match &*S3_PUBLIC_URL {
         Some(base) => format!("{}/{key}", base.trim_end_matches('/')),
         None => url,

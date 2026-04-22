@@ -13,7 +13,7 @@ pub struct BanditOptimizer {
 }
 
 impl BanditOptimizer {
-    /// Create a new optimiser with the given exploration rate (0.0–1.0).
+/// Create a new optimiser with the given exploration rate (0.0–1.0).
     pub fn new(epsilon: f64) -> Self {
         Self {
             epsilon: epsilon.clamp(0.0, 1.0),
@@ -21,7 +21,7 @@ impl BanditOptimizer {
         }
     }
 
-    /// Register a new arm and return its ID.
+/// Register a new arm and return its ID.
     pub fn add_arm(&self, name: &str) -> String {
         let arm = BanditArm::new(name);
         let id = arm.id.clone();
@@ -29,10 +29,9 @@ impl BanditOptimizer {
         id
     }
 
-    /// Select an arm using epsilon-greedy strategy.
-    ///
-    /// With probability `epsilon` choose a random arm (explore);
-    /// otherwise choose the arm with the highest observed reward (exploit).
+/// Select an arm using epsilon-greedy strategy.
+/// With probability `epsilon` choose a random arm (explore);
+/// otherwise choose the arm with the highest observed reward (exploit).
     pub fn select_arm(&self) -> Result<String, AiError> {
         let arms = self.arms.read();
         if arms.is_empty() {
@@ -41,10 +40,10 @@ impl BanditOptimizer {
 
         let mut rng = rand::thread_rng();
         let idx = if rng.gen::<f64>() < self.epsilon || arms.iter().all(|a| a.impressions == 0) {
-            // Explore: pick random arm
+// Explore:pick random arm
             rng.gen_range(0..arms.len())
         } else {
-            // Exploit: pick best conversion rate
+// Exploit:pick best conversion rate
             match arms.iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| {
@@ -62,7 +61,7 @@ impl BanditOptimizer {
         Ok(arms[idx].id.clone())
     }
 
-    /// Record a reward observation for an arm.
+/// Record a reward observation for an arm.
     pub fn record_reward(&self, arm_id: &str, reward: f64) -> Result<(), AiError> {
         let mut arms = self.arms.write();
         let arm = arms
@@ -78,15 +77,14 @@ impl BanditOptimizer {
         Ok(())
     }
 
-    /// Return a snapshot of all arms with their statistics.
+/// Return a snapshot of all arms with their statistics.
     pub fn get_stats(&self) -> Vec<BanditArm> {
         self.arms.read().clone()
     }
 
-    /// Thompson sampling approximation for an arm using the Beta distribution.
-    ///
-    /// Uses the normal approximation to Beta(α, β): mean = α/(α+β),
-    /// variance = αβ / ((α+β)²(α+β+1)).
+/// Thompson sampling approximation for an arm using the Beta distribution.
+/// Uses the normal approximation to Beta(α, β):mean = α/(α+β),
+/// variance = αβ / ((α+β)²(α+β+1)).
     pub fn thompson_sample(&self, arm_id: &str) -> Result<f64, AiError> {
         let arms = self.arms.read();
         let arm = arms
@@ -97,13 +95,13 @@ impl BanditOptimizer {
         let alpha = arm.conversions as f64 + 1.0;
         let beta = arm.impressions.saturating_sub(arm.conversions) as f64 + 1.0;
 
-        // Normal approximation to Beta
+// Normal approximation to Beta
         let mean = alpha / (alpha + beta);
         let variance = (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
         let std_dev = variance.sqrt();
 
         let mut rng = rand::thread_rng();
-        // Box-Muller transform for a normal sample
+// Box-Muller transform for a normal sample
         let u1: f64 = rng.gen::<f64>().max(1e-10);
         let u2: f64 = rng.gen();
         let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
@@ -158,7 +156,7 @@ mod tests {
         for _ in 0..80 {
             b.record_reward(&id, 0.0).unwrap();
         }
-        // Sample multiple times — all should be in [0,1]
+// Sample multiple times — all should be in [0,1]
         for _ in 0..50 {
             let s = b.thompson_sample(&id).unwrap();
             assert!((0.0..=1.0).contains(&s), "sample {s} out of range");

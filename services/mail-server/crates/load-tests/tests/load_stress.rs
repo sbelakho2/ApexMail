@@ -28,7 +28,7 @@ fn test_stress_crm_many_leads() {
         lead_ids.push(lead.id);
     }
 
-    // Verify all are retrievable
+// Verify all are retrievable
     for id in &lead_ids {
         assert!(crm.get_lead(*id).is_ok(), "lead {id} not found");
     }
@@ -43,8 +43,8 @@ fn test_stress_crm_many_leads() {
 
 #[test]
 fn test_stress_campaign_manager() {
-    // Set max_campaigns high enough so we don't hit the active limit
-    // (campaigns are created in Draft status, so max is for Active ones)
+// Set max_campaigns high enough so we don't hit the active limit
+// (campaigns are created in Draft status, so max is for Active ones)
     let mgr = CampaignManager::new(10_000);
     let mut campaign_ids = Vec::with_capacity(1_000);
 
@@ -84,7 +84,7 @@ fn test_stress_metrics_collector() {
     let summary = collector.get_summary();
     assert!(!summary.is_empty());
 
-    // Each of the 100 counter names should have been incremented 1 000 times
+// Each of the 100 counter names should have been incremented 1 000 times
     for m in &summary {
         assert!((m.value - 1_000.0).abs() < 1.0, "counter {} has value {}", m.name, m.value);
     }
@@ -111,12 +111,12 @@ fn test_stress_pattern_rules() {
     let ruleset = RuleSet::new(rules);
     assert_eq!(ruleset.rule_count(), 1_000);
 
-    // Text containing a handful of patterns
+// Text containing a handful of patterns
     let text = "This text has pattern0 and pattern500 and pattern999 in it";
     let matches = ruleset.evaluate(text);
     assert!(matches.len() >= 3, "expected at least 3 matches, got {}", matches.len());
 
-    // Verify no panic on large input
+// Verify no panic on large input
     let large_text = "clean ".repeat(10_000);
     let _ = ruleset.evaluate(&large_text);
 }
@@ -145,7 +145,7 @@ fn test_stress_health_checker() {
     let latest = checker.latest_checks();
     assert_eq!(latest.len(), 1_000);
 
-    // Verify individual service history
+// Verify individual service history
     let hist = checker.get_history("svc-0", 10);
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].status, ServiceStatus::Degraded);
@@ -165,7 +165,7 @@ fn test_stress_bandit_many_arms() {
         arm_ids.push(id);
     }
 
-    // Record rewards for each arm
+// Record rewards for each arm
     for (i, id) in arm_ids.iter().enumerate() {
         let reward = if i % 2 == 0 { 1.0 } else { 0.0 };
         bandit.record_reward(id, reward).unwrap();
@@ -174,7 +174,7 @@ fn test_stress_bandit_many_arms() {
     let stats = bandit.get_stats();
     assert_eq!(stats.len(), 1_000);
 
-    // Selection should still work with many arms
+// Selection should still work with many arms
     for _ in 0..100 {
         let selected = bandit.select_arm().unwrap();
         assert!(arm_ids.contains(&selected));

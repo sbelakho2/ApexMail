@@ -1,4 +1,4 @@
-//! Functional tests for ai-service: analytics, bandits, content, inference, STO.
+//! Functional tests for ai-service:analytics, bandits, content, inference, STO.
 
 use ai_service::analytics::AnalyticsPredictor;
 use ai_service::bandits::BanditOptimizer;
@@ -36,7 +36,7 @@ fn click_rate_always_between_0_and_1() {
 #[test]
 fn unsubscribe_risk_bounds() {
     let p = AnalyticsPredictor::new();
-    // extremes
+// extremes
     let high = p.predict_unsubscribe_risk(10.0, 0.0);
     let low  = p.predict_unsubscribe_risk(0.5, 1.0);
     assert!((0.0..=1.0).contains(&high), "high risk {} out of bounds", high);
@@ -57,11 +57,11 @@ fn open_rate_business_hours_boost() {
 #[test]
 fn subject_line_scoring_length_heuristics() {
     let c = ContentOptimizer::new();
-    // Optimal length (30-60 chars)
+// Optimal length (30-60 chars)
     let optimal = c.score_subject_line("Discover amazing deals waiting for you today");
-    // Very short
+// Very short
     let short = c.score_subject_line("Hi");
-    // Very long
+// Very long
     let long = c.score_subject_line(&"a]".repeat(60));
     assert!(optimal > short, "optimal ({}) should beat short ({})", optimal, short);
     assert!(optimal > long, "optimal ({}) should beat long ({})", optimal, long);
@@ -75,7 +75,7 @@ fn bandit_epsilon_0_always_exploits() {
     let id_a = b.add_arm("variant-a");
     let id_b = b.add_arm("variant-b");
 
-    // Give arm A a much higher reward rate
+// Give arm A a much higher reward rate
     for _ in 0..50 {
         b.record_reward(&id_a, 1.0).unwrap();
     }
@@ -83,7 +83,7 @@ fn bandit_epsilon_0_always_exploits() {
         b.record_reward(&id_b, 0.0).unwrap();
     }
 
-    // epsilon=0 should always pick the best arm
+// epsilon=0 should always pick the best arm
     for _ in 0..20 {
         let choice = b.select_arm().unwrap();
         assert_eq!(choice, id_a, "epsilon=0 should always exploit best arm");
@@ -95,7 +95,7 @@ fn bandit_epsilon_1_explores_both_arms() {
     let b = BanditOptimizer::new(1.0);
     let id_a = b.add_arm("variant-a");
     let id_b = b.add_arm("variant-b");
-    // Record some rewards so arms are initialized
+// Record some rewards so arms are initialized
     b.record_reward(&id_a, 1.0).unwrap();
     b.record_reward(&id_b, 0.0).unwrap();
 

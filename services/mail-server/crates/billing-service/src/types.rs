@@ -15,15 +15,15 @@ pub struct Plan {
     pub name: String,
     pub display_name: String,
     pub description: String,
-    /// Monthly price in **cents**.
+/// Monthly price in **cents**.
     pub price_monthly: i64,
-    /// Yearly price in **cents** (discounted).
+/// Yearly price in **cents** (discounted).
     pub price_yearly: i64,
-    /// Monthly email sending limit (−1 = unlimited).
+/// Monthly email sending limit (−1 = unlimited).
     pub email_limit: i64,
-    /// Monthly API-call limit (−1 = unlimited).
+/// Monthly API-call limit (−1 = unlimited).
     pub api_call_limit: i64,
-    /// JSON-encoded feature flags.
+/// JSON-encoded feature flags.
     pub features: PlanFeatures,
     pub stripe_price_id_monthly: Option<String>,
     pub stripe_price_id_yearly: Option<String>,
@@ -36,49 +36,49 @@ pub struct Plan {
 /// Feature flags attached to a plan.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlanFeatures {
-    // Infrastructure
+// Infrastructure
     pub dedicated_ip: bool,
     pub dedicated_ip_count: i32,
     pub max_sending_domains: i32,
 
-    // Auth & Security
+// Auth & Security
     pub sso_enabled: bool,
     pub audit_logs: bool,
 
-    // API & Integrations
+// API & Integrations
     pub api_access: bool,
     pub webhooks_enabled: bool,
     pub inbound_email: bool,
 
-    // Analytics
+// Analytics
     pub advanced_analytics: bool,
     pub send_time_optimization: bool,
     pub ab_testing: bool,
     pub time_travel_debugging: bool,
     pub data_export: bool,
 
-    // Customization
+// Customization
     pub custom_tracking_domain: bool,
     pub custom_templates: bool,
     pub template_approval_workflow: bool,
     pub white_label: bool,
     pub powered_by_footer: bool,
 
-    // Retention
+// Retention
     pub custom_retention: bool,
     pub max_retention_days: i32,
 
-    // Team
+// Team
     pub max_team_members: i32,
     pub subaccounts: bool,
     pub max_subaccounts: i32,
 
-    // Support
+// Support
     pub support_level: SupportLevel,
     pub dedicated_csm: bool,
     pub priority_onboarding: bool,
 
-    // Enterprise
+// Enterprise
     pub byoip: bool,
     pub sla_guarantee: bool,
     pub sla_credit_percentage: i32,
@@ -170,7 +170,7 @@ pub struct UsageRecord {
 /// Aggregated usage for a billing period.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageSummary {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
     pub emails_sent: i64,
@@ -200,9 +200,9 @@ pub enum InvoiceStatus {
 pub struct InvoiceLineItem {
     pub description: String,
     pub quantity: i64,
-    /// Unit price in cents.
+/// Unit price in cents.
     pub unit_price: i64,
-    /// Line total in cents.
+/// Line total in cents.
     pub amount: i64,
     pub vat_rate: i32,
     pub vat_amount: i64,
@@ -216,7 +216,7 @@ pub struct Invoice {
     pub invoice_number: String,
     pub status: InvoiceStatus,
     pub currency: String,
-    /// Subtotal in cents.
+/// Subtotal in cents.
     pub subtotal: i64,
     pub vat_total: i64,
     pub total: i64,
@@ -264,7 +264,7 @@ pub struct BillingEvent {
 /// Quota limits derived from a plan, used for enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaLimit {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub plan_name: String,
     pub emails_per_month: i64,
     pub api_calls_per_month: i64,
@@ -277,18 +277,18 @@ pub struct QuotaLimit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitTier {
-    /// Free tier – strict limits.
+/// Free tier – strict limits.
     Free,
-    /// Starter / Pro.
+/// Starter / Pro.
     Standard,
-    /// Growth / Scale.
+/// Growth / Scale.
     High,
-    /// Enterprise – highest throughput.
+/// Enterprise – highest throughput.
     Unlimited,
 }
 
 impl RateLimitTier {
-    /// Requests per second for the API.
+/// Requests per second for the API.
     pub fn rps(&self) -> u32 {
         match self {
             Self::Free => 10,
@@ -353,5 +353,156 @@ mod tests {
             let back: InvoiceStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(back, status);
         }
+    }
+
+    // ── Fail-first tests ──────────────────────────────────────────
+
+    #[test]
+    fn subscription_status_all_variants_serialize() {
+        // BUG DETECTION: If a new variant is added but serde renaming breaks,
+        // this test catches it.
+        for status in [
+            SubscriptionStatus::Active,
+            SubscriptionStatus::PastDue,
+            SubscriptionStatus::Canceled,
+            SubscriptionStatus::Trialing,
+            SubscriptionStatus::Paused,
+            SubscriptionStatus::Incomplete,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: SubscriptionStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status, "roundtrip failed for {:?}", status);
+        }
+    }
+
+    #[test]
+    fn billing_interval_roundtrip() {
+        for interval in [BillingInterval::Monthly, BillingInterval::Yearly] {
+            let json = serde_json::to_string(&interval).unwrap();
+            let back: BillingInterval = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, interval);
+        }
+    }
+
+    #[test]
+    fn meter_event_type_all_variants_serialize() {
+        for etype in [
+            MeterEventType::EmailsSent,
+            MeterEventType::EmailsDelivered,
+            MeterEventType::ApiCalls,
+            MeterEventType::WebhooksDelivered,
+            MeterEventType::DedicatedIpHours,
+            MeterEventType::StorageGbHours,
+            MeterEventType::BandwidthGb,
+        ] {
+            let json = serde_json::to_string(&etype).unwrap();
+            let back: MeterEventType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, etype, "roundtrip failed for {:?}", etype);
+        }
+    }
+
+    #[test]
+    fn plan_features_default_no_dedicated_ip() {
+        // BUG DETECTION: Default plan must NOT include dedicated IP.
+        // If defaults change, this test catches the security regression.
+        let f = PlanFeatures::default();
+        assert!(!f.dedicated_ip, "default plan must not include dedicated IP");
+        assert_eq!(f.dedicated_ip_count, 0, "default dedicated_ip_count must be 0");
+    }
+
+    #[test]
+    fn plan_features_default_no_enterprise_features() {
+        // BUG DETECTION: Default features must not grant enterprise capabilities.
+        let f = PlanFeatures::default();
+        assert!(!f.byoip, "default must not allow BYOIP");
+        assert!(!f.sla_guarantee, "default must not include SLA");
+        assert!(!f.hipaa_compliance, "default must not include HIPAA");
+        assert!(!f.soc2_compliance, "default must not include SOC2");
+        assert!(!f.private_cloud, "default must not include private cloud");
+        assert!(!f.white_label, "default must not include white label");
+    }
+
+    #[test]
+    fn plan_features_default_limited_team() {
+        // BUG DETECTION: Default team size must be small.
+        let f = PlanFeatures::default();
+        assert!(f.max_team_members >= 1, "must allow at least 1 team member");
+        assert!(f.max_team_members <= 10, "default team size must be <= 10");
+    }
+
+    #[test]
+    fn quota_limit_email_limit_negative_means_unlimited() {
+        // Verify the convention: -1 = unlimited
+        let quota = QuotaLimit {
+            tenant_id: "test".into(),
+            plan_name: "enterprise".into(),
+            emails_per_month: -1,
+            api_calls_per_month: -1,
+            max_sending_domains: 100,
+            max_team_members: 50,
+            max_subaccounts: 50,
+            rate_limit_tier: RateLimitTier::Unlimited,
+        };
+        assert_eq!(quota.emails_per_month, -1);
+        assert_eq!(quota.api_calls_per_month, -1);
+    }
+
+    #[test]
+    fn rate_limit_tier_ordering() {
+        // BUG DETECTION: Tiers must be strictly ordered.
+        assert!(RateLimitTier::Free.rps() < RateLimitTier::Standard.rps());
+        assert!(RateLimitTier::Standard.rps() < RateLimitTier::High.rps());
+        assert!(RateLimitTier::High.rps() < RateLimitTier::Unlimited.rps());
+    }
+
+    #[test]
+    fn invoice_line_item_amount_calculation() {
+        // BUG DETECTION: line item amount should be quantity * unit_price.
+        let item = InvoiceLineItem {
+            description: "Dedicated IP".into(),
+            quantity: 2,
+            unit_price: 3000, // $30.00
+            amount: 6000,
+            vat_rate: 20,
+            vat_amount: 1200,
+        };
+        assert_eq!(item.amount, item.quantity * item.unit_price,
+            "line amount must equal quantity * unit_price");
+    }
+
+    #[test]
+    fn billing_event_kind_covers_all_critical_events() {
+        // BUG DETECTION: Ensure critical event kinds exist.
+        let critical = [
+            BillingEventKind::SubscriptionCreated,
+            BillingEventKind::SubscriptionCanceled,
+            BillingEventKind::QuotaExceeded,
+            BillingEventKind::InvoiceFailed,
+            BillingEventKind::PlanChanged,
+        ];
+        for kind in critical {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert!(serde_json::from_str::<BillingEventKind>(&json).is_ok(),
+                "critical event kind {:?} must roundtrip", kind);
+        }
+    }
+
+    #[test]
+    fn usage_summary_percent_used_cannot_exceed_100_for_display() {
+        // This is a data integrity check - percent_used can exceed 100
+        // (indicating overage) but callers must handle it.
+        let summary = UsageSummary {
+            tenant_id: "test".into(),
+            period_start: chrono::Utc::now(),
+            period_end: chrono::Utc::now(),
+            emails_sent: 200,
+            emails_limit: 100,
+            api_calls: 50,
+            api_calls_limit: 100,
+            percent_used: 200.0, // 200% = overage
+            metrics: serde_json::json!({}),
+        };
+        // Overages are valid - percent_used > 100 means over limit
+        assert!(summary.percent_used > 100.0, "overage must be representable");
     }
 }

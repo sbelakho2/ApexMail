@@ -26,8 +26,7 @@ pub struct AuditLogger {
     #[allow(unused)]
     config: AuditConfig,
     signing_key: Vec<u8>,
-    /// In-memory cache of last hash per chain key. Primary source:
-    /// Redis `audit:lasthash:{key}`, falling back to DB.
+/// In-memory cache of last hash per chain key. Primary source:/// Redis `audit:lasthash:{key}`, falling back to DB.
     last_hashes: RwLock<HashMap<String, String>>,
 }
 
@@ -42,7 +41,7 @@ impl AuditLogger {
         }
     }
 
-    /// Initialize by loading last hashes from DB.
+/// Initialize by loading last hashes from DB.
     pub async fn initialize(&self) -> Result<(), String> {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_timestamp ON audit_logs (tenant_id, timestamp DESC)",
@@ -72,9 +71,9 @@ impl AuditLogger {
         Ok(())
     }
 
-    // ── Core logging ────────────────────────────────────────
+// ── Core logging ────────────────────────────────────────
 
-    /// Log a single audit event. Returns the persisted entry.
+/// Log a single audit event. Returns the persisted entry.
     pub async fn log(
         &self,
         action: AuditAction,
@@ -137,7 +136,7 @@ impl AuditLogger {
 
         self.persist_entry(&entry).await?;
 
-        // Update last hash cache
+// Update last hash cache
         {
             let mut map = self.last_hashes.write().await;
             map.insert(chain_key, hash);
@@ -146,7 +145,7 @@ impl AuditLogger {
         Ok(entry)
     }
 
-    // ── Convenience wrappers ────────────────────────────────
+// ── Convenience wrappers ────────────────────────────────
 
     pub async fn log_create(
         &self, resource: AuditResource, resource_id: &str,
@@ -199,7 +198,7 @@ impl AuditLogger {
         self.log(AuditAction::Export, resource, Some(resource_id), details, AuditOutcome::Success, None, ctx).await
     }
 
-    // ── Query ───────────────────────────────────────────────
+// ── Query ───────────────────────────────────────────────
 
     pub async fn query(
         &self,
@@ -278,7 +277,7 @@ impl AuditLogger {
         Ok(count)
     }
 
-    /// Get a single entry by ID.
+/// Get a single entry by ID.
     pub async fn get_entry(
         &self,
         id: &str,
@@ -300,9 +299,9 @@ impl AuditLogger {
         }
     }
 
-    // ── Chain Verification ──────────────────────────────────
+// ── Chain Verification ──────────────────────────────────
 
-    /// Verify the integrity of the hash chain for a given scope.
+/// Verify the integrity of the hash chain for a given scope.
     pub fn verify_chain_entries(
         &self,
         entries: &[AuditLogEntry],
@@ -317,7 +316,7 @@ impl AuditLogger {
         }
 
         for (i, entry) in entries.iter().enumerate() {
-            // Recompute hash
+// Recompute hash
             let expected_hash = self.compute_hash(
                 &entry.id,
                 &entry.tenant_id,
@@ -344,7 +343,7 @@ impl AuditLogger {
                 };
             }
 
-            // Verify HMAC signature
+// Verify HMAC signature
             let expected_sig = match self.compute_signature(&entry.hash) {
                 Ok(v) => v,
                 Err(e) => {
@@ -365,7 +364,7 @@ impl AuditLogger {
                 };
             }
 
-            // Verify chain linkage
+// Verify chain linkage
             if i > 0 {
                 let prev = &entries[i - 1];
                 if entry.previous_hash.as_deref() != Some(&prev.hash) {
@@ -390,7 +389,7 @@ impl AuditLogger {
         }
     }
 
-    /// Verify chain from DB for optional tenant scope.
+/// Verify chain from DB for optional tenant scope.
     pub async fn verify_chain(
         &self,
         tenant_id: Option<&str>,
@@ -422,9 +421,9 @@ impl AuditLogger {
         Ok(self.verify_chain_entries(&entries))
     }
 
-    // ── Export ───────────────────────────────────────────────
+// ── Export ───────────────────────────────────────────────
 
-    /// Export audit logs in the specified format.
+/// Export audit logs in the specified format.
     pub async fn export(
         &self,
         query: &AuditLogQuery,
@@ -473,7 +472,7 @@ impl AuditLogger {
                 })
             }
             "pdf" => {
-                // Minimal PDF 1.4 generation (Courier font, text-only)
+// Minimal PDF 1.4 generation (Courier font, text-only)
                 let data = generate_simple_pdf(&entries);
                 Ok(ExportResult {
                     data,
@@ -488,7 +487,7 @@ impl AuditLogger {
         }
     }
 
-    // ── Stats ───────────────────────────────────────────────
+// ── Stats ───────────────────────────────────────────────
 
     pub async fn get_stats(
         &self,
@@ -538,14 +537,14 @@ impl AuditLogger {
         }))
     }
 
-    // ── Archival ────────────────────────────────────────────
+// ── Archival ────────────────────────────────────────────
 
-    /// Archive audit logs older than the specified date.
+/// Archive audit logs older than the specified date.
     pub async fn archive(
         &self,
         older_than: DateTime<Utc>,
     ) -> Result<i64, String> {
-        // Copy to archive
+// Copy to archive
         let result = sqlx::query(
             "INSERT INTO audit_logs_archive
              SELECT * FROM audit_logs WHERE timestamp < $1
@@ -558,7 +557,7 @@ impl AuditLogger {
 
         let archived = result.rows_affected() as i64;
 
-        // Delete from main table
+// Delete from main table
         sqlx::query("DELETE FROM audit_logs WHERE timestamp < $1")
             .bind(older_than)
             .execute(&self.db)
@@ -569,7 +568,7 @@ impl AuditLogger {
         Ok(archived)
     }
 
-    // ── Webhook Registration ────────────────────────────────
+// ── Webhook Registration ────────────────────────────────
 
     pub async fn register_webhook(
         &self,
@@ -597,7 +596,7 @@ impl AuditLogger {
         Ok(id)
     }
 
-    // ── Hash & Signature Computation ────────────────────────
+// ── Hash & Signature Computation ────────────────────────
 
     fn compute_hash(
         &self,
@@ -616,7 +615,7 @@ impl AuditLogger {
         timestamp: &DateTime<Utc>,
         previous_hash: &Option<String>,
     ) -> String {
-        // Deterministic JSON object with sorted keys (manual assembly)
+// Deterministic JSON object with sorted keys (manual assembly)
         let obj = serde_json::json!({
             "action": action.to_string(),
             "details": details,
@@ -706,7 +705,7 @@ fn csv_escape(value: &str) -> String {
 // ─── Minimal PDF generator ─────────────────────────────────────
 
 fn generate_simple_pdf(entries: &[AuditLogEntry]) -> String {
-    // Generate a minimal text-based PDF 1.4
+// Generate a minimal text-based PDF 1.4
     let mut lines = Vec::with_capacity(entries.len().saturating_add(4));
     lines.push("Audit Log Export".to_string());
     lines.push(format!("Generated: {}", Utc::now().to_rfc3339()));
@@ -725,7 +724,7 @@ fn generate_simple_pdf(entries: &[AuditLogEntry]) -> String {
         ));
     }
 
-    // Minimal PDF structure
+// Minimal PDF structure
     let content = lines.join("\n");
     let stream = format!("BT /F1 10 Tf 50 750 Td ({content}) Tj ET");
     let stream_len = stream.len();
@@ -967,7 +966,7 @@ mod tests {
         let ts2 = ts1 + Duration::seconds(1);
         let details = serde_json::json!({});
 
-        // Entry 1 (no previous)
+// Entry 1 (no previous)
         let hash1 = logger.compute_hash(
             "e1", &Some("t1".into()), &None, &None,
             &AuditAction::Create, &AuditResource::User, &None,
@@ -986,7 +985,7 @@ mod tests {
             previous_hash: None, signature: sig1,
         };
 
-        // Entry 2 (previous = hash1)
+// Entry 2 (previous = hash1)
         let hash2 = logger.compute_hash(
             "e2", &Some("t1".into()), &None, &None,
             &AuditAction::Update, &AuditResource::User, &None,
@@ -1067,7 +1066,7 @@ mod tests {
             previous_hash: None, signature: sig1,
         };
 
-        // Entry 2 with WRONG previous hash
+// Entry 2 with WRONG previous hash
         let wrong_prev = Some("wrong_previous_hash".to_string());
         let hash2 = logger.compute_hash(
             "e2", &Some("t1".into()), &None, &None,
@@ -1107,7 +1106,7 @@ mod tests {
             previous_hash: None, signature: "def".into(),
         };
 
-        // Test CSV generation manually
+// Test CSV generation manually
         let csv = format!(
             "{},{},{},{},{},{},{},{},{}",
             entry.id,

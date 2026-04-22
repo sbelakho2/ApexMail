@@ -791,13 +791,13 @@ pub struct SupportMetrics {
     pub tickets_by_category: serde_json::Value,
 }
 
-/// SLA deadlines by priority: (first_response_minutes, resolution_minutes)
+/// SLA deadlines by priority:(first_response_minutes, resolution_minutes)
 pub fn sla_deadlines(priority: &str) -> (i64, i64) {
     match priority {
-        "critical" => (15, 240),     // 15 min / 4 hours
-        "high" => (60, 480),         // 1 hr / 8 hours
-        "medium" => (240, 1440),     // 4 hr / 24 hours
-        "low" => (480, 4320),        // 8 hr / 72 hours
+        "critical" => (15, 240), // 15 min / 4 hours
+        "high" => (60, 480), // 1 hr / 8 hours
+        "medium" => (240, 1440), // 4 hr / 24 hours
+        "low" => (480, 4320), // 8 hr / 72 hours
         _ => (240, 1440),
     }
 }

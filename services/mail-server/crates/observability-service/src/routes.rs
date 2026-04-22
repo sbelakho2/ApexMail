@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{DefaultBodyLimit, Query, State},
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::{header::AUTHORIZATION, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::get,
@@ -171,8 +171,8 @@ async fn alerts_list(State(state): State<AppState>) -> Json<Vec<Alert>> {
 async fn slos_list(
     State(state): State<AppState>,
 ) -> Json<Vec<crate::slo::SloComplianceResult>> {
-    // Return targets as-is (compliance requires request counts, so here we
-    // just list defined SLOs as zero-traffic compliance snapshots).
+// Return targets as-is (compliance requires request counts, so here we
+// just list defined SLOs as zero-traffic compliance snapshots).
     let targets = state.slos.list_slos();
     let results: Vec<_> = targets
         .iter()
@@ -225,13 +225,15 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
 
     fn test_state() -> AppState {
-        AppState::new(
+        let mut state = AppState::new(
             Arc::new(MetricsCollector::new(vec![0.1, 0.5, 1.0])),
             Arc::new(TraceCollector::new()),
             Arc::new(LogAggregator::new()),
             Arc::new(AlertManager::new()),
             Arc::new(SloMonitor::new()),
-        )
+        );
+        state.service_token = "test-token".to_string();
+        state
     }
 
     #[tokio::test]
@@ -261,6 +263,7 @@ mod tests {
         let app = router(state);
         let req = Request::builder()
             .uri("/metrics/summary")
+            .header("x-api-key", "test-token")
             .body(Body::empty())
             .unwrap();
 
@@ -283,6 +286,7 @@ mod tests {
         let app = router(state);
         let req = Request::builder()
             .uri("/slos")
+            .header("x-api-key", "test-token")
             .body(Body::empty())
             .unwrap();
 

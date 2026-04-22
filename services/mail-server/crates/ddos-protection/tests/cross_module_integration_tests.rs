@@ -29,7 +29,7 @@ fn make_ctx(ip: &str, path: &str, method: &str) -> RequestContext {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 1: Full Pipeline — allowed request flows through all layers
+// SCENARIO 1:Full Pipeline — allowed request flows through all layers
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -54,7 +54,7 @@ async fn test_full_pipeline_allows_normal_traffic() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 2: Blocklist → immediate block, bypasses all other layers
+// SCENARIO 2:Blocklist → immediate block, bypasses all other layers
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -65,7 +65,7 @@ async fn test_blocked_ip_bypasses_all_layers() {
 
     protector.block_ip(ip, Duration::from_secs(600), "integration_test".to_string());
 
-    // Even with valid fingerprint and low cost, should be blocked
+// Even with valid fingerprint and low cost, should be blocked
     let ctx = RequestContextBuilder::new(ip, "/v1/health", "GET")
         .tls_fingerprint("t13d1517h2_8daaf6152771_e5627efa2ab1")
         .user_agent("Mozilla/5.0 Chrome/120")
@@ -77,7 +77,7 @@ async fn test_blocked_ip_bypasses_all_layers() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 3: Suspicious fingerprint + repeated requests → reputation decay
+// SCENARIO 3:Suspicious fingerprint + repeated requests → reputation decay
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -90,7 +90,7 @@ async fn test_suspicious_fingerprint_degrades_reputation() {
     let ip: IpAddr = "203.0.113.42".parse().unwrap();
     let trusted_ip: IpAddr = "203.0.113.43".parse().unwrap();
 
-    // Baseline trusted traffic should stay allowed.
+// Baseline trusted traffic should stay allowed.
     let trusted_warmup = RequestContextBuilder::new(trusted_ip, "/v1/health", "GET")
         .tls_fingerprint("t13d1517h2_8daaf6152771_e5627efa2ab1")
         .build();
@@ -101,8 +101,8 @@ async fn test_suspicious_fingerprint_degrades_reputation() {
         warmup_decision
     );
 
-    // Mix suspicious signals: malformed JA4 + very short token.
-    // This should degrade reputation on every request for this IP.
+// Mix suspicious signals:malformed JA4 + very short token.
+// This should degrade reputation on every request for this IP.
     let suspicious_fingerprints = ["not-a-ja4", "ab", "cd", "ef", "gh"];
     let mut saw_block = false;
     for (idx, fp) in suspicious_fingerprints.into_iter().enumerate() {
@@ -130,7 +130,7 @@ async fn test_suspicious_fingerprint_degrades_reputation() {
     }
     assert!(saw_block, "Expected suspicious sequence to eventually block");
 
-    // Once blocked, subsequent requests from this IP remain blocked.
+// Once blocked, subsequent requests from this IP remain blocked.
     let ctx = RequestContextBuilder::new(ip, "/v1/health", "GET")
         .tls_fingerprint("valid_enough_fingerprint_here")
         .build();
@@ -141,7 +141,7 @@ async fn test_suspicious_fingerprint_degrades_reputation() {
         decision
     );
 
-    // Ensure unrelated trusted IP does not inherit penalties.
+// Ensure unrelated trusted IP does not inherit penalties.
     let trusted_ctx = RequestContextBuilder::new(trusted_ip, "/v1/health", "GET")
         .tls_fingerprint("t13d1517h2_8daaf6152771_e5627efa2ab1")
         .build();
@@ -192,7 +192,7 @@ async fn test_suspicious_fingerprint_penalty_is_ip_scoped() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 4: Middleware integration — evaluates and translates decisions
+// SCENARIO 4:Middleware integration — evaluates and translates decisions
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -229,7 +229,7 @@ async fn test_middleware_allow_maps_correctly() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 5: SMTP + Connection Tracker — concurrent limit enforcement
+// SCENARIO 5:SMTP + Connection Tracker — concurrent limit enforcement
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -241,15 +241,15 @@ fn test_smtp_connection_exhaustion_and_recovery() {
     let tracker = SmtpConnectionTracker::new(config.clone());
     let ip: IpAddr = "10.0.0.1".parse().unwrap();
 
-    // Exhaust connections
+// Exhaust connections
     tracker.register_connection(ip).unwrap();
     tracker.register_connection(ip).unwrap();
     tracker.register_connection(ip).unwrap();
 
-    // 4th should fail
+// 4th should fail
     assert!(tracker.register_connection(ip).is_err());
 
-    // Simulate one connection ending a full SMTP session first
+// Simulate one connection ending a full SMTP session first
     let mut conn = SmtpConnectionProtection::new(ip, 50, config);
     conn.process_command("EHLO test.com").unwrap();
     conn.process_command("MAIL FROM:<a@b.com>").unwrap();
@@ -257,17 +257,17 @@ fn test_smtp_connection_exhaustion_and_recovery() {
     conn.process_command("QUIT").unwrap();
     assert_eq!(conn.state(), SmtpState::Quit);
 
-    // Unregister it
+// Unregister it
     tracker.unregister_connection(&ip);
     assert_eq!(tracker.active_count(&ip), 2);
 
-    // Now a new connection should be allowed
+// Now a new connection should be allowed
     tracker.register_connection(ip).unwrap();
     assert_eq!(tracker.active_count(&ip), 3);
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 6: SMTP tarpit integrates with reputation
+// SCENARIO 6:SMTP tarpit integrates with reputation
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -279,30 +279,30 @@ fn test_smtp_tarpit_based_on_reputation_and_invalids() {
         ..SmtpProtectionConfig::default()
     };
 
-    // Low reputation → tarpit from the start
+// Low reputation → tarpit from the start
     let low_rep = SmtpConnectionProtection::new("10.0.0.1".parse().unwrap(), 10, config.clone());
     assert_eq!(low_rep.should_tarpit(), Some(Duration::from_secs(2)));
 
-    // Good reputation, no tarpit initially
+// Good reputation, no tarpit initially
     let mut good_rep = SmtpConnectionProtection::new("10.0.0.2".parse().unwrap(), 80, config);
     assert!(good_rep.should_tarpit().is_none());
 
-    // Send invalid commands past threshold
+// Send invalid commands past threshold
     good_rep.process_command("XYZZY1").unwrap(); // invalid #1
     good_rep.process_command("XYZZY2").unwrap(); // invalid #2
     good_rep.process_command("XYZZY3").unwrap(); // invalid #3 → over max_invalid=2
 
-    // Now tarpit kicks in: (3 - 2) * 5s = 5s
+// Now tarpit kicks in:(3 - 2) * 5s = 5s
     assert_eq!(good_rep.should_tarpit(), Some(Duration::from_secs(5)));
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 7: Bot detection + adaptive limiter — attack coordination
+// SCENARIO 7:Bot detection + adaptive limiter — attack coordination
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
 fn test_bot_detection_feeds_adaptive_limiter() {
-    // Simulate: bot detected → observe high RPS → adaptive limiter tightens
+// Simulate:bot detected → observe high RPS → adaptive limiter tightens
 
     let adaptive_config = AdaptiveConfig {
         consecutive_alert_trigger: 2,
@@ -311,7 +311,7 @@ fn test_bot_detection_feeds_adaptive_limiter() {
     };
     let limiter = AdaptiveRateLimiter::new(adaptive_config);
 
-    // Build baseline
+// Build baseline
     for i in 0..20 {
         limiter.update(TrafficObservation {
             timestamp: Instant::now(),
@@ -324,7 +324,7 @@ fn test_bot_detection_feeds_adaptive_limiter() {
 
     let pre_attack_threshold = limiter.current_threshold();
 
-    // Simultaneously, bot detection flags automated traffic
+// Simultaneously, bot detection flags automated traffic
     let mut behavior = SessionBehavior::new(100);
     let ep = hash_ep("/api/scrape");
     for _ in 0..30 {
@@ -336,7 +336,7 @@ fn test_bot_detection_feeds_adaptive_limiter() {
         "Should have enough data for assessment"
     );
 
-    // Bot is generating a traffic spike
+// Bot is generating a traffic spike
     limiter.update(TrafficObservation {
         timestamp: Instant::now(),
         requests_per_second: 5000.0,
@@ -362,7 +362,7 @@ fn test_bot_detection_feeds_adaptive_limiter() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 8: IP extraction → DDoS evaluation pipeline
+// SCENARIO 8:IP extraction → DDoS evaluation pipeline
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -370,7 +370,7 @@ async fn test_ip_extraction_feeds_into_ddos_pipeline() {
     let config = ProtectorConfig::default();
     let protector = DdosProtector::new(config).await.unwrap();
 
-    // Simulate proxy setup: real IP in XFF
+// Simulate proxy setup:real IP in XFF
     let real_ip = extract_client_ip(
         None,
         Some("203.0.113.50, 10.0.0.1"),
@@ -380,10 +380,10 @@ async fn test_ip_extraction_feeds_into_ddos_pipeline() {
 
     assert_eq!(real_ip, "203.0.113.50".parse::<IpAddr>().unwrap());
 
-    // Block the real IP
+// Block the real IP
     protector.block_ip(real_ip, Duration::from_secs(300), "test".to_string());
 
-    // Build context with the extracted IP
+// Build context with the extracted IP
     let ctx = RequestContextBuilder::new(real_ip, "/api/data", "GET").build();
     let decision = protector.evaluate(&ctx).await;
 
@@ -391,7 +391,7 @@ async fn test_ip_extraction_feeds_into_ddos_pipeline() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 9: Reputation scoring integration
+// SCENARIO 9:Reputation scoring integration
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -399,19 +399,19 @@ fn test_reputation_decay_and_recovery() {
     let mut rep = ReputationScore::default();
     assert_eq!(rep.score, 50);
 
-    // Simulates failed challenges (from challenge system)
+// Simulates failed challenges (from challenge system)
     rep.record_challenge_failed(); // -10
     rep.record_challenge_failed(); // -10
     assert_eq!(rep.score, 30);
     assert_eq!(rep.level(), ddos_protection::reputation::ReputationLevel::Suspicious);
 
-    // Decay toward neutral
+// Decay toward neutral
     for _ in 0..10 {
         rep.decay_toward_neutral(2);
     }
     assert_eq!(rep.score, 50); // Should cap at 50
 
-    // Good behavior: pass challenges
+// Good behavior:pass challenges
     rep.record_challenge_passed(); // +5
     rep.record_challenge_passed(); // +5
     assert_eq!(rep.score, 60);
@@ -419,7 +419,7 @@ fn test_reputation_decay_and_recovery() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 10: Cost-based limiter interacts with DDoS system
+// SCENARIO 10:Cost-based limiter interacts with DDoS system
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -433,7 +433,7 @@ async fn test_cost_exhaustion_produces_rate_limit() {
 
     let ip: IpAddr = "192.168.1.100".parse().unwrap();
 
-    // Hit expensive endpoint repeatedly until budget exhausted
+// Hit expensive endpoint repeatedly until budget exhausted
     let mut limited = false;
     for _ in 0..20 {
         let ctx = RequestContextBuilder::new(ip, "/v1/messages/send", "POST")
@@ -450,7 +450,7 @@ async fn test_cost_exhaustion_produces_rate_limit() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 11: Block expiration works end-to-end
+// SCENARIO 11:Block expiration works end-to-end
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -460,26 +460,26 @@ async fn test_block_expiration() {
 
     let ip: IpAddr = "10.0.0.99".parse().unwrap();
 
-    // Block for a very short time
+// Block for a very short time
     protector.block_ip(ip, Duration::from_millis(50), "short_block".to_string());
 
-    // Initially blocked
+// Initially blocked
     assert!(protector.is_blocked(&ip));
 
-    // Wait for expiration
+// Wait for expiration
     std::thread::sleep(Duration::from_millis(100));
 
-    // Should no longer be blocked
+// Should no longer be blocked
     assert!(!protector.is_blocked(&ip));
 
-    // Request should now be allowed
+// Request should now be allowed
     let ctx = RequestContextBuilder::new(ip, "/health", "GET").build();
     let decision = protector.evaluate(&ctx).await;
     assert!(decision.is_allowed());
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 12: Multiple IPs interacting — isolation check
+// SCENARIO 12:Multiple IPs interacting — isolation check
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -490,22 +490,22 @@ async fn test_ip_isolation() {
     let good_ip: IpAddr = "10.0.0.1".parse().unwrap();
     let bad_ip: IpAddr = "10.0.0.2".parse().unwrap();
 
-    // Block the bad IP
+// Block the bad IP
     protector.block_ip(bad_ip, Duration::from_secs(600), "bad_actor".to_string());
 
-    // Good IP should not be affected
+// Good IP should not be affected
     let ctx = RequestContextBuilder::new(good_ip, "/v1/messages", "GET").build();
     let decision = protector.evaluate(&ctx).await;
     assert!(decision.is_allowed(), "Good IP should be unaffected by bad IP block");
 
-    // Bad IP should still be blocked
+// Bad IP should still be blocked
     let ctx = RequestContextBuilder::new(bad_ip, "/v1/messages", "GET").build();
     let decision = protector.evaluate(&ctx).await;
     assert!(matches!(decision, ProtectionDecision::Block));
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 13: SMTP full session under multiple IPs
+// SCENARIO 13:SMTP full session under multiple IPs
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -519,28 +519,28 @@ fn test_smtp_tracker_multiple_ips_isolation() {
     let ip_a: IpAddr = "10.0.0.1".parse().unwrap();
     let ip_b: IpAddr = "10.0.0.2".parse().unwrap();
 
-    // Fill up IP A
+// Fill up IP A
     tracker.register_connection(ip_a).unwrap();
     tracker.register_connection(ip_a).unwrap();
     assert!(tracker.register_connection(ip_a).is_err());
 
-    // IP B should still have capacity
+// IP B should still have capacity
     tracker.register_connection(ip_b).unwrap();
     tracker.register_connection(ip_b).unwrap();
     assert!(tracker.register_connection(ip_b).is_err());
 
-    // Cleanup IP A
+// Cleanup IP A
     tracker.unregister_connection(&ip_a);
     tracker.unregister_connection(&ip_a);
 
-    // IP A should be back to 0
+// IP A should be back to 0
     assert_eq!(tracker.active_count(&ip_a), 0);
-    // IP B still at limit
+// IP B still at limit
     assert_eq!(tracker.active_count(&ip_b), 2);
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 14: Adaptive limiter recovery feeds back to normal
+// SCENARIO 14:Adaptive limiter recovery feeds back to normal
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -556,7 +556,7 @@ fn test_adaptive_attack_then_recovery_cycle() {
     };
     let limiter = AdaptiveRateLimiter::new(config);
 
-    // Phase 1: Build stable baseline at 500 rps (higher to avoid cold-start threshold conflicts)
+// Phase 1:Build stable baseline at 500 rps (higher to avoid cold-start threshold conflicts)
     for i in 0..25 {
         limiter.update(TrafficObservation {
             timestamp: Instant::now(),
@@ -569,7 +569,7 @@ fn test_adaptive_attack_then_recovery_cycle() {
     let baseline_threshold = limiter.current_threshold();
     assert!(!limiter.is_under_attack());
 
-    // Phase 2: Attack spike
+// Phase 2:Attack spike
     limiter.update(TrafficObservation {
         timestamp: Instant::now(),
         requests_per_second: 8000.0,
@@ -590,7 +590,7 @@ fn test_adaptive_attack_then_recovery_cycle() {
         "Attack threshold {} should be < baseline threshold {}", 
         attack_threshold, baseline_threshold);
 
-    // Phase 3: Recovery after cooldown
+// Phase 3:Recovery after cooldown
     std::thread::sleep(Duration::from_millis(20));
 
     for _ in 0..10 {
@@ -613,7 +613,7 @@ fn test_adaptive_attack_then_recovery_cycle() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCENARIO 15: Builder pattern completeness
+// SCENARIO 15:Builder pattern completeness
 // ═══════════════════════════════════════════════════════════════
 
 #[test]

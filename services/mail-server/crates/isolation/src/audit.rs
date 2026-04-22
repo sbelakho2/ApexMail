@@ -34,7 +34,7 @@ impl AuditService {
         }
     }
 
-    /// Log an audit event. Critical events are flushed immediately.
+/// Log an audit event. Critical events are flushed immediately.
     pub async fn log(&self, event: AuditEvent) -> anyhow::Result<AuditEvent> {
         let is_critical = event.severity == AuditSeverity::Critical;
 
@@ -52,7 +52,7 @@ impl AuditService {
         Ok(event)
     }
 
-    /// Create a new audit event with auto-generated ID and timestamp.
+/// Create a new audit event with auto-generated ID and timestamp.
     pub fn create_event(
         &self,
         organization_id: &str,
@@ -85,7 +85,7 @@ impl AuditService {
         }
     }
 
-    /// Verify the hash chain for an organization's audit logs.
+/// Verify the hash chain for an organization's audit logs.
     pub async fn verify_hash_chain(
         &self,
         organization_id: &str,
@@ -172,7 +172,7 @@ impl AuditService {
         })
     }
 
-    /// Query audit events with pagination and filtering.
+/// Query audit events with pagination and filtering.
     pub async fn query(&self, q: &AuditQuery) -> anyhow::Result<(Vec<AuditEvent>, i64)> {
         let limit = q.limit.unwrap_or(50).min(1000);
         let offset = q.offset.unwrap_or(0);
@@ -225,7 +225,7 @@ impl AuditService {
             where_clause, limit_param, offset_param
         );
 
-        // Build count query
+// Build count query
         let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql).bind(&q.organization_id);
         let mut select_q = sqlx::query_as::<_, AuditRow>(&select_sql).bind(&q.organization_id);
 
@@ -263,7 +263,7 @@ impl AuditService {
         Ok((events, total))
     }
 
-    /// Get audit statistics for an organization.
+/// Get audit statistics for an organization.
     pub async fn get_stats(
         &self,
         organization_id: &str,
@@ -323,7 +323,7 @@ impl AuditService {
         })
     }
 
-    /// Export audit logs as JSON or CSV.
+/// Export audit logs as JSON or CSV.
     pub async fn export(
         &self,
         query: &AuditQuery,
@@ -337,7 +337,7 @@ impl AuditService {
         }
     }
 
-    /// Delete audit logs older than retention period.
+/// Delete audit logs older than retention period.
     pub async fn cleanup(&self) -> anyhow::Result<i64> {
         let cutoff = Utc::now() - Duration::days(self.config.audit_retention_days);
         let result = sqlx::query(
@@ -354,7 +354,7 @@ impl AuditService {
         Ok(deleted)
     }
 
-    /// Flush remaining buffer.
+/// Flush remaining buffer.
     pub async fn flush(&self) -> anyhow::Result<()> {
         let events = {
             let mut buf = self.buffer.write().await;
@@ -366,7 +366,7 @@ impl AuditService {
         Ok(())
     }
 
-    // ── Private ────────────────────────────────────────────
+// ── Private ────────────────────────────────────────────
 
     async fn flush_events(&self, events: Vec<AuditEvent>) -> anyhow::Result<()> {
         if events.is_empty() {
@@ -454,7 +454,7 @@ impl AuditService {
             }
             Err(e) => {
                 tracing::error!(err = %e, count = events.len(), "Failed to flush audit events");
-                // Requeue events
+// Requeue events
                 let mut buf = self.buffer.write().await;
                 let mut requeue = events;
                 requeue.extend(buf.drain(..));
@@ -595,7 +595,7 @@ mod tests {
         let h2_again = compute_event_hash("e2", "AUTH_LOGOUT", &serde_json::json!({}), &h1);
         assert_eq!(h2, h2_again);
 
-        // Changing previous hash changes result
+// Changing previous hash changes result
         let h2_diff = compute_event_hash("e2", "AUTH_LOGOUT", &serde_json::json!({}), "tampered");
         assert_ne!(h2, h2_diff);
     }
@@ -696,7 +696,7 @@ mod tests {
             created_at: Utc::now(),
         };
         let event = row.into_event();
-        // Defaults applied
+// Defaults applied
         assert_eq!(event.event_type, AuditEventType::DataRead);
         assert_eq!(event.severity, AuditSeverity::Info);
     }

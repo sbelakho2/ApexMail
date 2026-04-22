@@ -3,7 +3,6 @@
 use crate::types::{ChunkConfig, TextChunk};
 
 /// Split text into overlapping chunks using recursive separator strategy.
-///
 /// Tries separators in order (paragraph → line → sentence → word),
 /// falling back to character-level splitting if needed.
 pub fn chunk_text(text: &str, config: &ChunkConfig) -> Vec<TextChunk> {
@@ -22,7 +21,7 @@ pub fn chunk_text(text: &str, config: &ChunkConfig) -> Vec<TextChunk> {
 
     let chunks = recursive_split(text, &config.separators, config.chunk_size);
 
-    // Apply overlap
+// Apply overlap
     merge_with_overlap(&chunks, config.chunk_overlap, config.chunk_size)
 }
 
@@ -32,7 +31,7 @@ fn recursive_split(text: &str, separators: &[String], max_size: usize) -> Vec<St
     }
 
     if separators.is_empty() {
-        // Fall back to character-level splitting
+// Fall back to character-level splitting
         return text
             .chars()
             .collect::<Vec<_>>()
@@ -47,11 +46,11 @@ fn recursive_split(text: &str, separators: &[String], max_size: usize) -> Vec<St
     let parts: Vec<&str> = text.split(sep.as_str()).collect();
 
     if parts.len() <= 1 {
-        // This separator doesn't split the text; try next
+// This separator doesn't split the text; try next
         return recursive_split(text, remaining_seps, max_size);
     }
 
-    // Merge small parts together, split large parts recursively
+// Merge small parts together, split large parts recursively
     let mut result = Vec::new();
     let mut current = String::new();
 
@@ -71,7 +70,7 @@ fn recursive_split(text: &str, separators: &[String], max_size: usize) -> Vec<St
             }
 
             if part.len() > max_size {
-                // Recurse with finer separators
+// Recurse with finer separators
                 let sub_chunks = recursive_split(part, remaining_seps, max_size);
                 result.extend(sub_chunks);
             } else {
@@ -99,7 +98,7 @@ fn merge_with_overlap(chunks: &[String], overlap: usize, max_size: usize) -> Vec
         let mut text = String::new();
         let mut overlap_len = 0;
 
-        // Prepend overlap from previous chunk
+// Prepend overlap from previous chunk
         if i > 0 && overlap > 0 {
             let prev = &chunks[i - 1];
             let overlap_start = prev.len().saturating_sub(overlap);
@@ -110,7 +109,7 @@ fn merge_with_overlap(chunks: &[String], overlap: usize, max_size: usize) -> Vec
 
         text.push_str(chunk);
 
-        // Truncate if overlap made it too long
+// Truncate if overlap made it too long
         if text.len() > max_size {
             text.truncate(max_size);
         }
@@ -190,9 +189,9 @@ mod tests {
         };
         let chunks = chunk_text(text, &config);
         assert!(chunks.len() >= 2);
-        // Second chunk should start with overlap from first
+// Second chunk should start with overlap from first
         if chunks.len() > 1 {
-            // overlap creates some shared content
+// overlap creates some shared content
             assert!(chunks[1].text.len() > 0);
         }
     }
@@ -238,7 +237,7 @@ mod tests {
         };
         let chunks = chunk_text(&text, &config);
         assert!(!chunks.is_empty());
-        // Should fall back to character-level splitting
+// Should fall back to character-level splitting
     }
 
     #[test]

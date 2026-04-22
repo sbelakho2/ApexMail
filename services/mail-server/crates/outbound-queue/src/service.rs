@@ -34,7 +34,7 @@ impl OutboundServiceImpl {
 
 #[tonic::async_trait]
 impl OutboundService for OutboundServiceImpl {
-    /// Queue email for delivery
+/// Queue email for delivery
     async fn queue_email(
         &self,
         request: Request<QueueEmailRequest>,
@@ -54,7 +54,7 @@ impl OutboundService for OutboundServiceImpl {
             from_address: req.from,
             to_addresses: req.to,
             subject: req.subject,
-            text_body: Some(req.text_body),  // #118: Preserve empty string as Some("")
+            text_body: Some(req.text_body), // #118:Preserve empty string as Some("")
             html_body: if req.html_body.is_empty() { None } else { Some(req.html_body) },
             headers: serde_json::Value::Object(
                 req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
@@ -88,7 +88,7 @@ impl OutboundService for OutboundServiceImpl {
         }
     }
     
-    /// Send email immediately (bypassing queue)
+/// Send email immediately (bypassing queue)
     async fn send_email_now(
         &self,
         request: Request<SendEmailRequest>,
@@ -102,13 +102,13 @@ impl OutboundService for OutboundServiceImpl {
             "Sending email immediately"
         );
         
-        // Create a queued email with high priority
+// Create a queued email with high priority
         let email = QueuedEmail {
             id: Uuid::new_v4(),
             from_address: req.from.clone(),
             to_addresses: req.to.clone(),
             subject: req.subject,
-            text_body: Some(req.text_body),  // #118: Preserve empty string
+            text_body: Some(req.text_body), // #118:Preserve empty string
             html_body: if req.html_body.is_empty() { None } else { Some(req.html_body) },
             headers: serde_json::Value::Object(
                 req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
@@ -129,7 +129,7 @@ impl OutboundService for OutboundServiceImpl {
         
         match self.queue.enqueue(email.clone()).await {
             Ok(id) => {
-                // #116: Report queued status, not accepted:true — delivery hasn't happened yet
+// #116:Report queued status, not accepted:true — delivery hasn't happened yet
                 info!(email_id = %id, "Email queued for immediate delivery");
                 
                 let recipients: Vec<RecipientResult> = req.to.iter().map(|email| {
@@ -161,7 +161,7 @@ impl OutboundService for OutboundServiceImpl {
         }
     }
     
-    /// Get delivery status
+/// Get delivery status
     async fn get_delivery_status(
         &self,
         request: Request<GetDeliveryStatusRequest>,
@@ -202,7 +202,7 @@ impl OutboundService for OutboundServiceImpl {
         }))
     }
     
-    /// Cancel queued email
+/// Cancel queued email
     async fn cancel_email(
         &self,
         request: Request<CancelEmailRequest>,
@@ -212,8 +212,7 @@ impl OutboundService for OutboundServiceImpl {
         let email_id = Uuid::parse_str(&req.email_id)
             .map_err(|e| Status::invalid_argument(format!("Invalid email ID: {}", e)))?;
         
-        // FIX: Atomic cancel — single UPDATE with WHERE status guard eliminates
-        // the TOCTOU race between reading status and writing the cancellation.
+// the TOCTOU race between reading status and writing the cancellation.
         match self.queue.cancel_email_atomic(&email_id).await {
             Ok(CancelResult::Cancelled) => {
                 info!(email_id = %email_id, "Email cancelled");
@@ -241,7 +240,7 @@ impl OutboundService for OutboundServiceImpl {
         }
     }
     
-    /// Queue bulk emails
+/// Queue bulk emails
     async fn queue_bulk_emails(
         &self,
         request: Request<QueueBulkEmailsRequest>,
@@ -263,7 +262,7 @@ impl OutboundService for OutboundServiceImpl {
                 from_address: email_req.from,
                 to_addresses: email_req.to,
                 subject: email_req.subject,
-                text_body: Some(email_req.text_body),  // #118: Preserve empty string
+                text_body: Some(email_req.text_body), // #118:Preserve empty string
                 html_body: if email_req.html_body.is_empty() { None } else { Some(email_req.html_body) },
                 headers: serde_json::Value::Object(
                     email_req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
@@ -309,7 +308,7 @@ impl OutboundService for OutboundServiceImpl {
         }))
     }
     
-    /// Get queue statistics
+/// Get queue statistics
     async fn get_queue_stats(
         &self,
         _request: Request<GetQueueStatsRequest>,

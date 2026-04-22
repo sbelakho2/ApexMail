@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// Redact an email address for logging: `"alice@example.com"` → `"a***@example.com"`.
+/// Redact an email address for logging:`"alice@example.com"` → `"a***@example.com"`.
 pub fn redact_email(email: &str) -> RedactedEmail<'_> {
     RedactedEmail(email)
 }

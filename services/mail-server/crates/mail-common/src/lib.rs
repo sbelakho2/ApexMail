@@ -9,6 +9,7 @@ pub mod hot_config;
 pub mod internal_auth;
 pub mod pii;
 pub mod security;
+pub mod warmup;
 
 pub use config::Config;
 pub use error::{Error, Result};

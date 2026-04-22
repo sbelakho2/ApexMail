@@ -94,7 +94,7 @@ impl CircuitBreakerService {
         }
     }
 
-    /// Check if a call to `circuit_name` is allowed.
+/// Check if a call to `circuit_name` is allowed.
     pub async fn allow_request(&self, circuit_name: &str) -> Result<bool, String> {
         let mut circuits = self.circuits.write().await;
         let circuit = circuits.get_mut(circuit_name)
@@ -107,7 +107,7 @@ impl CircuitBreakerService {
         match circuit.state {
             CircuitState::Closed => Ok(true),
             CircuitState::Open => {
-                // Check if timeout has elapsed → transition to HalfOpen
+// Check if timeout has elapsed → transition to HalfOpen
                 let elapsed = (Utc::now() - circuit.state_changed_at)
                     .num_milliseconds()
                     .max(0) as u64;
@@ -134,7 +134,7 @@ impl CircuitBreakerService {
         }
     }
 
-    /// Report a successful call.
+/// Report a successful call.
     pub async fn report_success(&self, circuit_name: &str) -> Result<(), String> {
         let mut circuits = self.circuits.write().await;
         let circuit = circuits.get_mut(circuit_name)
@@ -158,7 +158,7 @@ impl CircuitBreakerService {
         Ok(())
     }
 
-    /// Report a failed call.
+/// Report a failed call.
     pub async fn report_failure(&self, circuit_name: &str) -> Result<(), String> {
         let mut circuits = self.circuits.write().await;
         let circuit = circuits.get_mut(circuit_name)
@@ -177,7 +177,7 @@ impl CircuitBreakerService {
                 }
             }
             CircuitState::HalfOpen => {
-                // Any failure in half-open → back to open
+// Any failure in half-open → back to open
                 circuit.state = CircuitState::Open;
                 circuit.state_changed_at = Utc::now();
                 warn!(circuit = circuit_name, "Circuit re-opened from half-open");
@@ -187,19 +187,19 @@ impl CircuitBreakerService {
         Ok(())
     }
 
-    /// Get stats for all circuits.
+/// Get stats for all circuits.
     pub async fn get_all_stats(&self) -> Vec<CircuitStats> {
         let circuits = self.circuits.read().await;
         circuits.values().map(|c| c.to_stats()).collect()
     }
 
-    /// Get stats for a specific circuit.
+/// Get stats for a specific circuit.
     pub async fn get_stats(&self, circuit_name: &str) -> Option<CircuitStats> {
         let circuits = self.circuits.read().await;
         circuits.get(circuit_name).map(|c| c.to_stats())
     }
 
-    /// Reset a circuit to closed state.
+/// Reset a circuit to closed state.
     pub async fn reset(&self, circuit_name: &str) -> Result<(), String> {
         let mut circuits = self.circuits.write().await;
         let circuit = circuits.get_mut(circuit_name)
@@ -216,7 +216,7 @@ impl CircuitBreakerService {
         Ok(())
     }
 
-    /// Add or update a circuit configuration.
+/// Add or update a circuit configuration.
     pub async fn configure(&self, config: CircuitConfig) -> Result<(), String> {
         let mut circuits = self.circuits.write().await;
         let name = config.name.clone();
@@ -225,7 +225,7 @@ impl CircuitBreakerService {
         Ok(())
     }
 
-    /// Remove a circuit.
+/// Remove a circuit.
     pub async fn remove(&self, circuit_name: &str) -> Result<bool, String> {
         let mut circuits = self.circuits.write().await;
         Ok(circuits.remove(circuit_name).is_some())
@@ -272,13 +272,13 @@ mod tests {
     fn test_circuit_opens_after_threshold() {
         test_runtime().block_on(async {
             let svc = CircuitBreakerService::new(test_config());
-            // database threshold is 5
+// database threshold is 5
             for _ in 0..5 {
                 svc.report_failure("database").await.unwrap();
             }
             let stats = svc.get_stats("database").await.unwrap();
             assert_eq!(stats.state, "open");
-            // Allow request should be false (timeout hasn't elapsed)
+// Allow request should be false (timeout hasn't elapsed)
             let allowed = svc.allow_request("database").await.unwrap();
             assert!(!allowed);
         });
@@ -301,14 +301,14 @@ mod tests {
     fn test_circuit_half_open_recovery() {
         test_runtime().block_on(async {
             let svc = CircuitBreakerService::new(test_config());
-            // Force into half-open
+// Force into half-open
             {
                 let mut circuits = svc.circuits.write().await;
                 let c = circuits.get_mut("database").unwrap();
                 c.state = CircuitState::HalfOpen;
                 c.success_count = 0;
             }
-            // Two successes should close it (threshold = 2)
+// Two successes should close it (threshold = 2)
             svc.report_success("database").await.unwrap();
             svc.report_success("database").await.unwrap();
             let stats = svc.get_stats("database").await.unwrap();
@@ -426,7 +426,7 @@ mod tests {
             let mut cfg = Config::from_env();
             cfg.circuit_breaker.enabled = false;
             let svc = CircuitBreakerService::new(Arc::new(cfg));
-            // Even after failures, disabled circuit allows requests
+// Even after failures, disabled circuit allows requests
             for _ in 0..100 {
                 svc.report_failure("database").await.unwrap();
             }

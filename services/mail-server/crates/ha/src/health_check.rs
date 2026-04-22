@@ -55,29 +55,29 @@ impl HealthCheckService {
         }
     }
 
-    /// Run all health checks and produce a cluster health report.
+/// Run all health checks and produce a cluster health report.
     pub async fn check_all(&self) -> ClusterHealth {
         let mut components = Vec::with_capacity(5);
 
-        // 1. Database primary
+// 1. Database primary
         components.push(self.check_database().await);
 
-        // 2. Redis
+// 2. Redis
         components.push(self.check_redis().await);
 
-        // 3. Replication lag
+// 3. Replication lag
         components.push(self.check_replication_lag().await);
 
-        // 4. Disk space (simulated check via DB)
+// 4. Disk space (simulated check via DB)
         components.push(self.check_disk_space().await);
 
-        // 5. Memory (in-process)
+// 5. Memory (in-process)
         components.push(self.check_memory().await);
 
-        // Compute overall status
+// Compute overall status
         let overall = Self::compute_overall(&components);
 
-        // Record in DB (best effort)
+// Record in DB (best effort)
         if let Err(error) = self.record_health_check(&overall, &components).await {
             warn!(error = %error, "Failed to persist health check result");
         }
@@ -124,7 +124,7 @@ impl HealthCheckService {
         let threshold = self.config.replication.lag_threshold_ms as f64;
         let warning = self.config.replication.warning_lag_ms as f64;
         check_component("replication", async move {
-            // pg_last_wal_receive_lsn / pg_last_wal_replay_lsn
+// pg_last_wal_receive_lsn / pg_last_wal_replay_lsn
             let row: Option<(Option<f64>,)> = sqlx::query_as(
                 "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) * 1000 AS lag_ms"
             )
@@ -143,7 +143,7 @@ impl HealthCheckService {
                     Ok((HealthStatus::Healthy, Some(format!("Lag: {lag_ms:.0}ms"))))
                 }
                 _ => {
-                    // No replication configured is fine on standalone
+// No replication configured is fine on standalone
                     Ok((HealthStatus::Healthy, Some("Standalone / no replication timestamp".into())))
                 }
             }
@@ -223,7 +223,7 @@ impl HealthCheckService {
         Ok(())
     }
 
-    /// Get the latest health checks for all nodes.
+/// Get the latest health checks for all nodes.
     pub async fn get_cluster_status(&self) -> Result<Vec<serde_json::Value>, sqlx::Error> {
         let rows: Vec<(String, String, String, serde_json::Value, chrono::DateTime<Utc>)> =
             sqlx::query_as(

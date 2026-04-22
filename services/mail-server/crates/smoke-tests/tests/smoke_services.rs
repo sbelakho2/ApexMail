@@ -72,7 +72,7 @@ mod apexmail_db_tests {
         assert!(json.contains("acme"), "JSON should contain the slug");
         assert!(json.contains("free"), "JSON should contain the plan");
 
-        // Round-trip
+// Round-trip
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["name"], "Acme Corp");
     }
@@ -93,7 +93,7 @@ mod apexmail_db_tests {
 
     #[tokio::test]
     async fn test_db_pool_lazy_creation() {
-        // create_lazy_pool should succeed without an actual database running
+// create_lazy_pool should succeed without an actual database running
         let pool = apexmail_db::pool::create_lazy_pool("postgres://localhost/smoke_test");
         assert!(pool.is_ok(), "create_lazy_pool should return Ok for any URL");
     }
@@ -107,7 +107,7 @@ mod apexmail_db_tests {
 mod api_server_tests {
     #[test]
     fn test_api_error_variants_exist() {
-        // Verify error enum variants can be constructed
+// Verify error enum variants can be constructed
         let bad_req = api_server::error::ApiError::BadRequest("test".into());
         assert_eq!(bad_req.to_string(), "test");
 
@@ -171,7 +171,7 @@ mod billing_tests {
         assert!(!payg.email_tiers.is_empty(), "PAYG should have email tiers");
         assert_eq!(payg.free_api_calls_per_month, 100_000);
 
-        // Verify PAYG calculation
+// Verify PAYG calculation
         let (email_cost, api_cost, total) = payg.calculate(5_000, 50_000);
         assert!(email_cost > 0, "should charge for 5k emails");
         assert_eq!(api_cost, 0, "50k API calls should be within free tier");
@@ -180,17 +180,17 @@ mod billing_tests {
 
     #[test]
     fn test_billing_vat_calculation() {
-        // Estonian customer: full 22% VAT
+// Estonian customer:full 22% VAT
         let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "EE", None);
         assert_eq!(rate, 22);
         assert_eq!(amount, 2_200);
 
-        // EU B2B with VAT number: reverse charge = 0%
+// EU B2B with VAT number:reverse charge = 0%
         let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "DE", Some("DE123456789"));
         assert_eq!(rate, 0);
         assert_eq!(amount, 0);
 
-        // Non-EU: 0%
+// Non-EU:0%
         let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "US", None);
         assert_eq!(rate, 0);
         assert_eq!(amount, 0);
@@ -209,7 +209,7 @@ mod devex_tests {
         let sdks = mgr.list_sdks();
         assert_eq!(sdks.len(), 6, "should have 6 SDK languages");
 
-        // Verify all languages are distinct
+// Verify all languages are distinct
         let mut languages: Vec<String> = sdks.iter().map(|s| format!("{:?}", s.language)).collect();
         languages.sort();
         languages.dedup();
@@ -234,7 +234,7 @@ mod devex_tests {
         let versions = registry.list_versions();
         assert!(!versions.is_empty(), "should have at least one API version");
 
-        // The latest version should be 2024-01
+// The latest version should be 2024-01
         let latest = registry.get_version("2024-01");
         assert!(latest.is_ok());
         assert_eq!(latest.unwrap().version, "2024-01");
@@ -280,7 +280,7 @@ mod observability_tests {
             cooldown_secs: 300,
         });
 
-        // Evaluate with a metric that exceeds the threshold
+// Evaluate with a metric that exceeds the threshold
         let summaries = vec![MetricSummary {
             name: "error_rate".into(),
             metric_type: MetricType::Gauge,
@@ -442,7 +442,7 @@ mod ai_tests {
         assert!(!arm1.is_empty());
         assert!(!arm2.is_empty());
 
-        // Record some rewards
+// Record some rewards
         bandit.record_reward(&arm1, 1.0).unwrap();
         bandit.record_reward(&arm1, 1.0).unwrap();
         bandit.record_reward(&arm2, 0.0).unwrap();
@@ -460,7 +460,7 @@ mod ai_tests {
         let score = optimizer.score_subject_line("Discover our amazing new product launch today");
         assert!(score > 0 && score <= 100, "subject line score should be 1-100, got {}", score);
 
-        // Very short should score lower
+// Very short should score lower
         let short_score = optimizer.score_subject_line("Hi");
         assert!(short_score < score, "short subject should score lower");
     }
@@ -523,9 +523,9 @@ mod compliance_tests {
 
     #[test]
     fn test_compliance_modules_compile() {
-        // Verify we can reference modules from the compliance crate
+// Verify we can reference modules from the compliance crate
         let _ = std::any::type_name::<compliance::types::RiskLevel>();
-        // The crate compiles and exports these modules
+// The crate compiles and exports these modules
         assert!(true, "compliance crate compiles successfully");
     }
 }
@@ -538,16 +538,16 @@ mod compliance_tests {
 mod enterprise_tests {
     #[test]
     fn test_enterprise_types() {
-        // Verify SSO types exist and can be referenced
+// Verify SSO types exist and can be referenced
         let _ = std::any::type_name::<enterprise::types::SSOConfiguration>();
         let _ = std::any::type_name::<enterprise::types::SSOSession>();
     }
 
     #[test]
     fn test_enterprise_modules_compile() {
-        // Verify all enterprise modules compile
+// Verify all enterprise modules compile
         let _ = std::any::type_name::<fn()>();
-        // We can access the modules
+// We can access the modules
         let modules = [
             "enterprise::sso",
             "enterprise::compliance",
@@ -605,9 +605,9 @@ mod isolation_tests {
 mod mta_tests {
     #[test]
     fn test_mta_config_type() {
-        // Verify MtaConfig exists and can be referenced
+// Verify MtaConfig exists and can be referenced
         let _ = std::any::type_name::<mta::MtaConfig>();
-        // The crate compiles with all auth modules
+// The crate compiles with all auth modules
         assert!(true, "MTA crate compiles successfully");
     }
 }
@@ -621,7 +621,7 @@ mod edge_cases_tests {
     #[test]
     fn test_edge_cases_config_type() {
         let _ = std::any::type_name::<edge_cases::config::EdgeCasesConfig>();
-        // Verify the services module is accessible
+// Verify the services module is accessible
         assert!(true, "edge-cases crate compiles successfully");
     }
 }
@@ -634,7 +634,7 @@ mod edge_cases_tests {
 mod worker_processors_tests {
     #[test]
     fn test_worker_processors_types() {
-        // Verify key re-exported types exist
+// Verify key re-exported types exist
         let _ = std::any::type_name::<worker_processors::ProcessorConfig>();
         let _ = std::any::type_name::<worker_processors::ProcessorError>();
         let _ = std::any::type_name::<worker_processors::ReplyClassification>();
@@ -669,7 +669,7 @@ mod ai_embeddings_tests {
         let _ = std::any::type_name::<ai_embeddings::types::SearchResult>();
         let _ = std::any::type_name::<ai_embeddings::types::EmbeddingError>();
 
-        // Verify error variants
+// Verify error variants
         let err = ai_embeddings::types::EmbeddingError::EmptyText;
         assert_eq!(format!("{}", err), "Empty text input");
     }
@@ -683,7 +683,7 @@ mod ai_embeddings_tests {
 mod pattern_matcher_tests {
     #[test]
     fn test_pattern_matcher_compile_and_match() {
-        // Verify the PatternMatcher and Rule types exist
+// Verify the PatternMatcher and Rule types exist
         let _ = std::any::type_name::<pattern_matcher::PatternMatcher>();
         let _ = std::any::type_name::<pattern_matcher::Rule>();
         let _ = std::any::type_name::<pattern_matcher::RuleCategory>();

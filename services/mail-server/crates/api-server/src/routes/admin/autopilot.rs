@@ -1,6 +1,6 @@
 //! Autopilot AI proxy endpoints.
 //!
-//! Migrated from: apps/control-plane/src/app/api/autopilot/route.ts
+//! Migrated from:apps/control-plane/src/app/api/autopilot/route.ts
 //! Proxies to the Sales Autopilot backend (port 3010).
 
 use axum::extract::{Query, State};

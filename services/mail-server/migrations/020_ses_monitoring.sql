@@ -1,7 +1,5 @@
 -- SES Monitoring and Deliverability Metrics Schema
--- 
--- This migration adds tables for:
--- 1. SES account-level quota/reputation metrics
+-- This migration adds tables for:-- 1. SES account-level quota/reputation metrics
 -- 2. Domain deliverability statistics (VDM)
 -- 3. Per-tenant deliverability metrics
 -- 4. Per-tenant MAIL FROM configuration
@@ -76,12 +74,12 @@ CREATE INDEX IF NOT EXISTS idx_tenant_deliverability_time
 CREATE TABLE IF NOT EXISTS tenant_mail_from (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id             UUID NOT NULL UNIQUE,
-    mail_from_domain      TEXT NOT NULL,  -- e.g., "bounce.customerdomain.com"
+    mail_from_domain      TEXT NOT NULL, -- e.g., "bounce.customerdomain.com"
     status                TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'verified', 'failed')),
     spf_verified          BOOLEAN NOT NULL DEFAULT false,
     mx_verified           BOOLEAN NOT NULL DEFAULT false,
-    ses_identity_arn      TEXT,  -- ARN of the SES identity
+    ses_identity_arn      TEXT, -- ARN of the SES identity
     verification_token    TEXT,
     last_verified_at      TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -157,14 +155,14 @@ CREATE INDEX IF NOT EXISTS idx_alert_webhook_queue_pending
 CREATE TABLE IF NOT EXISTS byoip_ranges (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id             UUID NOT NULL,
-    cidr_block            TEXT NOT NULL,  -- e.g., "198.51.100.0/24"
-    aws_cidr_id           TEXT,  -- AWS CIDR authorization ID after import
+    cidr_block            TEXT NOT NULL, -- e.g., "198.51.100.0/24"
+    aws_cidr_id           TEXT, -- AWS CIDR authorization ID after import
     status                TEXT NOT NULL DEFAULT 'pending_verification'
         CHECK (status IN ('pending_verification', 'verification_in_progress', 
                           'verified', 'provisioning', 'active', 'failed', 'deprovisioned')),
     verification_token    TEXT,
-    verification_method   TEXT DEFAULT 'dns',  -- 'dns' or 'email'
-    message_id            TEXT,  -- SES message ID for provisioning
+    verification_method   TEXT DEFAULT 'dns', -- 'dns' or 'email'
+    message_id            TEXT, -- SES message ID for provisioning
     verified_at           TIMESTAMPTZ,
     provisioned_at        TIMESTAMPTZ,
     failure_reason        TEXT,
@@ -191,7 +189,7 @@ CREATE TABLE IF NOT EXISTS ip_provisioning_queue (
     status                TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')),
     ses_pool_name         TEXT,
-    provisioned_ips       JSONB,  -- Array of provisioned IP addresses
+    provisioned_ips       JSONB, -- Array of provisioned IP addresses
     billing_status        TEXT DEFAULT 'pending',
     error_message         TEXT,
     retry_count           INT NOT NULL DEFAULT 0,
@@ -200,7 +198,7 @@ CREATE TABLE IF NOT EXISTS ip_provisioning_queue (
     started_at            TIMESTAMPTZ,
     completed_at          TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_by            TEXT  -- API key or system
+    created_by            TEXT -- API key or system
 );
 
 CREATE INDEX IF NOT EXISTS idx_ip_provisioning_queue_pending 
@@ -209,15 +207,15 @@ CREATE INDEX IF NOT EXISTS idx_ip_provisioning_queue_tenant
     ON ip_provisioning_queue(tenant_id);
 
 -- =============================================================================
--- Data retention: auto-cleanup old metrics
+-- Data retention:auto-cleanup old metrics
 -- =============================================================================
 -- Keep 90 days of account metrics
 CREATE INDEX IF NOT EXISTS idx_ses_account_metrics_cleanup 
-    ON ses_account_metrics(recorded_at) WHERE recorded_at < NOW() - INTERVAL '90 days';
+    ON ses_account_metrics(recorded_at);
 
 -- Keep 1 year of tenant metrics
 CREATE INDEX IF NOT EXISTS idx_tenant_metrics_cleanup 
-    ON tenant_deliverability_metrics(created_at) WHERE created_at < NOW() - INTERVAL '365 days';
+    ON tenant_deliverability_metrics(created_at);
 
 COMMENT ON TABLE ses_account_metrics IS 'Historical SES account quota and reputation metrics';
 COMMENT ON TABLE ses_domain_stats IS 'SES VDM domain deliverability statistics';

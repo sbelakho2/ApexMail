@@ -8,18 +8,17 @@ use std::net::IpAddr;
 
 /// Redact an email address, preserving the first character and domain for
 /// debuggability while removing the full local-part.
-///
 /// ```text
 /// "alice@example.com" → "a***@example.com"
-/// ""                  → "<empty>"
-/// "no-at-sign"        → "***"
+/// "" → "<empty>"
+/// "no-at-sign" → "***"
 /// ```
 pub fn redact_email(email: &str) -> RedactedEmail<'_> {
     RedactedEmail(email)
 }
 
 /// Zero-copy wrapper implementing `Display` with masking.
-/// Use with tracing: `email = %redact_email(&addr)`
+/// Use with tracing:`email = %redact_email(&addr)`
 pub struct RedactedEmail<'a>(pub &'a str);
 
 impl fmt::Display for RedactedEmail<'_> {
@@ -76,10 +75,9 @@ impl fmt::Display for RedactedEmailList<'_> {
 }
 
 /// Truncate an IP address for logging. IPv4 → /24, IPv6 → /48.
-///
 /// ```text
-/// 192.168.1.42   → "192.168.1.0/24"
-/// 2001:db8::1    → "2001:db8::/48"
+/// 192.168.1.42 → "192.168.1.0/24"
+/// 2001:db8::1 → "2001:db8::/48"
 /// ```
 pub fn redact_ip(ip: &IpAddr) -> String {
     match ip {

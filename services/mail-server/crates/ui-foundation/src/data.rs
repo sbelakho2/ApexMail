@@ -1,9 +1,10 @@
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 
-const WEB_USE_API_SOURCE: &str = include_str!("../../../../../apps/web/src/hooks/use-api.ts");
-const WEB_CSRF_SOURCE: &str = include_str!("../../../../../apps/web/src/lib/csrf.ts");
-const CONTROL_PLANE_MIDDLEWARE_SOURCE: &str = include_str!("../../../../../apps/control-plane/src/middleware.ts");
+const WEB_USE_API_SOURCE: &str = include_str!("../baselines/web/use-api.baseline.txt");
+const WEB_CSRF_SOURCE: &str = include_str!("../baselines/web/csrf.baseline.txt");
+const CONTROL_PLANE_MIDDLEWARE_SOURCE: &str = include_str!("../baselines/control-plane/middleware.baseline.txt");
+const FRONTEND_ENDPOINT_BASELINE_SOURCE: &str = include_str!("../baselines/shared/frontend-endpoints.baseline.txt");
 const API_CONTRACT_MANIFEST_SOURCE: &str = include_str!("../../../../../docs/api-contract-manifest.json");
 const UI_BEHAVIOR_MANIFEST_SOURCE: &str = include_str!("../../../../../docs/development/ui-behavior-baseline-manifest.json");
 
@@ -136,11 +137,12 @@ pub fn expected_auth_network_contracts() -> Vec<(&'static str, &'static str, u16
         .collect()
 }
 
-pub fn source_catalog() -> [(&'static str, &'static str); 5] {
+pub fn source_catalog() -> [(&'static str, &'static str); 6] {
     [
         ("web_use_api", WEB_USE_API_SOURCE),
         ("web_csrf", WEB_CSRF_SOURCE),
         ("control_plane_middleware", CONTROL_PLANE_MIDDLEWARE_SOURCE),
+        ("frontend_endpoint_baseline", FRONTEND_ENDPOINT_BASELINE_SOURCE),
         ("api_contract_manifest", API_CONTRACT_MANIFEST_SOURCE),
         ("ui_behavior_manifest", UI_BEHAVIOR_MANIFEST_SOURCE),
     ]
@@ -153,11 +155,13 @@ mod tests {
     #[test]
     fn sources_capture_csrf_cache_and_error_contracts() {
         assert!(WEB_USE_API_SOURCE.contains("X-CSRF-Token"));
-        assert!(WEB_USE_API_SOURCE.contains("dedupingInterval: 5000"));
-        assert!(WEB_USE_API_SOURCE.contains("class APIError extends Error"));
+        assert!(WEB_USE_API_SOURCE.contains("\"dedupingIntervalMs\": 5000"));
+        assert!(WEB_USE_API_SOURCE.contains("\"errorType\": \"APIError\""));
         assert!(WEB_CSRF_SOURCE.contains("csrf_token_sig"));
         assert!(CONTROL_PLANE_MIDDLEWARE_SOURCE.contains("CSRF token invalid"));
         assert!(CONTROL_PLANE_MIDDLEWARE_SOURCE.contains("sessionBinding"));
+        assert!(FRONTEND_ENDPOINT_BASELINE_SOURCE.contains("/v1/auth/forgot-password"));
+        assert!(FRONTEND_ENDPOINT_BASELINE_SOURCE.contains("/api/v1/discovery/run"));
     }
 
     #[test]
@@ -203,10 +207,11 @@ mod tests {
     fn exposes_catalog_and_behavior_manifest_contracts() {
         let catalog = source_catalog();
 
-        assert_eq!(catalog.len(), 5);
-        assert!(catalog.iter().any(|(name, source)| *name == "web_use_api" && source.contains("dedupingInterval: 5000")));
+        assert_eq!(catalog.len(), 6);
+        assert!(catalog.iter().any(|(name, source)| *name == "web_use_api" && source.contains("\"dedupingIntervalMs\": 5000")));
         assert!(catalog.iter().any(|(name, source)| *name == "web_csrf" && source.contains("csrf_token_sig")));
         assert!(catalog.iter().any(|(name, source)| *name == "control_plane_middleware" && source.contains("sessionBinding")));
+        assert!(catalog.iter().any(|(name, source)| *name == "frontend_endpoint_baseline" && source.contains("/v1/campaigns")));
         assert!(catalog.iter().any(|(name, source)| *name == "api_contract_manifest" && source.contains("frontendRequiredEndpoints")));
         assert!(catalog.iter().any(|(name, source)| *name == "ui_behavior_manifest" && source.contains("web-login-rate-limited-flow")));
     }

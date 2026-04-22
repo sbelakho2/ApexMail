@@ -25,39 +25,39 @@ use session::SubmissionSession;
 #[command(name = "submission-server")]
 #[command(about = "Authenticated SMTP Submission Server")]
 struct Args {
-    /// Listen address
+/// Listen address
     #[arg(long, default_value = "0.0.0.0:587")]
     listen: String,
     
-    /// Database URL
+/// Database URL
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
     
-    /// Outbound queue gRPC address
+/// Outbound queue gRPC address
     #[arg(long, default_value = "http://localhost:50052")]
     outbound_url: String,
     
-    /// Server hostname
+/// Server hostname
     #[arg(long, default_value = "mail.apexmail.ee")]
     hostname: String,
     
-    /// Require authentication
+/// Require authentication
     #[arg(long, default_value = "true")]
     require_auth: bool,
     
-    /// #176: Enable STARTTLS — auto-detected from cert/key presence when not explicit
+/// #176:Enable STARTTLS — auto-detected from cert/key presence when not explicit
     #[arg(long)]
     enable_starttls: Option<bool>,
 
-    /// TLS certificate path (PEM)
+/// TLS certificate path (PEM)
     #[arg(long, env = "TLS_CERT_PATH")]
     tls_cert_path: Option<String>,
 
-    /// TLS private key path (PEM)
+/// TLS private key path (PEM)
     #[arg(long, env = "TLS_KEY_PATH")]
     tls_key_path: Option<String>,
 
-    /// #175: Maximum concurrent connections
+/// #175:Maximum concurrent connections
     #[arg(long, env = "MAX_CONNECTIONS", default_value = "512")]
     max_connections: usize,
 }
@@ -100,7 +100,7 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
+// Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -118,11 +118,11 @@ async fn main() -> Result<()> {
         "Starting Submission Server"
     );
     
-    // Connect to database
+// Connect to database
     let db_pool = sqlx::PgPool::connect(&args.database_url).await?;
     info!("Connected to database");
 
-    // #176: Auto-detect STARTTLS from cert/key presence if not explicitly set
+// #176:Auto-detect STARTTLS from cert/key presence if not explicitly set
     let enable_starttls = args.enable_starttls.unwrap_or_else(|| {
         args.tls_cert_path.is_some() && args.tls_key_path.is_some()
     });
@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
         None
     };
     
-    // Create server state
+// Create server state
     let state = Arc::new(ServerState {
         hostname: args.hostname,
         require_auth: args.require_auth,
@@ -152,15 +152,15 @@ async fn main() -> Result<()> {
         tls_acceptor,
     });
     
-    // #175: Connection limiter
+// #175:Connection limiter
     let conn_semaphore = Arc::new(Semaphore::new(args.max_connections));
 
-    // Bind to address
+// Bind to address
     let addr: SocketAddr = args.listen.parse()?;
     let listener = TcpListener::bind(addr).await?;
     info!(address = %addr, max_connections = args.max_connections, "Submission server listening");
     
-    // Accept connections with graceful shutdown
+// Accept connections with graceful shutdown
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("shutdown signal received — stopping submission server");
@@ -198,6 +198,8 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    Ok(())
 }
 
 /// Handle a single SMTP connection

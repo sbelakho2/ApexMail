@@ -1,6 +1,6 @@
 //! Drip campaign listing endpoint.
 //!
-//! Migrated from: apps/control-plane/src/app/api/campaigns/route.ts (82 lines)
+//! Migrated from:apps/control-plane/src/app/api/campaigns/route.ts (82 lines)
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -47,7 +47,7 @@ async fn list_campaigns(
 ) -> Result<Json<Vec<CampaignRow>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    // Check table exists
+// Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class WHERE relname = 'drip_campaigns')",
     )

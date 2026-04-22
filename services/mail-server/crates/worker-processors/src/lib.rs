@@ -1,7 +1,7 @@
 //! ApexMail Worker Processors — Rust implementation of queue-based background workers.
 //!
 //! This crate provides high-performance Rust implementations of the worker processors
-//! that handle background tasks: analytics aggregation, email sending, reply classification,
+//! that handle background tasks:analytics aggregation, email sending, reply classification,
 //! and webhook delivery.
 //!
 //! ## Modules

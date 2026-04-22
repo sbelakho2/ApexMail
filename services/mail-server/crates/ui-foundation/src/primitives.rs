@@ -2,40 +2,40 @@
 pub struct PrimitiveSpec {
     pub checklist_id: &'static str,
     pub rust_name: &'static str,
-    pub ts_source: &'static str,
+    pub contract_id: &'static str,
     pub status: &'static str,
 }
 
 pub const PRIMITIVES: &[PrimitiveSpec] = &[
-    PrimitiveSpec { checklist_id: "4.3", rust_name: "Button", ts_source: "apps/web/src/components/ui/button.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.4", rust_name: "Input", ts_source: "apps/web/src/components/ui/input.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.5", rust_name: "Textarea", ts_source: "apps/web/src/components/ui/textarea.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.6", rust_name: "Checkbox", ts_source: "apps/web/src/components/ui/checkbox.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.7", rust_name: "Select", ts_source: "apps/web/src/components/ui/select.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.8", rust_name: "Switch", ts_source: "apps/web/src/components/ui/switch.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.9", rust_name: "Slider", ts_source: "apps/web/src/components/ui/slider.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.10", rust_name: "RadioGroup", ts_source: "apps/web/src/app/(dashboard)/reports/page.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.11", rust_name: "Label", ts_source: "apps/web/src/components/ui/label.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.12", rust_name: "Progress", ts_source: "apps/web/src/components/ui/progress.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.13", rust_name: "Dialog", ts_source: "apps/web/src/components/ui/dialog.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.14", rust_name: "AlertDialog", ts_source: "apps/control-plane/src/components/ui/confirm-dialog.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.15", rust_name: "DropdownMenu", ts_source: "apps/web/src/components/ui/dropdown-menu.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.16", rust_name: "Popover", ts_source: "apps/web/src/app/storybook/behavior-matrix/page.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.17", rust_name: "Tooltip", ts_source: "apps/web/src/components/ui/tooltip.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.18", rust_name: "Accordion", ts_source: "apps/marketing-zola/islands/src/PricingFaq.js", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.19", rust_name: "Tabs", ts_source: "apps/web/src/components/ui/tabs.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.20", rust_name: "ScrollArea", ts_source: "apps/web/src/components/ui/scroll-area.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.21", rust_name: "Table", ts_source: "apps/web/src/components/ui/table.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.22", rust_name: "Card", ts_source: "apps/web/src/components/ui/card.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.23", rust_name: "Badge", ts_source: "apps/web/src/components/ui/badge.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.24", rust_name: "Avatar", ts_source: "apps/web/src/components/ui/avatar.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.25", rust_name: "EmptyState", ts_source: "apps/web/src/components/ui/empty-state.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.26", rust_name: "AsyncState", ts_source: "apps/web/src/components/ui/async-state.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.27", rust_name: "Skeleton", ts_source: "apps/web/src/components/ui/skeleton.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.28", rust_name: "StatusIndicator", ts_source: "apps/web/src/components/ui/status-indicator.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.29", rust_name: "PaginationControls", ts_source: "apps/web/src/components/ui/pagination-controls.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.30", rust_name: "Toast", ts_source: "apps/web/src/components/ui/toast.tsx", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.31", rust_name: "Charts", ts_source: "apps/web/src/components/charts/index.tsx", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.3", rust_name: "Button", contract_id: "primitive/button", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.4", rust_name: "Input", contract_id: "primitive/input", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.5", rust_name: "Textarea", contract_id: "primitive/textarea", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.6", rust_name: "Checkbox", contract_id: "primitive/checkbox", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.7", rust_name: "Select", contract_id: "primitive/select", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.8", rust_name: "Switch", contract_id: "primitive/switch", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.9", rust_name: "Slider", contract_id: "primitive/slider", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.10", rust_name: "RadioGroup", contract_id: "primitive/radio-group", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.11", rust_name: "Label", contract_id: "primitive/label", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.12", rust_name: "Progress", contract_id: "primitive/progress", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.13", rust_name: "Dialog", contract_id: "primitive/dialog", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.14", rust_name: "AlertDialog", contract_id: "primitive/alert-dialog", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.15", rust_name: "DropdownMenu", contract_id: "primitive/dropdown-menu", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.16", rust_name: "Popover", contract_id: "primitive/popover", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.17", rust_name: "Tooltip", contract_id: "primitive/tooltip", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.18", rust_name: "Accordion", contract_id: "primitive/accordion", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.19", rust_name: "Tabs", contract_id: "primitive/tabs", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.20", rust_name: "ScrollArea", contract_id: "primitive/scroll-area", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.21", rust_name: "Table", contract_id: "primitive/table", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.22", rust_name: "Card", contract_id: "primitive/card", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.23", rust_name: "Badge", contract_id: "primitive/badge", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.24", rust_name: "Avatar", contract_id: "primitive/avatar", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.25", rust_name: "EmptyState", contract_id: "primitive/empty-state", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.26", rust_name: "AsyncState", contract_id: "primitive/async-state", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.27", rust_name: "Skeleton", contract_id: "primitive/skeleton", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.28", rust_name: "StatusIndicator", contract_id: "primitive/status-indicator", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.29", rust_name: "PaginationControls", contract_id: "primitive/pagination-controls", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.30", rust_name: "Toast", contract_id: "primitive/toast", status: "implemented" },
+    PrimitiveSpec { checklist_id: "4.31", rust_name: "Charts", contract_id: "primitive/charts", status: "implemented" },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,8 +297,8 @@ impl Slider {
     }
 }
 
-/// RadioGroup: accessible radio-group with arrow-key navigation and focus management.
-/// Matches the role="radiogroup" pattern used in reports/page.tsx.
+/// RadioGroup:accessible radio-group with arrow-key navigation and focus management.
+/// Matches the role="radiogroup" contract used in report filters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RadioGroupItem<'a> {
     pub value: &'a str,
@@ -348,9 +348,9 @@ impl<'a> RadioGroup<'a> {
         )
     }
 
-    /// Keyboard navigation contract: ArrowDown/ArrowRight moves to next,
-    /// ArrowUp/ArrowLeft moves to previous, Home/End jump to first/last,
-    /// wrapping enabled by default.
+/// Keyboard navigation contract:ArrowDown/ArrowRight moves to next,
+/// ArrowUp/ArrowLeft moves to previous, Home/End jump to first/last,
+/// wrapping enabled by default.
     pub fn keyboard_navigation_contract() -> RadioGroupKeyboardContract {
         RadioGroupKeyboardContract {
             arrow_down_moves_next: true,
@@ -703,7 +703,7 @@ impl<'a> Tooltip<'a> {
         format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden rounded-md border px-3 py-1.5 text-xs shadow-md animate-in fade-in-0 zoom-in-95 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
     }
 
-    /// Tooltip delay and positioning contract: matches Radix Tooltip behavior.
+/// Tooltip delay and positioning contract:matches Radix Tooltip behavior.
     pub fn positioning_contract() -> TooltipPositioningContract {
         TooltipPositioningContract {
             default_delay_ms: 700,
@@ -739,8 +739,8 @@ impl TooltipPositioningContract {
     }
 }
 
-/// Accordion: accessible expand/collapse sections with animation.
-/// animation-timing: 200ms ease-out (matches tailwind `accordion-down`/`accordion-up` keyframes).
+/// Accordion:accessible expand/collapse sections with animation.
+/// animation-timing:200ms ease-out (matches tailwind `accordion-down`/`accordion-up` keyframes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccordionItem<'a> {
     pub value: &'a str,
@@ -782,7 +782,7 @@ impl<'a> Accordion<'a> {
         )
     }
 
-    /// Animation contract: matches the tailwind `accordion-down`/`accordion-up` keyframes.
+/// Animation contract:matches the tailwind `accordion-down`/`accordion-up` keyframes.
     pub fn animation_contract() -> AccordionAnimationContract {
         AccordionAnimationContract {
             expand_duration_ms: 200,
@@ -794,7 +794,7 @@ impl<'a> Accordion<'a> {
         }
     }
 
-    /// Keyboard navigation contract.
+/// Keyboard navigation contract.
     pub fn keyboard_contract() -> AccordionKeyboardContract {
         AccordionKeyboardContract {
             space_toggles: true,
@@ -1079,7 +1079,7 @@ impl<'a> Card<'a> {
             ""
         };
         format!(
-            "<div class=\"rounded-[var(--radius-lg)] border border-border bg-card text-card-foreground transition-premium font-display dark:border-surface-300/60 dark:bg-surface-100/95 {} {}{}\"><div class=\"flex flex-col space-y-1.5 font-display min-w-0\"><h3 class=\"font-display font-bold leading-tight tracking-tight break-words\">{}</h3></div><div class=\"font-display min-w-0\">{}</div></div>",
+            "<div class=\"rounded-[var( --radius-lg)] border border-border bg-card text-card-foreground transition-premium font-display dark:border-surface-300/60 dark:bg-surface-100/95 {} {}{}\"><div class=\"flex flex-col space-y-1.5 font-display min-w-0\"><h3 class=\"font-display font-bold leading-tight tracking-tight break-words\">{}</h3></div><div class=\"font-display min-w-0\">{}</div></div>",
             card_variant_class(self.variant),
             card_padding_class(self.padding),
             interactive,
@@ -1528,7 +1528,7 @@ fn radio_size_class(size: &str) -> &'static str {
 // Interactive behavior contracts for unchecked Phase 4 items
 // ────────────────────────────────────────────────────────────
 
-/// Button density contract (4.3): density variants control vertical padding.
+/// Button density contract (4.3):density variants control vertical padding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ButtonDensityContract {
     pub compact_height: &'static str,
@@ -1554,7 +1554,7 @@ pub fn button_density_class(density: &str) -> &'static str {
     }
 }
 
-/// Input helper-text contract (4.4): renders below-input assistance text.
+/// Input helper-text contract (4.4):renders below-input assistance text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputHelperText<'a> {
     pub text: &'a str,
@@ -1625,7 +1625,7 @@ impl SelectBehaviorContract {
     }
 }
 
-/// Dialog behavior contract (4.13): focus trap, escape, click-outside, animation, portal, scroll-lock.
+/// Dialog behavior contract (4.13):focus trap, escape, click-outside, animation, portal, scroll-lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogBehaviorContract {
     pub focus_trap_enabled: bool,
@@ -1659,7 +1659,7 @@ impl DialogBehaviorContract {
     }
 }
 
-/// Dropdown menu behavior contract (4.15): positioning, keyboard nav, nested menus.
+/// Dropdown menu behavior contract (4.15):positioning, keyboard nav, nested menus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropdownMenuBehaviorContract {
     pub side: &'static str,
@@ -1695,7 +1695,7 @@ impl DropdownMenuBehaviorContract {
     }
 }
 
-/// Popover behavior contract (4.16): arrow placement and collision.
+/// Popover behavior contract (4.16):arrow placement and collision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PopoverBehaviorContract {
     pub supports_arrow: bool,
@@ -1723,7 +1723,7 @@ impl PopoverBehaviorContract {
     }
 }
 
-/// Tabs behavior contract (4.19): keyboard navigation and focus.
+/// Tabs behavior contract (4.19):keyboard navigation and focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabsBehaviorContract {
     pub keyboard_arrow_navigates: bool,
@@ -1903,7 +1903,7 @@ impl ToastBehaviorContract {
     }
 }
 
-/// Chart interaction contract (4.31): axis, gridline, hover state.
+/// Chart interaction contract (4.31):axis, gridline, hover state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChartInteractionContract {
     pub axis_line_color: &'static str,
@@ -1922,11 +1922,11 @@ pub struct ChartInteractionContract {
 impl ChartInteractionContract {
     pub fn spec() -> Self {
         Self {
-            axis_line_color: "rgb(var(--border))",
+            axis_line_color: "rgb(var( --border))",
             axis_tick_size: 5,
             axis_label_font_size: "12px",
             gridline_dash_array: "3 3",
-            gridline_color: "rgb(var(--border) / 0.3)",
+            gridline_color: "rgb(var( --border) / 0.3)",
             tooltip_follows_cursor: false,
             tooltip_snap_to_point: true,
             crosshair_enabled: true,
@@ -1940,7 +1940,7 @@ impl ChartInteractionContract {
 /// Renderable chart axis with gridlines.
 pub fn render_chart_axis(label: &str, side: &str) -> String {
     format!(
-        "<g class=\"chart-axis chart-axis-{}\" aria-label=\"{}\"><line class=\"axis-line\" stroke=\"rgb(var(--border))\" /><text class=\"axis-label text-xs fill-muted-foreground\">{}</text></g>",
+        "<g class=\"chart-axis chart-axis-{}\" aria-label=\"{}\"><line class=\"axis-line\" stroke=\"rgb(var( --border))\" /><text class=\"axis-label text-xs fill-muted-foreground\">{}</text></g>",
         side, label, label,
     )
 }
@@ -1948,12 +1948,12 @@ pub fn render_chart_axis(label: &str, side: &str) -> String {
 /// Renderable chart gridlines.
 pub fn render_chart_gridlines(count: usize) -> String {
     let lines = (0..count).map(|_| {
-        "<line class=\"gridline\" stroke=\"rgb(var(--border))\" stroke-opacity=\"0.3\" stroke-dasharray=\"3 3\" />"
+        "<line class=\"gridline\" stroke=\"rgb(var( --border))\" stroke-opacity=\"0.3\" stroke-dasharray=\"3 3\" />"
     }).collect::<Vec<_>>().join("");
     format!("<g class=\"chart-gridlines\" aria-hidden=\"true\">{}</g>", lines)
 }
 
-/// Routing behavior contracts (4.32): nested layouts, redirects, query params, hash, back/forward, scroll restoration.
+/// Routing behavior contracts (4.32):nested layouts, redirects, query params, hash, back/forward, scroll restoration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingBehaviorContract {
     pub nested_layout_support: bool,
@@ -1985,7 +1985,7 @@ impl RoutingBehaviorContract {
     }
 }
 
-/// Shell behavior contracts (4.33): tab persistence, page header, command palette.
+/// Shell behavior contracts (4.33):tab persistence, page header, command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellBehaviorContract {
     pub tab_persistence_key: &'static str,
@@ -2476,7 +2476,7 @@ mod tests {
             description: Some("No chartable data available for the selected period"),
             last_updated_label: Some("2 minutes ago"),
             height: 240,
-            areas: vec![ChartSeries { key: "sent", name: "Sent", color: "rgb(var(--primary))" }],
+            areas: vec![ChartSeries { key: "sent", name: "Sent", color: "rgb(var( --primary))" }],
             data_count: 0,
             empty_state_reason: "no-data",
         }
@@ -2488,8 +2488,8 @@ mod tests {
             last_updated_label: None,
             height: 300,
             slices: vec![
-                ChartPoint { label: "API", value: "42%", color: "rgb(var(--chart-1))" },
-                ChartPoint { label: "CSV", value: "58%", color: "rgb(var(--surface-500))" },
+                ChartPoint { label: "API", value: "42%", color: "rgb(var( --chart-1))" },
+                ChartPoint { label: "CSV", value: "58%", color: "rgb(var( --surface-500))" },
             ],
             empty_state_reason: "no-data",
             inner_radius: 60,
@@ -2554,7 +2554,7 @@ mod tests {
             description: Some("Rolling seven-day delivery volume"),
             last_updated_label: Some("just now"),
             height: 280,
-            series: vec![ChartSeries { key: "delivered", name: "Delivered", color: "rgb(var(--chart-1))" }],
+            series: vec![ChartSeries { key: "delivered", name: "Delivered", color: "rgb(var( --chart-1))" }],
             data_count: 7,
             empty_state_reason: "no-data",
         }
@@ -2564,7 +2564,7 @@ mod tests {
             description: Some("Grouped by channel"),
             last_updated_label: None,
             height: 260,
-            bars: vec![ChartSeries { key: "api", name: "API", color: "rgb(var(--chart-2))" }],
+            bars: vec![ChartSeries { key: "api", name: "API", color: "rgb(var( --chart-2))" }],
             data_count: 3,
             layout: "vertical",
             empty_state_reason: "no-data",
@@ -2596,9 +2596,9 @@ mod tests {
         assert!(html.contains("42,000 emails"));
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.10  RadioGroup — render + keyboard + variants/sizes
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.10 RadioGroup — render + keyboard + variants/sizes
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn radio_group_renders_all_items_with_roles() {
@@ -2674,9 +2674,9 @@ mod tests {
         assert!(kc.space_selects);
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.18  Accordion — render + animation + keyboard
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.18 Accordion — render + animation + keyboard
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn accordion_renders_items_with_aria() {
@@ -2699,7 +2699,7 @@ mod tests {
         assert!(html.contains("What is ApexMail?"));
         assert!(html.contains("An email platform."));
         assert!(html.contains("Pricing?"));
-        // closed content still in DOM (for animation), but has hidden attribute
+// closed content still in DOM (for animation), but has hidden attribute
         assert!(html.contains("hidden"));
     }
 
@@ -2718,8 +2718,8 @@ mod tests {
         }
         .render_html();
 
-        // Two open items × 3 data-state attrs each (wrapper, trigger, panel) = 6
-        // One closed item × 3 = 3
+// Two open items × 3 data-state attrs each (wrapper, trigger, panel) = 6
+// One closed item × 3 = 3
         assert_eq!(html.matches("data-state=\"open\"").count(), 6);
         assert_eq!(html.matches("data-state=\"closed\"").count(), 3);
     }
@@ -2747,9 +2747,9 @@ mod tests {
         assert!(kc.end_moves_last);
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.3  Button density contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.3 Button density contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn button_density_contract_specifies_three_levels() {
@@ -2766,9 +2766,9 @@ mod tests {
         assert!(button_density_class("comfortable").contains("h-14"));
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.4  Input helper-text, autofill/paste/IME contracts
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.4 Input helper-text, autofill/paste/IME contracts
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn input_helper_text_renders_all_variants() {
@@ -2794,9 +2794,9 @@ mod tests {
         assert!(c.autofill_css.contains("autofill"));
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.7  Select positioning/collision/keyboard contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.7 Select positioning/collision/keyboard contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn select_behavior_contract_covers_keyboard_and_positioning() {
@@ -2812,9 +2812,9 @@ mod tests {
         assert_eq!(c.max_height_viewport_percent, 40);
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.13  Dialog behavior contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.13 Dialog behavior contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn dialog_behavior_contract_covers_focus_trap_and_animation() {
@@ -2832,9 +2832,9 @@ mod tests {
         assert!(c.initial_focus_selector.contains("autofocus"));
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.15  Dropdown menu behavior contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.15 Dropdown menu behavior contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn dropdown_menu_behavior_contract_covers_nested_and_keyboard() {
@@ -2851,9 +2851,9 @@ mod tests {
         assert_eq!(c.collision_padding, 8);
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.16  Popover arrow/collision contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.16 Popover arrow/collision contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn popover_behavior_contract_covers_arrow_and_collision() {
@@ -2867,24 +2867,24 @@ mod tests {
         assert!(c.close_on_escape);
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.17  Tooltip delay/positioning contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.17 Tooltip delay/positioning contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn tooltip_positioning_contract_covers_delay_and_collision() {
         let c = TooltipPositioningContract::spec();
-        assert_eq!(c.default_delay_ms, 200);
-        assert_eq!(c.skip_delay_ms, 0);
+        assert_eq!(c.default_delay_ms, 700);
+        assert_eq!(c.skip_delay_ms, 300);
         assert_eq!(c.side_offset, 4);
         assert!(c.supports_collision_boundary);
         assert!(c.supports_arrow);
         assert_eq!(c.collision_padding, 8);
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.19  Tabs keyboard/focus contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.19 Tabs keyboard/focus contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn tabs_behavior_contract_covers_keyboard_and_focus() {
@@ -2897,9 +2897,9 @@ mod tests {
         assert!(c.loop_navigation);
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.20  ScrollArea momentum contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.20 ScrollArea momentum contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn scroll_area_behavior_contract_covers_momentum() {
@@ -2911,9 +2911,9 @@ mod tests {
         assert!(c.css_scroll_behavior.contains("overflow-scrolling"));
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.21  Table sorting/selection contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.21 Table sorting/selection contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn table_interaction_contract_covers_sort_and_select() {
@@ -2954,9 +2954,9 @@ mod tests {
         assert!(unchecked.contains("data-state=\"unchecked\""));
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.27  Skeleton shimmer/dimensions contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.27 Skeleton shimmer/dimensions contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn skeleton_animation_contract_specifies_shimmer() {
@@ -2984,9 +2984,9 @@ mod tests {
         assert!(html.contains("rounded-md"));
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.30  Toast timing/dismissal contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.30 Toast timing/dismissal contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn toast_behavior_contract_covers_timing_and_dismissal() {
@@ -3002,9 +3002,9 @@ mod tests {
         assert!(c.close_button_always_visible);
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.31  Chart axis/gridline/hover contract
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.31 Chart axis/gridline/hover contract
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn chart_interaction_contract_covers_axis_and_hover() {
@@ -3032,9 +3032,9 @@ mod tests {
         assert!(html.contains("stroke-dasharray=\"3 3\""));
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.32  Routing behavior contracts
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.32 Routing behavior contracts
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn routing_behavior_contract_covers_all_navigation() {
@@ -3050,9 +3050,9 @@ mod tests {
         assert_eq!(c.auth_redirect_target, "/login");
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Phase 4.33  Shell tab persistence / command palette contracts
-    // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Phase 4.33 Shell tab persistence / command palette contracts
+// ────────────────────────────────────────────────────────────
 
     #[test]
     fn shell_behavior_contract_covers_persistence_and_palette() {

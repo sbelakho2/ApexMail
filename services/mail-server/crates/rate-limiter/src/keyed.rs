@@ -28,7 +28,7 @@ pub struct KeyedRateLimiter {
 }
 
 impl KeyedRateLimiter {
-    /// Create a new keyed rate limiter.
+/// Create a new keyed rate limiter.
     pub fn new(config: KeyedConfig) -> Self {
         Self {
             limiters: Arc::new(DashMap::with_capacity(1024)),
@@ -39,7 +39,7 @@ impl KeyedRateLimiter {
         }
     }
 
-    /// Create with simple per-key config.
+/// Create with simple per-key config.
     pub fn from_params(rps: u32, burst: u32, max_keys: usize) -> Self {
         Self {
             limiters: Arc::new(DashMap::with_capacity(1024)),
@@ -50,7 +50,7 @@ impl KeyedRateLimiter {
         }
     }
 
-    /// Check rate limit for a specific key.
+/// Check rate limit for a specific key.
     pub fn check(&self, key: &str) -> Decision {
         self.total_checks.fetch_add(1, Ordering::Relaxed);
 
@@ -68,7 +68,7 @@ impl KeyedRateLimiter {
         }
     }
 
-    /// Check rate limit for `n` requests for a key (batch).
+/// Check rate limit for `n` requests for a key (batch).
     pub fn check_n(&self, key: &str, n: u32) -> Decision {
         self.total_checks.fetch_add(1, Ordering::Relaxed);
         let Some(n_nz) = NonZeroU32::new(n) else {
@@ -91,32 +91,32 @@ impl KeyedRateLimiter {
         }
     }
 
-    /// Remove a specific key's rate limiter (e.g. on key deletion).
+/// Remove a specific key's rate limiter (e.g. on key deletion).
     pub fn remove(&self, key: &str) {
         self.limiters.remove(key);
     }
 
-    /// Number of tracked keys.
+/// Number of tracked keys.
     pub fn key_count(&self) -> usize {
         self.limiters.len()
     }
 
-    /// Total check count.
+/// Total check count.
     pub fn total_checks(&self) -> u64 {
         self.total_checks.load(Ordering::Relaxed)
     }
 
-    /// Total denied count.
+/// Total denied count.
     pub fn total_denied(&self) -> u64 {
         self.total_denied.load(Ordering::Relaxed)
     }
 
-    /// Clear all tracked keys.
+/// Clear all tracked keys.
     pub fn clear(&self) {
         self.limiters.clear();
     }
 
-    /// Evict keys to stay within max_keys. Simple strategy: remove random entries.
+/// Evict keys to stay within max_keys. Simple strategy:remove random entries.
     fn maybe_evict(&self) {
         if self.limiters.len() <= self.max_keys {
             return;
@@ -141,12 +141,12 @@ impl KeyedRateLimiter {
         );
     }
 
-    // #219: Use entry().or_insert_with() to avoid TOCTOU and unnecessary limiter creation
+// #219:Use entry.or_insert_with to avoid TOCTOU and unnecessary limiter creation
     fn get_or_create(
         &self,
         key: &str,
     ) -> Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>> {
-        // Use entry API to avoid race condition between get and insert
+// Use entry API to avoid race condition between get and insert
         let limiter = self.limiters
             .entry(key.to_string())
             .or_insert_with(|| {
@@ -157,7 +157,7 @@ impl KeyedRateLimiter {
             .value()
             .clone();
 
-        // Check if we need to evict
+// Check if we need to evict
         self.maybe_evict();
 
         limiter
@@ -182,9 +182,9 @@ mod tests {
     fn test_keyed_independent_limits() {
         let limiter = KeyedRateLimiter::from_params(1, 1, 1000);
         assert!(limiter.check("key_a").is_allowed());
-        // key_a exhausted but key_b should still work
+// key_a exhausted but key_b should still work
         assert!(limiter.check("key_b").is_allowed());
-        // key_a should be denied
+// key_a should be denied
         assert!(limiter.check("key_a").is_denied());
     }
 
@@ -223,7 +223,7 @@ mod tests {
         for i in 0..10 {
             limiter.check(&format!("key_{i}"));
         }
-        // Should have evicted some keys
+// Should have evicted some keys
         assert!(limiter.key_count() <= 6);
     }
 

@@ -28,10 +28,10 @@ fn risk_level_limit_multiplier() {
 
 #[test]
 fn risk_level_reassessment_cadence() {
-    assert_eq!(RiskLevel::Low.reassessment_secs(), 86_400);      // 24h
-    assert_eq!(RiskLevel::Medium.reassessment_secs(), 21_600);   // 6h
-    assert_eq!(RiskLevel::High.reassessment_secs(), 3_600);      // 1h
-    assert_eq!(RiskLevel::Critical.reassessment_secs(), 900);    // 15m
+    assert_eq!(RiskLevel::Low.reassessment_secs(), 86_400); // 24h
+    assert_eq!(RiskLevel::Medium.reassessment_secs(), 21_600); // 6h
+    assert_eq!(RiskLevel::High.reassessment_secs(), 3_600); // 1h
+    assert_eq!(RiskLevel::Critical.reassessment_secs(), 900); // 15m
 }
 
 #[test]

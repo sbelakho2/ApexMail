@@ -14,7 +14,7 @@
 //!
 //! ## API Reference
 //!
-//! Hetzner Cloud API: https://docs.hetzner.cloud/
+//! Hetzner Cloud API:https://docs.hetzner.cloud/
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -38,91 +38,8 @@ struct HetznerFloatingIpResponse {
 
 /// Hetzner Floating IP list response.
 #[derive(Debug, Deserialize)]
-struct HetznerFloatingIpListResponse {
-    floating_ips: Vec<HetznerFloatingIp>,
-}
-
-/// Hetzner Floating IP object.
-#[derive(Debug, Deserialize)]
 struct HetznerFloatingIp {
     id: u64,
-    ip: String,
-    #[serde(rename = "type")]
-    ip_type: String,
-    description: Option<String>,
-    dns_ptr: Vec<HetznerDnsPtr>,
-    home_location: HetznerLocation,
-    labels: HashMap<String, String>,
-    blocked: bool,
-    created: String,
-}
-
-/// Hetzner DNS PTR record.
-#[derive(Debug, Deserialize)]
-struct HetznerDnsPtr {
-    ip: String,
-    dns_ptr: String,
-}
-
-/// Hetzner location.
-#[derive(Debug, Deserialize)]
-struct HetznerLocation {
-    id: u64,
-    name: String,
-    city: String,
-    country: String,
-}
-
-/// Hetzner action response.
-#[derive(Debug, Deserialize)]
-struct HetznerActionResponse {
-    action: HetznerAction,
-}
-
-/// Hetzner action object.
-#[derive(Debug, Deserialize)]
-struct HetznerAction {
-    id: u64,
-    command: String,
-    status: String,
-    progress: u32,
-    started: String,
-    finished: Option<String>,
-    error: Option<HetznerActionError>,
-}
-
-/// Hetzner action error.
-#[derive(Debug, Deserialize)]
-struct HetznerActionError {
-    code: String,
-    message: String,
-}
-
-/// Hetzner server response.
-#[derive(Debug, Deserialize)]
-struct HetznerServerListResponse {
-    servers: Vec<HetznerServer>,
-}
-
-/// Hetzner server object.
-#[derive(Debug, Deserialize)]
-struct HetznerServer {
-    id: u64,
-    name: String,
-    public_net: HetznerPublicNet,
-    labels: HashMap<String, String>,
-}
-
-/// Hetzner public network config.
-#[derive(Debug, Deserialize)]
-struct HetznerPublicNet {
-    ipv4: HetznerIpv4,
-    floating_ips: Vec<u64>,
-}
-
-/// Hetzner IPv4 config.
-#[derive(Debug, Deserialize)]
-struct HetznerIpv4 {
     ip: String,
 }
 
@@ -195,20 +112,20 @@ pub struct IpProvisioningRequest {
 
 /// Provider for Hetzner Cloud IP management.
 pub struct HetznerIpProvider {
-    /// HTTP client for Hetzner API.
+/// HTTP client for Hetzner API.
     client: Client,
-    /// Hetzner API token.
+/// Hetzner API token.
     api_token: String,
-    /// Database connection.
+/// Database connection.
     db: PgPool,
-    /// Default location for new IPs (e.g., "fsn1", "nbg1", "hel1").
+/// Default location for new IPs (e.g., "fsn1", "nbg1", "hel1").
     default_location: String,
-    /// MTA server ID to assign IPs to.
+/// MTA server ID to assign IPs to.
     mta_server_id: Option<u64>,
 }
 
 impl HetznerIpProvider {
-    /// Create a new Hetzner IP provider.
+/// Create a new Hetzner IP provider.
     pub fn new(
         api_token: String,
         db: PgPool,
@@ -229,7 +146,7 @@ impl HetznerIpProvider {
         })
     }
 
-    /// Create from environment variables.
+/// Create from environment variables.
     pub fn from_env(db: PgPool) -> Option<Self> {
         let api_token = std::env::var("HETZNER_API_TOKEN").ok()?;
         let default_location =
@@ -238,10 +155,10 @@ impl HetznerIpProvider {
             .ok()
             .and_then(|s| s.parse().ok());
 
-        Some(Self::new(api_token, db, default_location, mta_server_id))
+        Self::new(api_token, db, default_location, mta_server_id).ok()
     }
 
-    /// Provision a new dedicated IP for a tenant.
+/// Provision a new dedicated IP for a tenant.
     pub async fn provision_ip(
         &self,
         tenant_id: &str,
@@ -249,7 +166,7 @@ impl HetznerIpProvider {
     ) -> Result<DedicatedIp, ProvisionError> {
         info!(tenant_id = %tenant_id, "Provisioning new dedicated IP");
 
-        // Create request record
+// Create request record
         let request_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             r#"
@@ -263,13 +180,13 @@ impl HetznerIpProvider {
         .await
         .map_err(|e| ProvisionError::Database(e.to_string()))?;
 
-        // Create labels for the floating IP
+// Create labels for the floating IP
         let mut labels = HashMap::new();
         labels.insert("tenant_id".to_string(), tenant_id.to_string());
         labels.insert("service".to_string(), "apexmail".to_string());
         labels.insert("type".to_string(), "dedicated_ip".to_string());
 
-        // Create floating IP via Hetzner API
+// Create floating IP via Hetzner API
         let create_request = CreateFloatingIpRequest {
             ip_type: "ipv4".to_string(),
             home_location: self.default_location.clone(),
@@ -310,12 +227,12 @@ impl HetznerIpProvider {
             "Created Hetzner floating IP"
         );
 
-        // Assign to MTA server if configured
+// Assign to MTA server if configured
         if let Some(server_id) = self.mta_server_id {
             self.assign_ip_to_server(floating_ip.id, server_id).await?;
         }
 
-        // Set up reverse DNS if domain provided
+// Set up reverse DNS if domain provided
         let rdns_hostname = if let Some(domain) = domain {
             let hostname = format!("mail.{}", domain);
             match self.set_rdns(floating_ip.id, &ip_address, &hostname).await {
@@ -329,7 +246,7 @@ impl HetznerIpProvider {
             None
         };
 
-        // Create database record
+// Create database record
         let ip_id = uuid::Uuid::new_v4().to_string();
         let dedicated_ip = DedicatedIp {
             id: ip_id.clone(),
@@ -367,14 +284,14 @@ impl HetznerIpProvider {
         .await
         .map_err(|e| ProvisionError::Database(e.to_string()))?;
 
-        // Update provisioning queue
+// Update provisioning queue
         self.update_provisioning_status(&request_id, "completed", None)
             .await?;
 
         Ok(dedicated_ip)
     }
 
-    /// Assign a floating IP to a server.
+/// Assign a floating IP to a server.
     async fn assign_ip_to_server(
         &self,
         floating_ip_id: u64,
@@ -408,7 +325,7 @@ impl HetznerIpProvider {
         Ok(())
     }
 
-    /// Set reverse DNS for an IP.
+/// Set reverse DNS for an IP.
     async fn set_rdns(
         &self,
         floating_ip_id: u64,
@@ -442,9 +359,9 @@ impl HetznerIpProvider {
         Ok(())
     }
 
-    /// Release a dedicated IP (delete from Hetzner).
+/// Release a dedicated IP (delete from Hetzner).
     pub async fn release_ip(&self, ip_id: &str) -> Result<(), ProvisionError> {
-        // Get the IP record
+// Get the IP record
         let ip: Option<(i64, String)> = sqlx::query_as(
             r#"
             SELECT hetzner_floating_ip_id, ip_address
@@ -462,7 +379,7 @@ impl HetznerIpProvider {
             None => return Err(ProvisionError::NotFound(ip_id.to_string())),
         };
 
-        // Delete from Hetzner
+// Delete from Hetzner
         let response = self
             .client
             .delete(format!(
@@ -479,7 +396,7 @@ impl HetznerIpProvider {
             return Err(ProvisionError::HetznerApi(error_text));
         }
 
-        // Update database
+// Update database
         sqlx::query(
             r#"
             UPDATE dedicated_ips
@@ -497,7 +414,7 @@ impl HetznerIpProvider {
         Ok(())
     }
 
-    /// List all IPs for a tenant.
+/// List all IPs for a tenant.
     pub async fn list_tenant_ips(&self, tenant_id: &str) -> Result<Vec<DedicatedIp>, ProvisionError> {
         let ips: Vec<DedicatedIp> = sqlx::query_as::<_, (String, String, String, Option<i64>, String, Option<String>, Option<i64>, i32, DateTime<Utc>, Option<DateTime<Utc>>)>(
             r#"
@@ -541,7 +458,7 @@ impl HetznerIpProvider {
         Ok(ips)
     }
 
-    /// Update warmup day for all warming IPs.
+/// Update warmup day for all warming IPs.
     pub async fn update_warmup_days(&self) -> Result<u64, ProvisionError> {
         let result = sqlx::query(
             r#"
@@ -554,14 +471,15 @@ impl HetznerIpProvider {
         .await
         .map_err(|e| ProvisionError::Database(e.to_string()))?;
 
-        // Graduate IPs that are past warmup period (45 days)
+// Graduate IPs that have completed the canonical warmup period.
         sqlx::query(
             r#"
             UPDATE dedicated_ips
             SET status = 'active'
-            WHERE status = 'warming' AND warmup_day >= 45
+            WHERE status = 'warming' AND warmup_day >= $1
             "#,
         )
+        .bind(mail_common::warmup::FULL_WARMUP_DAYS as i32)
         .execute(&self.db)
         .await
         .map_err(|e| ProvisionError::Database(e.to_string()))?;
@@ -569,7 +487,7 @@ impl HetznerIpProvider {
         Ok(result.rows_affected())
     }
 
-    /// Helper to update provisioning queue status.
+/// Helper to update provisioning queue status.
     async fn update_provisioning_status(
         &self,
         request_id: &str,
@@ -593,7 +511,7 @@ impl HetznerIpProvider {
         Ok(())
     }
 
-    /// Process pending provisioning requests.
+/// Process pending provisioning requests.
     pub async fn process_pending_requests(&self) -> Result<usize, ProvisionError> {
         let pending: Vec<(String, String)> = sqlx::query_as(
             r#"
@@ -610,7 +528,7 @@ impl HetznerIpProvider {
 
         let mut processed = 0;
         for (request_id, tenant_id) in pending {
-            // Update to processing
+// Update to processing
             sqlx::query(
                 r#"
                 UPDATE ip_provisioning_queue
@@ -623,7 +541,7 @@ impl HetznerIpProvider {
             .await
             .map_err(|e| ProvisionError::Database(e.to_string()))?;
 
-            // Get tenant's primary domain for rDNS
+// Get tenant's primary domain for rDNS
             let domain: Option<String> = sqlx::query_scalar(
                 r#"
                 SELECT domain

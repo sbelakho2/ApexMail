@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 #[test]
 fn fuzz_metrics_record_no_panic() {
-    // Random metric names and values must never crash the collector.
+// Random metric names and values must never crash the collector.
     let collector = MetricsCollector::new(vec![
         0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
     ]);
@@ -22,25 +22,25 @@ fn fuzz_metrics_record_no_panic() {
         let value: f64 = rng.gen_range(-1e12..1e12);
         let help = random_ascii(rng.gen_range(0..100));
 
-        // All three metric types
+// All three metric types
         collector.record_counter(&name, value.abs(), &help);
         collector.record_gauge(&format!("{name}_gauge"), value, &help);
         collector.record_histogram(&format!("{name}_hist"), value, &help);
         collector.adjust_gauge(&format!("{name}_gauge"), value * -0.5, &help);
     }
 
-    // Verify we can get a summary without panicking
+// Verify we can get a summary without panicking
     let summary = collector.get_summary();
     assert!(!summary.is_empty());
 
-    // Verify Prometheus export doesn't panic
+// Verify Prometheus export doesn't panic
     let prom = collector.export_prometheus();
     assert!(!prom.is_empty());
 }
 
 #[test]
 fn fuzz_trust_score_bounded() {
-    // Any inputs should produce a trust score in [0, 100].
+// Any inputs should produce a trust score in [0, 100].
     let mut rng = rand::thread_rng();
     for _ in 0..10_000 {
         let metrics = TenantMetrics {
@@ -65,7 +65,7 @@ fn fuzz_trust_score_bounded() {
 
 #[test]
 fn fuzz_health_check_states() {
-    // Recording health checks with random states must never crash.
+// Recording health checks with random states must never crash.
     let checker = HealthChecker::new(1000);
     let statuses = [
         ServiceStatus::Operational,
@@ -87,11 +87,11 @@ fn fuzz_health_check_states() {
         checker.record_check(check);
     }
 
-    // Verify we can retrieve data without panicking
+// Verify we can retrieve data without panicking
     let latest = checker.latest_checks();
     assert!(!latest.is_empty());
 
-    // Retrieving history for random services
+// Retrieving history for random services
     for _ in 0..100 {
         let service = random_string(rng.gen_range(1..30));
         let history = checker.get_history(&service, 10);
@@ -101,7 +101,7 @@ fn fuzz_health_check_states() {
 
 #[tokio::test]
 async fn fuzz_warmup_schedule_valid() {
-    // Warmup calculations must always produce valid volumes (>= 0).
+// Warmup calculations must always produce valid volumes (>= 0).
     let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
     let manager = IpWarmupManager::new(pool);
     let mut rng = rand::thread_rng();
@@ -122,13 +122,13 @@ async fn fuzz_warmup_schedule_valid() {
             schedule.current_volume
         );
 
-        // Advance through all days and verify monotonic increase
+// Advance through all days and verify monotonic increase
         let mut prev_volume = schedule.current_volume;
         for _ in 0..days {
             manager.advance_day_sync(&ip);
         }
 
-        // After advancing total_days, volume should equal target
+// After advancing total_days, volume should equal target
         let final_vol = manager.get_daily_volume(&ip, days);
         if let Some(vol) = final_vol {
             assert!(

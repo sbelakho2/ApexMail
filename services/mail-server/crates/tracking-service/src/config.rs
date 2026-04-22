@@ -106,7 +106,7 @@ fn parse_trusted_proxies(s: &str) -> Vec<IpNetwork> {
                 return None;
             }
             trimmed.parse::<IpNetwork>().ok().or_else(|| {
-                // Try bare IP without prefix — default to /32 or /128
+// Try bare IP without prefix — default to /32 or /128
                 trimmed
                     .parse::<std::net::IpAddr>()
                     .ok()
@@ -165,7 +165,7 @@ pub fn load() -> Result<Config> {
     let max_per_minute = var_or_u32("RATE_LIMIT_MAX_PER_MINUTE", 1000);
     let metrics_port = var_or_u16("METRICS_PORT", 9092);
 
-    // #199: Runtime validation of config values
+// #199:Runtime validation of config values
     if max_connections == 0 || max_connections > 10_000 {
         anyhow::bail!("DB_MAX_CONNECTIONS must be between 1 and 10,000 (got {max_connections})");
     }

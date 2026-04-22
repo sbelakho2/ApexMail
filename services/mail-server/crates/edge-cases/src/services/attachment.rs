@@ -71,17 +71,17 @@ impl AttachmentService {
         Self { pool, limits, clamav }
     }
 
-    /// Max single attachment size.
+/// Max single attachment size.
     pub fn max_single_size(&self) -> usize {
         self.limits.max_single_size
     }
 
-    /// Validate a single attachment.
+/// Validate a single attachment.
     pub async fn validate_attachment(&self, attachment: &Attachment) -> AttachmentValidation {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
 
-        // 1. Size check
+// 1. Size check
         if attachment.size > self.limits.max_single_size {
             errors.push(format!(
                 "Attachment too large: {} (max {})",
@@ -90,16 +90,16 @@ impl AttachmentService {
             ));
         }
 
-        // 2. Extension check
+// 2. Extension check
         let ext = get_file_extension(&attachment.filename);
         if self.limits.blocked_extensions.iter().any(|b| b.eq_ignore_ascii_case(&ext)) {
             errors.push(format!("Blocked file extension: {ext}"));
         }
 
-        // 3. Detect MIME type from magic bytes
+// 3. Detect MIME type from magic bytes
         let detected_mime = detect_from_magic_bytes(&attachment.content);
 
-        // 4. MIME type blocklist
+// 4. MIME type blocklist
         let effective_mime = attachment
             .content_type
             .as_deref()
@@ -109,7 +109,7 @@ impl AttachmentService {
             errors.push(format!("Blocked MIME type: {effective_mime}"));
         }
 
-        // 5. MIME mismatch warning
+// 5. MIME mismatch warning
         if let (Some(declared), Some(detected)) = (attachment.content_type.as_deref(), detected_mime) {
             if declared != detected && !is_compatible_mime(declared, detected) {
                 warnings.push(format!(
@@ -118,17 +118,17 @@ impl AttachmentService {
             }
         }
 
-        // 6. Double extension
+// 6. Double extension
         if check_double_extension(&attachment.filename) {
             warnings.push("Suspicious double extension detected".into());
         }
 
-        // 7. Encrypted content
+// 7. Encrypted content
         if is_encrypted_content(&attachment.content, effective_mime) {
             warnings.push("Attachment appears to be encrypted".into());
         }
 
-        // 8. Virus scan
+// 8. Virus scan
         let mut virus_scanned = false;
         let mut virus_detected = false;
         let mut virus_name = None;
@@ -145,7 +145,7 @@ impl AttachmentService {
                 ));
             }
             if let Some(err) = scan.error {
-                // Fail-closed: scan failure = not clean
+// Fail-closed:scan failure = not clean
                 virus_detected = true;
                 warnings.push(format!("Virus scan error: {err}"));
             }
@@ -161,7 +161,7 @@ impl AttachmentService {
         }
     }
 
-    /// Validate multiple attachments.
+/// Validate multiple attachments.
     pub async fn validate_attachments(
         &self,
         attachments: &[Attachment],
@@ -171,7 +171,7 @@ impl AttachmentService {
         let mut any_virus = false;
         let mut virus_name = None;
 
-        // Count check
+// Count check
         if attachments.len() > self.limits.max_count {
             all_errors.push(format!(
                 "Too many attachments: {} (max {})",
@@ -180,7 +180,7 @@ impl AttachmentService {
             ));
         }
 
-        // Total size check
+// Total size check
         let total: usize = attachments.iter().map(|a| a.size).sum();
         if total > self.limits.max_total_size {
             all_errors.push(format!(
@@ -190,7 +190,7 @@ impl AttachmentService {
             ));
         }
 
-        // Validate each
+// Validate each
         for att in attachments {
             let result = self.validate_attachment(att).await;
             all_errors.extend(result.errors);
@@ -213,7 +213,7 @@ impl AttachmentService {
         }
     }
 
-    /// Pre-check estimated message size.
+/// Pre-check estimated message size.
     pub fn validate_message_size(
         &self,
         body_size: usize,
@@ -246,7 +246,7 @@ impl AttachmentService {
         }
     }
 
-    /// Get aggregate attachment statistics.
+/// Get aggregate attachment statistics.
     pub fn get_attachment_stats(attachments: &[Attachment]) -> AttachmentStats {
         let mut mime_set = std::collections::HashSet::new();
         let mut has_inline = false;
@@ -274,7 +274,7 @@ impl AttachmentService {
         }
     }
 
-    /// Record scan result in DB.
+/// Record scan result in DB.
     pub async fn record_scan_result(
         &self,
         message_id: &str,
@@ -300,7 +300,7 @@ impl AttachmentService {
         Ok(())
     }
 
-    // ── ClamAV INSTREAM protocol ───────────────────────────────────────────────
+// ── ClamAV INSTREAM protocol ───────────────────────────────────────────────
 
     async fn scan_for_virus(&self, content: &[u8]) -> VirusScanResult {
         let start = std::time::Instant::now();
@@ -311,20 +311,20 @@ impl AttachmentService {
         let result = tokio::time::timeout(timeout, async {
             let mut stream = TcpStream::connect(&addr).await?;
 
-            // Send INSTREAM command
+// Send INSTREAM command
             stream.write_all(b"nINSTREAM\n").await?;
 
-            // Send content in chunks with 4-byte BE length prefix
+// Send content in chunks with 4-byte BE length prefix
             for chunk in content.chunks(8192) {
                 let len = (chunk.len() as u32).to_be_bytes();
                 stream.write_all(&len).await?;
                 stream.write_all(chunk).await?;
             }
-            // Zero-length terminator
+// Zero-length terminator
             stream.write_all(&[0u8; 4]).await?;
             stream.flush().await?;
 
-            // Read response
+// Read response
             let mut response = Vec::new();
             stream.read_to_end(&mut response).await?;
             let response_str = String::from_utf8_lossy(&response);
@@ -387,35 +387,35 @@ pub fn detect_from_magic_bytes(content: &[u8]) -> Option<&'static str> {
     if content.len() < 4 {
         return None;
     }
-    // PDF
+// PDF
     if content.starts_with(b"%PDF") {
         return Some("application/pdf");
     }
-    // ZIP / Office XML
+// ZIP / Office XML
     if content.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
         return Some("application/zip");
     }
-    // JPEG
+// JPEG
     if content.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some("image/jpeg");
     }
-    // PNG
+// PNG
     if content.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
         return Some("image/png");
     }
-    // GIF
+// GIF
     if content.starts_with(b"GIF8") {
         return Some("image/gif");
     }
-    // Windows EXE
+// Windows EXE
     if content.starts_with(b"MZ") {
         return Some("application/x-msdownload");
     }
-    // RAR
+// RAR
     if content.starts_with(b"Rar!") {
         return Some("application/x-rar-compressed");
     }
-    // 7z
+// 7z
     if content.len() >= 6 && content[..6] == [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C] {
         return Some("application/x-7z-compressed");
     }
@@ -435,7 +435,7 @@ fn check_double_extension(filename: &str) -> bool {
     if parts.len() < 3 {
         return false;
     }
-    // Safety: parts.len() >= 3 guaranteed by guard above
+// Safety:parts.len >= 3 guaranteed by guard above
     let Some(last) = parts.last() else { return false };
     let last = last.to_lowercase();
     let dangerous = ["exe", "bat", "cmd", "com", "dll", "scr", "pif", "vbs", "js", "jar", "msi", "ps1", "sh"];
@@ -443,11 +443,11 @@ fn check_double_extension(filename: &str) -> bool {
 }
 
 fn is_compatible_mime(declared: &str, detected: &str) -> bool {
-    // ZIP can be Office XML
+// ZIP can be Office XML
     if declared.contains("officedocument") && detected == "application/zip" {
         return true;
     }
-    // Generic octet-stream matches anything
+// Generic octet-stream matches anything
     if declared == "application/octet-stream" || detected == "application/octet-stream" {
         return true;
     }
@@ -455,14 +455,14 @@ fn is_compatible_mime(declared: &str, detected: &str) -> bool {
 }
 
 fn is_encrypted_content(content: &[u8], mime: &str) -> bool {
-    // PDF encryption
+// PDF encryption
     if mime == "application/pdf" {
         let text = String::from_utf8_lossy(content);
         if text.contains("/Encrypt") {
             return true;
         }
     }
-    // ZIP encryption flag (bit 0 at offset 6)
+// ZIP encryption flag (bit 0 at offset 6)
     if mime == "application/zip" && content.len() > 7 {
         if content[6] & 0x01 != 0 {
             return true;

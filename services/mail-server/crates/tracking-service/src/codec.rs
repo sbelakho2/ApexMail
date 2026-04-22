@@ -1,20 +1,17 @@
-//! Tracking token codec: AES-128-GCM encrypt / decrypt with zeroized key material.
+//! Tracking token codec:AES-128-GCM encrypt / decrypt with zeroized key material.
 //!
-//! BACKWARD COMPATIBILITY: This implementation is byte-for-byte compatible with
-//! the TypeScript `TrackingCodec` class.  Existing tokens produced by the Node.js
+//! BACKWARD COMPATIBILITY:This implementation is byte-for-byte compatible with
+//! the TypeScript `TrackingCodec` class. Existing tokens produced by the Node.js
 //! service can be decoded here without re-encoding.
 //!
-//! Binary payload format (inside the GCM envelope):
-//!   v1  – version u8 + per-field u8 length prefix
-//!   v2  – version u8 + per-field u16-BE length prefix
-//!   v3  – v2 + additional originalUrl field
+//! Binary payload format (inside the GCM envelope)://! v1 – version u8 + per-field u8 length prefix
+//! v2 – version u8 + per-field u16-BE length prefix
+//! v3 – v2 + additional originalUrl field
 //!
-//! Token wire format:
-//!   base64url( IV[12] || AuthTag[16] || ciphertext )
+//! Token wire format://! base64url(IV[12] || AuthTag[16] || ciphertext)
 //!
-//! Key derivation (must match TypeScript `deriveKeyHMAC`):
-//!   encryption_key = HMAC-SHA256(master_secret, "encryption")[0..16]
-//!   signature_key  = HMAC-SHA256(master_secret, "signature")[0..32]
+//! Key derivation (must match TypeScript `deriveKeyHMAC`)://! encryption_key = HMAC-SHA256(master_secret, "encryption")[0..16]
+//! signature_key = HMAC-SHA256(master_secret, "signature")[0..32]
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -35,7 +32,7 @@ pub struct TrackingData {
     pub message_id: String,
     pub recipient: String,
     pub link_id: Option<String>,
-    /// Original click URL, included inside the encrypted token (FIX-041).
+/// Original click URL, included inside the encrypted token (-041).
     pub original_url: Option<String>,
 }
 
@@ -87,10 +84,9 @@ pub struct TrackingCodec {
 // to embed tokens into outgoing messages).
 #[allow(unused)]
 impl TrackingCodec {
-    /// Build a codec from the master secret string.
-    ///
-    /// Derives two sub-keys with HMAC-SHA-256, matching the TypeScript
-    /// `deriveKeyHMAC(secretKey, 'encryption', 16)` / `('signature', 32)`.
+/// Build a codec from the master secret string.
+/// Derives two sub-keys with HMAC-SHA-256, matching the TypeScript
+/// `deriveKeyHMAC(secretKey, 'encryption', 16)` / `('signature', 32)`.
     pub fn new(master_secret: &str) -> Self {
         let enc_key = derive_key_hmac(master_secret.as_bytes(), b"encryption", 16);
         let sig_key = derive_key_hmac(master_secret.as_bytes(), b"signature", 32);
@@ -107,9 +103,9 @@ impl TrackingCodec {
         }
     }
 
-    // ── Token encode / decode ─────────────────────────────────────────
+// ── Token encode / decode ─────────────────────────────────────────
 
-    /// Encode `TrackingData` into a URL-safe tracking token.
+/// Encode `TrackingData` into a URL-safe tracking token.
     pub fn encode(&self, data: &TrackingData) -> Result<String> {
         let payload = serialize_tracking_data(data);
         let (iv, tag, ciphertext) = self.aes128gcm_encrypt(&payload)?;
@@ -122,8 +118,8 @@ impl TrackingCodec {
         Ok(URL_SAFE_NO_PAD.encode(&combined))
     }
 
-    /// Decode a URL-safe tracking token back into `TrackingData`.
-    /// Returns `None` on failure, while emitting an auditable error classification.
+/// Decode a URL-safe tracking token back into `TrackingData`.
+/// Returns `None` on failure, while emitting an auditable error classification.
     pub fn decode(&self, token: &str) -> Option<TrackingData> {
         match self.decode_with_error(token) {
             Ok(data) => Some(data),
@@ -134,7 +130,7 @@ impl TrackingCodec {
         }
     }
 
-    /// Decode a URL-safe tracking token with a typed failure reason.
+/// Decode a URL-safe tracking token with a typed failure reason.
     pub fn decode_with_error(&self, token: &str) -> std::result::Result<TrackingData, TrackingDecodeError> {
         if token.len() < 10 || token.len() > 4096 {
             return Err(TrackingDecodeError::InvalidLength);
@@ -158,10 +154,10 @@ impl TrackingCodec {
         deserialize_tracking_data(&plaintext).ok_or(TrackingDecodeError::InvalidPayload)
     }
 
-    // ── Unsubscribe token ─────────────────────────────────────────────
+// ── Unsubscribe token ─────────────────────────────────────────────
 
-    /// Generate an AES-128-GCM encrypted unsubscribe token.
-    /// Payload: `{tenantId}:{recipient}:{unix_ms}` (UTF-8).
+/// Generate an AES-128-GCM encrypted unsubscribe token.
+/// Payload:`{tenantId}:{recipient}:{unix_ms}` (UTF-8).
     pub fn generate_unsubscribe_token(
         &self,
         tenant_id: &str,
@@ -183,13 +179,10 @@ impl TrackingCodec {
         Ok(URL_SAFE_NO_PAD.encode(&combined))
     }
 
-    /// Verify and decode an unsubscribe token.
-    ///
-    /// Supports two formats:
-    ///   1. **New (GCM-encrypted)** — IV[12] || AuthTag[16] || Ciphertext.
-    ///   2. **Legacy (HMAC-signed)** — payload-bytes || 16-byte truncated HMAC-SHA-256.
-    ///
-    /// `max_age_days` defaults to 90 days.
+/// Verify and decode an unsubscribe token.
+/// Supports two formats:/// 1. **New (GCM-encrypted)** — IV[12] || AuthTag[16] || Ciphertext.
+/// 2. **Legacy (HMAC-signed)** — payload-bytes || 16-byte truncated HMAC-SHA-256.
+/// `max_age_days` defaults to 90 days.
     pub fn verify_unsubscribe_token(
         &self,
         token: &str,
@@ -212,16 +205,16 @@ impl TrackingCodec {
             return None;
         }
 
-        // ── Try AES-128-GCM first ─────────────────────────────────────
+// ── Try AES-128-GCM first ─────────────────────────────────────
         let payload_str = self.try_gcm_decrypt_to_string(&combined).or_else(|| {
-            // ── Fallback: legacy HMAC-signed format ───────────────────
+// ── Fallback:legacy HMAC-signed format ───────────────────
             self.try_legacy_hmac_verify(&combined)
         })?;
 
         parse_unsubscribe_payload(&payload_str, max_age_days)
     }
 
-    /// Public alias used by preferences routes (configurable max age).
+/// Public alias used by preferences routes (configurable max age).
     pub fn verify_unsubscribe_token_v2(
         &self,
         token: &str,
@@ -230,7 +223,7 @@ impl TrackingCodec {
         self.verify_unsubscribe_token_impl(token, max_age_days)
     }
 
-    // ── Preferences token (alias for unsubscribe, max 30 days) ───────
+// ── Preferences token (alias for unsubscribe, max 30 days) ───────
 
     pub fn generate_preferences_token(
         &self,
@@ -244,7 +237,7 @@ impl TrackingCodec {
         self.verify_unsubscribe_token_v2(token, Some(30))
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────
+// ── Internal helpers ──────────────────────────────────────────────
 
     fn aes128gcm_encrypt(&self, plaintext: &[u8]) -> Result<([u8; IV_LEN], [u8; AUTH_TAG_LEN], Vec<u8>)> {
         use aes_gcm::aead::OsRng;
@@ -257,12 +250,12 @@ impl TrackingCodec {
         let cipher = Aes128Gcm::new(key);
         let nonce = Nonce::from_slice(&iv_bytes);
 
-        // AES-GCM `encrypt` returns ciphertext || authTag (16 bytes at end)
+// AES-GCM `encrypt` returns ciphertext || authTag (16 bytes at end)
         let mut ciphertext_with_tag = cipher
             .encrypt(nonce, plaintext)
             .map_err(|e| anyhow!("AES-128-GCM encrypt failed: {}", e))?;
 
-        // The last 16 bytes are the auth tag
+// The last 16 bytes are the auth tag
         let tag_start = ciphertext_with_tag.len() - AUTH_TAG_LEN;
         let mut tag = [0u8; AUTH_TAG_LEN];
         tag.copy_from_slice(&ciphertext_with_tag[tag_start..]);
@@ -276,7 +269,7 @@ impl TrackingCodec {
         let cipher = Aes128Gcm::new(key);
         let nonce = Nonce::from_slice(iv);
 
-        // AES-GCM expects ciphertext || authTag
+// AES-GCM expects ciphertext || authTag
         let mut ct_with_tag = Vec::with_capacity(ciphertext.len() + tag.len());
         ct_with_tag.extend_from_slice(ciphertext);
         ct_with_tag.extend_from_slice(tag);
@@ -296,10 +289,10 @@ impl TrackingCodec {
     }
 
     fn try_legacy_hmac_verify(&self, combined: &[u8]) -> Option<String> {
-        // #194: Legacy tokens used 16-byte truncated HMAC. Accept both truncated
-        // (backward compat) and full 32-byte HMAC for newly generated tokens.
-        // Truncated verification is weaker (128 bits) but still sufficient for
-        // unsubscribe tokens; log a warning for monitoring migration progress.
+// #194:Legacy tokens used 16-byte truncated HMAC. Accept both truncated
+// (backward compat) and full 32-byte HMAC for newly generated tokens.
+// Truncated verification is weaker (128 bits) but still sufficient for
+// unsubscribe tokens; log a warning for monitoring migration progress.
         if combined.len() < 17 {
             return None;
         }
@@ -361,14 +354,14 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // ── Unsubscribe payload parser ────────────────────────────────────────────────
 
 fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option<UnsubscribeData> {
-    // Format: "tenantId:recipient:timestamp_ms"
-    // #195: Both tenant_id and recipient may contain colons.
-    // Strategy: timestamp_ms is always a pure decimal integer at the end,
-    // so find the rightmost `:` followed by only digits → that's the timestamp separator.
-    // Then from the remaining prefix find the FIRST `:` → tenant_id/recipient separator.
+// Format:"tenantId:recipient:timestamp_ms"
+// #195:Both tenant_id and recipient may contain colons.
+// Strategy:timestamp_ms is always a pure decimal integer at the end,
+// so find the rightmost `:` followed by only digits → that's the timestamp separator.
+// Then from the remaining prefix find the FIRST `:` → tenant_id/recipient separator.
     let last_colon = payload.rfind(':')?;
     let ts_str = &payload[last_colon + 1..];
-    // Verify ts_str is a valid numeric timestamp
+// Verify ts_str is a valid numeric timestamp
     if ts_str.is_empty() || !ts_str.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -385,7 +378,7 @@ fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option
 
     let timestamp_ms: u64 = ts_str.parse().ok()?;
 
-    // Age check
+// Age check
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -405,10 +398,9 @@ fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option
 }
 
 // ── Binary payload serialization ──────────────────────────────────────────────
-//
-// v1  – 1-byte version + u8 per-field lengths
-// v2  – 1-byte version + u16-BE per-field lengths
-// v3  – v2 + originalUrl field
+// v1 – 1-byte version + u8 per-field lengths
+// v2 – 1-byte version + u16-BE per-field lengths
+// v3 – v2 + originalUrl field
 
 #[allow(unused)] // encode path wired once outbound tokens are generated here
 fn write_u16be(buf: &mut Vec<u8>, v: u16) {
@@ -433,23 +425,23 @@ fn serialize_tracking_data(data: &TrackingData) -> Vec<u8> {
 
     buf.push(version);
 
-    // tenantId
+// tenantId
     write_u16be(&mut buf, tid.len() as u16);
     buf.extend_from_slice(tid);
 
-    // messageId
+// messageId
     write_u16be(&mut buf, mid.len() as u16);
     buf.extend_from_slice(mid);
 
-    // recipient
+// recipient
     write_u16be(&mut buf, rec.len() as u16);
     buf.extend_from_slice(rec);
 
-    // linkId
+// linkId
     write_u16be(&mut buf, lid.len() as u16);
     buf.extend_from_slice(lid);
 
-    // originalUrl (v3 only)
+// originalUrl (v3 only)
     if version == 3 {
         write_u16be(&mut buf, url.len() as u16);
         buf.extend_from_slice(url);
@@ -475,11 +467,11 @@ fn deserialize_tracking_data(buf: &[u8]) -> Option<TrackingData> {
         return None;
     }
 
-    /// Read a length-prefixed field from `buf` at `pos`; advance `pos`.
+/// Read a length-prefixed field from `buf` at `pos`; advance `pos`.
     macro_rules! read_field {
         ($buf:expr, $pos:expr, $version:expr) => {{
             let len = if $version >= 2 {
-                // u16-BE
+// u16-BE
                 if $pos + 2 > $buf.len() {
                     return None;
                 }
@@ -487,7 +479,7 @@ fn deserialize_tracking_data(buf: &[u8]) -> Option<TrackingData> {
                 $pos += 2;
                 l
             } else {
-                // u8
+// u8
                 if $pos >= $buf.len() {
                     return None;
                 }
@@ -606,7 +598,7 @@ mod tests {
             original_url: None,
         };
         let mut token = codec.encode(&data).expect("encode");
-        // Flip a bit in the middle of the token
+// Flip a bit in the middle of the token
         let mid = token.len() / 2;
         let b = &mut token.as_bytes().to_vec();
         b[mid] ^= 0x01;
@@ -629,8 +621,8 @@ mod tests {
 
     #[test]
     fn unsubscribe_token_recipient_with_colon() {
-        // Regression: email addresses do not contain ':', but the payload
-        // parser must not break if the tenant_id has unusual chars.
+// Regression:email addresses do not contain ':', but the payload
+// parser must not break if the tenant_id has unusual chars.
         let codec = make_codec();
         let token = codec
             .generate_unsubscribe_token("tenant-id-123", "complex+tag@host.example.com")

@@ -1,6 +1,6 @@
 //! Support ticket management endpoints.
 //!
-//! Migrated from: apps/control-plane/src/app/api/support/route.ts (252 lines)
+//! Migrated from:apps/control-plane/src/app/api/support/route.ts (252 lines)
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -127,7 +127,7 @@ async fn list_tickets(
 
     let mut tickets: Vec<Ticket> = Vec::with_capacity(ticket_rows.len());
     for (id, subj, desc, tid, tname, temail, status, priority, cat, assignee, ca, ua) in ticket_rows {
-        // Load messages for this ticket
+// Load messages for this ticket
         let msgs = sqlx::query_as::<_, (
             String, String, String, String, serde_json::Value, chrono::DateTime<chrono::Utc>,
         )>(
@@ -184,7 +184,7 @@ async fn add_reply(
     .execute(&state.db)
     .await?;
 
-    // Optionally update ticket status
+// Optionally update ticket status
     if let Some(ref new_status) = body.new_status {
         if VALID_STATUSES.contains(&new_status.as_str()) {
             sqlx::query("UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id::text = $2")

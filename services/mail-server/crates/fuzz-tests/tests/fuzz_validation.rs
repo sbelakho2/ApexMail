@@ -5,12 +5,12 @@ use apexmail_lib::validation::{is_valid_email, is_valid_domain, is_valid_uuid, h
 
 #[test]
 fn fuzz_email_validation_never_panics() {
-    // 10,000 random strings — is_valid_email must never panic.
+// 10,000 random strings — is_valid_email must never panic.
     for _ in 0..10_000 {
         let input = random_ascii(rand::random::<usize>() % 256);
         let _ = is_valid_email(&input);
     }
-    // Also test with empty and very short
+// Also test with empty and very short
     let _ = is_valid_email("");
     let _ = is_valid_email("@");
     let _ = is_valid_email("a");
@@ -39,7 +39,7 @@ fn fuzz_uuid_validation_never_panics() {
 
 #[test]
 fn fuzz_null_byte_detection() {
-    // Strings with embedded \0 must always be detected.
+// Strings with embedded \0 must always be detected.
     for _ in 0..1_000 {
         let prefix = random_string(rand::random::<usize>() % 50);
         let suffix = random_string(rand::random::<usize>() % 50);
@@ -50,10 +50,10 @@ fn fuzz_null_byte_detection() {
             with_null
         );
     }
-    // Strings without null bytes should not be detected (probabilistic check).
+// Strings without null bytes should not be detected (probabilistic check).
     for _ in 0..1_000 {
         let clean = random_string(rand::random::<usize>() % 100);
-        // random_string only produces alphanumeric, so no null bytes.
+// random_string only produces alphanumeric, so no null bytes.
         assert!(
             !has_null_bytes(&clean),
             "False positive null byte detection in: {:?}",
@@ -64,7 +64,7 @@ fn fuzz_null_byte_detection() {
 
 #[test]
 fn fuzz_email_with_unicode() {
-    // 1,000 Unicode emails — must never panic.
+// 1,000 Unicode emails — must never panic.
     for _ in 0..1_000 {
         let local = random_unicode(rand::random::<usize>() % 30 + 1);
         let domain = random_unicode(rand::random::<usize>() % 20 + 1);
@@ -75,7 +75,7 @@ fn fuzz_email_with_unicode() {
 
 #[test]
 fn fuzz_very_long_inputs() {
-    // Inputs up to 1 MB — must not panic or hang.
+// Inputs up to 1 MB — must not panic or hang.
     let sizes = [1_000, 10_000, 100_000, 500_000, 1_000_000];
     for &size in &sizes {
         let long_input = random_ascii(size);

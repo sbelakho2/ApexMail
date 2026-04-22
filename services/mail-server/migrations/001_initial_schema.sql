@@ -8,7 +8,7 @@
 CREATE TABLE IF NOT EXISTS email_queue (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     
-    -- Email content
+-- Email content
     from_address TEXT NOT NULL CHECK (
         char_length(from_address) <= 320 AND from_address ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$'
     ),
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS email_queue (
     headers JSONB DEFAULT '{}'::jsonb,
     attachments JSONB DEFAULT '[]'::jsonb,
     
-    -- Queue status
+-- Queue status
     status TEXT NOT NULL DEFAULT 'pending' 
         CHECK (status IN ('pending', 'processing', 'sent', 'failed', 'deferred', 'cancelled')),
     attempts INT NOT NULL DEFAULT 0,
@@ -30,25 +30,22 @@ CREATE TABLE IF NOT EXISTS email_queue (
     last_error TEXT,
     next_retry_at TIMESTAMPTZ,
     
-    -- Timestamps
+-- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     sent_at TIMESTAMPTZ,
     
-    -- Sales automation integration
+-- Sales automation integration
     tenant_id UUID,
     campaign_id UUID,
     sequence_id UUID,
     contact_id UUID,
     
-    -- Priority and metadata
+-- Priority and metadata
     priority INT NOT NULL DEFAULT 0,
     tags TEXT[] DEFAULT '{}',
     metadata JSONB DEFAULT '{}'::jsonb
-) PARTITION BY RANGE (created_at);
-
-CREATE TABLE IF NOT EXISTS email_queue_default
-    PARTITION OF email_queue DEFAULT;
+);
 
 -- Indexes for email queue
 CREATE INDEX IF NOT EXISTS idx_email_queue_status_retry 
@@ -77,14 +74,14 @@ CREATE TABLE IF NOT EXISTS mail_accounts (
     password_hash TEXT NOT NULL,
     display_name TEXT,
     
-    -- Quota management
+-- Quota management
     quota_bytes BIGINT NOT NULL DEFAULT 1073741824, -- 1GB default
     used_bytes BIGINT NOT NULL DEFAULT 0,
     
-    -- Status
+-- Status
     is_active BOOLEAN NOT NULL DEFAULT true,
     
-    -- Timestamps
+-- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -102,15 +99,15 @@ CREATE TABLE IF NOT EXISTS mail_mailboxes (
     name TEXT NOT NULL,
     parent_id UUID REFERENCES mail_mailboxes(id) ON DELETE CASCADE,
     
-    -- Mailbox type
+-- Mailbox type
     mailbox_type TEXT NOT NULL DEFAULT 'custom'
         CHECK (mailbox_type IN ('inbox', 'sent', 'drafts', 'trash', 'spam', 'archive', 'custom')),
     
-    -- Message counts (cached for performance)
+-- Message counts (cached for performance)
     total_messages BIGINT NOT NULL DEFAULT 0,
     unread_messages BIGINT NOT NULL DEFAULT 0,
     
-    -- Timestamps
+-- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -131,10 +128,10 @@ CREATE TABLE IF NOT EXISTS mail_messages (
     account_id UUID NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
     mailbox_id UUID NOT NULL REFERENCES mail_mailboxes(id) ON DELETE CASCADE,
     
-    -- Message identifiers
+-- Message identifiers
     message_id TEXT NOT NULL, -- RFC 5322 Message-ID
     
-    -- Envelope
+-- Envelope
     from_address TEXT NOT NULL CHECK (
         char_length(from_address) <= 320 AND from_address ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$'
     ),
@@ -145,23 +142,23 @@ CREATE TABLE IF NOT EXISTS mail_messages (
     subject TEXT NOT NULL,
     date TIMESTAMPTZ NOT NULL,
     
-    -- Content
+-- Content
     text_body TEXT,
     html_body TEXT,
     raw_size BIGINT NOT NULL DEFAULT 0,
     
-    -- Flags
+-- Flags
     is_read BOOLEAN NOT NULL DEFAULT false,
     is_starred BOOLEAN NOT NULL DEFAULT false,
     is_deleted BOOLEAN NOT NULL DEFAULT false,
     is_spam BOOLEAN NOT NULL DEFAULT false,
     labels TEXT[] DEFAULT '{}',
     
-    -- Headers and attachments
+-- Headers and attachments
     headers JSONB DEFAULT '{}'::jsonb,
     attachments JSONB DEFAULT '[]'::jsonb,
     
-    -- Timestamps
+-- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -195,21 +192,18 @@ CREATE TABLE IF NOT EXISTS email_delivery_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email_id UUID NOT NULL REFERENCES email_queue(id) ON DELETE CASCADE,
     
-    -- Delivery attempt info
+-- Delivery attempt info
     attempt_number INT NOT NULL,
     mx_host TEXT,
     smtp_response TEXT,
     
-    -- Status
+-- Status
     success BOOLEAN NOT NULL,
     error_message TEXT,
     
-    -- Timestamps
+-- Timestamps
     attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-) PARTITION BY RANGE (attempted_at);
-
-CREATE TABLE IF NOT EXISTS email_delivery_log_default
-    PARTITION OF email_delivery_log DEFAULT;
+);
 
 CREATE INDEX IF NOT EXISTS idx_email_delivery_log_email 
     ON email_delivery_log(email_id, attempted_at DESC);
@@ -225,14 +219,14 @@ CREATE TABLE IF NOT EXISTS dkim_keys (
     private_key_encrypted BYTEA NOT NULL,
     public_key_pem TEXT NOT NULL,
     
-    -- Status
+-- Status
     is_active BOOLEAN NOT NULL DEFAULT true,
     
-    -- Timestamps
+-- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     rotated_at TIMESTAMPTZ,
     
-    -- Unique constraint
+-- Unique constraint
     UNIQUE(domain, selector)
 );
 

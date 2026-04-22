@@ -57,7 +57,7 @@ impl OnboardingService {
         Self
     }
 
-    /// Generate a quickstart guide for the requested language.
+/// Generate a quickstart guide for the requested language.
     pub fn create_quickstart(&self, language: &str) -> QuickstartGuide {
         let (install_cmd, send_code) = match language {
             "node" | "typescript" | "javascript" => (
@@ -122,7 +122,7 @@ $apexmail->emails->send([
 ]);"#,
             ),
             "java" => (
-                "<!-- Maven -->\n<dependency>\n  <groupId>ee.apexmail</groupId>\n  <artifactId>apexmail-java</artifactId>\n  <version>1.3.0</version>\n</dependency>",
+                "<! -- Maven -->\n<dependency>\n <groupId>ee.apexmail</groupId>\n <artifactId>apexmail-java</artifactId>\n <version>1.3.0</version>\n</dependency>",
                 r#"ApexMailClient client = ApexMailClient.create("am_live_...");
 
 client.emails().send(SendEmailParams.builder()
@@ -134,7 +134,7 @@ client.emails().send(SendEmailParams.builder()
             ),
             _ => (
                 "# See https://docs.apexmail.ee/sdks for install instructions",
-                "// See https://docs.apexmail.ee/quickstart",
+                " // See https://docs.apexmail.ee/quickstart",
             ),
         };
 
@@ -171,7 +171,7 @@ client.emails().send(SendEmailParams.builder()
         }
     }
 
-    /// Get the default onboarding checklist for a tenant.
+/// Get the default onboarding checklist for a tenant.
     pub fn get_checklist(&self, tenant_id: &str) -> OnboardingChecklist {
         let items = vec![
             ChecklistItem {
@@ -234,7 +234,7 @@ client.emails().send(SendEmailParams.builder()
         }
     }
 
-    /// Mark a checklist step as complete (returns updated checklist).
+/// Mark a checklist step as complete (returns updated checklist).
     pub fn mark_step_complete(
         &self,
         checklist: &mut OnboardingChecklist,
@@ -247,14 +247,14 @@ client.emails().send(SendEmailParams.builder()
                 found = true;
             }
         }
-        // Recalculate progress.
+// Recalculate progress.
         let total = checklist.items.len() as f32;
         let done = checklist.items.iter().filter(|i| i.completed).count() as f32;
         checklist.progress_pct = if total > 0.0 { (done / total) * 100.0 } else { 0.0 };
         found
     }
 
-    /// Generate a short API key management guide.
+/// Generate a short API key management guide.
     pub fn generate_api_key_guide(&self) -> String {
         let guide = r#"# ApexMail API Key Guide
 
@@ -316,7 +316,7 @@ mod tests {
         let cl = svc.get_checklist("tenant_123");
         assert_eq!(cl.tenant_id, "tenant_123");
         assert_eq!(cl.items.len(), 6);
-        // Only "create_account" is pre-completed.
+// Only "create_account" is pre-completed.
         assert!((cl.progress_pct - (1.0 / 6.0) * 100.0).abs() < 0.1);
     }
 
@@ -326,9 +326,9 @@ mod tests {
         let mut cl = svc.get_checklist("t1");
         assert!(svc.mark_step_complete(&mut cl, "generate_api_key"));
         assert!(cl.items.iter().find(|i| i.id == "generate_api_key").unwrap().completed);
-        // Progress should increase.
+// Progress should increase.
         assert!((cl.progress_pct - (2.0 / 6.0) * 100.0).abs() < 0.1);
-        // Unknown step returns false.
+// Unknown step returns false.
         assert!(!svc.mark_step_complete(&mut cl, "nonexistent"));
     }
 }

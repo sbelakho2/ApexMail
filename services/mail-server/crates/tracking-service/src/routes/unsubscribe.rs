@@ -1,12 +1,10 @@
 //! Unsubscribe and preferences-center handlers.
 //!
-//! Unsubscribe endpoints:
-//!   POST `{unsub_path}/:token`  — RFC 8058 one-click (List-Unsubscribe-Post)
-//!   GET  `{unsub_path}/:token`  — Manual (shows confirmation / success page)
+//! Unsubscribe endpoints://! POST `{unsub_path}/:token` — RFC 8058 one-click (List-Unsubscribe-Post)
+//! GET `{unsub_path}/:token` — Manual (shows confirmation / success page)
 //!
-//! Preferences endpoints:
-//!   GET  `{prefs_path}/:token`  — Show preferences form
-//!   POST `{prefs_path}/:token`  — Save preferences
+//! Preferences endpoints://! GET `{prefs_path}/:token` — Show preferences form
+//! POST `{prefs_path}/:token` — Save preferences
 
 use std::net::SocketAddr;
 
@@ -45,7 +43,7 @@ pub async fn handle_unsub_post(
             .unwrap_or_default();
     }
 
-    // F-210: trim trailing CRLF / whitespace
+// F-210:trim trailing CRLF / whitespace
     let body = body.trim().to_owned();
 
     let ua = headers.get("user-agent").and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -97,7 +95,7 @@ pub async fn handle_unsub_post(
             .unwrap_or_default();
     }
 
-    // Fire-and-forget webhook queue (F-215)
+// Fire-and-forget webhook queue (F-215)
     queue_unsub_webhook_async(&state, &data.tenant_id, &data.recipient, "one-click");
 
     axum::http::Response::builder()
@@ -188,7 +186,6 @@ pub async fn handle_prefs_get(
     let email_lc = data.recipient.to_lowercase();
     let prefs_path = &state.config.tracking.preferences_path;
 
-    // FIX-077: parallel DB queries
     let (prefs_res, cats_res, sup_res) = match tokio::try_join!(
         sqlx::query_as::<_, (String, bool)>(
             "SELECT category, subscribed FROM subscription_preferences WHERE tenant_id=$1 AND email=$2"
@@ -217,7 +214,7 @@ pub async fn handle_prefs_get(
 
     let pref_map: std::collections::HashMap<String, bool> = prefs_res.into_iter().collect();
 
-    // Collect into owned strings first, then build Category slices from those.
+// Collect into owned strings first, then build Category slices from those.
     let cat_rows: Vec<(String, String)> = cats_res;
     let cats: Vec<OwnedCategory> = cat_rows
         .into_iter()
@@ -288,7 +285,7 @@ pub async fn handle_prefs_post(
     let email = data.recipient.to_lowercase();
     let prefs_path = &state.config.tracking.preferences_path;
 
-    // Global unsubscribe
+// Global unsubscribe
     if form.unsubscribe_all.as_deref() == Some("true") {
         let sup_id = new_id("sup");
         if let Err(e) = sqlx::query(r#"
@@ -311,7 +308,7 @@ pub async fn handle_prefs_post(
         return Redirect::to(&redirect_url).into_response();
     }
 
-    // Resubscribe
+// Resubscribe
     if form.resubscribe_all.as_deref() == Some("true") {
         if let Err(e) = sqlx::query(
             "DELETE FROM suppressions WHERE tenant_id=$1 AND email=$2 AND reason='unsubscribe'"
@@ -330,7 +327,7 @@ pub async fn handle_prefs_post(
         return Redirect::to(&redirect_url).into_response();
     }
 
-    // Update category preferences (B-033: single multi-row INSERT)
+// Update category preferences (B-033:single multi-row INSERT)
     let cats: Vec<(String, bool)> = form
         .categories
         .iter()
@@ -339,7 +336,7 @@ pub async fn handle_prefs_post(
         .collect();
 
     if !cats.is_empty() {
-        // #203: Use batch INSERT via sqlx::QueryBuilder instead of N individual INSERTs
+// #203:Use batch INSERT via sqlx::QueryBuilder instead of N individual INSERTs
         let mut tx = match state.db.begin().await {
             Ok(tx) => tx,
             Err(e) => {
@@ -352,7 +349,7 @@ pub async fn handle_prefs_post(
             }
         };
 
-        // Batch UPSERT all category preferences in a single statement
+// Batch UPSERT all category preferences in a single statement
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at) "
         );
@@ -370,7 +367,7 @@ pub async fn handle_prefs_post(
 
         if let Err(e) = builder.build().execute(&mut *tx).await {
             error!(error = %e, "Failed to batch update subscription preferences");
-            // tx will be rolled back on drop
+// tx will be rolled back on drop
             return axum::http::Response::builder()
                 .status(500)
                 .header("content-type", "application/json")
@@ -408,7 +405,7 @@ async fn find_latest_message_id(state: &AppState, tenant_id: &str, recipient: &s
 }
 
 /// Queue unsubscribe webhooks for all enabled webhook subscriptions of the tenant.
-/// Fire-and-forget: errors are logged but not propagated (F-215).
+/// Fire-and-forget:errors are logged but not propagated (F-215).
 fn queue_unsub_webhook_async(state: &AppState, tenant_id: &str, email: &str, method: &str) {
     let state = state.clone();
     let tenant_id = tenant_id.to_owned();
@@ -428,7 +425,7 @@ async fn queue_unsub_webhook(
     email: &str,
     method: &str,
 ) -> anyhow::Result<()> {
-    // Cache webhook IDs per tenant (1-minute TTL, like TypeScript)
+// Cache webhook IDs per tenant (1-minute TTL, like TypeScript)
     let webhook_ids = if let Some(ids) = state.webhook_cache.get(tenant_id).await {
         ids
     } else {
@@ -449,7 +446,7 @@ async fn queue_unsub_webhook(
         return Ok(());
     }
 
-    // Batch INSERT all webhook jobs (F-216)
+// Batch INSERT all webhook jobs (F-216)
     let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "INSERT INTO webhook_queue (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) "
     );
@@ -470,7 +467,7 @@ async fn queue_unsub_webhook(
             .push_bind(&payload_str)
             .push_bind("pending")
             .push_bind(1i32)
-            .push_unseparated(", NOW()");  // #179: comma must precede NOW()
+            .push_unseparated(", NOW()"); // #179:comma must precede NOW
     });
     builder.build().execute(&state.db).await?;
     Ok(())

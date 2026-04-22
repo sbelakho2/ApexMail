@@ -12,7 +12,7 @@ pub struct EmbeddingVector {
     pub vector: Vec<f32>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
-    /// Access timestamp for LRU eviction
+/// Access timestamp for LRU eviction
     pub last_accessed: DateTime<Utc>,
 }
 

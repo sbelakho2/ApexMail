@@ -1,6 +1,6 @@
 //! Auth telemetry endpoint.
 //!
-//! Migrated from: apps/web/src/app/api/auth/telemetry/route.ts
+//! Migrated from:apps/web/src/app/api/auth/telemetry/route.ts
 //! Receives client-side auth telemetry events for observability.
 
 use axum::routing::post;
@@ -37,7 +37,7 @@ pub struct TelemetryResponse {
 async fn auth_telemetry(
     body: Result<Json<TelemetryPayload>, axum::extract::rejection::JsonRejection>,
 ) -> Json<TelemetryResponse> {
-    // Telemetry endpoint is non-blocking: never fail
+// Telemetry endpoint is non-blocking:never fail
     match body {
         Ok(Json(payload)) => {
             let reason = sanitize_log_string(payload.reason.as_deref(), "unknown", 64);
@@ -54,7 +54,7 @@ async fn auth_telemetry(
             );
         }
         Err(_) => {
-            // Non-blocking: silently ignore parse errors
+// Non-blocking:silently ignore parse errors
         }
     }
 

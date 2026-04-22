@@ -21,21 +21,21 @@ pub struct MessageStorage {
 }
 
 impl MessageStorage {
-    /// Create a new message storage instance
+/// Create a new message storage instance
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
     
-    /// Initialize database tables
+/// Initialize database tables
     pub async fn initialize(&self) -> Result<()> {
         MIGRATOR.run(&self.pool).await?;
         info!("Mailstore tables initialized");
         Ok(())
     }
     
-    // ========== Account Operations ==========
+// ========== Account Operations ==========
     
-    /// Create a new account
+/// Create a new account
     pub async fn create_account(&self, email: &str, password_hash: &str, display_name: Option<&str>) -> Result<Account> {
         let domain = email.split('@').nth(1)
             .ok_or_else(|| anyhow!("Invalid email address"))?;
@@ -68,14 +68,14 @@ impl MessageStorage {
             updated_at: row.get("updated_at"),
         };
         
-        // Create default mailboxes
+// Create default mailboxes
         self.create_default_mailboxes(&account.id).await?;
         
         info!(account_id = %account.id, email = %mail_common::pii::redact_email(&email), "Account created");
         Ok(account)
     }
     
-    /// Get account by email
+/// Get account by email
     pub async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_accounts WHERE email = $1 AND is_active = true",
@@ -99,7 +99,7 @@ impl MessageStorage {
         }))
     }
     
-    /// Get account by ID
+/// Get account by ID
     pub async fn get_account(&self, account_id: &Uuid) -> Result<Option<Account>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_accounts WHERE id = $1",
@@ -123,9 +123,9 @@ impl MessageStorage {
         }))
     }
     
-    // ========== Mailbox Operations ==========
+// ========== Mailbox Operations ==========
     
-    /// Create default mailboxes for an account
+/// Create default mailboxes for an account
     async fn create_default_mailboxes(&self, account_id: &Uuid) -> Result<()> {
         let defaults = [
             ("Inbox", "inbox"),
@@ -152,7 +152,7 @@ impl MessageStorage {
         Ok(())
     }
     
-    /// List mailboxes for an account
+/// List mailboxes for an account
     pub async fn list_mailboxes(&self, account_id: &Uuid) -> Result<Vec<Mailbox>> {
         let rows = sqlx::query(&format!(
             "SELECT {} FROM mail_mailboxes WHERE account_id = $1 ORDER BY name",
@@ -186,7 +186,7 @@ impl MessageStorage {
         Ok(mailboxes)
     }
 
-    /// Get a mailbox by name (case-insensitive)
+/// Get a mailbox by name (case-insensitive)
     pub async fn get_mailbox_by_name(&self, account_id: &Uuid, name: &str) -> Result<Option<Mailbox>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_mailboxes WHERE account_id = $1 AND lower(name) = lower($2)",
@@ -219,7 +219,7 @@ impl MessageStorage {
         }))
     }
 
-    /// Create a new mailbox for an account
+/// Create a new mailbox for an account
     pub async fn create_mailbox(
         &self,
         account_id: &Uuid,
@@ -281,7 +281,7 @@ impl MessageStorage {
         })
     }
 
-    /// Delete a mailbox (custom mailboxes only)
+/// Delete a mailbox (custom mailboxes only)
     pub async fn delete_mailbox(&self, account_id: &Uuid, name: &str) -> Result<bool> {
         let mailbox = match self.get_mailbox_by_name(account_id, name).await? {
             Some(m) => m,
@@ -301,7 +301,7 @@ impl MessageStorage {
         Ok(rows > 0)
     }
     
-    /// Get mailbox by type
+/// Get mailbox by type
     pub async fn get_mailbox_by_type(&self, account_id: &Uuid, mailbox_type: MailboxType) -> Result<Option<Mailbox>> {
         let type_str = match mailbox_type {
             MailboxType::Inbox => "inbox",
@@ -336,9 +336,9 @@ impl MessageStorage {
         }))
     }
     
-    // ========== Message Operations ==========
+// ========== Message Operations ==========
     
-    /// Store a new message
+/// Store a new message
     pub async fn store_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
         let mut tx = self.pool.begin().await?;
 
@@ -415,7 +415,7 @@ impl MessageStorage {
         Ok((id, uid))
     }
     
-    /// Get a message by ID
+/// Get a message by ID
     pub async fn get_message(&self, message_id: &Uuid) -> Result<Option<StoredMessage>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_messages WHERE id = $1",
@@ -431,7 +431,7 @@ impl MessageStorage {
         }
     }
 
-    /// Get a message by mailbox UID
+/// Get a message by mailbox UID
     pub async fn get_message_by_uid(
         &self,
         account_id: &Uuid,
@@ -454,7 +454,7 @@ impl MessageStorage {
         }
     }
     
-    /// List messages
+/// List messages
     pub async fn list_messages(&self, query: &MessageQuery) -> Result<Vec<StoredMessage>> {
         let mut sql = format!(
             "SELECT {} FROM mail_messages WHERE account_id = $1",
@@ -510,7 +510,7 @@ impl MessageStorage {
             .collect()
     }
 
-    /// Search messages using full-text query.
+/// Search messages using full-text query.
     pub async fn search_messages(
         &self,
         account_id: &Uuid,
@@ -559,7 +559,7 @@ impl MessageStorage {
         Ok((messages, total))
     }
 
-    /// Fetch message flags for a set of UIDs.
+/// Fetch message flags for a set of UIDs.
     pub async fn get_message_flags_by_uids(
         &self,
         account_id: &Uuid,
@@ -598,7 +598,7 @@ impl MessageStorage {
         Ok(map)
     }
 
-    /// Update message flags by UID.
+/// Update message flags by UID.
     pub async fn update_message_flags_by_uid(
         &self,
         account_id: &Uuid,
@@ -624,7 +624,7 @@ impl MessageStorage {
         Ok(result.rows_affected())
     }
 
-    /// Fetch full messages by UID.
+/// Fetch full messages by UID.
     pub async fn get_messages_by_uids(
         &self,
         account_id: &Uuid,
@@ -648,7 +648,7 @@ impl MessageStorage {
         rows.iter().map(|r| self.row_to_message(r)).collect()
     }
     
-    /// Update message flags
+/// Update message flags
     pub async fn update_message_flags(&self, message_id: &Uuid, flags: &MessageFlags) -> Result<()> {
         sqlx::query(r#"
             UPDATE mail_messages
@@ -666,7 +666,7 @@ impl MessageStorage {
         Ok(())
     }
     
-    /// Move message to another mailbox
+/// Move message to another mailbox
     pub async fn move_message(&self, message_id: &Uuid, target_mailbox_id: &Uuid) -> Result<i64> {
         let mut tx = self.pool.begin().await?;
 
@@ -715,7 +715,7 @@ impl MessageStorage {
         Ok(new_uid)
     }
     
-    /// Delete a message permanently
+/// Delete a message permanently
     pub async fn delete_message(&self, message_id: &Uuid) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
@@ -743,7 +743,7 @@ impl MessageStorage {
         Ok(())
     }
 
-    /// Expunge deleted messages in a mailbox, returning the deleted UIDs.
+/// Expunge deleted messages in a mailbox, returning the deleted UIDs.
     pub async fn expunge_deleted_messages(
         &self,
         account_id: &Uuid,
@@ -780,12 +780,12 @@ impl MessageStorage {
         Ok(uids)
     }
 
-    /// Refresh mailbox counts for a mailbox.
+/// Refresh mailbox counts for a mailbox.
     pub async fn refresh_mailbox_counts(&self, mailbox_id: &Uuid) -> Result<()> {
         self.update_mailbox_counts(mailbox_id).await
     }
 
-    /// Return quota information for an account.
+/// Return quota information for an account.
     pub async fn get_account_quota(&self, account_id: &Uuid) -> Result<(i64, i64, i64)> {
         let row = sqlx::query(r#"
             SELECT used_bytes, quota_bytes FROM mail_accounts WHERE id = $1
@@ -807,7 +807,7 @@ impl MessageStorage {
         Ok((used_bytes, quota_bytes, used_messages))
     }
     
-    // ========== Helper Methods ==========
+// ========== Helper Methods ==========
     
     fn row_to_message(&self, row: &sqlx::postgres::PgRow) -> Result<StoredMessage> {
         Ok(StoredMessage {

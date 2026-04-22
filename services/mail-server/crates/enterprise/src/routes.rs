@@ -373,15 +373,14 @@ pub struct QBRGoalUpdateBody {
 // ── Router ─────────────────────────────────────────────────────────────
 
 /// Create the enterprise API router.
-///
 /// # Security Note (#249)
 /// This router must be wrapped with authentication middleware before deployment.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        // Health (unauthenticated)
+// Health (unauthenticated)
         .route("/health", get(health_check))
         .route("/readiness", get(readiness_check))
-        // SSO
+// SSO
         .route("/sso/configure", post(sso_configure))
         .route("/sso/config/:tenant_id", get(sso_get_config))
         .route("/sso/config/domain/:domain", get(sso_get_config_by_domain))
@@ -389,7 +388,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sso/login/oidc/:domain", get(sso_oidc_login))
         .route("/sso/validate", get(sso_validate_session))
         .route("/sso/cleanup", post(sso_cleanup_sessions))
-        // Compliance
+// Compliance
         .route("/compliance/enable", post(compliance_enable))
         .route("/compliance/config/:tenant_id", get(compliance_get_config))
         .route("/compliance/baa", post(compliance_sign_baa))
@@ -401,11 +400,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/compliance/data-deletion", post(compliance_data_deletion))
         .route("/compliance/report/:tenant_id", get(compliance_report))
         .route("/compliance/status/:tenant_id", get(compliance_status))
-        // Encryption (HIPAA field-level encryption management)
+// Encryption (HIPAA field-level encryption management)
         .route("/compliance/encryption/status/:tenant_id", get(encryption_status))
         .route("/compliance/encryption/encrypt-field", post(encrypt_field))
         .route("/compliance/encryption/decrypt-field", post(decrypt_field))
-        // Log Streaming
+// Log Streaming
         .route("/log-streams", post(log_stream_create))
         .route("/log-streams/:id", get(log_stream_get))
         .route("/log-streams/:id", put(log_stream_update))
@@ -415,7 +414,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/log-streams/:id/resume", post(log_stream_resume))
         .route("/log-streams/:id/verify", post(log_stream_verify))
         .route("/log-streams/:id/stats", get(log_stream_stats))
-        // Private Deploy
+// Private Deploy
         .route("/deployments", post(deploy_create))
         .route("/deployments/:id", get(deploy_get))
         .route("/deployments/tenant/:tenant_id", get(deploy_list))
@@ -427,7 +426,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ips/reputation/:ip_address", get(ip_reputation))
         .route("/ips/byoip", post(byoip_register))
         .route("/ips/byoip/:id/verify", post(byoip_verify))
-        // Sub-accounts
+// Sub-accounts
         .route("/sub-accounts", post(sub_account_create))
         .route("/sub-accounts/:id", get(sub_account_get))
         .route("/sub-accounts/:id", put(sub_account_update))
@@ -436,7 +435,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sub-accounts/:id/suspend", post(sub_account_suspend))
         .route("/sub-accounts/stats/:parent_id", get(sub_account_stats))
         .route("/sub-accounts/:id/api-keys", post(sub_account_api_key))
-        // Support
+// Support
         .route("/support/tickets", post(ticket_create))
         .route("/support/tickets/:id", get(ticket_get))
         .route("/support/tickets/:id", put(ticket_update))
@@ -446,7 +445,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/support/tickets/:id/escalate", post(ticket_escalate))
         .route("/support/tickets/:id/satisfaction", post(ticket_satisfaction))
         .route("/support/metrics/:tenant_id", get(support_metrics))
-        // Templates
+// Templates
         .route("/templates/submit", post(template_submit))
         .route("/templates/:id", get(template_get))
         .route("/templates/tenant/:tenant_id", get(template_list))
@@ -454,7 +453,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/templates/:id/reject", post(template_reject))
         .route("/templates/:id/request-changes", post(template_request_changes))
         .route("/templates/stats/:tenant_id", get(template_stats))
-        // Whitelabel
+// Whitelabel
         .route("/whitelabel/config", put(whitelabel_update_config))
         .route("/whitelabel/config/:tenant_id", get(whitelabel_get_config))
         .route("/whitelabel/domains", post(whitelabel_add_domain))
@@ -463,7 +462,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/whitelabel/domains/:tenant_id/:id", delete(whitelabel_remove_domain))
         .route("/whitelabel/email-templates", put(whitelabel_update_templates))
         .route("/whitelabel/email-templates/:tenant_id", get(whitelabel_get_templates))
-        // QBR
+// QBR
         .route("/qbr", post(qbr_schedule))
         .route("/qbr/:id", get(qbr_get))
         .route("/qbr/tenant/:tenant_id", get(qbr_list))
@@ -472,7 +471,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/qbr/:id/feedback", post(qbr_feedback))
         .route("/qbr/:id/goals", put(qbr_update_goal))
         .route("/qbr/benchmarks", get(qbr_benchmarks))
-        // PDF generation (via pdf-renderer service)
+// PDF generation (via pdf-renderer service)
         .route("/dpa/:tenant_id/pdf", post(dpa_generate_pdf))
         .route("/qbr/:id/pdf", get(qbr_generate_pdf))
         .route("/compliance/report/:tenant_id/pdf", get(compliance_report_pdf))
@@ -560,18 +559,18 @@ async fn sso_oidc_login(State(state): State<S>, Path(domain): Path<String>) -> i
 
 #[derive(Deserialize)]
 pub struct SessionQuery { 
-    /// Deprecated: Use Authorization header instead
+/// Deprecated:Use Authorization header instead
     pub token: Option<String> 
 }
 
 /// Validate an SSO session
-/// #251: Now accepts token from Authorization header (preferred) or query param (deprecated)
+/// #251:Now accepts token from Authorization header (preferred) or query param (deprecated)
 async fn sso_validate_session(
     State(state): State<S>,
     headers: axum::http::HeaderMap,
     Query(q): Query<SessionQuery>
 ) -> impl IntoResponse {
-    // #251: Prefer token from Authorization header to avoid URL logging/Referer leaks
+// #251:Prefer token from Authorization header to avoid URL logging/Referer leaks
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -584,7 +583,7 @@ async fn sso_validate_session(
         None => return err_json(StatusCode::BAD_REQUEST, "Missing token in Authorization header or query parameter"),
     };
     
-    // Log warning if using deprecated query parameter
+// Log warning if using deprecated query parameter
     if headers.get(axum::http::header::AUTHORIZATION).is_none() {
         tracing::warn!("SSO session validation using deprecated query parameter - use Authorization header");
     }
@@ -670,7 +669,7 @@ async fn encryption_status(
     State(state): State<S>,
     Path(tenant_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Check if HIPAA compliance is configured with encryption_at_rest
+// Check if HIPAA compliance is configured with encryption_at_rest
     let config = match state.compliance.get_config(tenant_id).await {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
@@ -699,18 +698,16 @@ struct EncryptFieldBody {
 }
 
 /// Encrypt a single field value (for testing/migration tooling).
-///
 /// In production, encryption happens transparently at the data access layer.
-/// This endpoint exists for:
-///   - Verifying encryption is working correctly after setup.
-///   - Batch migration of existing unencrypted PHI data.
+/// This endpoint exists for:/// - Verifying encryption is working correctly after setup.
+/// - Batch migration of existing unencrypted PHI data.
 async fn encrypt_field(
     State(_state): State<S>,
     Json(body): Json<EncryptFieldBody>,
 ) -> impl IntoResponse {
-    // In a real deployment, the KEK would be loaded from a secure key store
-    // (AWS KMS, HashiCorp Vault, etc.) keyed by tenant_id.  For now, we
-    // demonstrate the encryption API works with a test key.
+// In a real deployment, the KEK would be loaded from a secure key store
+// (AWS KMS, HashiCorp Vault, etc.) keyed by tenant_id. For now, we
+// demonstrate the encryption API works with a test key.
     let kek = crate::field_encryption::Kek::generate();
     let kek_id_hex = hex::encode(kek.id);
     let kek_hex = hex::encode(&kek.key_bytes());
@@ -740,9 +737,9 @@ struct DecryptFieldBody {
     #[allow(unused)]
     pub field_name: String,
     pub value: String,
-    /// Hex-encoded KEK ID (required for decryption).
+/// Hex-encoded KEK ID (required for decryption).
     kek_id_hex: String,
-    /// Hex-encoded KEK (required for decryption). In production, this would come from a key store.
+/// Hex-encoded KEK (required for decryption). In production, this would come from a key store.
     kek_hex: String,
 }
 
@@ -1038,7 +1035,7 @@ async fn whitelabel_remove_domain(
     State(state): State<S>,
     Path((tenant_id, id)): Path<(Uuid, Uuid)>
 ) -> impl IntoResponse {
-    // #250: Now requires tenant_id for ownership verification
+// #250:Now requires tenant_id for ownership verification
     service_result(state.whitelabel.remove_domain(id, tenant_id).await)
 }
 
@@ -1103,7 +1100,7 @@ async fn dpa_generate_pdf(
     Path(tenant_id): Path<Uuid>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Fetch compliance config for this tenant
+// Fetch compliance config for this tenant
     let status = match state.compliance.get_status(tenant_id).await {
         Ok(s) => s,
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get compliance status: {e}"))),
@@ -1161,7 +1158,7 @@ async fn dpa_generate_pdf(
 
 /// GET /qbr/:id/pdf — Generate a QBR PDF for the given report
 async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    // Fetch the QBR data
+// Fetch the QBR data
     let qbr = match state.qbr.get(id).await {
         Ok(q) => q,
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get QBR: {e}"))),
@@ -1211,7 +1208,7 @@ async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl 
 
 /// GET /compliance/report/:tenant_id/pdf — Generate a compliance report PDF
 async fn compliance_report_pdf(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
-    // Fetch compliance report and status
+// Fetch compliance report and status
     let report = match state.compliance.generate_report(tenant_id).await {
         Ok(r) => r,
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate report: {e}"))),

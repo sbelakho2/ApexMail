@@ -122,7 +122,6 @@ async fn list_campaigns(
     )
     .bind(&auth.tenant_id)
     .bind(clamp_limit(params.limit, 100))
-    // Fix #58: Clamp offset to valid range.
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
@@ -165,7 +164,6 @@ async fn resume_campaign(
     Path(id): Path<String>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
-    // Fix #51: Validate current state before resume - only paused/draft can be resumed.
     update_campaign_status_validated(&state, &auth.tenant_id, id, "sending", &["paused", "draft"]).await
 }
 
@@ -175,11 +173,9 @@ async fn pause_campaign(
     Path(id): Path<String>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
-    // Fix #51: Validate current state before pause - only sending/scheduled can be paused.
     update_campaign_status_validated(&state, &auth.tenant_id, id, "paused", &["sending", "scheduled"]).await
 }
 
-/// Fix #51: Update campaign status with validation of current state.
 async fn update_campaign_status_validated(
     state: &AppState,
     tenant_id: &str,
@@ -187,7 +183,7 @@ async fn update_campaign_status_validated(
     new_status: &str,
     valid_current_states: &[&str],
 ) -> Result<Json<CampaignResponse>, ApiError> {
-    // Fetch current campaign to validate state transition.
+// Fetch current campaign to validate state transition.
     let current = fetch_campaign(state, tenant_id, id.clone()).await?;
     
     if !valid_current_states.contains(&current.status.as_str()) {
@@ -265,40 +261,40 @@ async fn resend_campaign(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
 
-    // Verify campaign exists and belongs to tenant, and is in a resendable state
-    let campaign = sqlx::query!(
-        "SELECT id, status FROM campaigns WHERE id = $1 AND tenant_id = $2",
-        id,
-        auth.tenant_id.to_string(),
+// Verify campaign exists and belongs to tenant, and is in a resendable state
+    let campaign_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM campaigns WHERE id = $1 AND tenant_id = $2",
     )
+    .bind(id)
+    .bind(auth.tenant_id.to_string())
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("campaign not found".into()))?;
 
-    if campaign.status != "sent" && campaign.status != "partial" {
+    if campaign_status != "sent" && campaign_status != "partial" {
         return Err(ApiError::BadRequest(format!(
             "Campaign status '{}' is not resendable. Must be 'sent' or 'partial'.",
-            campaign.status
+            campaign_status
         )));
     }
 
-    // Create a new send job for failed/unsent recipients
+// Create a new send job for failed/unsent recipients
     let new_id = Uuid::new_v4();
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO campaign_jobs (id, campaign_id, tenant_id, status, created_at)
          VALUES ($1, $2, $3, 'queued', NOW())",
-        new_id,
-        id,
-        auth.tenant_id.to_string(),
     )
+    .bind(new_id)
+    .bind(id)
+    .bind(auth.tenant_id.to_string())
     .execute(&state.db)
     .await?;
 
-    // Update campaign status
-    sqlx::query!(
+// Update campaign status
+    sqlx::query(
         "UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1",
-        id,
     )
+    .bind(id)
     .execute(&state.db)
     .await?;
 
@@ -326,7 +322,7 @@ mod tests {
     #[test]
     fn test_campaign_response_serialisation() {
         let resp = CampaignResponse {
-            id: String::nil(),
+            id: String::new(),
             name: "Test".into(),
             subject: "Sub".into(),
             template_id: None,

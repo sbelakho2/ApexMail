@@ -5,7 +5,7 @@ use crate::rules::{Rule, RuleCategory, RuleSet, Severity};
 /// Build a rule set for common spam phrase detection.
 pub fn spam_rules() -> RuleSet {
     let rules = vec![
-        // Urgency / scarcity tactics
+// Urgency / scarcity tactics
         Rule::new("act now", "spam:urgency:act_now", RuleCategory::Spam, Severity::Medium, 3),
         Rule::new("limited time offer", "spam:urgency:limited_time", RuleCategory::Spam, Severity::Medium, 4),
         Rule::new("don't miss out", "spam:urgency:fomo", RuleCategory::Spam, Severity::Low, 2),
@@ -13,7 +13,7 @@ pub fn spam_rules() -> RuleSet {
         Rule::new("last chance", "spam:urgency:last_chance", RuleCategory::Spam, Severity::Medium, 3),
         Rule::new("hurry up", "spam:urgency:hurry", RuleCategory::Spam, Severity::Medium, 3),
         Rule::new("while supplies last", "spam:urgency:supplies", RuleCategory::Spam, Severity::Medium, 3),
-        // Financial spam
+// Financial spam
         Rule::new("you have been selected", "spam:financial:selected", RuleCategory::Spam, Severity::High, 6),
         Rule::new("claim your prize", "spam:financial:prize", RuleCategory::Spam, Severity::High, 7),
         Rule::new("congratulations you won", "spam:financial:won", RuleCategory::Spam, Severity::High, 7),
@@ -23,11 +23,11 @@ pub fn spam_rules() -> RuleSet {
         Rule::new("risk-free investment", "spam:financial:investment", RuleCategory::Spam, Severity::High, 7),
         Rule::new("no credit check", "spam:financial:credit", RuleCategory::Spam, Severity::Medium, 4),
         Rule::new("100% free", "spam:financial:free100", RuleCategory::Spam, Severity::Medium, 3),
-        // Pharmaceutical spam
+// Pharmaceutical spam
         Rule::new("buy cheap", "spam:pharma:cheap", RuleCategory::Spam, Severity::Medium, 4),
         Rule::new("order now", "spam:pharma:order", RuleCategory::Spam, Severity::Low, 2),
         Rule::new("no prescription", "spam:pharma:no_rx", RuleCategory::Spam, Severity::High, 6),
-        // Phishing indicators
+// Phishing indicators
         Rule::new("verify your account", "phishing:verify_account", RuleCategory::Phishing, Severity::High, 7),
         Rule::new("confirm your identity", "phishing:confirm_identity", RuleCategory::Phishing, Severity::High, 7),
         Rule::new("your account has been compromised", "phishing:compromised", RuleCategory::Phishing, Severity::Critical, 10),
@@ -37,7 +37,7 @@ pub fn spam_rules() -> RuleSet {
         Rule::new("suspended account", "phishing:suspended", RuleCategory::Phishing, Severity::High, 7),
         Rule::new("unauthorized login", "phishing:unauthorized", RuleCategory::Phishing, Severity::High, 6),
         Rule::new("security alert", "phishing:security_alert", RuleCategory::Phishing, Severity::Medium, 5),
-        // Content policy
+// Content policy
         Rule::new("unsubscribe", "policy:unsubscribe", RuleCategory::ContentPolicy, Severity::Low, 0),
         Rule::new("click here", "policy:click_here", RuleCategory::ContentPolicy, Severity::Low, 1),
         Rule::new("buy now", "policy:buy_now", RuleCategory::ContentPolicy, Severity::Low, 1),

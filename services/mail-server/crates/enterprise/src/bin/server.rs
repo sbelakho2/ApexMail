@@ -7,10 +7,10 @@ use enterprise::routes::{router, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load .env if present
+// Load .env if present
     dotenvy::dotenv().ok();
 
-    // Initialize tracing
+// Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
 
-    // Load configuration
+// Load configuration
     let config = Config::from_env()
         .map_err(|err| anyhow::anyhow!("Invalid enterprise config: {err}"))?;
     if let Err(err) = config.validate() {
@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = format!("{}:{}", config.host, config.port);
     info!(host = %config.host, port = config.port, "Starting enterprise service");
 
-    // Connect to PostgreSQL
+// Connect to PostgreSQL
     let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(config.db.max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -37,16 +37,16 @@ async fn main() -> anyhow::Result<()> {
         .connect_lazy(&config.db.url())
         .map_err(|e| anyhow::anyhow!("Database pool: {e}"))?;
 
-    // Build app state
+// Build app state
     let state = Arc::new(AppState::new(db.clone(), config));
 
-    // Build router
+// Build router
     let app = router(state.clone());
 
-    // Spawn background jobs
+// Spawn background jobs
     spawn_background_jobs(state.clone(), db.clone());
 
-    // Start server
+// Start server
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!(addr = %bind_addr, "Enterprise server listening");
 
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Spawn background jobs for enterprise features
 fn spawn_background_jobs(state: Arc<AppState>, _db: sqlx::PgPool) {
-    // Job 1: Check SLA breaches every 60 seconds
+// Job 1:Check SLA breaches every 60 seconds
     let sla_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
@@ -76,7 +76,7 @@ fn spawn_background_jobs(state: Arc<AppState>, _db: sqlx::PgPool) {
         }
     });
 
-    // Job 2: Auto-escalate tickets every 5 minutes
+// Job 2:Auto-escalate tickets every 5 minutes
     let escalate_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
@@ -92,7 +92,7 @@ fn spawn_background_jobs(state: Arc<AppState>, _db: sqlx::PgPool) {
         }
     });
 
-    // Job 3: Cleanup expired SSO sessions every hour
+// Job 3:Cleanup expired SSO sessions every hour
     let session_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));

@@ -167,7 +167,7 @@ async fn update_template(
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
-    let existing = fetch_template(&state, &auth.tenant_id, id.clone()).await?;;
+    let existing = fetch_template(&state, &auth.tenant_id, id.clone()).await?;
 
     let name = body.name.unwrap_or(existing.name);
     let subject = body.subject.unwrap_or(existing.subject);
@@ -229,9 +229,9 @@ async fn render_template(
 ) -> Result<Json<RenderResponse>, ApiError> {
     require_scopes(&auth, &["templates:read"])?;
 
-    let tpl = fetch_template(&state, &auth.tenant_id, id).await?;;
+    let tpl = fetch_template(&state, &auth.tenant_id, id).await?;
 
-    // Simple Handlebars-style variable substitution: {{var_name}}
+// Simple Handlebars-style variable substitution:{{var_name}}
     let vars = body.variables.as_object().unwrap_or(&serde_json::Map::new()).clone();
     let html = substitute(&tpl.html_body, &vars);
     let subject = substitute(&tpl.subject, &vars);
@@ -244,12 +244,10 @@ async fn render_template(
     }))
 }
 
-/// Fix #37: HTML-escape variable values to prevent stored XSS.
-/// Fix #38: Build output in single pass instead of O(n×m) replacements.
 fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>) -> String {
     use std::borrow::Cow;
     
-    // Build a lookup map for O(1) variable access
+// Build a lookup map for O(1) variable access
     let lookup: std::collections::HashMap<&str, Cow<str>> = vars
         .iter()
         .map(|(k, v)| {
@@ -261,14 +259,14 @@ fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>)
         })
         .collect();
     
-    // Single pass through template
+// Single pass through template
     let mut result = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     
     while let Some(c) = chars.next() {
         if c == '{' && chars.peek() == Some(&'{') {
             chars.next(); // consume second '{'
-            // Read variable name until '}}'
+// Read variable name until '}}'
             let mut var_name = String::new();
             while let Some(&ch) = chars.peek() {
                 if ch == '}' {
@@ -287,11 +285,11 @@ fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>)
                     }
                 }
             }
-            // Look up and substitute
+// Look up and substitute
             if let Some(replacement) = lookup.get(var_name.as_str()) {
                 result.push_str(replacement);
             } else {
-                // Keep original placeholder if variable not found
+// Keep original placeholder if variable not found
                 result.push_str("{{");
                 result.push_str(&var_name);
                 result.push_str("}}");
@@ -356,23 +354,23 @@ async fn duplicate_template(
 ) -> Result<(StatusCode, Json<TemplateResponse>), ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
-    // Fetch original
+// Fetch original
     let original = fetch_template(&state, &auth.tenant_id, id.clone()).await?;
 
     let new_id = Uuid::new_v4();
     let now = chrono::Utc::now();
     let new_name = format!("{} (copy)", original.name);
 
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at)
          SELECT $1, tenant_id, $3, subject, html_body, text_body, 1, 'draft', $4, $4
          FROM templates WHERE id = $2 AND tenant_id = $5",
-        new_id.to_string(),
-        id,
-        new_name,
-        now,
-        auth.tenant_id.to_string(),
     )
+    .bind(new_id.to_string())
+    .bind(id)
+    .bind(new_name)
+    .bind(now)
+    .bind(auth.tenant_id.to_string())
     .execute(&state.db)
     .await?;
 
@@ -393,8 +391,8 @@ async fn rollback_template(
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
-    // Restore from template_versions table
-    let result = sqlx::query!(
+// Restore from template_versions table
+    let result = sqlx::query(
         "UPDATE templates SET
             html_body = tv.html_body,
             text_body = tv.text_body,
@@ -404,10 +402,10 @@ async fn rollback_template(
          FROM template_versions tv
          WHERE templates.id = $1 AND templates.tenant_id = $2
            AND tv.template_id = $1 AND tv.version = $3",
-        id,
-        auth.tenant_id.to_string(),
-        body.version,
     )
+    .bind(&id)
+    .bind(auth.tenant_id.to_string())
+    .bind(body.version)
     .execute(&state.db)
     .await?;
 
@@ -445,7 +443,7 @@ mod tests {
     #[test]
     fn test_template_response_serialisation() {
         let resp = TemplateResponse {
-            id: String::nil(),
+            id: String::new(),
             name: "welcome".into(),
             subject: "Welcome!".into(),
             html_body: "<p>Hi</p>".into(),

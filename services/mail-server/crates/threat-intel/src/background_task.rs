@@ -16,13 +16,11 @@
 //! ```rust,ignore
 //! use threat_intel::{ThreatIntelEngine, background_task};
 //!
-//! let engine = Arc::new(ThreatIntelEngine::new());
-//! 
-//! // Spawn the background purge task
-//! let handle = tokio::spawn(background_task::run_purge_loop(engine.clone()));
+//! let engine = Arc::new(ThreatIntelEngine::new);
+//! //! // Spawn the background purge task
+//! let handle = tokio::spawn(background_task::run_purge_loop(engine.clone));
 //!
-//! // Later, to stop:
-//! handle.abort();
+//! // Later, to stop://! handle.abort;
 //! ```
 
 use std::sync::Arc;
@@ -35,9 +33,9 @@ use crate::ThreatIntelEngine;
 /// Configuration for the background purge task
 #[derive(Debug, Clone)]
 pub struct PurgeTaskConfig {
-    /// How often to run the purge (default: 60 seconds)
+/// How often to run the purge (default:60 seconds)
     pub interval: Duration,
-    /// Whether the task is enabled
+/// Whether the task is enabled
     pub enabled: bool,
 }
 
@@ -53,32 +51,29 @@ impl Default for PurgeTaskConfig {
 /// Statistics from a purge operation
 #[derive(Debug, Clone, Default)]
 pub struct PurgeStats {
-    /// Number of expired IP entries removed
+/// Number of expired IP entries removed
     pub expired_ips_removed: usize,
-    /// Number of expired domain entries removed
+/// Number of expired domain entries removed
     pub expired_domains_removed: usize,
-    /// Total entries remaining in IP blocklist
+/// Total entries remaining in IP blocklist
     pub ip_entries_remaining: usize,
-    /// Total entries remaining in domain blocklist
+/// Total entries remaining in domain blocklist
     pub domain_entries_remaining: usize,
-    /// Duration of the purge operation
+/// Duration of the purge operation
     pub duration_ms: u64,
 }
 
 /// Run the purge loop continuously.
 /// This function runs until the future is dropped/cancelled.
-/// 
 /// # Arguments
 /// * `engine` - Arc reference to the ThreatIntelEngine
 /// * `config` - Configuration for the purge task
-///
 /// # Example
 /// ```rust,ignore
-/// let engine = Arc::new(ThreatIntelEngine::new());
-/// let config = PurgeTaskConfig::default();
-/// 
+/// let engine = Arc::new(ThreatIntelEngine::new);
+/// let config = PurgeTaskConfig::default;
 /// let handle = tokio::spawn(async move {
-///     run_purge_loop(engine, config).await;
+/// run_purge_loop(engine, config).await;
 /// });
 /// ```
 pub async fn run_purge_loop(engine: Arc<ThreatIntelEngine>, config: PurgeTaskConfig) {
@@ -93,7 +88,7 @@ pub async fn run_purge_loop(engine: Arc<ThreatIntelEngine>, config: PurgeTaskCon
         
         let stats = purge_once(&engine);
         
-        // Reserved for optional observability hooks.
+// Reserved for optional observability hooks.
         let _ = &stats;
     }
 }
@@ -103,16 +98,16 @@ pub async fn run_purge_loop(engine: Arc<ThreatIntelEngine>, config: PurgeTaskCon
 pub fn purge_once(engine: &ThreatIntelEngine) -> PurgeStats {
     let start = std::time::Instant::now();
     
-    // Get counts before purge
+// Get counts before purge
     let stats_before = engine.stats();
     let ips_before = stats_before.ip_exact_entries + stats_before.ip_cidr_entries;
     let domains_before = stats_before.domain_entries;
     
-    // Run purge on both blocklists
+// Run purge on both blocklists
     engine.ip_blocklist().purge_expired();
     engine.domain_blocklist().purge_expired();
     
-    // Get counts after purge
+// Get counts after purge
     let stats_after = engine.stats();
     let ips_after = stats_after.ip_exact_entries + stats_after.ip_cidr_entries;
     let domains_after = stats_after.domain_entries;
@@ -144,32 +139,29 @@ pub fn spawn_purge_task(
 // ---------------------------------------------------------------------------
 
 /// Configuration for the feed auto-refresh background task.
-///
 /// Because the threat-intel crate has no embedded HTTP client, callers must
 /// provide a `loader` callback that performs the actual fetch + insertion.
 /// This keeps the crate dependency-free while still enabling automatic refresh
 /// of Spamhaus DROP / EDROP, DNSBL dumps, etc.
-///
 /// ## Example
 /// ```rust,ignore
 /// let refresh_cfg = FeedRefreshConfig {
-///     interval: Duration::from_secs(3600),   // reload every hour
-///     enabled: true,
+/// interval:Duration::from_secs(3600), // reload every hour
+/// enabled:true,
 /// };
-///
-/// let engine_clone = engine.clone();
-/// let handle = spawn_refresh_task(engine.clone(), refresh_cfg, move || {
-///     // Re-download all feeds and re-populate blocklists
-///     let data = reqwest::blocking::get("https://www.spamhaus.org/drop/drop.txt")
-///         .unwrap().text().unwrap();
-///     load_spamhaus_drop_into(&engine_clone, &data);
+/// let engine_clone = engine.clone;
+/// let handle = spawn_refresh_task(engine.clone, refresh_cfg, move || {
+/// // Re-download all feeds and re-populate blocklists
+/// let data = reqwest::blocking::get("https://www.spamhaus.org/drop/drop.txt")
+/// .unwrap.text.unwrap;
+/// load_spamhaus_drop_into(&engine_clone, &data);
 /// });
 /// ```
 #[derive(Debug, Clone)]
 pub struct FeedRefreshConfig {
-    /// How often to reload feeds.  Default: every 24 hours (matching default TTL).
+/// How often to reload feeds. Default:every 24 hours (matching default TTL).
     pub interval: Duration,
-    /// Whether the task is enabled.
+/// Whether the task is enabled.
     pub enabled: bool,
 }
 
@@ -183,11 +175,9 @@ impl Default for FeedRefreshConfig {
 }
 
 /// Run the feed refresh loop continuously.
-///
-/// `loader` is called on every tick.  It is responsible for fetching current
-/// feed data and loading it into the engine (via `engine.ip_blocklist()` /
-/// `engine.domain_blocklist()`).
-///
+/// `loader` is called on every tick. It is responsible for fetching current
+/// feed data and loading it into the engine (via `engine.ip_blocklist` /
+/// `engine.domain_blocklist`).
 /// The function returns only when the future is dropped/cancelled (Tokio abort).
 pub async fn run_refresh_loop<F>(
     engine: Arc<ThreatIntelEngine>,
@@ -200,11 +190,11 @@ pub async fn run_refresh_loop<F>(
         return;
     }
 
-    // Wrap in Arc so we can clone a reference for each spawn_blocking call
+// Wrap in Arc so we can clone a reference for each spawn_blocking call
     let loader = Arc::new(loader);
     let mut ticker = interval(config.interval);
 
-    // Skip the first immediate tick so we don't reload right at startup
+// Skip the first immediate tick so we don't reload right at startup
     ticker.tick().await;
 
     loop {
@@ -223,7 +213,7 @@ pub async fn run_refresh_loop<F>(
     }
 }
 
-/// Convenience wrapper: spawn a feed refresh task using [`tokio::spawn`].
+/// Convenience wrapper:spawn a feed refresh task using [`tokio::spawn`].
 pub fn spawn_refresh_task<F>(
     engine: Arc<ThreatIntelEngine>,
     config: FeedRefreshConfig,
@@ -270,9 +260,9 @@ mod tests {
     async fn test_purge_removes_expired() {
         let engine = ThreatIntelEngine::new();
         
-        // Add an entry with immediate expiration (in the past)
-        // This requires access to add_ip_with_ttl or similar
-        // For now, just verify the purge runs without error
+// Add an entry with immediate expiration (in the past)
+// This requires access to add_ip_with_ttl or similar
+// For now, just verify the purge runs without error
         let stats = purge_once(&engine);
         assert!(stats.duration_ms < 1000);
     }

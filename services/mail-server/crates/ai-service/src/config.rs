@@ -5,17 +5,17 @@ use serde::{Deserialize, Serialize};
 /// Top-level configuration for the AI service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiConfig {
-    /// External model inference endpoint (e.g. llama-server URL).
+/// External model inference endpoint (e.g. llama-server URL).
     pub model_endpoint: String,
-    /// Embedding vector dimensionality.
+/// Embedding vector dimensionality.
     pub embedding_dim: usize,
-    /// Maximum tokens for text generation.
+/// Maximum tokens for text generation.
     pub max_tokens: usize,
-    /// Sampling temperature (0.0 = greedy).
+/// Sampling temperature (0.0 = greedy).
     pub temperature: f64,
-    /// Epsilon for epsilon-greedy bandit exploration.
+/// Epsilon for epsilon-greedy bandit exploration.
     pub bandit_epsilon: f64,
-    /// Look-back window in days for STO engagement data.
+/// Look-back window in days for STO engagement data.
     pub sto_lookback_days: u32,
 }
 
@@ -33,7 +33,7 @@ impl Default for AiConfig {
 }
 
 impl AiConfig {
-    /// Build config from environment variables, falling back to defaults.
+/// Build config from environment variables, falling back to defaults.
     pub fn from_env() -> Result<Self, String> {
         let defaults = Self::default();
         let config = Self {

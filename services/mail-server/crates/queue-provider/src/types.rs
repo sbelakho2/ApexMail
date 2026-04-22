@@ -60,9 +60,9 @@ pub struct EnqueueOptions {
     pub max_attempts: i32,
     #[serde(default)]
     pub priority: i32,
-    /// When to make the job visible (None = now)
+/// When to make the job visible (None = now)
     pub scheduled_at: Option<DateTime<Utc>>,
-    /// Seconds before a processing job becomes visible again
+/// Seconds before a processing job becomes visible again
     #[serde(default = "default_visibility_timeout")]
     pub visibility_timeout: i32,
 }

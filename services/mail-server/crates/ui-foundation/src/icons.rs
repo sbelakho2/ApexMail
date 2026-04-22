@@ -1,8 +1,14 @@
 use std::collections::HashMap;
 
 use once_cell::sync::Lazy;
+use serde::Deserialize;
 
-pub const ICONS_TSX: &str = include_str!("../../../../../apps/web/src/components/ui/icons.tsx");
+pub const ICON_BASELINE_SOURCE: &str = include_str!("../baselines/web/icons.baseline.txt");
+
+#[derive(Debug, Deserialize)]
+struct IconBaseline {
+    glyphs: HashMap<String, String>,
+}
 
 static GLYPHS: Lazy<Vec<String>> = Lazy::new(|| {
     glyph_registry().keys().cloned().collect::<Vec<_>>()
@@ -52,100 +58,9 @@ pub fn render_icon(name: &str, options: IconRenderOptions<'_>) -> Option<String>
 }
 
 fn build_glyph_registry() -> HashMap<String, String> {
-    let mut names = Vec::new();
-    let mut in_union = false;
-
-    for line in ICONS_TSX.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("type Glyph =") {
-            in_union = true;
-            continue;
-        }
-        if in_union && trimmed.starts_with("const glyphs:") {
-            break;
-        }
-        if in_union && trimmed.starts_with('|') {
-            let name = trimmed.trim_start_matches('|').trim();
-            let name = name.trim_end_matches(';').trim().trim_matches('"').trim_matches('\'');
-            names.push(name.to_string());
-        }
-    }
-
-    let mut registry = HashMap::new();
-    let mut in_glyphs = false;
-    let mut current_name: Option<String> = None;
-    let mut current_markup: Vec<String> = Vec::new();
-    let mut paren_depth = 0_i32;
-
-    for line in ICONS_TSX.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("const glyphs:") {
-            in_glyphs = true;
-            continue;
-        }
-        if !in_glyphs {
-            continue;
-        }
-        if trimmed == "};" {
-            break;
-        }
-
-        if current_name.is_none() {
-            if let Some((raw_name, raw_markup)) = trimmed.split_once(':') {
-                let name = raw_name.trim().trim_matches('"').trim_matches('\'').to_string();
-                current_name = Some(name);
-                current_markup.push(raw_markup.trim().to_string());
-                paren_depth += paren_delta(trimmed);
-
-                if paren_depth <= 0 && trimmed.ends_with(',') {
-                    finalize_icon(&mut registry, &mut current_name, &mut current_markup);
-                }
-            }
-            continue;
-        }
-
-        current_markup.push(trimmed.to_string());
-        paren_depth += paren_delta(trimmed);
-        if paren_depth <= 0 && trimmed.ends_with(',') {
-            finalize_icon(&mut registry, &mut current_name, &mut current_markup);
-        }
-    }
-
-    for name in names {
-        registry.entry(name).or_insert_with(String::new);
-    }
-
-    registry
-}
-
-fn finalize_icon(
-    registry: &mut HashMap<String, String>,
-    current_name: &mut Option<String>,
-    current_markup: &mut Vec<String>,
-) {
-    let name = current_name.take().expect("icon name should exist when finalizing");
-    let joined = current_markup.join("\n");
-    let markup = normalize_markup(joined.trim_end_matches(',').trim());
-    registry.insert(name, markup);
-    current_markup.clear();
-}
-
-fn normalize_markup(markup: &str) -> String {
-    markup
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .replace("<>", "")
-        .replace("</>", "")
-        .trim()
-        .to_string()
-}
-
-fn paren_delta(line: &str) -> i32 {
-    line.chars().fold(0_i32, |acc, char| match char {
-        '(' => acc + 1,
-        ')' => acc - 1,
-        _ => acc,
-    })
+    serde_json::from_str::<IconBaseline>(ICON_BASELINE_SOURCE)
+        .expect("icon baseline must parse")
+        .glyphs
 }
 
 fn trim_float(value: f32) -> String {
