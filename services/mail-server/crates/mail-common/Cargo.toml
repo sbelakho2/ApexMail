@@ -33,7 +33,9 @@ arc-swap.workspace = true
 sqlx = { workspace = true, optional = true }
 # Optional — enabled by crates that need internal auth middleware
 axum = { workspace = true, optional = true }
+# Constant-time comparison for token authentication
+subtle = { version = "2.6", optional = true }
 
 [features]
 sqlx = ["dep:sqlx"]
-axum = ["dep:axum"]
+axum = ["dep:axum", "dep:subtle"]

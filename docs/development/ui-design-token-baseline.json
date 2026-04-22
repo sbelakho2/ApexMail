@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "surfaces": {
+    "web": {
+      "sources": ["apps/web/src/app/globals.css", "apps/web/tailwind.config.ts"],
+      "colors": [
+        { "source": "globals.css", "name": "--background", "value": "248 246 243" },
+        { "source": "globals.css", "name": "--foreground", "value": "15 23 42" },
+        { "source": "globals.css", "name": "--primary", "value": "99 102 241" },
+        { "source": "globals.css", "name": "--primary-foreground", "value": "255 255 255" },
+        { "source": "globals.css", "name": "--secondary", "value": "241 245 249" },
+        { "source": "globals.css", "name": "--secondary-foreground", "value": "15 23 42" },
+        { "source": "globals.css", "name": "--muted", "value": "241 245 249" },
+        { "source": "globals.css", "name": "--muted-foreground", "value": "100 116 139" },
+        { "source": "globals.css", "name": "--accent", "value": "241 245 249" },
+        { "source": "globals.css", "name": "--accent-foreground", "value": "15 23 42" },
+        { "source": "globals.css", "name": "--destructive", "value": "239 68 68" },
+        { "source": "globals.css", "name": "--destructive-foreground", "value": "255 255 255" },
+        { "source": "globals.css", "name": "--warning", "value": "245 158 11" },
+        { "source": "globals.css", "name": "--border", "value": "226 232 240" },
+        { "source": "globals.css", "name": "--input", "value": "226 232 240" },
+        { "source": "globals.css", "name": "--ring", "value": "99 102 241" },
+        { "source": "globals.css", "name": "--surface-50", "value": "248 250 252" },
+        { "source": "globals.css", "name": "--surface-100", "value": "241 245 249" },
+        { "source": "globals.css", "name": "--surface-200", "value": "226 232 240" },
+        { "source": "globals.css", "name": "--surface-300", "value": "203 213 225" },
+        { "source": "globals.css", "name": "--surface-400", "value": "148 163 184" },
+        { "source": "globals.css", "name": "--surface-500", "value": "100 116 139" },
+        { "source": "globals.css", "name": "--surface-600", "value": "71 85 105" },
+        { "source": "globals.css", "name": "--surface-900", "value": "15 23 42" },
+        { "source": "globals.css", "name": "--brand-50", "value": "238 242 255" },
+        { "source": "globals.css", "name": "--brand-900", "value": "49 46 129" },
+        { "source": "globals.css", "name": "--primary-600", "value": "79 70 229" }
+      ],
+      "spacing": [
+        { "source": "tailwind", "name": "--space-1", "value": "4px" },
+        { "source": "tailwind", "name": "--space-2", "value": "8px" },
+        { "source": "tailwind", "name": "--space-3", "value": "12px" },
+        { "source": "tailwind", "name": "--space-4", "value": "16px" },
+        { "source": "tailwind", "name": "--space-6", "value": "24px" },
+        { "source": "tailwind", "name": "--space-8", "value": "32px" },
+        { "source": "tailwind", "name": "--space-12", "value": "48px" },
+        { "source": "tailwind", "name": "--space-16", "value": "64px" }
+      ],
+      "typography": [
+        { "source": "tailwind", "name": "--font-sans", "value": "Inter, system-ui, sans-serif" },
+        { "source": "tailwind", "name": "--font-mono", "value": "JetBrains Mono, monospace" },
+        { "source": "tailwind", "name": "--text-xs", "value": "12px" },
+        { "source": "tailwind", "name": "--text-sm", "value": "14px" },
+        { "source": "tailwind", "name": "--text-base", "value": "16px" },
+        { "source": "tailwind", "name": "--text-lg", "value": "18px" },
+        { "source": "tailwind", "name": "--text-xl", "value": "20px" },
+        { "source": "tailwind", "name": "--text-2xl", "value": "24px" },
+        { "source": "tailwind", "name": "--text-4xl", "value": "36px" }
+      ],
+      "icons": [
+        { "source": "lucide-react", "name": "--icon-size-sm", "value": "16px" },
+        { "source": "lucide-react", "name": "--icon-size-md", "value": "20px" },
+        { "source": "lucide-react", "name": "--icon-size-lg", "value": "24px" },
+        { "source": "lucide-react", "name": "--icon-stroke-width", "value": "1.75" }
+      ],
+      "motion": [
+        { "source": "globals.css", "name": "--motion-duration-150", "value": "150ms" },
+        { "source": "globals.css", "name": "--motion-duration-180", "value": "180ms" },
+        { "source": "globals.css", "name": "--motion-duration-200", "value": "200ms" },
+        { "source": "globals.css", "name": "--motion-duration-300", "value": "300ms" },
+        { "source": "globals.css", "name": "--motion-easing-default", "value": "cubic-bezier(0.4, 0, 0.2, 1)" }
+      ],
+      "radius": [
+        { "source": "globals.css", "name": "--radius-sm", "value": "6px" },
+        { "source": "globals.css", "name": "--radius-md", "value": "12px" },
+        { "source": "globals.css", "name": "--radius-lg", "value": "18px" },
+        { "source": "globals.css", "name": "--radius-xl", "value": "24px" },
+        { "source": "globals.css", "name": "--radius-full", "value": "9999px" }
+      ]
+    },
+    "control-plane": {
+      "sources": ["apps/control-plane/src/app/globals.css"],
+      "colors": [
+        { "source": "globals.css", "name": "--background", "value": "15 23 42" },
+        { "source": "globals.css", "name": "--foreground", "value": "241 245 249" },
+        { "source": "globals.css", "name": "--primary", "value": "59 130 246" },
+        { "source": "globals.css", "name": "--card", "value": "30 41 59" }
+      ],
+      "spacing": [
+        { "source": "tailwind", "name": "--space-4", "value": "16px" },
+        { "source": "tailwind", "name": "--space-8", "value": "32px" }
+      ],
+      "typography": [
+        { "source": "tailwind", "name": "--font-sans", "value": "Inter, system-ui, sans-serif" }
+      ],
+      "icons": [
+        { "source": "lucide-react", "name": "--icon-size-md", "value": "20px" }
+      ],
+      "motion": [
+        { "source": "globals.css", "name": "--motion-duration-300", "value": "300ms" }
+      ],
+      "radius": [
+        { "source": "globals.css", "name": "--radius-lg", "value": "18px" }
+      ]
+    }
+  }
+}

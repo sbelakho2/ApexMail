@@ -14,7 +14,7 @@ ApexMail is a monorepo containing multiple services that work together to provid
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
 │  │   API App   │  │ Tracking App│  │ Analytics   │  │       MTA App       │ │
 │  │  (Hono)     │  │  (Hono)     │  │    App      │  │   (smtp-server)     │ │
-│  │  Port 3000  │  │  Port 3001  │  │  Port 3002  │  │  Ports 25/2525/2526 │ │
+│  │  Port 3010  │  │  Port 3001  │  │  Port 3002  │  │  Ports 25/2525/2526 │ │
 │  └─────┬───────┘  └─────┬───────┘  └─────┬───────┘  └──────────┬──────────┘ │
 │        │                │                │                     │            │
 │        └────────────────┴────────────────┴─────────────────────┘            │
@@ -52,10 +52,10 @@ ApexMail is a monorepo containing multiple services that work together to provid
 
 - **Runtime**: Node.js 20.11+
 - **Language**: TypeScript 5.3+
-- **Package Manager**: pnpm 8.14+
+- **Package Manager**: pnpm 9.15+
 - **Build System**: Turborepo
 - **API Framework**: Hono 4.x
-- **Database**: PostgreSQL 15+
+- **Database**: PostgreSQL 16+
 - **Cache/Queue**: Redis 7+
 - **Storage**: S3-compatible (MinIO, AWS S3, Cloudflare R2)
 - **Analytics**: DuckDB, Apache Parquet

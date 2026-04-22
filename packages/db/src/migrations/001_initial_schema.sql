@@ -6,8 +6,8 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- Organizations table
-CREATE TABLE IF NOT EXISTS organizations (
+-- Tenants table
+CREATE TABLE IF NOT EXISTS tenants (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(255) NOT NULL,
     slug VARCHAR(255) UNIQUE NOT NULL,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS organizations (
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    organization_id UUID REFERENCES organizations(id),
+    tenant_id UUID REFERENCES tenants(id),
     email VARCHAR(255) UNIQUE NOT NULL,
     name VARCHAR(255),
     role VARCHAR(50) NOT NULL DEFAULT 'member',
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- Messages table (for email tracking)
 CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    organization_id UUID NOT NULL REFERENCES organizations(id),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
     idempotency_key VARCHAR(255) UNIQUE,
     from_email VARCHAR(255) NOT NULL,
     to_email VARCHAR(255) NOT NULL,
@@ -43,18 +43,18 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_messages_org_status ON messages(organization_id, status);
+CREATE INDEX idx_messages_org_status ON messages(tenant_id, status);
 CREATE INDEX idx_messages_idempotency ON messages(idempotency_key);
 
 -- Suppressions table
 CREATE TABLE IF NOT EXISTS suppressions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    organization_id UUID NOT NULL REFERENCES organizations(id),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
     email VARCHAR(255) NOT NULL,
     reason VARCHAR(50) NOT NULL,
     source VARCHAR(50) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(organization_id, email)
+    UNIQUE(tenant_id, email)
 );
 
 CREATE INDEX idx_suppressions_email ON suppressions(email);
@@ -62,7 +62,7 @@ CREATE INDEX idx_suppressions_email ON suppressions(email);
 -- Audit logs table
 CREATE TABLE IF NOT EXISTS audit_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    organization_id UUID REFERENCES organizations(id),
+    tenant_id UUID REFERENCES tenants(id),
     user_id UUID REFERENCES users(id),
     action VARCHAR(255) NOT NULL,
     resource_type VARCHAR(100),
@@ -74,5 +74,5 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_audit_logs_org ON audit_logs(organization_id, created_at);
+CREATE INDEX idx_audit_logs_org ON audit_logs(tenant_id, created_at);
 CREATE INDEX idx_audit_logs_hash ON audit_logs(hash_chain);

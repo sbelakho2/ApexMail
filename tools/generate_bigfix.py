@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import re
 from collections import defaultdict
@@ -79,8 +80,9 @@ def scan_repo():
                         for pattern, message in lang_rules:
                             if pattern.search(line):
                                 issues.append(f"- [ ] **{message}** in `{filepath}:{i+1}`\n  ```\n  {line.strip()[:100]}\n  ```")
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError) as exc:
+                import logging
+                logging.warning('Skipped %s: %s', filepath, exc)
 
     with open('BigFix.md', 'w', encoding='utf-8') as f:
         f.write("# BigFix: Comprehensive Repository Analysis\n\n")

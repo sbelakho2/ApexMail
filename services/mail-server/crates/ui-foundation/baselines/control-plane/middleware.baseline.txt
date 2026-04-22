@@ -1,0 +1,7 @@
+{
+  "publicPaths": ["/login", "/favicon.ico"],
+  "csrfError": "CSRF token invalid",
+  "sessionBindingHeader": "sessionBinding",
+  "sessionBinding": "verified",
+  "redirectParam": "redirect"
+}

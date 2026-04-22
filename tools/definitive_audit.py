@@ -60,7 +60,7 @@ def parse_number(s):
         return int(float(s[:-1]) * 1000)
     try:
         return int(float(s))
-    except:
+    except (ValueError, TypeError):
         return None
 
 def get_assistant_text(text):

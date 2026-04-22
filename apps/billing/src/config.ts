@@ -40,7 +40,8 @@ const envSchema = z.object({
   SERVICE_AUTH_TOKEN: z.string().min(32),
 
   // Auth
-  JWT_SECRET: z.string().min(32),
+  JWT_SECRET: z.string().min(32).optional(),
+  JWT_PUBLIC_KEY_PEM: z.string().optional(),
 
   // CORS
   CORS_ORIGINS: z.string().optional(),
@@ -103,6 +104,13 @@ export function loadConfig(): Config {
       'Telemetry pseudonymization must not rely on a shared default salt.'
     );
   }
+
+  if (result.data.NODE_ENV === 'production' && !result.data.JWT_SECRET && !result.data.JWT_PUBLIC_KEY_PEM) {
+    throw new Error(
+      'At least one JWT verification key must be configured in production. ' +
+      'Set JWT_SECRET (HS256) or JWT_PUBLIC_KEY_PEM (RS256).'
+    );
+  }
   
   loadedConfig = result.data;
   return loadedConfig;
@@ -132,8 +140,11 @@ export const config = {
   get serviceAuthToken(): string {
     return getConfig().SERVICE_AUTH_TOKEN;
   },
-  get jwtSecret(): string {
+  get jwtSecret(): string | undefined {
     return getConfig().JWT_SECRET;
+  },
+  get jwtPublicKeyPem(): string | undefined {
+    return getConfig().JWT_PUBLIC_KEY_PEM;
   },
   get port(): number {
     const parsed = parseInt(getConfig().PORT, 10);
@@ -216,7 +227,9 @@ export const COMPANY_INFO = {
   },
   bank: {
     name: 'Swedbank AS',
-    iban: getConfig().BILLING_COMPANY_IBAN ?? 'UNCONFIGURED',
+    get iban(): string {
+      return getConfig().BILLING_COMPANY_IBAN ?? 'UNCONFIGURED';
+    },
     bic: 'HABAEE2X',
   },
-} as const;
+};

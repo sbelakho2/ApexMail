@@ -1,0 +1,6 @@
+{
+  "header": "X-CSRF-Token",
+  "tokenCookie": "csrf_token",
+  "signatureCookie": "csrf_token_sig",
+  "cacheTtlMs": 600000
+}

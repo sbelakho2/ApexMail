@@ -155,12 +155,16 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
 
 /// Tokenize an input string into SQL tokens
 fn tokenize_sql(input: &str) -> Vec<SqlToken> {
+    const MAX_TOKENS: usize = 10_000;
     let mut tokens = Vec::with_capacity(input.len().min(256));
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut i = 0;
 
     while i < len {
+        if tokens.len() >= MAX_TOKENS {
+            break;
+        }
 // Skip whitespace
         if chars[i].is_whitespace() {
             tokens.push(SqlToken::Whitespace);

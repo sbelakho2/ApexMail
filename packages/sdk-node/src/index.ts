@@ -559,6 +559,14 @@ class HttpClient {
         if (!/^https?:\/\/.+/.test(baseUrl)) {
             throw new ValidationError(`Invalid baseUrl: "${config.baseUrl}". Must start with https:// or http://`);
         }
+        // Enforce HTTPS for non-localhost URLs (HTTP only for local development)
+        if (baseUrl.startsWith('http://')) {
+            const url = new URL(baseUrl);
+            const host = url.hostname;
+            if (host !== 'localhost' && host !== '127.0.0.1' && host !== '::1') {
+                throw new ValidationError('HTTPS is required for production API URLs. HTTP is only allowed for localhost.');
+            }
+        }
         this.baseUrl = baseUrl;
         this.apiKey = config.apiKey;
         this.timeout = config.timeout || 30000;

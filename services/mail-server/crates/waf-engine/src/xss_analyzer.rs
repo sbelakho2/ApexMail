@@ -159,7 +159,7 @@ fn detect_js_uri(input: &str) -> bool {
 fn detect_dangerous_tags(input: &str) -> bool {
     let tags = [
         "<svg", "<object", "<embed", "<iframe", "<applet",
-        "<math", "<base", "<link", "<meta",
+        "<math", "<base", "<link", "<meta", "<img",
         "<form", "<isindex", "<marquee", "<video", "<audio",
         "<source", "<details", "<template",
     ];

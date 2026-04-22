@@ -6,74 +6,90 @@ import { Hono } from 'hono';
 import type { BillingEnv, BillingContext } from '../app.js';
 import { logger } from '../lib/logger.js';
 
+const DEADLETTER_EVENT_PREFIX = 'stripe:deadletter:event:';
+const DEADLETTER_INDEX_KEY = 'stripe:deadletter:index';
+const DEADLETTER_RETENTION_SECONDS = 35 * 24 * 60 * 60;
+const DEADLETTER_RETENTION_MS = DEADLETTER_RETENTION_SECONDS * 1000;
+
+type DeadletterEntry = {
+  reason: string;
+  occurredAt?: string;
+  eventId?: string;
+  error?: string;
+  payloadLength?: number;
+};
+
+async function recordDeadletter(ctx: BillingContext, entry: DeadletterEntry): Promise<void> {
+  const now = Date.now();
+  const occurredAt = entry.occurredAt ?? new Date(now).toISOString();
+  const eventId = entry.eventId?.trim();
+  const eventIdPart = eventId && eventId.length > 0
+    ? eventId.replace(/[^A-Za-z0-9_-]/g, '_')
+    : 'unknown';
+  const eventKey = `${DEADLETTER_EVENT_PREFIX}${eventIdPart}:${now}`;
+
+  try {
+    const pipeline = ctx.redis.pipeline();
+    pipeline.setex(eventKey, DEADLETTER_RETENTION_SECONDS, JSON.stringify({ ...entry, occurredAt }));
+    pipeline.zadd(DEADLETTER_INDEX_KEY, now, eventKey);
+    pipeline.zremrangebyscore(DEADLETTER_INDEX_KEY, 0, now - DEADLETTER_RETENTION_MS);
+    pipeline.expire(DEADLETTER_INDEX_KEY, DEADLETTER_RETENTION_SECONDS);
+    await pipeline.exec();
+  } catch (error) {
+    logger.error('Failed to record Stripe dead letter', {
+      reason: entry.reason,
+      eventId: entry.eventId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
-  const DEADLETTER_KEY = 'stripe:deadletter';
-  const MAX_DEADLETTER_EVENTS = 1000;
 
   // Stripe webhooks
   router.post('/stripe', async (c) => {
     const signature = c.req.header('stripe-signature');
 
     if (!signature) {
-      await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
+      await recordDeadletter(ctx, {
         reason: 'missing_signature',
-        occurredAt: new Date().toISOString(),
-      }));
-      await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
+      });
       return c.json({ error: 'Missing stripe-signature header' }, 400);
     }
 
     const rawBody = await c.req.text();
-    
-    // SEC-006 FIX: Add event ID deduplication to prevent replay attacks
-    // Extract event ID from raw body before verification (safe to parse for ID only)
+
+    // Parse only the event id to validate payload shape before signature verification.
     let eventId: string | undefined;
     try {
       const parsed = JSON.parse(rawBody) as { id?: string };
-      eventId = parsed.id;
+      eventId = typeof parsed.id === 'string' ? parsed.id : undefined;
     } catch (error) {
-      await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
+      await recordDeadletter(ctx, {
         reason: 'invalid_json_payload',
         error: String(error),
-        occurredAt: new Date().toISOString(),
-        payloadPreview: rawBody.slice(0, 1024),
-      }));
-      await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
+        payloadLength: rawBody.length,
+      });
       return c.json({ error: 'Invalid JSON payload' }, 400);
     }
-    
-    if (!eventId) {
-      await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
+
+    if (!eventId || eventId.trim().length === 0) {
+      await recordDeadletter(ctx, {
         reason: 'missing_event_id',
-        occurredAt: new Date().toISOString(),
-        payloadPreview: rawBody.slice(0, 1024),
-      }));
-      await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
+        payloadLength: rawBody.length,
+      });
       return c.json({ error: 'Missing event ID' }, 400);
     }
-    
-    // Check for duplicate event - 24 hour deduplication window
-    const dedupKey = `stripe:event:${eventId}`;
-    const wasSet = await ctx.redis.set(dedupKey, '1', 'EX', 86400, 'NX');
-    
-    if (!wasSet) {
-      // Event already processed - return simple response (Stripe ignores body anyway)
-      return c.json({ received: true });
-    }
-    
+
     const result = await ctx.stripe.processWebhook(rawBody, signature);
 
     if (!result.ok) {
-      await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
+      await recordDeadletter(ctx, {
         reason: 'processing_failed',
-        occurredAt: new Date().toISOString(),
         eventId,
         error: result.error instanceof Error ? result.error.message : String(result.error),
-      }));
-      await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
-      // On processing failure, remove dedup key to allow retry
-      await ctx.redis.del(dedupKey);
+      });
       logger.error('Stripe webhook error', { error: result.error instanceof Error ? result.error.message : String(result.error) });
       return c.json({ error: 'Webhook processing failed' }, 400);
     }

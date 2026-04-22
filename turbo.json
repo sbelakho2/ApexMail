@@ -44,6 +44,7 @@
       "env": ["CI", "NODE_ENV"]
     },
     "lint": {
+      "dependsOn": ["^build"],
       "outputs": []
     },
     "typecheck": {

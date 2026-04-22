@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run build:css && npm run build:zola",
+    "build": "pnpm run build:css && pnpm run build:zola",
     "build:css": "npx tailwindcss -i static/css/input.css -o static/css/styles.css --minify",
     "build:zola": "zola build",
-    "dev": "npm run build:css && concurrently \"npm run dev:css\" \"zola serve --port 1111\"",
+    "dev": "pnpm run build:css && concurrently \"pnpm run dev:css\" \"zola serve --port 1111\"",
     "dev:css": "npx tailwindcss -i static/css/input.css -o static/css/styles.css --watch"
   },
   "devDependencies": {

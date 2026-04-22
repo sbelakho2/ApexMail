@@ -44,9 +44,9 @@ class MockClient extends \ApexMail\Client
     /** Preset errors: each element thrown for next call */
     private array $errors = [];
 
-    public function __construct(string $apiKey = 'test_key')
+    public function __construct(string $apiKey = 'am_test_mockclient000000')
     {
-        parent::__construct($apiKey, ['baseUrl' => 'http://mock.local']);
+        parent::__construct($apiKey, ['baseUrl' => 'https://mock.local']);
     }
 
     /** Queue a successful response for the next request */

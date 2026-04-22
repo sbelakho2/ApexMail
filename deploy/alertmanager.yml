@@ -11,5 +11,5 @@ route:
 receivers:
   - name: default-notify
     webhook_configs:
-      - url: 'http://127.0.0.1:5001/alerts'
+      - url: 'http://api-server:5001/alerts'
         send_resolved: true

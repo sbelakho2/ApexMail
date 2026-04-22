@@ -265,8 +265,16 @@ export async function verifyPassword(
     SCRYPT_KEYLEN,
     { N: n, r, p, maxmem: SCRYPT_MAXMEM }
   );
-  
-  return timingSafeEqual(storedKey, derivedKey);
+
+  if (storedKey.length !== derivedKey.length) {
+    return false;
+  }
+
+  try {
+    return timingSafeEqual(storedKey, derivedKey);
+  } catch {
+    return false;
+  }
 }
 
 /**

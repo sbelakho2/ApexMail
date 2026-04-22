@@ -9,7 +9,9 @@ metadata:
     {{- include "apexmail.selectorLabels" (dict "name" "enterprise" "context" .) | nindent 4 }}
     app.kubernetes.io/component: enterprise
 spec:
+  {{- if not .Values.enterprise.autoscaling.enabled }}
   replicas: {{ .Values.enterprise.replicaCount }}
+  {{- end }}
   revisionHistoryLimit: 5
   selector:
     matchLabels:

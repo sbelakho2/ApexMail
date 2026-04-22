@@ -187,6 +187,9 @@ export default function EditCampaignPage() {
                                 ))}
                             </SelectContent>
                         </Select>
+                        {listsError && (
+                            <p className="text-xs text-destructive">Failed to load audience lists. Using default audience.</p>
+                        )}
                     </div>
                 </CardContent>
             </Card>

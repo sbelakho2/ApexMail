@@ -1,0 +1,7 @@
+{
+  "component": "Header",
+  "searchShortcutHint": "⌘K",
+  "logoutTarget": "/login",
+  "csrfHeader": "X-CSRF-Token",
+  "themeModes": ["light", "dark", "system"]
+}

@@ -249,7 +249,7 @@ export class InvoiceService {
     };
 
     // Generate invoice number
-    const numberResult = await this.generateInvoiceNumber();
+    const numberResult = await this.generateInvoiceNumber(input.tenantId);
     if (!numberResult.ok) return Result.err(numberResult.error);
 
     // Calculate VAT on subtotal to avoid per-line rounding drift, then allocate VAT across lines
@@ -594,8 +594,8 @@ export class InvoiceService {
 
   <div class="footer">
     <p>Payment terms: Net ${paymentTermsDays} days. Please include invoice number in payment reference.</p>
-    <p>Bel Consulting OÜ (trading as ApexMail) | Reg. 16192499 | VAT: EE102951727 | IBAN: EE38 2200 2210 1234 5678 | BIC: HABAEE2X</p>
-    <p>Sakala 7-2, 10141 Tallinn, Estonia</p>
+    <p>${COMPANY_INFO.name} (trading as ${COMPANY_INFO.tradingAs}) | Reg. ${COMPANY_INFO.registryCode} | VAT: ${COMPANY_INFO.vatNumber} | IBAN: ${COMPANY_INFO.bank.iban} | BIC: ${COMPANY_INFO.bank.bic}</p>
+    <p>${COMPANY_INFO.address.street}, ${COMPANY_INFO.address.postalCode} ${COMPANY_INFO.address.city}, ${COMPANY_INFO.address.country}</p>
     <p>Period: ${formatDate(invoice.periodStart)} to ${formatDate(invoice.periodEnd)}</p>
   </div>
 </body>
@@ -726,14 +726,17 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
   /**
    * Get invoice by ID
    */
-  async getInvoice(invoiceId: string): Promise<Result<Invoice | null, Error>> {
+  async getInvoice(invoiceId: string, tenantId?: string): Promise<Result<Invoice | null, Error>> {
+    const whereClause = tenantId ? 'WHERE id = $1 AND tenant_id = $2' : 'WHERE id = $1';
+    const params = tenantId ? [invoiceId, tenantId] : [invoiceId];
+
     const result = await this.db.query<InvoiceRow>(
       `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
               subtotal, vat_total, total, line_items, billing_address,
               issued_at, due_at, paid_at, period_start, period_end,
               purchase_order_number, notes, pdf_url, xml_url, created_at, updated_at
-       FROM invoices WHERE id = $1`,
-      [invoiceId]
+       FROM invoices ${whereClause}`,
+      params
     );
 
     if (!result.ok) return Result.err(result.error);

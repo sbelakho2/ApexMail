@@ -165,7 +165,7 @@ export class UsersRepository {
       return Result.err(new Error('tenantId is required for credential verification'));
     }
     // A-002: Enforce tenant scoping to prevent cross-tenant login
-    const sql = `SELECT * FROM users WHERE email = $1 AND status = 'active' AND tenant_id = $2`;
+    const sql = `SELECT id, tenant_id, email, name, password_hash, role, status, email_verified, last_login_at, mfa_enabled, metadata, created_at, updated_at FROM users WHERE email = $1 AND status = 'active' AND tenant_id = $2`;
     const params = [email.toLowerCase(), tenantId];
     const result = await this.db.query<{
       id: string;

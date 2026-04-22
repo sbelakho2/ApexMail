@@ -1,6 +1,7 @@
 //! Shared helper functions used across multiple route modules.
 
 use axum::http::HeaderMap;
+use sha2::{Digest, Sha256};
 
 /// Clamp a pagination `limit` to the range `[1, max]`.
 pub fn clamp_limit(limit: i64, max: i64) -> i64 {
@@ -45,6 +46,11 @@ pub fn html_escape(s: &str) -> String {
         }
     }
     escaped
+}
+
+/// Hash a verification or password-reset token before persisting it.
+pub fn hash_token(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 /// Check whether a table exists in the `public` schema.

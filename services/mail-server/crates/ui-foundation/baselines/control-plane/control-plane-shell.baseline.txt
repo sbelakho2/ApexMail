@@ -1,0 +1,6 @@
+{
+  "shell": "ControlPlaneShell",
+  "title": "ApexMail Control Plane",
+  "operatorShortcuts": "Operator Shortcuts",
+  "mobileMenuState": "mobile_menu_open"
+}

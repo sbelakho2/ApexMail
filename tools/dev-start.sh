@@ -10,7 +10,7 @@
 # - Marketing site (port 1111)
 # =============================================================================
 
-set -e
+set -eu
 cd "$(dirname "$0")/.."
 
 # Colors for output
@@ -48,8 +48,10 @@ log "Redis ready"
 # -----------------------------------------------------------------------------
 if [[ ! -f /tmp/jwt_private.pem ]]; then
     log "Generating development JWT keys..."
+    umask 077
     openssl genrsa 2048 2>/dev/null > /tmp/jwt_private.pem
     openssl rsa -in /tmp/jwt_private.pem -pubout 2>/dev/null > /tmp/jwt_public.pem
+    umask 022
 fi
 
 # -----------------------------------------------------------------------------

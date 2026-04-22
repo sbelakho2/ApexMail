@@ -11,6 +11,7 @@ use axum::{
     response::Response,
 };
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 /// Trait implemented by AppState types that hold an internal auth token.
 pub trait HasServiceToken {
@@ -33,10 +34,11 @@ pub async fn require_service_token<S: HasServiceToken + Send + Sync + 'static>(
     }
 
     let provided = extract_token(req.headers());
-    if provided.as_deref() == Some(expected) {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    match provided.as_deref() {
+        Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => {
+            Ok(next.run(req).await)
+        }
+        _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
 

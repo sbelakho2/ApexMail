@@ -1,0 +1,6 @@
+{
+  "component": "ControlPlaneSidebar",
+  "title": "Control Plane",
+  "activeMarker": "aria-current",
+  "routes": ["/audit", "/operators", "/incidents", "/queues"]
+}

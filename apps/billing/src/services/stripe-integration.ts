@@ -688,6 +688,7 @@ export class StripeService {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
+              'Authorization': `Bearer ${config.serviceAuthToken}`,
               'X-Internal-Service': 'billing',
               'X-Tenant-Id': tenantId,
             },

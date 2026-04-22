@@ -92,7 +92,7 @@ services:
     # Production: Do NOT expose Redis port to host
     ports: []
     command: >
-      sh -c "redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru --requirepass \"$REDIS_PASSWORD\""
+      sh -c "redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\""
     deploy:
       resources:
         limits:

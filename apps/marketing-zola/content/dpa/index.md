@@ -38,7 +38,7 @@ The Processor shall:
 
 ## 5. Sub-processors
 
-Current sub-processors are listed at [apexmail.ee/sub-processors](/sub-processors). The Processor will notify the Controller 30 days before adding new sub-processors.
+Current sub-processors are listed at [apexmail.ee/compliance](/compliance#sub-processors). The Processor will notify the Controller 30 days before adding new sub-processors.
 
 ## 6. International Transfers
 

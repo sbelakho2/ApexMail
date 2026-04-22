@@ -133,7 +133,11 @@ spec:
     - Ingress
   ingress:
     # SMTP ports are exposed externally via LoadBalancer
-    - ports:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
         - port: {{ .Values.mta.ports.smtp }}
           protocol: TCP
         - port: {{ .Values.mta.ports.submission }}

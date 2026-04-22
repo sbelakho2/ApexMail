@@ -1,0 +1,7 @@
+{
+  "shell": "WebDashboardShell",
+  "banner": "ImpersonationBanner",
+  "sidebarStorageKey": "apexmail-ui",
+  "mainWrapper": "bg-gradient-to-br",
+  "childSlot": "relative"
+}

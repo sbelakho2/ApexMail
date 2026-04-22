@@ -1,0 +1,8 @@
+{
+  "hook": "useAPI",
+  "csrfHeader": "X-CSRF-Token",
+  "dedupingIntervalMs": 5000,
+  "errorType": "APIError",
+  "mutatingMethods": ["POST", "PUT", "DELETE"],
+  "tokenEndpoint": "/v1/auth/csrf"
+}

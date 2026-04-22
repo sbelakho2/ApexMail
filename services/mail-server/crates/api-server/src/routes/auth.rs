@@ -1,9 +1,9 @@
-//! Authentication routes: login, logout, refresh, register, API key management.
+//! Authentication routes: login, logout, refresh, register, reset password, and API key management.
 
-use super::helpers::{extract_cookie, clamp_limit, default_limit};
+use super::helpers::{clamp_limit, default_limit, extract_cookie, hash_token, html_escape};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{delete, post, get};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -11,20 +11,165 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::middleware::auth::{AuthUser, JwtClaims};
+use crate::middleware::auth::{invalidate_api_key_cache, AuthUser, JwtClaims};
 use crate::state::AppState;
+
+const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
+
+fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> bool {
+    let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$") {
+        bcrypt::verify(password, hash).map_err(|error| error.to_string())
+    } else if hash.starts_with("$argon2") {
+        apexmail_lib::verify_password(password, hash).map_err(|error| error.to_string())
+    } else {
+        Err("unknown password hash scheme".into())
+    };
+
+    match result {
+        Ok(valid) => valid,
+        Err(error) => {
+            tracing::warn!(error = %error, subject = %subject, "password verification failed");
+            false
+        }
+    }
+}
+
+fn scopes_for_role(role: &str) -> Vec<String> {
+    match role {
+        "admin" | "owner" => vec!["*".into()],
+        "developer" => vec![
+            "messages:send".into(),
+            "messages:read".into(),
+            "domains:read".into(),
+            "templates:read".into(),
+            "templates:write".into(),
+            "events:read".into(),
+            "analytics:read".into(),
+            "contacts:read".into(),
+            "contacts:write".into(),
+        ],
+        "viewer" => vec![
+            "messages:read".into(),
+            "domains:read".into(),
+            "templates:read".into(),
+            "events:read".into(),
+            "analytics:read".into(),
+            "contacts:read".into(),
+        ],
+        _ => vec!["messages:read".into()],
+    }
+}
+
+fn validate_password_strength(password: &str) -> Result<(), ApiError> {
+    if password.len() < 12 || password.len() > 128 {
+        return Err(ApiError::Validation(vec![
+            "password must be 12-128 characters".into(),
+        ]));
+    }
+
+    let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
+    let has_digit = password.chars().any(|c| c.is_ascii_digit());
+    let has_special = password.chars().any(|c| !c.is_alphanumeric());
+    if !has_lower || !has_upper || !has_digit || !has_special {
+        return Err(ApiError::Validation(vec![
+            "password must include uppercase, lowercase, number, and special character".into(),
+        ]));
+    }
+
+    Ok(())
+}
+
+fn authenticated_user_id(auth: &AuthUser) -> Result<&str, ApiError> {
+    auth.user_id
+        .as_deref()
+        .ok_or_else(|| ApiError::Unauthorized("user session required".into()))
+}
+
+fn register_response() -> RegisterResponse {
+    RegisterResponse {
+        success: true,
+        message: "If the email is eligible, a verification message has been sent.".into(),
+    }
+}
+
+fn build_action_link(base_url: &str, path: &str, email: &str, token: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("token", token);
+    serializer.append_pair("email", email);
+    format!(
+        "{}{path}?{}",
+        base_url.trim_end_matches('/'),
+        serializer.finish(),
+    )
+}
+
+async fn enqueue_verification_email(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    base_url: &str,
+    email: &str,
+    token: &str,
+) -> Result<(), sqlx::Error> {
+    let verification_link = build_action_link(base_url, "/verify-email", email, token);
+    let safe_email = html_escape(email);
+    let safe_link = html_escape(&verification_link);
+    let html_body = format!(
+        r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:sans-serif;line-height:1.6;color:#1a1a1a;max-width:560px;margin:0 auto;padding:24px">
+<h2 style="color:#2563EB">Verify Your ApexMail Account</h2>
+<p>Finish setting up <strong>{safe_email}</strong> by confirming this email address.</p>
+<p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#2563EB;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Verify email</a></p>
+<p style="font-size:13px;color:#666">This link expires in 24 hours.</p>
+<hr style="border:none;border-top:1px solid #e5e5e5;margin:24px 0"/>
+<p style="font-size:12px;color:#999">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999">apexmail.ee</a></p>
+</body></html>"#,
+    );
+    let text_body = format!(
+        "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours.\n\n© 2026 ApexMail — https://apexmail.ee",
+    );
+
+    sqlx::query(
+        "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
+    )
+    .bind(apexmail_lib::id::generate_id("msg", 22))
+    .bind(SYSTEM_TENANT_ID)
+    .bind("noreply@apexmail.ee")
+    .bind(serde_json::json!([email]))
+    .bind("Verify your ApexMail account")
+    .bind(&html_body)
+    .bind(&text_body)
+    .bind(serde_json::json!(["system", "verification"]))
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
         .route("/register", post(register))
+        .route("/signup", post(register))
         .route("/verify-email", get(verify_email))
+        .route("/reset-password", post(reset_password))
         .route("/api-keys", post(create_api_key).get(list_api_keys))
         .route("/api-keys/:id", delete(revoke_api_key))
         .route("/logout", post(logout))
         .route("/refresh", post(refresh_token))
         .route("/change-password", post(change_password))
         .route("/sessions/revoke", post(revoke_session))
+}
+
+pub fn control_plane_alias_router() -> Router<AppState> {
+    Router::new()
+        .route("/login", post(login))
+        .route("/register", post(register))
+        .route("/signup", post(register))
+        .route("/verify-email", get(verify_email))
+        .route("/reset-password", post(reset_password))
+        .route("/logout", post(logout))
+        .route("/refresh", post(refresh_token))
 }
 
 // ─── Request / Response types ──────────────────────────────────
@@ -120,6 +265,21 @@ pub struct RefreshRequest {
     pub token: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordRequest {
+    pub token: String,
+    pub email: String,
+    pub password: String,
+    #[serde(default, rename = "confirmPassword", alias = "confirm_password")]
+    pub confirm_password: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResetPasswordResponse {
+    pub success: bool,
+    pub message: String,
+}
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn login(
@@ -144,10 +304,7 @@ async fn login(
         return Err(ApiError::Forbidden("account is not active".into()));
     }
 
-    // Fix #47: If password_hash cannot be parsed (e.g., SCIM placeholder), treat as invalid credentials
-    // rather than internal error to avoid leaking hash format information.
-    let valid = apexmail_lib::crypto::verify_password(&body.password, &user.password_hash)
-        .unwrap_or(false);
+    let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email);
 
     if !valid {
         return Err(ApiError::Unauthorized("invalid credentials".into()));
@@ -157,35 +314,10 @@ async fn login(
     let now = Utc::now();
     let exp = now + ChronoDuration::seconds(expiry_secs);
 
-    // Fix #24: Assign scopes based on user role instead of blanket wildcard.
-    let scopes = match user.role.as_str() {
-        "admin" | "owner" => vec!["*".into()],
-        "developer" => vec![
-            "messages:send".into(),
-            "messages:read".into(),
-            "domains:read".into(),
-            "templates:read".into(),
-            "templates:write".into(),
-            "events:read".into(),
-            "analytics:read".into(),
-            "contacts:read".into(),
-            "contacts:write".into(),
-        ],
-        "viewer" => vec![
-            "messages:read".into(),
-            "domains:read".into(),
-            "templates:read".into(),
-            "events:read".into(),
-            "analytics:read".into(),
-            "contacts:read".into(),
-        ],
-        _ => vec!["messages:read".into()],
-    };
-
     let claims = JwtClaims {
         sub: user.id.to_string(),
         tenant_id: user.tenant_id.to_string(),
-        scopes,
+        scopes: scopes_for_role(&user.role),
         exp: exp.timestamp(),
         iat: now.timestamp(),
     };
@@ -252,9 +384,7 @@ fn default_plan() -> String {
 
 #[derive(Debug, Serialize)]
 pub struct RegisterResponse {
-    pub tenant_id: String,
-    pub user_id: String,
-    pub verification_token: String,
+    pub success: bool,
     pub message: String,
 }
 
@@ -285,20 +415,7 @@ async fn register(
     if body.name.is_empty() || body.name.len() > 100 {
         return Err(ApiError::Validation(vec!["name must be 1-100 characters".into()]));
     }
-    if body.password.len() < 12 || body.password.len() > 128 {
-        return Err(ApiError::Validation(vec!["password must be 12-128 characters".into()]));
-    }
-
-    // Validate password strength
-    let has_lower = body.password.chars().any(|c| c.is_ascii_lowercase());
-    let has_upper = body.password.chars().any(|c| c.is_ascii_uppercase());
-    let has_digit = body.password.chars().any(|c| c.is_ascii_digit());
-    let has_special = body.password.chars().any(|c| !c.is_alphanumeric());
-    if !has_lower || !has_upper || !has_digit || !has_special {
-        return Err(ApiError::Validation(vec![
-            "password must include uppercase, lowercase, number, and special character".into()
-        ]));
-    }
+    validate_password_strength(&body.password)?;
 
     // Validate plan
     let valid_plans = ["free", "starter", "pro", "growth", "scale", "enterprise", "payg"];
@@ -317,7 +434,7 @@ async fn register(
     .await?;
 
     if existing.is_some() {
-        return Err(ApiError::Conflict("an account with this email already exists".into()));
+        return Ok((StatusCode::ACCEPTED, Json(register_response())));
     }
 
     // Generate IDs and slug
@@ -332,7 +449,13 @@ async fn register(
 
     // Generate verification token
     let verification_token = apexmail_lib::id::generate_verification_token();
+    let verification_token_hash = hash_token(&verification_token);
     let verification_expires = now + ChronoDuration::hours(24);
+
+    let mut tx = state.db.begin().await.map_err(|error| {
+        tracing::error!(error = %error, "failed to begin registration transaction");
+        ApiError::Internal("database error".into())
+    })?;
 
     // Create tenant
     sqlx::query(
@@ -348,8 +471,12 @@ async fn register(
     .bind(serde_json::json!({}))
     .bind(now)
     .bind(now)
-    .execute(&state.db)
-    .await?;
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, tenant_id = %tenant_id, "failed to create tenant during registration");
+        ApiError::Internal("database error".into())
+    })?;
 
     // Create user with owner role
     sqlx::query(
@@ -367,13 +494,29 @@ async fn register(
     .bind(false) // email_verified = false until verified
     .bind(false) // mfa_enabled
     .bind(serde_json::json!({
-        "verification_token": &verification_token,
+        "verification_token_hash": verification_token_hash,
         "verification_expires": verification_expires.to_rfc3339(),
     }))
     .bind(now)
     .bind(now)
-    .execute(&state.db)
-    .await?;
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, user_id = %user_id, tenant_id = %tenant_id, "failed to create user during registration");
+        ApiError::Internal("database error".into())
+    })?;
+
+    enqueue_verification_email(&mut tx, &state.config.base_url, &email_lower, &verification_token)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %tenant_id, user_id = %user_id, "failed to queue verification email during registration");
+            ApiError::Internal("database error".into())
+        })?;
+
+    tx.commit().await.map_err(|error| {
+        tracing::error!(error = %error, tenant_id = %tenant_id, user_id = %user_id, "failed to commit registration transaction");
+        ApiError::Internal("database error".into())
+    })?;
 
     tracing::info!(
         tenant_id = %tenant_id,
@@ -383,13 +526,8 @@ async fn register(
     );
 
     Ok((
-        StatusCode::CREATED,
-        Json(RegisterResponse {
-            tenant_id,
-            user_id,
-            verification_token,
-            message: "Account created. Please verify your email.".into(),
-        }),
+        StatusCode::ACCEPTED,
+        Json(register_response()),
     ))
 }
 
@@ -409,18 +547,28 @@ async fn verify_email(
     State(state): State<AppState>,
     Query(params): Query<VerifyEmailQuery>,
 ) -> Result<Json<VerifyEmailResponse>, ApiError> {
-    if params.token.is_empty() || params.token.len() > 128 {
+    Ok(Json(verify_email_token(&state, &params.token).await?))
+}
+
+pub(crate) async fn verify_email_token(
+    state: &AppState,
+    token: &str,
+) -> Result<VerifyEmailResponse, ApiError> {
+    if token.is_empty() || token.len() > 128 {
         return Err(ApiError::Validation(vec!["invalid verification token".into()]));
     }
 
+    let token_hash = hash_token(token);
+
     // Find user with matching verification token
-    let user: Option<(Uuid, Uuid, serde_json::Value)> = sqlx::query_as(
+    let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
         "SELECT id, tenant_id, metadata FROM users 
-         WHERE metadata->>'verification_token' = $1 
+         WHERE (metadata->>'verification_token_hash' = $1 OR metadata->>'verification_token' = $2) 
          AND email_verified = false
          LIMIT 1"
     )
-    .bind(&params.token)
+    .bind(&token_hash)
+    .bind(token)
     .fetch_optional(&state.db)
     .await?;
 
@@ -443,11 +591,11 @@ async fn verify_email(
     // Mark email as verified
     sqlx::query(
         "UPDATE users SET email_verified = true, 
-         metadata = metadata - 'verification_token' - 'verification_expires',
+            metadata = metadata - 'verification_token_hash' - 'verification_token' - 'verification_expires',
          updated_at = NOW()
          WHERE id = $1"
     )
-    .bind(user_id)
+    .bind(&user_id)
     .execute(&state.db)
     .await?;
 
@@ -455,16 +603,16 @@ async fn verify_email(
     sqlx::query(
         "UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1"
     )
-    .bind(tenant_id)
+    .bind(&tenant_id)
     .execute(&state.db)
     .await?;
 
     tracing::info!(user_id = %user_id, tenant_id = %tenant_id, "Email verified");
 
-    Ok(Json(VerifyEmailResponse {
+    Ok(VerifyEmailResponse {
         success: true,
         message: "Email verified successfully. You can now log in.".into(),
-    }))
+    })
 }
 
 async fn create_api_key(
@@ -477,7 +625,7 @@ async fn create_api_key(
     }
 
     let raw_key = apexmail_lib::id::generate_api_key(false);
-    let key_hash = apexmail_lib::crypto::hash_api_key(&raw_key);
+    let key_hash = apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
     // Fix #23: Safely limit prefix length. If key is shorter than 15 chars, store
     // at most 8 chars (or half the key) to avoid exposing the full key.
     let prefix_len = if raw_key.len() >= 15 {
@@ -567,19 +715,91 @@ async fn revoke_api_key(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let result = sqlx::query(
-        "DELETE FROM api_keys WHERE id = $1 AND tenant_id = $2",
+    let deleted_key_hash: Option<String> = sqlx::query_scalar(
+        "DELETE FROM api_keys WHERE id = $1 AND tenant_id = $2 RETURNING key_hash",
     )
     .bind(id)
     .bind(auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some(key_hash) = deleted_key_hash else {
+        return Err(ApiError::NotFound("API key not found".into()));
+    };
+
+    invalidate_api_key_cache(&key_hash, &state).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn reset_password(
+    State(state): State<AppState>,
+    Json(body): Json<ResetPasswordRequest>,
+) -> Result<Json<ResetPasswordResponse>, ApiError> {
+    if body.token.is_empty() || body.token.len() > 128 {
+        return Err(ApiError::Validation(vec!["invalid password reset token".into()]));
+    }
+    if body.email.is_empty() || body.email.len() > 254 {
+        return Err(ApiError::Validation(vec!["invalid email address".into()]));
+    }
+    if let Some(confirm_password) = &body.confirm_password {
+        if confirm_password != &body.password {
+            return Err(ApiError::Validation(vec![
+                "password confirmation does not match".into(),
+            ]));
+        }
+    }
+    validate_password_strength(&body.password)?;
+
+    let token_hash = hash_token(&body.token);
+    let email = body.email.trim().to_lowercase();
+    let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, status, metadata FROM users
+         WHERE LOWER(email) = LOWER($1)
+           AND (metadata->>'password_reset_token_hash' = $2 OR metadata->>'password_reset_token' = $3)
+         LIMIT 1",
+    )
+    .bind(&email)
+    .bind(&token_hash)
+    .bind(&body.token)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some((user_id, status, metadata)) = user else {
+        return Err(ApiError::BadRequest("invalid or expired reset token".into()));
+    };
+
+    if status != "active" {
+        return Err(ApiError::Forbidden(format!("account is {status}")));
+    }
+
+    if let Some(expires_str) = metadata.get("password_reset_expires").and_then(|value| value.as_str()) {
+        if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expires_str) {
+            if Utc::now() > expires {
+                return Err(ApiError::BadRequest("password reset token has expired".into()));
+            }
+        }
+    }
+
+    let password_hash = apexmail_lib::hash_password(&body.password)
+        .map_err(|error| ApiError::Internal(format!("password hashing failed: {error}")))?;
+
+    sqlx::query(
+        "UPDATE users
+         SET password_hash = $1,
+             metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires',
+             updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(password_hash)
+    .bind(&user_id)
     .execute(&state.db)
     .await?;
 
-    if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound("API key not found".into()));
-    }
-
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(ResetPasswordResponse {
+        success: true,
+        message: "Password updated successfully.".into(),
+    }))
 }
 
 async fn logout(
@@ -663,7 +883,7 @@ async fn refresh_token(
     let claims = JwtClaims {
         sub: user.id.to_string(),
         tenant_id: user.tenant_id.to_string(),
-        scopes: old_claims.scopes,
+        scopes: scopes_for_role(&user.role),
         exp: exp.timestamp(),
         iat: now.timestamp(),
     };
@@ -720,10 +940,10 @@ mod tests {
             token: "jwt.token.here".into(),
             expires_at: "2026-01-01T00:00:00Z".into(),
             user: UserInfo {
-                id: String::nil(),
+                id: Uuid::nil().to_string(),
                 email: "a@b.com".into(),
                 name: None,
-                tenant_id: String::nil(),
+                tenant_id: Uuid::nil().to_string(),
                 role: "admin".into(),
             },
         };
@@ -742,7 +962,7 @@ mod tests {
     #[test]
     fn test_api_key_info_serialisation() {
         let info = ApiKeyInfo {
-            id: String::nil(),
+            id: Uuid::nil().to_string(),
             name: "test".into(),
             key_prefix: "am_live_abc".into(),
             scopes: serde_json::json!(["*"]),
@@ -751,6 +971,82 @@ mod tests {
         };
         let json = serde_json::to_value(&info).unwrap();
         assert!(json["last_used_at"].is_null());
+    }
+
+    #[test]
+    fn test_register_response_does_not_leak_verification_token_or_internal_ids() {
+        let json = serde_json::to_value(register_response()).unwrap();
+
+        assert_eq!(json["success"], true);
+        assert!(json.get("message").is_some());
+        assert!(json.get("tenant_id").is_none());
+        assert!(json.get("user_id").is_none());
+        assert!(json.get("verification_token").is_none());
+    }
+
+    #[test]
+    fn test_hash_token_is_deterministic() {
+        assert_eq!(hash_token("abc"), hash_token("abc"));
+        assert_ne!(hash_token("abc"), hash_token("def"));
+    }
+
+    #[test]
+    fn test_verify_password_or_log_accepts_argon2_hashes() {
+        let password = "StrongPassword1!";
+        let hash = apexmail_lib::hash_password(password).unwrap();
+
+        assert!(verify_password_or_log(password, &hash, "argon2-user@example.com"));
+        assert!(!verify_password_or_log("WrongPassword1!", &hash, "argon2-user@example.com"));
+    }
+
+    #[test]
+    fn test_verify_password_or_log_accepts_bcrypt_hashes() {
+        let password = "StrongPassword1!";
+        let hash = bcrypt::hash(password, 4).unwrap();
+
+        assert!(verify_password_or_log(password, &hash, "bcrypt-user@example.com"));
+        assert!(!verify_password_or_log("WrongPassword1!", &hash, "bcrypt-user@example.com"));
+    }
+
+    #[test]
+    fn test_authenticated_user_id_requires_user_session() {
+        let auth = AuthUser {
+            tenant_id: "tenant_123".into(),
+            user_id: None,
+            api_key_id: Some("key_123".into()),
+            scopes: vec!["messages:read".into()],
+        };
+
+        assert!(matches!(
+            authenticated_user_id(&auth),
+            Err(ApiError::Unauthorized(message)) if message == "user session required"
+        ));
+    }
+
+    #[test]
+    fn test_authenticated_user_id_returns_string_identifier_without_conversion() {
+        let auth = AuthUser {
+            tenant_id: "tenant_123".into(),
+            user_id: Some("usr_01hxyz".into()),
+            api_key_id: None,
+            scopes: vec!["messages:read".into()],
+        };
+
+        assert_eq!(authenticated_user_id(&auth).unwrap(), "usr_01hxyz");
+    }
+
+    #[test]
+    fn test_reset_password_request_aliases() {
+        let json = r#"{"token":"tok","email":"user@example.com","password":"StrongPassword1!","confirmPassword":"StrongPassword1!"}"#;
+        let req: ResetPasswordRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.confirm_password.as_deref(), Some("StrongPassword1!"));
+    }
+
+    #[test]
+    fn test_scopes_for_role_mapping() {
+        assert_eq!(scopes_for_role("owner"), vec!["*".to_string()]);
+        assert!(scopes_for_role("developer").contains(&"messages:send".to_string()));
+        assert_eq!(scopes_for_role("member"), vec!["messages:read".to_string()]);
     }
 }
 
@@ -767,40 +1063,46 @@ async fn change_password(
     auth: AuthUser,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Validate new password strength
-    if body.new_password.len() < 12 {
-        return Err(ApiError::BadRequest("Password must be at least 12 characters".into()));
+    let user_id = authenticated_user_id(&auth)?;
+
+    if body.current_password == body.new_password {
+        return Err(ApiError::Validation(vec![
+            "new password must be different from current password".into(),
+        ]));
+    }
+    validate_password_strength(&body.new_password)?;
+
+    #[derive(sqlx::FromRow)]
+    struct PasswordHashRow {
+        password_hash: Option<String>,
     }
 
     // Verify current password
-    let user_id_str = auth.user_id.as_ref().map(|id| id.to_string());
-    let user = sqlx::query!(
-        "SELECT id, password_hash FROM users WHERE id = $1",
-        user_id_str,
+    let user = sqlx::query_as::<_, PasswordHashRow>(
+        "SELECT password_hash FROM users WHERE id = $1",
     )
+    .bind(user_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
 
     let password_hash = user.password_hash.as_deref()
         .ok_or_else(|| ApiError::Unauthorized("No password set".into()))?;
-    let valid = bcrypt::verify(&body.current_password, password_hash)
-        .map_err(|_| ApiError::Unauthorized("Invalid current password".into()))?;
+    let valid = verify_password_or_log(&body.current_password, password_hash, user_id);
 
     if !valid {
         return Err(ApiError::Unauthorized("Invalid current password".into()));
     }
 
     // Hash and update
-    let new_hash = bcrypt::hash(&body.new_password, 12)
-        .map_err(|e| ApiError::Internal(format!("Password hashing failed: {e}")))?;
+    let new_hash = apexmail_lib::hash_password(&body.new_password)
+        .map_err(|error| ApiError::Internal(format!("Password hashing failed: {error}")))?;
 
-    let user_id_str = auth.user_id.as_ref().map(|id| id.to_string());
-    sqlx::query!(
+    sqlx::query(
         "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
-        new_hash,
-        user_id_str,
     )
+    .bind(new_hash)
+    .bind(user_id)
     .execute(&state.db)
     .await?;
 
@@ -819,24 +1121,25 @@ async fn revoke_session(
     auth: AuthUser,
     Json(body): Json<RevokeSessionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let user_id_str = auth.user_id.map(|id| id.to_string());
+    let user_id = authenticated_user_id(&auth)?;
+
     let affected = if let Some(session_id) = &body.session_id {
         // Revoke single session
-        sqlx::query!(
+        sqlx::query(
             "DELETE FROM sessions WHERE id = $1 AND user_id = $2",
-            session_id,
-            user_id_str,
         )
+        .bind(session_id)
+        .bind(user_id)
         .execute(&state.db)
         .await?
         .rows_affected()
     } else {
         // Revoke all sessions except current - if no specific session provided,
         // revoke all other sessions (we don't have session_id in auth context)
-        sqlx::query!(
+        sqlx::query(
             "DELETE FROM sessions WHERE user_id = $1",
-            user_id_str,
         )
+        .bind(user_id)
         .execute(&state.db)
         .await?
         .rows_affected()

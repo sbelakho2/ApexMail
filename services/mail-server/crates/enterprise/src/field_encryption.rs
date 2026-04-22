@@ -534,11 +534,11 @@ mod tests {
         let encrypted = enc.encrypt("sensitive@data.com").unwrap();
 
 // Tamper with the last byte of the base64-encoded data
-        let mut tampered = encrypted.clone();
-        let len = tampered.len();
-        let last = tampered.as_bytes()[len - 2];
-        let replacement = if last == b'A' { b'B' } else { b'A' };
-        unsafe { tampered.as_bytes_mut()[len - 2] = replacement; }
+        let mut tampered_bytes = encrypted.clone().into_bytes();
+        let len = tampered_bytes.len();
+        let last = tampered_bytes[len - 2];
+        tampered_bytes[len - 2] = if last == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(tampered_bytes).unwrap();
 
 // Decryption should fail due to authentication tag mismatch
         assert!(enc.decrypt(&tampered).is_err());

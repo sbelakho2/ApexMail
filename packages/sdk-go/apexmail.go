@@ -83,6 +83,9 @@ func New(apiKey string, cfg ...Config) *Client {
 	if c.BaseURL != "" {
 		baseURL = c.BaseURL
 	}
+	if !strings.HasPrefix(baseURL, "https://") {
+		panic("apexmail: baseURL must use HTTPS")
+	}
 	timeout := defaultTimeout
 	if c.Timeout > 0 {
 		timeout = c.Timeout

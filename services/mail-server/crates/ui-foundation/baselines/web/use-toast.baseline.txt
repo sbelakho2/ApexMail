@@ -1,0 +1,5 @@
+{
+  "globalStore": "__apexmailToastStore__",
+  "removeDelayMs": 5000,
+  "surfaceRole": "Notifications"
+}

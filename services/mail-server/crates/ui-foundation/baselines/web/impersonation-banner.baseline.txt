@@ -1,0 +1,7 @@
+{
+  "component": "ImpersonationBanner",
+  "headline": "Impersonation Mode",
+  "primaryAction": "End Session",
+  "tenantLabel": "tenant_id",
+  "operatorLabel": "operator_name"
+}

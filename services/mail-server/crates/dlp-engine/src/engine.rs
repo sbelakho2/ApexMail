@@ -77,9 +77,10 @@ impl DlpEngine {
             .map(|domain| self.config.allowlisted_domains.iter().any(|d| d == domain))
             .unwrap_or(false);
 
-// Truncate body to max scan size
+// Truncate body to max scan size (safe UTF-8 boundary)
         let scan_text = if body.len() > self.config.max_scan_size {
-            &body[..self.config.max_scan_size]
+            let boundary = body.floor_char_boundary(self.config.max_scan_size);
+            &body[..boundary]
         } else {
             body
         };

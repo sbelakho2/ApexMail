@@ -40,9 +40,7 @@ const COMMAND_RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_COMMANDS_PER_WINDOW: usize = 240;
 /// Maximum number of distinct IPs tracked for rate limiting.
 /// Once exceeded, the oldest entries are evicted to prevent unbounded growth.
-#[allow(dead_code)]
 const MAX_RATE_TRACKER_ENTRIES: usize = 100_000;
-#[allow(dead_code)]
 const RATE_TRACKER_EVICTION_INTERVAL: Duration = Duration::from_secs(30);
 const DATA_BUFFER_SHRINK_THRESHOLD: usize = 128 * 1024;
 const DATA_BUFFER_DEFAULT_CAPACITY: usize = 8 * 1024;
@@ -118,7 +116,6 @@ static COMMAND_RATE_TRACKER: LazyLock<DashMap<IpAddr, VecDeque<Instant>>> =
 
 /// Spawn a background task that periodically evicts stale entries from the
 /// rate tracker. Call once at server startup.
-#[allow(dead_code)]
 pub fn spawn_rate_tracker_cleanup() {
     tokio::spawn(async {
         loop {
@@ -131,7 +128,6 @@ pub fn spawn_rate_tracker_cleanup() {
 /// Remove entries whose most-recent timestamp is older than the window,
 /// or trim the map down to MAX_RATE_TRACKER_ENTRIES by dropping the
 /// least-recently-active IPs.
-#[allow(dead_code)]
 fn evict_stale_rate_entries() {
     let now = Instant::now();
     let window_start = now - COMMAND_RATE_WINDOW;
@@ -668,7 +664,7 @@ async fn handle_data_mode(
                         Err(e) => {
                             config.metrics.record_delivery_rejected();
                             warn!(peer = %peer, error = %e, "Message rejected");
-                            let response = format!("550 5.7.1 Message rejected: {}\r\n", e);
+                            let response = "550 5.7.1 Message rejected\r\n";
                             stream.write_all(response.as_bytes()).await?;
                             stream.flush().await?;
                         }
@@ -814,6 +810,10 @@ async fn handle_command_mode(
 }
 
 async fn allow_command_from_peer(peer_ip: IpAddr) -> bool {
+    use std::sync::Once;
+    static CLEANUP_INIT: Once = Once::new();
+    CLEANUP_INIT.call_once(spawn_rate_tracker_cleanup);
+
     let now = Instant::now();
     let window_start = now - COMMAND_RATE_WINDOW;
 

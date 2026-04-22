@@ -9,7 +9,7 @@ last_updated = "2025-12-01"
 
 ## 1. Introduction
 
-These Terms of Service ("Terms") govern your access to and use of the ApexMail email infrastructure platform operated by ApexMail OÜ, a company incorporated in the Republic of Estonia (registry code 16XXXXXX).
+These Terms of Service ("Terms") govern your access to and use of the ApexMail email infrastructure platform operated by Bel Consulting OÜ, a company incorporated in the Republic of Estonia (registry code 16192499).
 
 By accessing or using our services, you agree to be bound by these Terms. If you do not agree to these Terms, you may not use our services.
 

@@ -55,7 +55,7 @@ impl Default for SmtpSenderConfig {
             timeout_seconds: 60,
             max_retries: 3,
             retry_delay_seconds: 30,
-            require_starttls: false,
+            require_starttls: true,
             connection_pool_size: 2,
             mx_cache_ttl_secs: default_mx_cache_ttl_secs(),
         }
@@ -465,7 +465,8 @@ impl SmtpSender {
     {
         let mut response = String::new();
         let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
-        let mail_from = format!("MAIL FROM:<{}>\r\n", from);
+        let sanitized_from = Self::sanitize_smtp_address(from);
+        let mail_from = format!("MAIL FROM:<{}>\r\n", sanitized_from);
         stream.write_all(mail_from.as_bytes()).await?;
         response.clear();
         read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
@@ -478,7 +479,8 @@ impl SmtpSender {
         let mut rejected = Vec::with_capacity(recipients.len());
         
         for recipient in recipients {
-            let rcpt_to = format!("RCPT TO:<{}>\r\n", recipient);
+            let sanitized_rcpt = Self::sanitize_smtp_address(recipient);
+            let rcpt_to = format!("RCPT TO:<{}>\r\n", sanitized_rcpt);
             stream.write_all(rcpt_to.as_bytes()).await?;
             response.clear();
             read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
@@ -542,6 +544,15 @@ impl SmtpSender {
         })
     }
     
+/// Sanitize an SMTP envelope address to prevent SMTP command injection.
+/// Strips CR, LF, NUL, angle brackets, and space characters that could
+/// inject additional SMTP commands via MAIL FROM / RCPT TO.
+    fn sanitize_smtp_address(addr: &str) -> String {
+        addr.chars()
+            .filter(|c| *c != '\r' && *c != '\n' && *c != '\0' && *c != '<' && *c != '>' && *c != ' ')
+            .collect()
+    }
+
 /// Sanitize a header value to prevent header injection (#101)
 /// Strips CR, LF, and NUL bytes that could inject additional headers
     fn sanitize_header(value: &str) -> String {

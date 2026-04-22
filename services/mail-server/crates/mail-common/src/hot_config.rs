@@ -81,16 +81,14 @@ where
     }
 
 /// Apply a function to the current config and store the result.
-/// Useful for partial updates (e.g., bumping a single threshold while
-/// leaving all other fields unchanged) when `T:Clone`.
+/// Uses `arc_swap::ArcSwap::rcu` for a retry-loop that eliminates the
+/// TOCTOU race between `load()` and `store()`.
     pub fn update<F>(&self, f: F)
     where
         T: Clone,
-        F: FnOnce(&T) -> T,
+        F: Fn(&T) -> T,
     {
-        let current = self.inner.load();
-        let updated = f(&current);
-        self.inner.store(Arc::new(updated));
+        self.inner.rcu(|current| Arc::new(f(current)));
     }
 }
 

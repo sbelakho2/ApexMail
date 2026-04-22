@@ -9,9 +9,9 @@ last_updated = "2025-12-01"
 
 ## 1. Introduction
 
-ApexMail OÜ ("we", "us") is committed to protecting your privacy. This policy explains how we collect, use, and safeguard personal data when you use our services.
+Bel Consulting OÜ (trading as ApexMail) ("we", "us") is committed to protecting your privacy. This policy explains how we collect, use, and safeguard personal data when you use our services.
 
-**Data Controller:** ApexMail OÜ, Tallinn, Estonia.
+**Data Controller:** Bel Consulting OÜ, Tallinn, Estonia.
 
 ## 2. Data We Collect
 

@@ -9,7 +9,7 @@ import { logger as honoLogger } from 'hono/logger';
 import { logger } from './lib/logger.js';
 import { secureHeaders } from 'hono/secure-headers';
 import { timing } from 'hono/timing';
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as verifySignature } from 'node:crypto';
 import { ApiKeysRepository, createDatabase, DatabasePool } from '@apexmail/db';
 import { Redis } from 'ioredis';
 import { config, loadConfig } from './config.js';
@@ -42,6 +42,7 @@ export interface BillingEnv {
     userId: string;
     isAdmin: boolean;
     adminId: string;
+    adminScope: string[] | undefined;
     requestId: string;
   };
 }
@@ -189,6 +190,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
     c.set('userId', tokenResult.userId);
     c.set('isAdmin', tokenResult.isAdmin);
     c.set('adminId', tokenResult.adminId ?? '');
+    c.set('adminScope', tokenResult.adminScope as string[] | undefined);
 
     // Tenant ID from header or token
     const tenantId = tenantHeader ?? tokenResult.tenantId;
@@ -233,6 +235,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
       }
     } catch (error) {
       logger.error('Rate limit check failed', { error: error instanceof Error ? error.message : String(error) });
+      return c.json({ error: 'Service temporarily unavailable' }, 503);
     }
 
     return next();
@@ -270,6 +273,7 @@ interface TokenResult {
   tenantId?: string;
   isAdmin: boolean;
   adminId?: string;
+  adminScope?: string[];
 }
 
 async function verifyToken(ctx: BillingContext, token: string, clientIp?: string): Promise<TokenResult> {
@@ -293,6 +297,7 @@ async function verifyToken(ctx: BillingContext, token: string, clientIp?: string
       tenantId: apiKey.tenantId,
       isAdmin: adminAccess,
       adminId: adminAccess ? (apiKey.userId ?? apiKey.id) : undefined,
+      adminScope: adminAccess ? [`tenant:${apiKey.tenantId}`] : undefined,
     };
   }
 
@@ -310,34 +315,79 @@ async function verifyToken(ctx: BillingContext, token: string, clientIp?: string
       tenantId: decoded.tenant_id,
       isAdmin: decoded.admin === true,
       adminId: decoded.admin ? decoded.sub : undefined,
+      adminScope: Array.isArray(decoded.scopes)
+        ? decoded.scopes
+        : Array.isArray(decoded.scope)
+          ? decoded.scope
+          : decoded.admin
+            ? ['tenant:*']
+            : undefined,
     };
   } catch {
     return { valid: false, userId: '', isAdmin: false };
   }
 }
 
+type ResolveClientIpInput = {
+  remoteAddress?: string | null;
+  xForwardedFor?: string | null;
+  xRealIp?: string | null;
+  trustProxyHeaders?: boolean;
+};
+
+function normalizeIp(rawIp?: string | null): string | undefined {
+  if (!rawIp) {
+    return undefined;
+  }
+
+  const trimmed = rawIp.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  return trimmed.startsWith('::ffff:') ? trimmed.slice(7) : trimmed;
+}
+
+export function resolveClientIp(input: ResolveClientIpInput): string | undefined {
+  if (input.trustProxyHeaders) {
+    const forwarded = input.xForwardedFor?.split(',')[0];
+    const forwardedIp = normalizeIp(forwarded);
+    if (forwardedIp) {
+      return forwardedIp;
+    }
+
+    const realIp = normalizeIp(input.xRealIp);
+    if (realIp) {
+      return realIp;
+    }
+  }
+
+  return normalizeIp(input.remoteAddress);
+}
+
 function getClientIp(xForwardedFor?: string | null, xRealIp?: string | null): string | undefined {
-  if (xForwardedFor) {
-    return xForwardedFor.split(',')[0]?.trim();
-  }
-  if (xRealIp) {
-    return xRealIp.trim();
-  }
-  return undefined;
+  return resolveClientIp({
+    xForwardedFor,
+    xRealIp,
+    trustProxyHeaders: true,
+  });
 }
 
 interface JwtPayload {
   sub: string;
-  tenant_id?: string;
+  tenant_id: string;
   admin?: boolean;
   exp: number;
+  scope?: string[];
+  scopes?: string[];
+  [key: string]: unknown;
 }
 
 /**
  * SECURITY: Properly verify JWT signature to prevent token forgery
  * The signature is verified using HMAC-SHA256 with timing-safe comparison
  */
-function verifyJwt(token: string): JwtPayload | null {
+export function verifyJwt(token: string): JwtPayload | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
@@ -346,43 +396,88 @@ function verifyJwt(token: string): JwtPayload | null {
     if (!headerB64 || !payloadB64 || !signatureB64) return null;
 
     // Decode and validate header - prevent algorithm confusion attack
-    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8'));
-    if (header.alg !== 'HS256') {
+    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8')) as { alg?: string };
+    if (!header.alg) {
+      logger.error('Missing JWT algorithm', { component: 'jwt' });
+      return null;
+    }
+
+    if (header.alg === 'RS256') {
+      const publicKeyPem = config.jwtPublicKeyPem;
+      if (!publicKeyPem) {
+        logger.error('JWT_PUBLIC_KEY_PEM not configured', { component: 'jwt' });
+        return null;
+      }
+
+      const signedPayload = Buffer.from(`${headerB64}.${payloadB64}`);
+      const signature = Buffer.from(signatureB64, 'base64url');
+      const verified = verifySignature('RSA-SHA256', signedPayload, createPublicKey(publicKeyPem), signature);
+
+      if (!verified) {
+        logger.error('RS256 signature verification failed', { component: 'jwt' });
+        return null;
+      }
+    } else if (header.alg === 'HS256') {
+      // Get JWT secret from config - MUST be set for HS256 support
+      const jwtSecret = config.jwtSecret;
+      if (!jwtSecret) {
+        logger.error('JWT_SECRET not configured', { component: 'jwt' });
+        return null;
+      }
+
+      // Compute expected signature
+      const expectedSignature = createHmac('sha256', jwtSecret)
+        .update(`${headerB64}.${payloadB64}`)
+        .digest('base64url');
+
+      // Timing-safe comparison to prevent timing attacks
+      const sigBuffer = Buffer.from(signatureB64);
+      const expectedBuffer = Buffer.from(expectedSignature);
+
+      if (sigBuffer.length !== expectedBuffer.length ||
+          !timingSafeEqual(sigBuffer, expectedBuffer)) {
+        logger.error('HS256 signature verification failed', { component: 'jwt' });
+        return null;
+      }
+    } else {
       logger.error('Invalid algorithm', { component: 'jwt', algorithm: header.alg });
       return null;
     }
 
-    // Get JWT secret from config - MUST be set in production
-    const jwtSecret = config.jwtSecret;
-    if (!jwtSecret) {
-      logger.error('JWT_SECRET not configured', { component: 'jwt' });
-      return null;
-    }
-
-    // Compute expected signature
-    const expectedSignature = createHmac('sha256', jwtSecret)
-      .update(`${headerB64}.${payloadB64}`)
-      .digest('base64url');
-
-    // Timing-safe comparison to prevent timing attacks
-    const sigBuffer = Buffer.from(signatureB64);
-    const expectedBuffer = Buffer.from(expectedSignature);
-    
-    if (sigBuffer.length !== expectedBuffer.length || 
-        !timingSafeEqual(sigBuffer, expectedBuffer)) {
-      logger.error('Signature verification failed', { component: 'jwt' });
-      return null;
-    }
-
     // Decode and validate payload
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8'));
-    
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8')) as Partial<JwtPayload>;
+
+    if (typeof payload.sub !== 'string' || payload.sub.trim().length === 0) {
+      return null;
+    }
+
+    if (typeof payload.tenant_id !== 'string' || payload.tenant_id.trim().length === 0) {
+      return null;
+    }
+
+    if (typeof payload.exp !== 'number') {
+      return null;
+    }
+
     // Validate expiration
     if (!payload.exp || payload.exp < Date.now() / 1000) {
       return null;
     }
 
-    return payload as JwtPayload;
+    const normalizedScopes = Array.isArray(payload.scopes)
+      ? payload.scopes.filter((scope): scope is string => typeof scope === 'string')
+      : Array.isArray(payload.scope)
+        ? payload.scope.filter((scope): scope is string => typeof scope === 'string')
+        : undefined;
+
+    return {
+      ...payload,
+      sub: payload.sub.trim(),
+      tenant_id: payload.tenant_id.trim(),
+      admin: payload.admin === true,
+      exp: payload.exp,
+      scopes: normalizedScopes,
+    } as JwtPayload;
   } catch (error) {
     logger.error('Verification error', { component: 'jwt', error: error instanceof Error ? error.message : 'Unknown' });
     return null;

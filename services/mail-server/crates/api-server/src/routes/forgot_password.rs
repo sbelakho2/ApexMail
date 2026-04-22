@@ -1,9 +1,9 @@
 //! Forgot-password endpoint.
 //!
-//! Migrated from:apps/web/src/app/api/auth/forgot-password/route.ts
+//! Migrated from apps/web/src/app/api/auth/forgot-password/route.ts.
 //! Validates email, rate-limits by IP, then delegates to password reset logic.
 
-use super::helpers::html_escape;
+use super::helpers::{hash_token, html_escape};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::post;
@@ -91,7 +91,7 @@ async fn forgot_password(
             "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2",
         )
         .bind(serde_json::json!({
-            "password_reset_token": token,
+            "password_reset_token_hash": hash_token(&token),
             "password_reset_expires": expires.to_rfc3339(),
         }))
         .bind(&user_id)

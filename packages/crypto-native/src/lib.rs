@@ -391,16 +391,23 @@ pub fn generate_dkim_key_pair(bits: u32) -> Result<AsyncTask<GenerateDkimKeyPair
 /// lengths differ, to prevent length-based leakage.
 #[napi]
 pub fn timing_safe_equal(a: Buffer, b: Buffer) -> bool {
-    let max_len = a.len().max(b.len());
-    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    if a.len() != b.len() {
+        // Still do constant-time work to avoid leaking length via timing
+        let max_len = a.len().max(b.len());
+        let mut padded_a = Zeroizing::new(vec![0u8; max_len]);
+        let mut padded_b = Zeroizing::new(vec![0u8; max_len]);
+        padded_a[..a.len()].copy_from_slice(&a);
+        padded_b[..b.len()].copy_from_slice(&b);
+        let mut _dummy: u8 = 0;
+        for idx in 0..max_len {
+            _dummy |= padded_a[idx] ^ padded_b[idx];
+        }
+        return false;
+    }
 
-    let mut padded_a = Zeroizing::new(vec![0u8; max_len]);
-    let mut padded_b = Zeroizing::new(vec![0u8; max_len]);
-    padded_a[..a.len()].copy_from_slice(&a);
-    padded_b[..b.len()].copy_from_slice(&b);
-
-    for idx in 0..max_len {
-        diff |= padded_a[idx] ^ padded_b[idx];
+    let mut diff: u8 = 0;
+    for idx in 0..a.len() {
+        diff |= a[idx] ^ b[idx];
     }
 
     diff == 0

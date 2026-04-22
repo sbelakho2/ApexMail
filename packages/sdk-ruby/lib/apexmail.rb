@@ -66,6 +66,7 @@ module ApexMail
     def initialize(api_key:, base_url:, open_timeout:, read_timeout:, max_response_bytes:)
       @api_key      = api_key
       @base_uri     = URI.parse(base_url)
+      raise ArgumentError, "baseUrl must use HTTPS" unless @base_uri.scheme == "https"
       @open_timeout = open_timeout
       @read_timeout = read_timeout
       @max_response_bytes = max_response_bytes

@@ -402,6 +402,11 @@ describe('Crypto — scrypt password hashing', () => {
     expect(await verifyPassword('pw', 'not-a-valid-hash')).toBe(false);
   });
 
+  it('verifyPassword returns false for malformed stored-key length mismatches', async () => {
+    const malformed = '$scrypt$8000$8$1$c2FsdA==$c2hvcnQ=';
+    await expect(verifyPassword('pw', malformed)).resolves.toBe(false);
+  });
+
   it('each hash is unique (salt)', async () => {
     const h1 = await hashPassword('same');
     const h2 = await hashPassword('same');

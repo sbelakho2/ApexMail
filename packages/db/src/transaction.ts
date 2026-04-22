@@ -98,13 +98,12 @@ export async function withTransaction<T>(
   options: TransactionOptions = {}
 ): Promise<Result<T, Error>> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
-  const pool = db.getPool();
   
   let lastError: Error | null = null;
   let attempt = 0;
 
   while (attempt <= (opts.retries ?? 0)) {
-    const client = await pool.connect();
+    const client = await db.getClient();
     
     try {
       // Build transaction start command
@@ -141,7 +140,7 @@ export async function withTransaction<T>(
           throw new Error(`Invalid statement_timeout value: ${opts.timeout}. Must be a positive integer up to 300000ms.`);
         }
         const safeTimeoutMs = Math.floor(timeoutMs);
-        await client.query(`SET LOCAL statement_timeout = ${safeTimeoutMs}`);
+        await client.query('SET LOCAL statement_timeout = $1', [safeTimeoutMs]);
       }
 
       // Create transaction context

@@ -9,7 +9,9 @@ metadata:
     {{- include "apexmail.selectorLabels" (dict "name" "web" "context" .) | nindent 4 }}
     app.kubernetes.io/component: frontend
 spec:
+  {{- if not .Values.web.autoscaling.enabled }}
   replicas: {{ .Values.web.replicaCount }}
+  {{- end }}
   revisionHistoryLimit: 5
   selector:
     matchLabels:

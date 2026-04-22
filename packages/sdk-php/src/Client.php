@@ -62,6 +62,9 @@ class Client
 
         $this->apiKey  = $apiKey;
         $this->baseUrl = rtrim($options['baseUrl'] ?? self::DEFAULT_URL, '/');
+        if (!str_starts_with($this->baseUrl, 'https://')) {
+            throw new \InvalidArgumentException('baseUrl must use HTTPS');
+        }
         $this->timeout = (int) ($options['timeout'] ?? 30);
         $this->maxRetries = (int) ($options['maxRetries'] ?? 3);
         $this->maxResponseBytes = (int) ($options['maxResponseBytes'] ?? self::DEFAULT_MAX_RESPONSE_BYTES);

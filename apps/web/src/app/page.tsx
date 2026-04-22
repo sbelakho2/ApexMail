@@ -9,7 +9,7 @@ export default function HomePage() {
                     Modern email infrastructure for developers
                 </p>
                 <Link
-                    href="/campaigns"
+                    href="/dashboard"
                     className="mt-6 inline-block rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
                 >
                     Go to Dashboard

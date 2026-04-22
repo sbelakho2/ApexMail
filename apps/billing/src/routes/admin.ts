@@ -56,7 +56,9 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
   router.get('/tenants', async (c) => {
     const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '50', 10) || 50, 1), 200);
     const offset = Math.max(parseInt(c.req.query('offset') ?? '0', 10) || 0, 0);
-    const status = c.req.query('status');
+    const rawStatus = c.req.query('status');
+    const VALID_STATUSES = ['active', 'past_due', 'canceled', 'trialing', 'incomplete', 'incomplete_expired', 'unpaid', 'paused'] as const;
+    const status = rawStatus && VALID_STATUSES.includes(rawStatus as any) ? rawStatus : undefined;
 
     let query = `
       SELECT 

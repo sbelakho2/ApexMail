@@ -11,10 +11,66 @@ import { logger } from '../lib/logger.js';
 
 export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
+  type RouteContext = Parameters<typeof router.get>[1] extends (arg: infer C) => unknown ? C : never;
 
-  const operationFailed = (c: Parameters<typeof router.get>[1] extends (arg: infer C) => unknown ? C : never, error: Error, label = 'Billing operation failed') => {
+  const operationFailed = (c: RouteContext, error: unknown, label = 'Billing operation failed') => {
     logger.error(label, { error: error instanceof Error ? error.message : String(error) });
     return c.json({ error: 'Operation failed' }, 500);
+  };
+
+  const parseJsonBody = async (c: RouteContext): Promise<{ ok: true; value: unknown } | { ok: false; response: Response }> => {
+    try {
+      const value = await c.req.json();
+      return { ok: true, value };
+    } catch {
+      return { ok: false, response: c.json({ error: 'Invalid JSON body' }, 400) };
+    }
+  };
+
+  const parseJsonWithSchema = async <T extends z.ZodTypeAny>(
+    c: RouteContext,
+    schema: T,
+  ): Promise<{ ok: true; value: z.infer<T> } | { ok: false; response: Response }> => {
+    const parsedBody = await parseJsonBody(c);
+    if (!parsedBody.ok) {
+      return parsedBody;
+    }
+
+    const validated = schema.safeParse(parsedBody.value);
+    if (!validated.success) {
+      return {
+        ok: false,
+        response: c.json(
+          {
+            error: 'Validation failed',
+            issues: validated.error.issues,
+          },
+          400,
+        ),
+      };
+    }
+
+    return { ok: true, value: validated.data };
+  };
+
+  const isAllowedRedirectUrl = (urlString: string): boolean => {
+    try {
+      const url = new URL(urlString);
+      const hostname = url.hostname.toLowerCase();
+      const isApexmailHost = hostname === 'apexmail.ee' || hostname.endsWith('.apexmail.ee');
+
+      if (isApexmailHost) {
+        return url.protocol === 'https:';
+      }
+
+      if (process.env.NODE_ENV !== 'production' && hostname === 'localhost') {
+        return url.protocol === 'http:' || url.protocol === 'https:';
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
   };
 
   // Get usage summary
@@ -53,7 +109,6 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Configure usage alerts
   router.post('/alerts', async (c) => {
     const tenantId = c.get('tenantId');
-    const body = await c.req.json();
 
     const schema = z.object({
       thresholds: z.array(z.object({
@@ -63,7 +118,12 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
       })),
     });
 
-    const parsed = schema.parse(body);
+    const parsedResult = await parseJsonWithSchema(c, schema);
+    if (!parsedResult.ok) {
+      return parsedResult.response;
+    }
+
+    const parsed = parsedResult.value;
     const result = await ctx.usageAlerts.configureThresholds(tenantId, parsed.thresholds);
 
     if (!result.ok) {
@@ -93,32 +153,26 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Create checkout session
   router.post('/checkout', async (c) => {
     const tenantId = c.get('tenantId');
-    const body = await c.req.json();
 
     const schema = z.object({
-      priceId: z.string(),
+      priceId: z.string().trim().min(1, 'priceId is required'),
       // SEC-011 FIX: Check exact domain match to prevent bypass via evil-apexmail.ee
       successUrl: z.string().url().refine(
-        (u) => { 
-          try { 
-            const h = new URL(u).hostname; 
-            return h === 'apexmail.ee' || h.endsWith('.apexmail.ee') || (process.env.NODE_ENV !== 'production' && h === 'localhost'); 
-          } catch { return false; } 
-        },
+        isAllowedRedirectUrl,
         'Redirect URL must belong to apexmail.ee domain'
       ),
       cancelUrl: z.string().url().refine(
-        (u) => { 
-          try { 
-            const h = new URL(u).hostname; 
-            return h === 'apexmail.ee' || h.endsWith('.apexmail.ee') || (process.env.NODE_ENV !== 'production' && h === 'localhost'); 
-          } catch { return false; } 
-        },
+        isAllowedRedirectUrl,
         'Redirect URL must belong to apexmail.ee domain'
       ),
     });
 
-    const parsed = schema.parse(body);
+    const parsedResult = await parseJsonWithSchema(c, schema);
+    if (!parsedResult.ok) {
+      return parsedResult.response;
+    }
+
+    const parsed = parsedResult.value;
 
     const result = await ctx.stripe.createCheckoutSession(
       tenantId,
@@ -137,22 +191,21 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Create portal session
   router.post('/portal', async (c) => {
     const tenantId = c.get('tenantId');
-    const body = await c.req.json();
 
     const schema = z.object({
       // SEC-011 FIX: Check exact domain match to prevent bypass
       returnUrl: z.string().url().refine(
-        (u) => { 
-          try { 
-            const h = new URL(u).hostname; 
-            return h === 'apexmail.ee' || h.endsWith('.apexmail.ee') || (process.env.NODE_ENV !== 'production' && h === 'localhost'); 
-          } catch { return false; } 
-        },
+        isAllowedRedirectUrl,
         'Redirect URL must belong to apexmail.ee domain'
       ),
     });
 
-    const parsed = schema.parse(body);
+    const parsedResult = await parseJsonWithSchema(c, schema);
+    if (!parsedResult.ok) {
+      return parsedResult.response;
+    }
+
+    const parsed = parsedResult.value;
 
     const result = await ctx.stripe.createPortalSession(tenantId, parsed.returnUrl);
 
@@ -202,7 +255,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const invoiceId = c.req.param('id');
     const tenantId = c.get('tenantId');
 
-    const result = await ctx.invoices.getInvoice(invoiceId);
+    const result = await ctx.invoices.getInvoice(invoiceId, tenantId);
 
     if (!result.ok) {
       return operationFailed(c, result.error);
@@ -225,7 +278,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const invoiceId = c.req.param('id');
     const tenantId = c.get('tenantId');
 
-    const result = await ctx.invoices.getInvoice(invoiceId);
+    const result = await ctx.invoices.getInvoice(invoiceId, tenantId);
 
     if (!result.ok) {
       return operationFailed(c, result.error);
@@ -250,7 +303,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const invoiceId = c.req.param('id');
     const tenantId = c.get('tenantId');
 
-    const result = await ctx.invoices.getInvoice(invoiceId);
+    const result = await ctx.invoices.getInvoice(invoiceId, tenantId);
 
     if (!result.ok) {
       return operationFailed(c, result.error);
@@ -291,7 +344,8 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const tenantId = c.get('tenantId');
     const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '50', 10) || 50, 1), 200);
     const offset = Math.max(parseInt(c.req.query('offset') ?? '0', 10) || 0, 0);
-    const type = c.req.query('type') as 'credit' | 'debit' | undefined;
+    const rawType = c.req.query('type');
+    const type = rawType === 'credit' || rawType === 'debit' ? rawType : undefined;
 
     const result = await ctx.wallet.getTransactions(tenantId, { limit, offset, type });
 
@@ -369,14 +423,17 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Calculate PAYG cost estimate
   router.post('/payg/estimate', async (c) => {
-    const body = await c.req.json();
-
     const schema = z.object({
       emailsSent: z.number().min(0),
       apiCalls: z.number().min(0).optional().default(0),
     });
 
-    const parsed = schema.parse(body);
+    const parsedResult = await parseJsonWithSchema(c, schema);
+    if (!parsedResult.ok) {
+      return parsedResult.response;
+    }
+
+    const parsed = parsedResult.value;
     const cost = calculatePaygCost(parsed.emailsSent, parsed.apiCalls);
 
     return c.json({
@@ -391,14 +448,17 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Calculate subscription overage estimate
   router.post('/overage/estimate', async (c) => {
-    const body = await c.req.json();
-
     const schema = z.object({
       emailsSent: z.number().min(0),
       emailLimit: z.number(),
     });
 
-    const parsed = schema.parse(body);
+    const parsedResult = await parseJsonWithSchema(c, schema);
+    if (!parsedResult.ok) {
+      return parsedResult.response;
+    }
+
+    const parsed = parsedResult.value;
     const overageCostCents = calculateOverageCost(parsed.emailsSent, parsed.emailLimit);
 
     return c.json({
@@ -446,14 +506,18 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Switch plan (handles proration)
   router.post('/switch-plan', async (c) => {
     const tenantId = c.get('tenantId');
-    const body = await c.req.json();
 
     const schema = z.object({
       planName: z.string(),
       billingInterval: z.enum(['monthly', 'yearly']).optional().default('monthly'),
     });
 
-    const parsed = schema.parse(body);
+    const parsedResult = await parseJsonWithSchema(c, schema);
+    if (!parsedResult.ok) {
+      return parsedResult.response;
+    }
+
+    const parsed = parsedResult.value;
 
     // Check if switching to PAYG
     if (parsed.planName === 'payg') {
@@ -567,7 +631,6 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Cancel subscription
   router.post('/cancel', async (c) => {
     const tenantId = c.get('tenantId');
-    const body = await c.req.json();
 
     const schema = z.object({
       reason: z.string().max(500).optional(),
@@ -575,7 +638,12 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
       cancelImmediately: z.boolean().optional().default(false),
     });
 
-    const parsed = schema.parse(body);
+    const parsedResult = await parseJsonWithSchema(c, schema);
+    if (!parsedResult.ok) {
+      return parsedResult.response;
+    }
+
+    const parsed = parsedResult.value;
 
     // Get current subscription
     const subscriptionResult = await ctx.stripe.getSubscription(tenantId);

@@ -74,8 +74,10 @@ struct DnsCacheEntry {
 
 static RESOLVER: OnceLock<TokioAsyncResolver> = OnceLock::new();
 
-fn get_resolver() -> Option<&'static TokioAsyncResolver> {
-    RESOLVER.get()
+fn get_resolver() -> &'static TokioAsyncResolver {
+    RESOLVER.get_or_init(|| {
+        TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+    })
 }
 
 fn lookup_dns_cache(domain: &str) -> Option<bool> {
@@ -284,10 +286,7 @@ pub async fn validate_email_with_mx(email: String) -> Result<ValidationResult> {
             }
             return Ok(result);
         }
-        let Some(resolver) = get_resolver() else {
-            result.warnings.push("DNS resolver not initialized".into());
-            return Ok(result);
-        };
+        let resolver = get_resolver();
 
         let has_mx = match resolver.mx_lookup(&domain).await {
             Ok(mx) => mx.iter().next().is_some(),
@@ -355,9 +354,7 @@ pub fn set_disposable_domains(domains: Vec<String>, replace: bool) -> Result<u32
 /// Check MX records for a domain.
 #[napi]
 pub async fn check_mx(domain: String) -> Result<MxCheckResult> {
-    let Some(resolver) = get_resolver() else {
-        return Err(napi::Error::from_reason("DNS resolver not initialized"));
-    };
+    let resolver = get_resolver();
 
     let mx_result = resolver.mx_lookup(&domain).await;
     let mx_records: Vec<String> = match &mx_result {

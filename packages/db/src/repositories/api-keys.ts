@@ -260,7 +260,7 @@ export class ApiKeysRepository {
       updated_at: Date;
     }>(
       // FIX-500-041: Select only columns needed for verification instead of SELECT *
-      'SELECT id, tenant_id, name, prefix, key_hash, scopes, rate_limit, expires_at, last_used_at, last_used_ip, usage_count, is_active, metadata, created_at, updated_at FROM api_keys WHERE prefix = ANY($1) AND is_active = true',
+      'SELECT id, tenant_id, user_id, name, prefix, key_hash, scopes, rate_limit, allowed_ips, allowed_domains, expires_at, last_used_at, last_used_ip, usage_count, is_active, metadata, created_at, updated_at FROM api_keys WHERE prefix = ANY($1) AND is_active = true',
       [prefixes]
     );
 

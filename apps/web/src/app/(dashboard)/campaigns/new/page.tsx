@@ -225,6 +225,9 @@ export default function NewCampaignPage() {
                                 )}
                             </SelectContent>
                         </Select>
+                        {listsError && (
+                            <p className="text-xs text-destructive">Failed to load audience lists. Using default audience.</p>
+                        )}
                         <p className="text-xs text-muted-foreground">
                             Estimated recipients: {(audienceEstimates[audience] ?? 0).toLocaleString()}
                         </p>

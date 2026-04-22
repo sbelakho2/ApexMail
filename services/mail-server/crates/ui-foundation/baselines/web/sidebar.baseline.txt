@@ -1,0 +1,17 @@
+{
+  "component": "Sidebar",
+  "brand": "ApexMail",
+  "activeMarker": "aria-current",
+  "routes": [
+    "/dashboard",
+    "/campaigns",
+    "/contacts",
+    "/lists",
+    "/templates",
+    "/reports",
+    "/analytics",
+    "/events",
+    "/domains",
+    "/settings"
+  ]
+}

@@ -41,15 +41,15 @@ export interface SchemaDiff {
 async function extractSchemaObjects(db: DatabasePool): Promise<Result<SchemaObject[], Error>> {
   const objects: SchemaObject[] = [];
   const pool = db.getPool();
+  const client = await pool.connect();
   const schemaQueryTimeoutMs = 15_000;
 
-  const queryWithTimeout = <T>(text: string) =>
-    pool.query<T>({
-      text,
-      statement_timeout: schemaQueryTimeoutMs,
-    });
-
   try {
+    await client.query('BEGIN');
+    await client.query('SET LOCAL statement_timeout = $1', [schemaQueryTimeoutMs]);
+
+    const queryWithTimeout = <T>(text: string) => client.query<T>(text);
+
     // Get all tables with column definitions
     const tablesResult = await queryWithTimeout<{
       table_schema: string;
@@ -182,9 +182,18 @@ async function extractSchemaObjects(db: DatabasePool): Promise<Result<SchemaObje
       });
     }
 
+    await client.query('COMMIT');
+
     return Result.ok(objects);
   } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Ignore rollback failures and return the original extraction error.
+    }
     return Result.err(error instanceof Error ? error : new Error(String(error)));
+  } finally {
+    client.release();
   }
 }
 

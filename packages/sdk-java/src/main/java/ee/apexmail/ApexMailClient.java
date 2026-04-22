@@ -91,6 +91,9 @@ public final class ApexMailClient implements AutoCloseable {
         }
         this.apiKey  = apiKey;
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        if (!this.baseUrl.startsWith("https://")) {
+            throw new IllegalArgumentException("baseUrl must use HTTPS");
+        }
         if (httpClient != null) {
             this.httpClient = httpClient;
             this.executor = null;
@@ -367,5 +370,17 @@ public final class ApexMailClient implements AutoCloseable {
             executor.shutdown();
         }
         retryScheduler.shutdown();
+        try {
+            if (!retryScheduler.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                retryScheduler.shutdownNow();
+            }
+            if (executor != null && !executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            retryScheduler.shutdownNow();
+            if (executor != null) executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }
