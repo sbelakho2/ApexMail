@@ -39,10 +39,9 @@ describe('PAYG cost calculation — fail-first', () => {
     expect(result.totalCostCents).toBe(0);
   });
 
-  it('5 emails cost exactly 1 cent (0.5 millicents each = 500mc = floor to 0 or round to 1)', () => {
+  it('5 emails stay at 0 cents when monthly subtotal is below 1 cent', () => {
     const result = calculatePaygCost(5, 0);
-    // 5 * 100 millicents = 500mc → roundMillicentsToCents(500) = floor((500+500)/1000) = 1
-    expect(result.emailCostCents).toBe(1);
+    expect(result.emailCostCents).toBe(0);
   });
 
   it('first 10k emails at tier 1 price = $10.00', () => {
@@ -99,7 +98,7 @@ describe('PAYG cost calculation — fail-first', () => {
 
   it('USD string formatting handles cents < 10', () => {
     const result = calculatePaygCost(5, 0);
-    expect(result.totalCostUsd).toBe('$0.01');
+    expect(result.totalCostUsd).toBe('$0.00');
   });
 
   it('USD string formatting handles exact dollars', () => {

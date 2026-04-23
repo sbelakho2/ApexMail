@@ -4,8 +4,8 @@ Canonical taxonomy for product surfaces.
 
 ## Primary Product Surfaces
 
-- Customer Console (`apps/web`)
-- Control Plane (`apps/control-plane`)
+- Customer Console (`web` surface served by `services/mail-server/crates/api-server`)
+- Control Plane (`control-plane` surface served by `services/mail-server/crates/api-server`)
 - Marketing (`apps/marketing`, `apps/marketing-zola`)
 
 ## Customer Console Taxonomy

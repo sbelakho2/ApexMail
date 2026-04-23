@@ -31,7 +31,7 @@ export interface QueryOptions {
   name?: string;
 }
 
-const DEFAULT_CONFIG: Partial<DatabaseConfig> = {
+const DEFAULT_CONFIG: Pick<DatabaseConfig, 'host' | 'port' | 'database' | 'maxConnections' | 'idleTimeoutMs' | 'connectionTimeoutMs' | 'statementTimeoutMs'> = {
   host: 'localhost',
   port: 5432,
   database: 'apexmail',
@@ -94,27 +94,27 @@ class DatabasePool {
   constructor(config: Partial<DatabaseConfig> = {}) {
     // Parse and validate port
     const portFromEnv = process.env['DB_PORT'];
-    const portValue = config.port ?? parseIntSafe(portFromEnv, DEFAULT_CONFIG.port!, 'DB_PORT');
+    const portValue = config.port ?? parseIntSafe(portFromEnv, DEFAULT_CONFIG.port, 'DB_PORT');
     const validatedPort = validatePort(portValue, 'DB_PORT');
 
     // Parse and validate max connections
     const maxConnFromEnv = process.env['DB_MAX_CONNECTIONS'];
-    const maxConnValue = config.maxConnections ?? parseIntSafe(maxConnFromEnv, DEFAULT_CONFIG.maxConnections!, 'DB_MAX_CONNECTIONS');
+    const maxConnValue = config.maxConnections ?? parseIntSafe(maxConnFromEnv, DEFAULT_CONFIG.maxConnections, 'DB_MAX_CONNECTIONS');
     
     if (maxConnValue < 1 || maxConnValue > 1000) {
       throw new Error(`Invalid DB_MAX_CONNECTIONS: must be between 1 and 1000, got ${maxConnValue}`);
     }
 
     this.config = {
-      host: config.host ?? process.env['DB_HOST'] ?? DEFAULT_CONFIG.host!,
+      host: config.host ?? process.env['DB_HOST'] ?? DEFAULT_CONFIG.host,
       port: validatedPort,
-      database: config.database ?? process.env['DB_NAME'] ?? DEFAULT_CONFIG.database!,
+      database: config.database ?? process.env['DB_NAME'] ?? DEFAULT_CONFIG.database,
       user: config.user ?? process.env['DB_USER'] ?? 'postgres',
       password: config.password ?? process.env['DB_PASSWORD'] ?? (() => { throw new Error('DB_PASSWORD must be configured — refusing to connect with an empty password'); })(),
       maxConnections: maxConnValue,
-      idleTimeoutMs: config.idleTimeoutMs ?? DEFAULT_CONFIG.idleTimeoutMs!,
-      connectionTimeoutMs: config.connectionTimeoutMs ?? DEFAULT_CONFIG.connectionTimeoutMs!,
-      statementTimeoutMs: config.statementTimeoutMs ?? DEFAULT_CONFIG.statementTimeoutMs!,
+      idleTimeoutMs: config.idleTimeoutMs ?? DEFAULT_CONFIG.idleTimeoutMs,
+      connectionTimeoutMs: config.connectionTimeoutMs ?? DEFAULT_CONFIG.connectionTimeoutMs,
+      statementTimeoutMs: config.statementTimeoutMs ?? DEFAULT_CONFIG.statementTimeoutMs,
       ssl: config.ssl ?? (process.env['DB_SSL'] === 'true' ? { rejectUnauthorized: process.env['DB_SSL_REJECT_UNAUTHORIZED'] !== 'false' } : undefined),
     };
     

@@ -15,7 +15,16 @@
     "./queue": "./dist/queue/index.js",
     "./time": "./dist/time/index.js",
     "./id": "./dist/id/index.js",
-    "./bot-detection": "./dist/bot-detection/index.js"
+    "./bot-detection": "./dist/bot-detection/index.js",
+    "./result": "./dist/result.js",
+    "./mail-server-client": "./dist/mail-server-client.js",
+    "./templates": "./dist/templates/index.js",
+    "./attachments": "./dist/attachments/index.js",
+    "./validation": "./dist/validation/index.js",
+    "./company": "./dist/company.js",
+    "./error-codes": "./dist/error-codes.js",
+    "./api-version": "./dist/api-version.js",
+    "./json": "./dist/json/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -35,6 +44,7 @@
     "nanoid": "^4.0.0",
     "pg": "^8.11.0",
     "pino": "^8.17.0",
+    "undici": "^7.16.0",
     "uuid": "^9.0.0",
     "@apexmail/crypto-native": "workspace:*",
     "@apexmail/validator-native": "workspace:*",

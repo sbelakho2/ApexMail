@@ -11,6 +11,24 @@ use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
+fn is_optional_schema_error(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_error) if matches!(db_error.code().as_deref(), Some("42P01") | Some("42703")))
+}
+
+fn optional_relation_rows<T>(
+    result: Result<Vec<T>, sqlx::Error>,
+    table: &'static str,
+) -> Result<Vec<T>, ApiError> {
+    match result {
+        Ok(rows) => Ok(rows),
+        Err(error) if is_optional_schema_error(&error) => {
+            tracing::warn!(table, "system health table missing; returning empty dataset");
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(system_health))
 }
@@ -72,15 +90,17 @@ async fn system_health(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
 // ── Queues ─────────────────────────────────────────────────
-    let queue_rows = sqlx::query_as::<_, (String, i64, i64)>(
-        "SELECT queue_name,
-                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as depth,
-                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as proc
-         FROM queue_jobs GROUP BY queue_name",
-    )
-    .fetch_all(&state.db)
-    .await
-    ?;
+    let queue_rows = optional_relation_rows(
+        sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT queue_name,
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as depth,
+                    SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as proc
+             FROM queue_jobs GROUP BY queue_name",
+        )
+        .fetch_all(&state.db)
+        .await,
+        "queue_jobs",
+    )?;
 
     let queues: Vec<QueueStatus> = queue_rows
         .into_iter()
@@ -91,14 +111,16 @@ async fn system_health(
         .collect();
 
 // ── Workers (derived from queue_jobs.worker_id) ────────────
-    let worker_rows = sqlx::query_as::<_, (String, String, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT DISTINCT worker_id, queue_name, MAX(updated_at)
-         FROM queue_jobs WHERE worker_id IS NOT NULL
-         GROUP BY worker_id, queue_name",
-    )
-    .fetch_all(&state.db)
-    .await
-    ?;
+    let worker_rows = optional_relation_rows(
+        sqlx::query_as::<_, (String, String, Option<chrono::DateTime<chrono::Utc>>)>(
+            "SELECT DISTINCT worker_id, queue_name, MAX(updated_at)
+             FROM queue_jobs WHERE worker_id IS NOT NULL
+             GROUP BY worker_id, queue_name",
+        )
+        .fetch_all(&state.db)
+        .await,
+        "queue_jobs",
+    )?;
 
     let workers: Vec<WorkerStatus> = worker_rows
         .into_iter()
@@ -116,16 +138,25 @@ async fn system_health(
         .collect();
 
 // ── MTA nodes from ip_pool_addresses ───────────────────────
-    let mta_rows = sqlx::query_as::<_, (
-        String, String, Option<String>, String, Option<i32>, Option<i64>, Option<i64>, bool,
-    )>(
-        "SELECT id::text, ip_address, pool_id::text, status,
-                warmup_day, daily_limit, daily_sent, is_fully_warmed
-         FROM ip_pool_addresses ORDER BY ip_address LIMIT 50",
-    )
-    .fetch_all(&state.db)
-    .await
-    ?;
+    let mta_rows = optional_relation_rows(
+        sqlx::query_as::<_, (
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<i32>,
+            Option<i64>,
+            Option<i64>,
+            bool,
+        )>(
+            "SELECT id::text, ip_address, pool_id::text, status,
+                    warmup_day, daily_limit, daily_sent, is_fully_warmed
+             FROM ip_pool_addresses ORDER BY ip_address LIMIT 50",
+        )
+        .fetch_all(&state.db)
+        .await,
+        "ip_pool_addresses",
+    )?;
 
     let mta_nodes: Vec<MtaNode> = mta_rows
         .into_iter()
@@ -136,15 +167,22 @@ async fn system_health(
         .collect();
 
 // ── Alerts ─────────────────────────────────────────────────
-    let alert_rows = sqlx::query_as::<_, (
-        String, String, String, String, chrono::DateTime<chrono::Utc>, bool,
-    )>(
-        "SELECT id::text, severity, component, message, timestamp, acknowledged
-         FROM system_alerts ORDER BY timestamp DESC LIMIT 50",
-    )
-    .fetch_all(&state.db)
-    .await
-    ?;
+    let alert_rows = optional_relation_rows(
+        sqlx::query_as::<_, (
+            String,
+            String,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            bool,
+        )>(
+            "SELECT id::text, severity, component, message, timestamp, acknowledged
+             FROM system_alerts ORDER BY timestamp DESC LIMIT 50",
+        )
+        .fetch_all(&state.db)
+        .await,
+        "system_alerts",
+    )?;
 
     let alerts: Vec<SystemAlert> = alert_rows
         .into_iter()

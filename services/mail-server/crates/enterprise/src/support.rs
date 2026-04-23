@@ -1,9 +1,27 @@
+use std::sync::Once;
+
 use chrono::{Duration, TimeDelta, Utc};
 use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::types::*;
+
+static SUPPORT_TICKETS_MISSING_WARNING: Once = Once::new();
+
+fn is_missing_relation_error(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("42P01"))
+}
+
+fn log_missing_support_tickets_once(job: &'static str) {
+    SUPPORT_TICKETS_MISSING_WARNING.call_once(|| {
+        tracing::warn!(
+            table = "ent_support_tickets",
+            job,
+            "Enterprise support tickets table missing; skipping support background job until migrations are applied"
+        );
+    });
+}
 
 /// Support Service:enterprise tickets, SLA tracking, agent assignment, escalation
 pub struct SupportService {
@@ -343,7 +361,7 @@ impl SupportService {
 /// Check SLA breaches (background job)
     pub async fn check_sla_breaches(&self) -> Result<Vec<SupportTicket>, String> {
         let now = Utc::now();
-        let tickets = sqlx::query_as::<_, SupportTicket>(
+        let tickets = match sqlx::query_as::<_, SupportTicket>(
             "SELECT * FROM ent_support_tickets
              WHERE status NOT IN ('resolved','closed')
              AND sla_breached = false
@@ -355,7 +373,14 @@ impl SupportService {
         .bind(now)
         .fetch_all(&self.db)
         .await
-        .map_err(|e| format!("SLA breach check: {e}"))?;
+        {
+            Ok(tickets) => tickets,
+            Err(error) if is_missing_relation_error(&error) => {
+                log_missing_support_tickets_once("check_sla_breaches");
+                return Ok(vec![]);
+            }
+            Err(error) => return Err(format!("SLA breach check: {error}")),
+        };
 
         for ticket in &tickets {
             if let Err(e) = sqlx::query("UPDATE ent_support_tickets SET sla_breached = true WHERE id = $1")
@@ -385,14 +410,21 @@ impl SupportService {
         let mut escalated = 0i64;
         for (priority, threshold) in rules {
             let cutoff = now - threshold;
-            let result = sqlx::query(
+            let result = match sqlx::query(
                 "UPDATE ent_support_tickets SET status = 'escalated', escalation_level = escalation_level + 1, escalated_at = NOW(), updated_at = NOW()
                  WHERE status = 'open' AND priority = $1 AND escalation_level = 0 AND created_at < $2"
             )
             .bind(priority).bind(cutoff)
             .execute(&self.db)
             .await
-            .map_err(|e| format!("Auto-escalate: {e}"))?;
+            {
+                Ok(result) => result,
+                Err(error) if is_missing_relation_error(&error) => {
+                    log_missing_support_tickets_once("auto_escalate");
+                    return Ok(0);
+                }
+                Err(error) => return Err(format!("Auto-escalate: {error}")),
+            };
             escalated += result.rows_affected() as i64;
         }
 

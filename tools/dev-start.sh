@@ -5,8 +5,8 @@
 # Starts all required services for local ApexMail development:
 # - Docker containers (PostgreSQL + Redis)
 # - Rust API server (port 3001)
-# - Web console (port 3010)
-# - Control Plane (port 3020)
+# - Rust web surface via 127.0.0.1 host mapping
+# - Rust control-plane surface via localhost host mapping
 # - Marketing site (port 1111)
 # =============================================================================
 
@@ -107,8 +107,8 @@ echo ""
 log "Development environment ready!"
 echo ""
 echo "  API Server:     http://localhost:3001/health/live"
-echo "  Web Console:    cd apps/web && pnpm dev (port 3010)"
-echo "  Control Plane:  cd apps/control-plane && pnpm dev (port 3020)"
+echo "  Web Surface:    http://127.0.0.1:3001 (Rust SSR via api-server host map)"
+echo "  Control Plane:  http://localhost:3001 (Rust SSR via api-server host map)"
 echo "  Marketing:      cd apps/marketing-zola && zola serve (port 1111)"
 echo ""
 echo "  Test user:      aaron / &&Pw20354491"

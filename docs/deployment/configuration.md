@@ -65,8 +65,8 @@ JWT_REFRESH_TTL=2592000
 ### Login CAPTCHA (mCaptcha)
 
 Login protection is available for both login surfaces:
-- User web login: `apps/web` (`/login`)
-- Control-plane login: `apps/control-plane` (`/login`)
+- User web login: Rust SSR web surface served by `services/mail-server/crates/api-server` on the `127.0.0.1` host map (`/login`)
+- Control-plane login: Rust SSR control-plane surface served by `services/mail-server/crates/api-server` on the `localhost` host map (`/login`)
 
 Server-side verification variables:
 

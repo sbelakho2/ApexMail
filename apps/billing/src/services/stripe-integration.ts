@@ -18,6 +18,10 @@ import { STRIPE_WEBHOOK_TOLERANCE_SECONDS, MS_PER_SECOND } from '../lib/constant
 
 const logger = createLogger();
 
+function hasPostgresErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === code;
+}
+
 export interface StripeCustomer {
   id: string;
   tenantId: string;
@@ -152,6 +156,8 @@ export class StripeService {
             tenant_id: tenantId,
             ...metadata,
           },
+        }, {
+          idempotencyKey: `customer_create_${tenantId}`,
         })
       );
 
@@ -560,8 +566,28 @@ export class StripeService {
       }
     }
 
-    const priceId = subscription.items.data[0]?.price.id;
-    const interval = subscription.items.data[0]?.price.recurring?.interval;
+    const primaryItem = subscription.items.data[0];
+    const priceId = primaryItem?.price?.id;
+    const interval = primaryItem?.price?.recurring?.interval;
+
+    if (!priceId) {
+      logger.error('Subscription has no valid line-item price', {
+        tenantId,
+        subscriptionId: subscription.id,
+        itemCount: subscription.items.data.length,
+      });
+      throw new Error(`Subscription ${subscription.id} has no valid line-item price`);
+    }
+
+    if (interval !== 'month' && interval !== 'year') {
+      logger.error('Subscription price interval is missing or unsupported', {
+        tenantId,
+        subscriptionId: subscription.id,
+        priceId,
+        interval,
+      });
+      throw new Error(`Subscription ${subscription.id} has an unsupported billing interval`);
+    }
 
     // CRITICAL: Use atomic CTE to upsert subscription and update tenant plan in one transaction
     await this.db.query(
@@ -925,7 +951,14 @@ export class StripeService {
       [tenantId]
     );
 
-    if (!result.ok) return Result.err(result.error);
+    if (!result.ok) {
+      if (hasPostgresErrorCode(result.error, '42P01')) {
+        logger.warn('Stripe subscription table missing; treating tenant as unsubscribed', { tenantId });
+        return Result.ok(null);
+      }
+
+      return Result.err(result.error);
+    }
 
     const row = result.value.rows[0];
     if (!row) return Result.ok(null);

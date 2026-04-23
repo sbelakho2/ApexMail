@@ -65,12 +65,20 @@ export interface BillingContext {
   dedicatedIpBilling: DedicatedIpBillingService;
 }
 
-export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
+export async function createApp(): Promise<{ app: Hono<BillingEnv>; ctx: BillingContext }> {
   // Load config first
   loadConfig();
 
   // Initialize connections
-  const db = createDatabase();
+  const databaseUrl = new URL(config.databaseUrl);
+  const db = createDatabase({
+    host: databaseUrl.hostname,
+    port: databaseUrl.port ? parseInt(databaseUrl.port, 10) : undefined,
+    database: databaseUrl.pathname.replace(/^\//, '') || undefined,
+    user: databaseUrl.username ? decodeURIComponent(databaseUrl.username) : undefined,
+    password: databaseUrl.password ? decodeURIComponent(databaseUrl.password) : undefined,
+  });
+  await db.connect();
   const redis = new Redis(config.redisUrl);
 
   // C-078: Handle Redis connection errors to prevent uncaught exceptions

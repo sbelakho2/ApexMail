@@ -28,7 +28,7 @@ describe('calculatePaygCost monthly rounding contract', () => {
     });
   });
 
-  it('rounds the aggregated monthly email subtotal to the nearest cent', () => {
+  it('rounds down aggregated monthly email subtotal to avoid fractional-cent overcharge', () => {
     expect(calculatePaygCost(1, 0)).toMatchObject({
       emailCostCents: 0,
       totalCostCents: 0,
@@ -41,9 +41,9 @@ describe('calculatePaygCost monthly rounding contract', () => {
     });
 
     expect(calculatePaygCost(5, 0)).toMatchObject({
-      emailCostCents: 1,
-      totalCostCents: 1,
-      totalCostUsd: '$0.01',
+      emailCostCents: 0,
+      totalCostCents: 0,
+      totalCostUsd: '$0.00',
     });
   });
 

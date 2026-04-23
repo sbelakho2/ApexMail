@@ -1,3 +1,5 @@
+use std::sync::Once;
+
 use chrono::{TimeDelta, Utc};
 use rand::Rng;
 use redis::AsyncCommands;
@@ -10,6 +12,21 @@ use crate::config::Config;
 use crate::types::*;
 
 pub type RedisPool = deadpool_redis::Pool;
+
+static SSO_SESSIONS_MISSING_WARNING: Once = Once::new();
+
+fn is_missing_relation_error(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("42P01"))
+}
+
+fn log_missing_sso_sessions_once() {
+    SSO_SESSIONS_MISSING_WARNING.call_once(|| {
+        tracing::warn!(
+            table = "ent_sso_sessions",
+            "Enterprise SSO sessions table missing; skipping session cleanup until migrations are applied"
+        );
+    });
+}
 
 /// SSO Service:SAML 2.0 + OIDC authentication
 pub struct SSOService {
@@ -74,13 +91,17 @@ impl SSOService {
 
 /// Get SSO configuration by domain
     pub async fn get_config_by_domain(&self, domain: &str) -> Result<Option<SSOConfiguration>, String> {
-        sqlx::query_as::<_, SSOConfiguration>(
+        match sqlx::query_as::<_, SSOConfiguration>(
             "SELECT * FROM ent_sso_configurations WHERE domain = $1 AND enabled = true"
         )
         .bind(domain)
         .fetch_optional(&self.db)
         .await
-        .map_err(|e| format!("Get config by domain: {e}"))
+        {
+            Ok(config) => Ok(config),
+            Err(sqlx::Error::Database(db_error)) if db_error.code().as_deref() == Some("42P01") => Ok(None),
+            Err(error) => Err(format!("Get config by domain: {error}")),
+        }
     }
 
 /// Initiate SAML login — returns redirect URL
@@ -326,10 +347,17 @@ impl SSOService {
 
 /// Cleanup expired sessions
     pub async fn cleanup_expired_sessions(&self) -> Result<u64, String> {
-        let result = sqlx::query("DELETE FROM ent_sso_sessions WHERE expires_at < NOW()")
+        let result = match sqlx::query("DELETE FROM ent_sso_sessions WHERE expires_at < NOW()")
             .execute(&self.db)
             .await
-            .map_err(|e| format!("Cleanup sessions: {e}"))?;
+        {
+            Ok(result) => result,
+            Err(error) if is_missing_relation_error(&error) => {
+                log_missing_sso_sessions_once();
+                return Ok(0);
+            }
+            Err(error) => return Err(format!("Cleanup sessions: {error}")),
+        };
         let count = result.rows_affected();
         if count > 0 {
             info!(count = count, "Cleaned up expired SSO sessions");

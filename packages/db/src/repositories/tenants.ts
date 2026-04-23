@@ -193,12 +193,17 @@ export class TenantsRepository {
 
   async suspend(id: string, reason: string): Promise<Result<void, Error>> {
     return withTransaction(this.db, async (ctx) => {
-      await ctx.client.query(
+      const suspendResult = await ctx.client.query(
         `UPDATE tenants SET status = 'suspended', updated_at = NOW(),
          metadata = metadata || $2::jsonb
-         WHERE id = $1`,
+         WHERE id = $1
+         RETURNING id`,
         [id, JSON.stringify({ suspendedReason: reason, suspendedAt: new Date().toISOString() })]
       );
+
+      if ((suspendResult.rowCount ?? 0) === 0) {
+        throw new Error(`Tenant ${id} not found`);
+      }
     });
   }
 

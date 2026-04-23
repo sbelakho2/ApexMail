@@ -113,11 +113,50 @@ type MessageRow = {
   updated_at: Date;
 };
 
-const MESSAGE_COLUMNS =
-  'id, tenant_id, user_id, idempotency_key, message_id, status, from_email, from_name, reply_to, recipients, subject, html_body, text_body, headers, attachments, template_id, template_data, campaign_id, tags, priority, scheduled_at, sent_at, delivered_at, bounced_at, bounce_type, bounce_reason, mta_message_id, ip_address, sending_domain, attempts, max_attempts, last_attempt_at, next_attempt_at, metadata, created_at, updated_at';
+const MESSAGE_COLUMN_LIST = [
+  'id',
+  'tenant_id',
+  'user_id',
+  'idempotency_key',
+  'message_id',
+  'status',
+  'from_email',
+  'from_name',
+  'reply_to',
+  'recipients',
+  'subject',
+  'html_body',
+  'text_body',
+  'headers',
+  'attachments',
+  'template_id',
+  'template_data',
+  'campaign_id',
+  'tags',
+  'priority',
+  'scheduled_at',
+  'sent_at',
+  'delivered_at',
+  'bounced_at',
+  'bounce_type',
+  'bounce_reason',
+  'mta_message_id',
+  'ip_address',
+  'sending_domain',
+  'attempts',
+  'max_attempts',
+  'last_attempt_at',
+  'next_attempt_at',
+  'metadata',
+  'created_at',
+  'updated_at',
+] as const;
 
-const MESSAGE_COLUMNS_NO_BODY =
-  'id, tenant_id, user_id, idempotency_key, message_id, status, from_email, from_name, reply_to, recipients, subject, headers, attachments, template_id, template_data, campaign_id, tags, priority, scheduled_at, sent_at, delivered_at, bounced_at, bounce_type, bounce_reason, mta_message_id, ip_address, sending_domain, attempts, max_attempts, last_attempt_at, next_attempt_at, metadata, created_at, updated_at';
+const MESSAGE_COLUMNS = MESSAGE_COLUMN_LIST.join(', ');
+
+const MESSAGE_COLUMNS_NO_BODY = MESSAGE_COLUMN_LIST
+  .filter((column) => column !== 'html_body' && column !== 'text_body')
+  .join(', ');
 
 export interface CreateMessageInput {
   tenantId: string;
@@ -566,14 +605,24 @@ export class MessagesRepository {
            next_attempt_at = $3, 
            metadata = metadata || $4::jsonb,
            updated_at = $2
-       WHERE id = $1 
+       WHERE id = $1
+         AND status = 'sending'
        RETURNING *`,
       [id, now, nextAttempt, JSON.stringify({ lastDeferReason: reason })]
     );
 
     if (!result.ok) return result;
     const row = result.value.rows[0];
-    if (!row) return Result.err(new Error('Message not found'));
+    if (!row) {
+      const statusResult = await this.db.query<{ status: Message['status'] }>(
+        'SELECT status FROM messages WHERE id = $1',
+        [id]
+      );
+      if (!statusResult.ok) return statusResult;
+      const currentStatus = statusResult.value.rows[0]?.status;
+      if (!currentStatus) return Result.err(new Error('Message not found'));
+      return Result.err(new Error(`C-105: Invalid status transition '${currentStatus}' → 'deferred'`));
+    }
     return Result.ok(this.mapRow(row));
   }
 
@@ -622,6 +671,7 @@ export class MessagesRepository {
          FOR UPDATE SKIP LOCKED
          LIMIT $3
        )
+         AND status IN ('queued', 'deferred')
        RETURNING *`,
       [ipAddress, now, limit]
     );
@@ -995,9 +1045,11 @@ export class MessagesRepository {
     failed: number;
     bounced: number;
   }, Error>> {
-    // Support both since/until and startDate/endDate
-    const startDate = options.startDate ?? options.since;
-    const endDate = options.endDate ?? options.until;
+    if (options.since || options.until) {
+      return Result.err(new Error('Deprecated getStats options: use startDate/endDate instead of since/until'));
+    }
+
+    const { startDate, endDate } = options;
 
     const conditions = ['tenant_id = $1'];
     const values: unknown[] = [tenantId];

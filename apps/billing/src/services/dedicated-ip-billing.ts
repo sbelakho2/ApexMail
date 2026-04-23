@@ -28,6 +28,22 @@ import { DEDICATED_IP_ADDON_PRICE_CENTS } from '../lib/constants.js';
 import { StripeCircuitBreaker } from './stripe-circuit-breaker.js';
 
 const logger = createLogger();
+let missingDedicatedIpsTableLogged = false;
+
+function hasPostgresErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === code;
+}
+
+function logMissingDedicatedIpsTableOnce(): void {
+  if (missingDedicatedIpsTableLogged) {
+    return;
+  }
+
+  missingDedicatedIpsTableLogged = true;
+  logger.warn('Dedicated IP table missing; skipping dedicated IP billing sync until migrations are applied', {
+    table: 'dedicated_ips',
+  });
+}
 
 /** Stripe price ID for the $30/mo dedicated IP add-on */
 function getDedicatedIpPriceId(): Result<string, Error> {
@@ -153,6 +169,11 @@ export class DedicatedIpBillingService {
     );
 
     if (!pendingResult.ok) {
+      if (hasPostgresErrorCode(pendingResult.error, '42P01')) {
+        logMissingDedicatedIpsTableOnce();
+        return Result.ok(0);
+      }
+
       logger.error('Failed to fetch pending charge IPs', { error: pendingResult.error.message });
       return Result.err(pendingResult.error);
     }
@@ -286,6 +307,11 @@ export class DedicatedIpBillingService {
     );
 
     if (!pendingResult.ok) {
+      if (hasPostgresErrorCode(pendingResult.error, '42P01')) {
+        logMissingDedicatedIpsTableOnce();
+        return Result.ok(0);
+      }
+
       logger.error('Failed to fetch pending cancel IPs', { error: pendingResult.error.message });
       return Result.err(pendingResult.error);
     }

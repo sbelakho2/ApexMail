@@ -170,7 +170,11 @@ pub fn control_plane_home_page() -> String {
 <div class=\"text-center\">\
 <h1 class=\"text-4xl font-bold\">Control Plane</h1>\
 <p class=\"mt-4 text-lg text-slate-400\">ApexMail administration and monitoring</p>\
-<a href=\"/audit\" class=\"mt-6 inline-block rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700\">View Audit Logs</a>\
+<div class=\"mt-6 flex flex-wrap items-center justify-center gap-3\">\
+<a href=\"/sales\" class=\"inline-block rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400\">Open Sales Console</a>\
+<a href=\"/audit\" class=\"inline-block rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700\">View Audit Logs</a>\
+<a href=\"mailto:security@apexmail.test\" class=\"inline-block rounded-md border border-slate-700 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-slate-800\">Contact Security</a>\
+</div>\
 </div></main>"
         .to_string()
 }
@@ -228,6 +232,232 @@ pub fn control_plane_audit_page() -> String {
         search = search_input.render_html(),
         table = table.render_html(),
     )
+}
+
+/// Rust SSR sales console shell for the control-plane migration.
+pub fn control_plane_sales_page() -> String {
+        r#"
+<main class="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.16),_transparent_35%),linear-gradient(180deg,#071018_0%,#0b1420_45%,#111827_100%)] px-6 py-10 text-white">
+    <div class="mx-auto max-w-7xl space-y-8">
+        <header class="grid gap-6 rounded-[2rem] border border-white/10 bg-black/20 p-6 shadow-2xl shadow-black/30 lg:grid-cols-[1.1fr_0.9fr]">
+            <div class="space-y-4">
+                <p class="text-xs uppercase tracking-[0.34em] text-cyan-300">Automated Sales</p>
+                <div class="space-y-3">
+                    <h1 class="max-w-3xl text-4xl font-semibold tracking-tight text-white">Operator console for discovery, outreach, and autopilot approvals.</h1>
+                    <p class="max-w-3xl text-sm leading-6 text-slate-300">
+                        This Rust-rendered control-plane surface fronts the repaired admin API. Live actions run through operator API keys and the
+                        <code class="rounded bg-black/30 px-1.5 py-0.5 text-cyan-100">/v1/admin/sales/*</code> routes.
+                    </p>
+                </div>
+
+                <div class="grid gap-4 rounded-3xl border border-cyan-400/10 bg-cyan-400/5 p-4 md:grid-cols-3">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-cyan-200/70">Autopilot</p>
+                        <p class="mt-2 text-2xl font-semibold">Disconnected</p>
+                        <p class="mt-1 text-sm text-slate-300">Provide an operator key to pull live state.</p>
+                    </div>
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-cyan-200/70">Pending approvals</p>
+                        <p class="mt-2 text-2xl font-semibold">0</p>
+                        <p class="mt-1 text-sm text-slate-300">High-scoring leads waiting for review.</p>
+                    </div>
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-cyan-200/70">Campaigns live</p>
+                        <p class="mt-2 text-2xl font-semibold">0</p>
+                        <p class="mt-1 text-sm text-slate-300">Queued recipients 0</p>
+                    </div>
+                </div>
+            </div>
+
+            <section class="rounded-3xl border border-white/10 bg-[#0f1b2b] p-5">
+                <div class="flex items-center justify-between gap-3">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-slate-400">Connection</p>
+                        <h2 class="mt-2 text-xl font-semibold">Admin API session</h2>
+                    </div>
+                    <button type="button" class="rounded-full border border-white/15 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-white/30 hover:bg-white/10">
+                        Refresh
+                    </button>
+                </div>
+
+                <form class="mt-5 space-y-4">
+                    <div class="space-y-2 text-sm">
+                        <label for="sales-api-base" class="block text-slate-300">API base URL</label>
+                        <input id="sales-api-base" name="apiBaseUrl" class="w-full rounded-2xl border border-white/10 bg-[#101826] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" placeholder="http://localhost:3000" value="http://localhost:3000" />
+                    </div>
+                    <div class="space-y-2 text-sm">
+                        <label for="sales-api-key" class="block text-slate-300">Admin API key</label>
+                        <input id="sales-api-key" name="apiKey" type="password" class="w-full rounded-2xl border border-white/10 bg-[#101826] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" placeholder="Paste a super-admin or scoped operator key" />
+                    </div>
+
+                    <div class="flex flex-wrap items-center gap-3">
+                        <button type="submit" class="rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200">
+                            Connect
+                        </button>
+                        <span class="text-xs uppercase tracking-[0.28em] text-slate-400">Awaiting connection</span>
+                    </div>
+                </form>
+            </section>
+        </header>
+
+        <section class="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]">
+            <div class="space-y-6">
+                <section class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                    <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                        <div>
+                            <p class="text-xs uppercase tracking-[0.28em] text-slate-400">Pipeline</p>
+                            <h2 class="mt-2 text-2xl font-semibold">Lead inventory</h2>
+                        </div>
+
+                        <div class="grid gap-3 md:grid-cols-[1fr_auto]">
+                            <input class="w-full rounded-2xl border border-white/10 bg-[#121926] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" placeholder="Search companies, domains, owners, or sources" />
+                            <select class="rounded-2xl border border-white/10 bg-[#121926] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400">
+                                <option>all</option>
+                                <option>new</option>
+                                <option>qualified</option>
+                                <option>converted</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="mt-5 grid gap-3 md:grid-cols-4">
+                        <div class="rounded-3xl border border-white/10 bg-black/20 p-4"><p class="text-xs uppercase tracking-[0.24em] text-slate-500">Total leads</p><p class="mt-3 text-2xl font-semibold text-white">0</p><p class="mt-2 text-sm text-slate-400">Load a live snapshot to populate this view.</p></div>
+                        <div class="rounded-3xl border border-white/10 bg-black/20 p-4"><p class="text-xs uppercase tracking-[0.24em] text-slate-500">Conversion</p><p class="mt-3 text-2xl font-semibold text-white">0%</p><p class="mt-2 text-sm text-slate-400">Qualified to converted.</p></div>
+                        <div class="rounded-3xl border border-white/10 bg-black/20 p-4"><p class="text-xs uppercase tracking-[0.24em] text-slate-500">Average score</p><p class="mt-3 text-2xl font-semibold text-white">0</p><p class="mt-2 text-sm text-slate-400">Across the active pipeline.</p></div>
+                        <div class="rounded-3xl border border-white/10 bg-black/20 p-4"><p class="text-xs uppercase tracking-[0.24em] text-slate-500">Selected</p><p class="mt-3 text-2xl font-semibold text-white">0</p><p class="mt-2 text-sm text-slate-400">Ready for outreach.</p></div>
+                    </div>
+
+                    <div class="mt-5 overflow-hidden rounded-3xl border border-white/10">
+                        <table class="min-w-full divide-y divide-white/10 text-left text-sm">
+                            <thead class="bg-black/20 text-slate-300">
+                                <tr>
+                                    <th class="px-4 py-3 font-medium">Pick</th>
+                                    <th class="px-4 py-3 font-medium">Lead</th>
+                                    <th class="px-4 py-3 font-medium">Status</th>
+                                    <th class="px-4 py-3 font-medium">Score</th>
+                                    <th class="px-4 py-3 font-medium">Source</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-white/10">
+                                <tr>
+                                    <td class="px-4 py-6 text-slate-400" colspan="5">Live lead rows appear here after an operator connects to the admin API.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="rounded-3xl border border-white/10 bg-[#0f1726] p-5">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-xs uppercase tracking-[0.28em] text-slate-400">Campaigns</p>
+                            <h2 class="mt-2 text-2xl font-semibold">Outreach inventory</h2>
+                        </div>
+                        <div class="text-sm text-slate-400">0 campaigns</div>
+                    </div>
+
+                    <div class="mt-5 rounded-3xl border border-dashed border-white/10 bg-black/15 px-4 py-6 text-sm text-slate-400">
+                        Active outreach campaigns populate here once the admin API launches a sequence.
+                    </div>
+                </section>
+            </div>
+
+            <div class="space-y-6">
+                <section class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                    <div class="flex items-center justify-between gap-3">
+                        <div>
+                            <p class="text-xs uppercase tracking-[0.28em] text-slate-400">Autopilot</p>
+                            <h2 class="mt-2 text-2xl font-semibold">Approval loop</h2>
+                        </div>
+                        <span class="rounded-full bg-amber-300/15 px-3 py-1 text-xs font-semibold text-amber-100">Safe mode</span>
+                    </div>
+
+                    <div class="mt-5 flex flex-wrap gap-3">
+                        <button type="button" class="rounded-full border border-white/15 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/30 hover:bg-white/10">Start</button>
+                        <button type="button" class="rounded-full border border-white/15 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/30 hover:bg-white/10">Stop</button>
+                        <button type="button" class="rounded-full border border-white/15 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/30 hover:bg-white/10">Approve all</button>
+                        <button type="button" class="rounded-full border border-white/15 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/30 hover:bg-white/10">Exit safe mode</button>
+                    </div>
+
+                    <div class="mt-5 rounded-3xl border border-dashed border-white/10 bg-black/10 px-4 py-6 text-sm text-slate-400">
+                        Candidate approvals render here after the connected operator fetches the live autopilot snapshot.
+                    </div>
+                </section>
+
+                <section class="rounded-3xl border border-white/10 bg-[#11192a] p-5">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-slate-400">Discovery</p>
+                        <h2 class="mt-2 text-2xl font-semibold">Import from enriched company cache</h2>
+                    </div>
+                    <form class="mt-5 grid gap-4">
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-discovery-sources" class="block text-slate-300">Sources</label>
+                            <input id="sales-discovery-sources" name="sources" value="product_hunt, g2, capterra" class="w-full rounded-2xl border border-white/10 bg-[#0f1624] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" />
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-discovery-categories" class="block text-slate-300">Categories</label>
+                            <input id="sales-discovery-categories" name="categories" value="Email Marketing, Transactional Email" class="w-full rounded-2xl border border-white/10 bg-[#0f1624] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" />
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-discovery-pages" class="block text-slate-300">Max pages</label>
+                            <input id="sales-discovery-pages" name="maxPages" value="3" class="w-full rounded-2xl border border-white/10 bg-[#0f1624] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" />
+                        </div>
+                        <button type="button" class="rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200">Run discovery</button>
+                    </form>
+                </section>
+
+                <section class="rounded-3xl border border-white/10 bg-[#121926] p-5">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-slate-400">Outreach</p>
+                        <h2 class="mt-2 text-2xl font-semibold">Launch campaign from selected leads</h2>
+                    </div>
+
+                    <form class="mt-5 grid gap-4">
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-offer-id" class="block text-slate-300">Offer id</label>
+                            <input id="sales-offer-id" name="offerId" value="deliverability_audit" class="w-full rounded-2xl border border-white/10 bg-[#0f1624] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" />
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-template-name" class="block text-slate-300">Template name</label>
+                            <input id="sales-template-name" name="templateName" value="default" class="w-full rounded-2xl border border-white/10 bg-[#0f1624] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" />
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-subject-override" class="block text-slate-300">Subject override</label>
+                            <input id="sales-subject-override" name="subject" placeholder="Optional subject line" class="w-full rounded-2xl border border-white/10 bg-[#0f1624] px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400" />
+                        </div>
+                        <button type="button" class="rounded-full bg-emerald-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-200">Launch outreach for 0 leads</button>
+                    </form>
+                </section>
+
+                <section class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-slate-400">Settings</p>
+                        <h2 class="mt-2 text-2xl font-semibold">Sales runtime configuration</h2>
+                    </div>
+
+                    <form class="mt-5 grid gap-4">
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-scoring-weights" class="block text-slate-300">Scoring weights</label>
+                            <textarea id="sales-scoring-weights" name="scoringWeights" rows="6" class="w-full rounded-3xl border border-white/10 bg-[#0f1624] px-4 py-3 font-mono text-xs text-white outline-none transition focus:border-cyan-400">{}</textarea>
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-schedule" class="block text-slate-300">Schedule</label>
+                            <textarea id="sales-schedule" name="schedule" rows="6" class="w-full rounded-3xl border border-white/10 bg-[#0f1624] px-4 py-3 font-mono text-xs text-white outline-none transition focus:border-cyan-400">{}</textarea>
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-notifications" class="block text-slate-300">Notifications</label>
+                            <textarea id="sales-notifications" name="notifications" rows="6" class="w-full rounded-3xl border border-white/10 bg-[#0f1624] px-4 py-3 font-mono text-xs text-white outline-none transition focus:border-cyan-400">{}</textarea>
+                        </div>
+                        <button type="button" class="rounded-full border border-white/15 px-4 py-2 text-sm font-semibold text-white transition hover:border-white/30 hover:bg-white/10">Save settings</button>
+                    </form>
+                </section>
+            </div>
+        </section>
+    </div>
+</main>
+"#
+        .trim()
+        .to_string()
 }
 
 // ─── Marketing pages ────────────────────────────────────────
@@ -1637,8 +1867,9 @@ mod tests {
         let html = control_plane_home_page();
         assert!(html.contains("<h1 class=\"text-4xl font-bold\">Control Plane</h1>"));
         assert!(html.contains("ApexMail administration and monitoring"));
+        assert!(html.contains("href=\"/sales\""));
         assert!(html.contains("href=\"/audit\""));
-        assert!(html.contains("bg-blue-600"));
+        assert!(html.contains("Contact Security"));
     }
 
     #[test]
@@ -1648,6 +1879,19 @@ mod tests {
         assert!(html.contains("Export"));
         assert!(html.contains("Search audit logs"));
         assert!(html.contains("<table"));
+    }
+
+    #[test]
+    fn control_plane_sales_page_renders_operator_shell() {
+        let html = control_plane_sales_page();
+        assert!(html.contains("Operator console for discovery, outreach, and autopilot approvals."));
+        assert!(html.contains("API base URL"));
+        assert!(html.contains("Admin API key"));
+        assert!(html.contains("Connect"));
+        assert!(html.contains("Refresh"));
+        assert!(html.contains("Approval loop"));
+        assert!(html.contains("Launch campaign from selected leads"));
+        assert!(html.contains("/v1/admin/sales/*"));
     }
 
 // ─── Login page parity ──────────────────────────────────
@@ -1940,6 +2184,15 @@ mod tests {
     }
 
     #[test]
+    fn cp_sales_renders_runtime_sections() {
+        let html = control_plane_sales_page();
+        assert!(html.contains("Lead inventory"));
+        assert!(html.contains("Outreach inventory"));
+        assert!(html.contains("Import from enriched company cache"));
+        assert!(html.contains("Sales runtime configuration"));
+    }
+
+    #[test]
     fn cp_discovery_renders_services() {
         let html = control_plane_discovery_page();
         assert!(html.contains("Service Discovery"));
@@ -2079,6 +2332,7 @@ mod tests {
         let pages = vec![
             control_plane_root_layout(&control_plane_home_page()),
             control_plane_root_layout(&control_plane_audit_page()),
+            control_plane_root_layout(&control_plane_sales_page()),
             control_plane_root_layout(&control_plane_dashboard_page()),
             control_plane_root_layout(&control_plane_tenants_page()),
             control_plane_root_layout(&control_plane_operators_page()),

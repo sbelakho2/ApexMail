@@ -62,3 +62,21 @@ pub async fn table_exists(db: &sqlx::PgPool, name: &str) -> bool {
         .await
         .unwrap_or(false)
 }
+
+/// Check whether a column exists on a table in the `public` schema.
+pub async fn column_exists(db: &sqlx::PgPool, table: &str, column: &str) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = $1
+              AND column_name = $2
+        )",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(db)
+    .await
+    .unwrap_or(false)
+}

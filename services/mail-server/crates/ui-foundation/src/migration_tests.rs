@@ -171,7 +171,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
 // ─── Route coverage tests ──────────────────────────────────
 
 #[test]
-fn migration_all_92_routes_have_view_functions() {
+fn migration_all_93_routes_have_view_functions() {
     let routes = rendered_routes();
     assert_eq!(routes.len(), routing::total_route_count(), "SSR route count drifted from manifest");
 
@@ -397,6 +397,7 @@ fn migration_control_plane_pages_have_titles() {
     let pages_and_titles: Vec<(&str, &str)> = vec![
         ("dashboard", "Dashboard"),
         ("tenants", "Tenants"),
+        ("sales", "Operator console"),
         ("operators", "Operators"),
         ("analytics", "Analytics"),
         ("discovery", "Service Discovery"),

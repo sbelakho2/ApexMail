@@ -104,6 +104,10 @@ const MAX_SCIM_COUNT: i64 = 200;
 /// Users with this hash must authenticate via SSO.
 const SCIM_DISABLED_HASH: &str = "!scim:disabled";
 
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
+}
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn list_users(
@@ -165,28 +169,35 @@ async fn create_user(
         .unwrap_or(body.user_name.clone());
 
     let name = body.name.as_ref().and_then(|n| n.given_name.clone());
-    let id = Uuid::new_v4();
+    let id = apexmail_lib::id::generate_id("", 26);
     let now = Utc::now();
 
 // SCIM users must authenticate via SSO; direct password login is blocked.
-    sqlx::query(
+    match sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,'member','active',$6,$6)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .bind(&email)
     .bind(&name)
     .bind(SCIM_DISABLED_HASH)
     .bind(now)
     .execute(&state.db)
-    .await?;
+    .await
+    {
+        Ok(_) => {}
+        Err(error) if is_unique_violation(&error) => {
+            return Err(ApiError::Conflict("user already exists".into()));
+        }
+        Err(error) => return Err(error.into()),
+    }
 
     Ok((
         StatusCode::CREATED,
         Json(ScimUser {
             schemas: vec![SCIM_USER_SCHEMA.into()],
-            id: id.to_string(),
+            id: id.clone(),
             user_name: email.clone(),
             name: name.map(|n| ScimName { given_name: Some(n), family_name: None }),
             emails: vec![ScimEmail { value: email, primary: true }],
@@ -198,14 +209,14 @@ async fn create_user(
 async fn get_user(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<ScimUser>, ApiError> {
     require_scopes(&auth, &["scim:read"])?;
 
     let row = sqlx::query_as::<_, UserScimRow>(
         "SELECT id, email, name, status FROM users WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
@@ -213,7 +224,7 @@ async fn get_user(
 
     Ok(Json(ScimUser {
         schemas: vec![SCIM_USER_SCHEMA.into()],
-        id: row.id.to_string(),
+        id: row.id,
         user_name: row.email.clone(),
         name: row.name.map(|n| ScimName { given_name: Some(n), family_name: None }),
         emails: vec![ScimEmail { value: row.email, primary: true }],
@@ -224,7 +235,7 @@ async fn get_user(
 async fn update_user(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(body): Json<ScimUser>,
 ) -> Result<Json<ScimUser>, ApiError> {
     require_scopes(&auth, &["scim:write"])?;
@@ -239,7 +250,7 @@ async fn update_user(
     .bind(&email)
     .bind(&name)
     .bind(status)
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
@@ -248,11 +259,11 @@ async fn update_user(
         return Err(ApiError::NotFound("user not found".into()));
     }
 
-    invalidate_user_status_cache(&id.to_string(), &auth.tenant_id, &state).await;
+    invalidate_user_status_cache(&id, &auth.tenant_id, &state).await;
 
     Ok(Json(ScimUser {
         schemas: vec![SCIM_USER_SCHEMA.into()],
-        id: id.to_string(),
+        id,
         user_name: email.clone(),
         name: name.map(|n| ScimName { given_name: Some(n), family_name: None }),
         emails: vec![ScimEmail { value: email, primary: true }],
@@ -263,14 +274,14 @@ async fn update_user(
 async fn delete_user(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["scim:write"])?;
 
     let result = sqlx::query(
         "UPDATE users SET status = 'deactivated', updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
@@ -279,7 +290,7 @@ async fn delete_user(
         return Err(ApiError::NotFound("user not found".into()));
     }
 
-    invalidate_user_status_cache(&id.to_string(), &auth.tenant_id, &state).await;
+    invalidate_user_status_cache(&id, &auth.tenant_id, &state).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

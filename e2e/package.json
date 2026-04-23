@@ -1,0 +1,24 @@
+{
+  "name": "@apexmail/e2e",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Aggressive fail-first end-to-end suite for ApexMail",
+  "scripts": {
+    "test": "pnpm run test:e2e",
+    "test:e2e": "pnpm run test:repo && pnpm run test:api && pnpm run test:services && pnpm run test:ui",
+    "test:repo": "vitest run tests/repo --reporter=verbose",
+    "test:api": "vitest run tests/api --reporter=verbose",
+    "test:services": "vitest run tests/services --reporter=verbose",
+    "test:ui": "playwright test --config=playwright.config.ts",
+    "test:fail-first": "pnpm run test:e2e",
+    "test:ui:headed": "playwright test --config=playwright.config.ts --headed",
+    "test:ui:debug": "playwright test --config=playwright.config.ts --debug"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  }
+}

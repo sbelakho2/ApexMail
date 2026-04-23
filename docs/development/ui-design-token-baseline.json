@@ -2,7 +2,7 @@
   "version": 1,
   "surfaces": {
     "web": {
-      "sources": ["apps/web/src/app/globals.css", "apps/web/tailwind.config.ts"],
+      "sources": ["apps/testing/fixtures/rust-ui/assets/globals.css", "services/mail-server/crates/ui-foundation/src/lib.rs"],
       "colors": [
         { "source": "globals.css", "name": "--background", "value": "248 246 243" },
         { "source": "globals.css", "name": "--foreground", "value": "15 23 42" },
@@ -75,7 +75,7 @@
       ]
     },
     "control-plane": {
-      "sources": ["apps/control-plane/src/app/globals.css"],
+      "sources": ["apps/testing/fixtures/rust-ui/assets/globals.css", "services/mail-server/crates/ui-foundation/src/lib.rs"],
       "colors": [
         { "source": "globals.css", "name": "--background", "value": "15 23 42" },
         { "source": "globals.css", "name": "--foreground", "value": "241 245 249" },

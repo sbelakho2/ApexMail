@@ -4,6 +4,7 @@
  */
 
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -84,6 +85,13 @@ export function loadConfig(): Config {
     );
   }
 
+  if (result.data.NODE_ENV === 'production' && !result.data.BILLING_COMPANY_PHONE) {
+    throw new Error(
+      'BILLING_COMPANY_PHONE must be configured in production environment. ' +
+      'Customer invoices and payment notices must include a real support phone number.'
+    );
+  }
+
   if (result.data.NODE_ENV === 'production' && !result.data.API_BASE_URL) {
     throw new Error(
       'API_BASE_URL must be configured in production environment. ' +
@@ -148,7 +156,7 @@ export const config = {
   },
   get port(): number {
     const parsed = parseInt(getConfig().PORT, 10);
-    return Number.isNaN(parsed) ? 3000 : parsed;
+    return Number.isNaN(parsed) ? 4100 : parsed;
   },
   get host(): string {
     return getConfig().HOST;
@@ -184,10 +192,17 @@ export const config = {
     return getConfig().PDF_RENDERER_URL ?? 'http://pdf-renderer:3004';
   },
   get viralTelemetryHashSalt(): string {
-    return getConfig().VIRAL_TELEMETRY_HASH_SALT ?? 'apexmail-telemetry';
+    const configured = getConfig().VIRAL_TELEMETRY_HASH_SALT;
+    if (configured) {
+      return configured;
+    }
+
+    return createHash('sha256')
+      .update(`billing-telemetry:${getConfig().SERVICE_AUTH_TOKEN}`)
+      .digest('hex');
   },
   get billingCompanyPhone(): string {
-    return getConfig().BILLING_COMPANY_PHONE ?? '+37200000000';
+    return getConfig().BILLING_COMPANY_PHONE ?? 'UNCONFIGURED';
   },
   get maxProrationChargeCents(): number {
     return parseInt(getConfig().MAX_PRORATION_CHARGE_CENTS ?? '100000', 10);

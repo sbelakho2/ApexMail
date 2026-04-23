@@ -271,6 +271,7 @@ fn render_control_plane(path: &str) -> Option<String> {
         "/dashboard" => leptos_views::control_plane_dashboard_page(),
         "/tenants" => leptos_views::control_plane_tenants_page(),
         "/tenants/new" => leptos_views::control_plane_tenants_new_page(),
+        "/sales" => leptos_views::control_plane_sales_page(),
         "/operators" => leptos_views::control_plane_operators_page(),
         "/operators/new" => leptos_views::control_plane_operators_new_page(),
         "/analytics" => leptos_views::control_plane_analytics_page(),

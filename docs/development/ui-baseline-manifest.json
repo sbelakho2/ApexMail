@@ -39,7 +39,7 @@
     },
     {
       "id": "control-plane",
-      "routeCount": 23,
+      "routeCount": 24,
       "routes": [
         { "path": "/login", "name": "Login", "category": "auth", "authRequired": false },
         { "path": "/", "name": "Home", "category": "admin", "authRequired": true },
@@ -47,6 +47,7 @@
         { "path": "/tenants", "name": "Tenants", "category": "admin", "authRequired": true },
         { "path": "/tenants/new", "name": "New Tenant", "category": "admin", "authRequired": true },
         { "path": "/audit", "name": "Audit Logs", "category": "admin", "authRequired": true },
+        { "path": "/sales", "name": "Sales Console", "category": "admin", "authRequired": true },
         { "path": "/analytics", "name": "Analytics", "category": "admin", "authRequired": true },
         { "path": "/operators", "name": "Operators", "category": "admin", "authRequired": true },
         { "path": "/operators/new", "name": "New Operator", "category": "admin", "authRequired": true },

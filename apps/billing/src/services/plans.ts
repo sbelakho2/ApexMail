@@ -66,6 +66,10 @@ const PlanFeaturesSchema = z.object({
 
 const logger = createLogger();
 
+function hasPostgresErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === code;
+}
+
 export interface Plan {
   id: string;
   name: string;
@@ -244,7 +248,7 @@ export function calculatePaygCost(emailsSent: number, apiCalls: number): {
   const apiCostCents =
     Math.ceil(billableApiCalls / 1000) * PAYG_PRICING.apiPricing.pricePerThousandCallsCents;
 
-  const emailCostCents = Math.floor((emailCostMillicents + 500) / 1000);
+  const emailCostCents = Math.floor(emailCostMillicents / 1000);
   const minimumMonthlyChargeCents = PAYG_PRICING.minimumMonthlyChargeCents;
   const totalCostCents = Math.max(emailCostCents + apiCostCents, minimumMonthlyChargeCents);
 
@@ -748,7 +752,24 @@ export class PlansService {
        FROM plans WHERE is_active = true ORDER BY sort_order ASC LIMIT 100`
     );
 
-    if (!result.ok) return Result.err(result.error);
+    if (!result.ok) {
+      if (!hasPostgresErrorCode(result.error, '42703')) {
+        return Result.err(result.error);
+      }
+
+      const legacyResult = await this.db.query<PlanRow>(
+        `SELECT id, name, display_name, description, price_monthly, price_yearly,
+                email_limit, api_call_limit, features, NULL::text AS stripe_price_id_monthly,
+                NULL::text AS stripe_price_id_yearly, is_active, sort_order, created_at, updated_at
+         FROM plans WHERE is_active = true ORDER BY sort_order ASC LIMIT 100`
+      );
+
+      if (!legacyResult.ok) {
+        return Result.err(legacyResult.error);
+      }
+
+      return Result.ok(legacyResult.value.rows.map(row => this.mapRow(row)));
+    }
 
     return Result.ok(result.value.rows.map(row => this.mapRow(row)));
   }
@@ -773,7 +794,33 @@ export class PlansService {
       [name]
     );
 
-    if (!result.ok) return Result.err(result.error);
+    if (!result.ok) {
+      if (!hasPostgresErrorCode(result.error, '42703')) {
+        return Result.err(result.error);
+      }
+
+      const legacyResult = await this.db.query<PlanRow>(
+        `SELECT id, name, display_name, description, price_monthly, price_yearly,
+                email_limit, api_call_limit, features, NULL::text AS stripe_price_id_monthly,
+                NULL::text AS stripe_price_id_yearly, is_active, sort_order, created_at, updated_at
+         FROM plans WHERE name = $1`,
+        [name]
+      );
+
+      if (!legacyResult.ok) {
+        return Result.err(legacyResult.error);
+      }
+
+      const legacyRow = legacyResult.value.rows[0];
+      if (!legacyRow) return Result.ok(null);
+
+      const plan = this.mapRow(legacyRow);
+      this.cache.plans.set(name, {
+        plan,
+        expiresAt: Date.now() + PLAN_CACHE_TTL_MS,
+      });
+      return Result.ok(plan);
+    }
 
     const row = result.value.rows[0];
     if (!row) return Result.ok(null);

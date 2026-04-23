@@ -5,6 +5,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { withTransaction } from '@apexmail/db';
+import { domainToASCII, domainToUnicode } from 'node:url';
 import type { BillingEnv, BillingContext } from '../app.js';
 import { calculateOverageCost, calculatePaygCost, PAYG_PRICING } from '../services/plans.js';
 import { logger } from '../lib/logger.js';
@@ -56,7 +57,17 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const isAllowedRedirectUrl = (urlString: string): boolean => {
     try {
       const url = new URL(urlString);
-      const hostname = url.hostname.toLowerCase();
+      const asciiHostname = domainToASCII(url.hostname);
+      if (!asciiHostname) {
+        return false;
+      }
+
+      // Reject IDN/punycode hostnames to prevent visual spoofing in redirects.
+      if (domainToUnicode(asciiHostname) !== asciiHostname) {
+        return false;
+      }
+
+      const hostname = asciiHostname.toLowerCase();
       const isApexmailHost = hostname === 'apexmail.ee' || hostname.endsWith('.apexmail.ee');
 
       if (isApexmailHost) {
@@ -376,7 +387,11 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.dunning.getFullState(tenantId);
 
     if (!result.ok) {
-      logger.error('Billing operation failed', { error: String(result.error), operation: 'getDunning' }); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Billing operation failed', {
+        error: String(result.error),
+        operation: 'getDunning',
+      });
+      return c.json({ error: 'Operation failed' }, 500);
     }
 
     return c.json(result.value ?? { status: 'healthy' });
@@ -391,7 +406,11 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.costCircuit.getCostReport(tenantId, periodStart, now);
 
     if (!result.ok) {
-      logger.error('Billing operation failed', { error: String(result.error), operation: 'getCosts' }); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Billing operation failed', {
+        error: String(result.error),
+        operation: 'getCosts',
+      });
+      return c.json({ error: 'Operation failed' }, 500);
     }
 
     return c.json(result.value);
@@ -406,7 +425,11 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.viralLoop.getStats(tenantId, periodStart, now);
 
     if (!result.ok) {
-      logger.error('Billing operation failed', { error: String(result.error), operation: 'getViralStats' }); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Billing operation failed', {
+        error: String(result.error),
+        operation: 'getViralStats',
+      });
+      return c.json({ error: 'Operation failed' }, 500);
     }
 
     return c.json(result.value);
@@ -571,7 +594,11 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
       });
 
       if (!localUpdateResult.ok) {
-        logger.error('Update failed', { error: String(localUpdateResult.error), operation: 'switchToPAYG' }); return c.json({ error: "Operation failed" }, 500);
+        logger.error('Update failed', {
+          error: String(localUpdateResult.error),
+          operation: 'switchToPAYG',
+        });
+        return c.json({ error: 'Operation failed' }, 500);
       }
 
       return c.json({
@@ -585,7 +612,11 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const previewResult = await ctx.proration.previewProration(tenantId, parsed.planName);
 
     if (!previewResult.ok) {
-      logger.error('Preview failed', { error: String(previewResult.error), operation: 'switchPlan' }); return c.json({ error: "Operation failed" }, 500);
+      logger.error('Preview failed', {
+        error: String(previewResult.error),
+        operation: 'switchPlan',
+      });
+      return c.json({ error: 'Operation failed' }, 500);
     }
 
     // Apply the plan change

@@ -7,6 +7,7 @@ import { generateUuid, generateApiKey, parseApiKey } from '@apexmail/lib/id';
 import { hashPassword, verifyPassword } from '@apexmail/lib/crypto';
 import { getLogger, type Logger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '../pool.js';
+import { withTransaction } from '../transaction.js';
 
 export type ApiKeyScope =
   | 'messages:send'
@@ -80,6 +81,27 @@ export interface VerifyApiKeyResult {
 
 type ApiKeySqlParam = string | number | boolean | Date | null | string[] | ApiKeyScope[];
 
+type ApiKeyRow = {
+  id: string;
+  tenant_id: string;
+  user_id: string | null;
+  name: string;
+  prefix: string;
+  key_hash: string;
+  scopes: ApiKeyScope[];
+  rate_limit: number;
+  allowed_ips: string[] | null;
+  allowed_domains: string[] | null;
+  expires_at: Date | null;
+  last_used_at: Date | null;
+  last_used_ip: string | null;
+  usage_count: number;
+  is_active: boolean;
+  metadata: string;
+  created_at: Date;
+  updated_at: Date;
+};
+
 export class ApiKeysRepository {
   private readonly logger: Logger;
 
@@ -151,26 +173,7 @@ export class ApiKeysRepository {
     
     const now = new Date();
 
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      name: string;
-      prefix: string;
-      key_hash: string;
-      scopes: ApiKeyScope[];
-      rate_limit: number;
-      allowed_ips: string[] | null;
-      allowed_domains: string[] | null;
-      expires_at: Date | null;
-      last_used_at: Date | null;
-      last_used_ip: string | null;
-      usage_count: number;
-      is_active: boolean;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ApiKeyRow>(
       `INSERT INTO api_keys (
         id, tenant_id, user_id, name, prefix, key_hash, scopes,
         rate_limit, allowed_ips, allowed_domains, expires_at,
@@ -239,26 +242,7 @@ export class ApiKeysRepository {
     // The prefix index drives the WHERE clause; the key_hash hash index
     // supports any future key_hash-based lookups (e.g. migration or audit).
     // Without these indexes, every verify() call triggers a sequential scan.
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      name: string;
-      prefix: string;
-      key_hash: string;
-      scopes: ApiKeyScope[];
-      rate_limit: number;
-      allowed_ips: string[] | null;
-      allowed_domains: string[] | null;
-      expires_at: Date | null;
-      last_used_at: Date | null;
-      last_used_ip: string | null;
-      usage_count: number;
-      is_active: boolean;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ApiKeyRow>(
       // FIX-500-041: Select only columns needed for verification instead of SELECT *
       'SELECT id, tenant_id, user_id, name, prefix, key_hash, scopes, rate_limit, allowed_ips, allowed_domains, expires_at, last_used_at, last_used_ip, usage_count, is_active, metadata, created_at, updated_at FROM api_keys WHERE prefix = ANY($1) AND is_active = true',
       [prefixes]
@@ -347,6 +331,7 @@ export class ApiKeysRepository {
 
   private async updateLastUsed(id: string, ip?: string): Promise<void> {
     try {
+      const debounceSeconds = Math.floor(ApiKeysRepository.LAST_USED_DEBOUNCE_MS / 1000);
       await this.db.query(
         `UPDATE api_keys 
          SET last_used_at = NOW(), 
@@ -354,8 +339,8 @@ export class ApiKeysRepository {
              usage_count = usage_count + 1,
              updated_at = NOW()
          WHERE id = $1
-           AND (last_used_at IS NULL OR last_used_at < NOW() - INTERVAL '${ApiKeysRepository.LAST_USED_DEBOUNCE_MS / 1000} seconds')`,
-        [id, ip ?? null]
+           AND (last_used_at IS NULL OR last_used_at < NOW() - ($3 * INTERVAL '1 second'))`,
+        [id, ip ?? null, debounceSeconds]
       );
     } catch (error) {
       this.logger.error('Failed to update API key last used timestamp', {
@@ -406,26 +391,7 @@ export class ApiKeysRepository {
   }
 
   async findById(id: string, tenantId: string): Promise<Result<ApiKey | null, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      name: string;
-      prefix: string;
-      key_hash: string;
-      scopes: ApiKeyScope[];
-      rate_limit: number;
-      allowed_ips: string[] | null;
-      allowed_domains: string[] | null;
-      expires_at: Date | null;
-      last_used_at: Date | null;
-      last_used_ip: string | null;
-      usage_count: number;
-      is_active: boolean;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ApiKeyRow>(
       'SELECT * FROM api_keys WHERE id = $1 AND tenant_id = $2',
       [id, tenantId]
     );
@@ -487,26 +453,7 @@ export class ApiKeysRepository {
 
     values.push(id);
 
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      name: string;
-      prefix: string;
-      key_hash: string;
-      scopes: ApiKeyScope[];
-      rate_limit: number;
-      allowed_ips: string[] | null;
-      allowed_domains: string[] | null;
-      expires_at: Date | null;
-      last_used_at: Date | null;
-      last_used_ip: string | null;
-      usage_count: number;
-      is_active: boolean;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ApiKeyRow>(
       `UPDATE api_keys SET ${updates.join(', ')} WHERE id = $${paramIndex} AND tenant_id = $${paramIndex + 1} RETURNING *`,
       [...values, tenantId]
     );
@@ -545,39 +492,16 @@ export class ApiKeysRepository {
     tenantId: string,
     options?: { gracePeriodMs?: number }
   ): Promise<Result<ApiKeyWithSecret, Error>> {
-    const client = await this.db.getClient();
-    try {
-      await client.query('BEGIN');
-
+    return withTransaction(this.db, async ({ client }) => {
       // 1. Look up the existing key to copy its configuration
-      const existingResult = await client.query<{
-        id: string;
-        tenant_id: string;
-        user_id: string | null;
-        name: string;
-        prefix: string;
-        key_hash: string;
-        scopes: ApiKeyScope[];
-        rate_limit: number;
-        allowed_ips: string[] | null;
-        allowed_domains: string[] | null;
-        expires_at: Date | null;
-        last_used_at: Date | null;
-        last_used_ip: string | null;
-        usage_count: number;
-        is_active: boolean;
-        metadata: string;
-        created_at: Date;
-        updated_at: Date;
-      }>(
+      const existingResult = await client.query<ApiKeyRow>(
         'SELECT * FROM api_keys WHERE id = $1 AND tenant_id = $2',
         [id, tenantId]
       );
 
       const existingRow = existingResult.rows[0];
       if (!existingRow) {
-        await client.query('ROLLBACK');
-        return Result.err(new Error('API key not found'));
+        throw new Error('API key not found');
       }
 
       const existing = this.mapRow(existingRow);
@@ -587,26 +511,7 @@ export class ApiKeysRepository {
       const keyHash = await hashPassword(secretKey);
       const now = new Date();
 
-      const createResult = await client.query<{
-        id: string;
-        tenant_id: string;
-        user_id: string | null;
-        name: string;
-        prefix: string;
-        key_hash: string;
-        scopes: ApiKeyScope[];
-        rate_limit: number;
-        allowed_ips: string[] | null;
-        allowed_domains: string[] | null;
-        expires_at: Date | null;
-        last_used_at: Date | null;
-        last_used_ip: string | null;
-        usage_count: number;
-        is_active: boolean;
-        metadata: string;
-        created_at: Date;
-        updated_at: Date;
-      }>(
+      const createResult = await client.query<ApiKeyRow>(
         `INSERT INTO api_keys (
           id, tenant_id, user_id, name, prefix, key_hash, scopes,
           rate_limit, allowed_ips, allowed_domains, expires_at,
@@ -639,8 +544,7 @@ export class ApiKeysRepository {
 
       const createdRow = createResult.rows[0];
       if (!createdRow) {
-        await client.query('ROLLBACK');
-        return Result.err(new Error('Failed to create rotated API key'));
+        throw new Error('Failed to create rotated API key');
       }
 
       // 3. Retire the old key — either immediately or after a grace period
@@ -653,8 +557,7 @@ export class ApiKeysRepository {
           [id, tenantId, expiresAt]
         );
         if ((updateResult.rowCount ?? 0) === 0) {
-          await client.query('ROLLBACK');
-          return Result.err(new Error('Failed to set grace period expiry for old API key'));
+          throw new Error('Failed to set grace period expiry for old API key');
         }
       } else {
         const revokeResult = await client.query(
@@ -664,21 +567,13 @@ export class ApiKeysRepository {
           [id, tenantId]
         );
         if ((revokeResult.rowCount ?? 0) === 0) {
-          await client.query('ROLLBACK');
-          return Result.err(new Error('Failed to revoke old API key during rotation'));
+          throw new Error('Failed to revoke old API key during rotation');
         }
       }
 
-      await client.query('COMMIT');
-
       const apiKey = this.mapRow(createdRow);
-      return Result.ok({ ...apiKey, secretKey });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      client.release();
-    }
+      return { ...apiKey, secretKey };
+    });
   }
 
   // FIX-500-255: Add RETURNING id + rowCount check
@@ -739,26 +634,7 @@ export class ApiKeysRepository {
     const offset = options.offset ?? 0;
     values.push(limit, offset);
 
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      name: string;
-      prefix: string;
-      key_hash: string;
-      scopes: ApiKeyScope[];
-      rate_limit: number;
-      allowed_ips: string[] | null;
-      allowed_domains: string[] | null;
-      expires_at: Date | null;
-      last_used_at: Date | null;
-      last_used_ip: string | null;
-      usage_count: number;
-      is_active: boolean;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ApiKeyRow>(
       `SELECT * FROM api_keys ${whereClause}
        ORDER BY created_at DESC
        LIMIT $${paramIndex++} OFFSET $${paramIndex}`,
@@ -774,26 +650,7 @@ export class ApiKeysRepository {
   }
 
   async listByUser(userId: string): Promise<Result<ApiKey[], Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      name: string;
-      prefix: string;
-      key_hash: string;
-      scopes: ApiKeyScope[];
-      rate_limit: number;
-      allowed_ips: string[] | null;
-      allowed_domains: string[] | null;
-      expires_at: Date | null;
-      last_used_at: Date | null;
-      last_used_ip: string | null;
-      usage_count: number;
-      is_active: boolean;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ApiKeyRow>(
       `SELECT * FROM api_keys WHERE user_id = $1 AND is_active = true ORDER BY created_at DESC`,
       [userId]
     );
@@ -819,26 +676,7 @@ export class ApiKeysRepository {
     return Result.ok(parseInt(result.value.rows[0]?.count ?? '0', 10));
   }
 
-  private mapRow(row: {
-    id: string;
-    tenant_id: string;
-    user_id: string | null;
-    name: string;
-    prefix: string;
-    key_hash: string;
-    scopes: ApiKeyScope[];
-    rate_limit: number;
-    allowed_ips: string[] | null;
-    allowed_domains: string[] | null;
-    expires_at: Date | null;
-    last_used_at: Date | null;
-    last_used_ip: string | null;
-    usage_count: number;
-    is_active: boolean;
-    metadata: string;
-    created_at: Date;
-    updated_at: Date;
-  }): ApiKey {
+  private mapRow(row: ApiKeyRow): ApiKey {
     return {
       id: row.id,
       tenantId: row.tenant_id,

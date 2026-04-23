@@ -51,6 +51,9 @@ pub fn router(state: AppState) -> Router {
         .route("/companies", get(list_companies))
         .route("/enrich", post(enrich))
         .route("/campaigns", get(list_campaigns).post(create_campaign))
+        .route("/campaigns/:id/recipients", post(add_campaign_recipients))
+        .route("/campaigns/:id/start", post(start_campaign))
+        .route("/campaigns/:id/pause", post(pause_campaign))
         .route("/calendar", get(list_calendar))
         .route("/inbox", get(list_inbox))
         .with_state(shared.clone())
@@ -231,7 +234,10 @@ async fn list_companies(
 
 #[derive(Deserialize)]
 struct EnrichBody {
-    email: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
     #[serde(default)]
     tenant_id: Option<String>,
 }
@@ -240,7 +246,13 @@ async fn enrich(
     State(state): State<Arc<AppState>>,
     Json(body): Json<EnrichBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let company = state.enrichment.enrich_lead(&body.email)?;
+    let company = if let Some(email) = body.email.as_deref() {
+        state.enrichment.enrich_lead(email)?
+    } else if let Some(domain) = body.domain.as_deref() {
+        state.enrichment.enrich_company(domain)?
+    } else {
+        return Err(SalesError::InvalidInput("email or domain is required".into()));
+    };
     let tenant_id = body.tenant_id.unwrap_or_else(|| "default".to_string());
 
 // Persist to enriched_companies table
@@ -270,7 +282,7 @@ async fn enrich(
     .execute(&state.db)
     .await
     {
-        warn!(email = %body.email, tenant_id = %tenant_id, error = %error, "Failed to persist enriched company cache entry");
+        warn!(email = ?body.email, domain = ?body.domain, tenant_id = %tenant_id, error = %error, "Failed to persist enriched company cache entry");
     }
 
     json_response(&company)
@@ -301,6 +313,40 @@ async fn list_campaigns(
 ) -> Result<Json<serde_json::Value>, SalesError> {
     let campaigns = state.campaigns.list_campaigns();
     json_response(&campaigns)
+}
+
+#[derive(Deserialize)]
+struct RecipientBody {
+    emails: Vec<String>,
+}
+
+async fn add_campaign_recipients(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RecipientBody>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    if body.emails.is_empty() {
+        return Err(SalesError::InvalidInput("at least one recipient email is required".into()));
+    }
+
+    let added = state.campaigns.add_recipients(id, body.emails)?;
+    json_response(&serde_json::json!({ "campaignId": id, "added": added }))
+}
+
+async fn start_campaign(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let campaign = state.campaigns.start_campaign(id)?;
+    json_response(&campaign)
+}
+
+async fn pause_campaign(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let campaign = state.campaigns.pause_campaign(id)?;
+    json_response(&campaign)
 }
 
 // -- Calendar ---------------------------------------------------------------
@@ -447,6 +493,7 @@ mod tests {
         let app = test_app();
         let body = serde_json::json!({ "email": "bob@beta.io" });
         let resp = app
+            .clone()
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
@@ -457,5 +504,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let domain_body = serde_json::json!({ "domain": "acme.com" });
+        let domain_resp = app
+            .oneshot(
+                Request::post("/enrich")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&domain_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(domain_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_campaign_lifecycle_endpoints() {
+        let app = test_app();
+        let create_body = serde_json::json!({
+            "name": "Migration wave",
+            "template_id": "tmpl_competitor_migration",
+            "audience": "selected-leads"
+        });
+
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::post("/campaigns")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::OK);
+
+        let created: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let campaign_id = created["id"].as_str().unwrap();
+
+        let recipients_body = serde_json::json!({
+            "emails": ["alice@acme.com", "bob@beta.io"]
+        });
+        let recipients_resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/campaigns/{campaign_id}/recipients"))
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&recipients_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recipients_resp.status(), StatusCode::OK);
+
+        let start_resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/campaigns/{campaign_id}/start"))
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(start_resp.status(), StatusCode::OK);
+
+        let started: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(start_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(started["status"], "active");
+
+        let pause_resp = app
+            .oneshot(
+                Request::post(format!("/campaigns/{campaign_id}/pause"))
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pause_resp.status(), StatusCode::OK);
+
+        let paused: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(pause_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(paused["status"], "paused");
     }
 }

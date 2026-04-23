@@ -4,12 +4,12 @@ This document describes the mCaptcha integration for ApexMail login flows.
 
 ## Scope
 
-mCaptcha is wired into both login applications:
+mCaptcha is wired into both Rust-served login surfaces:
 
-- Web app login: `apps/web` (`/login`)
-- Control-plane login: `apps/control-plane` (`/login`)
+- Web login: `services/mail-server/crates/api-server` serving the `web` surface on the `127.0.0.1` host map (`/login`)
+- Control-plane login: `services/mail-server/crates/api-server` serving the `control-plane` surface on the `localhost` host map (`/login`)
 
-The integration is enforced server-side and surfaced client-side.
+The integration is enforced in the Rust application layer and surfaced in the Rust SSR login shells.
 
 ## Runtime Behavior
 
@@ -74,11 +74,6 @@ NEXT_PUBLIC_MCAPTCHA_GLUE_SCRIPT_URL=https://unpkg.com/@mcaptcha/vanilla-glue@0.
 
 ## Implementation References
 
-- `apps/web/src/components/security/mcaptcha-widget.tsx`
-- `apps/web/src/lib/security/mcaptcha.ts`
-- `apps/web/src/app/api/auth/login/route.ts`
-- `apps/web/src/app/login/use-login-controller.ts`
-- `apps/control-plane/src/components/security/mcaptcha-widget.tsx`
-- `apps/control-plane/src/lib/security/mcaptcha.ts`
-- `apps/control-plane/src/app/api/auth/login/route.ts`
-- `apps/control-plane/src/app/login/page.tsx`
+- `services/mail-server/crates/api-server`
+- `services/mail-server/crates/ui-foundation`
+- `services/mail-server/README.md`

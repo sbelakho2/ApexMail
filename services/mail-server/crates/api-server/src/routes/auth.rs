@@ -426,7 +426,7 @@ async fn register(
     let email_lower = body.email.to_lowercase();
 
     // Check if email already exists
-    let existing: Option<(Uuid,)> = sqlx::query_as(
+    let existing: Option<String> = sqlx::query_scalar(
         "SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1"
     )
     .bind(&email_lower)
@@ -626,30 +626,32 @@ async fn create_api_key(
 
     let raw_key = apexmail_lib::id::generate_api_key(false);
     let key_hash = apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
-    // Fix #23: Safely limit prefix length. If key is shorter than 15 chars, store
-    // at most 8 chars (or half the key) to avoid exposing the full key.
-    let prefix_len = if raw_key.len() >= 15 {
-        15
+    // The persisted prefix must fit the api_keys.prefix VARCHAR(10) column.
+    // If the key is unusually short, store at most 8 chars (or half the key)
+    // to avoid exposing the full key.
+    let prefix_len = if raw_key.len() >= 10 {
+        10
     } else {
         raw_key.len().min(8).max(raw_key.len() / 2)
     };
     let key_prefix = raw_key[..prefix_len].to_string();
 
-    let id = Uuid::new_v4();
+    let id = apexmail_lib::id::generate_id("key", 22);
     let now = Utc::now();
     let expires_at = body
         .expires_in_days
         .map(|d| now + ChronoDuration::days(d));
 
     sqlx::query(
-        "INSERT INTO api_keys (id, tenant_id, name, key_hash, key_prefix, scopes, expires_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO api_keys (id, tenant_id, user_id, name, prefix, key_hash, scopes, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(auth.tenant_id)
+    .bind(auth.user_id.as_deref())
     .bind(&body.name)
-    .bind(&key_hash)
     .bind(&key_prefix)
+    .bind(&key_hash)
     .bind(serde_json::json!(body.scopes))
     .bind(expires_at)
     .bind(now)
@@ -659,7 +661,7 @@ async fn create_api_key(
     Ok((
         StatusCode::CREATED,
         Json(CreateApiKeyResponse {
-            id: id.to_string(),
+            id,
             key: raw_key,
             key_prefix,
             name: body.name,
@@ -676,7 +678,7 @@ async fn list_api_keys(
 ) -> Result<Json<Vec<ApiKeyInfo>>, ApiError> {
     let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, ApiKeyInfoRow>(
-        "SELECT id, name, key_prefix, scopes, last_used_at, created_at
+        "SELECT id, name, prefix AS key_prefix, scopes, last_used_at, created_at
          FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
@@ -713,7 +715,7 @@ struct ApiKeyInfoRow {
 async fn revoke_api_key(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let deleted_key_hash: Option<String> = sqlx::query_scalar(
         "DELETE FROM api_keys WHERE id = $1 AND tenant_id = $2 RETURNING key_hash",

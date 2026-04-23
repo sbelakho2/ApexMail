@@ -2,14 +2,14 @@
 
 Maps user goals to canonical navigation entry points.
 
-## Customer Console (`apps/web`)
+## Customer Console (`web` surface via `services/mail-server/crates/api-server`)
 
 - **Launch a campaign quickly** → `Campaigns`, `Templates`, `Lists`
 - **Understand deliverability performance** → `Reports`, `Activity`, `AI Insights`
 - **Manage account and plan** → `Settings`, `Billing`, `Dedicated IPs`
 - **Operate team permissions** → `Settings` → `Team`
 
-## Control Plane (`apps/control-plane`)
+## Control Plane (`control-plane` surface via `services/mail-server/crates/api-server`)
 
 - **Triage platform health** → Operations Dashboard
 - **Respond to compliance risk** → Risk / Compliance, GDPR

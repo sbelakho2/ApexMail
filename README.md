@@ -34,9 +34,10 @@ ApexMail is a monorepo containing multiple services that work together to provid
 | App | Description | Port |
 |-----|-------------|------|
 | `@apexmail/api` | REST API for message sending, domain management, templates | 3010 |
+| `web` (Rust SSR) | User dashboard served by `services/mail-server/crates/api-server` via `127.0.0.1` host mapping | 3000 |
 | `tracking-service` (Rust) | Open pixel, click tracking, unsubscribe handling — `services/mail-server/crates/tracking-service` | 3001 |
 | `@apexmail/analytics` | Parquet compaction, reconciliation, DuckDB queries | 3002 |
-| `@apexmail/control-plane` | Internal administration dashboard for platform owners | 3020 |
+| `control-plane` (Rust SSR) | Internal administration dashboard served by `services/mail-server/crates/api-server` via `localhost` host mapping | 3000 |
 | `@apexmail/worker` | Background job processing (email delivery, webhooks) | N/A |
 | `@apexmail/mta` | **Inbound** email, bounce, and feedback loop processing | 25, 2525, 2526 |
 | `outbound-queue` (Rust) | Outbound email delivery via AWS SES (default) or self-hosted SMTP | N/A |

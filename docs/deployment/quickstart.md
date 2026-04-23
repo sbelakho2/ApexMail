@@ -97,10 +97,9 @@ This starts:
 # Start all frontend apps
 pnpm dev
 
-# Or start individually:
-pnpm --filter @apexmail/web dev         # Dashboard (port 3000)
-pnpm --filter @apexmail/control-plane dev  # Admin (port 4000)
-pnpm --filter @apexmail/marketing dev   # Marketing site (port 4100)
+# Browser surfaces now come from the Rust api-server:
+#   http://127.0.0.1:3000 -> web
+#   http://localhost:3000 -> control-plane
 ```
 
 ## 5. Verify Installation

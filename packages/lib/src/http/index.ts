@@ -210,8 +210,6 @@ export class HttpClient {
           method: method as Dispatcher.HttpMethod,
           headers,
           body,
-          headersTimeout: timeout,
-          bodyTimeout: timeout,
           signal: controller.signal,
         });
 
@@ -272,7 +270,7 @@ export class HttpClient {
 
         this.logger.warn('HTTP request failed', {
           method,
-          url: fullUrl,
+          url: safeLogUrl,
           error: lastError.message,
           latencyMs,
           attempt,

@@ -14,3 +14,4 @@ pub mod pixel_parity;
 mod migration_tests;
 
 pub const FOUNDATION_MANIFEST_JSON: &str = include_str!("../../../../../docs/development/ui-rust-foundation-manifest.json");
+pub const GLOBALS_CSS: &str = include_str!("../../../../../apps/testing/fixtures/rust-ui/assets/globals.css");

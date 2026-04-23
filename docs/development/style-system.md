@@ -12,8 +12,8 @@ Use “Apex style” in documentation, PR descriptions, and design review notes 
 
 This guide applies to:
 
-- `apps/web`
-- `apps/control-plane`
+- Rust `web` surface served by `services/mail-server/crates/api-server`
+- Rust `control-plane` surface served by `services/mail-server/crates/api-server`
 - `apps/marketing`
 - `apps/marketing-zola` (must follow the same token and interaction contracts)
 
@@ -34,17 +34,16 @@ This guide applies to:
 
 ### Canonical Token Source
 
-- `apps/web/src/app/globals.css`
+- `apps/testing/fixtures/rust-ui/assets/globals.css`
+- runtime delivery via `services/mail-server/crates/ui-foundation/src/lib.rs` and `services/mail-server/crates/api-server/src/app.rs`
 
-`apps/web` defines canonical CSS custom properties for color, spacing, radii, and semantic states.
+The shared Rust UI stylesheet defines canonical CSS custom properties for color, spacing, radii, and semantic states.
 
 ### Tailwind Token Mapping
 
-- `apps/web/tailwind.config.ts`
-- `apps/control-plane/tailwind.config.ts`
 - `apps/marketing/tailwind.config.ts`
 
-All app Tailwind configs must map utilities to CSS variables via `rgb(var(--token) / <alpha-value>)`.
+Rust-served browser surfaces consume the shared stylesheet directly; remaining Tailwind configs must map utilities to CSS variables via `rgb(var(--token) / <alpha-value>)`.
 
 ### Token Snapshots
 
@@ -148,21 +147,20 @@ Every Apex surface should rely on these families:
 
 ### Canonical Icon Modules
 
-- `apps/web/src/components/ui/icons.tsx`
-- `apps/control-plane/src/components/ui/icons.tsx`
+- `services/mail-server/crates/ui-foundation/src/icons.rs`
 - `apps/marketing/src/components/ui/icons.tsx`
 
 ### Icon Rules
 
-1. Import icons from the local app icon module only.
+1. Import icons from the owning surface module only.
 2. Keep stable export aliases aligned with UI usage (`LogOut`, `Loader2`, `BarChart3`, etc.).
 3. Add glyph → export in the icon module before use in feature code.
 4. Do not import from `lucide-react` in app source.
 
 ### Example
 
-```tsx
-import { LogOut, Loader2 } from '@/components/ui/icons';
+```rust
+use ui_foundation::icons;
 ```
 
 ## Flexibility Model (How to Extend Apex Safely)

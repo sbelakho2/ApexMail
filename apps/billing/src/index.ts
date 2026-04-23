@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   // Load config early
   loadConfig();
 
-  const { app, ctx } = createApp();
+  const { app, ctx } = await createApp();
 
   // Graceful shutdown
   const shutdown = async (reason = 'signal', error?: unknown): Promise<void> => {
@@ -99,7 +99,9 @@ async function main(): Promise<void> {
   await startBackgroundWorkers(ctx);
 }
 
-async function startBackgroundWorkers(ctx: ReturnType<typeof createApp>['ctx']): Promise<void> {
+type BillingAppContext = Awaited<ReturnType<typeof createApp>>['ctx'];
+
+async function startBackgroundWorkers(ctx: BillingAppContext): Promise<void> {
   logger.info('Starting background workers...');
 
   // Recover any metering events that were pending when the process last stopped.

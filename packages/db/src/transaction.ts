@@ -76,6 +76,32 @@ function sanitizeSavepointName(name: string): string {
 }
 
 const logger: Logger = getLogger().child({ component: 'transaction' });
+const INT32_MIN = -2147483648;
+const INT32_MAX = 2147483647;
+const UINT32_MASK = BigInt(0xFFFFFFFF);
+
+function toSignedInt32(value: number): number {
+  return value > INT32_MAX ? value - 0x100000000 : value;
+}
+
+function splitBigIntLockKey(lockKey: bigint): [number, number] {
+  const highUnsigned = Number((lockKey >> BigInt(32)) & UINT32_MASK);
+  const lowUnsigned = Number(lockKey & UINT32_MASK);
+  return [toSignedInt32(highUnsigned), toSignedInt32(lowUnsigned)];
+}
+
+function normalizeLockKeyTuple(lockKey: [number, number]): [number, number] {
+  const [first, second] = lockKey;
+  const valid = [first, second].every(
+    (part) => Number.isInteger(part) && part >= INT32_MIN && part <= INT32_MAX,
+  );
+
+  if (!valid) {
+    throw new Error('Advisory lock tuple must contain signed 32-bit integers');
+  }
+
+  return [first, second];
+}
 
 /**
  * Check if an error is a serialization failure that should be retried
@@ -249,9 +275,9 @@ export async function withAdvisoryLock<T>(
 
   try {
     // Calculate lock ID
-    const lockId = Array.isArray(lockKey) 
-      ? lockKey 
-      : [Number(lockKey >> BigInt(32)), Number(lockKey & BigInt(0xFFFFFFFF))];
+    const lockId = Array.isArray(lockKey)
+      ? normalizeLockKeyTuple(lockKey)
+      : splitBigIntLockKey(lockKey);
 
     // Try to acquire lock
     const lockFn = options.shared ? 'pg_try_advisory_lock_shared' : 'pg_try_advisory_lock';

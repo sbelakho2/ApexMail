@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::{header::HOST, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header::{CONTENT_TYPE, HOST}, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use rand::RngCore;
 use axum::routing::get;
@@ -75,6 +75,7 @@ pub fn build_app(state: AppState) -> Router {
         ));
 
     let public = Router::<AppState>::new()
+        .route("/assets/globals.css", get(browser_globals_css))
         .route("/verify-email", get(browser_verify_email_page))
         .nest("/health", routes::health::router())
         .nest("/v1/ses", routes::ses_notifications::router())
@@ -254,6 +255,13 @@ fn browser_html_response(html: String) -> Response {
         .headers_mut()
         .insert("Content-Security-Policy", browser_csp_header(&nonce));
     response
+}
+
+async fn browser_globals_css() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, HeaderValue::from_static("text/css; charset=utf-8"))],
+        ui_foundation::GLOBALS_CSS,
+    )
 }
 
 // ─── Null byte check ───────────────────────────────────────────
@@ -518,8 +526,8 @@ mod tests {
             rate_limit_max_requests: 1000,
             cors_origins: vec!["*".into()],
             trusted_proxies: vec![],
-            ui_web_hosts: vec!["app.apexmail.ee".into(), "localhost".into()],
-            ui_control_plane_hosts: vec!["admin.apexmail.ee".into()],
+            ui_web_hosts: vec!["app.apexmail.ee".into(), "127.0.0.1".into()],
+            ui_control_plane_hosts: vec!["admin.apexmail.ee".into(), "localhost".into()],
             ui_marketing_hosts: vec!["apexmail.ee".into()],
             ui_marketing_surface: "marketing-zola".into(),
             ui_default_surface: Some("web".into()),
@@ -540,6 +548,8 @@ mod tests {
             impersonation_secret: "test-impersonation-secret-12345".into(),
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
             control_plane_api_key: None,
+            sales_autopilot_base_url: "http://localhost:3010".into(),
+            internal_service_token: None,
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
             metrics_port: 9090,
         }
@@ -556,6 +566,44 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers().get("content-type").unwrap(), "text/html; charset=utf-8");
+    }
+
+    #[tokio::test]
+    async fn renders_control_plane_sales_for_localhost() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("localhost"));
+        let uri: Uri = "/sales".parse().unwrap();
+
+        let response = render_ui_response(&test_config(), &headers, &uri, &Method::GET)
+            .expect("expected control-plane sales ui response");
+        let body = response_body_string(response).await;
+
+        assert!(body.contains("Operator console for discovery, outreach, and autopilot approvals."));
+        assert!(body.contains("Admin API session"));
+    }
+
+    #[tokio::test]
+    async fn serves_globals_css_asset() {
+        let response = test_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/globals.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/css; charset=utf-8"
+        );
+
+        let body = response_body_string(response).await;
+        assert!(body.contains(":root {"));
+        assert!(body.contains("font-family: var(--font-sans);"));
     }
 
     #[test]

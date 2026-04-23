@@ -82,6 +82,8 @@ pub struct Config {
 /// internal requests. If set, X-API-Key matching this value bypasses
 /// the normal api_keys DB lookup and returns a super-admin identity.
     pub control_plane_api_key: Option<String>,
+    pub sales_autopilot_base_url: String,
+    pub internal_service_token: Option<String>,
 
 // ── Tracking / SSE ──────────────────────────────────────
 /// Shared HMAC secret with the tracking-service, used to issue short-lived
@@ -261,11 +263,11 @@ impl Config {
 
             ui_web_hosts: parse_csv(&env_or(
                 "UI_WEB_HOSTS",
-                "app.apexmail.ee,localhost,127.0.0.1",
+                "app.apexmail.ee,127.0.0.1",
             )),
             ui_control_plane_hosts: parse_csv(&env_or(
                 "UI_CONTROL_PLANE_HOSTS",
-                "admin.apexmail.ee,control.apexmail.ee",
+                "admin.apexmail.ee,control.apexmail.ee,localhost",
             )),
             ui_marketing_hosts: parse_csv(&env_or(
                 "UI_MARKETING_HOSTS",
@@ -317,6 +319,8 @@ impl Config {
             csrf_secret: env_or("CSRF_SECRET", "dev-csrf-secret-change-me"),
 
             control_plane_api_key: env::var("CONTROL_PLANE_API_KEY").ok().filter(|s| !s.is_empty()),
+            sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://localhost:3010"),
+            internal_service_token: env::var("INTERNAL_SERVICE_TOKEN").ok().filter(|s| !s.is_empty()),
 
             tracking_secret_key: env_or("TRACKING_SECRET_KEY", "dev-tracking-secret-change-me-32chars!!"),
 
@@ -533,6 +537,8 @@ mod tests {
             impersonation_secret: "test-impersonation-secret-12345".into(),
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
             control_plane_api_key: None,
+            sales_autopilot_base_url: "http://localhost:3010".into(),
+            internal_service_token: None,
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
             metrics_port: 9090,
         };
@@ -564,8 +570,8 @@ mod tests {
             rate_limit_max_requests: 1000,
             cors_origins: vec!["*".into()],
             trusted_proxies: vec![],
-            ui_web_hosts: vec!["app.apexmail.ee".into(), "localhost".into()],
-            ui_control_plane_hosts: vec!["admin.apexmail.ee".into()],
+            ui_web_hosts: vec!["app.apexmail.ee".into(), "127.0.0.1".into()],
+            ui_control_plane_hosts: vec!["admin.apexmail.ee".into(), "localhost".into()],
             ui_marketing_hosts: vec!["apexmail.ee".into()],
             ui_marketing_surface: "marketing-zola".into(),
             ui_default_surface: Some("web".into()),
@@ -586,15 +592,21 @@ mod tests {
             impersonation_secret: "test-impersonation-secret-12345".into(),
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
             control_plane_api_key: None,
+            sales_autopilot_base_url: "http://localhost:3010".into(),
+            internal_service_token: None,
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
             metrics_port: 9090,
         };
 
         assert_eq!(config.ui_surface_for_host(Some("app.apexmail.ee")), Some("web"));
+        assert_eq!(config.ui_surface_for_host(Some("127.0.0.1")), Some("web"));
+        assert_eq!(config.ui_surface_for_host(Some("localhost")), Some("control-plane"));
         assert_eq!(config.ui_surface_for_host(Some("admin.apexmail.ee:3002")), Some("control-plane"));
         assert_eq!(config.ui_surface_for_host(Some("apexmail.ee")), Some("marketing-zola"));
         assert_eq!(config.ui_surface_for_host(Some("unknown.example.com")), Some("web"));
         assert!(config.is_explicit_web_host(Some("app.apexmail.ee")));
+        assert!(config.is_explicit_web_host(Some("127.0.0.1")));
+        assert!(!config.is_explicit_web_host(Some("localhost")));
         assert!(!config.is_explicit_web_host(Some("unknown.example.com")));
     }
 }

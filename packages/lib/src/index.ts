@@ -18,6 +18,7 @@ export * from './cache/index.js';
 export * from './queue/index.js';
 export * from './time/index.js';
 export * from './id/index.js';
+export * from './bot-detection/index.js';
 export * from './json/index.js';
 export * from './result.js';
 export * from './mail-server-client.js';

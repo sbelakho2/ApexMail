@@ -1,6 +1,6 @@
 # Premium Experience Spec
 
-Canonical implementation contract for premium UX across `apps/web`, `apps/control-plane`, `apps/marketing`, and `apps/marketing-zola`.
+Canonical implementation contract for premium UX across the Rust-served `web` and `control-plane` surfaces plus `apps/marketing` and `apps/marketing-zola`.
 
 ## 1) Spacing Rhythm
 

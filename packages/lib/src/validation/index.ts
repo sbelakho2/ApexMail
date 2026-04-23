@@ -260,7 +260,7 @@ function validateSyntax(email: string): { valid: boolean; local: string; domain:
     if (_nativeValidator) {
         const result = _nativeValidator.validateEmail(email);
         return {
-            valid: result.valid && !result.isDisposable, // disposable handled separately
+            valid: result.valid,
             local: result.localPart,
             domain: result.domain,
         };
@@ -969,6 +969,31 @@ export class EmailValidator {
     }
 }
 
+const validatorLifecycleRegistry = new Set<EmailValidator>();
+let lifecycleHooksRegistered = false;
+
+function destroyRegisteredValidators(): void {
+    for (const validator of validatorLifecycleRegistry) {
+        validator.destroy();
+    }
+    validatorLifecycleRegistry.clear();
+}
+
+function ensureValidatorLifecycleHooks(): void {
+    if (lifecycleHooksRegistered) {
+        return;
+    }
+
+    const shutdown = (): void => {
+        destroyRegisteredValidators();
+    };
+
+    process.once('beforeExit', shutdown);
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+    lifecycleHooksRegistered = true;
+}
+
 /**
  * Create a new email validator instance
  */
@@ -976,5 +1001,15 @@ export function createEmailValidator(
     options: EmailValidationOptions = {},
     cacheMaxAgeMs = 3600000
 ): EmailValidator {
-    return new EmailValidator(options, cacheMaxAgeMs);
+    const validator = new EmailValidator(options, cacheMaxAgeMs);
+    ensureValidatorLifecycleHooks();
+    validatorLifecycleRegistry.add(validator);
+
+    const originalDestroy = validator.destroy.bind(validator);
+    validator.destroy = (): void => {
+        originalDestroy();
+        validatorLifecycleRegistry.delete(validator);
+    };
+
+    return validator;
 }

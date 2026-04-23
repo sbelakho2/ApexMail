@@ -13,6 +13,10 @@ import { DEFAULT_NET_DAYS, MS_PER_DAY } from '../lib/constants.js';
 
 const logger = createLogger();
 
+function hasPostgresErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === code;
+}
+
 // BUG-004 FIX: Helper for generating random hex strings
 function generateRandomHex(bytes: number): string {
   return randomBytes(bytes).toString('hex');
@@ -130,6 +134,29 @@ const EU_VAT_RATES: Record<string, number> = {
  */
 export class InvoiceService {
   constructor(private readonly db: DatabasePool) {}
+
+  private async queryInvoicesWithLegacyFallback(
+    sql: string,
+    legacySql: string,
+    params: unknown[]
+  ): Promise<Result<{ rows: InvoiceRow[] }, Error>> {
+    const result = await this.db.query<InvoiceRow>(sql, params);
+
+    if (result.ok) {
+      return Result.ok({ rows: result.value.rows });
+    }
+
+    if (!hasPostgresErrorCode(result.error, '42703')) {
+      return Result.err(result.error);
+    }
+
+    const legacyResult = await this.db.query<InvoiceRow>(legacySql, params);
+    if (!legacyResult.ok) {
+      return Result.err(legacyResult.error);
+    }
+
+    return Result.ok({ rows: legacyResult.value.rows });
+  }
 
   /**
    * Generate invoice number with tenant isolation
@@ -730,11 +757,18 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
     const whereClause = tenantId ? 'WHERE id = $1 AND tenant_id = $2' : 'WHERE id = $1';
     const params = tenantId ? [invoiceId, tenantId] : [invoiceId];
 
-    const result = await this.db.query<InvoiceRow>(
+    const result = await this.queryInvoicesWithLegacyFallback(
       `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
               subtotal, vat_total, total, line_items, billing_address,
               issued_at, due_at, paid_at, period_start, period_end,
               purchase_order_number, notes, pdf_url, xml_url, created_at, updated_at
+       FROM invoices ${whereClause}`,
+      `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
+              amount_cents AS subtotal, 0::integer AS vat_total, amount_cents AS total,
+              line_items::text AS line_items, '{}'::text AS billing_address,
+              created_at AS issued_at, due_date AS due_at, paid_at, period_start, period_end,
+              NULL::text AS purchase_order_number, NULL::text AS notes,
+              NULL::text AS pdf_url, NULL::text AS xml_url, created_at, updated_at
        FROM invoices ${whereClause}`,
       params
     );
@@ -764,7 +798,7 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
 
     if (!totalCountResult.ok) return Result.err(totalCountResult.error);
 
-    const result = await this.db.query<InvoiceRow>(
+    const result = await this.queryInvoicesWithLegacyFallback(
       `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
               subtotal, vat_total, total, line_items, billing_address,
               issued_at, due_at, paid_at, period_start, period_end,
@@ -772,6 +806,16 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
        FROM invoices 
        WHERE tenant_id = $1
        ORDER BY issued_at DESC
+       LIMIT $2 OFFSET $3`,
+      `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
+              amount_cents AS subtotal, 0::integer AS vat_total, amount_cents AS total,
+              line_items::text AS line_items, '{}'::text AS billing_address,
+              created_at AS issued_at, due_date AS due_at, paid_at, period_start, period_end,
+              NULL::text AS purchase_order_number, NULL::text AS notes,
+              NULL::text AS pdf_url, NULL::text AS xml_url, created_at, updated_at
+       FROM invoices
+       WHERE tenant_id = $1
+       ORDER BY created_at DESC
        LIMIT $2 OFFSET $3`,
       [tenantId, limit, offset]
     );
