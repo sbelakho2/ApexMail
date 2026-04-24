@@ -11,6 +11,51 @@ pub struct TemplateApprovalService {
     auto_reject_threshold: i32,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct TemplateSubmissionDbRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    name: String,
+    description: Option<String>,
+    html_content: String,
+    text_content: Option<String>,
+    subject: String,
+    status: String,
+    submitted_by: String,
+    reviewed_by: Option<String>,
+    review_notes: Option<String>,
+    spam_score: Option<f64>,
+    spam_details: Option<serde_json::Value>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<TemplateSubmissionDbRow> for TemplateSubmission {
+    fn from(row: TemplateSubmissionDbRow) -> Self {
+        Self {
+            id: row.id,
+            tenant_id: row.tenant_id.to_string(),
+            name: row.name,
+            description: row.description,
+            html_content: row.html_content,
+            text_content: row.text_content,
+            subject: row.subject,
+            status: row.status,
+            submitted_by: row.submitted_by,
+            reviewed_by: row.reviewed_by,
+            review_notes: row.review_notes,
+            spam_score: row.spam_score,
+            spam_details: row.spam_details,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
+}
+
 impl TemplateApprovalService {
     pub fn new(db: PgPool, auto_approve_threshold: i32, auto_reject_threshold: i32) -> Self {
         Self { db, auto_approve_threshold, auto_reject_threshold }
@@ -18,9 +63,10 @@ impl TemplateApprovalService {
 
 /// Submit a template for approval, including spam scoring
     pub async fn submit(
-        &self, tenant_id: Uuid, name: &str, subject: &str,
+        &self, tenant_id: String, name: &str, subject: &str,
         html_content: &str, text_content: Option<&str>, submitted_by: &str,
     ) -> Result<ApiResult<TemplateSubmission>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let spam_result = calculate_spam_score(html_content, subject);
 
@@ -36,12 +82,12 @@ impl TemplateApprovalService {
         let spam_json = serde_json::to_value(&spam_result)
             .map_err(|e| format!("failed to serialize spam result: {e}"))?;
 
-        let row = sqlx::query_as::<_, TemplateSubmission>(
+        let row = sqlx::query_as::<_, TemplateSubmissionDbRow>(
             "INSERT INTO ent_template_submissions (id, tenant_id, name, subject, html_content, text_content, status, submitted_by, spam_score, spam_details, created_at, updated_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_id).bind(name).bind(subject)
+        .bind(id).bind(tenant_uuid).bind(name).bind(subject)
         .bind(html_content).bind(text_content)
         .bind(status).bind(submitted_by)
         .bind(spam_result.score).bind(&spam_json)
@@ -50,12 +96,12 @@ impl TemplateApprovalService {
         .map_err(|e| format!("Submit template: {e}"))?;
 
         info!(template_id = %id, score = spam_result.score, status = status, "Template submitted");
-        Ok(ApiResult::ok(row))
+        Ok(ApiResult::ok(row.into()))
     }
 
 /// Get a template submission by ID
     pub async fn get_submission(&self, id: Uuid) -> Result<ApiResult<TemplateSubmission>, String> {
-        let row = sqlx::query_as::<_, TemplateSubmission>(
+        let row = sqlx::query_as::<_, TemplateSubmissionDbRow>(
             "SELECT * FROM ent_template_submissions WHERE id = $1"
         )
         .bind(id)
@@ -64,39 +110,40 @@ impl TemplateApprovalService {
         .map_err(|e| format!("Get submission: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("Submission not found", "NOT_FOUND")),
         }
     }
 
 /// List submissions for a tenant
     pub async fn list_submissions(
-        &self, tenant_id: Uuid, status: Option<&str>, limit: i64, offset: i64,
+        &self, tenant_id: String, status: Option<&str>, limit: i64, offset: i64,
     ) -> Result<ApiResult<Vec<TemplateSubmission>>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = if let Some(s) = status {
-            sqlx::query_as::<_, TemplateSubmission>(
+            sqlx::query_as::<_, TemplateSubmissionDbRow>(
                 "SELECT * FROM ent_template_submissions WHERE tenant_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4"
             )
-            .bind(tenant_id).bind(s).bind(limit).bind(offset)
+            .bind(tenant_uuid).bind(s).bind(limit).bind(offset)
             .fetch_all(&self.db)
             .await
         } else {
-            sqlx::query_as::<_, TemplateSubmission>(
+            sqlx::query_as::<_, TemplateSubmissionDbRow>(
                 "SELECT * FROM ent_template_submissions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
             )
-            .bind(tenant_id).bind(limit).bind(offset)
+            .bind(tenant_uuid).bind(limit).bind(offset)
             .fetch_all(&self.db)
             .await
         }.map_err(|e| format!("List submissions: {e}"))?;
 
-        Ok(ApiResult::ok(rows))
+        Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
 /// Approve a template
     pub async fn approve(
         &self, id: Uuid, reviewed_by: &str, notes: Option<&str>,
     ) -> Result<ApiResult<TemplateSubmission>, String> {
-        let row = sqlx::query_as::<_, TemplateSubmission>(
+        let row = sqlx::query_as::<_, TemplateSubmissionDbRow>(
             "UPDATE ent_template_submissions SET status = 'approved', reviewed_by = $2, review_notes = $3, updated_at = NOW()
              WHERE id = $1 RETURNING *"
         )
@@ -108,7 +155,7 @@ impl TemplateApprovalService {
         match row {
             Some(r) => {
                 info!(template_id = %id, "Template approved");
-                Ok(ApiResult::ok(r))
+                Ok(ApiResult::ok(r.into()))
             }
             None => Ok(ApiResult::err("Submission not found", "NOT_FOUND")),
         }
@@ -118,7 +165,7 @@ impl TemplateApprovalService {
     pub async fn reject(
         &self, id: Uuid, reviewed_by: &str, reason: &str,
     ) -> Result<ApiResult<TemplateSubmission>, String> {
-        let row = sqlx::query_as::<_, TemplateSubmission>(
+        let row = sqlx::query_as::<_, TemplateSubmissionDbRow>(
             "UPDATE ent_template_submissions SET status = 'rejected', reviewed_by = $2, review_notes = $3, updated_at = NOW()
              WHERE id = $1 RETURNING *"
         )
@@ -130,7 +177,7 @@ impl TemplateApprovalService {
         match row {
             Some(r) => {
                 info!(template_id = %id, reason = reason, "Template rejected");
-                Ok(ApiResult::ok(r))
+                Ok(ApiResult::ok(r.into()))
             }
             None => Ok(ApiResult::err("Submission not found", "NOT_FOUND")),
         }
@@ -140,7 +187,7 @@ impl TemplateApprovalService {
     pub async fn request_changes(
         &self, id: Uuid, reviewed_by: &str, notes: &str,
     ) -> Result<ApiResult<TemplateSubmission>, String> {
-        let row = sqlx::query_as::<_, TemplateSubmission>(
+        let row = sqlx::query_as::<_, TemplateSubmissionDbRow>(
             "UPDATE ent_template_submissions SET status = 'changes_requested', reviewed_by = $2, review_notes = $3, updated_at = NOW()
              WHERE id = $1 RETURNING *"
         )
@@ -150,15 +197,16 @@ impl TemplateApprovalService {
         .map_err(|e| format!("Request changes: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("Submission not found", "NOT_FOUND")),
         }
     }
 
 /// Get approval stats for a tenant
     pub async fn get_stats(
-        &self, tenant_id: Uuid,
+        &self, tenant_id: String,
     ) -> Result<ApiResult<serde_json::Value>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row: (i64, i64, i64, i64, i64, Option<f64>) = sqlx::query_as(
             "SELECT
              COUNT(*),
@@ -169,7 +217,7 @@ impl TemplateApprovalService {
              AVG(spam_score)::float8
              FROM ent_template_submissions WHERE tenant_id = $1"
         )
-        .bind(tenant_id)
+           .bind(tenant_uuid)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Get template stats: {e}"))?;

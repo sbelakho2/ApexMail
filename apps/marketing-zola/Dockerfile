@@ -79,7 +79,7 @@ server {
 
     # Gzip
     gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+    gzip_types text/plain text/css application/json text/xml application/xml;
     gzip_vary on;
 }
 EOF

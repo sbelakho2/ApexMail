@@ -20,9 +20,8 @@ public final class Templates {
     /**
      * Create a template.
      *
-     * <p>Required: {@code name}, {@code subject}, {@code html} (or {@code templateSource} for React).
-     * Optional: {@code engine} ("handlebars" | "mjml" | "liquid" | "ejs" | "react"),
-     * {@code text}, {@code schema}.
+     * <p>Required: {@code name}, {@code subject}, {@code html}.
+     * Optional: {@code engine}, {@code text}, {@code schema}.
      */
     public TemplateResponse create(Map<String, Object> params) {
         return client.request("POST", "/v1/templates", params, TemplateResponse.class);
@@ -74,27 +73,6 @@ public final class Templates {
             Map.of("data", data != null ? data : Map.of()), RenderResponse.class);
     }
 
-    /**
-     * Validate a React Email JSX source string.
-     *
-     * @param source  Raw JSX source
-     */
-    public ValidateReactEmailResponse validateReactEmail(String source) {
-        return client.request("POST", "/v1/templates/react-email/validate", Map.of("source", source),
-            ValidateReactEmailResponse.class);
-    }
-
-    /**
-     * Retrieve a React Email JSX starter template.
-     *
-     * @param componentName  Name for the root React component
-     */
-    public ReactEmailStarterResponse reactEmailStarter(String componentName) {
-        return client.request("GET",
-            "/v1/templates/react-email/starter?name=" + encode(componentName), null,
-            ReactEmailStarterResponse.class);
-    }
-
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static String encode(String s) {
@@ -129,8 +107,4 @@ public final class Templates {
     public record TemplateListResponse(java.util.List<Template> templates, Map<String, Object> pagination) {}
 
     public record RenderResponse(String html, String text, String subject) {}
-
-    public record ValidateReactEmailResponse(boolean valid, java.util.List<String> errors) {}
-
-    public record ReactEmailStarterResponse(String source, String name) {}
 }

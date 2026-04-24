@@ -120,54 +120,9 @@ docker build -t apexmail/mail-server .
 docker-compose up -d mail-server
 ```
 
-## Integration with Sales Autopilot
+## Integration Notes
 
-The mail server is integrated with the TypeScript sales-autopilot via the `@apexmail/lib` client:
-
-```typescript
-// From sales-autopilot drip-engine
-import { createMailServerClient, createDripEmailSender } from '@apexmail/lib';
-
-// Create client
-const mailClient = createMailServerClient({
-    outboundGrpcUrl: process.env.MAIL_SERVER_URL || 'http://localhost:50052',
-    tenantId: 'your-tenant-id',
-    defaultFromDomain: 'apexmail.ee',
-});
-
-// Create email sender compatible with drip engine
-const sendEmail = createDripEmailSender(mailClient, 'sales@apexmail.ee');
-
-// Use in drip campaign processing
-await processEnrollmentStep(enrollmentId, lead, sendEmail);
-```
-
-### Direct Usage
-
-```typescript
-// Send immediately
-const result = await mailClient.send({
-    from: 'sales@apexmail.ee',
-    to: ['lead@company.com'],
-    subject: 'Follow-up on our conversation',
-    html: '<p>Hello...</p>',
-    text: 'Hello...',
-});
-
-// Queue for later
-const queueResult = await mailClient.queue({
-    from: 'sales@apexmail.ee',
-    to: ['lead@company.com'],
-    subject: 'Scheduled follow-up',
-    html: '<p>Hello...</p>',
-    scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // Tomorrow
-    campaignId: 'campaign-123',
-});
-
-// Get stats
-const stats = await mailClient.getQueueStats();
-console.log(`Pending: ${stats.pendingCount}, Sent today: ${stats.sentToday}`);
-```
+Internal integrations now communicate with the mail server through its Rust-owned HTTP and gRPC surfaces.
 
 ## Security Features
 

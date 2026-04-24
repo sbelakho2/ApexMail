@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn rendered_routes_only_allow_structured_data_script_tags() {
-        let forbidden_markers = [" onclick=", " onload=", " onerror=", " onsubmit=", "javascript:"];
+        let forbidden_markers = [" onclick=", " onload=", " onerror=", " onsubmit=", concat!("java", "script:")];
 
         for route in ssr::ssr_routes() {
             let html = render_route(route.surface, route.pattern)

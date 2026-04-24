@@ -269,19 +269,18 @@ POST /v1/webhooks/:id/enable
 
 Every webhook request includes an `X-ApexMail-Signature` header containing an HMAC-SHA256 signature. Always verify this signature to ensure the request is authentic.
 
-```javascript
-const crypto = require('crypto');
+```python
+import hashlib
+import hmac
 
-function verifySignature(payload, signature, secret) {
-  const expected = crypto
-    .createHmac('sha256', secret)
-    .update(payload)
-    .digest('hex');
-  return crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(expected)
-  );
-}
+
+def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
+    expected = hmac.new(
+        secret.encode(),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
 ```
 
 The signing secret is displayed when you create the webhook and can be retrieved from **Settings → Webhooks → [your webhook] → Signing Secret**.

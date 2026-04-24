@@ -1,6 +1,5 @@
 //! Compliance overview endpoint.
 //!
-//! Migrated from:apps/control-plane/src/app/api/compliance/overview/route.ts
 
 use super::super::helpers::table_exists;
 use axum::extract::State;

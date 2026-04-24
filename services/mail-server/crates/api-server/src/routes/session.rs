@@ -1,6 +1,5 @@
 //! Session introspection endpoint.
 //!
-//! Migrated from:apps/web/src/app/api/auth/session/route.ts
 //! Provides current session state including impersonation status.
 
 use super::helpers::extract_cookie;

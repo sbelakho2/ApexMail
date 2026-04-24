@@ -21,7 +21,7 @@ class Templates
      *   @type string $subject    Subject line (supports {{variables}})
      *   @type string $html       HTML body
      *   @type string $text       Plain-text body (generated automatically when omitted)
-     *   @type string $engine     "handlebars" | "mjml" | "liquid" | "ejs" | "react"
+        *   @type string $engine     Template engine name
      *   @type array  $schema     JSON Schema describing available template variables
      * }
      */
@@ -83,22 +83,4 @@ class Templates
         return $this->client->request('POST', '/v1/templates/' . urlencode($id) . '/render', ['data' => $data]);
     }
 
-    /**
-     * Validate a React Email JSX source string without saving it.
-     *
-     * @param string $source  Raw JSX source
-     */
-    public function validateReactEmail(string $source): array
-    {
-        return $this->client->request('POST', '/v1/templates/react-email/validate', ['source' => $source]);
-    }
-
-    /** Get a React Email JSX starter template. */
-    public function reactEmailStarter(string $componentName = 'EmailTemplate'): array
-    {
-        return $this->client->request(
-            'GET',
-            '/v1/templates/react-email/starter?name=' . urlencode($componentName)
-        );
-    }
 }

@@ -1,6 +1,5 @@
 //! System health endpoint — queues, workers, MTA nodes, alerts.
 //!
-//! Migrated from:apps/control-plane/src/app/api/system/health/route.ts (119 lines)
 
 use axum::extract::State;
 use axum::routing::get;

@@ -71,29 +71,6 @@ spec:
         - port: 9092
           protocol: TCP
 ---
-# ── Web — allow ingress from ingress controller ─────────────────────────────
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "apexmail.fullname" . }}-web-ingress
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "apexmail.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      {{- include "apexmail.selectorLabels" (dict "name" "web" "context" .) | nindent 6 }}
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
-      ports:
-        - port: {{ .Values.web.port }}
-          protocol: TCP
----
 # ── Enterprise — allow only from API server (internal) ──────────────────────
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

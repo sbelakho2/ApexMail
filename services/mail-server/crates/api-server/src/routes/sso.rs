@@ -1,8 +1,5 @@
 //! OAuth / SSO initiation endpoints.
 //!
-//! Migrated from://! - apps/web/src/app/api/auth/sso/google/route.ts
-//! - apps/web/src/app/api/auth/sso/github/route.ts
-//!
 //! These endpoints generate OAuth state tokens, set state cookies,
 //! and redirect to the OAuth provider authorization URLs.
 
@@ -61,7 +58,7 @@ async fn sso_google(
         .config
         .google_client_id
         .as_deref()
-        .ok_or_else(|| ApiError::ServiceUnavailable("Google SSO is not configured".into()))?;
+        .ok_or_else(|| ApiError::NotFound("Google SSO is not configured".into()))?;
 
     let redirect_base = &state.config.oauth_redirect_base_url;
     let callback_url = format!("{redirect_base}/v1/auth/sso/google/callback");
@@ -95,7 +92,7 @@ async fn sso_github(
         .config
         .github_client_id
         .as_deref()
-        .ok_or_else(|| ApiError::ServiceUnavailable("GitHub SSO is not configured".into()))?;
+        .ok_or_else(|| ApiError::NotFound("GitHub SSO is not configured".into()))?;
 
     let redirect_base = &state.config.oauth_redirect_base_url;
     let callback_url = format!("{redirect_base}/v1/auth/sso/github/callback");

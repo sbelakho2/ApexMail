@@ -228,22 +228,6 @@ expect('render() POST /v1/templates/tpl_1/render', t.calls[0][:method] == 'POST'
 expect('render() body has data',                    t.calls[0][:body][:data][:name] == 'Alice')
 expect('render() returns html',                     resp.key?('html'))
 
-t = FakeTransport.new
-t.queue_response({ 'valid' => true, 'errors' => [] })
-api = ApexMail::TemplatesAPI.new(t)
-resp = api.validate_react_email('<Email><Text>Hello</Text></Email>')
-expect('validate_react_email() POST .../react-email/validate', t.calls[0][:path] == '/v1/templates/react-email/validate')
-expect('validate_react_email() body has source',                t.calls[0][:body][:source].include?('Email'))
-expect('validate_react_email() returns valid',                  resp['valid'] == true)
-
-t = FakeTransport.new
-t.queue_response({ 'source' => 'export default function MyEmail(){}', 'name' => 'MyEmail' })
-api = ApexMail::TemplatesAPI.new(t)
-resp = api.react_email_starter('MyEmail')
-expect('react_email_starter() GET .../react-email/starter', t.calls[0][:path].include?('/v1/templates/react-email/starter'))
-expect('react_email_starter() has name param',               t.calls[0][:path].include?('name=MyEmail'))
-expect('react_email_starter() returns source',               resp.key?('source'))
-
 # ── Suppression tests ─────────────────────────────────────────────────────
 
 puts "\nSuppressions"

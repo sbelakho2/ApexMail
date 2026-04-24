@@ -569,7 +569,7 @@ mod tests {
         let result = DetonationResult {
             original_url: "https://bit.ly/test".into(),
             final_url: "https://evil.tk/phish".into(),
-            redirect_chain: vec!["https://bit.ly/test".into],
+            redirect_chain: vec!["https://bit.ly/test".into()],
             hops: 1,
             truncated: false,
             error: None,

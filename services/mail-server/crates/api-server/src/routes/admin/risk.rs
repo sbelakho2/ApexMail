@@ -1,6 +1,5 @@
 //! Risk monitoring endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/risk/route.ts
 
 use super::super::helpers::table_exists;
 use axum::extract::{Query, State};

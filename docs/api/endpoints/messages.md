@@ -32,27 +32,6 @@ Content-Type: application/json
 {
   "to": [
     { "email": "recipient@example.com", "name": "Recipient Name" }
-  ],
-  "from": {
-    "email": "sender@yourcompany.com",
-    "name": "Your Company"
-  },
-  "replyTo": "support@yourcompany.com",
-  "subject": "Welcome to Our Service",
-  "html": "<h1>Welcome!</h1><p>Thanks for signing up.</p>",
-  "text": "Welcome! Thanks for signing up.",
-  "templateId": "tmpl_welcome_001",
-  "templateData": {
-    "name": "John",
-    "company": "Acme Inc"
-  },
-  "headers": {
-    "X-Custom-Header": "custom-value"
-  },
-  "attachments": [
-    {
-      "filename": "invoice.pdf",
-      "content": "base64_encoded_content",
       "contentType": "application/pdf"
     }
   ],
@@ -435,27 +414,6 @@ Templates use Handlebars syntax:
 ---
 
 ## Code Examples
-
-### Node.js
-
-```javascript
-const response = await fetch('https://api.apexmail.ee/v1/messages', {
-  method: 'POST',
-  headers: {
-    'X-API-Key': API_KEY,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    to: [{ email: 'user@example.com' }],
-    from: { email: 'hello@yourcompany.com', name: 'Your Company' },
-    subject: 'Welcome!',
-    html: '<h1>Hello World</h1>',
-  }),
-});
-
-const message = await response.json();
-console.log(`Message sent: ${message.message.id}`);
-```
 
 ### Python
 

@@ -70,7 +70,7 @@ Eval loss decreased across all 3 epochs (0.277 → 0.126 → 0.116), confirming 
 | training_args.bin | 6.0 KB |
 | train_metrics.json | 8.7 KB |
 
-Location: `/workspace/output_agent/` on instance, metadata copied to `apps/ai/training/output_agent/` locally.
+Location: `/workspace/output_agent/` on instance. Local metadata copies are treated as generated output and are not tracked in this repo.
 
 ## 5. Evaluation Results
 

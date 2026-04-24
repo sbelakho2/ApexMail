@@ -7,7 +7,7 @@ template = "compare.html"
 competitor = "Resend"
 competitor_slug = "resend"
 competitor_name = "Resend"
-competitor_description = "Resend is a modern email API for developers with React Email support."
+competitor_description = "Resend is a modern email API for developers with component-based email authoring."
 og_image = "/images/og-compare-resend.png"
 apexmail_wins = 15
 competitor_wins = 2
@@ -18,8 +18,8 @@ verdict_points = [
   "Private deployment option for complete data sovereignty",
   "Advanced analytics and send-time optimization (Pro+)",
   "Higher batch limits (1,000 vs 100 per request)",
-  "React Email JSX authoring — compose emails as React components",
-  "Official SDKs for Node.js, Python, Go, Ruby, PHP, and Java",
+  "Component-based email authoring with reusable layouts",
+  "Official SDKs for Python, Go, Ruby, PHP, and Java",
 ]
 +++
 
@@ -102,14 +102,14 @@ verdict_points = [
   <span class="text-xs font-bold text-surface-600">DEVELOPER EXPERIENCE</span>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
-  <div class="text-sm font-medium text-surface-900 self-center">TypeScript SDK</div>
+  <div class="text-sm font-medium text-surface-900 self-center">Official SDK Coverage</div>
   <div class="text-center text-sm self-center"><span class="text-primary-600">✓</span></div>
   <div class="text-center text-sm self-center"><span class="text-primary-600">✓</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
-  <div class="text-sm font-medium text-surface-900 self-center">React Email Support</div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">Yes — JSX authoring</span></div>
+  <div class="text-sm font-medium text-surface-900 self-center">Component Templates</div>
+  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">Yes — reusable components</span></div>
   <div class="text-center text-sm self-center"><span class="text-primary-600">✓</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-500">Tie</span></div>
 </div>
@@ -121,8 +121,8 @@ verdict_points = [
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
   <div class="text-sm font-medium text-surface-900 self-center">SDK Languages</div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">Node, Python, Go, Ruby, PHP, Java</span></div>
-  <div class="text-center text-sm self-center"><span class="text-surface-600">Node, Python, Ruby, Go, Elixir</span></div>
+  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">Python, Go, Ruby, PHP, Java</span></div>
+  <div class="text-center text-sm self-center"><span class="text-surface-600">Python, Ruby, Go, Elixir</span></div>
   <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">

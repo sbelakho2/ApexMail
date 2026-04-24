@@ -4,7 +4,7 @@
 
 Accepted
 
-> **Implementation Note (2026-02):** Security controls are implemented in the Rust tracking service. The TypeScript examples below are conceptual designs; actual implementation uses Rust with the `crypto`, `jsonwebtoken`, and rate-limiting crates.
+> **Implementation Note (2026-04):** Security controls are implemented in Rust across the mail-server security crates. The examples below are conceptual reference material; the live implementation uses Rust-native crypto, token, validation, and rate-limiting libraries.
 
 ## Date
 
@@ -28,46 +28,14 @@ We implement a **Defense in Depth** security architecture:
 
 #### API Key Authentication
 
-```typescript
-// API keys are scoped with specific permissions
-interface ApiKey {
-  id: string;
-  tenantId: string;
-  hashedKey: string;          // Argon2 hash
-  keyPrefix: string;          // am_live_ or am_test_
-  permissions: Permission[];
-  rateLimit: number;
-  ipWhitelist?: string[];
-  expiresAt?: Date;
-  lastUsedAt?: Date;
-}
-
-// Permissions follow least privilege principle
-type Permission = 
-  | 'messages:write'
-  | 'messages:read'
-  | 'domains:write'
-  | 'webhooks:write'
-  | 'analytics:read';
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### JWT for Dashboard Sessions
 
-```typescript
-// Short-lived access tokens + refresh rotation
-interface SessionTokens {
-  accessToken: string;   // 15 min expiry
-  refreshToken: string;  // 7 day expiry, single use
-}
-
-// Token payload
-interface AccessTokenPayload {
-  sub: string;           // User ID
-  tid: string;           // Tenant ID
-  roles: string[];       // User roles
-  iat: number;           // Issued at
-  exp: number;           // Expiration
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Encryption
@@ -97,29 +65,8 @@ interface AccessTokenPayload {
 └─────────────────────────────────────────────────────────┘
 ```
 
-```typescript
-// Field-level encryption for sensitive data
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
-
-class EncryptionService {
-  async encrypt(plaintext: string, tenantId: string): Promise<EncryptedField> {
-    const dek = await this.getOrCreateDEK(tenantId);
-    const iv = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', dek, iv);
-    
-    const encrypted = Buffer.concat([
-      cipher.update(plaintext, 'utf8'),
-      cipher.final(),
-    ]);
-    
-    return {
-      ciphertext: encrypted.toString('base64'),
-      iv: iv.toString('base64'),
-      authTag: cipher.getAuthTag().toString('base64'),
-      keyVersion: dek.version,
-    };
-  }
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### Data in Transit
@@ -128,161 +75,38 @@ class EncryptionService {
 - Certificate pinning for internal services
 - mTLS between microservices
 
-```typescript
-// TLS configuration
-const tlsConfig = {
-  minVersion: 'TLSv1.3',
-  cipherSuites: [
-    'TLS_AES_256_GCM_SHA384',
-    'TLS_CHACHA20_POLY1305_SHA256',
-    'TLS_AES_128_GCM_SHA256',
-  ],
-  ecdhCurves: ['X25519', 'P-256'],
-};
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Input Validation & Sanitization
 
-```typescript
-// Strict schema validation with Zod
-const sendEmailSchema = z.object({
-  from: z.string().email().max(254),
-  to: z.array(z.string().email().max(254)).min(1).max(50),
-  subject: z.string().min(1).max(998),  // RFC 5322 limit
-  html: z.string().max(5_000_000).optional(),  // 5MB limit
-  text: z.string().max(5_000_000).optional(),
-  attachments: z.array(attachmentSchema).max(10).optional(),
-}).refine(
-  (data) => data.html || data.text,
-  { message: 'Either html or text is required' }
-);
-
-// Sanitize HTML to prevent XSS in email clients
-import DOMPurify from 'isomorphic-dompurify';
-
-function sanitizeEmailHtml(html: string): string {
-  return DOMPurify.sanitize(html, {
-    ALLOWED_TAGS: ['p', 'br', 'b', 'i', 'u', 'a', 'img', 'table', 'tr', 'td', 'th', 'div', 'span'],
-    ALLOWED_ATTR: ['href', 'src', 'alt', 'style', 'class'],
-    ALLOW_DATA_ATTR: false,
-  });
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Rate Limiting & Abuse Prevention
 
-```typescript
-// Multi-layer rate limiting
-const rateLimiters = {
-  // Per API key
-  apiKey: new RateLimiter({
-    windowMs: 60_000,
-    max: 1000,
-    keyGenerator: (req) => req.apiKey.id,
-  }),
-  
-  // Per IP (for auth endpoints)
-  ip: new RateLimiter({
-    windowMs: 60_000,
-    max: 10,
-    keyGenerator: (req) => req.ip,
-  }),
-  
-  // Per recipient domain (anti-spam)
-  recipientDomain: new RateLimiter({
-    windowMs: 3600_000,
-    max: 100,
-    keyGenerator: (req, email) => `${req.tenantId}:${getDomain(email.to)}`,
-  }),
-};
-
-// Abuse detection
-const abuseDetector = new AbuseDetector({
-  rules: [
-    { name: 'spam-pattern', pattern: /viagra|crypto|lottery/i, action: 'flag' },
-    { name: 'phishing-link', pattern: /bit\.ly|tinyurl/i, action: 'review' },
-    { name: 'high-bounce-rate', threshold: 0.1, action: 'throttle' },
-  ],
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Audit Logging
 
-```typescript
-// Comprehensive audit trail
-interface AuditEvent {
-  id: string;
-  timestamp: Date;
-  tenantId: string;
-  userId?: string;
-  action: string;
-  resourceType: string;
-  resourceId: string;
-  ipAddress: string;
-  userAgent: string;
-  requestId: string;
-  changes?: {
-    field: string;
-    oldValue: unknown;
-    newValue: unknown;
-  }[];
-  outcome: 'success' | 'failure';
-  failureReason?: string;
-}
-
-// Audit all sensitive operations
-async function auditLog(event: AuditEvent) {
-  // Write to immutable audit log
-  await auditDB.insert(event);
-  
-  // Alert on suspicious activity
-  if (await isAnomalous(event)) {
-    await alertSecurityTeam(event);
-  }
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Secret Management
 
-```typescript
-// No secrets in code or environment variables
-// Use HashiCorp Vault or AWS Secrets Manager
-
-const secretsClient = new SecretsManager({
-  region: process.env.AWS_REGION,
-});
-
-async function getSecret(name: string): Promise<string> {
-  const cached = secretsCache.get(name);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.value;
-  }
-  
-  const response = await secretsClient.getSecretValue({ SecretId: name });
-  const value = response.SecretString!;
-  
-  secretsCache.set(name, {
-    value,
-    expiresAt: Date.now() + 300_000,  // 5 min cache
-  });
-  
-  return value;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Security Headers
 
-```typescript
-// Strict security headers for web dashboard
-const securityHeaders = {
-  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'",
-  'X-Content-Type-Options': 'nosniff',
-  'X-Frame-Options': 'DENY',
-  'X-XSS-Protection': '1; mode=block',
-  'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
-};
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Vulnerability Management
@@ -295,7 +119,7 @@ security-scan:
     - uses: actions/checkout@v4
     
     # Dependency scanning
-    - run: pnpm audit --audit-level=high
+    - run: cargo deny check advisories
     
     # SAST
     - uses: github/codeql-action/analyze@v2

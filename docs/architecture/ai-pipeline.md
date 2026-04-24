@@ -1,6 +1,6 @@
 # ApexMail AI — 3-Model Pipeline Architecture
 
-> **Implementation Note (2026-02):** AI capabilities are implemented in Rust crates at `services/mail-server/crates/ai-service/` and `services/mail-server/crates/ai-embeddings/`. TypeScript interfaces below are design specifications; actual implementation is Rust.
+> **Implementation Note (2026-02):** AI capabilities are implemented in Rust crates at `services/mail-server/crates/ai-service/` and `services/mail-server/crates/ai-embeddings/`. Historical browser-surface interface snippets were removed to keep this document aligned with the live implementation.
 
 ## Overview
 
@@ -43,30 +43,8 @@ User
 
 The planner receives the user message and chat history, then produces a structured plan:
 
-```typescript
-interface PlanResult {
-    // What the user wants
-    intent: 'question' | 'action' | 'greeting' | 'off_topic' | 'clarification';
-
-    // Extracted parameters (for actions)
-    params?: Record<string, unknown>;
-
-    // Which knowledge context to inject into the generator prompt
-    context_keys: string[];  // e.g. ['pricing_table', 'payg_rates']
-
-    // If the user wants to perform an action
-    tool_call?: {
-        name: string;        // e.g. 'SEND_CAMPAIGN'
-        args: Record<string, unknown>;
-        requires_confirm: boolean;
-    };
-
-    // Confidence score (0-1)
-    confidence: number;
-
-    // If confidence < threshold, ask clarifying question instead
-    clarification_prompt?: string;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 **Training data**: The planner is trained on (user_message → PlanResult JSON) pairs. The fine-tuned model learns to produce valid JSON plans for every input.
@@ -155,7 +133,7 @@ The planner selects from a pre-indexed knowledge store:
 | `deliverability` | Best practices, benchmarks, warm-up guidance |
 | `webhooks` | Event types, payload format, signatures |
 | `templates` | Handlebars syntax, dynamic content |
-| `sdks` | Node.js and Python SDK installation and usage |
+| `sdks` | Python, Go, Ruby, PHP, and Java SDK installation and usage |
 | `suppression` | Suppression list management |
 | `compliance` | GDPR, CAN-SPAM, consent management |
 | `troubleshooting` | Common errors (401, 429, spam folder) |

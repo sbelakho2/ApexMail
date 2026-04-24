@@ -4,7 +4,7 @@
 
 ## System Architecture
 
-ApexMail uses a hybrid architecture with TypeScript frontends and a Rust backend service:
+ApexMail uses a Rust-first architecture with SSR browser surfaces, a dedicated tracking service, and Zola-generated marketing exports:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -12,50 +12,43 @@ ApexMail uses a hybrid architecture with TypeScript frontends and a Rust backend
 │                         (nginx reverse proxy)                           │
 └────────────────────────────────────────────────────────────────────────┘
                                  │
-         ┌───────────────────────┼───────────────────────┐
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Web App       │    │ Control Plane   │    │    Marketing    │
-│   (Next.js 14)  │    │   (Next.js)     │    │   (Next.js)     │
-│   Port: 3000    │    │   Port: 4000    │    │   Port: 4100    │
-└────────┬────────┘    └────────┬────────┘    └─────────────────┘
-         │                      │
-         └──────────────────────┘
-                                │
-                                ▼
-                  ┌─────────────────────────┐
-                  │   Tracking Service      │
-                  │   (Rust/Axum)           │
-                  │   Port: 3001            │
-                  │   Metrics: 9092         │
-                  └────────────┬────────────┘
-                               │
-     ┌───────────────┬─────────┴─────────┬───────────────┐
-     │               │                   │               │
-     ▼               ▼                   ▼               ▼
-┌─────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────┐
-│PostgreSQL│   │ ClickHouse  │   │    Redis    │   │ Mailpit │
-│ (OLTP)  │   │   (OLAP)    │   │   (Cache)   │   │(DevSMTP)│
-└─────────┘   └─────────────┘   └─────────────┘   └─────────┘
+            ┌───────────────────────┴───────────────────────┐
+            │                                               │
+            ▼                                               ▼
+    ┌─────────────────────────┐                    ┌─────────────────────────┐
+    │       API Server        │                    │    Tracking Service     │
+    │     (Rust/Axum)         │                    │      (Rust/Axum)        │
+    │ REST + SSR browser UI   │                    │ redirects / webhooks    │
+    │ Port: 3000              │                    │ Port: 3001              │
+    │ Metrics: 9090           │                    │ Metrics: 9092           │
+    └────────────┬────────────┘                    └────────────┬────────────┘
+              │                                              │
+    ┌───────────┼───────────────┬───────────────┐              │
+    │           │               │               │              │
+    ▼           ▼               ▼               ▼              ▼
+┌─────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────┐  ┌─────────────┐
+│PostgreSQL│ │ ClickHouse  │ │    Redis    │ │ Mailpit │  │ marketing-  │
+│  (OLTP) │ │   (OLAP)    │ │   (Cache)   │ │(DevSMTP)│  │ zola export  │
+└─────────┘ └─────────────┘ └─────────────┘ └─────────┘  └─────────────┘
 ```
+
+Marketing pages are generated from `apps/marketing-zola` and served through the Rust browser-surface stack.
 
 ## Service Breakdown
 
-### Frontend Services (TypeScript/Next.js)
+### Browser and API Services (Rust)
 
 | Service | Port | Technology | Purpose |
 | ------- | ---- | ---------- | ------- |
-| Web | 3000 | Next.js 14 | User dashboard |
-| Control Plane | 4000 | Next.js 14 | Admin interface |
-| Marketing | 4100 | Next.js 14 | Marketing site |
+| API Server | 3000 | Rust/Axum + `ui-foundation` | REST API plus SSR `web` and `control-plane` surfaces |
+| Tracking | 3001 | Rust/Axum | Tracking redirects, pixels, unsubscribe flows, webhooks |
 
-### Backend Services (Rust)
+### Supporting Runtime Outputs
 
 | Service | Port | Technology | Purpose |
 | ------- | ---- | ---------- | ------- |
-| Tracking | 3001 | Rust/Axum | API, tracking, webhooks |
-| Metrics | 9092 | Prometheus | Observability |
+| Marketing Export | n/a | Zola static export | Generated marketing documents consumed by production routing |
+| Metrics | 9090 / 9092 | Prometheus | Observability endpoints for Rust services |
 
 ### Infrastructure (Docker)
 
@@ -72,17 +65,15 @@ ApexMail uses a hybrid architecture with TypeScript frontends and a Rust backend
 ```
 apexmail/
 ├── apps/
-│   ├── billing/             # Billing service
-│   ├── control-plane/       # Admin Next.js app
-│   ├── marketing/           # Marketing site
-│   ├── testing/             # Playwright tests
-│   └── web/                 # User dashboard
+│   ├── ai/                  # AI application surface
+│   ├── marketing-zola/      # Marketing static site source
+│   └── ...
 │
 ├── services/
 │   └── mail-server/         # Rust mail server
 │       └── crates/
-│           ├── tracking-service/   # Main HTTP server
-│           ├── api-server/         # REST API routes
+│           ├── tracking-service/   # Tracking endpoints and redirect flows
+│           ├── api-server/         # REST API + SSR browser surfaces
 │           ├── analytics/          # Analytics engine
 │           ├── mta/                # SMTP handling
 │           ├── worker-processors/  # Background jobs
@@ -97,11 +88,11 @@ apexmail/
 │           └── ...                 # 45+ crates total
 │
 ├── packages/
-│   ├── db/                  # Database schema (Drizzle)
-│   ├── lib/                 # Shared TypeScript utils
-│   ├── sdk-node/            # Node.js SDK
-│   ├── sdk-python/          # Python SDK
 │   ├── sdk-go/              # Go SDK
+│   ├── sdk-java/            # Java SDK
+│   ├── sdk-php/             # PHP SDK
+│   ├── sdk-python/          # Python SDK
+│   ├── sdk-ruby/            # Ruby SDK
 │   └── ...                  # More SDKs
 │
 ├── tools/

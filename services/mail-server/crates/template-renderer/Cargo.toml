@@ -1,6 +1,6 @@
 [package]
 name = "template-renderer"
-description = "React-like email template rendering with sandboxed execution"
+description = "Email template rendering with sandboxed execution"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

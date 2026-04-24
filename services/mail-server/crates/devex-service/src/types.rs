@@ -6,13 +6,12 @@ use uuid::Uuid;
 
 // ── SDK Language ─────────────────────────────────────────────────────────────
 
-/// Supported SDK languages — mirrors the TS `SDK_LANGUAGES` constant.
+/// Supported SDK languages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SdkLanguage {
     Go,
     Java,
-    Node,
     #[serde(rename = "php")]
     Php,
     Python,
@@ -25,7 +24,6 @@ impl SdkLanguage {
         match self {
             Self::Go => "Go",
             Self::Java => "Java",
-            Self::Node => "Node.js / TypeScript",
             Self::Php => "PHP",
             Self::Python => "Python",
             Self::Ruby => "Ruby",
@@ -37,7 +35,6 @@ impl SdkLanguage {
         match self {
             Self::Go => "go mod",
             Self::Java => "maven",
-            Self::Node => "npm",
             Self::Php => "composer",
             Self::Python => "pip",
             Self::Ruby => "gem",
@@ -49,7 +46,6 @@ impl SdkLanguage {
         &[
             Self::Go,
             Self::Java,
-            Self::Node,
             Self::Php,
             Self::Python,
             Self::Ruby,
@@ -62,7 +58,6 @@ impl std::fmt::Display for SdkLanguage {
         let s = match self {
             Self::Go => "go",
             Self::Java => "java",
-            Self::Node => "node",
             Self::Php => "php",
             Self::Python => "python",
             Self::Ruby => "ruby",
@@ -78,7 +73,6 @@ impl std::str::FromStr for SdkLanguage {
         match s.to_lowercase().as_str() {
             "go" => Ok(Self::Go),
             "java" => Ok(Self::Java),
-            "node" | "typescript" | "javascript" => Ok(Self::Node),
             "php" => Ok(Self::Php),
             "python" => Ok(Self::Python),
             "ruby" => Ok(Self::Ruby),
@@ -256,9 +250,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sdk_language_from_aliases() {
-        assert_eq!("typescript".parse::<SdkLanguage>().unwrap(), SdkLanguage::Node);
-        assert_eq!("javascript".parse::<SdkLanguage>().unwrap(), SdkLanguage::Node);
+    fn test_sdk_language_rejects_removed_aliases() {
+        assert!("node".parse::<SdkLanguage>().is_err());
+        assert!("legacy-sdk".parse::<SdkLanguage>().is_err());
         assert!("cobol".parse::<SdkLanguage>().is_err());
     }
 

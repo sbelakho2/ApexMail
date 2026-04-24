@@ -1,6 +1,5 @@
 //! Inbox / autopilot message management endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/inbox/route.ts
 
 use axum::extract::{Query, State};
 use axum::routing::get;

@@ -1,12 +1,5 @@
 //! Sales suite endpoints.
 //!
-//! Migrated from://! - apps/control-plane/src/app/api/sales/leads/route.ts
-//! - apps/control-plane/src/app/api/sales/leads/update/route.ts
-//! - apps/control-plane/src/app/api/sales/leads/enrich/route.ts
-//! - apps/control-plane/src/app/api/sales/campaigns/route.ts
-//! - apps/control-plane/src/app/api/sales/discovery/run/route.ts
-//! - apps/control-plane/src/app/api/sales/outreach/start/route.ts
-//! - apps/control-plane/src/app/api/sales/settings/route.ts
 
 use super::super::helpers::{column_exists, table_exists};
 use axum::extract::{Query, State};

@@ -2,13 +2,11 @@
 
 Get ApexMail running locally in under 10 minutes.
 
-> **Note (2026-02):** The backend uses a Rust tracking service. TypeScript is used only for the frontend apps.
+> **Note (2026-04):** The `web` and `control-plane` browser surfaces are served by the Rust `api-server`, and the repo no longer depends on a Node workspace.
 
 ## Prerequisites
 
-- **Node.js** 20.11.0 or later (for frontend apps)
 - **Rust** 1.75+ (for backend service)
-- **pnpm** 8.14.0 or later
 - **Docker** and Docker Compose
 - **Git**
 
@@ -27,13 +25,13 @@ The bootstrap script sets up the entire development environment:
 ./tools/bootstrap.sh
 ```
 
-This script will:
-1. ✅ Verify prerequisites (Node.js, pnpm, Docker, Rust)
-2. ✅ Install dependencies
-3. ✅ Start infrastructure services (PostgreSQL, Redis)
-4. ✅ Run database migrations
-5. ✅ Seed development data
-6. ✅ Build the Rust tracking service
+This script installs the pinned Rust and Go toolchains under `.toolchain/` for local development.
+
+After it finishes, activate the toolchain:
+
+```bash
+source .toolchain/env.sh
+```
 
 ## 3. Configure Environment
 
@@ -61,13 +59,10 @@ TRACKING_SECRET_KEY=your-secure-tracking-secret-minimum-32-characters
 TRACKING_BASE_URL=http://localhost:3001
 
 # Optional: login CAPTCHA protection (mCaptcha)
-# Keep server-side and frontend flags aligned
 MCAPTCHA_ENABLED=false
-NEXT_PUBLIC_MCAPTCHA_ENABLED=false
 # Required only when enabling CAPTCHA
 # MCAPTCHA_SITE_KEY=...
 # MCAPTCHA_SECRET=...
-# NEXT_PUBLIC_MCAPTCHA_WIDGET_URL=...
 ```
 
 Generate secure secrets:
@@ -91,13 +86,12 @@ This starts:
 - Tracking service (port 3001, metrics on 9092)
 - Mailpit (port 8025 - dev SMTP)
 
-### Start Frontend Apps
+### Start Development Services
 
 ```bash
-# Start all frontend apps
-pnpm dev
+cargo run --manifest-path services/mail-server/Cargo.toml -p api-server
 
-# Browser surfaces now come from the Rust api-server:
+# Browser surfaces:
 #   http://127.0.0.1:3000 -> web
 #   http://localhost:3000 -> control-plane
 ```
@@ -108,8 +102,8 @@ Open your browser and navigate to:
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Dashboard | http://localhost:3000 | User web interface |
-| Control Plane | http://localhost:4000 | Admin interface |
+| Dashboard | http://127.0.0.1:3000 | User web interface |
+| Control Plane | http://localhost:3000 | Admin interface |
 | Tracking Health | http://localhost:3001/health | Backend health check |
 | Mailpit | http://localhost:8025 | Dev email inbox |
 | Prometheus Metrics | http://localhost:9092/metrics | Service metrics |
@@ -136,19 +130,17 @@ curl http://localhost:3001/ready
 
 If you enable mCaptcha, verify both login surfaces:
 
-1. Set these env values and restart frontend services:
+1. Set these env values and restart the local dev services:
 
 ```env
 MCAPTCHA_ENABLED=true
 MCAPTCHA_SITE_KEY=your-site-key
 MCAPTCHA_SECRET=your-secret
-NEXT_PUBLIC_MCAPTCHA_ENABLED=true
-NEXT_PUBLIC_MCAPTCHA_WIDGET_URL=https://your-mcaptcha-instance/widget-path
 ```
 
 2. Open both login pages:
-  - `http://localhost:3000/login` (web)
-  - `http://localhost:4000/login` (control-plane)
+  - `http://127.0.0.1:3000/login` (web)
+  - `http://localhost:3000/login` (control-plane)
 
 3. Confirm expected behavior:
   - Widget is visible on both pages.
@@ -159,7 +151,7 @@ NEXT_PUBLIC_MCAPTCHA_WIDGET_URL=https://your-mcaptcha-instance/widget-path
 
 ### Get API Key
 
-1. Log into the dashboard at http://localhost:3000
+1. Log into the dashboard at http://127.0.0.1:3000
 2. Navigate to Settings → API Keys
 3. Create a new API key with `messages:write` scope
 
@@ -196,25 +188,23 @@ Mailpit intercepts all outgoing emails in development, allowing you to test with
 ```
 apexmail/
 ├── apps/
-│   ├── billing/          # Billing service
-│   ├── control-plane/    # Admin dashboard (Next.js)
-│   ├── marketing/        # Marketing site (Next.js)
-│   ├── testing/          # Playwright tests
-│   └── web/              # User dashboard (Next.js)
+│   ├── ai/               # AI application surface
+│   ├── marketing-zola/   # Marketing static site (Zola)
+│   └── ...
 │
 ├── services/
 │   └── mail-server/      # Rust backend
 │       └── crates/
-│           ├── tracking-service/  # Main HTTP server
-│           ├── api-server/        # API routes
+│           ├── tracking-service/  # Tracking endpoints and redirect flows
+│           ├── api-server/        # API + SSR browser surfaces
 │           └── ...                # 30+ crates
 │
 ├── packages/
-│   ├── db/               # Database schema
-│   ├── lib/              # Shared TypeScript utils
-│   ├── sdk-node/         # Node.js SDK
+│   ├── sdk-go/           # Go SDK
+│   ├── sdk-java/         # Java SDK
+│   ├── sdk-php/          # PHP SDK
 │   ├── sdk-python/       # Python SDK
-│   └── ...               # More SDKs
+│   └── sdk-ruby/         # Ruby SDK
 │
 ├── docs/                 # Documentation
 └── tools/                # Scripts & utilities
@@ -226,11 +216,9 @@ apexmail/
 
 | Command | Description |
 |---------|-------------|
-| `pnpm dev` | Start all frontend apps in dev mode |
-| `pnpm build` | Build all TypeScript packages |
-| `pnpm test` | Run TypeScript tests |
-| `pnpm lint` | Lint all packages |
-| `pnpm typecheck` | Type check all packages |
+| `cargo run --manifest-path services/mail-server/Cargo.toml -p api-server` | Start the main API and SSR surfaces |
+| `cargo test --manifest-path services/mail-server/Cargo.toml` | Run the Rust test suite |
+| `zola build --root apps/marketing-zola` | Rebuild the static marketing output |
 | `docker compose up -d` | Start backend services |
 | `docker compose logs -f tracking` | View tracking service logs |
 
@@ -296,11 +284,11 @@ lsof -ti:3001 | xargs kill -9
 docker compose down && docker compose up -d
 ```
 
-### Dependencies Out of Sync
+### Toolchain Out of Sync
 
 ```bash
-pnpm install
-pnpm build
+./tools/bootstrap.sh
+source .toolchain/env.sh
 ```
 
 ---

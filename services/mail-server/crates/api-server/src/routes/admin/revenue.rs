@@ -1,6 +1,5 @@
 //! Revenue analytics endpoint.
 //!
-//! Migrated from:apps/control-plane/src/app/api/revenue/route.ts
 
 use axum::extract::State;
 use axum::routing::get;

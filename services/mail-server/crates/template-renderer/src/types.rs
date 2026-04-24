@@ -218,11 +218,7 @@ pub const STARTER_TEMPLATE: &str = r#"<html>
 // ─── Module Allowlist ──────────────────────────────────────────
 
 /// Modules allowed in template imports (for security)
-pub const ALLOWED_MODULES: &[&str] = &[
-    "react",
-    "@react-email/components",
-    "@react-email/render",
-];
+pub const ALLOWED_MODULES: &[&str] = &[];
 
 #[cfg(test)]
 mod tests {
@@ -284,8 +280,7 @@ mod tests {
 
     #[test]
     fn test_allowed_modules() {
-        assert!(ALLOWED_MODULES.contains(&"react"));
-        assert!(ALLOWED_MODULES.contains(&"@react-email/components"));
+        assert!(ALLOWED_MODULES.is_empty());
         assert!(!ALLOWED_MODULES.contains(&"fs"));
         assert!(!ALLOWED_MODULES.contains(&"child_process"));
     }

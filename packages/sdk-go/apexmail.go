@@ -1026,36 +1026,6 @@ func (a *TemplatesAPI) Render(ctx context.Context, id string, data map[string]in
 	return &resp, err
 }
 
-// ValidateReactEmailResponse is returned by Templates.ValidateReactEmail.
-type ValidateReactEmailResponse struct {
-	Valid  bool     `json:"valid"`
-	Errors []string `json:"errors,omitempty"`
-}
-
-// ValidateReactEmail validates a React Email JSX source string without saving it.
-func (a *TemplatesAPI) ValidateReactEmail(ctx context.Context, source string) (*ValidateReactEmailResponse, error) {
-	var resp ValidateReactEmailResponse
-	err := a.client.do(ctx, http.MethodPost, "/v1/templates/react-email/validate",
-		map[string]string{"source": source}, &resp)
-	return &resp, err
-}
-
-// ReactEmailStarterResponse is returned by Templates.ReactEmailStarter.
-type ReactEmailStarterResponse struct {
-	Source string `json:"source"`
-	Name   string `json:"name"`
-}
-
-// ReactEmailStarter retrieves a React Email JSX starter template.
-func (a *TemplatesAPI) ReactEmailStarter(ctx context.Context, componentName string) (*ReactEmailStarterResponse, error) {
-	var resp ReactEmailStarterResponse
-	values := url.Values{}
-	values.Set("name", componentName)
-	err := a.client.do(ctx, http.MethodGet,
-		"/v1/templates/react-email/starter?"+values.Encode(), nil, &resp)
-	return &resp, err
-}
-
 // SuppressionsAPI provides methods for managing the suppression list.
 type SuppressionsAPI struct{ client *Client }
 

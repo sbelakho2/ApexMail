@@ -37,19 +37,6 @@ Error semantics:
 | `MCAPTCHA_SECRET` | Yes when enabled | mCaptcha secret sent to verification endpoint |
 | `MCAPTCHA_VERIFY_URL` | No | Verification endpoint (default: `https://demo.mcaptcha.org/api/v1/pow/siteverify`) |
 
-### Frontend rendering
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `NEXT_PUBLIC_MCAPTCHA_ENABLED` | No | Enables widget rendering when `true` |
-| `NEXT_PUBLIC_MCAPTCHA_WIDGET_URL` | Yes when enabled | mCaptcha widget URL |
-| `NEXT_PUBLIC_MCAPTCHA_GLUE_SCRIPT_URL` | No | Optional script override (default uses unpkg vanilla glue) |
-
-Important: keep server and frontend enablement flags aligned:
-
-- `MCAPTCHA_ENABLED=true`
-- `NEXT_PUBLIC_MCAPTCHA_ENABLED=true`
-
 ## Configuration Example
 
 ```env
@@ -57,10 +44,6 @@ MCAPTCHA_ENABLED=true
 MCAPTCHA_SITE_KEY=your-site-key
 MCAPTCHA_SECRET=your-secret
 MCAPTCHA_VERIFY_URL=https://demo.mcaptcha.org/api/v1/pow/siteverify
-
-NEXT_PUBLIC_MCAPTCHA_ENABLED=true
-NEXT_PUBLIC_MCAPTCHA_WIDGET_URL=https://your-mcaptcha-instance/widget-path
-NEXT_PUBLIC_MCAPTCHA_GLUE_SCRIPT_URL=https://unpkg.com/@mcaptcha/vanilla-glue@0.1.0-rc2/dist/index.js
 ```
 
 ## Smoke Verification Checklist

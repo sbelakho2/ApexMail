@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::types::{Campaign, CampaignStatus, SalesError};
 
 /// In-memory campaign manager.
-/// Mirrors the TypeScript drip-engine / campaign subsystem, exposing CRUD +
-/// lifecycle operations. Recipients are tracked as a simple Vec of email
+/// Exposes CRUD + lifecycle operations. Recipients are tracked as a simple Vec
+/// of email
 /// addresses per campaign for now.
 #[derive(Debug, Clone)]
 pub struct CampaignManager {

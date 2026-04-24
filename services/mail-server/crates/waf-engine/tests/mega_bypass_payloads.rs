@@ -43,7 +43,8 @@ fn check_payloads_in_query(label: &str, payloads: &[&str]) {
 
     let total = payloads.len();
     let rate = if total > 0 { (blocked as f64 / total as f64) * 100.0 } else { 100.0 };
-// We want at least 80% detection rate     assert!(
+    // We want at least 80% detection rate.
+    assert!(
         rate >= 80.0,
         "[{}] Detection rate {:.1}% ({}/{}) — missed: {:?}",
         label, rate, blocked, total, &missed[..missed.len().min(10)]

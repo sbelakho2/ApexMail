@@ -52,6 +52,7 @@ uuid.workspace = true
 # Crypto (S3 Signature V4 signing)
 hmac.workspace = true
 sha2.workspace = true
+hex.workspace = true
 
 # Error handling
 anyhow.workspace = true

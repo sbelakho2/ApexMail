@@ -24,7 +24,7 @@ All changes to:
 - Database schemas (migrations).
 - Infrastructure configuration (Hetzner servers, networking, DNS).
 - CI/CD pipeline configuration.
-- Dependency versions (npm packages, base Docker images).
+- Dependency versions (runtime libraries, base Docker images).
 - Feature flags and runtime configuration.
 - Security-sensitive components (auth, encryption, access control).
 
@@ -104,17 +104,13 @@ Developer branch
 
 | Check | Tool | Blocking |
 |-------|------|----------|
-| Linting (TypeScript) | ESLint | ✅ Yes |
 | Linting (Rust) | `cargo clippy` | ✅ Yes |
-| Type checking (TypeScript) | `tsc --noEmit` | ✅ Yes |
 | Type checking (Rust) | `cargo check` | ✅ Yes |
-| Unit tests (TypeScript) | Vitest | ✅ Yes |
 | Unit tests (Rust) | `cargo test` | ✅ Yes |
-| Integration tests | Vitest + test database | ✅ Yes |
-| Dependency audit (TS) | `pnpm audit` / Snyk | ✅ Yes (critical/high) |
+| Integration tests | `cargo test` targeted crates + environment checks | ✅ Yes |
 | Dependency audit (Rust) | `cargo audit` | ✅ Yes (critical/high) |
 | Container image scan | Trivy | ✅ Yes (critical/high) |
-| Build | Turbo + Cargo | ✅ Yes |
+| Build | Cargo | ✅ Yes |
 
 ### 5.3 Staging Validation
 

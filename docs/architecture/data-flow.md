@@ -1,7 +1,7 @@
 # Data Flow Architecture
 
 > **Implementation Note (2026-02):** This document describes the conceptual data flow. The actual implementation uses:
-> - **Rust tracking service** instead of TypeScript API
+> - **Rust tracking service** as the current API implementation
 > - **PostgreSQL-native queues** instead of BullMQ (see [queue-system.md](./queue-system.md))
 > - **Rust MTA crate** instead of Postfix (for inbound SMTP only)
 > - **AWS SES** for shared-pool sending (default for tenants without dedicated IPs)
@@ -40,113 +40,23 @@
 ### Step-by-Step Flow
 
 #### 1. API Request Reception
-```typescript
-// POST /v1/messages
-{
-  "to": "user@example.com",
-  "from": "sender@company.com",
-  "subject": "Welcome!",
-  "template_id": "welcome-001",
-  "variables": {
-    "name": "John",
-    "company": "Acme"
-  },
-  "metadata": {
-    "campaign_id": "camp_123"
-  }
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### 2. Validation Layer
-```typescript
-// Validation checks performed:
-// 1. Email syntax validation (RFC 5322)
-// 2. Domain existence (DNS MX lookup)
-// 3. Suppression list check (bounces, complaints, unsubs)
-// 4. Rate limiting (per-sender, per-domain)
-// 5. Template existence and variable validation
-
-interface ValidationResult {
-  valid: boolean;
-  recipient: string;
-  checks: {
-    syntax: boolean;
-    mx_exists: boolean;
-    not_suppressed: boolean;
-    rate_allowed: boolean;
-    template_valid: boolean;
-  };
-  enrichment?: {
-    mx_host: string;
-    domain_reputation: number;
-    historical_engagement: number;
-  };
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### 3. Queue Insertion
-```typescript
-// Message written to BullMQ queue with priority
-await messageQueue.add('send', {
-  messageId: 'msg_abc123',
-  to: 'user@example.com',
-  from: 'sender@company.com',
-  templateId: 'welcome-001',
-  variables: { ... },
-  priority: calculatePriority(campaign, sender),
-  scheduledAt: null, // or ISO timestamp for delayed send
-}, {
-  priority: 1,
-  attempts: 3,
-  backoff: {
-    type: 'exponential',
-    delay: 5000,
-  },
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### 4. Worker Processing
-```typescript
-// Worker picks up job and processes
-messageQueue.process('send', async (job) => {
-  const { messageId, templateId, variables, to } = job.data;
-  
-  // 1. Load template
-  const template = await templateEngine.load(templateId);
-  
-  // 2. Render with variables
-  const { html, text, subject } = await template.render(variables);
-  
-  // 3. Apply tracking pixels
-  const trackedHtml = trackingService.injectPixel(html, messageId);
-  
-  // 4. Rewrite links for click tracking
-  const finalHtml = trackingService.rewriteLinks(trackedHtml, messageId);
-  
-  // 5. Build MIME message
-  const message = mimeBuilder.build({
-    to,
-    from: job.data.from,
-    subject,
-    html: finalHtml,
-    text,
-    headers: {
-      'X-ApexMail-ID': messageId,
-      'List-Unsubscribe': `<mailto:unsub@domain.com?subject=${messageId}>`,
-    },
-  });
-  
-  // 6. Submit to delivery transport
-  //    Default: SES v2 SendEmail API (RawMessage)
-  //    Opt-in:  Direct SMTP via SmtpSender (outbound-queue)
-  await transport.send(message);
-  
-  // 7. Update status
-  await db.messages.update({
-    where: { id: messageId },
-    data: { status: 'sent', sentAt: new Date() },
-  });
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### 5. Delivery Transport
@@ -211,98 +121,29 @@ incoming → active → bounce → notification
 ### Event Types
 
 #### Open Events
-```typescript
-// Tracking pixel request
-// GET /t/o/{{messageId}}.gif
-
-interface OpenEvent {
-  type: 'open';
-  messageId: string;
-  timestamp: Date;
-  ip: string;
-  userAgent: string;
-  geo?: {
-    country: string;
-    region: string;
-    city: string;
-  };
-  device?: {
-    type: 'mobile' | 'desktop' | 'tablet';
-    os: string;
-    client: string;
-  };
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### Click Events
-```typescript
-// Click redirect
-// GET /t/c/{{linkId}}?r={{base64Url}}
-
-interface ClickEvent {
-  type: 'click';
-  messageId: string;
-  linkId: string;
-  originalUrl: string;
-  timestamp: Date;
-  ip: string;
-  userAgent: string;
-  geo?: GeoData;
-  device?: DeviceData;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### Bounce Events
-```typescript
-// From SES SNS notifications (default) or SMTP DSN (self-hosted opt-in)
-
-interface BounceEvent {
-  type: 'bounce';
-  messageId: string;
-  timestamp: Date;
-  bounceType: 'hard' | 'soft' | 'block';
-  bounceCode: string;
-  bounceMessage: string;
-  recipient: string;
-  diagnosticCode?: string;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 #### Complaint Events
-```typescript
-// From feedback loops (FBL)
-
-interface ComplaintEvent {
-  type: 'complaint';
-  messageId: string;
-  timestamp: Date;
-  feedbackType: 'abuse' | 'fraud' | 'other';
-  userAgent?: string;
-  recipient: string;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Deduplication Strategy
 
-```typescript
-// Events deduplicated using Redis with TTL
-async function processEvent(event: EmailEvent): Promise<boolean> {
-  const dedupKey = `event:${event.type}:${event.messageId}:${event.timestamp.getTime()}`;
-  
-  const isNew = await redis.set(dedupKey, '1', {
-    NX: true,           // Only set if not exists
-    EX: 86400 * 7,      // Expire after 7 days
-  });
-  
-  if (!isNew) {
-    logger.debug('Duplicate event ignored', { event });
-    return false;
-  }
-  
-  // Process unique event
-  await eventStore.insert(event);
-  return true;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### CDC to Analytics
@@ -440,33 +281,8 @@ ORDER BY cohort_week, weeks_since_first;
 ```
 
 ### Score Calculation
-```typescript
-interface ScoringSignal {
-  type: 'email_open' | 'email_click' | 'page_view' | 'form_submit' | 'api_call';
-  weight: number;
-  decay: number;  // Daily decay factor
-  timestamp: Date;
-}
-
-function calculateScore(contact: Contact): number {
-  const signals = contact.signals;
-  const now = Date.now();
-  
-  return signals.reduce((score, signal) => {
-    const daysSince = (now - signal.timestamp.getTime()) / (1000 * 60 * 60 * 24);
-    const decayedWeight = signal.weight * Math.pow(signal.decay, daysSince);
-    return score + decayedWeight;
-  }, 0);
-}
-
-// Example scoring rules
-const scoringRules = [
-  { type: 'email_open', weight: 1, decay: 0.95 },
-  { type: 'email_click', weight: 5, decay: 0.90 },
-  { type: 'page_view', weight: 2, decay: 0.98 },
-  { type: 'form_submit', weight: 20, decay: 0.85 },
-  { type: 'demo_request', weight: 50, decay: 0.80 },
-];
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ---
@@ -495,28 +311,8 @@ const scoringRules = [
 ```
 
 ### Embedding Generation
-```typescript
-// Sentence embedding for semantic search
-async function generateEmbedding(text: string): Promise<Float32Array> {
-  // 1. Tokenize
-  const tokens = tokenizer.encode(text, {
-    maxLength: 512,
-    padding: true,
-    truncation: true,
-  });
-  
-  // 2. Run inference
-  const feeds = {
-    input_ids: new ort.Tensor('int64', tokens.inputIds, [1, tokens.length]),
-    attention_mask: new ort.Tensor('int64', tokens.attentionMask, [1, tokens.length]),
-  };
-  
-  const results = await session.run(feeds);
-  
-  // 3. Mean pooling
-  const embeddings = results.last_hidden_state.data as Float32Array;
-  return meanPool(embeddings, tokens.attentionMask);
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ---
@@ -536,40 +332,6 @@ async function generateEmbedding(text: string): Promise<Float32Array> {
 ```
 
 ### Cryptographic Chain
-```typescript
-interface AuditEntry {
-  id: string;
-  timestamp: Date;
-  actor: { type: 'user' | 'system'; id: string };
-  action: string;
-  resource: { type: string; id: string };
-  changes?: { before?: unknown; after?: unknown };
-  previousHash: string;
-  hash: string;
-  signature: string;
-}
-
-function createAuditEntry(action: AuditAction, previousEntry: AuditEntry | null): AuditEntry {
-  const entry: Partial<AuditEntry> = {
-    id: generateId(),
-    timestamp: new Date(),
-    actor: action.actor,
-    action: action.type,
-    resource: action.resource,
-    changes: action.changes,
-    previousHash: previousEntry?.hash ?? '0000000000000000000000000000000000000000000000000000000000000000',
-  };
-  
-  // Create hash chain
-  const hashInput = JSON.stringify({
-    ...entry,
-    previousHash: entry.previousHash,
-  });
-  entry.hash = crypto.createHash('sha256').update(hashInput).digest('hex');
-  
-  // Sign with HSM/KMS
-  entry.signature = signWithHSM(entry.hash);
-  
-  return entry as AuditEntry;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```

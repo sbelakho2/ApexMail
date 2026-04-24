@@ -1,7 +1,6 @@
 //! Configuration loaded from environment variables.
 //!
-//! Mirrors the Zod-validated config from the TypeScript API,
-//! with production-safety checks on secret lengths.
+//! Includes production-safety checks on secret lengths.
 
 use std::env;
 use std::time::Duration;

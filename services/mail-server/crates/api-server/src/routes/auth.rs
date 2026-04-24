@@ -16,6 +16,10 @@ use crate::state::AppState;
 
 const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
 
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
+}
+
 fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> bool {
     let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$") {
         bcrypt::verify(password, hash).map_err(|error| error.to_string())
@@ -479,7 +483,7 @@ async fn register(
     })?;
 
     // Create user with owner role
-    sqlx::query(
+    match sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, 
                            email_verified, mfa_enabled, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
@@ -501,10 +505,17 @@ async fn register(
     .bind(now)
     .execute(&mut *tx)
     .await
-    .map_err(|error| {
-        tracing::error!(error = %error, user_id = %user_id, tenant_id = %tenant_id, "failed to create user during registration");
-        ApiError::Internal("database error".into())
-    })?;
+    {
+        Ok(_) => {}
+        Err(error) if is_unique_violation(&error) => {
+            let _ = tx.rollback().await;
+            return Ok((StatusCode::ACCEPTED, Json(register_response())));
+        }
+        Err(error) => {
+            tracing::error!(error = %error, user_id = %user_id, tenant_id = %tenant_id, "failed to create user during registration");
+            return Err(ApiError::Internal("database error".into()));
+        }
+    }
 
     enqueue_verification_email(&mut tx, &state.config.base_url, &email_lower, &verification_token)
         .await

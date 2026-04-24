@@ -1,4 +1,4 @@
-//! MTA configuration – mirrors the TypeScript `MTAConfig` shape.
+//! MTA configuration.
 
 use serde::{Deserialize, Serialize};
 

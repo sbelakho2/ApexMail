@@ -1,4 +1,4 @@
-/* ── CSS-only interactivity (zero JavaScript) ──────────────── */
+/* ── CSS-only interactivity (zero client scripting) ─────────── */
 /* All interactive patterns use native HTML + CSS only:
    - Desktop dropdowns: :focus-within
    - Mobile menu: checkbox hack

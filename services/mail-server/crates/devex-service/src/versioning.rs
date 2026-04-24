@@ -1,6 +1,6 @@
 //! API versioning — list, inspect, compare, and deprecation checks.
 //!
-//! Mirrors the TypeScript `ApiVersioningService` with date-based versions (YYYY-MM).
+//! Uses date-based versions (YYYY-MM).
 
 use chrono::{DateTime, NaiveDate, Utc};
 

@@ -32,7 +32,7 @@
 - API: `api.apexmail.com/v1`, Auth: `X-API-Key` header
 - Overage: Starter $3/1K, Growth $2/1K, Business $1.50/1K
 - Annual billing: 20% discount
-- SDK: `@apexmail/node` (both schemas)
+- SDK: `apexmail` for Python (both schemas)
 
 **Recommendation**: Schema A is canonical (matches `customer_profiles.py`, `build_agent.py`, and the primary system prompt). Schema B in `mega_pipeline.py` is outdated/alt-branch data — **do not merge** its pricing into training without resolution.
 
@@ -42,7 +42,7 @@
 | Open rate benchmark | 27% | 21.5% | industry-knowledge-base uses ~27% |
 | Starter price | $29 | $25 | eval.py may use Schema B |
 | Pro price | $59 | $65 + "150K emails" | eval.py Pro doesn't match either schema |
-| API domain | .ee | — | eval.py uses SDK `@apexmail/node` |
+| API domain | .ee | — | eval.py uses the Python SDK `apexmail` |
 
 ---
 

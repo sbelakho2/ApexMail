@@ -25,8 +25,6 @@ X-API-Key: ak_live_...
 | `handlebars` | Handlebars-based syntax with helpers (`{{#if}}`, `{{#each}}`, `{{formatDate}}`) — **default** |
 | `liquid` | Shopify Liquid-compatible engine |
 | `mjml` | MJML markup compiled to responsive HTML |
-| `ejs` | EJS (Embedded JavaScript) `<%= variable %>` style |
-| `react` | **React Email** — compose emails as JSX using `@react-email/components`, transpiled server-side |
 | `plain` | No processing; HTML and text are used verbatim |
 
 ---
@@ -692,79 +690,4 @@ curl -X DELETE "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4" \
 ```
 
 ---
-
-### GET `/v1/templates/react-email/starter`
-
-Returns a ready-to-use React Email JSX starter template string that can be used as the `html` field when creating a template with `engine: "react"`.
-
-**Scope:** `templates:read`
-
-#### Query Parameters
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | No | Name for the root React component (default: `EmailTemplate`) |
-
-#### Example Request
-
-```bash
-curl "https://api.apexmail.ee/v1/templates/react-email/starter?name=WelcomeEmail" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
-```
-
-#### Example Response — `200 OK`
-
-```json
-{
-  "source": "import { Html, Head, Body, Container, Section, Text, Button, Link, Hr, Img, Preview } from '@react-email/components';\nimport * as React from 'react';\n\nexport default function WelcomeEmail(props) {\n  return (\n    <Html>\n      <Head />\n      <Preview>Your preview text here</Preview>\n      <Body style={{ fontFamily: 'sans-serif', backgroundColor: '#f6f6f6' }}>\n        <Container style={{ margin: '0 auto', padding: '20px' }}>\n          <Text>Hello!</Text>\n        </Container>\n      </Body>\n    </Html>\n  );\n}"
-}
-```
-
----
-
-### POST `/v1/templates/react-email/validate`
-
-Validates a React Email JSX source string for syntax correctness without saving it. Use this to lint a template before submission.
-
-**Scope:** `templates:read`
-
-#### Request Body
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `source` | string | Yes | Raw JSX source string to validate |
-
-#### Example Request
-
-```bash
-curl -X POST "https://api.apexmail.ee/v1/templates/react-email/validate" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{ "source": "import * as React from '\''react'\'';\nexport default function Email() { return <p>Hello</p>; }" }'
-```
-
-#### Example Response — `200 OK` (valid)
-
-```json
-{ "valid": true }
-```
-
-#### Example Response — `200 OK` (invalid)
-
-```json
-{
-  "valid": false,
-  "error": "SyntaxError: Unexpected token (3:12)"
-}
-```
-
-**Error codes specific to React Email templates:**
-
-| Code | Description |
-|------|-------------|
-| `INVALID_REACT_EMAIL_SOURCE` | JSX source failed syntax validation on template create/update |
-| `REACT_EMAIL_TRANSPILE_ERROR` | esbuild could not transpile the JSX |
-| `REACT_EMAIL_NO_DEFAULT_EXPORT` | Template JSX must have a default export returning a React element |
-| `REACT_EMAIL_EXECUTION_ERROR` | Template threw an error during server-side render |
-| `REACT_EMAIL_RENDER_ERROR` | `@react-email/render` failed to produce HTML output |
 

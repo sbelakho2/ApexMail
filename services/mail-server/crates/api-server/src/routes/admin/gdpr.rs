@@ -1,6 +1,5 @@
 //! GDPR request management endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/gdpr/route.ts
 
 use axum::extract::{Query, State};
 use axum::routing::get;

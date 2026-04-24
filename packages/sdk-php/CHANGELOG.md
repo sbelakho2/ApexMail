@@ -13,7 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - `$client->emails` resource — `send`, `batch`, `get`, `list`.
 - `$client->domains` resource — `create`, `list`, `get`, `verify`, `delete`.
 - `$client->webhooks` resource — `create`, `list`, `get`, `update`, `delete`.
-- `$client->templates` resource — `create`, `list`, `get`, `getBySlug`, `update`, `delete`, `render`, `validateReactEmail`, `reactEmailStarter`.
+- `$client->templates` resource — `create`, `list`, `get`, `getBySlug`, `update`, `delete`, `render`.
 - `$client->suppressions` resource — `add`, `list`, `check`, `delete`.
 - `$client->events` resource — `list`, `getByMessage`, `get`.
 - `Client::verifyWebhookSignature` helper for inbound webhook verification.

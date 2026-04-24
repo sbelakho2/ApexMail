@@ -1,10 +1,9 @@
 # SDK Reference
 
-ApexMail provides official SDKs for **six languages** to simplify integration with the ApexMail API. All SDKs offer typed interfaces and consistent error handling.
+ApexMail provides official SDKs for **five languages** to simplify integration with the ApexMail API. All SDKs offer typed interfaces and consistent error handling.
 
 | Language | Package | Min. version |
 |----------|---------|--------------|
-| Node.js / TypeScript | `@apexmail/node` (npm) | Node.js ≥ 18 |
 | Python | `apexmail` (PyPI) | Python ≥ 3.9 |
 | Go | `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go` | Go 1.21 |
 | Ruby | `apexmail` (RubyGems) | Ruby ≥ 2.7 |
@@ -21,112 +20,25 @@ All SDK methods authenticate via an API key passed in the `X-API-Key` header.
 
 | Environment | Format | Example |
 |-------------|--------|---------|
-| Production | `am_live_<hex>` | `am_live_7f3a9c1e4b8d2f0a6e5c...` |
-| Test / Sandbox | `am_test_<hex>` | `am_test_2d4f6a8b0c1e3f5a7d9b...` |
+| Live | `am_live_<hex>` | `am_live_8f3ac1...` |
+| Test | `am_test_<hex>` | `am_test_91bc22...` |
 
-Test keys operate against a sandboxed environment. Messages sent with test keys are never delivered to real recipients and do not count toward plan quotas.
-
----
-
-## Node.js SDK
-
-**Package:** `@apexmail/node`
-
-```bash
-npm install @apexmail/node
-# or
-pnpm add @apexmail/node
-# or
-yarn add @apexmail/node
-```
-
-**Requirements:** Node.js ≥ 18.0.0
-
-### Initialization
-
-```typescript
-import { ApexMail } from '@apexmail/node';
-
-const apexmail = new ApexMail('am_live_your_api_key', {
-  baseUrl: 'https://api.apexmail.ee',  // optional, defaults to production
-  timeout: 30_000,                       // optional, request timeout in ms (default: 30000)
-  retries: 3,                            // optional, max retry attempts (default: 3)
-  debug: false,                          // optional, enable request/response logging (default: false)
-});
-```
-
-**Constructor Options**
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `apiKey` | `string` | — | Required. Your ApexMail API key. |
-| `baseUrl` | `string` | `https://api.apexmail.ee` | API base URL override. |
-| `timeout` | `number` | `30000` | Request timeout in milliseconds. |
-| `retries` | `number` | `3` | Maximum number of retry attempts for transient failures. |
-| `debug` | `boolean` | `false` | When `true`, logs request and response details to stdout. |
+If you need another client language, use the HTTP API directly or maintain that client outside this repository.
 
 ---
 
-### Messages
+## Common Resources
 
-#### `emails.send(options)`
+The examples below use the Python SDK for the shared API surface. The same resources are available in Go, Ruby, PHP, and Java with language-appropriate naming.
 
-Send a single email message.
-
-```typescript
-const message = await apexmail.emails.send({
-  from: 'hello@yourdomain.com',
-  to: ['jane@example.com'],
-  subject: 'Welcome to ApexMail',
-  html: '<h1>Hello, Jane!</h1><p>Welcome aboard.</p>',
-  text: 'Hello, Jane! Welcome aboard.',
-  tags: ['onboarding', 'welcome'],
-  headers: { 'X-Custom-Id': 'onb-001' },
-});
-// => { id: 'msg_x9y8z7w6', status: 'queued' }
-```
-
-#### `emails.batch(options)`
-
-Send up to 1,000 messages in a single request.
-
-```typescript
-const result = await apexmail.emails.batch({
-  emails: [
-    { from: 'hello@yourdomain.com', to: ['alice@example.com'], subject: 'Hello Alice', html: '...' },
-    { from: 'hello@yourdomain.com', to: ['bob@example.com'], subject: 'Hello Bob', html: '...' },
-  ],
-});
-// => { ids: ['msg_...', 'msg_...'], successCount: 2, failureCount: 0 }
-```
-
-#### `emails.get(id)`
-
-Retrieve the current status and details of a message.
-
-```typescript
-const msg = await apexmail.emails.get('msg_x9y8z7w6');
-// => { id: 'msg_x9y8z7w6', status: 'delivered', to: [...], ... }
-```
-
-#### `emails.list(options)`
-
-List messages with optional filters.
-
-```typescript
-const list = await apexmail.emails.list({
-  status: 'delivered',
-  limit: 20,
-  cursor: 'cursor_from_previous_response',
-});
-```
+### Emails
 
 #### `emails.cancel(id)`
 
 Cancel a message that is still in `queued` or `scheduled` status.
 
-```typescript
-await apexmail.emails.cancel('msg_x9y8z7w6');
+```python
+client.emails.cancel("msg_x9y8z7w6")
 ```
 
 ---
@@ -137,43 +49,43 @@ await apexmail.emails.cancel('msg_x9y8z7w6');
 
 Add a new sending domain.
 
-```typescript
-const domain = await apexmail.domains.create({ domain: 'yourdomain.com' });
-// => { id: 'dom_abc123', domain: 'yourdomain.com', status: 'pending', ... }
+```python
+domain = client.domains.create(domain="yourdomain.com")
+# => {"id": "dom_abc123", "domain": "yourdomain.com", "status": "pending", ...}
 ```
 
 #### `domains.verify(id)`
 
 Trigger DNS verification for a domain. ApexMail checks SPF, DKIM, DMARC, and optionally MX records.
 
-```typescript
-const result = await apexmail.domains.verify('dom_abc123');
-// => { id: 'dom_abc123', status: 'verified', dnsRecords: [...] }
+```python
+result = client.domains.verify("dom_abc123")
+# => {"id": "dom_abc123", "status": "verified", "dns_records": [...]} 
 ```
 
 #### `domains.list()`
 
 List all domains associated with the account.
 
-```typescript
-const domains = await apexmail.domains.list();
-// => { data: [{ id: 'dom_abc123', domain: 'yourdomain.com', status: 'verified' }] }
+```python
+domains = client.domains.list()
+# => {"data": [{"id": "dom_abc123", "domain": "yourdomain.com", "status": "verified"}]}
 ```
 
 #### `domains.get(id)`
 
 Retrieve a domain by ID.
 
-```typescript
-const domain = await apexmail.domains.get('dom_abc123');
+```python
+domain = client.domains.get("dom_abc123")
 ```
 
 #### `domains.delete(id)`
 
 Remove a domain from the account. All future sends from this domain will be rejected.
 
-```typescript
-await apexmail.domains.delete('dom_abc123');
+```python
+client.domains.delete("dom_abc123")
 ```
 
 ---
@@ -184,31 +96,31 @@ await apexmail.domains.delete('dom_abc123');
 
 Create a new email template.
 
-```typescript
-const template = await apexmail.templates.create({
-  name: 'welcome-email',
-  subject: 'Welcome, {{name}}!',
-  html: '<h1>Hello, {{name}}</h1><p>Thanks for joining.</p>',
-  text: 'Hello, {{name}}. Thanks for joining.',
-});
-// => { id: 'tpl_xyz789', name: 'welcome-email', ... }
+```python
+template = client.templates.create(
+    name="welcome-email",
+    subject="Welcome, {{name}}!",
+    html="<h1>Hello, {{name}}</h1><p>Thanks for joining.</p>",
+    text="Hello, {{name}}. Thanks for joining.",
+)
+# => {"id": "tpl_xyz789", "name": "welcome-email", ...}
 ```
 
 #### `templates.render(id, data)`
 
 Render a template with the provided data without sending. Useful for previews.
 
-```typescript
-const rendered = await apexmail.templates.render('tpl_xyz789', { name: 'Jane' });
-// => { subject: 'Welcome, Jane!', html: '<h1>Hello, Jane</h1>...', text: 'Hello, Jane. ...' }
+```python
+rendered = client.templates.render("tpl_xyz789", {"name": "Jane"})
+# => {"subject": "Welcome, Jane!", "html": "<h1>Hello, Jane</h1>...", "text": "Hello, Jane. ..."}
 ```
 
 #### `templates.list(filters)`
 
 List templates with optional filters.
 
-```typescript
-const templates = await apexmail.templates.list({ page: 1 });
+```python
+templates = client.templates.list(page=1)
 ```
 
 ---
@@ -219,20 +131,20 @@ const templates = await apexmail.templates.list({ page: 1 });
 
 Register a webhook endpoint for event notifications.
 
-```typescript
-const webhook = await apexmail.webhooks.create({
-  url: 'https://yourapp.com/webhooks/apexmail',
-  events: ['message.delivered', 'message.bounced', 'message.complained'],
-});
-// => { id: 'whk_def456', url: '...', events: [...], active: true, secret: '...' }
+```python
+webhook = client.webhooks.create(
+    url="https://yourapp.com/webhooks/apexmail",
+    events=["message.delivered", "message.bounced", "message.complained"],
+)
+# => {"id": "whk_def456", "url": "...", "events": [...], "active": True, "secret": "..."}
 ```
 
 #### `webhooks.list()`
 
 List all registered webhooks.
 
-```typescript
-const webhooks = await apexmail.webhooks.list();
+```python
+webhooks = client.webhooks.list()
 ```
 
 ---
@@ -243,48 +155,48 @@ const webhooks = await apexmail.webhooks.list();
 
 Retrieve analytics for the specified date range.
 
-```typescript
-const overview = await apexmail.analytics.get({
-  from: '2026-02-01T00:00:00Z',
-  to: '2026-02-09T00:00:00Z',
-});
-// => { sent: 125000, delivered: 121500, openRate: 0.397, clickRate: 0.102, ... }
+```python
+overview = client.analytics.get(
+    from_="2026-02-01T00:00:00Z",
+    to="2026-02-09T00:00:00Z",
+)
+# => {"sent": 125000, "delivered": 121500, "open_rate": 0.397, "click_rate": 0.102, ...}
 ```
 
 ---
 
 ### API Keys
 
-#### `apiKeys.create(options)`
+#### `api_keys.create(options)`
 
 Create a new API key with the specified scopes.
 
-```typescript
-const key = await apexmail.apiKeys.create({
-  name: 'Production Backend',
-  scopes: ['messages:write', 'events:read'],
-  expiresAt: '2027-02-09T00:00:00Z',  // optional
-});
-// => { id: 'key_ghi789', key: 'am_live_...', name: '...', scopes: [...] }
+```python
+key = client.api_keys.create(
+    name="Production Backend",
+    scopes=["messages:write", "events:read"],
+    expires_at="2027-02-09T00:00:00Z",  # optional
+)
+# => {"id": "key_ghi789", "key": "am_live_...", "name": "...", "scopes": [...]} 
 ```
 
 > **Important:** The full API key value is only returned once, at creation time. Store it securely.
 
-#### `apiKeys.list()`
+#### `api_keys.list()`
 
 List all API keys associated with the account. Key values are masked.
 
-```typescript
-const keys = await apexmail.apiKeys.list();
-// => { data: [{ id: 'key_ghi789', name: 'Production Backend', last_four: '9c1e', ... }] }
+```python
+keys = client.api_keys.list()
+# => {"data": [{"id": "key_ghi789", "name": "Production Backend", "last_four": "9c1e", ...}]}
 ```
 
-#### `apiKeys.revoke(id)`
+#### `api_keys.revoke(id)`
 
 Revoke an API key. This action is immediate and irreversible.
 
-```typescript
-await apexmail.apiKeys.revoke('key_ghi789');
+```python
+client.api_keys.revoke("key_ghi789")
 ```
 
 ---
@@ -343,7 +255,7 @@ async def send_welcome():
 
 ### Method Parity
 
-The Python SDK mirrors all methods available in the Node.js SDK:
+The Python SDK exposes the same resource groups documented for the other official SDKs:
 
 | Resource | Methods |
 |----------|---------|
@@ -382,18 +294,19 @@ client.domains.verify(domain.id)
 
 ### Automatic Retry with Exponential Backoff
 
-Both SDKs automatically retry failed requests that return transient errors (`429`, `500`, `502`, `503`, `504`). Retries use exponential backoff with jitter. The `Retry-After` header, if present, is respected.
+Official SDKs automatically retry failed requests that return transient errors (`429`, `500`, `502`, `503`, `504`). Retries use exponential backoff with jitter. The `Retry-After` header, if present, is respected.
 
 ### Typed Responses
 
-Both SDKs return strongly typed response objects:
+Official SDKs return structured response objects:
 
-- **Node.js:** Full TypeScript type definitions included. Generics used for paginated responses.
 - **Python:** Type hints with `TypedDict` and dataclass-based response models. Compatible with `mypy` strict mode.
+- **Go / Java:** Native structs and classes with compile-time type checking.
+- **Ruby / PHP:** Idiomatic hashes or arrays wrapped by resource-specific helpers.
 
 ### Error Classes
 
-Both SDKs raise specific error types that extend a common base class:
+Official SDKs raise specific error types that extend a common base class:
 
 | Error Class | HTTP Status | Description |
 |-------------|-------------|-------------|
@@ -402,22 +315,6 @@ Both SDKs raise specific error types that extend a common base class:
 | `RateLimitError` | `429` | Rate limit exceeded. The `retry_after` property indicates when to retry. |
 | `ValidationError` | `400`, `422` | Request parameters failed validation. The `errors` property contains field-level details. |
 | `NotFoundError` | `404` | The requested resource does not exist. |
-
-**Node.js error handling:**
-
-```typescript
-import { ApexMailError, RateLimitError } from '@apexmail/node';
-
-try {
-  await apexmail.emails.send({ /* ... */ });
-} catch (error) {
-  if (error instanceof RateLimitError) {
-    console.log(`Rate limited. Retry after ${error.retryAfter}s`);
-  } else if (error instanceof ApexMailError) {
-    console.error(`API error: ${error.code} — ${error.message}`);
-  }
-}
-```
 
 **Python error handling:**
 
@@ -434,20 +331,7 @@ except ApexMailError as e:
 
 ### Webhook Signature Verification
 
-Both SDKs include a helper for verifying webhook payload signatures to ensure authenticity.
-
-**Node.js:**
-
-```typescript
-import { verifyWebhookSignature } from '@apexmail/node';
-
-const isValid = verifyWebhookSignature({
-  payload: req.body,                          // raw request body string
-  signature: req.headers['x-apexmail-signature'],
-  secret: 'whsec_your_signing_secret',
-  tolerance: 300,                             // optional, max age in seconds (default: 300)
-});
-```
+Official SDKs expose helpers for verifying webhook payload signatures to ensure authenticity.
 
 **Python:**
 
@@ -474,7 +358,7 @@ Signatures use HMAC-SHA256 over the `timestamp.payload` format. The `X-ApexMail-
 | Batch sends | 10 requests/second per API key |
 | Event stream (SSE) | 5 concurrent connections per API key |
 
-Rate limit information is returned in response headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`). Both SDKs automatically surface this data through the `RateLimitError` class when limits are exceeded.
+Rate limit information is returned in response headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`). SDKs surface this data through their rate-limit error types when limits are exceeded.
 
 ---
 
@@ -745,54 +629,28 @@ try {
 
 ---
 
-## React Email Templates
+## Component-Based Templates
 
-ApexMail supports composing emails as **React components** using `@react-email/components`. Templates with `engine: "react"` are transpiled and rendered server-side using a secure VM sandbox.
+ApexMail can store HTML generated by external component-based email tooling. Render the final HTML in your application or CI pipeline, then submit the rendered markup through the standard template APIs from any official SDK.
 
-### Create a React Email template
+### Create a template from rendered HTML
 
-```typescript
-// Node.js SDK
-const template = await apexmail.templates.create({
-  name: 'Welcome Email',
-  subject: 'Welcome, {{name}}!',
-  engine: 'react',
-  html: `
-import { Html, Head, Body, Container, Text, Button } from '@react-email/components';
-import * as React from 'react';
-
-export default function WelcomeEmail({ name, ctaUrl }) {
-  return (
-    <Html>
-      <Head />
-      <Body style={{ fontFamily: 'sans-serif' }}>
-        <Container>
-          <Text>Hello, {name}!</Text>
-          <Button href={ctaUrl}>Get Started</Button>
-        </Container>
-      </Body>
-    </Html>
-  );
-}
-  `,
-});
+```python
+template = client.templates.create(
+    name="welcome-email",
+    subject="Welcome, {{name}}!",
+    html="<html><body><h1>Hello, {{name}}!</h1><p>Get started with ApexMail.</p></body></html>",
+    text="Hello, {{name}}! Get started with ApexMail.",
+)
 ```
 
-### Validate JSX before saving
+### Validate before saving
 
-```typescript
-const validation = await apexmail.templates.validateReactEmail(jsxSource);
-// => { valid: true }   or   { valid: false, error: "SyntaxError: ..." }
-```
+Validate or render the component source in your own build system before calling `templates.create`. ApexMail stores the rendered HTML and uses the same `templates.render()` flow for previewing variables.
 
 ### Get a starter template
 
-```typescript
-const starter = await fetch('/v1/templates/react-email/starter?name=MyEmail');
-// Returns a full JSX template with all @react-email/components imports included.
-```
+Use `GET /v1/templates/starter?name=MyEmail` to fetch a basic starter HTML template you can adapt in your own renderer or editor.
 
-**Supported components:** All `@react-email/components` — `Html`, `Head`, `Body`, `Container`, `Section`, `Row`, `Column`, `Text`, `Button`, `Link`, `Image`, `Hr`, `Preview`, `Markdown`, `Font`, `Head`, `Tailwind`, and more.
-
-**Security:** Templates execute inside a Node.js `vm` sandbox with a strict module allowlist. Only `react` and `@react-email/*` packages may be imported. Filesystem access, child processes, and network calls are blocked.
+**Security:** Server-side template preview runs in an isolated renderer. Filesystem access, child processes, and outbound network calls are blocked.
 

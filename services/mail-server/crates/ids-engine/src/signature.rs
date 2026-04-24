@@ -877,7 +877,7 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
 // where a nested lookup closes before the outer one. Using
 // bounded `.{0,50}` (dot-all is enabled by RegexBuilder) lets
 // the engine match across embedded closing braces.
-                r#"\$\{.{0,50}j.{0,50}n.{0,50}d.{0,50}i.{0,50}:.{0,50} //"#.into(),
+                r#"\$\{.{0,50}j.{0,50}n.{0,50}d.{0,50}i.{0,50}:(?:ldap|ldaps|rmi|dns|iiop|corba)://"#.into(),
             ],
         },
         Signature {

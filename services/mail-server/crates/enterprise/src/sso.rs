@@ -61,7 +61,7 @@ impl SSOService {
                attribute_mapping=$12, enforce_sso=$13, session_duration_hours=$14, updated_at=$15
              RETURNING *"
         )
-        .bind(id).bind(req.tenant_id).bind(&req.provider_type).bind(enabled)
+           .bind(id).bind(&req.tenant_id).bind(&req.provider_type).bind(enabled)
         .bind(&req.domain).bind(&req.entity_id).bind(&req.sso_url).bind(&req.certificate)
         .bind(&req.oidc_client_id).bind(&req.oidc_client_secret).bind(&req.oidc_issuer)
         .bind(&req.attribute_mapping).bind(enforce).bind(session_hours).bind(now)
@@ -74,7 +74,7 @@ impl SSOService {
     }
 
 /// Get SSO configuration for a tenant
-    pub async fn get_configuration(&self, tenant_id: Uuid) -> Result<ApiResult<SSOConfiguration>, String> {
+    pub async fn get_configuration(&self, tenant_id: &str) -> Result<ApiResult<SSOConfiguration>, String> {
         let row = sqlx::query_as::<_, SSOConfiguration>(
             "SELECT * FROM ent_sso_configurations WHERE tenant_id = $1"
         )
@@ -144,7 +144,7 @@ impl SSOService {
     }
 
 /// Handle SAML callback — validate assertion and create session
-    pub async fn handle_saml_callback(&self, tenant_id: Uuid, email: &str, display_name: Option<&str>, external_user_id: &str, groups: Option<serde_json::Value>, attributes: Option<serde_json::Value>) -> Result<ApiResult<SSOCallbackResult>, String> {
+    pub async fn handle_saml_callback(&self, tenant_id: &str, email: &str, display_name: Option<&str>, external_user_id: &str, groups: Option<serde_json::Value>, attributes: Option<serde_json::Value>) -> Result<ApiResult<SSOCallbackResult>, String> {
         self.create_sso_session(tenant_id, "saml", email, display_name, external_user_id, groups, attributes).await
     }
 
@@ -237,7 +237,10 @@ impl SSOService {
                 return Ok(Some(OidcStateData {
                     code_verifier,
                     domain,
-                    tenant_id: parsed["tenant_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()),
+                    tenant_id: parsed["tenant_id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string()),
                 }));
             }
         }
@@ -259,13 +262,13 @@ impl SSOService {
     }
 
 /// Handle OIDC callback
-    pub async fn handle_oidc_callback(&self, tenant_id: Uuid, email: &str, display_name: Option<&str>, external_user_id: &str, groups: Option<serde_json::Value>) -> Result<ApiResult<SSOCallbackResult>, String> {
+    pub async fn handle_oidc_callback(&self, tenant_id: &str, email: &str, display_name: Option<&str>, external_user_id: &str, groups: Option<serde_json::Value>) -> Result<ApiResult<SSOCallbackResult>, String> {
         self.create_sso_session(tenant_id, "oidc", email, display_name, external_user_id, groups, None).await
     }
 
 /// Create or update SSO session
     async fn create_sso_session(
-        &self, tenant_id: Uuid, provider_type: &str, email: &str,
+        &self, tenant_id: &str, provider_type: &str, email: &str,
         display_name: Option<&str>, external_user_id: &str,
         groups: Option<serde_json::Value>, attributes: Option<serde_json::Value>,
     ) -> Result<ApiResult<SSOCallbackResult>, String> {
@@ -479,7 +482,7 @@ mod tests {
     #[test]
     fn test_sso_configure_request_serde() {
         let req = SSOConfigureRequest {
-            tenant_id: Uuid::new_v4(),
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
             provider_type: "saml".into(),
             domain: "example.com".into(),
             enabled: Some(true),

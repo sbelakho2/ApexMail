@@ -11,8 +11,6 @@ TOOLCHAIN_DIR="$PROJECT_ROOT/.toolchain"
 CHECKSUMS_FILE="$SCRIPT_DIR/checksums.sha256"
 
 # Version pins - update these for upgrades
-NODE_VERSION="20.11.0"
-PNPM_VERSION="8.14.0"
 RUST_VERSION="1.82.0"
 GO_VERSION="1.22.6"
 
@@ -78,53 +76,6 @@ verify_archive_integrity() {
   if ! tar -tzf "$archive_path" >/dev/null 2>&1; then
     error "Archive integrity check failed for $archive_path"
   fi
-}
-
-setup_node() {
-  local node_dir="$TOOLCHAIN_DIR/node"
-  local node_bin="$node_dir/bin/node"
-  
-  if [[ -x "$node_bin" ]] && "$node_bin" --version | grep -q "v$NODE_VERSION"; then
-    log "Node.js $NODE_VERSION already installed"
-    return
-  fi
-  
-  log "Installing Node.js $NODE_VERSION..."
-  rm -rf "$node_dir"
-  mkdir -p "$node_dir"
-  
-  local archive_name="node-v${NODE_VERSION}-${OS}-${ARCH}.tar.gz"
-  local download_url="https://nodejs.org/dist/v${NODE_VERSION}/${archive_name}"
-  local archive_path="$TOOLCHAIN_DIR/downloads/$archive_name"
-  
-  mkdir -p "$TOOLCHAIN_DIR/downloads"
-  
-  if [[ ! -f "$archive_path" ]]; then
-    download_with_retry "$download_url" "$archive_path"
-  fi
-
-  local expected_checksum
-  expected_checksum="$(require_checksum "node-${OS}-${ARCH}")"
-  verify_checksum "$archive_path" "$expected_checksum"
-  verify_archive_integrity "$archive_path"
-  
-  tar -xzf "$archive_path" -C "$node_dir" --strip-components=1
-  log "Node.js $NODE_VERSION installed to $node_dir"
-}
-
-setup_pnpm() {
-  local node_bin="$TOOLCHAIN_DIR/node/bin/node"
-  local pnpm_bin="$TOOLCHAIN_DIR/node/bin/pnpm"
-  
-  if [[ -x "$pnpm_bin" ]] && "$pnpm_bin" --version | grep -q "$PNPM_VERSION"; then
-    log "pnpm $PNPM_VERSION already installed"
-    return
-  fi
-  
-  log "Installing pnpm $PNPM_VERSION..."
-  export PATH="$TOOLCHAIN_DIR/node/bin:$PATH"
-  npm install -g "pnpm@$PNPM_VERSION"
-  log "pnpm $PNPM_VERSION installed"
 }
 
 setup_rust() {
@@ -206,8 +157,6 @@ export GOPATH="$TOOLCHAIN_DIR/gopath"
 mkdir -p "$GOPATH"
 
 echo "ApexMail toolchain activated"
-echo "  Node: $(node --version 2>/dev/null || echo 'not found')"
-echo "  pnpm: $(pnpm --version 2>/dev/null || echo 'not found')"
 echo "  Rust: $(rustc --version 2>/dev/null || echo 'not found')"
 echo "  Go:   $(go version 2>/dev/null || echo 'not found')"
 EOF
@@ -224,8 +173,6 @@ main() {
   
   mkdir -p "$TOOLCHAIN_DIR"
   
-  setup_node
-  setup_pnpm
   setup_rust
   setup_go
   create_env_script

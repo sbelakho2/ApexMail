@@ -1,6 +1,5 @@
 //! Forgot-password endpoint.
 //!
-//! Migrated from apps/web/src/app/api/auth/forgot-password/route.ts.
 //! Validates email, rate-limits by IP, then delegates to password reset logic.
 
 use super::helpers::{hash_token, html_escape};

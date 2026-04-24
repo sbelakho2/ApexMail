@@ -136,7 +136,7 @@ pub async fn generate_invoice_number(pool: &PgPool) -> Result<String, InvoiceErr
 
 /// Input for creating an invoice.
 pub struct CreateInvoiceInput {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub stripe_invoice_id: Option<String>,
     pub line_items: Vec<NewLineItem>,
     pub period_start: DateTime<Utc>,
@@ -161,7 +161,7 @@ pub async fn create_invoice(
     let addr: BillingAddrRow = sqlx::query_as(
         "SELECT country, vat_number FROM billing_addresses WHERE tenant_id = $1",
     )
-    .bind(input.tenant_id)
+    .bind(&input.tenant_id)
     .fetch_optional(pool)
     .await
     .map_err(InvoiceError::Db)?
@@ -214,7 +214,7 @@ pub async fn create_invoice(
         "#,
     )
     .bind(id)
-    .bind(input.tenant_id)
+    .bind(&input.tenant_id)
     .bind(&input.stripe_invoice_id)
     .bind(&invoice_number)
     .bind(&currency)
@@ -334,7 +334,7 @@ pub async fn generate_invoice_pdf(
 /// List invoices for a tenant with pagination.
 pub async fn list_invoices(
     pool: &PgPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Invoice>, InvoiceError> {
@@ -402,7 +402,7 @@ struct BillingAddrRow {
 #[derive(sqlx::FromRow)]
 struct InvoiceRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     stripe_invoice_id: Option<String>,
     invoice_number: String,
     status: String,
@@ -643,7 +643,7 @@ mod tests {
     fn invoice_row_status_mapping() {
         let row = InvoiceRow {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
             stripe_invoice_id: None,
             invoice_number: "2026-000001".into(),
             status: "paid".into(),

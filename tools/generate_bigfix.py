@@ -20,19 +20,6 @@ def scan_repo():
                 (re.compile(r'Mutex<'), 'Use of `Mutex` - consider `RwLock` for read-heavy workloads'),
             ]
         },
-        'TypeScript/JavaScript': {
-            'ext': ['.ts', '.tsx', '.js', '.jsx'],
-            'rules': [
-                (re.compile(r'console\.log\('), 'Leftover `console.log` - remove for production'),
-                (re.compile(r':\s*any\b'), 'Use of `any` type - reduces type safety'),
-                (re.compile(r'@ts-ignore'), 'Use of `@ts-ignore` - fix the underlying type error'),
-                (re.compile(r'eslint-disable'), 'Use of `eslint-disable` - fix the linting issue'),
-                (re.compile(r'\bvar\s+'), 'Use of `var` - use `let` or `const` instead'),
-                (re.compile(r'==\s'), 'Use of `==` - use `===` for strict equality'),
-                (re.compile(r'!=\s'), 'Use of `!=` - use `!==` for strict inequality'),
-                (re.compile(r'TODO|FIXME'), 'TODO or FIXME comment found'),
-            ]
-        },
         'Python': {
             'ext': ['.py'],
             'rules': [
@@ -50,7 +37,7 @@ def scan_repo():
     for root, _, files in os.walk('.'):
         if any(part.startswith('.') for part in root.split(os.sep)):
             continue
-        if 'node_modules' in root or 'target' in root or 'dist' in root or 'build' in root or '.venv' in root:
+        if 'target' in root or 'dist' in root or 'build' in root or '.venv' in root:
             continue
             
         if not any(root.startswith(f'./{d}') or root == f'./{d}' for d in directories_to_scan):

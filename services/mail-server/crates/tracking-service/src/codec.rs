@@ -1,8 +1,8 @@
 //! Tracking token codec:AES-128-GCM encrypt / decrypt with zeroized key material.
 //!
 //! BACKWARD COMPATIBILITY:This implementation is byte-for-byte compatible with
-//! the TypeScript `TrackingCodec` class. Existing tokens produced by the Node.js
-//! service can be decoded here without re-encoding.
+//! the legacy tracking codec. Existing tokens produced by earlier services
+//! can be decoded here without re-encoding.
 //!
 //! Binary payload format (inside the GCM envelope)://! v1 – version u8 + per-field u8 length prefix
 //! v2 – version u8 + per-field u16-BE length prefix
@@ -10,7 +10,7 @@
 //!
 //! Token wire format://! base64url(IV[12] || AuthTag[16] || ciphertext)
 //!
-//! Key derivation (must match TypeScript `deriveKeyHMAC`)://! encryption_key = HMAC-SHA256(master_secret, "encryption")[0..16]
+//! Key derivation://! encryption_key = HMAC-SHA256(master_secret, "encryption")[0..16]
 //! signature_key = HMAC-SHA256(master_secret, "signature")[0..32]
 
 use aes_gcm::{
@@ -85,8 +85,7 @@ pub struct TrackingCodec {
 #[allow(unused)]
 impl TrackingCodec {
 /// Build a codec from the master secret string.
-/// Derives two sub-keys with HMAC-SHA-256, matching the TypeScript
-/// `deriveKeyHMAC(secretKey, 'encryption', 16)` / `('signature', 32)`.
+/// Derives two sub-keys with HMAC-SHA-256.
     pub fn new(master_secret: &str) -> Self {
         let enc_key = derive_key_hmac(master_secret.as_bytes(), b"encryption", 16);
         let sig_key = derive_key_hmac(master_secret.as_bytes(), b"signature", 32);
@@ -309,7 +308,6 @@ impl TrackingCodec {
 
 // ── Key derivation ────────────────────────────────────────────────────────────
 
-/// `deriveKeyHMAC(secret, info, keyLength)` — matches TypeScript implementation.
 /// Returns HMAC-SHA-256(secret, info) truncated to `len` bytes.
 fn derive_key_hmac(secret: &[u8], info: &[u8], len: usize) -> Zeroizing<Vec<u8>> {
     type HmacSha256 = Hmac<Sha256>;

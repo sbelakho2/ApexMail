@@ -9,7 +9,7 @@
 //! ```rust,no_run
 //! use ato_protection::lockout_backend::{InMemoryLockoutBackend, LockoutBackend};
 //!
-//! let backend = InMemoryLockoutBackend::new;
+//! let backend = InMemoryLockoutBackend::new();
 //! backend.record_lockout("user123", 86400);
 //! let count = backend.recent_lockouts("user123", 86400);
 //! assert_eq!(count, 1);

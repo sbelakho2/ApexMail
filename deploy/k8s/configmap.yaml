@@ -30,6 +30,3 @@ data:
   trusted-proxies: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
   rate-limit-enabled: "true"
   rate-limit-max-per-minute: "1000"
-
-  # ── Web app ────────────────────────────────────────────────────────────────
-  web-base-url: "https://app.apexmail.ee"

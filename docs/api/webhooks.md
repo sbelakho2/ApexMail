@@ -205,67 +205,58 @@ X-ApexMail-Timestamp: 1705312200
 
 Verify the signature:
 
-```typescript
-import crypto from 'crypto';
+```python
+import hashlib
+import hmac
+import time
 
-function verifyWebhookSignature(
-  payload: string,
-  signature: string,
-  timestamp: string,
-  secret: string
-): boolean {
-  // Check timestamp is recent (within 5 minutes)
-  const timestampMs = parseInt(timestamp) * 1000;
-  if (Math.abs(Date.now() - timestampMs) > 5 * 60 * 1000) {
-    return false;
-  }
-  
-  // Compute expected signature
-  const signedPayload = `${timestamp}.${payload}`;
-  const expected = crypto
-    .createHmac('sha256', secret)
-    .update(signedPayload)
-    .digest('hex');
-  
-  // Constant-time comparison
-  const actual = signature.replace('sha256=', '');
-  return crypto.timingSafeEqual(
-    Buffer.from(expected),
-    Buffer.from(actual)
-  );
-}
+
+def verify_webhook_signature(
+    payload: str,
+    signature: str,
+    timestamp: str,
+    secret: str,
+) -> bool:
+    timestamp_ms = int(timestamp) * 1000
+    if abs((time.time() * 1000) - timestamp_ms) > 5 * 60 * 1000:
+        return False
+
+    signed_payload = f"{timestamp}.{payload}".encode()
+    expected = hmac.new(
+        secret.encode(),
+        signed_payload,
+        hashlib.sha256,
+    ).hexdigest()
+
+    actual = signature.replace("sha256=", "")
+    return hmac.compare_digest(expected, actual)
 ```
 
-### Example: Node.js
+### Example: Python
 
-```javascript
-import express from 'express';
+```python
+from flask import Flask, request
 
-const app = express();
+app = Flask(__name__)
 
-app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  const signature = req.headers['x-apexmail-signature'];
-  const timestamp = req.headers['x-apexmail-timestamp'];
-  const payload = req.body.toString();
-  
-  if (!verifyWebhookSignature(payload, signature, timestamp, WEBHOOK_SECRET)) {
-    return res.status(401).send('Invalid signature');
-  }
-  
-  const event = JSON.parse(payload);
-  
-  switch (event.event) {
-    case 'message.delivered':
-      handleDelivery(event.data);
-      break;
-    case 'message.bounced':
-      handleBounce(event.data);
-      break;
-    // ... handle other events
-  }
-  
-  res.status(200).send('OK');
-});
+
+@app.post('/webhook')
+def webhook():
+    signature = request.headers['X-ApexMail-Signature']
+    timestamp = request.headers['X-ApexMail-Timestamp']
+    payload = request.get_data(as_text=True)
+
+    if not verify_webhook_signature(payload, signature, timestamp, WEBHOOK_SECRET):
+        return 'Invalid signature', 401
+
+    event = request.get_json(force=True)
+
+    if event['event'] == 'message.delivered':
+        handle_delivery(event['data'])
+    elif event['event'] == 'message.bounced':
+        handle_bounce(event['data'])
+
+    return 'OK', 200
 ```
 
 ---
@@ -297,55 +288,53 @@ Failures occur when:
 
 Return `200 OK` immediately, then process asynchronously:
 
-```typescript
-app.post('/webhook', (req, res) => {
-  // Acknowledge immediately
-  res.status(200).send('OK');
-  
-  // Process asynchronously
-  queue.add('webhook', req.body);
-});
+```python
+@app.post('/webhook')
+def webhook():
+    queue.add('webhook', request.get_json(force=True))
+    return 'OK', 200
 ```
 
 ### 2. Handle Duplicates
 
 Webhooks may be delivered multiple times. Use `messageId` for deduplication:
 
-```typescript
-async function handleWebhook(event: WebhookEvent) {
-  const dedupeKey = `webhook:${event.event}:${event.data.messageId}`;
-  
-  // Use any key-value store or database for deduplication
-  const isNew = await cache.setIfAbsent(dedupeKey, '1', { ttlSeconds: 86400 });
-  if (!isNew) {
-    return; // Already processed
-  }
-  
-  await processEvent(event);
-}
+```python
+def handle_webhook(event: dict) -> None:
+    dedupe_key = f"webhook:{event['event']}:{event['data']['messageId']}"
+
+    is_new = cache.set_if_absent(dedupe_key, '1', ttl_seconds=86400)
+    if not is_new:
+        return
+
+    process_event(event)
 ```
 
 ### 3. Log Everything
 
-```typescript
-async function handleWebhook(event: WebhookEvent) {
-  logger.info('Webhook received', {
-    event: event.event,
-    messageId: event.data.messageId,
-    timestamp: event.timestamp,
-  });
-  
-  try {
-    await processEvent(event);
-    logger.info('Webhook processed', { messageId: event.data.messageId });
-  } catch (error) {
-    logger.error('Webhook processing failed', {
-      messageId: event.data.messageId,
-      error: error.message,
-    });
-    throw error;
-  }
-}
+```python
+def handle_webhook(event: dict) -> None:
+    logger.info(
+        'Webhook received',
+        extra={
+            'event': event['event'],
+            'messageId': event['data']['messageId'],
+            'timestamp': event['timestamp'],
+        },
+    )
+
+    try:
+        process_event(event)
+        logger.info('Webhook processed', extra={'messageId': event['data']['messageId']})
+    except Exception as error:
+        logger.error(
+            'Webhook processing failed',
+            extra={
+                'messageId': event['data']['messageId'],
+                'error': str(error),
+            },
+        )
+        raise
 ```
 
 ### 4. Use Multiple Endpoints

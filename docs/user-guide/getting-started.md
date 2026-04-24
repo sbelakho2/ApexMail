@@ -304,20 +304,18 @@ Receive real-time notifications for email events.
 
 Verify webhook authenticity:
 
-```javascript
-const crypto = require('crypto');
+```python
+import hashlib
+import hmac
 
-function verifyWebhook(payload, signature, secret) {
-  const expected = crypto
-    .createHmac('sha256', secret)
-    .update(payload)
-    .digest('hex');
-  
-  return crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(`sha256=${expected}`)
-  );
-}
+
+def verify_webhook(payload: bytes, signature: str, secret: str) -> bool:
+    expected = hmac.new(
+        secret.encode(),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, f"sha256={expected}")
 ```
 
 ---

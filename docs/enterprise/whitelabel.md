@@ -9,7 +9,7 @@ White-label features include:
 - **Custom Domain** - Use your own domain for the dashboard and APIs
 - **Complete UI Branding** - Custom colors, logos, and styling
 - **Branded Emails** - Customize all system emails with your branding
-- **Custom CSS/JavaScript** - Full control over the interface
+- **Custom CSS & Branding Assets** - Full control over the interface styling
 - **Removal of ApexMail References** - Complete brand anonymity
 
 ## Setup Process
@@ -152,7 +152,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/emails \
 | `{{user_name}}` | Recipient's name |
 | `{{action_url}}` | Primary action URL |
 
-## Custom CSS & JavaScript
+## Custom CSS & Branding Assets
 
 ### Custom CSS Injection
 
@@ -176,28 +176,6 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/custom-css \
     .powered-by {
       display: none;
     }
-  '
-```
-
-### Custom JavaScript
-
-```bash
-curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/custom-js \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -H "Content-Type: application/javascript" \
-  -d '
-    // Custom analytics tracking
-    window.addEventListener("load", function() {
-      analytics.track("Dashboard Viewed", {
-        whitelabel: true,
-        company: "YourMail Pro"
-      });
-    });
-    
-    // Custom intercom integration
-    window.intercomSettings = {
-      app_id: "your_intercom_id"
-    };
   '
 ```
 

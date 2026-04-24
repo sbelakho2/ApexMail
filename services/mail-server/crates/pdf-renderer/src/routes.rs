@@ -89,10 +89,11 @@ async fn health() -> impl IntoResponse {
 }
 
 /// Render a PDF and stream it as `application/pdf`.
-/// Request body:/// ```json
+/// Request body:
+/// ```json
 /// { "template":"invoice", "data":{ ... } }
 /// ```
-/// Response:raw PDF bytes with `Content-Type:application/pdf`
+/// Response: raw PDF bytes with `Content-Type: application/pdf`.
 async fn render_pdf_stream(Json(req): Json<RenderRequest>) -> Result<Response, PdfApiError> {
     info!(template = %req.template, "PDF render request (stream)");
 

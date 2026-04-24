@@ -201,8 +201,8 @@ RECOVERED_STRESS_TESTS = {
     ],
 
     "sdk_integration": [
-        {"q": "What's the Node.js SDK package name?",
-         "checks": {"must_contain_any": ["@apexmail/node", "npm", "pnpm"]}},
+        {"q": "What's the Python SDK package name?",
+         "checks": {"must_contain_any": ["apexmail", "pip", "PyPI"]}},
         {"q": "Does the Python SDK support async/await?",
          "checks": {"must_contain_any": ["yes", "async", "await", "asyncio"]}},
         {"q": "What's the minimum Python version for the SDK?",

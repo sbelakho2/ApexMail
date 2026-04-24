@@ -48,7 +48,7 @@ apx-<role>-<index>
 - Base image: Ubuntu 24.04 LTS ARM64.
 - Post-provision configuration is applied via shell scripts (no Ansible/Terraform — kept simple for single-team operation).
 - Backend services run the Rust mail-server binary.
-- Frontend services run Node.js 22 LTS (installed via `fnm`) for Next.js apps.
+- Browser surfaces are served by the Rust `api-server` via SSR.
 
 ---
 
@@ -133,7 +133,7 @@ The **Robot API** is used exclusively for hardware-level fencing during PostgreS
 ### Updates
 
 - OS security patches are applied weekly (automated via `unattended-upgrades`, reboot window: Sunday 04:00 UTC).
-- Node.js and application updates are deployed manually via the deploy script.
+- Application updates are deployed manually via the deploy script.
 
 ### Monitoring
 

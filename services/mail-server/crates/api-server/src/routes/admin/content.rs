@@ -1,6 +1,5 @@
 //! Content management endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/content/route.ts
 
 use axum::extract::{Query, State};
 use axum::routing::get;

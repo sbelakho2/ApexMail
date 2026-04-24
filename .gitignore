@@ -1,13 +1,7 @@
-# ─── Node / JS ────────────────────────────────────────────────────────────────
-node_modules/
-**/node_modules/
-
-# Compiled native addons (napi-rs / node-gyp outputs)
+# Compiled native addons (napi-rs / native build outputs)
 *.node
 
 # ─── Build & cache outputs ────────────────────────────────────────────────────
-.next/
-**/.next/
 out/
 **/out/
 dist/
@@ -31,6 +25,7 @@ venv/
 .env_python/
 __pycache__/
 **/__pycache__/
+apps/marketing-zola/tailwindcss-*
 *.pyc
 *.pyo
 *.pyd
@@ -52,14 +47,9 @@ playwright-report/
 **/playwright-report/
 test-results/
 **/test-results/
-apps/testing/reports/
 
 # ─── Logs ─────────────────────────────────────────────────────────────────────
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
 lerna-debug.log*
 
 # ─── Env / secrets ────────────────────────────────────────────────────────────
@@ -89,6 +79,7 @@ vast_instance_id.txt
 # ─── AI / ML model artefacts (large binaries — use external storage / LFS) ────
 apps/ai/training/onnx_model/
 apps/ai/training/output/
+apps/ai/training/output_agent/
 apps/ai/training/output-merged/
 apps/ai/training/gguf_model/
 apps/ai/training/checkpoints/

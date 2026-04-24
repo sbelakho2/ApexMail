@@ -4,7 +4,7 @@
 
 Accepted
 
-> **Implementation Note (2026-02):** Backend services now use Rust. Testing is split: TypeScript tests (Vitest/Playwright) for Next.js apps, `cargo test` for Rust crates. Integration tests are in `services/mail-server/crates/integration-tests/`.
+> **Implementation Note (2026-04):** Backend services and browser surfaces are now Rust-owned. The active test stack is `cargo test` for Rust crates, Playwright for browser validation of Rust-served surfaces, and targeted load and chaos checks under `tools/`.
 
 ## Date
 
@@ -34,20 +34,8 @@ We adopt a **multi-layered testing pyramid** with the following structure:
 
 **Tools**: Vitest
 
-```typescript
-// Example: Email validation unit test
-describe('EmailValidator', () => {
-  it('should reject invalid email formats', () => {
-    expect(validateEmail('invalid')).toBe(false);
-    expect(validateEmail('test@')).toBe(false);
-    expect(validateEmail('@domain.com')).toBe(false);
-  });
-
-  it('should accept valid email formats', () => {
-    expect(validateEmail('user@domain.com')).toBe(true);
-    expect(validateEmail('user+tag@sub.domain.co')).toBe(true);
-  });
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 **Coverage Requirements**:
@@ -59,95 +47,32 @@ describe('EmailValidator', () => {
 
 **Tools**: Vitest + Testcontainers
 
-```typescript
-// Example: Database integration test
-describe('EmailRepository', () => {
-  let container: PostgreSqlContainer;
-  let db: Database;
-
-  beforeAll(async () => {
-    container = await new PostgreSqlContainer().start();
-    db = await createConnection(container.getConnectionUri());
-  });
-
-  afterAll(async () => {
-    await container.stop();
-  });
-
-  it('should persist and retrieve emails', async () => {
-    const email = await repo.create({ to: 'test@example.com', subject: 'Test' });
-    const retrieved = await repo.findById(email.id);
-    expect(retrieved).toMatchObject(email);
-  });
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Layer 3: End-to-End Tests (10% of tests)
 
 **Tools**: Playwright
 
-```typescript
-// Example: Email sending E2E test
-test('send email flow', async ({ page }) => {
-  await page.goto('/dashboard');
-  await page.click('text=Send Email');
-  await page.fill('[name=to]', 'recipient@example.com');
-  await page.fill('[name=subject]', 'Test Email');
-  await page.fill('[name=body]', 'Hello World');
-  await page.click('text=Send');
-  await expect(page.locator('.toast')).toContainText('Email sent');
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Layer 4: Performance Tests
 
 **Tools**: k6
 
-```javascript
-// Example: API load test
-import http from 'k6/http';
-import { check, sleep } from 'k6';
-
-export const options = {
-  stages: [
-    { duration: '1m', target: 100 },
-    { duration: '5m', target: 100 },
-    { duration: '1m', target: 0 },
-  ],
-  thresholds: {
-    http_req_duration: ['p(95)<200'],
-    http_req_failed: ['rate<0.01'],
-  },
-};
-
-export default function () {
-  const response = http.post('http://localhost:3000/api/emails', {
-    to: 'test@example.com',
-    subject: 'Load Test',
-    text: 'Testing throughput',
-  });
-  check(response, {
-    'status is 200': (r) => r.status === 200,
-  });
-  sleep(0.1);
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Layer 5: Chaos Tests
 
 **Tools**: Custom chaos testing framework (tools/chaos/)
 
-```typescript
-// Example: Network partition simulation
-describe('MTA Resilience', () => {
-  it('should queue emails during database outage', async () => {
-    await chaos.simulateFailure('postgres', { duration: '30s' });
-    const result = await api.sendEmail({ to: 'test@example.com', subject: 'Test' });
-    expect(result.status).toBe('queued');
-    await chaos.restoreService('postgres');
-    await waitFor(() => api.getEmail(result.id).status === 'delivered');
-  });
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Test Data Management
@@ -165,11 +90,11 @@ test:
   runs-on: ubuntu-latest
   steps:
     - uses: actions/checkout@v4
-    - run: pnpm install
-    - run: pnpm test:unit
-    - run: pnpm test:integration
-    - run: pnpm test:e2e
-    - run: pnpm test:coverage
+    - run: cargo test --manifest-path services/mail-server/Cargo.toml
+    - run: cargo test --manifest-path services/mail-server/Cargo.toml -p integration-tests --tests
+    - run: cargo test --manifest-path services/mail-server/Cargo.toml -p ui-foundation --no-run
+    - run: playwright test
+    - run: k6 run tools/load/mail-api.js
     - uses: codecov/codecov-action@v3
 ```
 

@@ -269,22 +269,6 @@ expect('templates.render() POST /v1/templates/{id}/render',
 expect('templates.render() body has data', $client->calls[0]['body']['data']['name'] === 'Alice');
 expect('templates.render() returns html', $resp['html'] === '<p>Hello Alice</p>');
 
-$client = new MockClient();
-$client->queueResponse(['valid' => true, 'errors' => []]);
-$resp = $client->templates->validateReactEmail('export default () => <h1>Hi</h1>');
-expect('templates.validateReactEmail() POST .../react-email/validate',
-    $client->calls[0]['method'] === 'POST' && str_contains($client->calls[0]['path'], 'react-email/validate'));
-expect('templates.validateReactEmail() body has source', $client->calls[0]['body']['source'] === 'export default () => <h1>Hi</h1>');
-expect('templates.validateReactEmail() returns valid', $resp['valid'] === true);
-
-$client = new MockClient();
-$client->queueResponse(['source' => 'import { Html } from ...', 'name' => 'MyEmail']);
-$resp = $client->templates->reactEmailStarter('MyEmail');
-expect('templates.reactEmailStarter() GET .../react-email/starter',
-    $client->calls[0]['method'] === 'GET' && str_contains($client->calls[0]['path'], 'react-email/starter'));
-expect('templates.reactEmailStarter() has name param', str_contains($client->calls[0]['path'], 'name=MyEmail'));
-expect('templates.reactEmailStarter() returns source', isset($resp['source']));
-
 // ── Suppression resource tests ────────────────────────────────────────────
 
 echo "\nSuppressions\n";

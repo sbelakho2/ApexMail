@@ -92,39 +92,4 @@ spec:
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 300
-{{- end }}---
-{{- if and .Values.web.enabled .Values.web.autoscaling.enabled }}
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: {{ include "apexmail.fullname" . }}-web
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "apexmail.labels" . | nindent 4 }}
-    {{- include "apexmail.selectorLabels" (dict "name" "web" "context" .) | nindent 4 }}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: {{ include "apexmail.fullname" . }}-web
-  minReplicas: {{ .Values.web.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.web.autoscaling.maxReplicas }}
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: {{ .Values.web.autoscaling.targetCPUUtilizationPercentage }}
-    {{- if .Values.web.autoscaling.targetMemoryUtilizationPercentage }}
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: {{ .Values.web.autoscaling.targetMemoryUtilizationPercentage }}
-    {{- end }}
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
 {{- end }}

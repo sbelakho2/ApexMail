@@ -425,7 +425,7 @@ async fn queue_unsub_webhook(
     email: &str,
     method: &str,
 ) -> anyhow::Result<()> {
-// Cache webhook IDs per tenant (1-minute TTL, like TypeScript)
+// Cache webhook IDs per tenant (1-minute TTL).
     let webhook_ids = if let Some(ids) = state.webhook_cache.get(tenant_id).await {
         ids
     } else {

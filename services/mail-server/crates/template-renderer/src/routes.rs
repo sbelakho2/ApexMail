@@ -220,7 +220,7 @@ mod tests {
     async fn test_router_creation() {
 // Just verifies router builds without panic
         let config = test_config();
-        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap;
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
         let state = Arc::new(AppState {
             db: pool,
             sandbox: Sandbox::new(config.sandbox.clone()),

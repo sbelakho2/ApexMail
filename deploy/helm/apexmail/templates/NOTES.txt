@@ -23,9 +23,6 @@ Services:
 {{- if .Values.enterprise.enabled }}
   ✓ Enterprise          {{ include "apexmail.fullname" . }}-enterprise:{{ .Values.enterprise.service.port }}
 {{- end }}
-{{- if .Values.web.enabled }}
-  ✓ Web Dashboard       {{ include "apexmail.fullname" . }}-web:80
-{{- end }}
 
 {{- if .Values.ingress.enabled }}
 ────────────────────────────────────────────────────────────────────

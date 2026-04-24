@@ -1,6 +1,6 @@
 //! SDK registry — list SDKs, get install commands, validate versions.
 //!
-//! Mirrors the TypeScript `SdkGeneratorService` (read-only registry portion).
+//! Provides the read-only SDK registry used by the DevEx service.
 
 use crate::types::{DevExError, SdkInfo, SdkLanguage};
 
@@ -38,15 +38,6 @@ impl SdkManager {
                 install_command:
                     "<dependency>\n  <groupId>ee.apexmail</groupId>\n  <artifactId>apexmail-java</artifactId>\n  <version>1.3.0</version>\n</dependency>".into(),
                 min_runtime_version: "17".into(),
-            },
-            SdkInfo {
-                language: SdkLanguage::Node,
-                package_name: "@apexmail/sdk".into(),
-                latest_version: "2.1.0".into(),
-                api_version: "2024-01".into(),
-                repository_url: "https://github.com/apexmail/apexmail-node".into(),
-                install_command: "npm install @apexmail/sdk".into(),
-                min_runtime_version: "18.0.0".into(),
             },
             SdkInfo {
                 language: SdkLanguage::Php,
@@ -140,7 +131,7 @@ mod tests {
     fn test_list_sdks_has_all_languages() {
         let mgr = SdkManager::new();
         let sdks = mgr.list_sdks();
-        assert_eq!(sdks.len(), 6);
+        assert_eq!(sdks.len(), 5);
         let langs: Vec<SdkLanguage> = sdks.iter().map(|s| s.language).collect();
         assert!(langs.contains(&SdkLanguage::Go));
         assert!(langs.contains(&SdkLanguage::Python));
@@ -150,9 +141,9 @@ mod tests {
     #[test]
     fn test_get_sdk_info() {
         let mgr = SdkManager::new();
-        let info = mgr.get_sdk_info(SdkLanguage::Node).unwrap();
-        assert_eq!(info.package_name, "@apexmail/sdk");
-        assert_eq!(info.min_runtime_version, "18.0.0");
+        let info = mgr.get_sdk_info(SdkLanguage::Python).unwrap();
+        assert_eq!(info.package_name, "apexmail");
+        assert_eq!(info.min_runtime_version, "3.9");
     }
 
     #[test]

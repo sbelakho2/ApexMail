@@ -1,6 +1,5 @@
 //! IP warmup schedule management endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/warmup/route.ts
 
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;

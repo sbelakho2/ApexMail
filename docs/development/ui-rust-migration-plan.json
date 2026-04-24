@@ -17,7 +17,7 @@
   "replacementStrategies": {
     "next": "axum-plus-leptos-router",
     "react": "remove-from-browser-ui-paths",
-    "reactDom": "remove-from-browser-ui-paths",
+    "browserDomHydration": "remove-from-browser-ui-paths",
     "radix": "replace-with-rust-native-primitives",
     "zustand": "replace-with-leptos-signals",
     "swr": "replace-with-leptos-resources",

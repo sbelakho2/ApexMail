@@ -1,6 +1,5 @@
 //! Feature flag management endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/features/route.ts
 
 use axum::extract::State;
 use axum::http::StatusCode;

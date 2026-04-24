@@ -46,7 +46,7 @@ mod devex {
     }
 
     #[tokio::test]
-    async fn sdks_returns_six_entries() {
+    async fn sdks_returns_five_entries() {
         let resp = app()
             .oneshot(
                 Request::get("/sdks")
@@ -58,7 +58,7 @@ mod devex {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["sdks"].as_array().unwrap().len(), 6);
+        assert_eq!(json["sdks"].as_array().unwrap().len(), 5);
     }
 
     #[tokio::test]

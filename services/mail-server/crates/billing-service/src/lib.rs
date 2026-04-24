@@ -2,10 +2,6 @@
 //!
 //! Handles usage metering, plan management, quota enforcement, invoice record
 //! keeping, rate-limit tier management and billing event processing.
-//!
-//! Stripe webhook handling and direct Stripe API calls remain in the TypeScript
-//! billing app (`apps/billing`). This crate owns the business logic and
-//! database layer.
 
 pub mod config;
 /// **DEPRECATED** — Dedicated IP provisioning now lives in `api-server::ip_provider`.
@@ -13,8 +9,10 @@ pub mod config;
 /// use `api_server::ip_provider::DedicatedIpProvider`.
 pub mod hetzner_ip_provider;
 pub mod invoices;
+pub mod maintenance;
 pub mod plans;
 pub mod routes;
+mod stripe_webhooks;
 pub mod subscriptions;
 pub mod types;
 pub mod usage;

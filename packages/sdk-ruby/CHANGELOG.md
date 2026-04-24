@@ -13,7 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - `client.emails` resource — `send_email`, `batch`, `get`, `list`.
 - `client.domains` resource — `create`, `list`, `get`, `verify`, `delete`, `health`.
 - `client.webhooks` resource — `create`, `list`, `get`, `update`, `delete`.
-- `client.templates` resource — `create`, `list`, `get`, `get_by_slug`, `update`, `delete`, `render`, `validate_react_email`, `react_email_starter`.
+- `client.templates` resource — `create`, `list`, `get`, `get_by_slug`, `update`, `delete`, `render`.
 - `client.suppressions` resource — `add`, `list`, `check`, `delete`.
 - `client.events` resource — `list`, `get_by_message`, `get`.
 - `client.analytics` resource — `get` with date range, grouping, and tag filters.

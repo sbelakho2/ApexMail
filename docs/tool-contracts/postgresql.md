@@ -75,7 +75,7 @@ CREATE POLICY tenant_isolation ON emails
 4. Destructive operations (drop column, drop table) require a **two-phase migration**:
    - Phase 1: stop writing to the column, deploy.
    - Phase 2 (next release): drop the column.
-5. Migrations run via `tools/migrate/index.ts` which wraps each file in a transaction (unless `-- no-transaction` pragma is present, required for `CREATE INDEX CONCURRENTLY`).
+5. Migrations run via the repository migration runner, which wraps each file in a transaction (unless `-- no-transaction` pragma is present, required for `CREATE INDEX CONCURRENTLY`).
 6. Migration lock: an advisory lock (`pg_advisory_lock(42)`) prevents concurrent migration runs.
 
 ### Schema Conventions
@@ -133,7 +133,7 @@ JSONB is permitted for **semi-structured metadata only**. Do NOT store data that
 ### Querying
 
 - Use `jsonb_path_query` or `->>` operator for reads.
-- Always validate shape at the application layer (Zod schema) before INSERT.
+- Always validate shape at the application layer before INSERT.
 - Index specific paths with expression indexes when needed: `CREATE INDEX idx_contacts_custom_company ON contacts ((custom_fields->>'company'))`.
 
 ---

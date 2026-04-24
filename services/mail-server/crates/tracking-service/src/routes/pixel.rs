@@ -22,7 +22,7 @@ use crate::routes::{extract_client_ip, TRANSPARENT_GIF};
 use crate::state::AppState;
 
 /// Pre-built response headers for the pixel — computed once; cloned per request.
-/// Matching TypeScript `PIXEL_HEADERS`.
+/// Shared pixel response headers.
 fn pixel_response() -> Response {
     let len = TRANSPARENT_GIF.len().to_string();
     axum::http::Response::builder()

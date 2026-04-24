@@ -14,7 +14,6 @@ This guide applies to:
 
 - Rust `web` surface served by `services/mail-server/crates/api-server`
 - Rust `control-plane` surface served by `services/mail-server/crates/api-server`
-- `apps/marketing`
 - `apps/marketing-zola` (must follow the same token and interaction contracts)
 
 ## Companion Specs
@@ -34,16 +33,16 @@ This guide applies to:
 
 ### Canonical Token Source
 
-- `apps/testing/fixtures/rust-ui/assets/globals.css`
+- `services/mail-server/crates/ui-foundation/assets/globals.css`
 - runtime delivery via `services/mail-server/crates/ui-foundation/src/lib.rs` and `services/mail-server/crates/api-server/src/app.rs`
 
 The shared Rust UI stylesheet defines canonical CSS custom properties for color, spacing, radii, and semantic states.
 
-### Tailwind Token Mapping
+### Marketing Token Mapping
 
-- `apps/marketing/tailwind.config.ts`
+- `apps/marketing-zola/static/css/styles.css`
 
-Rust-served browser surfaces consume the shared stylesheet directly; remaining Tailwind configs must map utilities to CSS variables via `rgb(var(--token) / <alpha-value>)`.
+Rust-served browser surfaces consume the shared stylesheet directly; static marketing CSS should continue to mirror the shared token values where parity matters.
 
 ### Token Snapshots
 
@@ -83,7 +82,7 @@ Every Apex surface should rely on these families:
 
 - Unscoped shadow literals in feature code for shared components.
 - New ad-hoc semantic aliases not declared in canonical token source.
-- Direct icon library imports in app source (`lucide-react`) instead of local icon modules.
+- Direct third-party icon imports in app source instead of local icon modules.
 
 ## Apex Visual Language
 
@@ -148,14 +147,14 @@ Every Apex surface should rely on these families:
 ### Canonical Icon Modules
 
 - `services/mail-server/crates/ui-foundation/src/icons.rs`
-- `apps/marketing/src/components/ui/icons.tsx`
+- `apps/marketing-zola/templates/partials/` (inline SVG partials and generated fragments)
 
 ### Icon Rules
 
-1. Import icons from the owning surface module only.
-2. Keep stable export aliases aligned with UI usage (`LogOut`, `Loader2`, `BarChart3`, etc.).
-3. Add glyph → export in the icon module before use in feature code.
-4. Do not import from `lucide-react` in app source.
+1. Use icons from the owning surface's canonical source only.
+2. Keep stable icon names or partial responsibilities aligned with UI usage.
+3. Add a glyph to the shared Rust icon module or the relevant Zola partial before using it in feature templates.
+4. Do not introduce third-party icon imports into browser-surface code.
 
 ### Example
 
@@ -190,7 +189,7 @@ use ui_foundation::icons;
 When updating Apex style:
 
 1. No new hard-coded color literals for shared UI components.
-2. No `lucide-react` imports in app source.
+2. No third-party icon imports in app source.
 3. Light and dark readability verified for changed views.
 4. Relevant visual tests re-run.
 5. Docs updated when tokens, icon exports, or component standards changed.

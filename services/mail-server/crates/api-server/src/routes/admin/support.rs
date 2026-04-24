@@ -1,6 +1,5 @@
 //! Support ticket management endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/support/route.ts (252 lines)
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;

@@ -381,61 +381,61 @@ Service temporarily unavailable.
 
 ### Retry Strategy
 
-```typescript
-async function apiRequestWithRetry<T>(
-  fn: () => Promise<T>,
-  maxRetries = 3,
-  baseDelay = 1000
-): Promise<T> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (!isRetryable(error) || attempt === maxRetries) {
-        throw error;
-      }
-      
-      const delay = baseDelay * Math.pow(2, attempt);
-      await sleep(delay + Math.random() * 1000);
-    }
-  }
-  throw new Error('Max retries exceeded');
-}
+```python
+import random
+import time
 
-function isRetryable(error: ApiError): boolean {
-  const retryableCodes = [
-    'RATE_LIMIT_EXCEEDED',
-    'SERVICE_UNAVAILABLE',
-    'INTERNAL_ERROR',
-  ];
-  return retryableCodes.includes(error.code);
-}
+
+def api_request_with_retry(fn, max_retries=3, base_delay=1.0):
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except ApiError as error:
+            if not is_retryable(error) or attempt == max_retries:
+                raise
+
+            delay = base_delay * (2 ** attempt)
+            time.sleep(delay + random.random())
+
+
+def is_retryable(error) -> bool:
+    retryable_codes = {
+        'RATE_LIMIT_EXCEEDED',
+        'SERVICE_UNAVAILABLE',
+        'INTERNAL_ERROR',
+    }
+    return error.code in retryable_codes
 ```
 
 ### Error Logging
 
-```typescript
-function logApiError(error: ApiError): void {
-  console.error({
-    code: error.code,
-    message: error.message,
-    requestId: error.requestId,
-    details: error.details,
-    timestamp: new Date().toISOString(),
-  });
-}
+```python
+from datetime import datetime, timezone
+
+
+def log_api_error(error) -> None:
+    logger.error(
+        'api_error',
+        extra={
+            'code': error.code,
+            'message': error.message,
+            'requestId': error.request_id,
+            'details': error.details,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        },
+    )
 ```
 
 ### User-Friendly Messages
 
-```typescript
-const userMessages: Record<string, string> = {
-  'VALIDATION_ERROR': 'Please check your request parameters.',
-  'DOMAIN_NOT_VERIFIED': 'Please verify your sending domain first.',
-  'RATE_LIMIT_EXCEEDED': 'Too many requests. Please try again in a moment.',
-};
-
-function getUserMessage(code: string): string {
-  return userMessages[code] ?? 'An error occurred. Please try again.';
+```python
+USER_MESSAGES = {
+    'VALIDATION_ERROR': 'Please check your request parameters.',
+    'DOMAIN_NOT_VERIFIED': 'Please verify your sending domain first.',
+    'RATE_LIMIT_EXCEEDED': 'Too many requests. Please try again in a moment.',
 }
+
+
+def get_user_message(code: str) -> str:
+    return USER_MESSAGES.get(code, 'An error occurred. Please try again.')
 ```

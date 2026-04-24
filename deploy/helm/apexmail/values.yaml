@@ -159,38 +159,6 @@ enterprise:
   env: {}
   envFrom: []
 
-# ── Web Frontend ─────────────────────────────────────────────────────────────
-
-web:
-  enabled: true
-  replicaCount: 2
-  image:
-    repository: web
-    tag: ""
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-  port: 3000
-  service:
-    type: ClusterIP
-    port: 3000
-  securityContext:
-    runAsUser: 1001
-    runAsGroup: 1001
-    fsGroup: 1001
-  autoscaling:
-    enabled: true
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 70
-    targetMemoryUtilizationPercentage: 80
-  podDisruptionBudget:
-    minAvailable: 1
-
 # ── Ingress ──────────────────────────────────────────────────────────────────
 
 ingress:
@@ -204,6 +172,9 @@ ingress:
   hosts:
     - host: mail.example.com
       paths:
+        - path: /api/enterprise
+          pathType: Prefix
+          service: enterprise
         - path: /v1
           pathType: Prefix
           service: api-server
@@ -212,7 +183,7 @@ ingress:
           service: tracking-service
         - path: /
           pathType: Prefix
-          service: web
+          service: api-server
   tls:
     - secretName: apexmail-tls
       hosts:

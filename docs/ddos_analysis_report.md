@@ -19,7 +19,7 @@ The DDoS protection system implemented in the `ApexMail` project (`crates/ddos-p
 *   **Advanced Bot Detection:** Analyzes session behavior for mechanical traits, such as inter-arrival time regularity, periodicity, and sequence entropy, effectively identifying sophisticated bots that rotate IPs.
 *   **SMTP-Specific Protections:** Implements a strict SMTP state machine, Slowloris detection (minimum data rate enforcement), and "Tarpitting" (introducing artificial delays to frustrate attackers and consume their resources).
 *   **Distributed Coordination:** Utilizes Redis Streams and CRDTs to share threat intelligence across different geographical regions, ensuring an attack on one node quickly immunizes the entire cluster.
-*   **Progressive Challenges:** Offers a tiered challenge system (Cookie -> JavaScript execution -> Proof-of-Work -> CAPTCHA) to verify legitimate users without immediately blocking suspicious traffic.
+*   **Progressive Challenges:** Offers a tiered challenge system (Cookie -> browser computation -> Proof-of-Work -> CAPTCHA) to verify legitimate users without immediately blocking suspicious traffic.
 
 ## 2. Real-Life Usefulness
 

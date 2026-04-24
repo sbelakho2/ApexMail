@@ -44,6 +44,117 @@ pub struct WhiteLabelService {
     db: PgPool,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct WhiteLabelConfigDbRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    company_name: Option<String>,
+    logo_url: Option<String>,
+    primary_color: Option<String>,
+    secondary_color: Option<String>,
+    accent_color: Option<String>,
+    font_family: Option<String>,
+    custom_css: Option<String>,
+    favicon_url: Option<String>,
+    footer_text: Option<String>,
+    support_email: Option<String>,
+    support_url: Option<String>,
+    privacy_url: Option<String>,
+    terms_url: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<WhiteLabelConfigDbRow> for WhiteLabelConfigRow {
+    fn from(row: WhiteLabelConfigDbRow) -> Self {
+        Self {
+            id: row.id,
+            tenant_id: row.tenant_id.to_string(),
+            company_name: row.company_name,
+            logo_url: row.logo_url,
+            primary_color: row.primary_color,
+            secondary_color: row.secondary_color,
+            accent_color: row.accent_color,
+            font_family: row.font_family,
+            custom_css: row.custom_css,
+            favicon_url: row.favicon_url,
+            footer_text: row.footer_text,
+            support_email: row.support_email,
+            support_url: row.support_url,
+            privacy_url: row.privacy_url,
+            terms_url: row.terms_url,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct WhiteLabelDomainDbRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    domain: String,
+    domain_type: String,
+    verification_status: String,
+    verification_token: Option<String>,
+    dns_records: Option<serde_json::Value>,
+    verified_at: Option<chrono::DateTime<chrono::Utc>>,
+    ssl_status: Option<String>,
+    ssl_certificate_id: Option<String>,
+    ssl_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<WhiteLabelDomainDbRow> for WhiteLabelDomain {
+    fn from(row: WhiteLabelDomainDbRow) -> Self {
+        Self {
+            id: row.id,
+            tenant_id: row.tenant_id.to_string(),
+            domain: row.domain,
+            domain_type: row.domain_type,
+            verification_status: row.verification_status,
+            verification_token: row.verification_token,
+            dns_records: row.dns_records,
+            verified_at: row.verified_at,
+            ssl_status: row.ssl_status,
+            ssl_certificate_id: row.ssl_certificate_id,
+            ssl_expires_at: row.ssl_expires_at,
+            created_at: row.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct WhiteLabelEmailTemplateDbRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    template_type: String,
+    subject_template: Option<String>,
+    html_template: Option<String>,
+    text_template: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<WhiteLabelEmailTemplateDbRow> for WhiteLabelEmailTemplate {
+    fn from(row: WhiteLabelEmailTemplateDbRow) -> Self {
+        Self {
+            id: row.id,
+            tenant_id: row.tenant_id.to_string(),
+            template_type: row.template_type,
+            subject_template: row.subject_template,
+            html_template: row.html_template,
+            text_template: row.text_template,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
+}
+
 impl WhiteLabelService {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -52,18 +163,19 @@ impl WhiteLabelService {
 /// Update (upsert) white-label configuration
 /// #254:Now sanitizes custom_css to prevent XSS
     pub async fn update_config(
-        &self, tenant_id: Uuid, company_name: Option<&str>,
+        &self, tenant_id: String, company_name: Option<&str>,
         logo_url: Option<&str>, favicon_url: Option<&str>,
         primary_color: Option<&str>, secondary_color: Option<&str>,
         custom_css: Option<&str>, footer_text: Option<&str>,
         support_email: Option<&str>, support_url: Option<&str>,
     ) -> Result<ApiResult<WhiteLabelConfigRow>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
 // #254:Sanitize custom_css to prevent stored XSS
         let sanitized_css = custom_css.map(sanitize_css);
         let css_ref = sanitized_css.as_deref();
         
         let id = Uuid::new_v4();
-        let row = sqlx::query_as::<_, WhiteLabelConfigRow>(
+        let row = sqlx::query_as::<_, WhiteLabelConfigDbRow>(
             "INSERT INTO ent_whitelabel_config (id, tenant_id, company_name, logo_url, favicon_url, primary_color, secondary_color, custom_css, footer_text, support_email, support_url, created_at, updated_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
              ON CONFLICT (tenant_id) DO UPDATE SET
@@ -79,7 +191,7 @@ impl WhiteLabelService {
              updated_at = NOW()
              RETURNING *"
         )
-        .bind(id).bind(tenant_id)
+           .bind(id).bind(tenant_uuid)
         .bind(company_name).bind(logo_url).bind(favicon_url)
         .bind(primary_color).bind(secondary_color)
         .bind(css_ref).bind(footer_text)
@@ -89,51 +201,53 @@ impl WhiteLabelService {
         .map_err(|e| format!("Upsert whitelabel config: {e}"))?;
 
         info!(tenant_id = %tenant_id, "White-label config updated");
-        Ok(ApiResult::ok(row))
+        Ok(ApiResult::ok(row.into()))
     }
 
 /// Get white-label configuration
-    pub async fn get_config(&self, tenant_id: Uuid) -> Result<ApiResult<WhiteLabelConfigRow>, String> {
-        let row = sqlx::query_as::<_, WhiteLabelConfigRow>(
+    pub async fn get_config(&self, tenant_id: String) -> Result<ApiResult<WhiteLabelConfigRow>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
+        let row = sqlx::query_as::<_, WhiteLabelConfigDbRow>(
             "SELECT * FROM ent_whitelabel_config WHERE tenant_id = $1"
         )
-        .bind(tenant_id)
+        .bind(tenant_uuid)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Get whitelabel config: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("White-label config not found", "NOT_FOUND")),
         }
     }
 
 /// Add a custom domain for white-labeling
     pub async fn add_domain(
-        &self, tenant_id: Uuid, domain: &str, domain_type: &str,
+        &self, tenant_id: String, domain: &str, domain_type: &str,
     ) -> Result<ApiResult<WhiteLabelDomain>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let dns_records = generate_dns_records(domain, domain_type);
         let dns_json = serde_json::to_value(&dns_records)
             .map_err(|e| format!("Serialize DNS records: {e}"))?;
 
-        let row = sqlx::query_as::<_, WhiteLabelDomain>(
+        let row = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
             "INSERT INTO ent_whitelabel_domains (id, tenant_id, domain, domain_type, verification_status, dns_records, created_at)
              VALUES ($1,$2,$3,$4,'pending',$5,NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_id).bind(domain).bind(domain_type).bind(&dns_json)
+        .bind(id).bind(tenant_uuid).bind(domain).bind(domain_type).bind(&dns_json)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Add domain: {e}"))?;
 
         info!(tenant_id = %tenant_id, domain = domain, "White-label domain added");
-        Ok(ApiResult::ok(row))
+        Ok(ApiResult::ok(row.into()))
     }
 
 /// Verify a domain (check DNS records)
     pub async fn verify_domain(&self, id: Uuid) -> Result<ApiResult<WhiteLabelDomain>, String> {
-        let domain_row = sqlx::query_as::<_, WhiteLabelDomain>(
+        let domain_row = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
             "SELECT * FROM ent_whitelabel_domains WHERE id = $1"
         )
         .bind(id)
@@ -150,7 +264,7 @@ impl WhiteLabelService {
         let verified = check_dns_records(&domain.domain).await;
         let status = if verified { "verified" } else { "failed" };
 
-        let updated = sqlx::query_as::<_, WhiteLabelDomain>(
+        let updated = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
             "UPDATE ent_whitelabel_domains SET verification_status = $2, verified_at = CASE WHEN $2 = 'verified' THEN NOW() ELSE verified_at END
              WHERE id = $1 RETURNING *"
         )
@@ -159,35 +273,37 @@ impl WhiteLabelService {
         .await
         .map_err(|e| format!("Update domain status: {e}"))?;
 
-        Ok(ApiResult::ok(updated))
+        Ok(ApiResult::ok(updated.into()))
     }
 
 /// List domains for a tenant
     pub async fn list_domains(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         limit: i64,
         offset: i64,
     ) -> Result<ApiResult<Vec<WhiteLabelDomain>>, String> {
-        let rows = sqlx::query_as::<_, WhiteLabelDomain>(
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
+        let rows = sqlx::query_as::<_, WhiteLabelDomainDbRow>(
             "SELECT * FROM ent_whitelabel_domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
-        .bind(tenant_id)
+        .bind(tenant_uuid)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("List domains: {e}"))?;
 
-        Ok(ApiResult::ok(rows))
+        Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
 /// Remove a domain.
 /// #250:Requires tenant ownership verification to prevent IDOR.
-    pub async fn remove_domain(&self, id: Uuid, tenant_id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
+    pub async fn remove_domain(&self, id: Uuid, tenant_id: String) -> Result<ApiResult<serde_json::Value>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let result = sqlx::query("DELETE FROM ent_whitelabel_domains WHERE id = $1 AND tenant_id = $2")
             .bind(id)
-            .bind(tenant_id)
+            .bind(tenant_uuid)
             .execute(&self.db)
             .await
             .map_err(|e| format!("Delete domain: {e}"))?;
@@ -201,12 +317,13 @@ impl WhiteLabelService {
 
 /// Update (upsert) email templates for white-labeling
     pub async fn update_email_templates(
-        &self, tenant_id: Uuid, template_type: &str,
+        &self, tenant_id: String, template_type: &str,
         subject_template: Option<&str>, html_template: Option<&str>,
         text_template: Option<&str>,
     ) -> Result<ApiResult<WhiteLabelEmailTemplate>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
-        let row = sqlx::query_as::<_, WhiteLabelEmailTemplate>(
+        let row = sqlx::query_as::<_, WhiteLabelEmailTemplateDbRow>(
             "INSERT INTO ent_whitelabel_email_templates (id, tenant_id, template_type, subject_template, html_template, text_template, created_at, updated_at)
              VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
              ON CONFLICT (tenant_id, template_type) DO UPDATE SET
@@ -216,28 +333,29 @@ impl WhiteLabelService {
              updated_at = NOW()
              RETURNING *"
         )
-        .bind(id).bind(tenant_id).bind(template_type)
+        .bind(id).bind(tenant_uuid).bind(template_type)
         .bind(subject_template).bind(html_template).bind(text_template)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Upsert email template: {e}"))?;
 
-        Ok(ApiResult::ok(row))
+        Ok(ApiResult::ok(row.into()))
     }
 
 /// Get email templates
     pub async fn get_email_templates(
-        &self, tenant_id: Uuid,
+        &self, tenant_id: String,
     ) -> Result<ApiResult<Vec<WhiteLabelEmailTemplate>>, String> {
-        let rows = sqlx::query_as::<_, WhiteLabelEmailTemplate>(
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
+        let rows = sqlx::query_as::<_, WhiteLabelEmailTemplateDbRow>(
             "SELECT * FROM ent_whitelabel_email_templates WHERE tenant_id = $1 ORDER BY template_type"
         )
-        .bind(tenant_id)
+        .bind(tenant_uuid)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("Get email templates: {e}"))?;
 
-        Ok(ApiResult::ok(rows))
+        Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 }
 
@@ -386,7 +504,7 @@ mod tests {
     fn test_whitelabel_config_serialization() {
         let wl = WhiteLabelConfigRow {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4().to_string(),
             company_name: Some("Acme Corp".into()),
             logo_url: Some("https://acme.com/logo.png".into()),
             favicon_url: None,
@@ -411,7 +529,7 @@ mod tests {
     fn test_whitelabel_domain_serialization() {
         let d = WhiteLabelDomain {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4().to_string(),
             domain: "mail.acme.com".into(),
             domain_type: "tracking".into(),
             verification_status: "pending".into(),

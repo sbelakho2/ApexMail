@@ -371,7 +371,6 @@ Would you like help setting up your first domain?"""
 
 | Language | Package | Min Version | Install |
 |----------|---------|-------------|---------|
-| **Node.js** | `@apexmail/node` | Node 18+ | `npm install @apexmail/node` |
 | **Python** | `apexmail` | Python 3.9+ | `pip install apexmail` |
 | **Go** | `github.com/apexmail/apexmail-go` | Go 1.21+ | `go get github.com/apexmail/apexmail-go` |
 | **Ruby** | `apexmail` | Ruby 2.7+ | `gem install apexmail` |

@@ -3,7 +3,7 @@
 This is the simulation/staging deployment runbook for ApexMail on Hetzner infrastructure. It documents the shadow-production environment for realistic load testing, chaos engineering, and continuous verification.
 
 > **Infrastructure Overview:**  
-> - **API Server:** `apex-sim-api` (API + dashboard + Stripe webhook handler)  
+> - **API Server:** `apex-sim-api` (API + SSR browser surfaces + Stripe webhook handler)  
 > - **Worker Server:** `apex-sim-worker` (queue workers + sender + webhook dispatcher)  
 > - **Data Server:** `apex-sim-data` (PostgreSQL + Redis)  
 > - **SSH Access:** `ssh -i ~/.ssh/apex-sim-key root@<SERVER_IP>`  
@@ -71,8 +71,8 @@ This is the simulation/staging deployment runbook for ApexMail on Hetzner infras
 │  └──────────────────────┘  │  │  └──────────────────────┘  │  │  └──────────────────────┘  │
 │                            │  │                            │  │                            │
 │  ┌──────────────────────┐  │  │  ┌──────────────────────┐  │  │  ┌──────────────────────┐  │
-│  │  Dashboard :4000     │  │  │  │  Email Sender        │  │  │  │  Redis 7             │  │
-│  │  - Next.js web app   │  │  │  │  - SES integration   │  │  │  │  - Job queues        │  │
+│  │  Browser UI :3000    │  │  │  │  Email Sender        │  │  │  │  Redis 7             │  │
+│  │  - web + control-plane│ │  │  │  - SES integration   │  │  │  │  - Job queues        │  │
 │  │  - Auth flows        │  │  │  │  - Throttle handling │  │  │  │  - Rate limit state  │  │
 │  └──────────────────────┘  │  │  └──────────────────────┘  │  │  │  - Session cache     │  │
 │                            │  │                            │  │  └──────────────────────┘  │
@@ -100,7 +100,7 @@ This is the simulation/staging deployment runbook for ApexMail on Hetzner infras
 
 | Server | Private IP | Public IP | Purpose |
 |--------|------------|-----------|---------|
-| apex-sim-api | 10.0.0.1 | (assigned) | API + Dashboard + Webhooks |
+| apex-sim-api | 10.0.0.1 | (assigned) | API + SSR browser surfaces + Webhooks |
 | apex-sim-worker | 10.0.0.2 | (assigned) | Workers + Sender + Dispatcher |
 | apex-sim-data | 10.0.0.3 | (assigned) | PostgreSQL + Redis |
 
@@ -109,8 +109,7 @@ This is the simulation/staging deployment runbook for ApexMail on Hetzner infras
 | Port | Server | Service | Access |
 |------|--------|---------|--------|
 | 22 | All | SSH | Public (key-only) |
-| 3000 | API | API Server | Public |
-| 4000 | API | Dashboard | Public |
+| 3000 | API | API Server + browser surfaces | Public |
 | 5432 | Data | PostgreSQL | Private (10.0.0.0/24) |
 | 6379 | Data | Redis | Private (10.0.0.0/24) |
 | 8474 | Data | Toxiproxy API | Private |
@@ -147,12 +146,11 @@ ufw allow from 10.0.0.0/24 to any port 8474 comment 'Toxiproxy'
 **Prerequisites:**
 - [x] Ubuntu 22.04 LTS
 - [x] Docker & Docker Compose installed
-- [x] Node.js 20+ installed
 - [x] SSH key access configured
 
 **Services running:**
-- [x] API Server (Node.js on port 3000)
-- [x] Dashboard (Next.js on port 4000)
+- [x] API Server (Rust on port 3000)
+- [x] SSR browser surfaces (`web` + `control-plane` on port 3000)
 - [x] Stripe webhook handler
 - [x] Assertion daemon
 - [x] Prometheus (port 9090)
@@ -176,7 +174,6 @@ RECIPIENT_ALLOWLIST=@example.com,@test.apexmail.dev
 **Prerequisites:**
 - [x] Ubuntu 22.04 LTS
 - [x] Docker & Docker Compose installed
-- [x] Node.js 20+ installed
 - [x] AWS CLI configured
 - [x] SSH key access configured
 
@@ -546,21 +543,8 @@ aws sesv2 create-configuration-set-event-destination \
 
 > **⚠️ CRITICAL:** In staging-sim, enforce a recipient allowlist in code. If recipient domain is not allowlisted, **reject before SES**. This guarantees no accidental real-world sends.
 
-```typescript
-// In worker/src/sender.ts
-const RECIPIENT_ALLOWLIST = process.env.RECIPIENT_ALLOWLIST?.split(',') ?? [];
-
-function isAllowedRecipient(email: string): boolean {
-  if (RECIPIENT_ALLOWLIST.length === 0) {
-    throw new Error('RECIPIENT_ALLOWLIST not configured - refusing to send');
-  }
-  return RECIPIENT_ALLOWLIST.some(pattern => email.endsWith(pattern));
-}
-
-// Before sending
-if (!isAllowedRecipient(message.to)) {
-  throw new RecipientNotAllowedError(`Recipient ${message.to} not in allowlist`);
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ---
@@ -646,7 +630,6 @@ ssh apex-sim-worker "docker compose up -d && ./bin/healthcheck"
 ```bash
 # Health check endpoints
 curl -sf http://apex-sim-api:3000/health || exit 1
-curl -sf http://apex-sim-api:4000/health || exit 1
 curl -sf http://apex-sim-worker:8080/health || exit 1
 
 # Database connectivity
@@ -675,13 +658,8 @@ The workload generator simulates:
 
 ### 10.2 Tenant Distribution
 
-```javascript
-// load/realistic.js
-const TENANT_DISTRIBUTION = {
-  heavy: { count: 10, sendRate: 1000 },      // 10 heavy tenants
-  medium: { count: 100, sendRate: 100 },     // 100 medium tenants
-  light: { count: 1890, sendRate: 10 },      // 1890 light tenants
-};
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### 10.3 SES Reality Simulation

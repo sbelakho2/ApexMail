@@ -1,7 +1,7 @@
 //! Observability service configuration.
 //!
-//! Mirrors the TypeScript `config.ts` – server, database, Redis, tracing,
-//! metrics, logging, and alerting settings sourced from environment variables.
+//! Server, database, Redis, tracing, metrics, logging, and alerting settings
+//! sourced from environment variables.
 
 use serde::{Deserialize, Serialize};
 

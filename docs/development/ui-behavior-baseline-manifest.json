@@ -2,7 +2,7 @@
   "version": 1,
   "requiredBrowsers": ["chromium", "firefox", "webkit"],
   "artifacts": {
-    "captureRoot": "apps/testing/reports/ui-behavior-baseline"
+    "captureRoot": "reports/visual-parity/ui-behavior-baseline"
   },
   "scenarios": [
     {

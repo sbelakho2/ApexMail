@@ -1,6 +1,5 @@
 //! CSRF token endpoint.
 //!
-//! Migrated from:apps/web/src/app/api/csrf/route.ts
 //! Generates CSRF tokens using HMAC-SHA256 with a server secret.
 
 use axum::extract::State;

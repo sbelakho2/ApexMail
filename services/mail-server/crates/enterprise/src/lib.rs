@@ -1,4 +1,5 @@
 pub mod config;
+pub mod contracts;
 pub mod types;
 pub mod sso;
 pub mod compliance;

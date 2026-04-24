@@ -4,7 +4,7 @@
 
 Accepted
 
-> **Implementation Note (2026-02):** Multi-tenant isolation is implemented in the Rust tracking service. The TypeScript middleware examples below are historical; actual implementation is in Rust using Axum state extractors.
+> **Implementation Note (2026-02):** Multi-tenant isolation is implemented in the Rust tracking service using Axum state extractors. Historical browser-runtime snippets were removed to keep this ADR aligned with the live repository.
 
 ## Date
 
@@ -81,128 +81,40 @@ CREATE POLICY tenant_isolation ON tenant_abc123.emails
 
 Every request includes tenant context:
 
-```typescript
-// Middleware extracts tenant from API key
-export const tenantMiddleware = async (c: Context, next: Next) => {
-  const apiKey = c.req.header('Authorization')?.replace('Bearer ', '');
-  const tenant = await resolveTenant(apiKey);
-  
-  c.set('tenant', tenant);
-  
-  // Set PostgreSQL session variable for RLS
-  await c.get('db').execute(
-    sql`SELECT set_config('app.tenant_id', ${tenant.id}, true)`
-  );
-  
-  await next();
-};
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Resource Quotas
 
 Per-tenant limits enforced at multiple layers:
 
-```typescript
-interface TenantQuotas {
-  // API rate limits
-  requestsPerMinute: number;
-  requestsPerDay: number;
-  
-  // Email limits
-  emailsPerMonth: number;
-  emailsPerSecond: number;
-  maxRecipients: number;
-  maxAttachmentSize: number;
-  
-  // Storage limits
-  maxStorageBytes: number;
-  maxWebhooks: number;
-  maxDomains: number;
-  maxApiKeys: number;
-}
-
-// Enforce quota before processing
-const enforceQuota = async (tenantId: string, resource: string) => {
-  const usage = await getUsage(tenantId, resource);
-  const quota = await getQuota(tenantId, resource);
-  
-  if (usage >= quota) {
-    throw new QuotaExceededError(resource, usage, quota);
-  }
-};
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Regional Data Residency
 
 Support for region-specific deployments:
 
-```typescript
-interface TenantConfig {
-  id: string;
-  region: 'us-east' | 'eu-west' | 'ap-southeast';
-  dataResidency: {
-    emails: string;     // Region where emails are stored
-    logs: string;       // Region where logs are stored
-    analytics: string;  // Region where analytics are processed
-  };
-}
-
-// Route requests to appropriate region
-const routeToRegion = (tenant: TenantConfig) => {
-  return endpoints[tenant.region];
-};
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Tenant Provisioning
 
 Automated tenant setup:
 
-```typescript
-async function provisionTenant(params: CreateTenantParams) {
-  // 1. Create tenant record
-  const tenant = await db.tenants.create({
-    id: generateTenantId(),
-    name: params.name,
-    region: params.region,
-  });
-
-  // 2. Create database schema
-  await db.execute(sql`CREATE SCHEMA ${sql.identifier(tenant.schemaName)}`);
-  
-  // 3. Run migrations
-  await runMigrations(tenant.schemaName);
-  
-  // 4. Provision MTA resources
-  await mta.provisionForTenant(tenant.id);
-  
-  // 5. Create default API key
-  const apiKey = await createApiKey(tenant.id);
-  
-  // 6. Initialize billing
-  await billing.createSubscription(tenant.id, params.plan);
-  
-  return { tenant, apiKey };
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Tenant-Aware Metrics
 
 Metrics include tenant dimension:
 
-```typescript
-// Prometheus metrics with tenant label
-const emailsSent = new Counter({
-  name: 'apexmail_emails_sent_total',
-  help: 'Total emails sent',
-  labelNames: ['tenant_id', 'status', 'region'],
-});
-
-// Increment with tenant context
-emailsSent.inc({
-  tenant_id: tenant.id,
-  status: 'delivered',
-  region: tenant.region,
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ## Consequences

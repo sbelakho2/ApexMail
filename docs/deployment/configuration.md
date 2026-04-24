@@ -77,33 +77,18 @@ Server-side verification variables:
 | `MCAPTCHA_SECRET` | ✓ when enabled | - | Secret sent to verification API |
 | `MCAPTCHA_VERIFY_URL` | | `https://demo.mcaptcha.org/api/v1/pow/siteverify` | Verification endpoint |
 
-Frontend widget variables:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `NEXT_PUBLIC_MCAPTCHA_ENABLED` | | `false` | Render mCaptcha widget in login pages |
-| `NEXT_PUBLIC_MCAPTCHA_WIDGET_URL` | ✓ when enabled | - | Widget URL used by vanilla glue |
-| `NEXT_PUBLIC_MCAPTCHA_GLUE_SCRIPT_URL` | | `https://unpkg.com/@mcaptcha/vanilla-glue@0.1.0-rc2/dist/index.js` | Optional glue script override |
-
 ```env
 # Server-side enforcement
 MCAPTCHA_ENABLED=true
 MCAPTCHA_SITE_KEY=your-site-key
 MCAPTCHA_SECRET=your-secret
 MCAPTCHA_VERIFY_URL=https://demo.mcaptcha.org/api/v1/pow/siteverify
-
-# Frontend widget rendering
-NEXT_PUBLIC_MCAPTCHA_ENABLED=true
-NEXT_PUBLIC_MCAPTCHA_WIDGET_URL=https://your-mcaptcha-instance/widget-path
-NEXT_PUBLIC_MCAPTCHA_GLUE_SCRIPT_URL=https://unpkg.com/@mcaptcha/vanilla-glue@0.1.0-rc2/dist/index.js
 ```
 
 Behavior when enabled:
 - Missing token: login is rejected (`MCAPTCHA_REQUIRED`)
 - Invalid token: login is rejected (`MCAPTCHA_INVALID`)
 - Provider/verification outage: login is rejected (`MCAPTCHA_UNAVAILABLE`)
-
-Important: keep `MCAPTCHA_ENABLED` and `NEXT_PUBLIC_MCAPTCHA_ENABLED` aligned to avoid UX drift between form rendering and API enforcement.
 
 ### Encryption
 
@@ -544,59 +529,4 @@ ALERT_EMAIL=oncall@example.com
 
 ## Configuration Files
 
-### TypeScript Config
-
-`tsconfig.json`:
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "lib": ["ES2022"],
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "outDir": "./dist",
-    "rootDir": "./src"
-  }
-}
-```
-
-### ESLint Config
-
-`.eslintrc.cjs`:
-```javascript
-module.exports = {
-  root: true,
-  extends: [
-    'eslint:recommended',
-    '@typescript-eslint/recommended',
-    'prettier'
-  ],
-  parser: '@typescript-eslint/parser',
-  plugins: ['@typescript-eslint'],
-  rules: {
-    '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
-    '@typescript-eslint/explicit-function-return-type': 'warn',
-    'no-console': ['warn', { allow: ['warn', 'error'] }]
-  }
-};
-```
-
-### Prettier Config
-
-`.prettierrc`:
-```json
-{
-  "semi": true,
-  "singleQuote": true,
-  "tabWidth": 2,
-  "trailingComma": "es5",
-  "printWidth": 100
-}
-```
+Runtime configuration now lives in Rust crate configuration structs, environment-variable loaders, and deployment manifests.

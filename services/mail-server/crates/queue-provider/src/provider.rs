@@ -358,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_provider_creation() {
-        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap;
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
         let _provider = PostgresQueueProvider::new(pool);
     }
 }

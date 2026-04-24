@@ -1,6 +1,5 @@
 //! Dashboard stats endpoint.
 //!
-//! Migrated from:apps/control-plane/src/app/api/dashboard/stats/route.ts
 
 use super::super::helpers::table_exists;
 use axum::extract::State;

@@ -10,6 +10,67 @@ pub struct QBRService {
     db: PgPool,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct QuarterlyBusinessReviewDbRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    quarter: i32,
+    year: i32,
+    status: String,
+    scheduled_date: Option<chrono::NaiveDate>,
+    delivered_date: Option<chrono::DateTime<Utc>>,
+    attendees: Option<serde_json::Value>,
+    metrics: Option<serde_json::Value>,
+    insights: Option<serde_json::Value>,
+    recommendations: Option<serde_json::Value>,
+    highlights: Option<serde_json::Value>,
+    concerns: Option<serde_json::Value>,
+    goals: Option<serde_json::Value>,
+    previous_qbr_id: Option<Uuid>,
+    quarter_over_quarter_change: Option<serde_json::Value>,
+    presentation_url: Option<String>,
+    report_url: Option<String>,
+    recording_url: Option<String>,
+    feedback: Option<serde_json::Value>,
+    action_items: Option<serde_json::Value>,
+    created_at: Option<chrono::DateTime<Utc>>,
+    updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl From<QuarterlyBusinessReviewDbRow> for QuarterlyBusinessReview {
+    fn from(row: QuarterlyBusinessReviewDbRow) -> Self {
+        Self {
+            id: row.id,
+            tenant_id: row.tenant_id.to_string(),
+            quarter: row.quarter,
+            year: row.year,
+            status: row.status,
+            scheduled_date: row.scheduled_date,
+            delivered_date: row.delivered_date,
+            attendees: row.attendees,
+            metrics: row.metrics,
+            insights: row.insights,
+            recommendations: row.recommendations,
+            highlights: row.highlights,
+            concerns: row.concerns,
+            goals: row.goals,
+            previous_qbr_id: row.previous_qbr_id,
+            quarter_over_quarter_change: row.quarter_over_quarter_change,
+            presentation_url: row.presentation_url,
+            report_url: row.report_url,
+            recording_url: row.recording_url,
+            feedback: row.feedback,
+            action_items: row.action_items,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
+}
+
 impl QBRService {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -17,28 +78,29 @@ impl QBRService {
 
 /// Schedule a new QBR
     pub async fn schedule(
-        &self, tenant_id: Uuid, quarter: i32, year: i32,
+        &self, tenant_id: String, quarter: i32, year: i32,
         scheduled_date: Option<chrono::NaiveDate>, attendees: Option<serde_json::Value>,
     ) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
-        let row = sqlx::query_as::<_, QuarterlyBusinessReview>(
+        let row = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "INSERT INTO ent_qbrs (id, tenant_id, quarter, year, status, scheduled_date, attendees, created_at, updated_at)
              VALUES ($1,$2,$3,$4,'scheduled',$5,$6,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_id).bind(quarter).bind(year)
+        .bind(id).bind(tenant_uuid).bind(quarter).bind(year)
         .bind(scheduled_date).bind(&attendees)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Schedule QBR: {e}"))?;
 
         info!(qbr_id = %id, quarter, year, "QBR scheduled");
-        Ok(ApiResult::ok(row))
+        Ok(ApiResult::ok(row.into()))
     }
 
 /// Get a QBR by ID
     pub async fn get(&self, id: Uuid) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
-        let row = sqlx::query_as::<_, QuarterlyBusinessReview>(
+        let row = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "SELECT * FROM ent_qbrs WHERE id = $1"
         )
         .bind(id)
@@ -47,31 +109,32 @@ impl QBRService {
         .map_err(|e| format!("Get QBR: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("QBR not found", "NOT_FOUND")),
         }
     }
 
 /// List QBRs for a tenant
     pub async fn list(
-        &self, tenant_id: Uuid, limit: i64, offset: i64,
+        &self, tenant_id: String, limit: i64, offset: i64,
     ) -> Result<ApiResult<Vec<QuarterlyBusinessReview>>, String> {
-        let rows = sqlx::query_as::<_, QuarterlyBusinessReview>(
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
+        let rows = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "SELECT * FROM ent_qbrs WHERE tenant_id = $1 ORDER BY year DESC, quarter DESC LIMIT $2 OFFSET $3"
         )
-        .bind(tenant_id).bind(limit).bind(offset)
+        .bind(tenant_uuid).bind(limit).bind(offset)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("List QBRs: {e}"))?;
 
-        Ok(ApiResult::ok(rows))
+        Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
 /// Generate QBR data (gather metrics + insights)
     pub async fn generate(
         &self, id: Uuid,
     ) -> Result<ApiResult<serde_json::Value>, String> {
-        let qbr = sqlx::query_as::<_, QuarterlyBusinessReview>(
+        let qbr = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "SELECT * FROM ent_qbrs WHERE id = $1"
         )
         .bind(id)
@@ -113,7 +176,7 @@ impl QBRService {
 
 /// Mark QBR as delivered
     pub async fn mark_delivered(&self, id: Uuid) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
-        let row = sqlx::query_as::<_, QuarterlyBusinessReview>(
+        let row = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "UPDATE ent_qbrs SET status = 'delivered', delivered_date = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *"
         )
         .bind(id)
@@ -122,7 +185,7 @@ impl QBRService {
         .map_err(|e| format!("Mark delivered: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("QBR not found", "NOT_FOUND")),
         }
     }
@@ -135,7 +198,7 @@ impl QBRService {
             "rating": rating,
             "text": feedback_text,
         });
-        let row = sqlx::query_as::<_, QuarterlyBusinessReview>(
+        let row = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "UPDATE ent_qbrs SET feedback = $2, status = 'feedback_received', updated_at = NOW() WHERE id = $1 RETURNING *"
         )
         .bind(id).bind(&feedback_val)
@@ -144,7 +207,7 @@ impl QBRService {
         .map_err(|e| format!("Submit feedback: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("QBR not found", "NOT_FOUND")),
         }
     }

@@ -2,9 +2,33 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
-const API_CONSOLE_BASELINE_DOM_SOURCE: &str = include_str!("../../../../../apps/testing/reports/ui-behavior-baseline/marketing-zola/chromium/marketing-zola-api-console-touch-flow/dom.html");
-const API_CONSOLE_BASELINE_INTERACTION_SOURCE: &str = include_str!("../../../../../apps/testing/reports/ui-behavior-baseline/marketing-zola/chromium/marketing-zola-api-console-touch-flow/interaction.json");
-const API_CONSOLE_BASELINE_TIMING_SOURCE: &str = include_str!("../../../../../apps/testing/reports/ui-behavior-baseline/marketing-zola/chromium/marketing-zola-api-console-touch-flow/timing.json");
+// Keep a small embedded baseline so ui-foundation can compile even when
+// ephemeral testing artifacts have been pruned from the workspace.
+const API_CONSOLE_BASELINE_DOM_SOURCE: &str = r#"<!doctype html>
+<html lang="en">
+    <body>
+        <section aria-label="API Sandbox Console">
+            <button type="button">Send →</button>
+            <div>Email queued for delivery</div>
+        </section>
+    </body>
+</html>
+"#;
+const API_CONSOLE_BASELINE_INTERACTION_SOURCE: &str = r#"[
+    {
+        "type": "tap",
+        "selector": "button:has-text(\"Send →\")"
+    },
+    {
+        "type": "waitForText",
+        "value": "queued"
+    }
+]"#;
+const API_CONSOLE_BASELINE_TIMING_SOURCE: &str = r#"{
+    "navigation": {
+        "domComplete": 34
+    }
+}"#;
 const TRANSITION_MANIFEST_SOURCE: &str = include_str!("../../../../../docs/development/ui-marketing-transition-manifest.json");
 const UI_BASELINE_MANIFEST_SOURCE: &str = include_str!("../../../../../docs/development/ui-baseline-manifest.json");
 

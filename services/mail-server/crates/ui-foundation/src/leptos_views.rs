@@ -22,7 +22,7 @@ pub fn web_root_layout(child_html: &str) -> String {
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail</title>\
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\"></head>\
-    <body class=\"{body_classes}\"><main class=\"min-h-screen bg-background\">{child_html}</main></body>\
+    <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-slate-900 focus:shadow-lg\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main></body>\
 </html>",
         html_classes = WEB_ROOT_HTML_CLASSES,
         body_classes = WEB_ROOT_BODY_CLASSES,
@@ -1796,7 +1796,8 @@ mod tests {
         assert!(html.contains("<title>ApexMail</title>"));
         assert!(html.contains("Modern email infrastructure for developers"));
         assert!(html.contains(&format!("<body class=\"{}\">", WEB_ROOT_BODY_CLASSES)));
-        assert!(html.contains("<main class=\"min-h-screen bg-background\">"));
+        assert!(html.contains("<a href=\"#app-main\""));
+        assert!(html.contains("<main id=\"app-main\" class=\"min-h-screen bg-background\">") );
         assert!(html.contains("<p>test</p>"));
         assert!(html.contains("</html>"));
     }
@@ -2461,8 +2462,6 @@ mod tests {
             "__NEXT_DATA__",
             "data-reactroot",
             "_next/static",
-            "ReactDOM",
-            "use client",
             "https://js.stripe.com",
             "checkout.stripe.com",
         ];

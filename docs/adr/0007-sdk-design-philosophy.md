@@ -12,7 +12,7 @@ Accepted
 
 ApexMail requires official SDKs to provide excellent developer experience. The key challenges:
 
-1. **Multi-language Support**: Developers use various languages (Node.js, Python, Go, Ruby)
+1. **Multi-language Support**: Developers use various languages (Python, Go, Ruby, PHP, Java)
 2. **Consistency**: APIs should feel native to each language while being consistent
 3. **Type Safety**: Modern developers expect type hints and autocompletion
 4. **Async Support**: I/O operations benefit from async patterns
@@ -32,11 +32,8 @@ client.{resource}.{operation}()
 
 Examples across languages:
 
-```typescript
-// Node.js
-await apexmail.emails.send({ to: 'user@example.com', subject: 'Hello' });
-await apexmail.domains.verify('dom_123');
-await apexmail.webhooks.list();
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ```python
@@ -57,14 +54,8 @@ apexmail.Webhooks.List(ctx)
 
 Each SDK provides both synchronous and asynchronous interfaces:
 
-```typescript
-// Node.js - Default async
-import ApexMail from 'apexmail';
-const client = new ApexMail({ apiKey: 'key' });
-await client.emails.send({ ... });
-
-// Sync available via callback
-client.emails.send({ ... }, (err, result) => { ... });
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ```python
@@ -84,28 +75,8 @@ result = await client.emails.send(to="user@example.com", subject="Hello")
 
 All SDKs include comprehensive type definitions:
 
-```typescript
-// Node.js - Full TypeScript support
-interface SendEmailParams {
-  from?: string;
-  to: string | string[];
-  subject: string;
-  html?: string;
-  text?: string;
-  cc?: string[];
-  bcc?: string[];
-  replyTo?: string;
-  attachments?: Attachment[];
-  tags?: Tag[];
-  scheduledAt?: string;
-  metadata?: Record<string, unknown>;
-}
-
-interface SendEmailResponse {
-  id: string;
-  status: 'queued' | 'sending' | 'delivered' | 'failed';
-  createdAt: string;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ```python
@@ -128,17 +99,8 @@ class Email(BaseModel):
 
 Errors are typed and actionable:
 
-```typescript
-// Node.js
-try {
-  await client.emails.send({ ... });
-} catch (error) {
-  if (error instanceof ApexMailError) {
-    console.log(error.code);      // 'rate_limit_exceeded'
-    console.log(error.message);   // 'Rate limit of 1000 req/min exceeded'
-    console.log(error.retryAfter); // 45 (seconds)
-  }
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ```python
@@ -157,75 +119,49 @@ except ValidationError as e:
 
 SDKs implement exponential backoff with jitter:
 
-```typescript
-const client = new ApexMail({
-  apiKey: 'key',
-  maxRetries: 3,        // Default: 2
-  retryDelay: 1000,     // Base delay: 1s
-  timeout: 30000,       // Request timeout: 30s
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### 6. Environment Configuration
 
 SDKs support multiple configuration methods:
 
-```typescript
-// Explicit configuration
-const client = new ApexMail({ apiKey: 'am_live_xxx' });
-
-// Environment variable (APEXMAIL_API_KEY)
-const client = new ApexMail();
-
-// Custom base URL (for self-hosted)
-const client = new ApexMail({
-  apiKey: 'key',
-  baseUrl: 'https://api.yourdomain.com',
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### 7. Request/Response Hooks
 
 Allow middleware for logging, metrics, etc.:
 
-```typescript
-const client = new ApexMail({
-  apiKey: 'key',
-  onRequest: (req) => {
-    console.log(`→ ${req.method} ${req.url}`);
-  },
-  onResponse: (res) => {
-    console.log(`← ${res.status} (${res.duration}ms)`);
-  },
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ## SDK Directory Structure
 
 ```
 packages/
-├── sdk-node/
-│   ├── src/
-│   │   ├── client.ts
+├── sdk-python/
+│   ├── src/apexmail/
+│   │   ├── __init__.py
+│   │   ├── client.py
 │   │   ├── resources/
-│   │   │   ├── emails.ts
-│   │   │   ├── domains.ts
-│   │   │   └── webhooks.ts
-│   │   ├── models/
-│   │   └── errors.ts
-│   ├── package.json
-│   └── tsconfig.json
-└── sdk-python/
-    ├── src/apexmail/
-    │   ├── __init__.py
-    │   ├── client.py
-    │   ├── resources/
-    │   │   ├── emails.py
-    │   │   ├── domains.py
-    │   │   └── webhooks.py
-    │   ├── models.py
-    │   └── exceptions.py
-    └── pyproject.toml
+│   │   │   ├── emails.py
+│   │   │   ├── domains.py
+│   │   │   └── webhooks.py
+│   │   ├── models.py
+│   │   └── exceptions.py
+│   └── pyproject.toml
+├── sdk-go/
+│   ├── client.go
+│   ├── emails.go
+│   ├── domains.go
+│   └── webhooks.go
+├── sdk-php/
+├── sdk-java/
+└── sdk-ruby/
 ```
 
 ## Consequences

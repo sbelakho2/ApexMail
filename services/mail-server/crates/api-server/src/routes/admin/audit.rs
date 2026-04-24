@@ -1,6 +1,5 @@
 //! Audit log viewer endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/audit/route.ts
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -112,7 +111,7 @@ async fn list_audit_logs(
         chrono::DateTime<chrono::Utc>,
         String,
         String,
-        String,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -146,7 +145,7 @@ async fn list_audit_logs(
                 timestamp: r.1.to_rfc3339(),
                 action: r.2,
                 resource: r.3,
-                resource_id: r.4,
+                resource_id: r.4.unwrap_or_default(),
                 actor_type: if r.5.is_some() { "user".into() } else { "system".into() },
                 actor_id: r.5.unwrap_or_else(|| "system".into()),
                 tenant_id: r.6,

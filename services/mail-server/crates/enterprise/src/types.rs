@@ -7,7 +7,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SSOConfiguration {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub provider_type: String,
     pub enabled: bool,
     pub domain: String,
@@ -33,7 +33,7 @@ pub struct SSOConfiguration {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SSOSession {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub user_id: Option<String>,
     pub provider_type: String,
     pub external_user_id: String,
@@ -51,7 +51,7 @@ pub struct SSOSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SSOConfigureRequest {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub provider_type: String,
     pub domain: String,
     pub enabled: Option<bool>,
@@ -77,7 +77,7 @@ pub struct SSOLoginRedirect {
 pub struct OidcStateData {
     pub code_verifier: String,
     pub domain: String,
-    pub tenant_id: Option<Uuid>,
+    pub tenant_id: Option<String>,
 }
 
 /// OIDC state row from database
@@ -86,7 +86,7 @@ pub struct OidcStateRow {
     pub state: String,
     pub code_verifier: String,
     pub domain: String,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -168,7 +168,7 @@ impl std::fmt::Display for ComplianceStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ComplianceConfig {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub enabled_frameworks: Option<Vec<String>>,
     pub status: String,
     pub zero_retention_mode: bool,
@@ -191,7 +191,7 @@ pub struct ComplianceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuditLogEntry {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub user_id: Option<String>,
     pub action: String,
     pub resource_type: String,
@@ -249,7 +249,7 @@ impl std::fmt::Display for DataRequestStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DataAccessRequest {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     #[sqlx(rename = "type")]
     #[serde(rename = "type")]
     pub request_type: String,
@@ -341,7 +341,7 @@ impl std::fmt::Display for StreamStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct LogStream {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub description: Option<String>,
     pub destination_type: String,
@@ -471,7 +471,7 @@ impl std::fmt::Display for IPStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PrivateDeployment {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub deployment_type: String,
     pub status: String,
@@ -493,7 +493,7 @@ pub struct PrivateDeployment {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DedicatedIP {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub deployment_id: Option<Uuid>,
     pub ip_address: String,
     pub ptr_record: Option<String>,
@@ -544,7 +544,7 @@ pub struct AvailableIpCount {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BYOIPRange {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub cidr_block: String,
     pub status: String,
     pub verification_token: Option<String>,
@@ -727,7 +727,7 @@ impl std::str::FromStr for TicketCategory {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SupportTicket {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub number: Option<i32>,
     pub subject: String,
     pub description: String,
@@ -843,7 +843,7 @@ impl std::str::FromStr for TemplateApprovalStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TemplateSubmission {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub description: Option<String>,
     pub html_content: String,
@@ -930,7 +930,7 @@ impl std::str::FromStr for DomainType {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WhiteLabelConfigRow {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub company_name: Option<String>,
     pub logo_url: Option<String>,
     pub primary_color: Option<String>,
@@ -951,7 +951,7 @@ pub struct WhiteLabelConfigRow {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WhiteLabelDomain {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub domain: String,
     pub domain_type: String,
     pub verification_status: String,
@@ -967,7 +967,7 @@ pub struct WhiteLabelDomain {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WhiteLabelEmailTemplate {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub template_type: String,
     pub subject_template: Option<String>,
     pub html_template: Option<String>,
@@ -982,6 +982,105 @@ pub struct DNSRecord {
     pub host: String,
     pub value: String,
     pub ttl: i32,
+}
+
+// ── Contract types ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractStatus {
+    Draft,
+    PendingSignature,
+    Active,
+    Expired,
+    Terminated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractFeeFrequency {
+    OneTime,
+    Monthly,
+    Yearly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractAdditionalFee {
+    pub name: String,
+    pub amount: i64,
+    pub frequency: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnterpriseContract {
+    pub id: Uuid,
+    pub tenant_id: String,
+    pub contract_number: String,
+    pub name: String,
+    pub status: String,
+    pub start_date: DateTime<Utc>,
+    pub end_date: DateTime<Utc>,
+    pub auto_renew: bool,
+    pub base_price: i64,
+    pub committed_volume: i64,
+    pub overage_rate: i64,
+    pub annual_prepay_discount: i32,
+    pub additional_fees: Vec<ContractAdditionalFee>,
+    pub payment_terms_days: i32,
+    pub sla_credit_percentage: i32,
+    pub custom_terms: Option<String>,
+    pub allow_purchase_orders: bool,
+    pub dedicated_support: bool,
+    pub custom_features: Vec<String>,
+    pub custom_sla: Option<serde_json::Value>,
+    pub signed_at: Option<DateTime<Utc>>,
+    pub signed_by: Option<String>,
+    pub purchase_order_number: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractUsageSummary {
+    pub current_usage: i64,
+    pub committed_volume: i64,
+    pub percent_used: f64,
+    pub projected_usage: i64,
+    pub overage_estimate: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractAmendmentResult {
+    pub id: Uuid,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractRenewalTerms {
+    pub base_fee: Option<i64>,
+    pub committed_volume: Option<i64>,
+    pub overage_rate: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractRenewalQuote {
+    pub current_contract: EnterpriseContract,
+    pub proposed_terms: ContractRenewalTerms,
+    pub savings: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractPurchaseOrderReceipt {
+    pub id: Uuid,
+    pub po_number: String,
+    pub status: String,
 }
 
 // ── QBR types ──────────────────────────────────────────────────────────
@@ -1050,7 +1149,7 @@ impl std::fmt::Display for GoalStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct QuarterlyBusinessReview {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub quarter: i32,
     pub year: i32,
     pub status: String,

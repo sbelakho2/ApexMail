@@ -1,6 +1,5 @@
 //! Control-plane route modules.
 //!
-//! These are the admin/operational endpoints migrated from apps/control-plane.
 //! All require admin authentication.
 
 pub mod tenants;

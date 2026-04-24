@@ -1,6 +1,5 @@
 //! Tenant management endpoints.
 //!
-//! Migrated from:apps/control-plane/src/app/api/tenants/route.ts
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;

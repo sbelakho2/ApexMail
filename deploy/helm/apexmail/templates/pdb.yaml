@@ -65,19 +65,3 @@ spec:
     matchLabels:
       {{- include "apexmail.selectorLabels" (dict "name" "worker" "context" .) | nindent 6 }}
 {{- end }}
----
-{{- if and .Values.web.enabled .Values.web.podDisruptionBudget }}
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "apexmail.fullname" . }}-web
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "apexmail.labels" . | nindent 4 }}
-    {{- include "apexmail.selectorLabels" (dict "name" "web" "context" .) | nindent 4 }}
-spec:
-  minAvailable: {{ .Values.web.podDisruptionBudget.minAvailable }}
-  selector:
-    matchLabels:
-      {{- include "apexmail.selectorLabels" (dict "name" "web" "context" .) | nindent 6 }}
-{{- end }}

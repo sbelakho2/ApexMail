@@ -25,13 +25,6 @@ data:
   tracking-base-url: "https://{{ .host }}"
   {{- end }}
   {{- end }}
-  {{- if .Values.web.baseUrl }}
-  web-base-url: {{ .Values.web.baseUrl | quote }}
-  {{- else }}
-  {{- with (index .Values.ingress.hosts 0) }}
-  web-base-url: "https://{{ .host }}"
-  {{- end }}
-  {{- end }}
   trusted-proxies: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
   rate-limit-enabled: "true"
   rate-limit-max-per-minute: "1000"

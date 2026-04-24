@@ -1,13 +1,13 @@
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     middleware,
-    response::IntoResponse,
+    response::{Html, IntoResponse},
     routing::{get, post, put, delete},
-    Json, Router,
+    Extension, Json, Router,
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +16,10 @@ use uuid::Uuid;
 
 use crate::compliance::ComplianceService;
 use crate::config::Config;
+use crate::contracts::{
+    AmendmentInput, CancelContractInput, ContractService, CreateContractInput, PurchaseOrderInput,
+    RenewContractInput, SignContractInput,
+};
 use crate::log_streaming::LogStreamingService;
 use crate::private_deploy::PrivateDeployService;
 use crate::qbr::QBRService;
@@ -23,7 +27,9 @@ use crate::sso::SSOService;
 use crate::sub_accounts::SubAccountService;
 use crate::support::SupportService;
 use crate::template_approval::TemplateApprovalService;
-use crate::types::SSOConfigureRequest;
+use crate::types::{
+    ApiResult, ContractAdditionalFee, ContractRenewalTerms, SSOConfigureRequest,
+};
 use crate::whitelabel::WhiteLabelService;
 
 // ── Shared state ───────────────────────────────────────────────────────
@@ -31,6 +37,7 @@ use crate::whitelabel::WhiteLabelService;
 pub struct AppState {
     pub db: PgPool,
     pub config: Config,
+    pub contracts: ContractService,
     pub sso: SSOService,
     pub compliance: ComplianceService,
     pub log_streaming: LogStreamingService,
@@ -46,6 +53,7 @@ impl AppState {
     pub fn new(db: PgPool, config: Config) -> Self {
         Self {
             config: config.clone(),
+            contracts: ContractService::new(db.clone()),
             sso: SSOService::new(db.clone(), config.clone()),
             compliance: ComplianceService::new(db.clone()),
             log_streaming: LogStreamingService::new(db.clone()),
@@ -70,15 +78,26 @@ impl AppState {
 
 type S = Arc<AppState>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone)]
+struct AuthContext {
+    _user_id: String,
+    tenant_id: String,
+    is_admin: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct JwtClaims {
+    sub: String,
+    tenant_id: String,
+    #[serde(default)]
+    admin: bool,
     #[serde(rename = "exp")]
     _exp: usize,
 }
 
 async fn auth_middleware(
     State(state): State<S>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: middleware::Next,
 ) -> impl IntoResponse {
     let path = req.uri().path();
@@ -99,15 +118,20 @@ async fn auth_middleware(
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
 
-    if jsonwebtoken::decode::<JwtClaims>(
+    let claims = match jsonwebtoken::decode::<JwtClaims>(
         token,
         &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
         &validation,
-    )
-    .is_err()
-    {
-        return err_json(StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
-    }
+    ) {
+        Ok(token) => token.claims,
+        Err(_) => return err_json(StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response(),
+    };
+
+    req.extensions_mut().insert(AuthContext {
+        _user_id: claims.sub,
+        tenant_id: claims.tenant_id,
+        is_admin: claims.admin,
+    });
 
     next.run(req).await
 }
@@ -120,16 +144,120 @@ async fn auth_middleware(
 #[derive(Deserialize)] pub struct DomainQuery { pub domain: Option<String> }
 #[derive(Deserialize)] pub struct IndustryQuery { pub industry: Option<String> }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractCommittedVolumeBody {
+    pub emails: i64,
+    pub api_calls: i64,
+    pub storage: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractOverageRatesBody {
+    pub emails_per_thousand: i64,
+    pub api_calls_per_thousand: i64,
+    pub storage_per_gb: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractCreateBody {
+    pub start_date: chrono::DateTime<chrono::Utc>,
+    pub end_date: chrono::DateTime<chrono::Utc>,
+    pub base_fee: i64,
+    pub committed_volume: ContractCommittedVolumeBody,
+    pub overage_rates: ContractOverageRatesBody,
+    pub payment_terms: String,
+    pub custom_features: Option<Vec<String>>,
+    pub allow_purchase_orders: Option<bool>,
+    pub dedicated_support: Option<bool>,
+    pub custom_sla: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractSignBody {
+    pub signature_data: String,
+    pub signer_name: String,
+    pub signer_title: String,
+    pub signed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractAmendmentChangesBody {
+    pub base_fee: Option<i64>,
+    pub committed_volume: Option<ContractCommittedVolumeOptionalBody>,
+    pub overage_rates: Option<ContractOverageRatesOptionalBody>,
+    pub end_date: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractCommittedVolumeOptionalBody {
+    pub emails: Option<i64>,
+    pub api_calls: Option<i64>,
+    pub storage: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractOverageRatesOptionalBody {
+    pub emails_per_thousand: Option<i64>,
+    pub api_calls_per_thousand: Option<i64>,
+    pub storage_per_gb: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractAmendmentBody {
+    pub reason: String,
+    pub proposed_changes: ContractAmendmentChangesBody,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractCancelBody {
+    pub reason: String,
+    pub effective_date: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractRenewTermsBody {
+    pub base_fee: Option<i64>,
+    pub committed_volume: Option<ContractCommittedVolumeOptionalBody>,
+    pub overage_rates: Option<ContractOverageRatesOptionalBody>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractRenewBody {
+    pub new_end_date: chrono::DateTime<chrono::Utc>,
+    pub new_terms: Option<ContractRenewTermsBody>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurchaseOrderBody {
+    pub po_number: String,
+    pub amount: i64,
+    pub issued_date: chrono::DateTime<chrono::Utc>,
+    pub expiry_date: Option<chrono::DateTime<chrono::Utc>>,
+    pub attachment_url: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct ComplianceEnableBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub frameworks: Vec<String>,
     pub hipaa_enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
 pub struct BAABody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub signatory_name: String,
     pub signatory_title: String,
     pub signatory_email: String,
@@ -137,7 +265,7 @@ pub struct BAABody {
 
 #[derive(Deserialize)]
 pub struct AuditLogBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub user_id: Option<String>,
     pub action: String,
     pub resource_type: String,
@@ -152,7 +280,7 @@ pub struct AuditLogBody {
 
 #[derive(Deserialize)]
 pub struct DataAccessBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub requester_id: String,
     pub requester_email: String,
     pub request_type: String,
@@ -169,7 +297,7 @@ pub struct DataAccessApproveBody {
 
 #[derive(Deserialize)]
 pub struct DataDeletionBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub requester_id: String,
     pub requester_email: String,
     pub identifiers: Option<serde_json::Value>,
@@ -177,7 +305,7 @@ pub struct DataDeletionBody {
 
 #[derive(Deserialize)]
 pub struct LogStreamCreateBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub description: Option<String>,
     pub destination_type: String,
@@ -198,7 +326,7 @@ pub struct LogStreamUpdateBody {
 
 #[derive(Deserialize)]
 pub struct DeployCreateBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub deployment_type: String,
     pub region: Option<String>,
@@ -207,14 +335,14 @@ pub struct DeployCreateBody {
 
 #[derive(Deserialize)]
 pub struct DedicatedIPBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub deployment_id: Option<Uuid>,
     pub ip_address: String,
 }
 
 #[derive(Deserialize)]
 pub struct BYOIPBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub cidr_block: String,
 }
 
@@ -256,7 +384,7 @@ pub struct ApiKeyCreateBody {
 
 #[derive(Deserialize)]
 pub struct TicketCreateBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub subject: String,
     pub description: String,
     pub priority: String,
@@ -299,7 +427,7 @@ pub struct SatisfactionBody {
 
 #[derive(Deserialize)]
 pub struct TemplateSubmitBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub subject: String,
     pub html_content: String,
@@ -321,7 +449,7 @@ pub struct TemplateRejectBody {
 
 #[derive(Deserialize)]
 pub struct WhiteLabelConfigBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub company_name: Option<String>,
     pub logo_url: Option<String>,
     pub favicon_url: Option<String>,
@@ -335,14 +463,14 @@ pub struct WhiteLabelConfigBody {
 
 #[derive(Deserialize)]
 pub struct DomainAddBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub domain: String,
     pub domain_type: String,
 }
 
 #[derive(Deserialize)]
 pub struct EmailTemplateBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub template_type: String,
     pub subject_template: Option<String>,
     pub html_template: Option<String>,
@@ -351,7 +479,7 @@ pub struct EmailTemplateBody {
 
 #[derive(Deserialize)]
 pub struct QBRScheduleBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub quarter: i32,
     pub year: i32,
     pub scheduled_date: Option<chrono::NaiveDate>,
@@ -372,6 +500,22 @@ pub struct QBRGoalUpdateBody {
 
 // ── Router ─────────────────────────────────────────────────────────────
 
+fn contract_routes() -> Router<S> {
+    Router::new()
+        .route("/contracts", get(contract_list))
+        .route("/contracts", post(contract_create))
+        .route("/contracts/:contract_id", get(contract_get))
+        .route("/contracts/:contract_id/pdf", get(contract_pdf))
+        .route("/contracts/:contract_id/usage", get(contract_usage))
+        .route("/contracts/:contract_id/submit", post(contract_submit))
+        .route("/contracts/:contract_id/sign", post(contract_sign))
+        .route("/contracts/:contract_id/amendments", post(contract_amendment))
+        .route("/contracts/:contract_id/cancel", post(contract_cancel))
+        .route("/contracts/:contract_id/renewal-quote", get(contract_renewal_quote))
+        .route("/contracts/:contract_id/renew", post(contract_renew))
+        .route("/contracts/:contract_id/purchase-orders", post(contract_purchase_order))
+}
+
 /// Create the enterprise API router.
 /// # Security Note (#249)
 /// This router must be wrapped with authentication middleware before deployment.
@@ -380,6 +524,8 @@ pub fn router(state: Arc<AppState>) -> Router {
 // Health (unauthenticated)
         .route("/health", get(health_check))
         .route("/readiness", get(readiness_check))
+        .merge(contract_routes())
+        .nest("/api/enterprise", contract_routes())
 // SSO
         .route("/sso/configure", post(sso_configure))
         .route("/sso/config/:tenant_id", get(sso_get_config))
@@ -493,8 +639,53 @@ fn ok_json<T: serde::Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>
     }
 }
 
+fn json_status<T: serde::Serialize>(status: StatusCode, data: T) -> (StatusCode, Json<serde_json::Value>) {
+    match serde_json::to_value(&data) {
+        Ok(v) => (status, Json(v)),
+        Err(e) => {
+            tracing::error!(error = %e, "JSON serialization failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal serialization error"})))
+        }
+    }
+}
+
 fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({"error": msg})))
+}
+
+fn resolve_tenant_id(headers: &HeaderMap, auth: &AuthContext) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let override_tenant = headers
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match override_tenant {
+        Some(tenant_id) if auth.is_admin => Ok(tenant_id.to_string()),
+        Some(tenant_id) if tenant_id == auth.tenant_id => Ok(auth.tenant_id.clone()),
+        Some(_) => Err(err_json(StatusCode::FORBIDDEN, "Tenant override requires admin access")),
+        None => Ok(auth.tenant_id.clone()),
+    }
+}
+
+fn require_admin(auth: &AuthContext) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    if auth.is_admin {
+        None
+    } else {
+        Some(err_json(StatusCode::FORBIDDEN, "Admin access required"))
+    }
+}
+
+fn unwrap_contract_result<T>(result: ApiResult<T>) -> Result<T, (StatusCode, Json<serde_json::Value>)>
+where
+    T: serde::Serialize,
+{
+    match (result.success, result.data, result.error.as_deref()) {
+        (true, Some(data), _) => Ok(data),
+        (_, _, Some("Contract not found")) => Err(err_json(StatusCode::NOT_FOUND, "Contract not found")),
+        (_, _, Some(message)) => Err(err_json(StatusCode::INTERNAL_SERVER_ERROR, message)),
+        _ => Err(err_json(StatusCode::INTERNAL_SERVER_ERROR, "Unexpected contract response")),
+    }
 }
 
 fn clamp_limit(limit: i64, max: i64) -> i64 {
@@ -531,14 +722,373 @@ async fn readiness_check(State(state): State<S>) -> impl IntoResponse {
     }
 }
 
+// ── Contract Handlers ──────────────────────────────────────────────────
+
+async fn contract_list(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    match state.contracts.list_contracts(&tenant_id).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(contracts) => json_status(StatusCode::OK, serde_json::json!({ "contracts": contracts })),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_get(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    match state.contracts.get_contract(contract_id, &tenant_id).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(contract) => json_status(StatusCode::OK, contract),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_pdf(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error.into_response(),
+    };
+
+    match state.contracts.get_contract(contract_id, &tenant_id).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(contract) => Html(state.contracts.generate_contract_pdf(&contract)).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response(),
+    }
+}
+
+async fn contract_usage(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    match state.contracts.get_contract_usage(&tenant_id, contract_id).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(usage) => json_status(StatusCode::OK, usage),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_create(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Json(body): Json<ContractCreateBody>,
+) -> impl IntoResponse {
+    if let Some(error) = require_admin(&auth) {
+        return error;
+    }
+
+    if body.base_fee < 0
+        || body.committed_volume.emails < 0
+        || body.committed_volume.api_calls < 0
+        || body.committed_volume.storage < 0
+        || body.overage_rates.emails_per_thousand < 0
+        || body.overage_rates.api_calls_per_thousand < 0
+        || body.overage_rates.storage_per_gb < 0
+    {
+        return err_json(StatusCode::BAD_REQUEST, "Numeric contract fields must be non-negative");
+    }
+
+    let payment_terms_days = match body.payment_terms.as_str() {
+        "net30" => 30,
+        "net60" => 60,
+        _ => return err_json(StatusCode::BAD_REQUEST, "paymentTerms must be net30 or net60"),
+    };
+
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    let dedicated_support = body.dedicated_support.unwrap_or(false);
+    let additional_fees = if dedicated_support {
+        vec![ContractAdditionalFee {
+            name: "Dedicated Support".to_string(),
+            amount: 0,
+            frequency: "monthly".to_string(),
+        }]
+    } else {
+        vec![]
+    };
+
+    let custom_terms = serde_json::json!({
+        "customFeatures": body.custom_features.clone().unwrap_or_default(),
+        "allowPurchaseOrders": body.allow_purchase_orders.unwrap_or(false),
+        "customSla": body.custom_sla.clone(),
+        "apiOveragePerThousand": body.overage_rates.api_calls_per_thousand,
+        "storageOveragePerGb": body.overage_rates.storage_per_gb,
+    })
+    .to_string();
+
+    match state.contracts.create_contract(CreateContractInput {
+        tenant_id: tenant_id.clone(),
+        name: format!("Enterprise Contract - {tenant_id}"),
+        start_date: body.start_date,
+        end_date: body.end_date,
+        auto_renew: false,
+        base_price: body.base_fee,
+        committed_volume: body.committed_volume.emails,
+        overage_rate: body.overage_rates.emails_per_thousand / 10,
+        annual_prepay_discount: 0,
+        additional_fees,
+        payment_terms_days,
+        sla_credit_percentage: 10,
+        custom_terms: Some(custom_terms),
+        allow_purchase_orders: body.allow_purchase_orders.unwrap_or(false),
+        dedicated_support,
+        custom_features: body.custom_features.unwrap_or_default(),
+        custom_sla: body.custom_sla,
+    }).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(contract) => json_status(StatusCode::CREATED, contract),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_submit(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    match state.contracts.submit_for_signature(&tenant_id, contract_id).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(contract) => json_status(StatusCode::OK, contract),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_sign(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+    Json(body): Json<ContractSignBody>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    match state.contracts.sign_contract(
+        &tenant_id,
+        contract_id,
+        SignContractInput {
+            signature_data: body.signature_data,
+            signer_name: body.signer_name,
+            signer_title: body.signer_title,
+            signed_at: body.signed_at,
+        },
+    ).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(contract) => json_status(StatusCode::OK, contract),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_amendment(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+    Json(body): Json<ContractAmendmentBody>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    let proposed_changes = match serde_json::to_value(&body.proposed_changes) {
+        Ok(value) => value,
+        Err(error) => return err_json(StatusCode::BAD_REQUEST, &format!("Invalid amendment payload: {error}")),
+    };
+
+    match state.contracts.request_amendment(
+        &tenant_id,
+        contract_id,
+        AmendmentInput {
+            reason: body.reason,
+            proposed_changes,
+        },
+    ).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(amendment) => json_status(StatusCode::CREATED, amendment),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_cancel(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+    Json(body): Json<ContractCancelBody>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    match state.contracts.cancel_contract(
+        &tenant_id,
+        contract_id,
+        CancelContractInput {
+            reason: body.reason,
+            effective_date: body.effective_date,
+        },
+    ).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(contract) => json_status(StatusCode::OK, contract),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_renewal_quote(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    match state.contracts.get_renewal_quote(&tenant_id, contract_id).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(quote) => json_status(StatusCode::OK, quote),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_renew(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+    Json(body): Json<ContractRenewBody>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    let new_terms = body.new_terms.map(|terms| ContractRenewalTerms {
+        base_fee: terms.base_fee,
+        committed_volume: terms.committed_volume.and_then(|volume| volume.emails),
+        overage_rate: terms
+            .overage_rates
+            .and_then(|rates| rates.emails_per_thousand)
+            .map(|value| value / 10),
+    });
+
+    match state.contracts.renew_contract(
+        &tenant_id,
+        contract_id,
+        RenewContractInput {
+            new_end_date: body.new_end_date,
+            new_terms,
+        },
+    ).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(contract) => json_status(StatusCode::CREATED, contract),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+async fn contract_purchase_order(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+    Path(contract_id): Path<Uuid>,
+    Json(body): Json<PurchaseOrderBody>,
+) -> impl IntoResponse {
+    let tenant_id = match resolve_tenant_id(&headers, &auth) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => return error,
+    };
+
+    match state.contracts.submit_purchase_order(
+        &tenant_id,
+        contract_id,
+        PurchaseOrderInput {
+            po_number: body.po_number,
+            amount: body.amount,
+            issued_date: body.issued_date,
+            expiry_date: body.expiry_date,
+            attachment_url: body.attachment_url,
+        },
+    ).await {
+        Ok(result) => match unwrap_contract_result(result) {
+            Ok(receipt) => json_status(StatusCode::CREATED, receipt),
+            Err(error) => error,
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
 // ── SSO Handlers ───────────────────────────────────────────────────────
 
 async fn sso_configure(State(state): State<S>, Json(body): Json<SSOConfigureRequest>) -> impl IntoResponse {
     service_result(state.sso.configure(body).await)
 }
 
-async fn sso_get_config(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.sso.get_configuration(tenant_id).await)
+async fn sso_get_config(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
+    service_result(state.sso.get_configuration(&tenant_id).await)
 }
 
 async fn sso_get_config_by_domain(State(state): State<S>, Path(domain): Path<String>) -> impl IntoResponse {
@@ -608,7 +1158,7 @@ async fn compliance_enable(State(state): State<S>, Json(body): Json<ComplianceEn
     service_result(state.compliance.enable(body.tenant_id, body.frameworks, body.hipaa_enabled.unwrap_or(false)).await)
 }
 
-async fn compliance_get_config(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn compliance_get_config(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.compliance.get_config(tenant_id).await)
 }
 
@@ -616,7 +1166,7 @@ async fn compliance_sign_baa(State(state): State<S>, Json(body): Json<BAABody>) 
     service_result(state.compliance.sign_baa(body.tenant_id, &body.signatory_name, &body.signatory_title, &body.signatory_email).await)
 }
 
-async fn compliance_zero_retention(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn compliance_zero_retention(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.compliance.enable_zero_retention(tenant_id).await)
 }
 
@@ -632,7 +1182,7 @@ async fn compliance_log_audit(State(state): State<S>, Json(body): Json<AuditLogB
     }
 }
 
-async fn compliance_get_audit_logs(State(state): State<S>, Path(tenant_id): Path<Uuid>, Query(q): Query<AuditFilterParams>) -> impl IntoResponse {
+async fn compliance_get_audit_logs(State(state): State<S>, Path(tenant_id): Path<String>, Query(q): Query<AuditFilterParams>) -> impl IntoResponse {
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(state.compliance.get_audit_logs(tenant_id, q.action.as_deref(), q.resource_type.as_deref(), limit, offset).await)
@@ -654,11 +1204,11 @@ async fn compliance_data_deletion(State(state): State<S>, Json(body): Json<DataD
     service_result(state.compliance.request_data_deletion(body.tenant_id, &body.requester_id, &body.requester_email, body.identifiers).await)
 }
 
-async fn compliance_report(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn compliance_report(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.compliance.generate_report(tenant_id).await)
 }
 
-async fn compliance_status(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn compliance_status(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.compliance.get_status(tenant_id).await)
 }
 
@@ -667,10 +1217,10 @@ async fn compliance_status(State(state): State<S>, Path(tenant_id): Path<Uuid>) 
 /// Get encryption status for a tenant (key info without revealing key material).
 async fn encryption_status(
     State(state): State<S>,
-    Path(tenant_id): Path<Uuid>,
+    Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
 // Check if HIPAA compliance is configured with encryption_at_rest
-    let config = match state.compliance.get_config(tenant_id).await {
+    let config = match state.compliance.get_config(tenant_id.clone()).await {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
             "error": { "code": "INTERNAL_ERROR", "message": e }
@@ -692,7 +1242,7 @@ async fn encryption_status(
 
 #[derive(Debug, Deserialize)]
 struct EncryptFieldBody {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub field_name: String,
     pub value: String,
 }
@@ -733,7 +1283,7 @@ async fn encrypt_field(
 #[derive(Debug, Deserialize)]
 struct DecryptFieldBody {
     #[allow(unused)]
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     #[allow(unused)]
     pub field_name: String,
     pub value: String,
@@ -794,7 +1344,7 @@ async fn log_stream_delete(State(state): State<S>, Path(id): Path<Uuid>) -> impl
     service_result(state.log_streaming.delete(id).await)
 }
 
-async fn log_stream_list(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn log_stream_list(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.log_streaming.list(tenant_id).await)
 }
 
@@ -827,7 +1377,7 @@ async fn deploy_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoRe
     service_result(state.private_deploy.get(id).await)
 }
 
-async fn deploy_list(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn deploy_list(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.private_deploy.list(tenant_id).await)
 }
 
@@ -849,7 +1399,7 @@ async fn ip_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoRespon
 
 async fn ip_list(
     State(state): State<S>,
-    Path(tenant_id): Path<Uuid>,
+    Path(tenant_id): Path<String>,
     Query(q): Query<PaginationParams>,
 ) -> impl IntoResponse {
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
@@ -917,7 +1467,7 @@ async fn sub_account_api_key(State(state): State<S>, Path(id): Path<Uuid>, Json(
 
 async fn ticket_create(State(state): State<S>, Json(body): Json<TicketCreateBody>) -> impl IntoResponse {
     service_result(state.support.create_ticket(
-        body.tenant_id, &body.subject, &body.description,
+        &body.tenant_id, &body.subject, &body.description,
         &body.priority, &body.category, body.contact_email.as_deref(),
     ).await)
 }
@@ -930,10 +1480,10 @@ async fn ticket_update(State(state): State<S>, Path(id): Path<Uuid>, Json(body):
     service_result(state.support.update_ticket(id, body.status.as_deref(), body.priority.as_deref(), body.assigned_to).await)
 }
 
-async fn ticket_list(State(state): State<S>, Path(tenant_id): Path<Uuid>, Query(q): Query<StatusFilterParams>) -> impl IntoResponse {
+async fn ticket_list(State(state): State<S>, Path(tenant_id): Path<String>, Query(q): Query<StatusFilterParams>) -> impl IntoResponse {
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
-    service_result(state.support.list_tickets(tenant_id, q.status.as_deref(), q.priority.as_deref(), limit, offset).await)
+    service_result(state.support.list_tickets(&tenant_id, q.status.as_deref(), q.priority.as_deref(), limit, offset).await)
 }
 
 async fn comment_add(State(state): State<S>, Path(ticket_id): Path<Uuid>, Json(body): Json<CommentBody>) -> impl IntoResponse {
@@ -955,8 +1505,8 @@ async fn ticket_satisfaction(State(state): State<S>, Path(id): Path<Uuid>, Json(
     service_result(state.support.submit_satisfaction(id, body.rating, body.feedback.as_deref()).await)
 }
 
-async fn support_metrics(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.support.get_metrics(tenant_id).await)
+async fn support_metrics(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
+    service_result(state.support.get_metrics(&tenant_id).await)
 }
 
 // ── Template Handlers ──────────────────────────────────────────────────
@@ -972,7 +1522,7 @@ async fn template_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl Into
     service_result(state.templates.get_submission(id).await)
 }
 
-async fn template_list(State(state): State<S>, Path(tenant_id): Path<Uuid>, Query(q): Query<StatusFilterParams>) -> impl IntoResponse {
+async fn template_list(State(state): State<S>, Path(tenant_id): Path<String>, Query(q): Query<StatusFilterParams>) -> impl IntoResponse {
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(state.templates.list_submissions(tenant_id, q.status.as_deref(), limit, offset).await)
@@ -993,7 +1543,7 @@ async fn template_request_changes(State(state): State<S>, Path(id): Path<Uuid>, 
     }
 }
 
-async fn template_stats(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn template_stats(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.templates.get_stats(tenant_id).await)
 }
 
@@ -1009,7 +1559,7 @@ async fn whitelabel_update_config(State(state): State<S>, Json(body): Json<White
     ).await)
 }
 
-async fn whitelabel_get_config(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn whitelabel_get_config(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.whitelabel.get_config(tenant_id).await)
 }
 
@@ -1023,7 +1573,7 @@ async fn whitelabel_verify_domain(State(state): State<S>, Path(id): Path<Uuid>) 
 
 async fn whitelabel_list_domains(
     State(state): State<S>,
-    Path(tenant_id): Path<Uuid>,
+    Path(tenant_id): Path<String>,
     Query(q): Query<PaginationParams>,
 ) -> impl IntoResponse {
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
@@ -1033,7 +1583,7 @@ async fn whitelabel_list_domains(
 
 async fn whitelabel_remove_domain(
     State(state): State<S>,
-    Path((tenant_id, id)): Path<(Uuid, Uuid)>
+    Path((tenant_id, id)): Path<(String, Uuid)>
 ) -> impl IntoResponse {
 // #250:Now requires tenant_id for ownership verification
     service_result(state.whitelabel.remove_domain(id, tenant_id).await)
@@ -1047,7 +1597,7 @@ async fn whitelabel_update_templates(State(state): State<S>, Json(body): Json<Em
     ).await)
 }
 
-async fn whitelabel_get_templates(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn whitelabel_get_templates(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     service_result(state.whitelabel.get_email_templates(tenant_id).await)
 }
 
@@ -1061,7 +1611,7 @@ async fn qbr_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoRespo
     service_result(state.qbr.get(id).await)
 }
 
-async fn qbr_list(State(state): State<S>, Path(tenant_id): Path<Uuid>, Query(q): Query<PaginationParams>) -> impl IntoResponse {
+async fn qbr_list(State(state): State<S>, Path(tenant_id): Path<String>, Query(q): Query<PaginationParams>) -> impl IntoResponse {
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(state.qbr.list(tenant_id, limit, offset).await)
@@ -1097,11 +1647,11 @@ static PDF_RENDERER_URL: std::sync::LazyLock<String> = std::sync::LazyLock::new(
 /// POST /dpa/:tenant_id/pdf — Generate a GDPR Data Processing Agreement PDF
 async fn dpa_generate_pdf(
     State(state): State<S>,
-    Path(tenant_id): Path<Uuid>,
+    Path(tenant_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
 // Fetch compliance config for this tenant
-    let status = match state.compliance.get_status(tenant_id).await {
+    let status = match state.compliance.get_status(tenant_id.clone()).await {
         Ok(s) => s,
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get compliance status: {e}"))),
     };
@@ -1207,7 +1757,7 @@ async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl 
 }
 
 /// GET /compliance/report/:tenant_id/pdf — Generate a compliance report PDF
-async fn compliance_report_pdf(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
+async fn compliance_report_pdf(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
 // Fetch compliance report and status
     let report = match state.compliance.generate_report(tenant_id).await {
         Ok(r) => r,
@@ -1259,11 +1809,41 @@ async fn compliance_report_pdf(State(state): State<S>, Path(tenant_id): Path<Uui
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
 
     #[test]
     fn test_router_builds() {
         let _ = Router::<Arc<AppState>>::new()
             .route("/health", get(health_check));
+    }
+
+    #[tokio::test]
+    async fn contract_routes_exist_at_root_and_legacy_prefix() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://apexmail:devpass123@localhost:5432/apexmail")
+            .unwrap();
+        let config = Config::from_env().unwrap();
+        let app = router(Arc::new(AppState::new(pool, config)));
+
+        let root = app
+            .clone()
+            .oneshot(Request::builder().uri("/contracts").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::UNAUTHORIZED);
+
+        let legacy = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/enterprise/contracts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]
@@ -1296,6 +1876,23 @@ mod tests {
         assert_eq!(body.quarter, 1);
         assert_eq!(body.year, 2024);
         assert_eq!(body.scheduled_date, None);
+    }
+
+    #[test]
+    fn test_contract_create_body_deserialize() {
+        let json = r#"{
+          "startDate":"2026-04-01T00:00:00Z",
+          "endDate":"2027-04-01T00:00:00Z",
+          "baseFee":5000,
+          "committedVolume":{"emails":100000,"apiCalls":1000,"storage":50},
+          "overageRates":{"emailsPerThousand":15,"apiCallsPerThousand":5,"storagePerGb":1},
+          "paymentTerms":"net30",
+          "allowPurchaseOrders":true
+        }"#;
+        let body: ContractCreateBody = serde_json::from_str(json).unwrap();
+        assert_eq!(body.base_fee, 5000);
+        assert_eq!(body.committed_volume.emails, 100000);
+        assert_eq!(body.payment_terms, "net30");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! OpenAPI specification generation — produce an OpenAPI 3.1 JSON document
 //! describing the ApexMail REST API.
 //!
-//! Mirrors the TypeScript `OpenApiGenerator`.
+//! Generates the service OpenAPI document.
 
 use serde::{Deserialize, Serialize};
 

@@ -13,7 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - `Emails` resource — `Send`, `Batch` (up to 1000), `Get`, `List`.
 - `Domains` resource — `Create`, `Get`, `List`, `Verify`, `Delete`, `Health`.
 - `Webhooks` resource — `Create`, `List`, `Get`, `Update`, `Delete`.
-- `Templates` resource — `Create`, `Get`, `GetBySlug`, `List`, `Update`, `Delete`, `Render`, `ValidateReactEmail`, `ReactEmailStarter`.
+- `Templates` resource — `Create`, `Get`, `GetBySlug`, `List`, `Update`, `Delete`, `Render`.
 - `Suppressions` resource — `Add`, `List`, `Check`, `Delete`.
 - `Events` resource — `List`, `GetByMessage`, `Get`.
 - `VerifyWebhookSignature` helper for inbound webhook verification.

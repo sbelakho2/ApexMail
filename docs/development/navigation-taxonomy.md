@@ -6,7 +6,7 @@ Canonical taxonomy for product surfaces.
 
 - Customer Console (`web` surface served by `services/mail-server/crates/api-server`)
 - Control Plane (`control-plane` surface served by `services/mail-server/crates/api-server`)
-- Marketing (`apps/marketing`, `apps/marketing-zola`)
+- Marketing (`marketing-zola` routes served from `apps/marketing-zola` exports)
 
 ## Customer Console Taxonomy
 
@@ -52,7 +52,7 @@ Rules:
 
 Rules:
 - Match conversion pathways to role intent (technical, compliance, executive).
-- Keep naming parity across Next.js and Zola surfaces.
+- Keep naming parity across SSR browser surfaces and Zola-generated marketing surfaces.
 
 ## Naming Contract
 

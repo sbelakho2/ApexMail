@@ -71,9 +71,9 @@ High-volume GET requests through the tracking service.
 - `GET /c/{tracking_id}` — click redirect
 - `POST /u/{token}` — unsubscribe
 
-### 3. Concurrent Users — Control Plane & Web
+### 3. Concurrent Users — SSR Browser Surfaces
 
-Browser-level load for the Next.js control-plane and web apps.
+Browser-level load for the Rust-served `control-plane` and `web` surfaces behind nginx.
 
 | Parameter | Target |
 |-----------|--------|

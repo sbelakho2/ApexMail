@@ -3,7 +3,7 @@
 # ApexMail — Forbidden Pattern Quality Gate
 #
 # Prevents regressions by failing CI if prohibited patterns creep back into
-# production code.  Run via:  pnpm verify:forbidden-patterns
+# production code. Run via: bash tools/check-forbidden-patterns.sh
 # =============================================================================
 set -euo pipefail
 
@@ -55,36 +55,30 @@ else
 fi
 
 # 5. All CI jobs have timeout-minutes
-if python3 -c "
-import yaml, sys
-for f in sys.argv[1:]:
-    with open(f) as fh:
-        doc = yaml.safe_load(fh)
-    for name, job in (doc.get('jobs') or {}).items():
-        if 'timeout-minutes' not in job:
-            print(f'{f}: job {name} missing timeout-minutes')
-            sys.exit(1)
-" .github/workflows/*.yml 2>/dev/null; then
+if ruby --disable-gems -ryaml -e '
+ARGV.each do |file|
+  doc = YAML.load_file(file) || {}
+  jobs = doc["jobs"] || {}
+  jobs.each do |name, job|
+    unless job.is_a?(Hash) && job.key?("timeout-minutes")
+      warn("#{file}: job #{name} missing timeout-minutes")
+      exit 1
+    end
+  end
+end
+' .github/workflows/*.yml 2>/dev/null; then
   green "PASS: All CI jobs have timeout-minutes"
 else
   red "FAIL: CI jobs missing timeout-minutes"
   ERRORS=$((ERRORS + 1))
 fi
 
-# 6. No console.* in billing TS app
-if grep -rn 'console\.' --include='*.ts' apps/billing/src/ 2>/dev/null; then
-  red "FAIL: console.* in billing app (use structured logger)"
+# 6. Legacy TS billing package must stay removed
+if [ -d apps/billing ]; then
+  red "FAIL: legacy apps/billing package still present"
   ERRORS=$((ERRORS + 1))
 else
-  green "PASS: No console.* in billing"
-fi
-
-# 7. No 'any' type in billing TS app
-if grep -rn ': any\b' --include='*.ts' apps/billing/src/ 2>/dev/null; then
-  red "FAIL: 'any' type in billing app"
-  ERRORS=$((ERRORS + 1))
-else
-  green "PASS: No 'any' type in billing"
+  green "PASS: legacy apps/billing package removed"
 fi
 
 echo ""

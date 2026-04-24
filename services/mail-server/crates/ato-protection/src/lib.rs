@@ -12,14 +12,14 @@
 //! use ato_protection::engine::AtoEngine;
 //! use ato_protection::session::LoginEvent;
 //!
-//! let engine = AtoEngine::new;
+//! let engine = AtoEngine::new();
 //! let event = LoginEvent {
 //! user_id:"user123".into(),
 //! ip_address:"203.0.113.50".into(),
 //! user_agent:"Mozilla/5.0 ...".into(),
 //! latitude:Some(40.7128),
 //! longitude:Some(-74.0060),
-//! timestamp:chrono::Utc::now,
+//! timestamp:chrono::Utc::now(),
 //! success:true,
 //! tls_fingerprint:None,
 //! };

@@ -1,6 +1,6 @@
 //! Redis WAL → PostgreSQL event processor.
 //!
-//! Mirrors the TypeScript `EventProcessor` class behaviour exactly://! • Events are RPUSH'd into a Redis list (write-ahead log) _before_ the
+//! • Events are RPUSH'd into a Redis list (write-ahead log) _before_ the
 //! HTTP response is sent, so they survive process crashes (Redis AOF).
 //! • A background Tokio task drains batches from Redis → Postgres using an
 //! atomic Lua script (LRANGE + LTRIM in one Redis round-trip).
@@ -31,12 +31,12 @@ use uuid::Uuid;
 
 // ── Event envelope ────────────────────────────────────────────────────────────
 
-/// WAL envelope version — must match TypeScript `WAL_VERSION = 1`.
+/// WAL envelope version for the persisted tracking payload.
 const WAL_VERSION: u8 = 1;
 
 /// Redis list key (without the `tracking:` keyPrefix applied by the pool).
 /// The pool's keyPrefix is `tracking:` so the effective key is
-/// `tracking:apexmail:events:pending` — matching the TypeScript service exactly.
+/// `tracking:apexmail:events:pending`.
 pub const REDIS_WAL_KEY: &str = "apexmail:events:pending";
 
 /// Atomic Lua drain:reads up to N items from the front of the list and
@@ -171,7 +171,7 @@ impl EventProcessor {
 
             loop {
                 tokio::select! {
-// Re-schedule after fixed interval (like TypeScript's setTimeout + reschedule)
+// Re-schedule after the configured fixed interval.
                     _ = tokio::time::sleep(interval) => {
                         if let Err(e) = this.flush().await {
                             error!(error = %e, "EventProcessor: flush error");
@@ -690,14 +690,14 @@ fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
 
 // ── Utility functions ─────────────────────────────────────────────────────────
 
-/// Compute first 8 hex chars of SHA-256 (matches TypeScript `sha256(s).slice(0, 8)`).
+/// Compute the first 8 hex chars of SHA-256.
 fn sha256_hex8(s: &str) -> String {
     let hash = Sha256::digest(s.as_bytes());
     hex::encode(&hash[..4]) // 4 bytes = 8 hex chars
 }
 
 /// Generate a prefixed ULID-style ID (e.g. "evt_01HXYZ...").
-/// Uses UUID v4 for simplicity — matches TypeScript `generateId(prefix)` semantics.
+/// Uses UUID v4 for simplicity.
 fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }

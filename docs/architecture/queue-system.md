@@ -2,7 +2,7 @@
 
 > **ApexMail** — PostgreSQL-native job queue with LISTEN/NOTIFY wakeups, batch processing, and multi-worker safety.
 >
-> **Implementation Note (2026-02):** Queue processing is implemented in Rust (`services/mail-server/crates/queue-provider/`). TypeScript code examples below are pseudo-code illustrating the algorithm. Node.js-specific metrics (V8 heap, event loop) should be read as process memory metrics for Rust.
+> **Implementation Note (2026-02):** Queue processing is implemented in Rust (`services/mail-server/crates/queue-provider/`). Historical browser-runtime pseudo-code was removed; interpret resource metrics in this document as Rust process metrics.
 
 ---
 
@@ -272,14 +272,8 @@ LISTEN/NOTIFY is a best-effort optimization. Notifications can be lost if:
 
 To handle these cases, **workers always fall back to periodic polling** after a configurable timeout. The NOTIFY mechanism reduces latency from `poll_interval` to near-zero under normal conditions, while polling guarantees no job is ever permanently missed.
 
-```typescript
-// Pseudocode: wakeup-or-poll loop
-while (running) {
-    const notified = await waitForNotify(pollInterval);
-    if (notified || pollIntervalElapsed) {
-        await claimAndProcessJobs();
-    }
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ---
@@ -327,8 +321,8 @@ The `FOR UPDATE SKIP LOCKED` clause is the sole mechanism that prevents double-p
 
 Each worker process generates a unique identifier at startup:
 
-```typescript
-const workerId = `worker-${hostname()}-${process.pid}-${randomBytes(4).toString('hex')}`;
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 This ID is stored in the `worker_id` column when a job is claimed, enabling:
@@ -356,22 +350,8 @@ The only shared resource is the PostgreSQL database itself, and all coordination
 
 Instead of updating each job's status individually after processing, completed jobs are **queued in memory** during a poll cycle and flushed in a **single PostgreSQL transaction**:
 
-```typescript
-// During poll cycle
-const completedIds: string[] = [];
-const failedJobs: Array<{ id: string; error: string }> = [];
-
-for (const job of claimedJobs) {
-    try {
-        await processJob(job);
-        completedIds.push(job.id);
-    } catch (err) {
-        failedJobs.push({ id: job.id, error: err.message });
-    }
-}
-
-// Single transaction flush
-await batchFlush(completedIds, failedJobs);
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Multi-Row Operations via unnest()
@@ -505,19 +485,8 @@ WHERE id = $1;
 
 Webhook retries follow exponential backoff but also **respect the `Retry-After` HTTP header** from the receiving server:
 
-```typescript
-function getWebhookRetryDelay(attempt: number, retryAfterHeader?: string): number {
-    const exponentialDelay = Math.min(30 * Math.pow(2, attempt - 1), 300);
-
-    if (retryAfterHeader) {
-        const retryAfterSeconds = parseInt(retryAfterHeader, 10);
-        if (!isNaN(retryAfterSeconds)) {
-            return Math.min(retryAfterSeconds, 300); // cap at 300s
-        }
-    }
-
-    return exponentialDelay;
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 | Parameter          | Value                  |

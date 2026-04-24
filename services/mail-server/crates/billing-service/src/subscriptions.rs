@@ -1,7 +1,8 @@
 //! Subscription management – create, get, update plan, cancel.
 //!
 //! The actual Stripe subscription lifecycle (checkout, webhooks) stays in
-//! TypeScript. This module manages the local DB record and plan transitions.
+//! the billing integration boundary. This module manages the local DB record
+//! and plan transitions.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -37,7 +38,7 @@ pub async fn create_subscription(
         "#,
     )
     .bind(id)
-    .bind(input.tenant_id)
+    .bind(&input.tenant_id)
     .bind(&input.plan_name)
     .bind(interval_to_str(input.billing_interval))
     .bind(input.period_start)
@@ -68,7 +69,7 @@ pub async fn create_subscription(
 /// Get the active subscription for a tenant.
 pub async fn get_subscription(
     pool: &PgPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
 ) -> Result<Option<Subscription>, SubscriptionError> {
     let row: Option<SubRow> = sqlx::query_as(
         r#"
@@ -97,7 +98,7 @@ pub async fn get_subscription(
 /// Also updates the tenant's `plan` column.
 pub async fn update_plan(
     pool: &PgPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
     new_plan: &str,
 ) -> Result<(), SubscriptionError> {
 // Verify the plan exists.
@@ -164,7 +165,7 @@ pub async fn update_plan(
 /// Cancel the subscription (at period end).
 pub async fn cancel_subscription(
     pool: &PgPool,
-    tenant_id: Uuid,
+    tenant_id: &str,
 ) -> Result<(), SubscriptionError> {
     let now = Utc::now();
 
@@ -195,7 +196,7 @@ pub async fn cancel_subscription(
 // ---------------------------------------------------------------------------
 
 pub struct CreateSubscriptionInput {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub plan_name: String,
     pub billing_interval: BillingInterval,
     pub period_start: DateTime<Utc>,
@@ -237,7 +238,7 @@ fn parse_interval(s: &str) -> BillingInterval {
 #[derive(sqlx::FromRow)]
 struct SubRow {
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     plan_name: String,
     status: String,
     billing_interval: String,
@@ -328,7 +329,7 @@ mod tests {
         let now = Utc::now();
         let row = SubRow {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
             plan_name: "pro".into(),
             status: "active".into(),
             billing_interval: "monthly".into(),
@@ -351,7 +352,7 @@ mod tests {
         let now = Utc::now();
         let row = SubRow {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
             plan_name: "pro".into(),
             status: "corrupted".into(),
             billing_interval: "monthly".into(),

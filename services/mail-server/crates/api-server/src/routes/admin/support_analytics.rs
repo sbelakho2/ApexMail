@@ -1,6 +1,5 @@
 //! Support ticket analytics endpoint.
 //!
-//! Migrated from:apps/control-plane/src/app/api/support/analytics/route.ts (124 lines)
 
 use axum::extract::{Query, State};
 use axum::routing::get;

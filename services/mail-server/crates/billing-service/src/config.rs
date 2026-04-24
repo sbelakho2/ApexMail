@@ -20,12 +20,27 @@ pub struct BillingConfig {
     pub metering_flush_interval_ms: u64,
 /// Service-to-service auth token.
     pub service_auth_token: String,
+/// Stripe webhook signing secret.
+    #[serde(default)]
+    pub stripe_webhook_secret: String,
+/// Internal API base URL used for dedicated IP provisioning.
+    #[serde(default = "default_api_base_url")]
+    pub api_base_url: String,
 /// Estonia VAT rate (percent).
     #[serde(default = "default_vat_rate")]
     pub estonia_vat_rate: u32,
 /// Overage rate per email in cents ($0.40 / 1 000 = 0.04 cents).
     #[serde(default = "default_overage_rate_cents")]
     pub overage_rate_per_email_millicents: i64,
+/// Maximum allowed proration charge in cents.
+    #[serde(default = "default_max_proration_charge_cents")]
+    pub max_proration_charge_cents: i64,
+/// Maximum allowed proration credit in cents.
+    #[serde(default = "default_max_proration_credit_cents")]
+    pub max_proration_credit_cents: i64,
+/// Warning threshold for large proration charges in cents.
+    #[serde(default = "default_warn_proration_charge_cents")]
+    pub warn_proration_charge_cents: i64,
 }
 
 fn default_listen_addr() -> String {
@@ -37,11 +52,23 @@ fn default_metering_batch_size() -> usize {
 fn default_metering_flush_interval_ms() -> u64 {
     10_000
 }
+fn default_api_base_url() -> String {
+    "http://localhost:3001".into()
+}
 fn default_vat_rate() -> u32 {
     22
 }
 fn default_overage_rate_cents() -> i64 {
     40
+}
+fn default_max_proration_charge_cents() -> i64 {
+    100_000
+}
+fn default_max_proration_credit_cents() -> i64 {
+    50_000
+}
+fn default_warn_proration_charge_cents() -> i64 {
+    25_000
 }
 
 impl Default for BillingConfig {
@@ -53,8 +80,13 @@ impl Default for BillingConfig {
             metering_batch_size: default_metering_batch_size(),
             metering_flush_interval_ms: default_metering_flush_interval_ms(),
             service_auth_token: String::new(),
+            stripe_webhook_secret: String::new(),
+            api_base_url: default_api_base_url(),
             estonia_vat_rate: default_vat_rate(),
             overage_rate_per_email_millicents: default_overage_rate_cents(),
+            max_proration_charge_cents: default_max_proration_charge_cents(),
+            max_proration_credit_cents: default_max_proration_credit_cents(),
+            warn_proration_charge_cents: default_warn_proration_charge_cents(),
         }
     }
 }
@@ -118,7 +150,7 @@ impl PaygPricing {
         let api_cost_cents = billable_thousands
             .saturating_mul(self.price_per_thousand_api_calls as i64);
 
-        let email_cost_cents = (email_cost_millicents + 500) / 1000;
+        let email_cost_cents = email_cost_millicents / 1000;
         let total = email_cost_cents + api_cost_cents;
         (email_cost_cents, api_cost_cents, total)
     }
@@ -138,6 +170,9 @@ mod tests {
         assert_eq!(cfg.listen_addr, "0.0.0.0:4100");
         assert_eq!(cfg.metering_batch_size, 100);
         assert_eq!(cfg.estonia_vat_rate, 22);
+        assert_eq!(cfg.max_proration_charge_cents, 100_000);
+        assert_eq!(cfg.max_proration_credit_cents, 50_000);
+        assert_eq!(cfg.warn_proration_charge_cents, 25_000);
     }
 
     #[test]
@@ -172,6 +207,28 @@ mod tests {
 // 10k emails at 0.10 = 1000 cents, api free tier → 0
         assert_eq!(email, 1000);
         assert_eq!(api, 0);
+        assert_eq!(total, 1000);
+    }
+
+    #[test]
+    fn payg_legacy_monthly_rounding_contract() {
+        let pricing = PaygPricing::default();
+
+        let (email, api, total) = pricing.calculate(1, 0);
+        assert_eq!(email, 0);
+        assert_eq!(api, 0);
+        assert_eq!(total, 0);
+
+        let (email, _, total) = pricing.calculate(4, 0);
+        assert_eq!(email, 0);
+        assert_eq!(total, 0);
+
+        let (email, _, total) = pricing.calculate(5, 0);
+        assert_eq!(email, 0);
+        assert_eq!(total, 0);
+
+        let (email, _, total) = pricing.calculate(10_001, 0);
+        assert_eq!(email, 1000);
         assert_eq!(total, 1000);
     }
 }

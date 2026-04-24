@@ -2,6 +2,7 @@ pub mod helpers;
 pub mod health;
 pub mod auth;
 pub mod account;
+pub mod billing;
 pub mod messages;
 pub mod domains;
 pub mod templates;
@@ -22,7 +23,6 @@ pub mod dedicated_ips;
 pub mod ses_notifications;
 pub mod self_hosted_bounces;
 
-// Migrated from apps/web auth routes
 pub mod session;
 pub mod forgot_password;
 pub mod sso;
@@ -30,7 +30,6 @@ pub mod impersonate;
 pub mod csrf;
 pub mod telemetry;
 
-// Migrated from apps/control-plane
 pub mod admin;
 
 // Real-time SSE stream token issuance

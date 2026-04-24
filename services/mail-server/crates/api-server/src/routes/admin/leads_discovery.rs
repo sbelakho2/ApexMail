@@ -1,6 +1,5 @@
 //! Lead discovery endpoint — sources and discovered leads.
 //!
-//! Migrated from:apps/control-plane/src/app/api/leads/discovery/route.ts (83 lines)
 
 use axum::extract::State;
 use axum::routing::get;

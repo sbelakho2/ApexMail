@@ -1,7 +1,7 @@
 //! Pixel-perfect parity testing framework.
 //!
 //! Provides utilities that compare every aspect of the Rust-rendered HTML
-//! against the original TypeScript/React-rendered HTML to verify
+//! against the legacy browser-rendered HTML to verify
 //! pixel-identical migration.
 //!
 //! ## Verification layers

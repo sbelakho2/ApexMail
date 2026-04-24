@@ -18,12 +18,16 @@ resources:
   # Shared config & secret template
   - configmap.yaml
   # Services
+  - api-server/deployment.yaml
+  - api-server/service.yaml
+  - api-server/hpa.yaml
+  - api-server/pdb.yaml
+  - api-server/network-policy.yaml
   - tracking-service/deployment.yaml
   - tracking-service/service.yaml
   - tracking-service/hpa.yaml
   - tracking-service/pdb.yaml
   - tracking-service/network-policy.yaml
-  - web/manifests.yaml
 
 commonLabels:
   app.kubernetes.io/part-of: apexmail
@@ -31,7 +35,7 @@ commonLabels:
 
 # Image tags — pin to release versions (override via kustomize overlays per environment)
 images:
-  - name: apexmail/tracking-service
+  - name: apexmail/api-server
     newTag: v1.0.0
-  - name: apexmail/web
+  - name: apexmail/tracking-service
     newTag: v1.0.0

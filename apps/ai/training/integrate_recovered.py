@@ -417,8 +417,8 @@ NEW_STRESS_CATEGORIES = {
         {"q": "What's the Java package name for ApexMail?",
          "checks": {"must_contain_any": ["ee.apexmail", "maven", "gradle"]}},
         
-        {"q": "How do I install the Node.js SDK?",
-         "checks": {"must_contain_any": ["npm", "pnpm", "yarn", "@apexmail"]}},
+        {"q": "How do I install the Python SDK?",
+         "checks": {"must_contain_any": ["pip", "apexmail", "PyPI"]}},
         
         {"q": "Is there a Python SDK?",
          "checks": {"must_contain_any": ["pip", "apexmail", "PyPI"]}},

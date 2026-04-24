@@ -14,7 +14,7 @@
         <div>
           <span class="text-sm font-bold text-primary-600 mb-2 block">Build in Minutes</span>
           <h3 class="text-2xl lg:text-3xl font-bold text-surface-900 mb-4">Developer-First API</h3>
-          <p class="text-lg text-surface-600 mb-6">Our RESTful API is designed for developers who value simplicity and power. TypeScript types, comprehensive SDKs, and instant feedback.</p>
+          <p class="text-lg text-surface-600 mb-6">Our RESTful API is designed for developers who value simplicity and power. Consistent SDKs, comprehensive docs, and instant feedback.</p>
           <ul class="space-y-3 mb-8">
             {% set api_benefits = ["Send your first email in under 10 seconds", "Idempotency keys for safe retries", "Webhook signatures for security", "Batch sending up to 1,000 emails", "Real-time status updates"] %}
             {% for b in api_benefits %}
@@ -39,25 +39,23 @@
                 <span class="w-2.5 h-2.5 rounded-full bg-gray-700"></span>
                 <span class="w-2.5 h-2.5 rounded-full bg-gray-700"></span>
               </div>
-              <span class="text-xs text-gray-400 ml-2 font-mono font-medium">example.ts</span>
+              <span class="text-xs text-gray-400 ml-2 font-mono font-medium">example.py</span>
             </div>
-            <pre class="p-4 text-sm text-gray-200 font-mono overflow-x-auto"><code>import { ApexMail } from '@apexmail/node';
+            <pre class="p-4 text-sm text-gray-200 font-mono overflow-x-auto"><code>from apexmail import ApexMail
 
-const apexmail = new ApexMail('am_live_xxx');
+client = ApexMail(api_key="am_live_xxx")
 
-// Send with full type safety
-const { id } = await apexmail.emails.send({
-  from: 'hello@company.com',
-  to: 'user@example.com',
-  subject: 'Welcome!',
-  html: '&lt;h1&gt;Hello &#123;&#123;name&#125;&#125;!&lt;/h1&gt;',
-  data: { name: 'John' },
-  tags: [{ name: 'type', value: 'welcome' }],
-});
+email = client.emails.send(
+    from_="hello@company.com",
+    to=["user@example.com"],
+    subject="Welcome!",
+    html="&lt;h1&gt;Hello {{name}}!&lt;/h1&gt;",
+    tags=[{"name": "type", "value": "welcome"}],
+)
 
-// Track delivery
-const email = await apexmail.emails.get(id);
-console.log(email.status); // 'delivered'</code></pre>
+# Track delivery
+status = client.emails.get(email.id)
+print(status.status)  # 'delivered'</code></pre>
           </div>
         </div>
       </div>

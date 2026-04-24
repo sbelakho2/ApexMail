@@ -1,8 +1,5 @@
 //! Impersonation endpoints.
 //!
-//! Migrated from://! - apps/web/src/app/api/auth/impersonate/route.ts
-//! - apps/web/src/app/api/auth/impersonate/end/route.ts
-//!
 //! Allows platform operators to impersonate tenant accounts.
 //! All impersonation events are audit-logged.
 

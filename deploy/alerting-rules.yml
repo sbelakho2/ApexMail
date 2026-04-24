@@ -95,7 +95,7 @@ groups:
           description: "Memory usage is {{ $value }}GB, exceeding 1.5GB threshold."
           runbook_url: "https://docs.apexmail.ee/runbooks/alerts/HighMemoryUsage"
 
-      # Event loop lag (Node.js)
+      # Event loop lag
       - alert: HighEventLoopLag
         expr: apexmail_event_loop_lag_seconds > 0.1
         for: 5m

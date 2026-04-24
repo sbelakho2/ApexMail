@@ -1,6 +1,5 @@
 //! CRM leads listing endpoint.
 //!
-//! Migrated from:apps/control-plane/src/app/api/crm/leads/route.ts (72 lines)
 
 use axum::extract::{Query, State};
 use axum::routing::get;

@@ -1,6 +1,5 @@
 //! SSRF-safe proxy endpoint.
 //!
-//! Migrated from:apps/control-plane/src/app/api/proxy/route.ts
 
 use axum::extract::State;
 use axum::http::StatusCode;

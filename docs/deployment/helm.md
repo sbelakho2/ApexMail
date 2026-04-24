@@ -43,7 +43,6 @@ kubectl create secret generic apexmail-secrets \
   --from-literal=redis-password='REDIS_PASSWORD' \
   --from-literal=redis-url='redis://:REDIS_PASSWORD@host:6379/0' \
   --from-literal=tracking-secret-key='YOUR_32_CHAR_SECRET_HERE' \
-  --from-literal=nextauth-secret='YOUR_NEXTAUTH_SECRET' \
   -n apexmail
 ```
 
@@ -104,12 +103,11 @@ The chart deploys these services:
 
 | Service            | Port  | Purpose                                 |
 |--------------------|-------|-----------------------------------------|
-| API Server         | 3000  | REST API + stream token issuance        |
+| API Server         | 3000  | REST API + web/control-plane SSR        |
 | Tracking Service   | 3001  | Open/click tracking, SSE streaming      |
 | MTA                | 25/587/465 | SMTP mail transfer                 |
 | Worker             | —     | Background job processing               |
 | Enterprise         | 3002  | Compliance, encryption, audit           |
-| Web                | 3000  | Next.js customer dashboard              |
 
 ## HIPAA Deployment
 

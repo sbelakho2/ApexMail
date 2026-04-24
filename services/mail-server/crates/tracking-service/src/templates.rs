@@ -1,5 +1,5 @@
 //! HTML template rendering for unsubscribe / preferences pages.
-//! Matches the TypeScript route.ts template output exactly.
+//! Keeps the tracking pages consistent across rendered surfaces.
 
 /// Escape HTML special characters to prevent XSS.
 pub fn escape_html(s: &str) -> String {

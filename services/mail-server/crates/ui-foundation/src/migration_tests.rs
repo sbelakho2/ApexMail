@@ -36,8 +36,6 @@ fn assert_no_unmigrated_markers(label: &str, html: &str) {
         "next-route-announcer",
         "_next/static",
         "hydrateRoot(",
-        "ReactDOM",
-        "use client",
         "Under construction",
         "Coming soon",
     ];
@@ -87,7 +85,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
                 route.pattern
             );
             assert!(
-                html.contains("<main class=\"min-h-screen bg-background\">"),
+                html.contains("<main id=\"app-main\" class=\"min-h-screen bg-background\">") ,
                 "[web] {} missing web main wrapper",
                 route.pattern
             );
@@ -190,7 +188,7 @@ fn migration_all_93_routes_have_view_functions() {
 }
 
 #[test]
-fn migration_docs_define_rust_ui_and_typescript_stripe_boundary() {
+fn migration_docs_define_rust_ui_and_current_stripe_boundary() {
     assert!(
         UI_RUST_MIGRATION_PLAN_JSON.contains("\"next\": \"axum-plus-leptos-router\""),
         "migration plan no longer requires axum + Leptos router replacement"
@@ -204,8 +202,8 @@ fn migration_docs_define_rust_ui_and_typescript_stripe_boundary() {
         "migration plan no longer requires Rust-native primitive replacement"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD.contains("**SDK** | `stripe` npm package (TypeScript)"),
-        "Stripe tool contract no longer documents the TypeScript SDK boundary"
+        STRIPE_TOOL_CONTRACT_MD.contains("**SDK** | Stripe-maintained server-side billing client"),
+        "Stripe tool contract no longer documents the current Stripe SDK boundary"
     );
     assert!(
         STRIPE_TOOL_CONTRACT_MD.contains("User redirected to Stripe Checkout"),

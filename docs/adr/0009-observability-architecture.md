@@ -4,7 +4,7 @@
 
 Accepted
 
-**Implementation Note (2026-02):** The TypeScript examples in this ADR are historical. Implementation has been migrated to Rust using `metrics_exporter_prometheus` and `tracing` crates. See [monitoring.md](../operations/monitoring.md) for current metrics documentation.
+**Implementation Note (2026-02):** Implementation has been migrated to Rust using `metrics_exporter_prometheus` and `tracing` crates. Historical browser-runtime snippets were removed; see [monitoring.md](../operations/monitoring.md) for current metrics documentation.
 
 ## Date
 
@@ -73,93 +73,22 @@ We implement a **Three Pillars** observability stack:
 
 Every email journey is traced:
 
-```typescript
-import { trace, SpanKind } from '@opentelemetry/api';
-
-const tracer = trace.getTracer('apexmail-api');
-
-async function sendEmail(params: SendEmailParams) {
-  return tracer.startActiveSpan('email.send', {
-    kind: SpanKind.PRODUCER,
-    attributes: {
-      'email.to_count': params.to.length,
-      'email.has_attachments': params.attachments?.length > 0,
-      'tenant.id': params.tenantId,
-    },
-  }, async (span) => {
-    try {
-      // Validate email
-      const validationSpan = tracer.startSpan('email.validate');
-      await validateEmail(params);
-      validationSpan.end();
-      
-      // Queue for delivery
-      const queueSpan = tracer.startSpan('email.queue');
-      const emailId = await queueEmail(params);
-      queueSpan.setAttribute('email.id', emailId);
-      queueSpan.end();
-      
-      span.setAttribute('email.id', emailId);
-      return { id: emailId, status: 'queued' };
-    } catch (error) {
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR });
-      throw error;
-    } finally {
-      span.end();
-    }
-  });
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 Trace propagation through async workers:
 
-```typescript
-// Worker receives message with trace context
-async function processEmail(message: QueueMessage) {
-  const parentContext = propagation.extract(context.active(), message.headers);
-  
-  return context.with(parentContext, async () => {
-    return tracer.startActiveSpan('email.deliver', async (span) => {
-      // ... delivery logic
-    });
-  });
-}
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 ### Pillar 2: Metrics
 
 Key performance indicators:
 
-```typescript
-import { metrics } from '@opentelemetry/api';
-
-const meter = metrics.getMeter('apexmail');
-
-// Counters
-const emailsSent = meter.createCounter('emails.sent', {
-  description: 'Total emails sent',
-});
-
-const emailsFailed = meter.createCounter('emails.failed', {
-  description: 'Total email failures',
-});
-
-// Histograms
-const deliveryLatency = meter.createHistogram('emails.delivery_latency', {
-  description: 'Email delivery latency in ms',
-  unit: 'ms',
-});
-
-// Gauges
-const queueDepth = meter.createObservableGauge('queue.depth', {
-  description: 'Current queue depth',
-});
-
-queueDepth.addCallback(async (result) => {
-  const depth = await getQueueDepth();
-  result.observe(depth, { queue: 'email' });
-});
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 Prometheus scrape configuration:
@@ -188,31 +117,8 @@ scrape_configs:
 
 JSON-formatted logs with correlation:
 
-```typescript
-import { pino } from 'pino';
-
-const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  formatters: {
-    level: (label) => ({ level: label }),
-  },
-  mixin() {
-    const span = trace.getActiveSpan();
-    if (span) {
-      const { traceId, spanId } = span.spanContext();
-      return { traceId, spanId };
-    }
-    return {};
-  },
-});
-
-// Usage
-logger.info({
-  event: 'email.queued',
-  emailId: email.id,
-  tenantId: tenant.id,
-  recipientCount: email.to.length,
-}, 'Email queued for delivery');
+```text
+Historical implementation example removed. Refer to the current Rust services and runtime notes in this document for the live implementation.
 ```
 
 Log levels and when to use them:

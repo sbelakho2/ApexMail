@@ -169,7 +169,7 @@ async fn validate_redirect_url(
 }
 
 /// Check if `domain` is authorised for `tenant_id`.
-/// Cache hierarchy (matches TypeScript):/// 1. moka in-memory cache (60 s TTL, 10 000 entries)
+/// Cache hierarchy:/// 1. moka in-memory cache (60 s TTL, 10 000 entries)
 /// 2. Redis (300 s TTL)
 /// 3. Postgres (domains + tenant_settings tables)
 async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str) -> bool {

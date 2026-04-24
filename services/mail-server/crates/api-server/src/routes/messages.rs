@@ -906,9 +906,10 @@ mod tests {
         tx.commit().await.expect("failed to commit message transaction");
 
         let message_row: (String, Option<DateTime<Utc>>,) = sqlx::query_as(
-            "SELECT status, scheduled_at FROM messages WHERE id = $1",
+            "SELECT status, scheduled_at FROM messages WHERE id = $1 AND tenant_id = $2",
         )
         .bind(&persisted.id)
+        .bind(&tenant_id)
         .fetch_one(&pool)
         .await
         .expect("failed to fetch stored message");
@@ -1108,9 +1109,10 @@ mod tests {
         assert!(matches!(result, CancelDeliveryResult::Cancelled(_)));
 
         let message_status: (String,) = sqlx::query_as(
-            "SELECT status FROM messages WHERE id = $1",
+            "SELECT status FROM messages WHERE id = $1 AND tenant_id = $2",
         )
         .bind(&persisted.id)
+        .bind(&tenant_id)
         .fetch_one(&pool)
         .await
         .expect("failed to fetch cancelled message");

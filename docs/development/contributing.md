@@ -105,9 +105,8 @@ Include:
 #### Checklist
 
 - [ ] Code follows project style guidelines
-- [ ] Tests pass locally (`pnpm test`)
-- [ ] Linting passes (`pnpm lint`)
-- [ ] TypeScript compiles (`pnpm typecheck`)
+- [ ] Rust tests pass locally (`cargo test --manifest-path services/mail-server/Cargo.toml`)
+- [ ] Formatting/lint checks pass for touched Rust code
 - [ ] Documentation updated
 - [ ] Commit messages follow conventions
 
@@ -127,17 +126,11 @@ See [Development Guide](./getting-started.md) for full setup instructions.
 
 Quick start:
 ```bash
-# Clone and install
 git clone https://github.com/sbelakho2/ApexMail.git
 cd ApexMail
-pnpm install
 
-# Start infrastructure
 docker compose up -d postgres redis
-
-# Run migrations and start
-pnpm db:migrate
-pnpm dev
+cargo test --manifest-path services/mail-server/Cargo.toml
 ```
 
 ---
@@ -147,17 +140,11 @@ pnpm dev
 ### Running Tests
 
 ```bash
-# All tests
-pnpm test
+# Full workspace tests
+cargo test --manifest-path services/mail-server/Cargo.toml
 
-# Specific package
-pnpm --filter @apexmail/api test
-
-# With coverage
-pnpm test:coverage
-
-# Watch mode
-pnpm test:watch
+# Specific crate
+cargo test --manifest-path services/mail-server/Cargo.toml -p api-server
 ```
 
 ### Writing Tests
@@ -167,22 +154,19 @@ pnpm test:watch
 - Use descriptive test names
 - Follow the Arrange-Act-Assert pattern
 
-```typescript
-describe('UserService', () => {
-  describe('createUser', () => {
-    it('should create user with valid email', async () => {
-      // Arrange
-      const input = { email: 'test@example.com', name: 'Test' };
-      
-      // Act
-      const result = await service.createUser(input);
-      
-      // Assert
-      expect(result.success).toBe(true);
-      expect(result.data.email).toBe('test@example.com');
-    });
-  });
-});
+```rust
+#[tokio::test]
+async fn creates_user_with_valid_email() {
+    let input = CreateUserInput {
+        email: "test@example.com".into(),
+        name: "Test".into(),
+    };
+
+    let result = service.create_user(input).await;
+
+    assert!(result.success);
+    assert_eq!(result.data.email, "test@example.com");
+}
 ```
 
 ---
@@ -255,10 +239,10 @@ We follow [Semantic Versioning](https://semver.org/):
 ### Release Workflow
 
 1. Update `CHANGELOG.md`
-2. Bump version in `package.json` files
+2. Bump versions in the affected crate and SDK metadata
 3. Create release PR
 4. After merge, tag release
-5. Automated publish to npm/Docker
+5. Publish the affected SDKs and Docker images
 
 ---
 

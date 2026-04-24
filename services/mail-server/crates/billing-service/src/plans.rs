@@ -23,6 +23,21 @@ pub struct PlanSeed {
     pub features: PlanFeatures,
 }
 
+#[derive(Debug, Clone)]
+pub struct PlanUpsertInput {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub price_monthly: i64,
+    pub price_yearly: i64,
+    pub email_limit: i64,
+    pub api_call_limit: i64,
+    pub sort_order: i32,
+    pub features: PlanFeatures,
+    pub stripe_price_id_monthly: Option<String>,
+    pub stripe_price_id_yearly: Option<String>,
+}
+
 /// All default plans shipped with ApexMail.
 pub fn default_plans() -> Vec<PlanSeed> {
     vec![
@@ -78,7 +93,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
             sort_order: 2,
             features: PlanFeatures {
                 dedicated_ip: true,
-                dedicated_ip_count: 1,
+                dedicated_ip_count: 0,
                 api_access: true,
                 webhooks_enabled: true,
                 advanced_analytics: true,
@@ -257,7 +272,28 @@ pub fn builtin_quota_limits(plan_name: Option<&str>) -> (i64, i64) {
 
 /// Upsert a plan seed into the database.
 pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::Error> {
-    let features_json = serde_json::to_value(&seed.features)
+    let input = PlanUpsertInput {
+        name: seed.name.to_string(),
+        display_name: seed.display_name.to_string(),
+        description: seed.description.to_string(),
+        price_monthly: seed.price_monthly,
+        price_yearly: seed.price_yearly,
+        email_limit: seed.email_limit,
+        api_call_limit: seed.api_call_limit,
+        sort_order: seed.sort_order,
+        features: seed.features.clone(),
+        stripe_price_id_monthly: None,
+        stripe_price_id_yearly: None,
+    };
+
+    upsert_plan_input(pool, &input).await
+}
+
+pub async fn upsert_plan_input(
+    pool: &PgPool,
+    input: &PlanUpsertInput,
+) -> Result<Plan, sqlx::Error> {
+    let features_json = serde_json::to_value(&input.features)
         .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
     let now = Utc::now();
 
@@ -286,19 +322,18 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
             features,
-            stripe_price_id_monthly, stripe_price_id_yearly,
             is_active, sort_order, created_at, updated_at
         "#,
     )
-    .bind(seed.name)
-    .bind(seed.display_name)
-    .bind(seed.description)
-    .bind(seed.price_monthly)
-    .bind(seed.price_yearly)
-    .bind(seed.email_limit)
-    .bind(seed.api_call_limit)
+    .bind(&input.name)
+    .bind(&input.display_name)
+    .bind(&input.description)
+    .bind(input.price_monthly)
+    .bind(input.price_yearly)
+    .bind(input.email_limit)
+    .bind(input.api_call_limit)
     .bind(&features_json)
-    .bind(seed.sort_order)
+    .bind(input.sort_order)
     .bind(now)
     .fetch_one(pool)
     .await?;
@@ -314,7 +349,6 @@ pub async fn get_active_plans(pool: &PgPool) -> Result<Vec<Plan>, sqlx::Error> {
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
             features,
-            stripe_price_id_monthly, stripe_price_id_yearly,
             is_active, sort_order, created_at, updated_at
         FROM plans
         WHERE is_active = true
@@ -335,7 +369,6 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
             id, name, display_name, description,
             price_monthly, price_yearly, email_limit, api_call_limit,
             features,
-            stripe_price_id_monthly, stripe_price_id_yearly,
             is_active, sort_order, created_at, updated_at
         FROM plans
         WHERE name = $1
@@ -346,6 +379,21 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
     .await?;
 
     Ok(row.map(|r| r.into_plan()))
+}
+
+pub async fn get_plan_for_tenant(
+    pool: &PgPool,
+    tenant_id: &str,
+) -> Result<Option<Plan>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT plan FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await?;
+
+    match row {
+        Some((plan_name,)) => get_plan_by_name(pool, &plan_name).await,
+        None => Ok(None),
+    }
 }
 
 /// Derive quota/rate-limit info for a tenant from their current plan.
@@ -433,8 +481,6 @@ struct PlanRow {
     email_limit: i64,
     api_call_limit: i64,
     features: Option<serde_json::Value>,
-    stripe_price_id_monthly: Option<String>,
-    stripe_price_id_yearly: Option<String>,
     is_active: bool,
     sort_order: i32,
     created_at: DateTime<Utc>,
@@ -457,8 +503,8 @@ impl PlanRow {
             email_limit: self.email_limit,
             api_call_limit: self.api_call_limit,
             features,
-            stripe_price_id_monthly: self.stripe_price_id_monthly,
-            stripe_price_id_yearly: self.stripe_price_id_yearly,
+            stripe_price_id_monthly: None,
+            stripe_price_id_yearly: None,
             is_active: self.is_active,
             sort_order: self.sort_order,
             created_at: self.created_at,
@@ -493,14 +539,14 @@ mod tests {
     }
 
     #[test]
-    fn pro_plan_includes_one_dedicated_ip() {
+    fn pro_plan_matches_legacy_dedicated_ip_count() {
         let pro_plan = default_plans()
             .into_iter()
             .find(|plan| plan.name == "pro")
             .expect("pro plan must exist");
 
         assert!(pro_plan.features.dedicated_ip);
-        assert_eq!(pro_plan.features.dedicated_ip_count, 1);
+        assert_eq!(pro_plan.features.dedicated_ip_count, 0);
     }
 
     #[test]

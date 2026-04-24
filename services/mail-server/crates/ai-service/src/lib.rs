@@ -1,6 +1,6 @@
 //! ApexMail AI Intelligence Suite
 //!
-//! Rust port of the `@apexmail/ai` TypeScript service covering://! ML analytics, AI assistant, multi-armed bandits, content generation /
+//! Service crate covering://! ML analytics, AI assistant, multi-armed bandits, content generation /
 //! optimization, inference engine, send-time optimization (STO), and
 //! model training management.
 

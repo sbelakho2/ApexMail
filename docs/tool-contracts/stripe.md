@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | **API Version** | `2024-12-18.acacia` (pinned) |
-| **SDK** | `stripe` npm package (TypeScript) |
+| **SDK** | Stripe-maintained server-side billing client |
 | **Role** | Subscription billing, payment processing, invoicing |
 | **Data Residency** | EU (Stripe account region) |
 | **Environments** | Test mode (dev/staging), Live mode (production) |
@@ -36,7 +36,7 @@
 - All prices are in **USD** (single currency).
 - Billing cycle: monthly, with annual option (2 months free) for Starter through Scale.
 - Metered usage (overage emails) is tracked via Stripe Usage Records and billed at invoice time.
-- Overage rate: $0.40 per 1,000 emails, reported via `stripe.subscriptionItems.createUsageRecord()`.
+- Overage rate: $0.40 per 1,000 emails, reported via the Stripe usage records API.
 
 ---
 
@@ -115,12 +115,12 @@ trial → canceled (no conversion)
 
 All **mutating** Stripe API calls MUST include an idempotency key.
 
-```ts
-await stripe.subscriptions.update(subscriptionId, {
-  items: [{ id: itemId, price: newPriceId }],
-}, {
-  idempotencyKey: `upgrade_${tenantId}_${newPriceId}_${Date.now()}`,
-});
+```python
+stripe.subscriptions.update(
+    subscription_id,
+    items=[{"id": item_id, "price": new_price_id}],
+    idempotency_key=f"upgrade_{tenant_id}_{new_price_id}_{timestamp}",
+)
 ```
 
 ### Key Construction
@@ -156,16 +156,16 @@ Pattern: `<action>_<tenant_id>_<resource_id>_<timestamp_or_hash>`
 
 ### Customer Object
 
-```ts
-const customer = await stripe.customers.create({
-  email: tenant.billingEmail,
-  name: tenant.companyName,
-  metadata: {
-    tenant_id: tenant.id,
-    plan: 'growth',
-    environment: 'production',
-  },
-});
+```python
+customer = stripe.customers.create(
+    email=tenant.billing_email,
+    name=tenant.company_name,
+    metadata={
+        "tenant_id": tenant.id,
+        "plan": "growth",
+        "environment": "production",
+    },
+)
 ```
 
 ### Metadata Conventions
@@ -223,7 +223,7 @@ const customer = await stripe.customers.create({
 ### Rules
 
 1. Stripe is the **source of truth** for billing state. Local DB is a read-optimized cache.
-2. If local state and Stripe diverge, Stripe wins. A daily reconciliation job (`tools/reconcile.ts`) detects and fixes drift.
+2. If local state and Stripe diverge, Stripe wins. A daily reconciliation job in the billing service detects and fixes drift.
 3. Never modify subscription state locally without a corresponding Stripe API call.
 
 ---

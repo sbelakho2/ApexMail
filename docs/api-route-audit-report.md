@@ -3,6 +3,8 @@
 **Generated:** March 3, 2026  
 **Purpose:** Production Readiness Check  
 
+> **Historical note (2026-04):** This audit compares backend routes with the former `apps/web` and `apps/control-plane` implementations. Use the Rust route modules in `services/mail-server/crates/api-server/src/routes/` as the current source of truth.
+
 ---
 
 ## Summary

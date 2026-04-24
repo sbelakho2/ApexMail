@@ -50,24 +50,24 @@ curl -X POST https://api.apexmail.ee/v1/stream/token \
 curl -N "https://track.apexmail.ee/v1/stream?token=eyJhbGciOi..."
 ```
 
-Or in JavaScript:
+Or in Python:
 
-```javascript
-const token = await getStreamToken();
-const source = new EventSource(
-  `https://track.apexmail.ee/v1/stream?token=${token}`
-);
+```python
+import json
+import requests
 
-source.addEventListener('message', (event) => {
-  const data = JSON.parse(event.data);
-  console.log(`${data.event_type} for ${data.message_id}`);
-});
 
-source.addEventListener('error', (event) => {
-  // Token expired or connection dropped — obtain a new token and reconnect
-  source.close();
-  reconnect();
-});
+token = get_stream_token()
+with requests.get(
+    f"https://track.apexmail.ee/v1/stream?token={token}",
+    stream=True,
+    timeout=60,
+) as response:
+    for line in response.iter_lines():
+        if not line or not line.startswith(b'data: '):
+            continue
+        data = json.loads(line[6:])
+        print(f"{data['event_type']} for {data['message_id']}")
 ```
 
 ## Query Parameters

@@ -1,6 +1,6 @@
 # ──────────────────────────────────────────────
 # Security & caching headers (Netlify / Cloudflare Pages)
-# Mirrors Next.js next.config.mjs headers config
+# Canonical headers for the marketing-zola static export
 # ──────────────────────────────────────────────
 
 /*

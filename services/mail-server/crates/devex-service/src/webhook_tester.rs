@@ -1,6 +1,6 @@
 //! Webhook testing — send test payloads, verify HMAC-SHA256 signatures.
 //!
-//! Mirrors the TypeScript `WebhookService` test-related helpers.
+//! Provides test-related webhook helpers.
 
 use chrono::Utc;
 use hmac::{Hmac, Mac};

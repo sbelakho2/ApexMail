@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("apps/testing/fixtures/rust-ui"));
+        .unwrap_or_else(|| PathBuf::from("services/mail-server/crates/ui-foundation/baselines/rust-ui"));
 
     fs::create_dir_all(&out_dir)?;
 

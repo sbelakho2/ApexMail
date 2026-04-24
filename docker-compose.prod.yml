@@ -28,6 +28,8 @@ services:
       - no-new-privileges:true
       - apparmor:docker-default
     depends_on:
+      enterprise:
+        condition: service_healthy
       tracking:
         condition: service_healthy
     ports:
@@ -118,6 +120,23 @@ services:
           cpus: '1.0'
         reservations:
           memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  enterprise:
+    environment:
+      RUST_LOG: info
+    ports: []
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
       restart_policy:
         condition: on-failure
         delay: 10s

@@ -35,7 +35,7 @@ impl SupportService {
 
 /// Create a support ticket with SLA deadline calculation
     pub async fn create_ticket(
-        &self, tenant_id: Uuid, subject: &str, description: &str,
+        &self, tenant_id: &str, subject: &str, description: &str,
         priority: &str, category: &str, contact_email: Option<&str>,
     ) -> Result<ApiResult<SupportTicket>, String> {
         let id = Uuid::new_v4();
@@ -83,7 +83,7 @@ impl SupportService {
 
 /// List tickets with optional filters
     pub async fn list_tickets(
-        &self, tenant_id: Uuid, status: Option<&str>, priority: Option<&str>,
+        &self, tenant_id: &str, status: Option<&str>, priority: Option<&str>,
         limit: i64, offset: i64,
     ) -> Result<ApiResult<Vec<SupportTicket>>, String> {
         let mut query = String::from("SELECT * FROM ent_support_tickets WHERE tenant_id = $1");
@@ -253,7 +253,7 @@ impl SupportService {
     }
 
 /// Get aggregate support metrics for a tenant
-    pub async fn get_metrics(&self, tenant_id: Uuid) -> Result<ApiResult<SupportMetrics>, String> {
+    pub async fn get_metrics(&self, tenant_id: &str) -> Result<ApiResult<SupportMetrics>, String> {
         let row: (i64, i64, Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
             "SELECT
              COUNT(*),
@@ -539,7 +539,7 @@ mod tests {
     fn test_support_ticket_serialization() {
         let t = SupportTicket {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
             number: Some(1001),
             subject: "Cannot send emails".into(),
             description: "Getting 500 errors".into(),

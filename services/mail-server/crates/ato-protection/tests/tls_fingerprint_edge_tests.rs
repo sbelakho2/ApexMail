@@ -201,7 +201,8 @@ mod user_history_edge_cases {
     fn test_fingerprint_change() {
         let mut history = UserTlsHistory::new(100);
         
-// Establish baseline with first fingerprint         let fp1 = TlsFingerprint::from_client_hello(
+        // Establish baseline with first fingerprint.
+        let fp1 = TlsFingerprint::from_client_hello(
             0x0303,
             &[0x1301, 0x1302, 0x1303],
             &[0x0000, 0x000a],
@@ -210,7 +211,7 @@ mod user_history_edge_cases {
         );
         history.record(&fp1);
         
-// Completely different fingerprint (potential ATO)
+        // Completely different fingerprint (potential ATO).
         let fp2 = TlsFingerprint::from_client_hello(
             0x0302, // Different TLS version
             &[0x002f], // Different ciphers
@@ -220,7 +221,7 @@ mod user_history_edge_cases {
         );
         let risk = history.fingerprint_risk(&fp2);
         
-// Should flag higher risk for new fingerprint
+        // Should flag higher risk for new fingerprint.
         assert!(risk > 0.0);
     }
 }

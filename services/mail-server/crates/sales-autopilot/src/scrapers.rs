@@ -3,8 +3,8 @@ use url::Url;
 
 /// Web scraper utilities:email extraction, URL validation, robots.txt
 /// checks.
-/// The TypeScript version contains full Puppeteer-based crawlers; this Rust
-/// port focuses on the *deterministic* text-processing parts that can run
+/// This implementation focuses on the *deterministic* text-processing parts
+/// that can run
 /// without a browser.
 #[derive(Debug, Clone)]
 pub struct WebScraper {

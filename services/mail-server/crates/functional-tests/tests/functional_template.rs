@@ -79,11 +79,10 @@ fn validate_source_rejects_forbidden_imports() {
 }
 
 #[test]
-fn validate_source_allows_react_imports() {
-    let source = r#"import { Html } from '@react-email/components';
-<Html><p>{{ name }}</p></Html>"#;
+fn validate_source_allows_plain_markup() {
+    let source = r#"<html><p>{{ name }}</p></html>"#;
     let result = transpiler::validate_source(source, 512 * 1024);
-    assert!(result.valid, "react imports should be allowed, errors: {:?}", result.errors);
+    assert!(result.valid, "plain markup should be allowed, errors: {:?}", result.errors);
 }
 
 // ── Sandbox execution ──────────────────────────────────────────

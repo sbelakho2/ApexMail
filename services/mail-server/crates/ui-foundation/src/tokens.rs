@@ -32,9 +32,11 @@ pub fn token_entries(surface: &str, category: &str) -> Vec<TokenEntry> {
 }
 
 pub fn token_value(surface: &str, category: &str, name: &str) -> Option<String> {
+    let normalized_name = name.trim();
+
     token_entries(surface, category)
         .into_iter()
-        .find(|entry| entry.name == name)
+        .find(|entry| entry.name.trim() == normalized_name)
         .map(|entry| entry.value)
 }
 

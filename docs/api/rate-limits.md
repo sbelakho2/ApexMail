@@ -51,99 +51,95 @@ When rate limited, the API returns `429 Too Many Requests`:
 
 ### 1. Implement Exponential Backoff
 
-```typescript
-async function requestWithBackoff<T>(
-  fn: () => Promise<T>,
-  maxRetries = 5
-): Promise<T> {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (error.status !== 429 || attempt === maxRetries - 1) {
-        throw error;
-      }
-      
-      const retryAfter = error.headers.get('X-RateLimit-Retry-After') || 1;
-      const delay = Math.min(
-        retryAfter * 1000,
-        Math.pow(2, attempt) * 1000 + Math.random() * 1000
-      );
-      
-      await sleep(delay);
-    }
-  }
-}
+```python
+import random
+import time
+
+
+def request_with_backoff(fn, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except ApiError as error:
+            if error.status != 429 or attempt == max_retries - 1:
+                raise
+
+            retry_after = int(error.headers.get('X-RateLimit-Retry-After', 1))
+            delay = min(retry_after, (2 ** attempt) + random.random())
+            time.sleep(delay)
 ```
 
 ### 2. Monitor Rate Limit Headers
 
-```typescript
-class ApiClient {
-  private remaining = Infinity;
-  private resetAt = 0;
-  
-  async request(url: string, options: RequestInit) {
-    // Wait if we know we're rate limited
-    if (this.remaining <= 0 && Date.now() < this.resetAt) {
-      await sleep(this.resetAt - Date.now());
-    }
-    
-    const response = await fetch(url, options);
-    
-    // Update rate limit state
-    this.remaining = parseInt(response.headers.get('X-RateLimit-Remaining') || '0');
-    this.resetAt = parseInt(response.headers.get('X-RateLimit-Reset') || '0') * 1000;
-    
-    return response;
-  }
-}
+```python
+import requests
+import time
+
+
+class ApiClient:
+    def __init__(self):
+        self.remaining = float('inf')
+        self.reset_at = 0
+
+    def request(self, url: str, method: str = 'GET', **kwargs):
+        if self.remaining <= 0 and time.time() < self.reset_at:
+            time.sleep(self.reset_at - time.time())
+
+        response = requests.request(method, url, **kwargs)
+        self.remaining = int(response.headers.get('X-RateLimit-Remaining', '0'))
+        self.reset_at = int(response.headers.get('X-RateLimit-Reset', '0'))
+        return response
 ```
 
 ### 3. Use Batch Endpoints
 
 Instead of multiple individual requests:
-```typescript
-// ❌ Bad: Multiple requests
-for (const email of emails) {
-  await api.post('/messages', { to: email, ... });
-}
+```python
+# Bad: multiple requests
+for email in emails:
+    api.post('/messages', json={'to': email, ...})
 
-// ✅ Good: Single batch request
-await api.post('/messages/batch', {
-  messages: emails.map(email => ({ to: email, ... }))
-});
+# Good: single batch request
+api.post(
+    '/messages/batch',
+    json={'messages': [{'to': email, ...} for email in emails]},
+)
 ```
 
 ### 4. Cache When Possible
 
-```typescript
-const cache = new Map();
-const CACHE_TTL = 60 * 1000; // 1 minute
+```python
+import time
 
-async function getTemplate(id: string) {
-  const cached = cache.get(id);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.data;
-  }
-  
-  const response = await api.get(`/templates/${id}`);
-  cache.set(id, { data: response, timestamp: Date.now() });
-  return response;
-}
+cache = {}
+CACHE_TTL = 60
+
+
+def get_template(template_id: str):
+    cached = cache.get(template_id)
+    if cached and time.time() - cached['timestamp'] < CACHE_TTL:
+        return cached['data']
+
+    response = api.get(f'/templates/{template_id}')
+    cache[template_id] = {'data': response, 'timestamp': time.time()}
+    return response
 ```
 
 ### 5. Use Webhooks Instead of Polling
 
-```typescript
-// ❌ Bad: Polling for status
-setInterval(async () => {
-  const status = await api.get(`/messages/${id}`);
-  if (status.delivered) handleDelivery();
-}, 5000);
+```python
+import time
 
-// ✅ Good: Webhook callback
-// Configure webhook endpoint to receive delivery events
+# Bad: polling for status
+while True:
+    status = api.get(f'/messages/{message_id}')
+    if status['delivered']:
+        handle_delivery()
+        break
+    time.sleep(5)
+
+# Good: webhook callback
+# Configure a webhook endpoint to receive delivery events
 ```
 
 ## Rate Limit Exemptions

@@ -60,19 +60,6 @@ impl OnboardingService {
 /// Generate a quickstart guide for the requested language.
     pub fn create_quickstart(&self, language: &str) -> QuickstartGuide {
         let (install_cmd, send_code) = match language {
-            "node" | "typescript" | "javascript" => (
-                "npm install @apexmail/sdk",
-                r#"import { ApexMail } from '@apexmail/sdk';
-
-const apexmail = new ApexMail({ apiKey: 'am_live_...' });
-
-await apexmail.emails.send({
-  from: 'sender@yourdomain.com',
-  to: ['user@example.com'],
-  subject: 'Hello from ApexMail!',
-  html: '<h1>Welcome!</h1>',
-});"#,
-            ),
             "python" => (
                 "pip install apexmail",
                 r#"from apexmail import ApexMail
@@ -302,11 +289,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_create_quickstart_node() {
+    fn test_create_quickstart_python() {
         let svc = OnboardingService::new();
-        let guide = svc.create_quickstart("node");
+        let guide = svc.create_quickstart("python");
         assert_eq!(guide.steps.len(), 4);
-        assert!(guide.steps[0].code_snippet.as_ref().unwrap().contains("npm install"));
+        assert!(guide.steps[0].code_snippet.as_ref().unwrap().contains("pip install"));
         assert_eq!(guide.estimated_minutes, 5);
     }
 

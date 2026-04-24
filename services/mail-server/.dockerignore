@@ -4,7 +4,6 @@ crates/**/target/
 .gitignore
 **/*.rs.bk
 **/*.log
-**/node_modules/
 **/dist/
 **/.turbo/
 **/.DS_Store

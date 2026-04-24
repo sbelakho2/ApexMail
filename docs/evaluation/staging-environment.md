@@ -97,12 +97,7 @@ Staging is seeded with realistic but synthetic data for testing all plan tiers.
 
 ### Seed Script
 
-```bash
-cd tools/migrate
-pnpm seed:staging    # idempotent — safe to re-run
-```
-
-The script creates tenants, users (with deterministic passwords: `staging-<tenant>-password`), contacts, campaigns, and historical analytics data.
+There is no dedicated repo-local seed helper anymore. Staging data should be provisioned through database snapshots, migrations, and the Rust-owned admin flows.
 
 ---
 

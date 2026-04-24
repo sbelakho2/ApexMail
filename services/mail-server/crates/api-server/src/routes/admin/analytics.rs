@@ -1,6 +1,5 @@
 //! Analytics endpoints — event stats, time series, provider breakdown.
 //!
-//! Migrated from:apps/control-plane/src/app/api/analytics/route.ts (216 lines)
 
 use axum::extract::{Query, State};
 use axum::routing::get;

@@ -2,7 +2,7 @@
   "version": 1,
   "surfaces": {
     "web": {
-      "sources": ["apps/testing/fixtures/rust-ui/assets/globals.css", "services/mail-server/crates/ui-foundation/src/lib.rs"],
+      "sources": ["services/mail-server/crates/ui-foundation/assets/globals.css", "services/mail-server/crates/ui-foundation/src/lib.rs"],
       "colors": [
         { "source": "globals.css", "name": "--background", "value": "248 246 243" },
         { "source": "globals.css", "name": "--foreground", "value": "15 23 42" },
@@ -54,10 +54,10 @@
         { "source": "tailwind", "name": "--text-4xl", "value": "36px" }
       ],
       "icons": [
-        { "source": "lucide-react", "name": "--icon-size-sm", "value": "16px" },
-        { "source": "lucide-react", "name": "--icon-size-md", "value": "20px" },
-        { "source": "lucide-react", "name": "--icon-size-lg", "value": "24px" },
-        { "source": "lucide-react", "name": "--icon-stroke-width", "value": "1.75" }
+        { "source": "icon-baseline", "name": "--icon-size-sm", "value": "16px" },
+        { "source": "icon-baseline", "name": "--icon-size-md", "value": "20px" },
+        { "source": "icon-baseline", "name": "--icon-size-lg", "value": "24px" },
+        { "source": "icon-baseline", "name": "--icon-stroke-width", "value": "1.75" }
       ],
       "motion": [
         { "source": "globals.css", "name": "--motion-duration-150", "value": "150ms" },
@@ -75,7 +75,7 @@
       ]
     },
     "control-plane": {
-      "sources": ["apps/testing/fixtures/rust-ui/assets/globals.css", "services/mail-server/crates/ui-foundation/src/lib.rs"],
+      "sources": ["services/mail-server/crates/ui-foundation/assets/globals.css", "services/mail-server/crates/ui-foundation/src/lib.rs"],
       "colors": [
         { "source": "globals.css", "name": "--background", "value": "15 23 42" },
         { "source": "globals.css", "name": "--foreground", "value": "241 245 249" },
@@ -90,7 +90,7 @@
         { "source": "tailwind", "name": "--font-sans", "value": "Inter, system-ui, sans-serif" }
       ],
       "icons": [
-        { "source": "lucide-react", "name": "--icon-size-md", "value": "20px" }
+        { "source": "icon-baseline", "name": "--icon-size-md", "value": "20px" }
       ],
       "motion": [
         { "source": "globals.css", "name": "--motion-duration-300", "value": "300ms" }

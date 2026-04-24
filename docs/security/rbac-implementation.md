@@ -16,7 +16,7 @@ ApexMail implements Role-Based Access Control (RBAC) through a **scope-based per
 
 ## 2. User Roles & Scope Assignments
 
-### 2.1 Customer Dashboard Roles (Apps/Web)
+### 2.1 Customer Dashboard Roles (`web` Surface)
 
 | Role | Assigned Scopes | Description |
 |------|----------------|-------------|
@@ -44,17 +44,19 @@ let scopes = match user.role.as_str() {
 };
 ```
 
-### 2.2 Control Plane Roles (Admin Dashboard)
+### 2.2 Current Role Profiles
 
-| Role | Rank | Permissions |
-|------|------|-------------|
-| **viewer** | 1 | Read-only dashboard access |
-| **operator** | 2 | Standard operations |
-| **admin** | 3 | Tenant/secrets/features mutations, secrets page access |
-| **owner** | 4 | Full control |
-| **super_admin** | 4 | Full control (equivalent to owner) |
+The Rust auth layer maps user roles to scopes rather than applying a separate rank-based control-plane middleware.
 
-**Source:** [middleware.ts](../apps/control-plane/src/middleware.ts#L69-L79)
+| Role | Effective Access |
+|------|------------------|
+| **viewer** | Read-only scopes for messages, domains, templates, events, analytics, and contacts |
+| **developer** | Viewer scopes plus send/write access for messages, templates, and contacts |
+| **admin** | Wildcard access via `*` |
+| **owner** | Wildcard access via `*` |
+| **fallback/member** | Minimal access via `messages:read` |
+
+**Source:** [routes/auth.rs](../services/mail-server/crates/api-server/src/routes/auth.rs#L37-L56)
 
 ---
 
@@ -276,52 +278,46 @@ let scopes = match user.role.as_str() {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.2 Frontend (Web App)
+### 5.2 Browser Surfaces (`web` and `control-plane`)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Web App Middleware                            │
+│                 Browser Surface Request Flow                     │
 ├─────────────────────────────────────────────────────────────────┤
-│  1. Request arrives                                             │
+│  1. Request arrives at nginx / api-server                       │
 │                                                                 │
-│  2. Check if public path (/login, /api/auth/*, etc.)            │
-│     └─ If public → NextResponse.next()                          │
+│  2. Host/surface routing resolves `web` vs `control-plane`      │
 │                                                                 │
-│  3. Check for impersonation session (control-plane operators)   │
-│     └─ If valid impersonation token → allow                     │
+│  3. `ui-foundation` SSR applies browser auth/CSRF equivalents   │
 │                                                                 │
-│  4. Check for user session (am_session cookie)                  │
-│     ├─ If missing → redirect to /login                          │
-│     └─ If present → validate via /v1/auth/me API call           │
+│  4. Protected data/API requests extract `AuthUser`              │
+│     └─ Returns tenant_id, user_id, api_key_id, scopes[]         │
 │                                                                 │
-│  5. If session invalid → clear cookie, redirect to /login       │
+│  5. Handlers call `require_scopes(&auth, &[..])`                │
+│     └─ Missing scope → ApiError::Forbidden                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.3 Control Plane (Admin Dashboard)
+### 5.3 Control Plane (Admin Surface)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │               Control Plane Security Layers                      │
 ├─────────────────────────────────────────────────────────────────┤
-│  Layer 1: IP Whitelist                                          │
-│     └─ Production: Only CONTROL_PLANE_IP_WHITELIST IPs allowed  │
+│  Layer 1: Surface routing                                       │
+│     └─ Host mapping resolves the `control-plane` browser surface│
 │                                                                 │
-│  Layer 2: API Key (for /api/* routes)                           │
-│     └─ x-control-plane-key header → constant-time comparison    │
+│  Layer 2: Authentication extraction                             │
+│     └─ JWT / API key auth produces `AuthUser` + scopes          │
 │                                                                 │
-│  Layer 3: Session Authentication                                │
-│     ├─ cp_session cookie with HMAC-SHA256 signature             │
-│     ├─ 24-hour max age, 8-hour sliding refresh                  │
-│     └─ Role-based route restrictions:                           │
-│         ├─ /secrets/* → requires admin+                         │
-│         └─ /api/tenants, /api/secrets mutations → admin+        │
+│  Layer 3: Scope enforcement                                     │
+│     └─ Handlers enforce exact scopes or wildcard access         │
 │                                                                 │
-│  Layer 4: CSRF Protection                                       │
-│     └─ x-csrf-token header must match csrf_token cookie         │
+│  Layer 4: Browser auth / CSRF equivalents                       │
+│     └─ Implemented in `ui-foundation` SSR wiring                │
 │                                                                 │
 │  Layer 5: Security Headers                                      │
-│     └─ X-Frame-Options: DENY, CSP, Cache-Control: no-store      │
+│     └─ Response hardening and no-store handling stay server-side│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -357,30 +353,28 @@ pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError
 
 ```rust
 pub struct AuthUser {
-    pub tenant_id: Uuid,
-    pub user_id: Option<Uuid>,     // Set for JWT auth
-    pub api_key_id: Option<Uuid>,  // Set for API key auth
-    pub scopes: Vec<String>,       // Permission scopes
+    pub tenant_id: String,
+    pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
+    pub scopes: Vec<String>,
 }
 ```
 
-### 6.3 Role-Level Guard (Control Plane)
+### 6.3 Scope Guard (`require_scopes`)
 
-**Location:** [middleware.ts](../apps/control-plane/src/middleware.ts#L84-L101)
+**Location:** [middleware/auth.rs](../services/mail-server/crates/api-server/src/middleware/auth.rs#L453-L465)
 
-```typescript
-function hasRequiredRole(path: string, method: string, role: ControlPlaneRole): boolean {
-    // Admin pages require admin role
-    if (ADMIN_PAGE_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) {
-        return roleRank(role) >= roleRank('admin');
+```rust
+pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError> {
+    if user.scopes.iter().any(|s| s == "*") {
+        return Ok(());
     }
-    // Mutation APIs require admin for specific prefixes
-    if (ADMIN_MUTATION_API_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) {
-        if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-            return roleRank(role) >= roleRank('admin');
+    for scope in required {
+        if !user.scopes.iter().any(|s| s == scope) {
+            return Err(ApiError::Forbidden(format!("missing required scope: {scope}")));
         }
     }
-    return true;
+    Ok(())
 }
 ```
 
@@ -479,16 +473,16 @@ The following auth-related routes use `AuthUser` but don't enforce scopes:
 | Support tickets | ✓ | ✓ | ✗ | ✗ | ✗ |
 | Dedicated IPs | ✓ | ✓ | ✗ | ✗ | ✗ |
 
-### 9.2 Control Plane Roles → Actions
+### 9.2 Current Role Profiles → Actions
 
-| Operation | Super Admin | Owner | Admin | Operator | Viewer |
-|-----------|:-----------:|:-----:|:-----:|:--------:|:------:|
-| View dashboard | ✓ | ✓ | ✓ | ✓ | ✓ |
-| View tenants | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Mutate tenants | ✓ | ✓ | ✓ | ✗ | ✗ |
-| Access /secrets | ✓ | ✓ | ✓ | ✗ | ✗ |
-| Mutate secrets | ✓ | ✓ | ✓ | ✗ | ✗ |
-| Feature flags | ✓ | ✓ | ✓ | ✗ | ✗ |
+| Operation | Owner | Admin | Developer | Viewer | Fallback/Member |
+|-----------|:-----:|:-----:|:---------:|:------:|:---------------:|
+| View dashboard | ✓ | ✓ | ✓ | ✓ | ✗ |
+| View messages/domains/templates/events | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Send messages | ✓ | ✓ | ✓ | ✗ | ✗ |
+| Edit templates | ✓ | ✓ | ✓ | ✗ | ✗ |
+| Edit contacts | ✓ | ✓ | ✓ | ✗ | ✗ |
+| Wildcard/admin operations | ✓ | ✓ | ✗ | ✗ | ✗ |
 
 ---
 
@@ -518,7 +512,6 @@ The following auth-related routes use `AuthUser` but don't enforce scopes:
 - [middleware/auth.rs](../services/mail-server/crates/api-server/src/middleware/auth.rs) — Authentication extractors and scope guards
 - [routes/auth.rs](../services/mail-server/crates/api-server/src/routes/auth.rs) — Role→scope assignment logic
 - [app.rs](../services/mail-server/crates/api-server/src/app.rs) — Route organization and middleware stacking
-- [apps/web/src/middleware.ts](../apps/web/src/middleware.ts) — Frontend session validation
-- [apps/control-plane/src/middleware.ts](../apps/control-plane/src/middleware.ts) — Admin dashboard RBAC
-- [packages/db/src/repositories/users.ts](../packages/db/src/repositories/users.ts) — User role definitions
+- [ssr.rs](../services/mail-server/crates/ui-foundation/src/ssr.rs) — Browser-surface auth and CSRF middleware equivalents
+- [dashboard.rs](../services/mail-server/crates/api-server/src/routes/dashboard.rs) — Dashboard route scope enforcement
 - [docs/adr/0010-security-architecture.md](../docs/adr/0010-security-architecture.md) — Security design decisions

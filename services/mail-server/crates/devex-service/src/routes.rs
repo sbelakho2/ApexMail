@@ -311,6 +311,6 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let sdks = json["sdks"].as_array().unwrap();
-        assert_eq!(sdks.len(), 6);
+        assert_eq!(sdks.len(), 5);
     }
 }

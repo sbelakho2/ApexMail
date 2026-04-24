@@ -1,4 +1,4 @@
-//! JSX/TSX template transpilation to intermediate representation.
+//! Template markup transpilation to intermediate representation.
 //!
 //! Validates template source, checks for forbidden imports,
 //! and resolves `{{ variable }}` placeholders against props.
@@ -372,8 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_allowed_import() {
-        let source = r#"import { Button } from '@react-email/components'; <div>hello</div>"#;
+    fn test_validate_plain_markup() {
+        let source = r#"<section><div>hello</div></section>"#;
         let result = validate_source(source, 4096);
         assert!(result.valid);
     }

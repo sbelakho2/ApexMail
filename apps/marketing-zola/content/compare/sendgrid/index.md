@@ -106,8 +106,8 @@ verdict_points = [
   <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">ApexMail</span></div>
 </div>
 <div class="grid grid-cols-4 gap-4 px-6 py-4 border-b border-surface-100 hover:bg-surface-50/30 transition-colors">
-  <div class="text-sm font-medium text-surface-900 self-center">TypeScript SDK</div>
-  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">Full types</span></div>
+  <div class="text-sm font-medium text-surface-900 self-center">Official SDK Coverage</div>
+  <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">Five official SDKs</span></div>
   <div class="text-center text-sm self-center"><span class="text-surface-600">Partial</span></div>
   <div class="text-center text-sm self-center"><span class="text-primary-600 font-semibold">ApexMail</span></div>
 </div>

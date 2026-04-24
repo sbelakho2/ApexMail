@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn csrf_middleware_web_config_matches_typescript() {
+    fn csrf_middleware_web_config_matches_defaults() {
         let csrf = CsrfMiddleware::web();
         assert_eq!(csrf.cookie_name, "csrf_token");
         assert_eq!(csrf.header_name, "X-CSRF-Token");
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn csrf_middleware_control_plane_config_matches_typescript() {
+    fn csrf_middleware_control_plane_config_matches_defaults() {
         let csrf = CsrfMiddleware::control_plane();
         assert_eq!(csrf.cookie_name, "csrf_token");
         assert_eq!(csrf.header_name, "X-CSRF-Token");

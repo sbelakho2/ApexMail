@@ -1,4 +1,4 @@
-# Redirect rules migrated from Next.js (apps/marketing/next.config.mjs)
+# Redirect rules for the marketing-zola static export
 # Compatible with Netlify, Cloudflare Pages, and similar hosting platforms.
 # For nginx, convert these to rewrite rules in the server block.
 

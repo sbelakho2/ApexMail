@@ -1,6 +1,5 @@
 //! Auth telemetry endpoint.
 //!
-//! Migrated from:apps/web/src/app/api/auth/telemetry/route.ts
 //! Receives client-side auth telemetry events for observability.
 
 use axum::routing::post;

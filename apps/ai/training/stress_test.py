@@ -104,7 +104,7 @@ STRESS_TESTS = {
     "api_accuracy": [
         {"q": "What's the API base URL?", "checks": {"must_contain": ["https://api.apexmail.ee/v1"], "must_not_contain": ["api.apexmail.com"]}},
         {"q": "How do I authenticate with the API?", "checks": {"must_contain_any": ["Bearer", "bearer", "Authorization", "am_live_", "am_test_"]}},
-        {"q": "What SDK languages are available?", "checks": {"must_contain_any": ["Node.js", "node", "nodejs"], "must_contain": ["Python"]}},
+        {"q": "What SDK languages are available?", "checks": {"must_contain_any": ["Python", "Go", "Ruby", "PHP", "Java"]}},
         {"q": "What's the dashboard URL?", "checks": {"must_contain": ["https://app.apexmail.ee"]}},
         {"q": "What's the test API key prefix?", "checks": {"must_contain": ["am_test_"]}},
         {"q": "What's the production API key prefix?", "checks": {"must_contain": ["am_live_"]}},

@@ -1,23 +1,23 @@
 # Control Plane API Data Contracts
 
-> Phase 6.1 — Documents all data contracts used by Control Plane API routes.
+> Historical migration inventory for the removed control-plane proxy layer.
 >
-> **Status:** All 54 routes proxy to Rust unchanged. Data contracts are preserved by the transparent proxy.
+> **Status:** Current admin-surface contracts are implemented directly in Rust under `services/mail-server/crates/api-server/src/routes/` with browser-surface wiring in `services/mail-server/crates/ui-foundation/src/`.
 
 ---
 
 ## Contract Preservation Strategy
 
-The `proxyToRust()` function in `src/lib/rust-api.ts` is a **transparent proxy** — it does not transform, filter, or enrich any data flowing between the Next.js frontend and the Rust backend. This means:
+During migration, the former `proxyToRust()` layer forwarded control-plane requests to Rust without reshaping request or response bodies. That proxy implementation is gone, but the inventory below is retained as a migration/back-compat reference.
 
-- **Request contracts** (query params, JSON bodies, headers) are forwarded verbatim.
-- **Response contracts** (status codes, JSON bodies, Content-Type, Set-Cookie) are returned verbatim.
-- **Error contracts** (HTTP status codes, JSON error bodies) are preserved.
-- **Pagination contracts** (query params for page/limit/offset, response shape) are unchanged.
+- Current source of truth for request/response behavior lives in Rust route handlers.
+- Authentication and scope enforcement now live in Rust middleware and route modules.
+- Use this document as historical comparison material, not as the primary runtime contract.
 
-The only additions are:
-- `x-api-key` header added by `proxyToRust()` for Rust-side authentication.
-- `Content-Type: application/json` default header if not already set.
+Relevant current implementation files:
+- `services/mail-server/crates/api-server/src/routes/`
+- `services/mail-server/crates/api-server/src/middleware/auth.rs`
+- `services/mail-server/crates/ui-foundation/src/ssr.rs`
 
 ---
 

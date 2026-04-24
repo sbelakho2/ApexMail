@@ -151,7 +151,7 @@ fn is_in_trusted(ip: std::net::IpAddr, ranges: &[ipnetwork::IpNetwork]) -> bool 
 // ── Rate-limiting middleware ───────────────────────────────────────────────────
 
 /// Redis sliding-window rate limiter:max N requests per minute per IP.
-/// Uses the same key scheme as TypeScript:/// `rl:{ip}:{minute}` (scoped under the `tracking:` keyPrefix)
+/// Uses the `rl:{ip}:{minute}` key scheme (scoped under the `tracking:` keyPrefix).
 async fn rate_limit_middleware(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,

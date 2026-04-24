@@ -478,7 +478,7 @@ module ApexMail
     # @param name    [String]
     # @param subject [String]
     # @param html    [String, nil]
-    # @param engine  [String] "handlebars" | "mjml" | "liquid" | "ejs" | "react"
+    # @param engine  [String] template engine name
     def create(name:, subject:, html: nil, text: nil, engine: "handlebars", **opts)
       @t.request("POST", "/v1/templates", body: {
         name: name, subject: subject, html: html, text: text,
@@ -515,19 +515,6 @@ module ApexMail
     # @param data [Hash]
     def render(id, data = {})
       @t.request("POST", "/v1/templates/#{ApexMail.encode_path(id)}/render", body: { data: data })
-    end
-
-    # Validate a React Email JSX source string without saving it.
-    # @param source [String]  Raw JSX source
-    def validate_react_email(source)
-      @t.request("POST", "/v1/templates/react-email/validate", body: { source: source })
-    end
-
-    # Get a React Email JSX starter template.
-    # @param component_name [String]
-    def react_email_starter(component_name = "EmailTemplate")
-      query = ApexMail.build_query(name: component_name)
-      @t.request("GET", "/v1/templates/react-email/starter#{query}")
     end
   end
 

@@ -12,6 +12,67 @@ pub struct LogStreamingService {
     db: PgPool,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct LogStreamDbRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    name: String,
+    description: Option<String>,
+    destination_type: String,
+    status: String,
+    enabled: bool,
+    destination_config: Option<serde_json::Value>,
+    credentials_encrypted: Option<String>,
+    log_categories: Option<Vec<String>>,
+    filter_rules: Option<serde_json::Value>,
+    batch_size: Option<i32>,
+    batch_interval_seconds: Option<i32>,
+    compression_enabled: bool,
+    format: Option<String>,
+    total_events_delivered: i64,
+    total_bytes_delivered: i64,
+    delivery_failures_count: i32,
+    last_delivery_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_error: Option<String>,
+    last_error_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<LogStreamDbRow> for LogStream {
+    fn from(row: LogStreamDbRow) -> Self {
+        Self {
+            id: row.id,
+            tenant_id: row.tenant_id.to_string(),
+            name: row.name,
+            description: row.description,
+            destination_type: row.destination_type,
+            status: row.status,
+            enabled: row.enabled,
+            destination_config: row.destination_config,
+            credentials_encrypted: row.credentials_encrypted,
+            log_categories: row.log_categories,
+            filter_rules: row.filter_rules,
+            batch_size: row.batch_size,
+            batch_interval_seconds: row.batch_interval_seconds,
+            compression_enabled: row.compression_enabled,
+            format: row.format,
+            total_events_delivered: row.total_events_delivered,
+            total_bytes_delivered: row.total_bytes_delivered,
+            delivery_failures_count: row.delivery_failures_count,
+            last_delivery_at: row.last_delivery_at,
+            last_error: row.last_error,
+            last_error_at: row.last_error_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(tenant_id).map_err(|error| format!("Invalid tenant id '{tenant_id}': {error}"))
+}
+
 impl LogStreamingService {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -19,18 +80,19 @@ impl LogStreamingService {
 
 /// Create a new log stream
     pub async fn create(
-        &self, tenant_id: Uuid, name: &str, description: Option<&str>,
+        &self, tenant_id: String, name: &str, description: Option<&str>,
         destination_type: &str, destination_config: Option<serde_json::Value>,
         log_categories: Option<Vec<String>>, batch_size: Option<i32>,
         batch_interval_seconds: Option<i32>, compression_enabled: bool,
     ) -> Result<ApiResult<LogStream>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
-        let row = sqlx::query_as::<_, LogStream>(
+        let row = sqlx::query_as::<_, LogStreamDbRow>(
             "INSERT INTO ent_log_streams (id, tenant_id, name, description, destination_type, status, enabled, destination_config, log_categories, batch_size, batch_interval_seconds, compression_enabled, format, total_events_delivered, total_bytes_delivered, delivery_failures_count, created_at, updated_at)
              VALUES ($1,$2,$3,$4,$5,'active',true,$6,$7,$8,$9,$10,'json',0,0,0,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id).bind(tenant_id).bind(name).bind(description)
+        .bind(id).bind(tenant_uuid).bind(name).bind(description)
         .bind(destination_type).bind(&destination_config).bind(&log_categories)
         .bind(batch_size).bind(batch_interval_seconds).bind(compression_enabled)
         .fetch_one(&self.db)
@@ -38,12 +100,12 @@ impl LogStreamingService {
         .map_err(|e| format!("Create log stream: {e}"))?;
 
         info!(tenant_id = %tenant_id, name = name, dest = destination_type, "Log stream created");
-        Ok(ApiResult::ok(row))
+        Ok(ApiResult::ok(row.into()))
     }
 
 /// Get a log stream by ID
     pub async fn get(&self, id: Uuid) -> Result<ApiResult<LogStream>, String> {
-        let row = sqlx::query_as::<_, LogStream>(
+        let row = sqlx::query_as::<_, LogStreamDbRow>(
             "SELECT * FROM ent_log_streams WHERE id = $1"
         )
         .bind(id)
@@ -52,22 +114,23 @@ impl LogStreamingService {
         .map_err(|e| format!("Get log stream: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         }
     }
 
 /// List log streams for an account
-    pub async fn list(&self, tenant_id: Uuid) -> Result<ApiResult<Vec<LogStream>>, String> {
-        let rows = sqlx::query_as::<_, LogStream>(
+    pub async fn list(&self, tenant_id: String) -> Result<ApiResult<Vec<LogStream>>, String> {
+        let tenant_uuid = parse_tenant_id(&tenant_id)?;
+        let rows = sqlx::query_as::<_, LogStreamDbRow>(
             "SELECT * FROM ent_log_streams WHERE tenant_id = $1 ORDER BY created_at DESC"
         )
-        .bind(tenant_id)
+        .bind(tenant_uuid)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("List log streams: {e}"))?;
 
-        Ok(ApiResult::ok(rows))
+        Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
 /// Update a log stream
@@ -76,7 +139,7 @@ impl LogStreamingService {
         destination_config: Option<serde_json::Value>,
         log_categories: Option<Vec<String>>,
     ) -> Result<ApiResult<LogStream>, String> {
-        let row = sqlx::query_as::<_, LogStream>(
+        let row = sqlx::query_as::<_, LogStreamDbRow>(
             "UPDATE ent_log_streams SET
              name = COALESCE($2, name),
              description = COALESCE($3, description),
@@ -92,14 +155,14 @@ impl LogStreamingService {
         .map_err(|e| format!("Update log stream: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         }
     }
 
 /// Pause a log stream
     pub async fn pause(&self, id: Uuid) -> Result<ApiResult<LogStream>, String> {
-        let row = sqlx::query_as::<_, LogStream>(
+        let row = sqlx::query_as::<_, LogStreamDbRow>(
             "UPDATE ent_log_streams SET status = 'paused', updated_at = NOW() WHERE id = $1 RETURNING *"
         )
         .bind(id)
@@ -108,14 +171,14 @@ impl LogStreamingService {
         .map_err(|e| format!("Pause log stream: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         }
     }
 
 /// Resume a log stream
     pub async fn resume(&self, id: Uuid) -> Result<ApiResult<LogStream>, String> {
-        let row = sqlx::query_as::<_, LogStream>(
+        let row = sqlx::query_as::<_, LogStreamDbRow>(
             "UPDATE ent_log_streams SET status = 'active', updated_at = NOW() WHERE id = $1 RETURNING *"
         )
         .bind(id)
@@ -124,7 +187,7 @@ impl LogStreamingService {
         .map_err(|e| format!("Resume log stream: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r)),
+            Some(r) => Ok(ApiResult::ok(r.into())),
             None => Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         }
     }
@@ -146,7 +209,7 @@ impl LogStreamingService {
 
 /// Verify destination connectivity
     pub async fn verify(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
-        let stream = sqlx::query_as::<_, LogStream>(
+        let stream = sqlx::query_as::<_, LogStreamDbRow>(
             "SELECT * FROM ent_log_streams WHERE id = $1"
         )
         .bind(id)
@@ -155,7 +218,7 @@ impl LogStreamingService {
         .map_err(|e| format!("Get stream for verify: {e}"))?;
 
         let stream = match stream {
-            Some(s) => s,
+            Some(s) => LogStream::from(s),
             None => return Ok(ApiResult::err("Log stream not found", "NOT_FOUND")),
         };
 
@@ -251,12 +314,14 @@ impl LogStreamingService {
 
 /// Get all active streams for background processing
     pub async fn get_active_streams(&self) -> Result<Vec<LogStream>, String> {
-        sqlx::query_as::<_, LogStream>(
+        let rows = sqlx::query_as::<_, LogStreamDbRow>(
             "SELECT * FROM ent_log_streams WHERE status = 'active' AND enabled = true"
         )
         .fetch_all(&self.db)
         .await
-        .map_err(|e| format!("Get active streams: {e}"))
+        .map_err(|e| format!("Get active streams: {e}"))?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 }
 
@@ -449,7 +514,7 @@ mod tests {
     fn test_log_stream_serialization() {
         let stream = LogStream {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4().to_string(),
             name: "My Stream".into(),
             description: Some("Test stream".into()),
             destination_type: "webhook".into(),

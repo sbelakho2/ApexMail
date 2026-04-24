@@ -1,168 +1,82 @@
 # ApexMail
 
-Enterprise-grade transactional email platform with multi-tenant architecture, comprehensive tracking, and analytics capabilities.
+Rust-first transactional email platform with SSR browser surfaces, tracking, analytics, and mail transport services.
 
 ## Architecture Overview
 
-ApexMail is a monorepo containing multiple services that work together to provide a complete email delivery platform:
+ApexMail now runs as a Rust-focused monorepo. The browser surfaces are served by the Rust `api-server`, tracking is handled by a dedicated Rust service, and the marketing site is generated statically with Zola.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              ApexMail Platform                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │   API App   │  │ Tracking App│  │ Analytics   │  │       MTA App       │ │
-│  │  (Hono)     │  │  (Hono)     │  │    App      │  │   (smtp-server)     │ │
-│  │  Port 3010  │  │  Port 3001  │  │  Port 3002  │  │  Ports 25/2525/2526 │ │
-│  └─────┬───────┘  └─────┬───────┘  └─────┬───────┘  └──────────┬──────────┘ │
-│        │                │                │                     │            │
-│        └────────────────┴────────────────┴─────────────────────┘            │
-│                                    │                                        │
-│                          ┌─────────┴─────────┐                              │
-│                          │                   │                              │
-│                    ┌─────▼─────┐       ┌─────▼─────┐                        │
-│                    │  Worker   │       │   Shared  │                        │
-│                    │  (Jobs)   │       │ Packages  │                        │
-│                    └───────────┘       └───────────┘                        │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+### Runtime Services
 
-### Apps
-
-| App | Description | Port |
-|-----|-------------|------|
-| `@apexmail/api` | REST API for message sending, domain management, templates | 3010 |
-| `web` (Rust SSR) | User dashboard served by `services/mail-server/crates/api-server` via `127.0.0.1` host mapping | 3000 |
-| `tracking-service` (Rust) | Open pixel, click tracking, unsubscribe handling — `services/mail-server/crates/tracking-service` | 3001 |
-| `@apexmail/analytics` | Parquet compaction, reconciliation, DuckDB queries | 3002 |
-| `control-plane` (Rust SSR) | Internal administration dashboard served by `services/mail-server/crates/api-server` via `localhost` host mapping | 3000 |
-| `@apexmail/worker` | Background job processing (email delivery, webhooks) | N/A |
-| `@apexmail/mta` | **Inbound** email, bounce, and feedback loop processing | 25, 2525, 2526 |
-| `outbound-queue` (Rust) | Outbound email delivery via AWS SES (default) or self-hosted SMTP | N/A |
-
-### Packages
-
-| Package | Description |
-|---------|-------------|
-| `@apexmail/lib` | Shared utilities (logger, crypto, storage, cache, queue) |
-| `@apexmail/db` | Database access layer with repositories |
+| Service | Description | Port |
+|---------|-------------|------|
+| `api-server` | REST API plus SSR `web` and `control-plane` surfaces | 3000 |
+| `tracking-service` | Open pixel, click tracking, unsubscribe handling | 3001 |
+| `enterprise` | Enterprise-only routes and support surfaces | 3002 |
+| `worker-processors` | Background job processing | N/A |
+| `mta` | SMTP handling and mail transfer | 25, 587, 465 |
 
 ## Tech Stack
 
-- **Runtime**: Node.js 20.11+
-- **Language**: TypeScript 5.3+
-- **Package Manager**: pnpm 9.15+
-- **Build System**: Turborepo
-- **API Framework**: Hono 4.x
-- **Database**: PostgreSQL 16+
-- **Cache/Queue**: Redis 7+
-- **Storage**: S3-compatible (MinIO, AWS S3, Cloudflare R2)
-- **Analytics**: DuckDB, Apache Parquet
+- Rust and Cargo for the application runtime
+- PostgreSQL 16+
+- Redis 7+
+- Zola for the static marketing source
+- Docker Compose for local dependencies
 
 ## Getting Started
 
 ### Prerequisites
 
-- Node.js 20.11 or higher
-- pnpm 8.14 or higher
-- PostgreSQL 15+
-- Redis 7+
-- S3-compatible storage (MinIO for local development)
+- Rust toolchain
+- Docker and Docker Compose
+- PostgreSQL and Redis if not using Docker locally
+- Zola only if you need to regenerate marketing exports
 
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/sbelakho2/ApexMail.git
 cd apexmail
 
-# Install dependencies
-pnpm install
-
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your configuration
-vim .env
-
-# Run database migrations
-pnpm db:migrate
-
-# Start development servers
-pnpm dev
+docker compose up -d postgres redis
+cargo test --manifest-path services/mail-server/Cargo.toml
 ```
 
-### Development Commands
+### Common Commands
 
 ```bash
-# Start all services in development mode
-pnpm dev
+# Run the full Rust test suite
+cargo test --manifest-path services/mail-server/Cargo.toml
 
-# Build all packages and apps
-pnpm build
+# Run a specific crate
+cargo test --manifest-path services/mail-server/Cargo.toml -p api-server
 
-# Run tests
-pnpm test
+# Start the main API surface
+cargo run --manifest-path services/mail-server/Cargo.toml -p api-server
 
-# Run end-to-end tests
-pnpm test:e2e
-
-# Run linting
-pnpm lint
-
-# Run type checking
-pnpm typecheck
-
-# Format code
-pnpm format
+# Rebuild static marketing output when needed
+zola build --root apps/marketing-zola
 ```
 
 ## Project Structure
 
-```
+```text
 apexmail/
 ├── apps/
-│   ├── api/                 # REST API service
-│   │   ├── src/
-│   │   │   ├── routes/      # API route handlers
-│   │   │   ├── middleware/  # Auth, rate limiting, etc.
-│   │   │   └── config.ts    # App configuration
-│   │   └── package.json
-│   ├── worker/              # Background job processor
-│   │   ├── src/
-│   │   │   └── processors/  # Email, webhook, analytics jobs
-│   │   └── package.json
-│   ├── mta/                 # Mail Transfer Agent
-│   │   ├── src/
-│   │   │   └── servers/     # Inbound, bounce, FBL servers
-│   │   └── package.json
-│   ├── tracking/            # Open/click tracking service
-│   │   └── package.json
-│   └── analytics/           # Analytics and reporting
-│       └── package.json
+│   ├── ai/                  # Non-JS application assets
+│   └── marketing-zola/      # Zola marketing source and generated public output
+├── services/
+│   └── mail-server/
+│       └── crates/          # Rust application crates
 ├── packages/
-│   ├── lib/                 # Shared utilities
-│   │   └── src/
-│   │       ├── cache/       # Redis wrapper
-│   │       ├── crypto/      # Encryption utilities
-│   │       ├── logger/      # Pino logger wrapper
-│   │       ├── queue/       # Job queue abstraction
-│   │       ├── storage/     # S3 storage wrapper
-│   │       └── result.ts    # Result<T,E> monad
-│   └── db/                  # Database layer
-│       └── src/
-│           ├── repositories/# Domain repositories
-│           ├── pool.ts      # Connection pooling
-│           └── transaction.ts
-├── tools/
-│   └── migrations/          # SQL migration files
-├── .env.example             # Environment template
-├── package.json             # Root package.json
-├── pnpm-workspace.yaml      # pnpm workspace config
-├── turbo.json              # Turborepo config
-└── tsconfig.base.json      # Base TypeScript config
+│   ├── sdk-go/
+│   ├── sdk-java/
+│   ├── sdk-php/
+│   ├── sdk-python/
+│   └── sdk-ruby/
+├── tools/                   # Python and shell operational tooling
+└── deploy/                  # Deployment manifests and configs
 ```
 
 ## API Reference
@@ -272,8 +186,6 @@ See `.env.example` for all available configuration options.
 | `MCAPTCHA_ENABLED` | Enable server-side login CAPTCHA verification (`true`/`false`) | No |
 | `MCAPTCHA_SITE_KEY` | mCaptcha site key for verification API | When enabled |
 | `MCAPTCHA_SECRET` | mCaptcha secret for verification API | When enabled |
-| `NEXT_PUBLIC_MCAPTCHA_ENABLED` | Enable login widget rendering in frontend apps | Should match server |
-| `NEXT_PUBLIC_MCAPTCHA_WIDGET_URL` | mCaptcha widget URL to embed in login pages | When frontend enabled |
 | `TRACKING_ENCRYPTION_KEY` | 128-bit key for tracking IDs | Yes |
 | `TRACKING_SIGNATURE_KEY` | 256-bit key for signatures | Yes |
 | `S3_ENDPOINT` | S3-compatible storage endpoint | Yes |

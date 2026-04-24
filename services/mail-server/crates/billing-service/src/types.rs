@@ -34,7 +34,7 @@ pub struct Plan {
 }
 
 /// Feature flags attached to a plan.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanFeatures {
 // Infrastructure
     pub dedicated_ip: bool,
@@ -87,6 +87,45 @@ pub struct PlanFeatures {
     pub private_cloud: bool,
 }
 
+impl Default for PlanFeatures {
+    fn default() -> Self {
+        Self {
+            dedicated_ip: false,
+            dedicated_ip_count: 0,
+            max_sending_domains: 1,
+            sso_enabled: false,
+            audit_logs: false,
+            api_access: true,
+            webhooks_enabled: false,
+            inbound_email: false,
+            advanced_analytics: false,
+            send_time_optimization: false,
+            ab_testing: false,
+            time_travel_debugging: false,
+            data_export: false,
+            custom_tracking_domain: false,
+            custom_templates: false,
+            template_approval_workflow: false,
+            white_label: false,
+            powered_by_footer: true,
+            custom_retention: false,
+            max_retention_days: 7,
+            max_team_members: 1,
+            subaccounts: false,
+            max_subaccounts: 0,
+            support_level: SupportLevel::Community,
+            dedicated_csm: false,
+            priority_onboarding: false,
+            byoip: false,
+            sla_guarantee: false,
+            sla_credit_percentage: 0,
+            hipaa_compliance: false,
+            soc2_compliance: false,
+            private_cloud: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SupportLevel {
@@ -118,7 +157,7 @@ pub enum SubscriptionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub plan_name: String,
     pub status: SubscriptionStatus,
     pub billing_interval: BillingInterval,
@@ -160,7 +199,7 @@ pub enum MeterEventType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub event_type: MeterEventType,
     pub quantity: i64,
     pub timestamp: DateTime<Utc>,
@@ -211,7 +250,7 @@ pub struct InvoiceLineItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invoice {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub stripe_invoice_id: Option<String>,
     pub invoice_number: String,
     pub status: InvoiceStatus,
@@ -251,7 +290,7 @@ pub enum BillingEventKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingEvent {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub kind: BillingEventKind,
     pub payload: serde_json::Value,
     pub created_at: DateTime<Utc>,

@@ -5,7 +5,7 @@ Get up and running with ApexMail in just a few minutes. This guide will walk you
 ## Prerequisites
 
 - An ApexMail account ([sign up free](https://apexmail.ee/signup))
-- Node.js 18+ (or any HTTP client)
+- Any HTTP client
 
 ## Step 1: Get Your API Key
 
@@ -16,16 +16,7 @@ Get up and running with ApexMail in just a few minutes. This guide will walk you
 
 > ⚠️ **Important**: Store your API key securely. It won't be shown again.
 
-## Step 2: Install the SDK (Optional)
-
-### Node.js
-```bash
-npm install @apexmail/node
-# or
-pnpm add @apexmail/node
-# or
-yarn add @apexmail/node
-```
+## Step 2: Install an SDK (Optional)
 
 ### Python
 ```bash
@@ -33,23 +24,6 @@ pip install apexmail
 ```
 
 ## Step 3: Send Your First Email
-
-### Using the Node.js SDK
-
-```typescript
-import { ApexMail } from '@apexmail/node';
-
-const apexmail = new ApexMail('am_live_your_api_key');
-
-const { id } = await apexmail.emails.send({
-  from: 'hello@yourdomain.com',
-  to: 'user@example.com',
-  subject: 'Welcome to our service!',
-  html: '<h1>Welcome!</h1><p>Thanks for signing up.</p>',
-});
-
-console.log(`Email sent! ID: ${id}`);
-```
 
 ### Using cURL
 

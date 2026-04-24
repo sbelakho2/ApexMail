@@ -17,22 +17,18 @@
 
 ### Pooling
 
-> **Note (2026-02):** The Rust tracking service uses `deadpool_redis` for connection pooling. TypeScript apps use `ioredis`.
+> **Note (2026-02):** The Rust tracking service and Rust `api-server` use `deadpool_redis` for connection pooling. The `web` and `control-plane` browser surfaces are served through `api-server`.
 
 - Rust services use `deadpool_redis` with async connection pooling.
-- TypeScript/Next.js apps use `ioredis` for Redis operations.
-- **Max connections per service**:
+- **Current runtime pools**:
 
 | Service | Connections |
 |---------|------------|
 | Tracking (Rust) | 16 |
-| Web (Next.js) | 10 |
-| Control Plane | 5 |
+| API Server (Rust; API + web/control-plane SSR) | Deployment-profile dependent |
 
-- Connections use `lazyConnect: true` — established on first command, not at boot.
-- All connections MUST set a `commandTimeout` of **5 s** and `connectTimeout` of **3 s**.
 - Connection strings are injected via `REDIS_URL` env var. Never hard-code credentials.
-- `enableReadyCheck: true` — client waits for Redis `LOADING` state to clear before sending commands.
+- Services MUST fail readiness if Redis cannot be reached or the pool cannot serve commands.
 
 ### Health Check
 
@@ -87,8 +83,8 @@ apexmail:<domain>:<tenant_id>:<resource>:<identifier>
 
 ### Enforcement
 
-- CI lint step scans all `redis.set()` / `redis.setex()` calls and fails if no TTL argument is present.
-- The `RedisClient` wrapper class in `packages/lib/src/redis.ts` **requires** a TTL parameter on all write methods. There is no raw `.set()` without TTL.
+- Service-level reviews enforce TTLs on cache writes and shared Redis usage patterns.
+- New Redis write paths should continue to fail closed on missing TTL configuration.
 
 ---
 
@@ -181,7 +177,7 @@ Complex multi-step operations MUST use Lua scripts to guarantee atomicity.
 
 ### Rules
 
-1. Lua scripts for TypeScript apps live in `packages/lib/src/`. Rust services embed scripts directly in code.
+1. Lua scripts, when used, live alongside the owning runtime implementation.
 2. Scripts are loaded at startup via `SCRIPT LOAD` and called via `EVALSHA`.
 3. Scripts MUST NOT call `TIME` — pass timestamps as arguments for determinism.
 4. Scripts MUST complete in < **5 ms**. Redis is single-threaded; long scripts block everything.

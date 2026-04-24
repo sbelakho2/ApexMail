@@ -1,7 +1,6 @@
 //! Configuration for the tracking service.
 //!
-//! Reads from environment variables matching the TypeScript service exactly
-//! so this binary is a drop-in replacement (same env vars, same routes).
+//! Reads the shared environment variables used by the tracking service.
 
 use std::net::SocketAddr;
 use anyhow::{Context, Result};

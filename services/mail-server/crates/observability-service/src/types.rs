@@ -1,6 +1,6 @@
 //! Core domain types for the observability service.
 //!
-//! Maps 1-to-1 with the TypeScript interfaces in the original codebase://! `MetricPoint`, `TraceSpan`, `LogEntry`, `Alert`, `SloTarget`,
+//! Covers `MetricPoint`, `TraceSpan`, `LogEntry`, `Alert`, `SloTarget`,
 //! `HealthStatus`, and `AlertSeverity`.
 
 use chrono::{DateTime, Utc};

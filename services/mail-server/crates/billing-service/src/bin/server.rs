@@ -8,7 +8,7 @@ use deadpool_redis::Runtime;
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use billing_service::{config::BillingConfig, routes, AppState};
+use billing_service::{config::BillingConfig, maintenance, routes, AppState};
 
 #[derive(Parser, Debug)]
 #[command(name = "billing-service", about = "ApexMail billing service")]
@@ -28,6 +28,14 @@ struct Cli {
 /// Service auth token.
     #[arg(long, env = "SERVICE_AUTH_TOKEN", default_value = "")]
     service_auth_token: String,
+
+/// Stripe webhook signing secret.
+    #[arg(long, env = "STRIPE_WEBHOOK_SECRET", default_value = "")]
+    stripe_webhook_secret: String,
+
+/// Internal API base URL.
+    #[arg(long, env = "API_BASE_URL", default_value = "http://localhost:3001")]
+    api_base_url: String,
 }
 
 #[tokio::main]
@@ -70,11 +78,14 @@ async fn main() -> anyhow::Result<()> {
         redis_url: cli.redis_url,
         listen_addr: cli.listen.clone(),
         service_auth_token: cli.service_auth_token,
+        stripe_webhook_secret: cli.stripe_webhook_secret,
+        api_base_url: cli.api_base_url,
         ..BillingConfig::default()
     };
 
     let state = AppState::new(db, redis, config);
-    let app = routes::router(state);
+    let app = routes::router(state.clone());
+    maintenance::start_periodic_jobs(state.clone());
 
 // Bind & serve.
     let listener = tokio::net::TcpListener::bind(&cli.listen).await?;

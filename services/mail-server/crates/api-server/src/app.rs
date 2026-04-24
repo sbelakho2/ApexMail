@@ -92,6 +92,7 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/analytics", routes::analytics::router())
         .nest("/v1/support", routes::support::router())
         .nest("/v1/scim", routes::scim::router())
+        .nest("/v1/billing", routes::billing::router())
         .nest("/v1/campaigns", routes::campaigns::router())
         .nest("/v1/contacts", routes::contacts::router())
         .nest("/v1/lists", routes::lists::router())
@@ -651,12 +652,12 @@ mod tests {
 
     #[test]
     fn inject_script_nonce_only_touches_opening_script_tags() {
-        let html = r#"<html><head><script type=\"application/ld+json\">{}</script><script nonce=\"keep\">ok</script></head></html>"#;
+        let html = r#"<html><head><script type="application/ld+json">{}</script><script nonce="keep">ok</script></head></html>"#;
 
         let updated = inject_script_nonce(html, "nonce-123");
 
-        assert!(updated.contains(r#"<script type=\"application/ld+json\" nonce=\"nonce-123\">"#));
-        assert!(updated.contains(r#"<script nonce=\"keep\">ok</script>"#));
+        assert!(updated.contains(r#"<script type="application/ld+json" nonce="nonce-123">"#));
+        assert!(updated.contains(r#"<script nonce="keep">ok</script>"#));
         assert_eq!(updated.matches("nonce=").count(), 2);
     }
 

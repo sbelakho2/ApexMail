@@ -207,13 +207,13 @@ mod devex_tests {
     fn test_devex_sdk_registry() {
         let mgr = devex_service::sdk_manager::SdkManager::new();
         let sdks = mgr.list_sdks();
-        assert_eq!(sdks.len(), 6, "should have 6 SDK languages");
+        assert_eq!(sdks.len(), 5, "should have 5 SDK languages");
 
 // Verify all languages are distinct
         let mut languages: Vec<String> = sdks.iter().map(|s| format!("{:?}", s.language)).collect();
         languages.sort();
         languages.dedup();
-        assert_eq!(languages.len(), 6, "all 6 SDK languages should be unique");
+        assert_eq!(languages.len(), 5, "all 5 SDK languages should be unique");
     }
 
     #[test]

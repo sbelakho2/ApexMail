@@ -1,6 +1,5 @@
 //! Drip campaign listing endpoint.
 //!
-//! Migrated from:apps/control-plane/src/app/api/campaigns/route.ts (82 lines)
 
 use axum::extract::{Query, State};
 use axum::routing::get;

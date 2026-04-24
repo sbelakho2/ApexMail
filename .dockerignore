@@ -7,14 +7,9 @@
 .git
 .gitignore
 
-# Node modules (reinstalled in container)
-node_modules
-**/node_modules
-
 # Build outputs (rebuilt in container)
 **/dist
 **/build
-**/.next
 **/.turbo
 
 # Development files
@@ -34,19 +29,10 @@ LICENSE
 
 # Test files
 **/tests
-**/*.test.ts
-**/*.test.tsx
-**/*.spec.ts
-**/*.spec.tsx
-apps/testing
 **/__tests__
-**/vitest.config.*
-**/playwright.config.*
 **/reports
 
 # Development tools
-tools/chaos
-tools/coverage-report.ts
 
 # Docker files (avoid recursive inclusion)
 Dockerfile*

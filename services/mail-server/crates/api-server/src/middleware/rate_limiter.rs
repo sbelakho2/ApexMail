@@ -155,28 +155,32 @@ async fn check_rate_limit(
 // ─── Public (IP-based) rate limiter for unauthenticated endpoints ────────
 
 /// Stricter rate limiter for public auth endpoints (login, register, SSO).
-/// Keys by source IP (from `X-Forwarded-For` first hop, falling back to the
-/// path itself as a global rate-limiter). Limits:20 requests per 60-second
-/// window per IP — enough for legitimate users, tight enough to mitigate
-/// credential-stuffing and registration spam.
+/// Keys by source IP and route path, falling back to the request path when
+/// no forwarded client IP is available. Limits:20 requests per 60-second
+/// window per IP/path bucket — enough for legitimate users, tight enough to
+/// mitigate credential-stuffing and registration spam without coupling every
+/// public auth route to the same local-development bucket.
 pub async fn public_rate_limit_middleware(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let ip = req
+    let path = req.uri().path().to_string();
+    let bucket = req
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.split(',').next())
         .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown-ip".to_string());
+        .filter(|ip| !ip.is_empty())
+        .map(|ip| format!("ip:{ip}:{path}"))
+        .unwrap_or_else(|| format!("path:{path}"));
 
     let window_ms: u64 = 60_000; // 1 minute
     let max_requests: u64 = 20;
     let redis_key = format!(
         "apexmail:ratelimit:public:{}:{}",
-        ip,
+        bucket,
         current_window(window_ms)
     );
 

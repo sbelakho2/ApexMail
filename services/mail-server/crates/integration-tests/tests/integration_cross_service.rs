@@ -215,7 +215,7 @@ fn enterprise_sso_types_serialize_correctly() {
 
 // Verify SSO types can round-trip through JSON (API compat)
     let req = SSOConfigureRequest {
-        tenant_id: uuid::Uuid::new_v4(),
+        tenant_id: uuid::Uuid::new_v4().to_string(),
         provider_type: "saml".into(),
         domain: "acme.com".into(),
         enabled: Some(true),

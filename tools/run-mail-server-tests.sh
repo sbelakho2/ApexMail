@@ -4,7 +4,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-DEFAULT_DATABASE_URL="postgres://apexmail:apexmail@127.0.0.1:5435/apexmail"
 
 log() {
   echo "[mail-server-tests] $*"
@@ -25,6 +24,36 @@ db_ready() {
   PGCONNECT_TIMEOUT=2 psql "$database_url" -tAc 'SELECT 1' >/dev/null 2>&1
 }
 
+select_database_url() {
+  local host="${DB_HOST:-${POSTGRES_HOST:-127.0.0.1}}"
+  local port="${DB_PORT:-${POSTGRES_PORT:-5432}}"
+  local name="${DB_NAME:-${POSTGRES_DB:-apexmail}}"
+  local user="${DB_USER:-${POSTGRES_USER:-apexmail}}"
+  local password="${DB_PASSWORD:-${POSTGRES_PASSWORD:-}}"
+  local candidate=""
+  local -a candidates=()
+
+  if [[ -n "$password" ]]; then
+    candidates+=("postgres://${user}:${password}@${host}:${port}/${name}")
+  fi
+
+  candidates+=(
+    "postgres://apexmail:apexmail@127.0.0.1:5432/apexmail"
+    "postgres://apexmail:devpass123@127.0.0.1:5432/apexmail"
+    "postgres://apexmail:devpass123@127.0.0.1:55432/apexmail"
+    "postgres://apexmail:apexmail@127.0.0.1:5435/apexmail"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if db_ready "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 if [[ $# -eq 0 ]]; then
   error "Usage: $0 <cargo args...>"
 fi
@@ -32,7 +61,13 @@ fi
 require_command cargo
 require_command psql
 
-DATABASE_URL="${DATABASE_URL:-$DEFAULT_DATABASE_URL}"
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  DATABASE_URL="$DATABASE_URL"
+else
+  DATABASE_URL="$(select_database_url)" || error "DATABASE_URL is not set and no reachable local Postgres default was detected"
+  log "Auto-selected reachable local DATABASE_URL"
+fi
+
 TEST_DATABASE_URL="${TEST_DATABASE_URL:-$DATABASE_URL}"
 
 if ! db_ready "$DATABASE_URL"; then

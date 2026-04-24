@@ -208,12 +208,15 @@ OAuth 2.0 enables third-party applications to access ApexMail on behalf of users
 ### Authorization Code Flow (PKCE)
 
 #### 1. Generate Code Verifier
-```javascript
-const codeVerifier = crypto.randomBytes(32).toString('base64url');
-const codeChallenge = crypto
-  .createHash('sha256')
-  .update(codeVerifier)
-  .digest('base64url');
+```python
+import base64
+import hashlib
+import secrets
+
+code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b'=').decode()
+code_challenge = base64.urlsafe_b64encode(
+    hashlib.sha256(code_verifier.encode()).digest()
+).rstrip(b'=').decode()
 ```
 
 #### 2. Authorization Request

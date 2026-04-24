@@ -13,7 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - `emails()` resource — `send`, `batch`, `get`, `list`.
 - `domains()` resource — `create`, `list`, `get`, `verify`, `delete`, `health`.
 - `webhooks()` resource — `create`, `list`, `get`, `update`, `delete`.
-- `templates()` resource — `create`, `list`, `get`, `getBySlug`, `update`, `delete`, `render`, `validateReactEmail`, `reactEmailStarter`.
+- `templates()` resource — `create`, `list`, `get`, `getBySlug`, `update`, `delete`, `render`.
 - `suppressions()` resource — `add`, `list`, `check`, `delete`.
 - `events()` resource — `list`, `getByMessage`, `get`.
 - Type-safe request builders using Java records.
