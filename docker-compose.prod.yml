@@ -22,12 +22,15 @@ services:
       - NET_BIND_SERVICE
     read_only: true
     tmpfs:
+      - /tmp
       - /var/cache/nginx
       - /var/run
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default
     depends_on:
+      api:
+        condition: service_healthy
       enterprise:
         condition: service_healthy
       tracking:
@@ -74,7 +77,7 @@ services:
 
   postgres:
     # Production: Do NOT expose database port to host
-    ports: []
+    ports: !override []
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
     deploy:
@@ -92,9 +95,14 @@ services:
 
   redis:
     # Production: Do NOT expose Redis port to host
-    ports: []
-    command: >
-      sh -c "redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru --requirepass \"$$REDIS_PASSWORD\""
+    ports: !override []
+    # SECURITY: Password from Docker secret, not environment variable
+    environment:
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_MAXMEMORY: "1gb"
+      REDIS_MAXMEMORY_POLICY: "allkeys-lru"
+    secrets:
+      - redis_password
     deploy:
       resources:
         limits:
@@ -111,7 +119,67 @@ services:
   tracking:
     environment:
       RUST_LOG: info
-    ports: []
+    ports: !override []
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: api-server
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+      ENVIRONMENT: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      BASE_URL: ${BASE_URL:?BASE_URL is required in production}
+      OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:?OAUTH_REDIRECT_BASE_URL is required in production}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}
+      JWT_PRIVATE_KEY_PEM: ${JWT_PRIVATE_KEY_PEM:?JWT_PRIVATE_KEY_PEM is required in production}
+      JWT_PUBLIC_KEY_PEM: ${JWT_PUBLIC_KEY_PEM:?JWT_PUBLIC_KEY_PEM is required in production}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:?API_KEY_HASH_SECRET is required in production}
+      WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:?WEBHOOK_SIGNING_SECRET is required in production}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required in production}
+      IMPERSONATION_SECRET: ${IMPERSONATION_SECRET:?IMPERSONATION_SECRET is required in production}
+      CSRF_SECRET: ${CSRF_SECRET:?CSRF_SECRET is required in production}
+      TRACKING_SECRET_KEY: ${TRACKING_SECRET_KEY:?TRACKING_SECRET_KEY is required in production}
+      BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
+      BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required in production}
+      METRICS_PORT: 9090
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports: !override []
+    networks:
+      - apexmail_backend
+      - apexmail_data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     deploy:
       replicas: 2
       resources:
@@ -128,7 +196,7 @@ services:
   enterprise:
     environment:
       RUST_LOG: info
-    ports: []
+    ports: !override []
     deploy:
       replicas: 2
       resources:
@@ -164,7 +232,7 @@ services:
       - apexmail_data
 
   clickhouse:
-    ports: []
+    ports: !override []
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}

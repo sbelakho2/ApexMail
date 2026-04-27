@@ -15,12 +15,3 @@ spec:
       targetPort: http
       protocol: TCP
   type: ClusterIP
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: api-server
-  namespace: apexmail
-  labels:
-    app.kubernetes.io/name: api-server
-automountServiceAccountToken: false

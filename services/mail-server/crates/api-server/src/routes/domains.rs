@@ -116,7 +116,7 @@ async fn create_domain(
     .map(Some)
     .unwrap_or(None);
 
-    if existing.map_or(false, |r| r.0) {
+    if existing.is_some_and(|r| r.0) {
         return Err(ApiError::Conflict("domain already exists".into()));
     }
 

@@ -270,11 +270,10 @@ pub fn validate_svg_content(svg: &str) -> bool {
                         return false;
                     }
 
-                    if key == "href" || key == "xlink:href" {
-                        if value.contains("http://") || value.contains("https://") || value.starts_with("//") {
+                    if (key == "href" || key == "xlink:href")
+                        && (value.contains("http://") || value.contains("https://") || value.starts_with("//")) {
                             return false;
                         }
-                    }
                 }
             }
             Ok(Event::DocType(_)) | Ok(Event::CData(_)) => {

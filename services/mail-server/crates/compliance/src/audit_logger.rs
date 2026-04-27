@@ -633,7 +633,10 @@ impl AuditLogger {
             "userId": user_id,
         });
 
-        let serialized = serde_json::to_string(&obj).unwrap_or_default();
+        let serialized = serde_json::to_string(&obj).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "Failed to serialize audit log entry, using empty string");
+            String::new()
+        });
         let mut hasher = Sha256::new();
         hasher.update(serialized.as_bytes());
         hex::encode(hasher.finalize())

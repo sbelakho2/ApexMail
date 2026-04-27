@@ -55,64 +55,34 @@ X-API-Key: ak_live_...
 
 Add a single email address to the suppression list.
 
-**Scope:** `suppressions:write`
+### GET `/v1/suppressions/check/:email`
 
-#### Request Body
+Check a single email address against the suppression list. Returns the suppression status without modifying the list.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `email` | string | Yes | Email address to suppress |
-| `reason` | string | Yes | Suppression reason (see table above) |
-| `bounceType` | string | No | Bounce classification: `hard`, `soft` (required when reason is `hard_bounce` or `soft_bounce`) |
-| `source` | string | No | Origin of the suppression: `api`, `webhook`, `import`, `system` (default: `api`) |
-| `notes` | string | No | Internal notes (max 500 chars) |
-| `metadata` | object | No | Arbitrary key-value metadata (max 20 keys) |
+**Limits:** One email address per request.
 
+#### Path Parameters
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `email` | string | Yes | Email address to check |
 #### Example Request
 
 ```bash
 curl -X POST "https://api.apexmail.ee/v1/suppressions" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "jane.doe@example.com",
-    "reason": "manual",
-    "source": "api",
-    "notes": "Customer requested removal from all marketing lists",
-    "metadata": {
-      "ticket": "SUP-4521"
-    }
+curl -X GET "https://api.apexmail.ee/v1/suppressions/check/jane.doe%40example.com" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
   }'
 ```
 
 #### Example Response — `201 Created`
 
 ```json
-{
-  "data": {
-    "id": "sup_3f4a5b6c",
-    "email": "j***@example.com",
-    "reason": "manual",
-    "source": "api",
-    "notes": "Customer requested removal from all marketing lists",
-    "metadata": {
-      "ticket": "SUP-4521"
-    },
-    "created_at": "2026-01-15T12:00:00Z"
-  }
-}
-```
-
----
-
-### POST `/v1/suppressions/bulk`
-
-Add multiple email addresses to the suppression list in a single request.
-
-**Scope:** `suppressions:write`
-
-**Limits:** 1–10,000 entries per request.
-
+  "email": "jane.doe@example.com",
+  "suppressed": true,
+  "reason": "manual"
 #### Request Body
 
 | Field | Type | Required | Description |
@@ -612,7 +582,7 @@ Poll `GET /v1/suppressions/export/:export_id` until `status` is `completed` and 
 
 ## Best Practices
 
-1. **Check before sending.** Use `POST /v1/suppressions/check` in your sending pipeline to avoid delivering to suppressed addresses.
+1. **Check before sending.** Use `GET /v1/suppressions/check/:email` in your sending pipeline to avoid delivering to suppressed addresses.
 2. **Respect hard bounces.** Removing hard-bounce suppressions is allowed but discouraged — ISPs track repeat delivery attempts to dead mailboxes.
 3. **Use bulk operations.** For list hygiene tasks, prefer `POST /v1/suppressions/bulk` or `POST /v1/suppressions/import` over individual requests to stay within rate limits.
 4. **Monitor via stats.** Call `GET /v1/suppressions/stats` periodically to track suppression growth; a sudden spike may indicate a list quality issue.

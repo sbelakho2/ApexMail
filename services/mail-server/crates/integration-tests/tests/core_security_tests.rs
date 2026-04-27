@@ -11,7 +11,7 @@
 mod ui_xss {
     use ui_foundation::shell::{
         ControlPlaneShell, ImpersonationBanner, MarketingShell, OperationalBanner,
-        ShellHeader, ToastSurface, WebDashboardShell,
+        ShellHeader, WebDashboardShell,
     };
 
 /// HTML-injection vectors that must never appear un-escaped in HTML output.

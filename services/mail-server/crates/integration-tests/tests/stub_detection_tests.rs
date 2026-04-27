@@ -8,10 +8,8 @@
 //! Each test verifies that the implementation actually performs its intended
 //! function, not just that it exists or returns without error.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // ===========================================================================
 // 1. SECURITY HEADERS - Verify actual header injection
@@ -152,7 +150,6 @@ mod circuit_breaker_stub_tests {
     enum CircuitState {
         Closed,
         Open,
-        HalfOpen,
     }
 
     struct TestCircuitBreaker {
@@ -462,6 +459,10 @@ mod audit_log_stub_tests {
         let reads = log.find_by_action("READ");
         
         assert_eq!(reads.len(), 2, "Audit log must support search by action");
+        assert!(reads.iter().all(|entry| entry.actor == "user"));
+        assert!(reads.iter().all(|entry| entry.resource.starts_with("resource:")));
+        let now = Instant::now();
+        assert!(reads.iter().all(|entry| entry.timestamp <= now));
     }
 }
 
@@ -474,9 +475,6 @@ mod audit_log_stub_tests {
 #[cfg(test)]
 mod graceful_shutdown_stub_tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::sync::Arc;
-    use std::thread;
-    use std::time::Duration;
 
     struct GracefulShutdown {
         shutting_down: AtomicBool,

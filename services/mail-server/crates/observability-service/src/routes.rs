@@ -5,17 +5,20 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::collections::HashMap;
 
 use axum::{
     extract::{DefaultBodyLimit, Query, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header::AUTHORIZATION, Method, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::get,
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use tower_http::timeout::TimeoutLayer;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::alerting::AlertManager;
 use crate::log_aggregator::LogAggregator;
@@ -69,7 +72,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics/summary", get(metrics_summary))
         .route("/traces", get(traces_list))
         .route("/logs", get(logs_query))
-        .route("/alerts", get(alerts_list))
+        .route("/alerts", get(alerts_list).post(alerts_ingest))
         .route("/slos", get(slos_list))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
         .with_state(state)
@@ -86,7 +89,9 @@ async fn require_service_token(
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if req.uri().path() == "/health" {
+    if req.uri().path() == "/health"
+        || (req.method() == Method::POST && req.uri().path() == "/alerts")
+    {
         return Ok(next.run(req).await);
     }
     if state.service_token.is_empty() {
@@ -99,7 +104,7 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -120,6 +125,25 @@ struct LogsQuery {
     level: Option<String>,
     service: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlertmanagerWebhook {
+    alerts: Vec<AlertmanagerAlert>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlertmanagerAlert {
+    status: String,
+    #[serde(default)]
+    labels: HashMap<String, String>,
+    #[serde(default)]
+    annotations: HashMap<String, String>,
+    #[serde(rename = "startsAt")]
+    starts_at: Option<DateTime<Utc>>,
+    #[serde(rename = "endsAt")]
+    ends_at: Option<DateTime<Utc>>,
+    fingerprint: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +192,19 @@ async fn alerts_list(State(state): State<AppState>) -> Json<Vec<Alert>> {
     Json(state.alerts.list_active_alerts())
 }
 
+async fn alerts_ingest(
+    State(state): State<AppState>,
+    Json(payload): Json<AlertmanagerWebhook>,
+) -> StatusCode {
+    let alerts = payload
+        .alerts
+        .into_iter()
+        .map(alertmanager_alert_to_domain_alert)
+        .collect();
+    state.alerts.ingest_external_alerts(alerts);
+    StatusCode::ACCEPTED
+}
+
 async fn slos_list(
     State(state): State<AppState>,
 ) -> Json<Vec<crate::slo::SloComplianceResult>> {
@@ -213,6 +250,74 @@ fn parse_log_level(s: &str) -> Option<LogLevel> {
     }
 }
 
+fn alertmanager_alert_to_domain_alert(alert: AlertmanagerAlert) -> Alert {
+    let status = parse_alert_status(&alert.status);
+    let fingerprint = alert
+        .fingerprint
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let rule_name = alert
+        .labels
+        .get("alertname")
+        .cloned()
+        .unwrap_or_else(|| "alertmanager".to_string());
+    let summary = alert
+        .annotations
+        .get("summary")
+        .cloned()
+        .unwrap_or_else(|| rule_name.clone());
+    let description = alert
+        .annotations
+        .get("description")
+        .cloned()
+        .unwrap_or_else(|| summary.clone());
+    let fired_at = alert.starts_at.unwrap_or_else(Utc::now);
+    let resolved_at = if status == crate::types::AlertStatus::Resolved {
+        Some(alert.ends_at.unwrap_or_else(Utc::now))
+    } else {
+        None
+    };
+
+    Alert {
+        id: fingerprint.clone(),
+        rule_id: fingerprint,
+        rule_name,
+        status,
+        severity: parse_alert_severity(alert.labels.get("severity").map(String::as_str)),
+        summary,
+        description,
+        labels: alert.labels,
+        annotations: alert.annotations,
+        value: 0.0,
+        threshold: 0.0,
+        fired_at,
+        resolved_at,
+        acknowledged_at: None,
+        acknowledged_by: None,
+        silenced_until: None,
+        notifications_sent: 1,
+        last_notification_at: Some(Utc::now()),
+    }
+}
+
+fn parse_alert_status(status: &str) -> crate::types::AlertStatus {
+    match status.to_ascii_lowercase().as_str() {
+        "resolved" => crate::types::AlertStatus::Resolved,
+        "pending" => crate::types::AlertStatus::Pending,
+        "acknowledged" => crate::types::AlertStatus::Acknowledged,
+        "silenced" => crate::types::AlertStatus::Silenced,
+        _ => crate::types::AlertStatus::Firing,
+    }
+}
+
+fn parse_alert_severity(severity: Option<&str>) -> crate::types::AlertSeverity {
+    match severity.unwrap_or("warning").to_ascii_lowercase().as_str() {
+        "info" => crate::types::AlertSeverity::Info,
+        "critical" => crate::types::AlertSeverity::Critical,
+        "emergency" => crate::types::AlertSeverity::Emergency,
+        _ => crate::types::AlertSeverity::Warning,
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -222,6 +327,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use serde_json::json;
     use tower::ServiceExt; // for `oneshot`
 
     fn test_state() -> AppState {
@@ -300,5 +406,54 @@ mod tests {
         assert_eq!(json.len(), 1);
         assert_eq!(json[0]["name"], "uptime");
         assert!(json[0]["compliant"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_alertmanager_webhook_ingest_endpoint() {
+        let app = router(test_state());
+        let payload = json!({
+            "alerts": [
+                {
+                    "status": "firing",
+                    "labels": {
+                        "alertname": "TrackingServiceDown",
+                        "severity": "critical"
+                    },
+                    "annotations": {
+                        "summary": "Tracking service is down",
+                        "description": "Tracking service has been unreachable for more than 1 minute"
+                    },
+                    "startsAt": "2026-04-27T10:00:00Z",
+                    "fingerprint": "tracking-service-down"
+                }
+            ]
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/alerts")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let req = Request::builder()
+            .uri("/alerts")
+            .header("x-api-key", "test-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["rule_name"], "TrackingServiceDown");
+        assert_eq!(json[0]["severity"], "critical");
     }
 }

@@ -1006,7 +1006,7 @@ func (a *TemplatesAPI) Delete(ctx context.Context, id string) error {
 
 // RenderTemplateRequest is the request body for rendering a template.
 type RenderTemplateRequest struct {
-	Data map[string]interface{} `json:"data"`
+	Variables map[string]interface{} `json:"variables"`
 }
 
 // RenderTemplateResponse is returned by Templates.Render.
@@ -1022,7 +1022,7 @@ func (a *TemplatesAPI) Render(ctx context.Context, id string, data map[string]in
 		data = map[string]interface{}{}
 	}
 	var resp RenderTemplateResponse
-	err := a.client.do(ctx, http.MethodPost, "/v1/templates/"+url.PathEscape(id)+"/render", &RenderTemplateRequest{Data: data}, &resp)
+	err := a.client.do(ctx, http.MethodPost, "/v1/templates/"+url.PathEscape(id)+"/render", &RenderTemplateRequest{Variables: data}, &resp)
 	return &resp, err
 }
 

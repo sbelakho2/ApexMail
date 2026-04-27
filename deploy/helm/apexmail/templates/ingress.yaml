@@ -34,7 +34,7 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                {{- if or (eq .service "api-server") (eq .service "web") }}
+                {{- if eq .service "api-server" }}
                 name: {{ include "apexmail.fullname" $ }}-api-server
                 port:
                   name: http

@@ -279,7 +279,7 @@ impl EmailAuthenticator {
         output
             .iter()
             .map(|sig| {
-                let verdict = map_dkim_result(&sig.result());
+                let verdict = map_dkim_result(sig.result());
                 DkimOutcome {
                     result: verdict,
                     domain: sig.signature().map(|s| s.d.to_string()).unwrap_or_default(),

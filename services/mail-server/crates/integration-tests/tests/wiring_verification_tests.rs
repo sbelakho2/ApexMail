@@ -9,7 +9,6 @@
 //! 4. Error handling propagates correctly through the stack
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
 
 // ===========================================================================
 // RATE LIMITER WIRING TESTS
@@ -134,7 +133,7 @@ mod circuit_breaker_wiring {
 
 #[cfg(test)]
 mod waf_engine_wiring {
-    use waf_engine::{WafEngine, WafConfig, WafDecision, HttpRequest};
+    use waf_engine::{WafConfig, WafEngine, HttpRequest};
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
@@ -300,7 +299,7 @@ mod ids_engine_wiring {
         let src_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
         let normal_payload = b"GET /api/health HTTP/1.1\r\nHost: example.com\r\n\r\n";
         
-        let (verdict, alerts) = engine.inspect(src_ip, 80, "tcp", normal_payload);
+        let (_verdict, alerts) = engine.inspect(src_ip, 80, "tcp", normal_payload);
         
 // Normal traffic should not be blocked
         let has_critical = alerts.iter()
@@ -320,7 +319,7 @@ mod ids_engine_wiring {
 #[cfg(test)]
 mod spam_filter_wiring {
     use spam_filter::engine::SpamClass;
-    use spam_filter::{SpamEngine, SpamVerdict};
+    use spam_filter::SpamEngine;
 
     #[test]
     fn test_spam_filter_scores_normal_messages() {

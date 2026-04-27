@@ -18,7 +18,7 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::config::SecretsConfig;
@@ -64,7 +64,7 @@ impl SecretManager {
         let rotation_json = input
             .rotation_schedule
             .as_ref()
-            .map(|rs| serde_json::to_value(rs))
+            .map(serde_json::to_value)
             .transpose()
             .map_err(|e| format!("failed to serialize rotation schedule: {e}"))?;
 
@@ -710,14 +710,15 @@ fn derive_key(master_key: &str) -> Result<[u8; 32], String> {
     type HmacSha256 = Hmac<Sha256>;
 
     let salt = std::env::var("SECRETS_KDF_SALT")
-        .unwrap_or_else(|_| "apexmail-compliance-kdf-v1".to_string());
+        .map_err(|_| "SECRETS_KDF_SALT must be configured".to_string())?;
+
+    if salt.len() < 16 {
+        return Err("SECRETS_KDF_SALT must be at least 16 characters".to_string());
+    }
 
 // HKDF-Extract(salt, ikm)
-    let mut extract = <HmacSha256 as Mac>::new_from_slice(salt.as_bytes()).or_else(|e| {
-        warn!(error = %e, "Invalid KDF salt; falling back to static salt");
-        <HmacSha256 as Mac>::new_from_slice(b"apexmail-compliance-kdf-v1")
-            .map_err(|err| format!("KDF salt init: {err}"))
-    })?;
+    let mut extract = <HmacSha256 as Mac>::new_from_slice(salt.as_bytes())
+        .map_err(|e| format!("KDF salt init: {e}"))?;
     extract.update(master_key.as_bytes());
     let prk = extract.finalize().into_bytes();
 
@@ -741,10 +742,10 @@ fn generate_secret_value(secret_type: SecretType) -> String {
     OsRng.fill_bytes(&mut buf);
 
     match secret_type {
-        SecretType::ApiKey => format!("am_{}", hex::encode(&buf)),
-        SecretType::WebhookSecret => format!("whsec_{}", hex::encode(&buf)),
-        SecretType::EncryptionKey => B64.encode(&buf),
-        _ => hex::encode(&buf),
+        SecretType::ApiKey => format!("am_{}", hex::encode(buf)),
+        SecretType::WebhookSecret => format!("whsec_{}", hex::encode(buf)),
+        SecretType::EncryptionKey => B64.encode(buf),
+        _ => hex::encode(buf),
     }
 }
 
@@ -814,6 +815,10 @@ impl SecretRow {
 mod tests {
     use super::*;
 
+    fn ensure_test_kdf_salt() {
+        std::env::set_var("SECRETS_KDF_SALT", "apexmail-compliance-test-salt-v1");
+    }
+
     fn test_runtime() -> &'static tokio::runtime::Runtime {
         use std::sync::OnceLock;
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -826,6 +831,7 @@ mod tests {
     }
 
     fn test_manager() -> Option<SecretManager> {
+        ensure_test_kdf_salt();
         let _guard = test_runtime().enter();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -843,6 +849,7 @@ mod tests {
 
     #[test]
     fn test_derive_key_deterministic() {
+        ensure_test_kdf_salt();
         let k1 = derive_key("same-key");
         let k2 = derive_key("same-key");
         assert!(k1.is_ok() && k2.is_ok(), "derive key should succeed");
@@ -853,6 +860,7 @@ mod tests {
 
     #[test]
     fn test_derive_key_different_keys() {
+        ensure_test_kdf_salt();
         let k1 = derive_key("key-a");
         let k2 = derive_key("key-b");
         assert!(k1.is_ok() && k2.is_ok(), "derive key should succeed");

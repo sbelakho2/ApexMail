@@ -9,7 +9,6 @@
 //! - Concurrency edge cases (CAS loops, atomic operations)
 //! - State machine edge cases (transitions, resets)
 
-use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

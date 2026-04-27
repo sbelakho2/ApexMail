@@ -24,6 +24,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Datelike;
+use apexmail_lib::{ErrorCode, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tower_http::timeout::TimeoutLayer;
@@ -32,7 +33,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 
 use crate::{
-    config::{BillingConfig, PaygPricing},
+    config::{BillingConfig, PaygCalculationError, PaygPricing},
     invoices,
     plans,
     subscriptions,
@@ -94,6 +95,14 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
 
+fn error_response(
+    status: StatusCode,
+    code: ErrorCode,
+    message: impl Into<String>,
+) -> Response {
+    (status, Json(ErrorEnvelope::new(code, message))).into_response()
+}
+
 /// GET /plans
 async fn list_plans(
     State(state): State<Arc<AppState>>,
@@ -111,11 +120,11 @@ async fn get_plan(
     let plan = plans::get_plan_by_name(&state.db, &plan_id).await?;
     match plan {
         Some(plan) => Ok((StatusCode::OK, Json(to_json_value(LegacyPlanDto::from(plan))?)).into_response()),
-        None => Ok((
+        None => Ok(error_response(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Plan not found" })),
-        )
-            .into_response()),
+            ErrorCode::NotFound,
+            "Plan not found",
+        )),
     }
 }
 
@@ -499,10 +508,11 @@ async fn compare_plans(
                 }
             })).into_response())
         }
-        _ => Ok((
+        _ => Ok(error_response(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "One or both plans not found" })),
-        ).into_response()),
+            ErrorCode::NotFound,
+            "One or both plans not found",
+        )),
     }
 }
 
@@ -537,10 +547,11 @@ async fn update_plan(
 ) -> Result<Response, ApiError> {
     let existing = plans::get_plan_by_name(&state.db, &plan_id).await?;
     let Some(existing) = existing else {
-        return Ok((
+        return Ok(error_response(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Plan not found" })),
-        ).into_response());
+            ErrorCode::NotFound,
+            "Plan not found",
+        ));
     };
 
     let updated = plans::upsert_plan_input(
@@ -677,28 +688,30 @@ fn legacy_payg_pricing_payload(pricing: &PaygPricing) -> LegacyPaygPricingDto {
     }
 }
 
-fn legacy_payg_cost(pricing: &PaygPricing, emails_sent: u64, api_calls: u64) -> LegacyPaygCostDto {
-    let (email_cost_cents, api_cost_cents, total_cost_cents) = pricing.calculate(emails_sent, api_calls);
+fn legacy_payg_cost(
+    pricing: &PaygPricing,
+    emails_sent: u64,
+    api_calls: u64,
+) -> Result<LegacyPaygCostDto, PaygCalculationError> {
+    let (email_cost_cents, api_cost_cents, total_cost_cents) = pricing.calculate(emails_sent, api_calls)?;
 
-    LegacyPaygCostDto {
+    Ok(LegacyPaygCostDto {
         email_cost_cents,
         api_cost_cents,
         total_cost_cents: total_cost_cents.max(LEGACY_PAYG_MINIMUM_MONTHLY_CHARGE_CENTS),
         email_cost_usd: cents_to_usd_string(email_cost_cents),
         api_cost_usd: cents_to_usd_string(api_cost_cents),
         total_cost_usd: cents_to_usd_string(total_cost_cents.max(LEGACY_PAYG_MINIMUM_MONTHLY_CHARGE_CENTS)),
-    }
+    })
 }
 
 fn validate_non_negative(value: i64, field_name: &str) -> Result<u64, Response> {
     if value < 0 {
-        return Err((
+        return Err(error_response(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("{field_name} must be non-negative"),
-            })),
-        )
-            .into_response());
+            ErrorCode::ValidationError,
+            format!("{field_name} must be non-negative"),
+        ));
     }
 
     Ok(value as u64)
@@ -722,7 +735,17 @@ async fn estimate_payg_cost(
     };
 
     let pricing = PaygPricing::default();
-    let cost = legacy_payg_cost(&pricing, emails_sent, api_calls);
+    let cost = match legacy_payg_cost(&pricing, emails_sent, api_calls) {
+        Ok(cost) => cost,
+        Err(err) => {
+            tracing::warn!(error = %err, emails_sent, api_calls, "rejected PAYG estimate outside supported range");
+            return Ok(error_response(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidInput,
+                err.to_string(),
+            ));
+        }
+    };
 
     Ok(Json(serde_json::json!({
         "usage": {
@@ -771,7 +794,10 @@ async fn get_payg_usage(
     let emails_sent = summary.emails_sent.max(0) as u64;
     let api_calls = summary.api_calls.max(0) as u64;
     let pricing = PaygPricing::default();
-    let cost = legacy_payg_cost(&pricing, emails_sent, api_calls);
+    let cost = legacy_payg_cost(&pricing, emails_sent, api_calls).map_err(|err| {
+        tracing::error!(error = %err, tenant_id = %q.tenant_id, emails_sent, api_calls, "persisted PAYG usage exceeded supported range");
+        sqlx::Error::Protocol(err.to_string())
+    })?;
 
     Ok(Json(serde_json::json!({
         "period": {
@@ -1177,11 +1203,11 @@ async fn switch_plan(
             .map_err(ApiError::Plans)?;
 
         if tenant_update.rows_affected() != 1 {
-            return Ok((
+            return Ok(error_response(
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "Tenant not found" })),
-            )
-                .into_response());
+                ErrorCode::NotFound,
+                "Tenant not found",
+            ));
         }
 
         insert_audit_log(
@@ -1212,33 +1238,33 @@ async fn switch_plan(
     let subscription = match get_route_subscription(&state.db, &q.tenant_id).await? {
         Some(subscription) => subscription,
         None => {
-            return Ok((
+            return Ok(error_response(
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "No active subscription found" })),
-            )
-                .into_response())
+                ErrorCode::NotFound,
+                "No active subscription found",
+            ))
         }
     };
 
     let current_plan = match plans::get_plan_by_name(&state.db, &subscription.plan_name).await? {
         Some(plan) => plan,
         None => {
-            return Ok((
+            return Ok(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "Operation failed" })),
-            )
-                .into_response())
+                ErrorCode::InternalError,
+                "Operation failed",
+            ))
         }
     };
 
     let new_plan = match plans::get_plan_by_name(&state.db, &body.plan_name).await? {
         Some(plan) => plan,
         None => {
-            return Ok((
+            return Ok(error_response(
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "Plan not found" })),
-            )
-                .into_response())
+                ErrorCode::NotFound,
+                "Plan not found",
+            ))
         }
     };
 
@@ -1246,11 +1272,11 @@ async fn switch_plan(
     {
         Ok(proration) => proration,
         Err(error) => {
-            return Ok((
+            return Ok(error_response(
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": error })),
-            )
-                .into_response())
+                ErrorCode::InvalidInput,
+                error,
+            ))
         }
     };
 
@@ -1284,11 +1310,11 @@ async fn switch_plan(
     .map_err(ApiError::Plans)?;
 
     if updated_subscription_id.is_none() {
-        return Ok((
+        return Ok(error_response(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "No active subscription found" })),
-        )
-            .into_response());
+            ErrorCode::NotFound,
+            "No active subscription found",
+        ));
     }
 
     sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
@@ -1333,11 +1359,11 @@ async fn cancel_subscription_request(
     let subscription = match get_route_subscription(&state.db, &q.tenant_id).await? {
         Some(subscription) => subscription,
         None => {
-            return Ok((
+            return Ok(error_response(
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "No active subscription found" })),
-            )
-                .into_response())
+                ErrorCode::NotFound,
+                "No active subscription found",
+            ))
         }
     };
 
@@ -1387,11 +1413,11 @@ async fn cancel_subscription_request(
     };
 
     if rows_affected == 0 {
-        return Ok((
+        return Ok(error_response(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "No active subscription found" })),
-        )
-            .into_response());
+            ErrorCode::NotFound,
+            "No active subscription found",
+        ));
     }
 
     if body.cancel_immediately {
@@ -1488,10 +1514,11 @@ fn csv_text_response(body: String, filename: Option<String>) -> Response {
 
     builder
         .body(axum::body::Body::from(body))
-        .unwrap_or_else(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "Operation failed" })))
-                .into_response()
-        })
+        .unwrap_or_else(|_| error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::InternalError,
+            "Operation failed",
+        ))
 }
 
 fn sanitize_csv_value(value: &serde_json::Value) -> String {
@@ -1545,19 +1572,19 @@ async fn get_revenue_report(
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Response, ApiError> {
     let (Some(start_date), Some(end_date)) = (query.start_date.as_deref(), query.end_date.as_deref()) else {
-        return Ok((
+        return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "startDate and endDate required" })),
-        )
-            .into_response());
+            ErrorCode::ValidationError,
+            "startDate and endDate required",
+        ));
     };
 
     let (Some(start_date), Some(end_date)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
-        return Ok((
+        return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Invalid startDate or endDate" })),
-        )
-            .into_response());
+            ErrorCode::InvalidInput,
+            "Invalid startDate or endDate",
+        ));
     };
 
     let report: serde_json::Value = sqlx::query_scalar(
@@ -1699,19 +1726,19 @@ async fn get_cost_report(
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Response, ApiError> {
     let (Some(start_date), Some(end_date)) = (query.start_date.as_deref(), query.end_date.as_deref()) else {
-        return Ok((
+        return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "startDate and endDate required" })),
-        )
-            .into_response());
+            ErrorCode::ValidationError,
+            "startDate and endDate required",
+        ));
     };
 
     let (Some(start_date), Some(end_date)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
-        return Ok((
+        return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Invalid startDate or endDate" })),
-        )
-            .into_response());
+            ErrorCode::InvalidInput,
+            "Invalid startDate or endDate",
+        ));
     };
 
     let report: serde_json::Value = sqlx::query_scalar(
@@ -1752,19 +1779,19 @@ async fn export_billing_data(
         query.start_date.as_deref(),
         query.end_date.as_deref(),
     ) else {
-        return Ok((
+        return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "type, startDate, and endDate required" })),
-        )
-            .into_response());
+            ErrorCode::ValidationError,
+            "type, startDate, and endDate required",
+        ));
     };
 
     let (Some(start_date_parsed), Some(end_date_parsed)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
-        return Ok((
+        return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Invalid startDate or endDate" })),
-        )
-            .into_response());
+            ErrorCode::InvalidInput,
+            "Invalid startDate or endDate",
+        ));
     };
 
     let export_query = match export_type {
@@ -1832,11 +1859,11 @@ async fn export_billing_data(
     };
 
     let Some(export_query) = export_query else {
-        return Ok((
+        return Ok(error_response(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Invalid export type" })),
-        )
-            .into_response());
+            ErrorCode::InvalidInput,
+            "Invalid export type",
+        ));
     };
 
     let data: serde_json::Value = sqlx::query_scalar(export_query)
@@ -1993,11 +2020,11 @@ async fn get_invoice(
         Some(inv) if inv.tenant_id == q.tenant_id => {
             Ok((StatusCode::OK, Json(to_json_value(inv)?)).into_response())
         }
-        Some(_) | None => Ok((
+        Some(_) | None => Ok(error_response(
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Invoice not found" })),
-        )
-            .into_response()),
+            ErrorCode::NotFound,
+            "Invoice not found",
+        )),
     }
 }
 
@@ -2030,6 +2057,7 @@ async fn check_quota(
 // ---------------------------------------------------------------------------
 
 /// Unified API error that maps domain errors → HTTP responses.
+#[derive(Debug)]
 enum ApiError {
     Plans(sqlx::Error),
     Usage(usage::UsageError),
@@ -2060,50 +2088,94 @@ impl From<subscriptions::SubscriptionError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let (status, msg) = match &self {
+        let (status, code, message) = match &self {
             ApiError::Plans(sqlx::Error::RowNotFound) => {
-                (StatusCode::NOT_FOUND, "plan not found".to_string())
+                (StatusCode::NOT_FOUND, ErrorCode::NotFound, "plan not found".to_string())
             }
-            ApiError::Plans(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::Plans(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "internal server error".to_string(),
+            ),
             ApiError::Usage(usage::UsageError::Db(sqlx::Error::RowNotFound)) => {
-                (StatusCode::NOT_FOUND, "billing resource not found".to_string())
+                (
+                    StatusCode::NOT_FOUND,
+                    ErrorCode::NotFound,
+                    "billing resource not found".to_string(),
+                )
             }
             ApiError::Usage(usage::UsageError::Redis(_))
             | ApiError::Usage(usage::UsageError::RedisCmd(_)) => {
-                (StatusCode::SERVICE_UNAVAILABLE, "billing cache unavailable".to_string())
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorCode::ServiceUnavailable,
+                    "billing cache unavailable".to_string(),
+                )
             }
-            ApiError::Usage(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::Usage(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "internal server error".to_string(),
+            ),
             ApiError::Invoice(invoices::InvoiceError::Db(sqlx::Error::RowNotFound)) => {
-                (StatusCode::NOT_FOUND, "invoice not found".to_string())
+                (
+                    StatusCode::NOT_FOUND,
+                    ErrorCode::NotFound,
+                    "invoice not found".to_string(),
+                )
             }
             ApiError::Invoice(invoices::InvoiceError::NoBillingAddress) => {
-                (StatusCode::NOT_FOUND, "billing address not found for tenant".to_string())
+                (
+                    StatusCode::NOT_FOUND,
+                    ErrorCode::NotFound,
+                    "billing address not found for tenant".to_string(),
+                )
             }
-            ApiError::Invoice(invoices::InvoiceError::PdfGeneration(e)) => {
-                (StatusCode::SERVICE_UNAVAILABLE, format!("PDF generation error: {e}"))
+            ApiError::Invoice(invoices::InvoiceError::PdfGeneration(_)) => {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorCode::ServiceUnavailable,
+                    "pdf generation unavailable".to_string(),
+                )
             }
-            ApiError::Invoice(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::Invoice(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "internal server error".to_string(),
+            ),
             ApiError::Subscription(subscriptions::SubscriptionError::PlanNotFound(name)) => {
-                (StatusCode::NOT_FOUND, format!("plan not found: {name}"))
+                (
+                    StatusCode::NOT_FOUND,
+                    ErrorCode::NotFound,
+                    format!("plan not found: {name}"),
+                )
             }
             ApiError::Subscription(subscriptions::SubscriptionError::NotFound) => {
-                (StatusCode::NOT_FOUND, "active subscription not found".to_string())
+                (
+                    StatusCode::NOT_FOUND,
+                    ErrorCode::NotFound,
+                    "active subscription not found".to_string(),
+                )
             }
             ApiError::Subscription(subscriptions::SubscriptionError::Db(sqlx::Error::RowNotFound)) => {
-                (StatusCode::NOT_FOUND, "active subscription not found".to_string())
+                (
+                    StatusCode::NOT_FOUND,
+                    ErrorCode::NotFound,
+                    "active subscription not found".to_string(),
+                )
             }
-            ApiError::Subscription(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::Subscription(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "internal server error".to_string(),
+            ),
         };
         if status.is_server_error() {
-            tracing::error!(error = %msg, status = %status, "billing API error");
+            tracing::error!(error = ?self, status = %status, code = %code, "billing API error");
         } else {
-            tracing::warn!(error = %msg, status = %status, "billing API error");
+            tracing::warn!(error = ?self, status = %status, code = %code, "billing API error");
         }
-        (
-            status,
-            Json(serde_json::json!({ "error": msg })),
-        )
-            .into_response()
+        error_response(status, code, message)
     }
 }
 
@@ -2155,11 +2227,20 @@ mod tests {
     use super::*;
     use crate::config::PaygPricing;
     use crate::subscriptions::SubscriptionError;
-    use axum::body::Body;
+    use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use deadpool_redis::Config as RedisConfig;
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
+
+    async fn response_json(resp: Response) -> (StatusCode, serde_json::Value) {
+        let status = resp.status();
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json = serde_json::from_slice(&body).expect("json body");
+        (status, json)
+    }
 
     const LEGACY_PLAN_ROUTE_SURFACE: &[(&str, &str)] = &[
         ("GET", "/plans"),
@@ -2244,6 +2325,36 @@ mod tests {
         let err = ApiError::Plans(sqlx::Error::RowNotFound);
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_error_uses_structured_error_envelope() {
+        let err = ApiError::Plans(sqlx::Error::RowNotFound);
+        let (status, json) = response_json(err.into_response()).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+        assert_eq!(json["error"]["message"], "plan not found");
+    }
+
+    #[tokio::test]
+    async fn internal_api_errors_are_sanitized() {
+        let err = ApiError::Plans(sqlx::Error::Protocol("boom".into()));
+        let (status, json) = response_json(err.into_response()).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json["error"]["code"], "INTERNAL_ERROR");
+        assert_eq!(json["error"]["message"], "internal server error");
+    }
+
+    #[tokio::test]
+    async fn validate_non_negative_returns_structured_validation_error() {
+        let response = validate_non_negative(-1, "emailsSent").expect_err("negative values should fail");
+        let (status, json) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "VALIDATION_ERROR");
+        assert_eq!(json["error"]["message"], "emailsSent must be non-negative");
     }
 
     #[test]
@@ -2377,7 +2488,10 @@ mod tests {
 
     #[test]
     fn legacy_payg_cost_matches_ts_contract() {
-        let payload = serde_json::to_value(legacy_payg_cost(&PaygPricing::default(), 5, 101_000))
+        let payload = serde_json::to_value(
+            legacy_payg_cost(&PaygPricing::default(), 5, 101_000)
+                .expect("PAYG cost contract input should calculate"),
+        )
             .expect("PAYG cost payload should serialize");
 
         assert_eq!(payload["emailCostCents"], serde_json::json!(0));

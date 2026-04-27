@@ -321,22 +321,25 @@ pub fn calculate_goal_progress(baseline: f64, target: f64, current: f64) -> f64 
 /// #267-268:Added validation for quarter range and safe date construction
 pub fn quarter_date_range(quarter: i32, year: i32) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
 // #268:Validate quarter is 1-4, default to Q1 for invalid values with warning
-    let valid_quarter = if quarter < 1 || quarter > 4 {
+    let valid_quarter = if !(1..=4).contains(&quarter) {
         tracing::warn!(quarter = quarter, "Invalid quarter value, defaulting to Q1");
         1
     } else {
         quarter
     };
     
+    // #268: Pre-validated above (line 324), but keep for exhaustiveness
+    debug_assert!((1..=4).contains(&valid_quarter));
     let (start_month, end_month) = match valid_quarter {
         1 => (1u32, 4u32),
         2 => (4, 7),
         3 => (7, 10),
         4 => (10, 1),
-        _ => unreachable!(), // Already validated
+        // Pre-validated above (line 324), unreachable if reached
+        _ => return (chrono::Utc::now(), chrono::Utc::now()),
     };
 
-// #267:Use checked construction to avoid potential panics
+    // #267: Use checked construction to avoid potential panics
     let start = chrono::NaiveDate::from_ymd_opt(year, start_month, 1)
         .and_then(|d| d.and_hms_opt(0, 0, 0))
         .unwrap_or_else(|| {

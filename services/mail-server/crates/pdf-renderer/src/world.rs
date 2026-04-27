@@ -4,11 +4,9 @@
 //! so the Typst compiler can resolve `#import` and `#include` directives.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use chrono::{Datelike, Utc};
+use chrono::Utc;
 use once_cell::sync::Lazy;
-use parking_lot::RwLock;
 
 // ---------------------------------------------------------------------------
 // Embedded templates (compiled into binary)

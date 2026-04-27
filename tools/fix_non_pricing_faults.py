@@ -118,7 +118,8 @@ def fix_line(line: str) -> tuple[str, list]:
     return line, fixes_applied
 
 def main():
-    data_file = Path('/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl')
+    project_root = Path(__file__).resolve().parents[1]
+    data_file = project_root / 'data/train_agent.jsonl'
     
     print("=== Non-Pricing Fault Scanner ===\n")
     

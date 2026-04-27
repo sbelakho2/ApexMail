@@ -368,7 +368,7 @@ async fn create_ticket_message(
 
     Ok((StatusCode::CREATED, Json(TicketMessageResponse {
         id: id.to_string(),
-        ticket_id: ticket_id,
+        ticket_id,
         sender_id: auth.user_id.unwrap_or_default(),
         sender_type: "user".into(),
         body: body.body,

@@ -39,8 +39,8 @@ pub fn decode_payload(input: &str, max_depth: usize) -> String {
 fn decode_one_layer(input: &str) -> String {
     let step1 = url_decode(input);
     let step2 = html_entity_decode(&step1);
-    let step3 = unicode_escape_decode(&step2);
-    step3
+    
+    unicode_escape_decode(&step2)
 }
 
 /// URL percent-decoding (%XX)
@@ -107,8 +107,7 @@ fn decode_html_entity(entity: &str) -> Option<char> {
         _ => {}
     }
 // Numeric (&#NNN;)
-    if entity.starts_with('#') {
-        let num_str = &entity[1..];
+    if let Some(num_str) = entity.strip_prefix('#') {
         if num_str.starts_with('x') || num_str.starts_with('X') {
 // Hex &#xHH;
             let hex_str = &num_str[1..];

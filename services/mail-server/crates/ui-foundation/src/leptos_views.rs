@@ -48,14 +48,12 @@ pub fn control_plane_root_layout(child_html: &str) -> String {
 
 /// Pixel-identical reproduction of the web landing page contract.
 pub fn web_home_page() -> String {
-    format!(
-        "<main class=\"flex min-h-screen flex-col items-center justify-center bg-gray-50\">\
+    "<main class=\"flex min-h-screen flex-col items-center justify-center bg-gray-50\">\
 <div class=\"text-center\">\
 <h1 class=\"text-4xl font-bold text-gray-900\">ApexMail</h1>\
 <p class=\"mt-4 text-lg text-gray-600\">Modern email infrastructure for developers</p>\
 <a href=\"/campaigns\" class=\"mt-6 inline-block rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700\">Go to Dashboard</a>\
-</div></main>",
-    )
+</div></main>".to_string()
 }
 
 /// Pixel-identical reproduction of the web not-found contract.
@@ -1756,8 +1754,7 @@ pub fn web_login_page() -> String {
 /// Login page for the control plane. Matches field selectors from the
 /// behavior baseline manifest (e.g. `#login-email`, `#login-password`).
 pub fn control_plane_login_page() -> String {
-    format!(
-        "<main class=\"flex min-h-screen items-center justify-center\">\
+    "<main class=\"flex min-h-screen items-center justify-center\">\
 <div class=\"w-full max-w-md space-y-8 rounded-xl border border-border bg-card p-8 shadow-lg\">\
 <div class=\"text-center\">\
 <div class=\"mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground font-bold text-lg shadow\">A</div>\
@@ -1778,8 +1775,7 @@ pub fn control_plane_login_page() -> String {
 <div id=\"login-mfa\" class=\"hidden space-y-4\">\
 <p class=\"text-sm text-muted-foreground\">MFA Verification</p>\
 <input name=\"mfaCode\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" placeholder=\"000000\" class=\"flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-center tracking-widest\" />\
-</div></div></main>"
-    )
+</div></div></main>".to_string()
 }
 
 #[cfg(test)]

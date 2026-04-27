@@ -38,6 +38,73 @@ fn default_interval() -> String {
     "day".into()
 }
 
+fn safe_ratio(numerator: i64, denominator: i64) -> f64 {
+    if denominator > 0 {
+        numerator as f64 / denominator as f64
+    } else {
+        0.0
+    }
+}
+
+fn volume_query_for_interval(interval: &str) -> &'static str {
+    match interval {
+        "hour" => {
+            "SELECT
+                date_trunc('hour', created_at) as day,
+                COUNT(*) as sent,
+                COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
+                COUNT(*) FILTER (WHERE status = 'bounced') as bounced
+             FROM messages
+             WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3
+             GROUP BY day ORDER BY day"
+        }
+        "week" => {
+            "SELECT
+                date_trunc('week', created_at) as day,
+                COUNT(*) as sent,
+                COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
+                COUNT(*) FILTER (WHERE status = 'bounced') as bounced
+             FROM messages
+             WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3
+             GROUP BY day ORDER BY day"
+        }
+        "month" => {
+            "SELECT
+                date_trunc('month', created_at) as day,
+                COUNT(*) as sent,
+                COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
+                COUNT(*) FILTER (WHERE status = 'bounced') as bounced
+             FROM messages
+             WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3
+             GROUP BY day ORDER BY day"
+        }
+        _ => {
+            "SELECT
+                date_trunc('day', created_at) as day,
+                COUNT(*) as sent,
+                COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
+                COUNT(*) FILTER (WHERE status = 'bounced') as bounced
+             FROM messages
+             WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3
+             GROUP BY day ORDER BY day"
+        }
+    }
+}
+
+fn build_deliverability_response(
+    total_sent: i64,
+    delivered: i64,
+    bounced: i64,
+    complained: i64,
+) -> DeliverabilityResponse {
+    DeliverabilityResponse {
+        delivery_rate: safe_ratio(delivered, total_sent),
+        bounce_rate: safe_ratio(bounced, total_sent),
+        complaint_rate: safe_ratio(complained, delivered),
+        inbox_rate: safe_ratio((delivered - complained).max(0), total_sent),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct DashboardResponse {
     pub total_sent: i64,
@@ -150,9 +217,9 @@ async fn dashboard(
         total_bounced: row.total_bounced,
         total_opened: events.opened,
         total_clicked: events.clicked,
-        delivery_rate: if total_sent > 0 { total_delivered as f64 / total_sent as f64 } else { 0.0 },
-        open_rate: if total_delivered > 0 { events.opened as f64 / total_delivered as f64 } else { 0.0 },
-        click_rate: if total_delivered > 0 { events.clicked as f64 / total_delivered as f64 } else { 0.0 },
+        delivery_rate: safe_ratio(total_delivered, total_sent),
+        open_rate: safe_ratio(events.opened, total_delivered),
+        click_rate: safe_ratio(events.clicked, total_delivered),
     }))
 }
 
@@ -166,27 +233,7 @@ async fn volume(
     let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
-    let interval_unit = match params.interval.as_str() {
-        "hour" => "hour",
-        "week" => "week",
-        "month" => "month",
-        _ => "day", // default to day
-    };
-
-// Use parameterized interval (safe from SQL injection as it's validated above)
-    let query = format!(
-        "SELECT
-            date_trunc('{}', created_at) as day,
-            COUNT(*) as sent,
-            COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
-            COUNT(*) FILTER (WHERE status = 'bounced') as bounced
-         FROM messages
-         WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3
-         GROUP BY day ORDER BY day",
-        interval_unit
-    );
-
-    let rows = sqlx::query_as::<_, VolumeRow>(&query)
+    let rows = sqlx::query_as::<_, VolumeRow>(volume_query_for_interval(&params.interval))
     .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
@@ -230,7 +277,9 @@ async fn engagement(
     .await?;
 
     let total_delivered = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND event_type = 'delivered' AND timestamp >= $2 AND timestamp <= $3",
+        "SELECT COUNT(*)
+         FROM messages
+         WHERE tenant_id = $1 AND status = 'delivered' AND created_at >= $2 AND created_at <= $3",
     )
     .bind(&auth.tenant_id)
     .bind(from)
@@ -253,9 +302,9 @@ async fn engagement(
     .await?;
 
     Ok(Json(EngagementResponse {
-        open_rate: if total_delivered > 0 { totals.opens as f64 / total_delivered as f64 } else { 0.0 },
-        click_rate: if total_delivered > 0 { totals.clicks as f64 / total_delivered as f64 } else { 0.0 },
-        unsubscribe_rate: if total_delivered > 0 { totals.unsubs as f64 / total_delivered as f64 } else { 0.0 },
+        open_rate: safe_ratio(totals.opens, total_delivered),
+        click_rate: safe_ratio(totals.clicks, total_delivered),
+        unsubscribe_rate: safe_ratio(totals.unsubs, total_delivered),
         timeseries: timeseries
             .into_iter()
             .map(|r| EngagementPoint {
@@ -279,12 +328,11 @@ async fn deliverability(
 
     let row = sqlx::query_as::<_, DeliverabilityRow>(
         "SELECT
-            COUNT(*) as total,
-            COUNT(*) FILTER (WHERE event_type = 'delivered') as delivered,
-            COUNT(*) FILTER (WHERE event_type = 'bounced') as bounced,
-            COUNT(*) FILTER (WHERE event_type = 'complained') as complained
-         FROM events
-         WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3",
+            COUNT(*) FILTER (WHERE status IN ('sent', 'delivered', 'bounced')) as total_sent,
+            COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
+            COUNT(*) FILTER (WHERE status = 'bounced') as bounced
+         FROM messages
+         WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3",
     )
     .bind(&auth.tenant_id)
     .bind(from)
@@ -292,14 +340,23 @@ async fn deliverability(
     .fetch_one(&state.db)
     .await?;
 
-    let total = row.total as f64;
+    let complained = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM events
+         WHERE tenant_id = $1 AND event_type = 'complained' AND timestamp >= $2 AND timestamp <= $3",
+    )
+    .bind(&auth.tenant_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(&state.db)
+    .await?;
 
-    Ok(Json(DeliverabilityResponse {
-        delivery_rate: if row.total > 0 { row.delivered as f64 / total } else { 0.0 },
-        bounce_rate: if row.total > 0 { row.bounced as f64 / total } else { 0.0 },
-        complaint_rate: if row.total > 0 { row.complained as f64 / total } else { 0.0 },
-        inbox_rate: if row.total > 0 { (row.delivered as f64 - row.complained as f64).max(0.0) / total } else { 0.0 },
-    }))
+    Ok(Json(build_deliverability_response(
+        row.total_sent,
+        row.delivered,
+        row.bounced,
+        complained,
+    )))
 }
 
 async fn export(
@@ -429,12 +486,12 @@ async fn process_analytics_export(
             for row in &rows {
                 csv.push_str(&format!(
                     "{},{},{},{},{},{}\n",
-                    row.message_id,
+                    escape_csv(&row.message_id),
                     escape_csv(&row.subject),
-                    row.recipient,
-                    row.sent_at.to_rfc3339(),
-                    row.last_event,
-                    row.event_time.map(|t| t.to_rfc3339()).unwrap_or_default()
+                    escape_csv(&row.recipient),
+                    escape_csv(&row.sent_at.to_rfc3339()),
+                    escape_csv(&row.last_event),
+                    escape_csv(&row.event_time.map(|t| t.to_rfc3339()).unwrap_or_default())
                 ));
             }
             (csv.into_bytes(), "text/csv", "csv")
@@ -474,7 +531,7 @@ async fn process_analytics_export(
 
 /// Prefixes dangerous characters with a single quote.
 fn escape_csv(s: &str) -> String {
-    let trimmed = s.trim();
+    let trimmed = s.trim_start();
 // CSV injection prevention:prefix = + - @ with single quote
     let needs_prefix = matches!(
         trimmed.chars().next(),
@@ -482,12 +539,12 @@ fn escape_csv(s: &str) -> String {
     );
     
     let sanitized = if needs_prefix {
-        format!("'{}", trimmed)
+        format!("'{}", s)
     } else {
-        trimmed.to_string()
+        s.to_string()
     };
     
-    if sanitized.contains(',') || sanitized.contains('"') || sanitized.contains('\n') {
+    if sanitized.contains(',') || sanitized.contains('"') || sanitized.contains('\n') || sanitized.contains('\r') {
         format!("\"{}\"" , sanitized.replace('"', "\"\""))
     } else {
         sanitized
@@ -631,10 +688,9 @@ struct EngagementTimeseriesRow {
 
 #[derive(sqlx::FromRow)]
 struct DeliverabilityRow {
-    total: i64,
+    total_sent: i64,
     delivered: i64,
     bounced: i64,
-    complained: i64,
 }
 
 // ─── PDF Export (via pdf-renderer service) ─────────────────────
@@ -790,5 +846,30 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["bounce_rate"].as_f64().unwrap() < 0.1);
+    }
+
+    #[test]
+    fn test_volume_query_for_interval_uses_static_query_fragments() {
+        assert!(volume_query_for_interval("hour").contains("date_trunc('hour'"));
+        assert!(volume_query_for_interval("week").contains("date_trunc('week'"));
+        assert!(volume_query_for_interval("month").contains("date_trunc('month'"));
+        assert!(volume_query_for_interval("unexpected").contains("date_trunc('day'"));
+    }
+
+    #[test]
+    fn test_build_deliverability_response_uses_consistent_denominators() {
+        let resp = build_deliverability_response(100, 90, 10, 5);
+
+        assert_eq!(resp.delivery_rate, 0.9);
+        assert_eq!(resp.bounce_rate, 0.1);
+        assert_eq!(resp.complaint_rate, 5.0 / 90.0);
+        assert_eq!(resp.inbox_rate, 0.85);
+    }
+
+    #[test]
+    fn test_escape_csv_prefixes_formula_like_values_without_stripping_content() {
+        assert_eq!(escape_csv("=SUM(A1:A2)"), "'=SUM(A1:A2)");
+        assert_eq!(escape_csv("  keep-leading-space"), "  keep-leading-space");
+        assert_eq!(escape_csv("hello,world"), "\"hello,world\"");
     }
 }

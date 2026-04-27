@@ -6,7 +6,7 @@
 use ddos_protection::{
     adaptive::{AdaptiveConfig, AdaptiveRateLimiter, TrafficObservation},
     bot_detection::SessionBehavior,
-    middleware::{extract_client_ip, RequestContextBuilder},
+    middleware::extract_client_ip,
     reputation::ReputationScore,
     smtp_protection::*,
 };

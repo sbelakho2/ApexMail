@@ -98,7 +98,7 @@ pub fn analyze_behavior(
 
 /// Circular distance between two hours (0-23)
 fn hour_distance(a: u32, b: u32) -> u32 {
-    let diff = if a > b { a - b } else { b - a };
+    let diff = a.abs_diff(b);
     diff.min(24 - diff)
 }
 

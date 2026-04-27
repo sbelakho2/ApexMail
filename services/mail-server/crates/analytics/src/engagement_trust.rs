@@ -168,17 +168,17 @@ pub fn compute_trust_score(e: &SubscriberEngagement) -> TrustScore {
 
 /// Credibility:open_rate + click_rate - spam_rate, normalized to 0-100.
 fn compute_credibility(e: &SubscriberEngagement) -> f64 {
-    let raw = (e.open_rate * 50.0 + e.click_rate * 50.0 - e.spam_rate * 100.0).clamp(0.0, 100.0);
-    raw
+    
+    (e.open_rate * 50.0 + e.click_rate * 50.0 - e.spam_rate * 100.0).clamp(0.0, 100.0)
 }
 
 /// Reliability:preference compliance + frequency compliance + recency.
 fn compute_reliability(e: &SubscriberEngagement) -> f64 {
-    let raw = (e.preference_compliance * 33.3
+    
+    (e.preference_compliance * 33.3
         + e.send_frequency_compliance * 33.3
         + e.recency_score * 33.4)
-        .clamp(0.0, 100.0);
-    raw
+        .clamp(0.0, 100.0)
 }
 
 /// Intimacy:reply_rate + survey/NPS + feedback.

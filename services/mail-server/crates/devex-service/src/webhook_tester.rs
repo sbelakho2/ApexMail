@@ -4,8 +4,8 @@
 
 use chrono::Utc;
 use hmac::{Hmac, Mac};
+use mail_common::is_private_or_reserved_host;
 use sha2::Sha256;
-use std::net::IpAddr;
 use uuid::Uuid;
 
 use crate::types::{DevExError, WebhookTestResult};
@@ -115,7 +115,7 @@ impl WebhookTester {
 
 // Block requests to private/internal networks
         if let Some(host) = parsed.host_str() {
-            if is_private_host(host) {
+            if is_private_or_reserved_host(host) {
                 return Err(DevExError::Validation(
                     "Webhook URLs pointing to private/internal networks are not allowed".into(),
                 ));
@@ -185,39 +185,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn is_private_host(host: &str) -> bool {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return is_private_ip(ip);
-    }
-
-    let lower = host.to_lowercase();
-    lower == "localhost"
-        || lower == "::1"
-        || lower == "[::1]"
-        || lower == "0.0.0.0"
-        || lower.ends_with(".local")
-        || lower.ends_with(".internal")
-        || lower == "metadata.google.internal"
-}
-
-fn is_private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-                || v6.is_unspecified()
-        }
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -244,11 +211,8 @@ mod tests {
             .map(|t| t.sign_payload(body))
             .unwrap_or_default();
 
-// The signature should start with "t=" and contain "v1="
         assert!(sig.starts_with("t="));
         assert!(sig.contains(",v1="));
-
-// Verify with the same secret should succeed
         assert!(WebhookTester::verify_signature(secret, body, &sig));
     }
 
@@ -278,5 +242,13 @@ mod tests {
             b"body",
             "t=,v1="
         ));
+    }
+
+    #[test]
+    fn test_shared_ssrf_classifier_blocks_localhost_and_ipv6_link_local() {
+        assert!(is_private_or_reserved_host("localhost"));
+        assert!(is_private_or_reserved_host("127.0.0.1"));
+        assert!(is_private_or_reserved_host("fe80::1"));
+        assert!(!is_private_or_reserved_host("hooks.apexmail.ee"));
     }
 }

@@ -73,6 +73,12 @@ pub struct BotDetectionService {
     velocity_cache: Arc<DashMap<String, Arc<RwLock<Vec<Instant>>>>>,
 }
 
+impl Default for BotDetectionService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BotDetectionService {
     pub fn new() -> Self {
         Self {
@@ -200,7 +206,7 @@ impl BotDetectionService {
 pub fn is_bot_ua(ua: &str) -> bool {
     BOT_UA_RE
         .as_ref()
-        .map_or(false, |regex| regex.is_match(ua))
+        .is_some_and(|regex| regex.is_match(ua))
 }
 
 /// Check if IP matches known bot prefixes.

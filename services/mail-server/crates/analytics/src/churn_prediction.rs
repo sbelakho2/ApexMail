@@ -95,8 +95,7 @@ impl ChurnPredictionEngine {
         .fetch_optional(&self.pool)
         .await?;
 
-        let days_inactive = last_engagement
-            .and_then(|(t,)| Some((Utc::now() - t).num_days()))
+        let days_inactive = last_engagement.map(|(t,)| (Utc::now() - t).num_days())
             .unwrap_or(365);
         let inactivity_score = (days_inactive as f64 / 90.0).min(1.0);
         signals.push(ChurnSignal {

@@ -129,8 +129,7 @@ impl CalendarService {
         let hour = dt.hour();
         let weekday = dt.weekday();
         matches!(weekday, chrono::Weekday::Mon | chrono::Weekday::Tue | chrono::Weekday::Wed | chrono::Weekday::Thu | chrono::Weekday::Fri)
-            && hour >= WORK_START_HOUR
-            && hour < WORK_END_HOUR
+            && (WORK_START_HOUR..WORK_END_HOUR).contains(&hour)
     }
 }
 

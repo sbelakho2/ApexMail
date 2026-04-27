@@ -10,67 +10,48 @@ global:
 rule_files:
   - 'alerting-rules.yml'
 
-# FIX-073: In production with multiple replicas, replace static_configs
-# with DNS-based service discovery (docker_sd_configs, dns_sd_configs,
-# or kubernetes_sd_configs) so Prometheus auto-discovers new instances.
-# Example for Docker Swarm / Compose DNS:
-#   dns_sd_configs:
-#     - names: ['tasks.api']
-#       type: A
-#       port: 3000
+# Local Docker Compose only runs tracking plus the exporter stack.
+# Production-style service discovery for API/worker lives in deployment
+# targets that actually provision those services.
 
 scrape_configs:
-  # API Service metrics
-  - job_name: 'apexmail-api'
-    dns_sd_configs:
-      - names: ['api']
-        type: A
-        port: 3000
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  # Worker metrics
-  - job_name: 'apexmail-worker'
-    dns_sd_configs:
-      - names: ['worker']
-        type: A
-        port: 9090
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
   # Tracking service metrics
   - job_name: 'apexmail-tracking'
-    dns_sd_configs:
-      - names: ['tracking']
-        type: A
-        port: 9092
+    static_configs:
+      - targets: ['tracking:9092']
     metrics_path: '/metrics'
+    # Tracking request and latency signals are high-churn and back 1m availability alerts.
     scrape_interval: 10s
 
   - job_name: 'postgres'
     static_configs:
       - targets: ['postgres-exporter:9187']
+    # Database exporter metrics change more slowly and use multi-minute alert windows.
     scrape_interval: 30s
 
   - job_name: 'redis'
     static_configs:
       - targets: ['redis-exporter:9121']
+    # Redis pressure and queue depth are operationally important enough to keep at the default cadence.
     scrape_interval: 15s
 
   - job_name: 'clickhouse'
     static_configs:
       - targets: ['clickhouse-exporter:9116']
+    # ClickHouse exporter metrics are lower-churn infrastructure signals.
     scrape_interval: 30s
 
   - job_name: 'node'
     static_configs:
       - targets: ['node-exporter:9100']
+    # Host-level resource metrics use longer windows, so 30s keeps noise and scrape cost down.
     scrape_interval: 30s
 
   - job_name: 'blackbox'
     metrics_path: /probe
     params:
       module: [https_tls]
+    # External reachability and TLS checks stay on the global 15s interval.
     static_configs:
       - targets:
           - https://api.apexmail.ee/health

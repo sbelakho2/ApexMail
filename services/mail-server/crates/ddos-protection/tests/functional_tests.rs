@@ -4,7 +4,6 @@
 //! response to various DDoS attack vectors.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -120,7 +119,6 @@ mod http_flood_tests {
 #[cfg(test)]
 mod slowloris_tests {
     use super::*;
-    use std::collections::HashSet;
     
     struct ConnectionTracker {
         connections: HashMap<String, ConnectionState>,
@@ -233,6 +231,17 @@ mod slowloris_tests {
 // Should not be detected as Slowloris
         assert!(!tracker.detect_slowloris("good_client_1"));
     }
+
+    #[test]
+    fn test_cleanup_stale_removes_expired_connections() {
+        let mut tracker = ConnectionTracker::new(10, Duration::from_millis(0));
+        tracker.add_connection("192.168.1.1_1");
+
+        let removed = tracker.cleanup_stale();
+
+        assert_eq!(removed, vec!["192.168.1.1_1".to_string()]);
+        assert!(tracker.connections.is_empty());
+    }
 }
 
 /// ============================================================================
@@ -247,8 +256,6 @@ mod app_layer_tests {
         None,
         CredentialStuffing,
         ResourceExhaustion,
-        PathTraversal,
-        SqlInjection,
     }
     
     struct PatternDetector {

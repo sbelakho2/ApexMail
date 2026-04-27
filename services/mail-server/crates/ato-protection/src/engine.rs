@@ -242,7 +242,7 @@ impl AtoEngine {
 
             let mut entry = self.lockout_events
                 .entry(event.user_id.clone())
-                .or_insert_with(Vec::new);
+                .or_default();
             
 // Clean up old lockout events outside the escalation window
             entry.retain(|ts| *ts > escalation_cutoff);

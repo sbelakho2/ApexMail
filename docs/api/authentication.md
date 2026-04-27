@@ -105,7 +105,13 @@ Authorization: Bearer {{jwt_token}}
 ## JWT Authentication
 
 ### Overview
-JWT tokens are used for user authentication in the dashboard and API.
+Browser sign-in is session-cookie based. `POST /v1/auth/login` sets an
+`am_session` HttpOnly cookie, and state-changing browser requests must present
+`X-CSRF-Token` using a token obtained from `GET /v1/auth/csrf`.
+
+Programmatic integrations should prefer API keys. The server still accepts
+`Authorization: Bearer <token>` when a trusted flow already has a valid session
+JWT, but login and refresh no longer return JWTs in JSON bodies.
 
 ### Login Flow
 ```http
@@ -121,16 +127,23 @@ Content-Type: application/json
 Response:
 ```json
 {
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expiresIn": "1h",
+  "expires_at": "2026-01-01T00:00:00Z",
   "user": {
-    "id": "usr_abc123",
+    "id": "01HF...",
     "email": "user@company.com",
     "name": "John Doe",
     "role": "admin",
-    "tenantId": "ten_xyz"
+    "tenant_id": "01TG..."
   }
 }
+```
+
+Successful login also sets:
+
+```http
+Set-Cookie: am_session=<jwt>; HttpOnly; Path=/; SameSite=Lax
+Cache-Control: no-store, private
+Pragma: no-cache
 ```
 
 ### Token Contents
@@ -140,57 +153,64 @@ Access tokens contain the following claims:
 | Claim | Description |
 |-------|-------------|
 | User ID | Identifies the authenticated user (`sub`) |
-| Tenant ID | The tenant the token is scoped to (`tid`) |
-| Role | The user's role (owner, admin, editor, viewer) |
+| Tenant ID | The tenant the token is scoped to (`tenant_id`) |
 | Scopes | Granted permission scopes |
 | Expiration | Access tokens expire based on server config (`exp`) |
+| Issued At | Token issue timestamp (`iat`) |
 
-Tokens are signed with **HS256**. Use `POST /v1/auth/refresh` with a valid token to obtain a new one before expiry.
+Tokens are signed with **RS256**. Do not expose or persist session JWTs in browser storage such as `localStorage`.
 
 ### Using Access Tokens
 ```http
 GET /v1/account
-Authorization: Bearer eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
+
+Protected API routes authenticate with `Authorization: Bearer <token>` or `X-API-Key`.
+Browser-originated requests can also authenticate with the `am_session` cookie.
+Unsafe cookie-authenticated requests must include `X-CSRF-Token`.
 
 ### Token Refresh
 ```http
 POST /v1/auth/refresh
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+X-CSRF-Token: <token from /v1/auth/csrf>
+Cookie: am_session=<current-session>; csrf_token=<same-token>
 ```
 
 Response:
 ```json
 {
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expiresIn": "1h",
+  "expires_at": "2026-01-01T01:00:00Z",
   "user": {
-    "id": "usr_abc123",
+    "id": "01HF...",
     "email": "user@company.com",
     "name": "John Doe",
     "role": "admin",
-    "tenantId": "ten_xyz"
+    "tenant_id": "01TG..."
   }
 }
 ```
 
+Refreshing rotates the session cookie, blacklists the previous JWT, and does
+not expose the new token in the response body.
+
 ### Token Logout (Revocation)
 ```http
 POST /v1/auth/logout
-Authorization: Bearer {{access_token}}
+X-CSRF-Token: <token from /v1/auth/csrf>
 ```
 
-Response:
-```json
-{
-  "success": true,
-  "message": "Logged out successfully"
-}
-```
+Response: `204 No Content`
+
+Cookie-backed logout requires a valid CSRF header and clears the `am_session`
+cookie. Legacy bearer-token logout is still accepted when the token is sent in
+`Authorization`.
 
 ### Security Features
-- Access tokens are short-lived and refresh tokens are rotated on each use.
-- Refresh token reuse is detected and results in immediate session revocation.
+- Access tokens are short-lived and signed with RS256.
+- Login failures are rate-limited with escalating Redis-backed account lockouts.
+- Cookie-authenticated unsafe requests require a matching, signed CSRF token.
+- Login and refresh responses are returned with `Cache-Control: no-store, private`.
 
 ---
 

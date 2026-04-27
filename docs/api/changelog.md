@@ -282,7 +282,7 @@ The inaugural stable release of the ApexMail API. All endpoints are production-r
 | `/v1/suppressions/bulk`         | POST   | Bulk add suppressions (up to 10,000).   |
 | `/v1/suppressions/import`       | POST   | Import suppressions from CSV (up to 100,000). |
 | `/v1/suppressions/export`       | GET    | Export the full suppression list.        |
-| `/v1/suppressions/check`        | GET    | Check if an address is suppressed.      |
+| `/v1/suppressions/check/:email` | GET    | Check if an address is suppressed.      |
 
 #### Auth API
 

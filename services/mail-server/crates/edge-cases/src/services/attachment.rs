@@ -463,11 +463,10 @@ fn is_encrypted_content(content: &[u8], mime: &str) -> bool {
         }
     }
 // ZIP encryption flag (bit 0 at offset 6)
-    if mime == "application/zip" && content.len() > 7 {
-        if content[6] & 0x01 != 0 {
+    if mime == "application/zip" && content.len() > 7
+        && content[6] & 0x01 != 0 {
             return true;
         }
-    }
     false
 }
 

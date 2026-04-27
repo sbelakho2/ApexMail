@@ -3,11 +3,14 @@
 //! Keys are per-tenant. On Redis failure the behaviour depends on the
 //! environment:fail-open in development, fail-closed (503) in production.
 
-use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use std::net::{IpAddr, SocketAddr};
+
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use deadpool_redis::redis::{self, AsyncCommands};
+use ipnetwork::IpNetwork;
 
 use crate::config::Environment;
 use crate::middleware::auth::AuthUser;
@@ -166,15 +169,22 @@ pub async fn public_rate_limit_middleware(
     next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
-    let bucket = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|ip| !ip.is_empty())
-        .map(|ip| format!("ip:{ip}:{path}"))
-        .unwrap_or_else(|| format!("path:{path}"));
+    let socket_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+
+    let bucket = if let Some(socket_ip) = socket_ip {
+        let client_ip = extract_public_client_ip(
+            req.headers(),
+            socket_ip,
+            &state.config.trusted_proxies,
+        );
+        format!("ip:{client_ip}:{path}")
+    } else {
+        tracing::warn!("public rate limiter missing ConnectInfo; falling back to path bucket");
+        format!("path:{path}")
+    };
 
     let window_ms: u64 = 60_000; // 1 minute
     let max_requests: u64 = 20;
@@ -228,6 +238,76 @@ pub async fn public_rate_limit_middleware(
     }
 }
 
+pub(crate) fn extract_public_client_ip(
+    headers: &HeaderMap,
+    socket_ip: IpAddr,
+    trusted_proxies: &[String],
+) -> String {
+    let socket_ip = normalise_ip(socket_ip);
+    let trusted_networks = parse_trusted_proxy_networks(trusted_proxies);
+
+    if !is_in_trusted(socket_ip, &trusted_networks) {
+        return socket_ip.to_string();
+    }
+
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        for part in xff.split(',').map(str::trim) {
+            if let Ok(ip) = part.parse::<IpAddr>() {
+                let ip = normalise_ip(ip);
+                if !is_in_trusted(ip, &trusted_networks) {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+
+    if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if let Ok(ip) = xri.trim().parse::<IpAddr>() {
+            return normalise_ip(ip).to_string();
+        }
+    }
+
+    socket_ip.to_string()
+}
+
+fn parse_trusted_proxy_networks(trusted_proxies: &[String]) -> Vec<IpNetwork> {
+    let mut networks = Vec::new();
+
+    for entry in trusted_proxies {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Ok(net) = trimmed.parse::<IpNetwork>() {
+            networks.push(net);
+            continue;
+        }
+
+        if let Ok(ip) = trimmed.parse::<IpAddr>() {
+            networks.push(IpNetwork::from(ip));
+            continue;
+        }
+
+        tracing::warn!(value = %trimmed, "Ignoring invalid TRUSTED_PROXIES entry");
+    }
+
+    networks
+}
+
+fn normalise_ip(ip: IpAddr) -> IpAddr {
+    if let IpAddr::V6(v6) = ip {
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            return IpAddr::V4(v4);
+        }
+    }
+    ip
+}
+
+fn is_in_trusted(ip: IpAddr, ranges: &[IpNetwork]) -> bool {
+    ranges.iter().any(|net| net.contains(ip))
+}
+
 // ─── Sliding-window approximation ──────────────────────────────
 
 /// A sliding-window rate limiter that interpolates between the current and
@@ -271,12 +351,48 @@ pub async fn sliding_window_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     #[test]
     fn test_current_window_deterministic() {
         let w1 = current_window(60_000);
         let w2 = current_window(60_000);
         assert_eq!(w1, w2);
+    }
+
+    #[test]
+    fn test_extract_public_client_ip_ignores_forwarded_when_socket_untrusted() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.55, 203.0.113.10"),
+        );
+
+        let ip = extract_public_client_ip(
+            &headers,
+            "203.0.113.77".parse().unwrap(),
+            &[],
+        );
+
+        assert_eq!(ip, "203.0.113.77");
+    }
+
+    #[test]
+    fn test_extract_public_client_ip_uses_forwarded_when_socket_trusted() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.55, 10.0.0.2"),
+        );
+
+        let trusted = vec!["10.0.0.0/8".to_string()];
+        let ip = extract_public_client_ip(
+            &headers,
+            "10.1.2.3".parse().unwrap(),
+            &trusted,
+        );
+
+        assert_eq!(ip, "198.51.100.55");
     }
 
     #[test]

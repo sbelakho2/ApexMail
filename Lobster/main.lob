@@ -1,0 +1,418 @@
+// Simple Calculator for Mac - Auto-fits to window
+// Written in Lobster language
+
+import vec
+import color
+import gl
+
+// Define button struct
+struct button:
+    label:string
+    x:int
+    y:int
+    w:int
+    op:bool
+    eq:bool
+
+// Colors
+let bg_color = color { 0.18, 0.18, 0.18, 1.0 }
+let button_bg = color { 0.30, 0.30, 0.30, 1.0 }
+let button_hover = color { 0.42, 0.42, 0.42, 1.0 }
+let button_press = color { 0.55, 0.55, 0.55, 1.0 }
+let operator_bg = color { 0.85, 0.55, 0.10, 1.0 }
+let operator_hover = color { 0.95, 0.65, 0.20, 1.0 }
+let operator_press = color { 1.0, 0.75, 0.30, 1.0 }
+let equals_bg = color { 0.20, 0.55, 0.85, 1.0 }
+let equals_hover = color { 0.30, 0.65, 0.95, 1.0 }
+let equals_press = color { 0.40, 0.75, 1.0, 1.0 }
+let text_color = color { 1.0, 1.0, 1.0, 1.0 }
+let display_bg = color { 0.08, 0.08, 0.08, 1.0 }
+
+// Fixed window size
+let window_width = 400.0
+let window_height = 500.0
+
+// Display takes 20% of window height
+let display_height = window_height * 0.2
+
+// Buttons fill remaining space (5 rows, 4 columns)
+let button_area_height = window_height - display_height
+let button_size_x = window_width / 4.0
+let button_rows = 5.0
+let button_size_y = button_area_height / button_rows
+
+// Calculator state
+var current_value = 0.0
+var current_operation = ""
+var input_whole = 0
+var input_fractional = 0
+var input_fractional_places = 0
+var input_has_decimal = false
+var input_is_negative = false
+var input_active = false
+var clear_on_next_digit = false
+var error_message = ""
+
+// Mouse state
+var mouse_x = 0.0
+var mouse_y = 0.0
+var pressed_btn = ""
+
+// Button layout
+let button_layout = [
+    button { label: "C",   x: 0, y: 4, w: 1, op: true,  eq: false },
+    button { label: "+/-", x: 1, y: 4, w: 1, op: true,  eq: false },
+    button { label: "DEL", x: 2, y: 4, w: 1, op: true,  eq: false },
+    button { label: "/",   x: 3, y: 4, w: 1, op: true,  eq: false },
+    
+    button { label: "7",  x: 0, y: 3, w: 1, op: false, eq: false },
+    button { label: "8",  x: 1, y: 3, w: 1, op: false, eq: false },
+    button { label: "9",  x: 2, y: 3, w: 1, op: false, eq: false },
+    button { label: "*",  x: 3, y: 3, w: 1, op: true,  eq: false },
+    
+    button { label: "4",  x: 0, y: 2, w: 1, op: false, eq: false },
+    button { label: "5",  x: 1, y: 2, w: 1, op: false, eq: false },
+    button { label: "6",  x: 2, y: 2, w: 1, op: false, eq: false },
+    button { label: "-",  x: 3, y: 2, w: 1, op: true,  eq: false },
+    
+    button { label: "1",  x: 0, y: 1, w: 1, op: false, eq: false },
+    button { label: "2",  x: 1, y: 1, w: 1, op: false, eq: false },
+    button { label: "3",  x: 2, y: 1, w: 1, op: false, eq: false },
+    button { label: "+",  x: 3, y: 1, w: 1, op: true,  eq: false },
+    
+    button { label: "0",  x: 0, y: 0, w: 2, op: false, eq: false },
+    button { label: ".",  x: 2, y: 0, w: 1, op: false, eq: false },
+    button { label: "=",  x: 3, y: 0, w: 1, op: false, eq: true  },
+]
+
+def get_button_x(btn:button) -> float:
+    return float(btn.x) * button_size_x
+
+def get_button_y(btn:button) -> float:
+    return display_height + (button_rows - 1.0 - float(btn.y)) * button_size_y
+
+def get_button_w(btn:button) -> float:
+    return float(btn.w) * button_size_x
+
+def get_button_h() -> float:
+    return button_size_y
+
+def point_in_rect(px:float, py:float, bx:float, by:float, bw:float, bh:float) -> bool:
+    return px >= bx and px < bx + bw and py >= by and py < by + bh
+
+def draw_button(btn:button, is_hovered:bool, is_pressed:bool):
+    let bx = get_button_x(btn)
+    let by = get_button_y(btn)
+    let bw = get_button_w(btn)
+    let bh = get_button_h()
+    
+    // Choose color based on button type
+    var col = button_bg
+    if btn.eq:
+        if is_pressed:
+            col = equals_press
+        elif is_hovered:
+            col = equals_hover
+        else:
+            col = equals_bg
+    elif btn.op:
+        if is_pressed:
+            col = operator_press
+        elif is_hovered:
+            col = operator_hover
+        else:
+            col = operator_bg
+    else:
+        if is_pressed:
+            col = button_press
+        elif is_hovered:
+            col = button_hover
+        else:
+            col = button_bg
+    
+    gl.translate float2 { bx, by }:
+        gl.color(col)
+        gl.rect(float2 { bw, bh })
+        gl.translate float2 { 18.0, 24.0 }:
+            gl.color(text_color)
+            gl.text(btn.label)
+
+def clear_entry():
+    input_whole = 0
+    input_fractional = 0
+    input_fractional_places = 0
+    input_has_decimal = false
+    input_is_negative = false
+    input_active = false
+
+def clear_all():
+    current_value = 0.0
+    current_operation = ""
+    clear_on_next_digit = false
+    error_message = ""
+    clear_entry()
+
+def pow10(exp:int) -> float:
+    var value = 1.0
+    var i = 0
+    while i < exp:
+        value = value * 10.0
+        i += 1
+    return value
+
+def get_current_input_value() -> float:
+    var value = float(input_whole)
+    if input_fractional_places > 0:
+        value = value + float(input_fractional) / pow10(input_fractional_places)
+    if input_is_negative:
+        value = -value
+    return value
+
+def format_result(value:float) -> string:
+    if float(int(value)) == value:
+        return string(int(value))
+    return string(value)
+
+def get_entry_text() -> string:
+    var text = string(input_whole)
+    if input_has_decimal:
+        text = text + "."
+        if input_fractional_places > 0:
+            var fractional_text = string(input_fractional)
+            while length(fractional_text) < input_fractional_places:
+                fractional_text = "0" + fractional_text
+            text = text + fractional_text
+    if input_is_negative:
+        text = "-" + text
+    return text
+
+def get_display_text() -> string:
+    if error_message != "":
+        return error_message
+    if input_active:
+        return get_entry_text()
+    return format_result(current_value)
+
+def draw_display():
+    gl.color(display_bg)
+    gl.rect(float2 { window_width, display_height })
+    gl.translate float2 { 10.0, 10.0 }:
+        gl.color(text_color)
+        gl.text(get_display_text())
+
+def perform_operation() -> bool:
+    if not input_active:
+        return false
+
+    let operand = get_current_input_value()
+
+    if current_operation == "+":
+        current_value = current_value + operand
+    elif current_operation == "-":
+        current_value = current_value - operand
+    elif current_operation == "*":
+        current_value = current_value * operand
+    elif current_operation == "/":
+        if operand == 0.0:
+            error_message = "Division by 0"
+            current_value = 0.0
+            current_operation = ""
+            clear_on_next_digit = true
+            clear_entry()
+            return false
+        else:
+            current_value = current_value / operand
+    else:
+        current_value = operand
+
+    clear_entry()
+    return true
+
+def begin_input_edit():
+    error_message = ""
+
+    if clear_on_next_digit and current_operation == "":
+        current_value = 0.0
+        current_operation = ""
+        clear_on_next_digit = false
+
+    if not input_active:
+        clear_entry()
+        input_active = true
+
+def append_digit(num:int):
+    begin_input_edit()
+    if input_has_decimal:
+        input_fractional = input_fractional * 10 + num
+        input_fractional_places += 1
+    else:
+        input_whole = input_whole * 10 + num
+
+def toggle_sign():
+    if error_message != "":
+        clear_all()
+
+    if not input_active and current_operation == "":
+        current_value = -current_value
+        clear_on_next_digit = true
+        return
+
+    begin_input_edit()
+    input_is_negative = not input_is_negative
+
+def add_decimal_point():
+    begin_input_edit()
+    if not input_has_decimal:
+        input_has_decimal = true
+
+def delete_last_input():
+    if error_message != "":
+        clear_all()
+        return
+
+    if not input_active:
+        if current_operation == "":
+            current_value = 0.0
+            clear_on_next_digit = false
+        return
+
+    if input_fractional_places > 0:
+        input_fractional = int(input_fractional / 10)
+        input_fractional_places -= 1
+    elif input_has_decimal:
+        input_has_decimal = false
+    elif input_whole > 0:
+        input_whole = int(input_whole / 10)
+    else:
+        input_is_negative = false
+
+def handle_click(label:string):
+    if label == "C":
+        clear_all()
+        return
+    
+    if label == "DEL":
+        delete_last_input()
+        return
+    
+    if label == "+/-":
+        toggle_sign()
+        return
+    
+    if label == ".":
+        add_decimal_point()
+        return
+    
+    if label == "+":
+        if input_active:
+            if not perform_operation(): return
+        current_operation = "+"
+        clear_on_next_digit = false
+        return
+    
+    if label == "-":
+        if input_active:
+            if not perform_operation(): return
+        current_operation = "-"
+        clear_on_next_digit = false
+        return
+    
+    if label == "*":
+        if input_active:
+            if not perform_operation(): return
+        current_operation = "*"
+        clear_on_next_digit = false
+        return
+    
+    if label == "/":
+        if input_active:
+            if not perform_operation(): return
+        current_operation = "/"
+        clear_on_next_digit = false
+        return
+    
+    if label == "=":
+        if input_active:
+            if not perform_operation(): return
+        current_operation = ""
+        clear_on_next_digit = true
+        return
+    
+    // Number buttons
+    var num = 0
+    if label == "0": num = 0
+    elif label == "1": num = 1
+    elif label == "2": num = 2
+    elif label == "3": num = 3
+    elif label == "4": num = 4
+    elif label == "5": num = 5
+    elif label == "6": num = 6
+    elif label == "7": num = 7
+    elif label == "8": num = 8
+    elif label == "9": num = 9
+    else: return
+
+    append_digit(num)
+
+def main():
+    fatal(gl.window("Calculator", int(window_width), int(window_height)))
+    gl.set_font_name("data/fonts/Droid_Sans/DroidSans.ttf")
+    gl.set_font_size(28)
+    
+    var hovered_index = -1
+    var was_mouse_down = false
+    let num_buttons = length(button_layout)
+    
+    while gl.frame():
+        let mpos = gl.mouse_pos(0)
+        mouse_x = float(mpos.x)
+        mouse_y = float(mpos.y)
+        
+        let is_mouse_down = gl.button("mouse1") == 1
+        let just_released = not is_mouse_down and was_mouse_down
+        
+        hovered_index = -1
+        if just_released and pressed_btn != "":
+            handle_click(pressed_btn)
+            pressed_btn = ""
+        
+        var i = 0
+        while i < num_buttons:
+            let btn = button_layout[i]
+            let bx = get_button_x(btn)
+            let by = get_button_y(btn)
+            let bw = get_button_w(btn)
+            let bh = get_button_h()
+            if point_in_rect(mouse_x, mouse_y, bx, by, bw, bh):
+                hovered_index = i
+                if is_mouse_down:
+                    pressed_btn = btn.label
+            i += 1
+        
+        was_mouse_down = is_mouse_down
+        
+        // Keyboard input
+        if gl.button("enter") == 1: handle_click("=")
+        if gl.button("+") == 1: handle_click("+")
+        if gl.button("-") == 1: handle_click("-")
+        if gl.button("*") == 1: handle_click("*")
+        if gl.button("/") == 1: handle_click("/")
+        
+        // Clear screen
+        gl.clear(bg_color)
+        
+        draw_display()
+        
+        i = 0
+        while i < num_buttons:
+            let btn = button_layout[i]
+            var is_hovered = false
+            var is_pressed = false
+            if hovered_index == i:
+                is_hovered = true
+            if pressed_btn == btn.label:
+                is_pressed = true
+            draw_button(btn, is_hovered, is_pressed)
+            i += 1
+
+main()

@@ -39,8 +39,7 @@ select_database_url() {
 
   candidates+=(
     "postgres://apexmail:apexmail@127.0.0.1:5432/apexmail"
-    "postgres://apexmail:devpass123@127.0.0.1:5432/apexmail"
-    "postgres://apexmail:devpass123@127.0.0.1:55432/apexmail"
+    "postgres://apexmail:apexmail@127.0.0.1:55432/apexmail"
     "postgres://apexmail:apexmail@127.0.0.1:5435/apexmail"
   )
 

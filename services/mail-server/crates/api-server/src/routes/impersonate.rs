@@ -255,7 +255,7 @@ fn create_signed_token(payload: &serde_json::Value, secret: &str) -> Result<Stri
     let sig = mac.finalize().into_bytes();
     let sig_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        &sig,
+        sig,
     );
 
     Ok(format!("{payload_b64}.{sig_b64}"))

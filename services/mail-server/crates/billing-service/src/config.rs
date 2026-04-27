@@ -1,6 +1,7 @@
 //! Billing configuration – plans, quotas, limits, metering knobs.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Top-level billing configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +110,18 @@ pub struct PaygPricing {
     pub price_per_thousand_api_calls: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PaygCalculationError {
+    #[error("PAYG usage value exceeds supported billing range")]
+    UsageOverflow,
+    #[error("PAYG cost exceeds supported billing range")]
+    CostOverflow,
+}
+
+fn checked_u64_to_i64(value: u64) -> Result<i64, PaygCalculationError> {
+    i64::try_from(value).map_err(|_| PaygCalculationError::UsageOverflow)
+}
+
 impl Default for PaygPricing {
     fn default() -> Self {
         Self {
@@ -127,7 +140,11 @@ impl Default for PaygPricing {
 impl PaygPricing {
 /// Calculate PAYG cost for a given email + API-call volume.
 /// Returns `(email_cost, api_cost, total)` all in cents.
-    pub fn calculate(&self, emails_sent: u64, api_calls: u64) -> (i64, i64, i64) {
+    pub fn calculate(
+        &self,
+        emails_sent: u64,
+        api_calls: u64,
+    ) -> Result<(i64, i64, i64), PaygCalculationError> {
         let mut email_cost_millicents: i64 = 0;
         let mut remaining = emails_sent;
         let mut prev_up_to: u64 = 0;
@@ -138,21 +155,29 @@ impl PaygPricing {
             }
             let tier_width = tier.up_to.saturating_sub(prev_up_to);
             let applicable = remaining.min(tier_width);
-            let applicable_i64 = i64::try_from(applicable).unwrap_or(i64::MAX);
+            let applicable_i64 = checked_u64_to_i64(applicable)?;
+            let tier_cost = applicable_i64
+                .checked_mul(tier.price_per_email_millicents)
+                .ok_or(PaygCalculationError::CostOverflow)?;
             email_cost_millicents = email_cost_millicents
-                .saturating_add(applicable_i64.saturating_mul(tier.price_per_email_millicents));
+                .checked_add(tier_cost)
+                .ok_or(PaygCalculationError::CostOverflow)?;
             remaining -= applicable;
             prev_up_to = tier.up_to;
         }
 
         let billable_api = api_calls.saturating_sub(self.free_api_calls_per_month);
-        let billable_thousands = i64::try_from((billable_api + 999) / 1000).unwrap_or(i64::MAX);
+        let billable_thousands = checked_u64_to_i64(billable_api.div_ceil(1000))?;
+        let api_unit_price = checked_u64_to_i64(self.price_per_thousand_api_calls)?;
         let api_cost_cents = billable_thousands
-            .saturating_mul(self.price_per_thousand_api_calls as i64);
+            .checked_mul(api_unit_price)
+            .ok_or(PaygCalculationError::CostOverflow)?;
 
         let email_cost_cents = email_cost_millicents / 1000;
-        let total = email_cost_cents + api_cost_cents;
-        (email_cost_cents, api_cost_cents, total)
+        let total = email_cost_cents
+            .checked_add(api_cost_cents)
+            .ok_or(PaygCalculationError::CostOverflow)?;
+        Ok((email_cost_cents, api_cost_cents, total))
     }
 }
 
@@ -178,7 +203,7 @@ mod tests {
     #[test]
     fn payg_zero_usage() {
         let pricing = PaygPricing::default();
-        let (email, api, total) = pricing.calculate(0, 0);
+        let (email, api, total) = pricing.calculate(0, 0).expect("zero usage must calculate");
         assert_eq!(email, 0);
         assert_eq!(api, 0);
         assert_eq!(total, 0);
@@ -187,7 +212,7 @@ mod tests {
     #[test]
     fn payg_first_tier_only() {
         let pricing = PaygPricing::default();
-        let (email, _api, _total) = pricing.calculate(5_000, 0);
+        let (email, _api, _total) = pricing.calculate(5_000, 0).expect("tier pricing must calculate");
 // 5 000 * 0.10 = 500.0 cents
         assert_eq!(email, 500);
     }
@@ -196,14 +221,14 @@ mod tests {
     fn payg_api_calls_billed_after_free_tier() {
         let pricing = PaygPricing::default();
 // 100 000 free + 2 000 billable → ceil(2000/1000)*10 = 20 cents
-        let (_email, api, _total) = pricing.calculate(0, 102_000);
+        let (_email, api, _total) = pricing.calculate(0, 102_000).expect("API overage must calculate");
         assert_eq!(api, 20);
     }
 
     #[test]
     fn payg_combined() {
         let pricing = PaygPricing::default();
-        let (email, api, total) = pricing.calculate(10_000, 100_000);
+        let (email, api, total) = pricing.calculate(10_000, 100_000).expect("combined pricing must calculate");
 // 10k emails at 0.10 = 1000 cents, api free tier → 0
         assert_eq!(email, 1000);
         assert_eq!(api, 0);
@@ -214,21 +239,46 @@ mod tests {
     fn payg_legacy_monthly_rounding_contract() {
         let pricing = PaygPricing::default();
 
-        let (email, api, total) = pricing.calculate(1, 0);
+        let (email, api, total) = pricing.calculate(1, 0).expect("single email must calculate");
         assert_eq!(email, 0);
         assert_eq!(api, 0);
         assert_eq!(total, 0);
 
-        let (email, _, total) = pricing.calculate(4, 0);
+        let (email, _, total) = pricing.calculate(4, 0).expect("small usage must calculate");
         assert_eq!(email, 0);
         assert_eq!(total, 0);
 
-        let (email, _, total) = pricing.calculate(5, 0);
+        let (email, _, total) = pricing.calculate(5, 0).expect("threshold usage must calculate");
         assert_eq!(email, 0);
         assert_eq!(total, 0);
 
-        let (email, _, total) = pricing.calculate(10_001, 0);
+        let (email, _, total) = pricing.calculate(10_001, 0).expect("cross-tier usage must calculate");
         assert_eq!(email, 1000);
         assert_eq!(total, 1000);
+    }
+
+    #[test]
+    fn payg_rejects_email_usage_beyond_supported_range() {
+        let pricing = PaygPricing::default();
+
+        let err = pricing.calculate(u64::MAX, 0).unwrap_err();
+
+        assert_eq!(err, PaygCalculationError::UsageOverflow);
+    }
+
+    #[test]
+    fn payg_rejects_api_pricing_overflow() {
+        let pricing = PaygPricing {
+            email_tiers: vec![PaygEmailTier {
+                up_to: u64::MAX,
+                price_per_email_millicents: 1,
+            }],
+            free_api_calls_per_month: 0,
+            price_per_thousand_api_calls: u64::MAX,
+        };
+
+        let err = pricing.calculate(0, 1_000).unwrap_err();
+
+        assert_eq!(err, PaygCalculationError::UsageOverflow);
     }
 }

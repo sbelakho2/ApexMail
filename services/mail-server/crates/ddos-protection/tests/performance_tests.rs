@@ -5,8 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// ============================================================================
 /// PERFORMANCE TESTS:Rate Limiter Throughput
@@ -71,6 +70,7 @@ mod rate_limiter_perf_tests {
         let ops_per_sec = iterations as f64 / elapsed.as_secs_f64();
         
         println!("Token bucket: {:.0} ops/sec", ops_per_sec);
+        assert!(successful > 0, "Token bucket should admit some requests");
         assert!(ops_per_sec > 100_000.0, "Should handle >100k ops/sec");
     }
     
@@ -403,12 +403,8 @@ mod decision_latency_tests {
 /// ============================================================================
 #[cfg(test)]
 mod memory_tests {
-    use super::*;
-    
     #[test]
     fn test_ip_entry_size() {
-        let map: HashMap<String, u64> = HashMap::new();
-        
 // Estimate entry size
         let ip_size = std::mem::size_of::<String>(); // String metadata
         let value_size = std::mem::size_of::<u64>();
@@ -425,14 +421,7 @@ mod memory_tests {
     
     #[test]
     fn test_session_state_size() {
-        struct SessionState {
-            request_count: u64,
-            error_count: u64,
-            first_seen: u64,
-            last_seen: u64,
-            reputation: i16,
-            endpoint_hash: u64,
-        }
+        type SessionState = (u64, u64, u64, u64, i16, u64);
         
         let size = std::mem::size_of::<SessionState>();
         println!("SessionState size: {} bytes", size);
@@ -447,13 +436,7 @@ mod memory_tests {
     
     #[test]
     fn test_fingerprint_cache_size() {
-        struct FingerprintEntry {
-            hash: [u8; 16],
-            classification: u8,
-            first_seen: u64,
-            last_seen: u64,
-            count: u32,
-        }
+        type FingerprintEntry = ([u8; 16], u8, u64, u64, u32);
         
         let size = std::mem::size_of::<FingerprintEntry>();
         println!("FingerprintEntry size: {} bytes", size);
@@ -638,25 +621,19 @@ mod anomaly_perf_tests {
     #[test]
     fn test_feature_extraction_performance() {
 // Simulate extracting features for ML
-        struct Features {
-            request_rate: f64,
-            error_rate: f64,
-            endpoint_diversity: f64,
-            inter_arrival_cov: f64,
-            payload_entropy: f64,
-        }
+        type Features = (f64, f64, f64, f64, f64);
         
         let start = Instant::now();
         let iterations = 100_000;
         
         for i in 0..iterations {
-            let _ = Features {
-                request_rate: (i % 100) as f64,
-                error_rate: (i % 10) as f64 / 10.0,
-                endpoint_diversity: (i % 50) as f64 / 50.0,
-                inter_arrival_cov: (i % 200) as f64 / 100.0,
-                payload_entropy: ((i * 7) % 100) as f64 / 100.0,
-            };
+            let _: Features = (
+                (i % 100) as f64,
+                (i % 10) as f64 / 10.0,
+                (i % 50) as f64 / 50.0,
+                (i % 200) as f64 / 100.0,
+                ((i * 7) % 100) as f64 / 100.0,
+            );
         }
         
         let elapsed = start.elapsed();

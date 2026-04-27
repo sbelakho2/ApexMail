@@ -334,7 +334,7 @@ impl EAIService {
         }
 
         let has_mx = match self.resolver.mx_lookup(domain).await {
-            Ok(mx) => !mx.iter().next().is_none(),
+            Ok(mx) => mx.iter().next().is_some(),
             Err(_) => {
 // Fallback to A record
                 self.resolver.lookup_ip(domain).await.is_ok()

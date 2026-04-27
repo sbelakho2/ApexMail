@@ -11,6 +11,7 @@
 **/dist
 **/build
 **/.turbo
+**/target
 
 # Development files
 .env
@@ -26,6 +27,12 @@
 docs/
 *.md
 LICENSE
+!docs/
+!docs/api-contract-manifest.json
+!docs/development/
+!docs/development/*.json
+!docs/tool-contracts/
+!docs/tool-contracts/stripe.md
 
 # Test files
 **/tests
@@ -36,6 +43,9 @@ LICENSE
 
 # Docker files (avoid recursive inclusion)
 Dockerfile*
+!deploy/**/Dockerfile*
+!services/**/Dockerfile*
+!apps/**/Dockerfile*
 docker-compose*
 
 # Misc

@@ -27,6 +27,7 @@ pub struct Config {
     pub redis_port: u16,
     pub redis_password: Option<String>,
     pub redis_db: u8,
+    pub redis_pool_max_size: usize,
 
 // ── Auth ────────────────────────────────────────────────
     pub jwt_private_key_pem: String,
@@ -37,6 +38,9 @@ pub struct Config {
 // ── Rate limiting ───────────────────────────────────────
     pub rate_limit_window_ms: u64,
     pub rate_limit_max_requests: u64,
+
+// ── Backpressure ────────────────────────────────────────
+    pub max_inflight_requests: usize,
 
 // ── CORS ────────────────────────────────────────────────
     pub cors_origins: Vec<String>,
@@ -88,6 +92,10 @@ pub struct Config {
 /// Shared HMAC secret with the tracking-service, used to issue short-lived
 /// SSE stream tokens. Must match the tracking-service `TRACKING_SECRET_KEY`.
     pub tracking_secret_key: String,
+
+// ── Billing documents ───────────────────────────────────
+    pub billing_company_iban: String,
+    pub billing_company_phone: String,
 
 // ── Metrics ──────────────────────────────────────────────
 /// Port for the dedicated Prometheus metrics HTTP endpoint (default:9090).
@@ -160,6 +168,13 @@ fn parse_u8(key: &str, val: &str) -> Result<u8, ConfigError> {
     })
 }
 
+fn parse_usize(key: &str, val: &str) -> Result<usize, ConfigError> {
+    val.parse::<usize>().map_err(|_| ConfigError::Invalid {
+        var: key.to_string(),
+        reason: format!("expected usize, got '{val}'"),
+    })
+}
+
 fn parse_duration_hours(key: &str, val: &str) -> Result<Duration, ConfigError> {
 // Accept formats:"24h", "1h", or plain seconds
     let trimmed = val.trim();
@@ -195,6 +210,77 @@ fn parse_csv(val: &str) -> Vec<String> {
     items
 }
 
+fn is_local_base_url(base_url: &str) -> bool {
+    url::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .map(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"))
+        .unwrap_or(false)
+}
+
+fn default_cors_origins(environment: Environment, base_url: &str) -> Vec<String> {
+    if environment == Environment::Development && is_local_base_url(base_url) {
+        vec!["*".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn default_max_inflight_requests(db_max_connections: u32) -> usize {
+    std::cmp::max(64usize, (db_max_connections as usize).saturating_mul(4))
+}
+
+fn validate_secret(
+    name: &str,
+    value: &str,
+    min_len: usize,
+    disallowed_values: &[&str],
+) -> Result<(), ConfigError> {
+    let trimmed = value.trim();
+    if trimmed.len() < min_len {
+        return Err(ConfigError::SecurityCheck(format!(
+            "{name} must be at least {min_len} characters in production"
+        )));
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    if disallowed_values
+        .iter()
+        .any(|candidate| normalized == candidate.to_ascii_lowercase())
+    {
+        return Err(ConfigError::SecurityCheck(format!(
+            "{name} must not use a placeholder or development secret in production"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_required_setting(
+    name: &str,
+    value: &str,
+    disallowed_values: &[&str],
+) -> Result<(), ConfigError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigError::SecurityCheck(format!(
+            "{name} must be set in production"
+        )));
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    if disallowed_values
+        .iter()
+        .any(|candidate| normalized == candidate.to_ascii_lowercase())
+    {
+        return Err(ConfigError::SecurityCheck(format!(
+            "{name} must not use a placeholder value in production"
+        )));
+    }
+
+    Ok(())
+}
+
 fn normalize_host(host: &str) -> String {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if let Some(stripped) = host.strip_prefix('[') {
@@ -221,11 +307,36 @@ impl Config {
         let jwt_public_key_pem = env_required_pem("JWT_PUBLIC_KEY_PEM")?;
         let api_key_hash_secret = env_required("API_KEY_HASH_SECRET")?;
         let webhook_signing_secret = env_required("WEBHOOK_SIGNING_SECRET")?;
+        let base_url = env_or("BASE_URL", "http://localhost:3000");
+        let cors_origins = match env::var("CORS_ORIGINS") {
+            Ok(value) => parse_csv(&value),
+            Err(_) => default_cors_origins(environment, &base_url),
+        };
+        let db_max_connections = parse_u32(
+            "DB_MAX_CONNECTIONS",
+            &env_or("DB_MAX_CONNECTIONS", "20"),
+        )?;
+        let redis_pool_default = std::cmp::max(32usize, (db_max_connections as usize).saturating_mul(2));
+        let redis_pool_default_str = redis_pool_default.to_string();
+        let max_inflight_requests_default = default_max_inflight_requests(db_max_connections);
+        let max_inflight_requests = parse_usize(
+            "MAX_INFLIGHT_REQUESTS",
+            &env_or(
+                "MAX_INFLIGHT_REQUESTS",
+                &max_inflight_requests_default.to_string(),
+            ),
+        )?;
+        if max_inflight_requests == 0 {
+            return Err(ConfigError::Invalid {
+                var: "MAX_INFLIGHT_REQUESTS".into(),
+                reason: "must be greater than 0".into(),
+            });
+        }
 
         let config = Config {
             port: parse_u16("PORT", &env_or("PORT", "3000"))?,
             host: env_or("HOST", "0.0.0.0"),
-            base_url: env_or("BASE_URL", "http://localhost:3000"),
+            base_url,
             environment,
 
             db_host: env_or("DB_HOST", "localhost"),
@@ -233,15 +344,16 @@ impl Config {
             db_name: env_or("DB_NAME", "apexmail"),
             db_user: env_or("DB_USER", "apexmail"),
             db_password: env_or("DB_PASSWORD", ""),
-            db_max_connections: parse_u32(
-                "DB_MAX_CONNECTIONS",
-                &env_or("DB_MAX_CONNECTIONS", "20"),
-            )?,
+            db_max_connections,
 
             redis_host: env_or("REDIS_HOST", "localhost"),
             redis_port: parse_u16("REDIS_PORT", &env_or("REDIS_PORT", "6379"))?,
             redis_password: env::var("REDIS_PASSWORD").ok().filter(|s| !s.is_empty()),
             redis_db: parse_u8("REDIS_DB", &env_or("REDIS_DB", "0"))?,
+            redis_pool_max_size: parse_usize(
+                "REDIS_POOL_MAX_SIZE",
+                &env_or("REDIS_POOL_MAX_SIZE", &redis_pool_default_str),
+            )?,
 
             jwt_private_key_pem,
             jwt_public_key_pem,
@@ -256,8 +368,9 @@ impl Config {
                 "RATE_LIMIT_MAX_REQUESTS",
                 &env_or("RATE_LIMIT_MAX_REQUESTS", "1000"),
             )?,
+            max_inflight_requests,
 
-            cors_origins: parse_csv(&env_or("CORS_ORIGINS", "*")),
+            cors_origins,
             trusted_proxies: parse_csv(&env_or("TRUSTED_PROXIES", "")),
 
             ui_web_hosts: parse_csv(&env_or(
@@ -322,6 +435,8 @@ impl Config {
             internal_service_token: env::var("INTERNAL_SERVICE_TOKEN").ok().filter(|s| !s.is_empty()),
 
             tracking_secret_key: env_or("TRACKING_SECRET_KEY", "dev-tracking-secret-change-me-32chars!!"),
+            billing_company_iban: env_or("BILLING_COMPANY_IBAN", ""),
+            billing_company_phone: env_or("BILLING_COMPANY_PHONE", ""),
 
             metrics_port: parse_u16("METRICS_PORT", &env_or("METRICS_PORT", "9090"))?,
         };
@@ -413,33 +528,49 @@ impl Config {
                 "JWT_PUBLIC_KEY_PEM must contain a valid PEM public key in production".into(),
             ));
         }
-        if self.api_key_hash_secret.len() < 32 {
-            return Err(ConfigError::SecurityCheck(
-                "API_KEY_HASH_SECRET must be at least 32 characters in production".into(),
-            ));
-        }
-        if self.webhook_signing_secret.len() < 32 {
-            return Err(ConfigError::SecurityCheck(
-                "WEBHOOK_SIGNING_SECRET must be at least 32 characters in production".into(),
-            ));
-        }
+        const COMMON_PLACEHOLDERS: &[&str] = &[
+            "dev-secret",
+            "secret",
+            "changeme",
+            "change-me",
+            "password",
+            "replace-me",
+            "replace_me",
+        ];
+        validate_secret(
+            "API_KEY_HASH_SECRET",
+            &self.api_key_hash_secret,
+            32,
+            COMMON_PLACEHOLDERS,
+        )?;
+        validate_secret(
+            "WEBHOOK_SIGNING_SECRET",
+            &self.webhook_signing_secret,
+            32,
+            COMMON_PLACEHOLDERS,
+        )?;
+        validate_secret(
+            "SESSION_SECRET",
+            &self.session_secret,
+            32,
+            &["dev-session-secret-change-me"],
+        )?;
+        validate_secret(
+            "IMPERSONATION_SECRET",
+            &self.impersonation_secret,
+            32,
+            &["dev-impersonation-secret-change-me"],
+        )?;
+        validate_secret(
+            "CSRF_SECRET",
+            &self.csrf_secret,
+            32,
+            &["dev-csrf-secret-change-me"],
+        )?;
         if self.db_password.is_empty() {
             return Err(ConfigError::SecurityCheck(
                 "DB_PASSWORD must not be empty in production".into(),
             ));
-        }
-        let dev_defaults = ["dev-secret", "secret", "changeme", "password"];
-        for secret_name in ["api_key_hash_secret", "webhook_signing_secret"] {
-            let value = match secret_name {
-                "api_key_hash_secret" => &self.api_key_hash_secret,
-                "webhook_signing_secret" => &self.webhook_signing_secret,
-                _ => unreachable!(),
-            };
-            if dev_defaults.iter().any(|d| value == *d) {
-                return Err(ConfigError::SecurityCheck(
-                    format!("{secret_name} must not use a dev default value in production"),
-                ));
-            }
         }
         if self.cors_origins.iter().any(|o| o == "*") {
             return Err(ConfigError::SecurityCheck(
@@ -447,17 +578,24 @@ impl Config {
             ));
         }
         if let Some(ref cp_key) = self.control_plane_api_key {
-            if cp_key.len() < 32 {
-                return Err(ConfigError::SecurityCheck(
-                    "CONTROL_PLANE_API_KEY must be at least 32 characters in production".into(),
-                ));
-            }
+            validate_secret("CONTROL_PLANE_API_KEY", cp_key, 32, COMMON_PLACEHOLDERS)?;
         }
-        if self.tracking_secret_key.len() < 32 {
-            return Err(ConfigError::SecurityCheck(
-                "TRACKING_SECRET_KEY must be at least 32 characters in production".into(),
-            ));
-        }
+        validate_secret(
+            "TRACKING_SECRET_KEY",
+            &self.tracking_secret_key,
+            32,
+            &["dev-tracking-secret-change-me-32chars!!"],
+        )?;
+        validate_required_setting(
+            "BILLING_COMPANY_IBAN",
+            &self.billing_company_iban,
+            &["UNCONFIGURED"],
+        )?;
+        validate_required_setting(
+            "BILLING_COMPANY_PHONE",
+            &self.billing_company_phone,
+            &["UNCONFIGURED"],
+        )?;
         Ok(())
     }
 }
@@ -490,28 +628,50 @@ mod tests {
     }
 
     #[test]
-    fn test_production_security_checks() {
-        let config = Config {
+    fn test_default_cors_origins_respects_environment_and_base_url() {
+        assert_eq!(
+            default_cors_origins(Environment::Development, "http://localhost:3000"),
+            vec!["*"]
+        );
+        assert_eq!(
+            default_cors_origins(Environment::Development, "http://127.0.0.1:3000"),
+            vec!["*"]
+        );
+        assert!(default_cors_origins(Environment::Development, "https://app.example.com").is_empty());
+        assert!(default_cors_origins(Environment::Staging, "http://localhost:3000").is_empty());
+    }
+
+    #[test]
+    fn default_max_inflight_requests_scales_from_db_pool() {
+        assert_eq!(default_max_inflight_requests(1), 64);
+        assert_eq!(default_max_inflight_requests(20), 80);
+        assert_eq!(default_max_inflight_requests(128), 512);
+    }
+
+    fn valid_production_config() -> Config {
+        Config {
             port: 3000,
             host: "0.0.0.0".into(),
-            base_url: "http://localhost:3000".into(),
+            base_url: "https://app.example.com".into(),
             environment: Environment::Production,
             db_host: "localhost".into(),
             db_port: 5432,
             db_name: "apexmail".into(),
             db_user: "apexmail".into(),
-            db_password: "password".into(),
+            db_password: "correct-horse-battery-staple-db-password".into(),
             db_max_connections: 20,
             redis_host: "localhost".into(),
             redis_port: 6379,
             redis_password: None,
             redis_db: 0,
-            jwt_private_key_pem: "short".into(),
-            jwt_public_key_pem: "short".into(),
+            redis_pool_max_size: 40,
+            jwt_private_key_pem: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----".into(),
+            jwt_public_key_pem: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----".into(),
             jwt_expiry: Duration::from_secs(86400),
-            api_key_hash_secret: "also-short".into(),
+            api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
             rate_limit_window_ms: 60000,
             rate_limit_max_requests: 1000,
+            max_inflight_requests: 80,
             cors_origins: vec!["https://app.example.com".into()],
             trusted_proxies: vec![],
             ui_web_hosts: vec!["app.example.com".into()],
@@ -519,7 +679,7 @@ mod tests {
             ui_marketing_hosts: vec!["example.com".into()],
             ui_marketing_surface: "marketing-zola".into(),
             ui_default_surface: None,
-            webhook_signing_secret: "short-webhook".into(),
+            webhook_signing_secret: "test-webhook-signing-secret-1234567890".into(),
             webhook_timeout_ms: 5000,
             webhook_max_retries: 3,
             idempotency_ttl_seconds: 86400,
@@ -531,16 +691,50 @@ mod tests {
             google_client_secret: None,
             github_client_id: None,
             github_client_secret: None,
-            oauth_redirect_base_url: "http://localhost:3000".into(),
-            session_secret: "test-session-secret-1234567890ab".into(),
-            impersonation_secret: "test-impersonation-secret-12345".into(),
-            csrf_secret: "test-csrf-secret-1234567890abcd".into(),
-            control_plane_api_key: None,
+            oauth_redirect_base_url: "https://app.example.com".into(),
+            session_secret: "test-session-secret-1234567890abcdef".into(),
+            impersonation_secret: "test-impersonation-secret-1234567890".into(),
+            csrf_secret: "test-csrf-secret-1234567890abcdef".into(),
+            control_plane_api_key: Some("test-control-plane-api-key-1234567890".into()),
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
-            tracking_secret_key: "test-tracking-secret-123456789012".into(),
+            tracking_secret_key: "test-tracking-secret-123456789012abcd".into(),
+            billing_company_iban: "EE381010220123456789".into(),
+            billing_company_phone: "+3721234567".into(),
             metrics_port: 9090,
-        };
+        }
+    }
+
+    #[test]
+    fn test_production_security_checks() {
+        let mut config = valid_production_config();
+        assert!(config.validate_production().is_ok());
+
+        config.session_secret = "dev-session-secret-change-me".into();
+        assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.impersonation_secret = "dev-impersonation-secret-change-me".into();
+        assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.csrf_secret = "dev-csrf-secret-change-me".into();
+        assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.tracking_secret_key = "dev-tracking-secret-change-me-32chars!!".into();
+        assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.cors_origins = vec!["*".into()];
+        assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.billing_company_iban = "UNCONFIGURED".into();
+        assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.billing_company_phone.clear();
         assert!(config.validate_production().is_err());
     }
 
@@ -561,12 +755,14 @@ mod tests {
             redis_port: 6379,
             redis_password: None,
             redis_db: 0,
+            redis_pool_max_size: 40,
             jwt_private_key_pem: "BEGIN TEST".into(),
             jwt_public_key_pem: "BEGIN TEST".into(),
             jwt_expiry: Duration::from_secs(86400),
             api_key_hash_secret: "a-very-long-secret-value-for-tests-1234".into(),
             rate_limit_window_ms: 60000,
             rate_limit_max_requests: 1000,
+            max_inflight_requests: 80,
             cors_origins: vec!["*".into()],
             trusted_proxies: vec![],
             ui_web_hosts: vec!["app.apexmail.ee".into(), "127.0.0.1".into()],
@@ -594,6 +790,8 @@ mod tests {
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
+            billing_company_iban: "EE381010220123456789".into(),
+            billing_company_phone: "+3721234567".into(),
             metrics_port: 9090,
         };
 

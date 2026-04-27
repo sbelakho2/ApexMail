@@ -2,7 +2,7 @@
 
 use super::helpers::{clamp_limit, default_limit, extract_cookie, hash_token, html_escape};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -11,10 +11,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::middleware::auth::{invalidate_api_key_cache, AuthUser, JwtClaims};
+use crate::middleware::auth::{invalidate_api_key_cache, validate_session_csrf, AuthUser, JwtClaims};
 use crate::state::AppState;
 
 const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
+const LOGIN_FAILURE_THRESHOLD: i64 = 5;
+const LOGIN_FAILURE_WINDOW_SECS: u64 = 5 * 60;
+const LOGIN_LOCKOUT_BASE_SECS: u64 = 15 * 60;
+const LOGIN_LOCKOUT_MAX_SECS: u64 = 24 * 60 * 60;
+const LOGIN_LOCKOUT_ESCALATION_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
@@ -74,7 +79,7 @@ fn validate_password_strength(password: &str) -> Result<(), ApiError> {
     let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
     let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
     let has_digit = password.chars().any(|c| c.is_ascii_digit());
-    let has_special = password.chars().any(|c| !c.is_alphanumeric());
+    let has_special = password.chars().any(|c| c.is_ascii_punctuation());
     if !has_lower || !has_upper || !has_digit || !has_special {
         return Err(ApiError::Validation(vec![
             "password must include uppercase, lowercase, number, and special character".into(),
@@ -106,6 +111,104 @@ fn build_action_link(base_url: &str, path: &str, email: &str, token: &str) -> St
         base_url.trim_end_matches('/'),
         serializer.finish(),
     )
+}
+
+fn normalized_login_identifier(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+fn login_failure_key(identifier: &str) -> String {
+    format!("apexmail:auth:failures:{}", hash_token(identifier))
+}
+
+fn login_lock_key(identifier: &str) -> String {
+    format!("apexmail:auth:lock:{}", hash_token(identifier))
+}
+
+fn login_lockout_counter_key(identifier: &str) -> String {
+    format!("apexmail:auth:lockouts:{}", hash_token(identifier))
+}
+
+fn login_lockout_duration(lockout_count: i64) -> u64 {
+    let exponent = lockout_count.saturating_sub(1).clamp(0, 7) as u32;
+    LOGIN_LOCKOUT_BASE_SECS
+        .saturating_mul(1_u64 << exponent)
+        .min(LOGIN_LOCKOUT_MAX_SECS)
+}
+
+async fn login_lock_ttl(
+    redis_pool: &deadpool_redis::Pool,
+    identifier: &str,
+) -> Result<Option<i64>, ApiError> {
+    let mut conn = redis_pool.get().await?;
+    let ttl: i64 = deadpool_redis::redis::cmd("TTL")
+        .arg(login_lock_key(identifier))
+        .query_async(&mut *conn)
+        .await?;
+    Ok((ttl > 0).then_some(ttl))
+}
+
+async fn record_login_failure(
+    redis_pool: &deadpool_redis::Pool,
+    identifier: &str,
+) -> Result<(), ApiError> {
+    let failure_key = login_failure_key(identifier);
+    let lock_key = login_lock_key(identifier);
+    let lockout_counter_key = login_lockout_counter_key(identifier);
+    let identifier_hash = hash_token(identifier);
+
+    let mut conn = redis_pool.get().await?;
+    let failures: i64 = deadpool_redis::redis::cmd("INCR")
+        .arg(&failure_key)
+        .query_async(&mut *conn)
+        .await?;
+
+    if failures == 1 {
+        let _: i64 = deadpool_redis::redis::cmd("EXPIRE")
+            .arg(&failure_key)
+            .arg(LOGIN_FAILURE_WINDOW_SECS)
+            .query_async(&mut *conn)
+            .await?;
+    }
+
+    if failures < LOGIN_FAILURE_THRESHOLD {
+        return Ok(());
+    }
+
+    let lockouts: i64 = deadpool_redis::redis::cmd("INCR")
+        .arg(&lockout_counter_key)
+        .query_async(&mut *conn)
+        .await?;
+
+    if lockouts == 1 {
+        let _: i64 = deadpool_redis::redis::cmd("EXPIRE")
+            .arg(&lockout_counter_key)
+            .arg(LOGIN_LOCKOUT_ESCALATION_WINDOW_SECS)
+            .query_async(&mut *conn)
+            .await?;
+    }
+
+    let duration = login_lockout_duration(lockouts);
+    let _: () = deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &lock_key, "1", duration)
+        .await?;
+    let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &failure_key).await?;
+
+    tracing::warn!(
+        identifier_hash = %identifier_hash,
+        failures = failures,
+        lockouts = lockouts,
+        lockout_seconds = duration,
+        "login account temporarily locked after repeated failures"
+    );
+
+    Ok(())
+}
+
+async fn clear_login_failures(redis_pool: &deadpool_redis::Pool, identifier: &str) {
+    let failure_key = login_failure_key(identifier);
+    if let Ok(mut conn) = redis_pool.get().await {
+        let _: Result<i64, _> = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &failure_key).await;
+    }
 }
 
 async fn enqueue_verification_email(
@@ -185,8 +288,7 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct LoginResponse {
-    pub token: String,
+pub struct SessionAuthResponse {
     pub expires_at: String,
     pub user: UserInfo,
 }
@@ -252,6 +354,11 @@ fn build_clear_session_cookie(secure: bool) -> String {
     )
 }
 
+fn insert_private_no_store_headers(headers: &mut HeaderMap) {
+    headers.insert("Cache-Control", HeaderValue::from_static("no-store, private"));
+    headers.insert("Pragma", HeaderValue::from_static("no-cache"));
+}
+
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     let auth = headers.get("authorization")?.to_str().ok()?;
     let mut parts = auth.splitn(2, ' ');
@@ -262,11 +369,6 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     } else {
         None
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RefreshRequest {
-    pub token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,11 +391,16 @@ pub struct ResetPasswordResponse {
 async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
-) -> Result<(HeaderMap, Json<LoginResponse>), ApiError> {
+) -> Result<(HeaderMap, Json<SessionAuthResponse>), ApiError> {
     if body.email.is_empty() || body.password.is_empty() {
         return Err(ApiError::Validation(vec![
             "email and password are required".into(),
         ]));
+    }
+
+    let login_identifier = normalized_login_identifier(&body.email);
+    if login_lock_ttl(&state.redis, &login_identifier).await?.is_some() {
+        return Err(ApiError::RateLimited);
     }
 
     let user = sqlx::query_as::<_, UserRow>(
@@ -301,8 +408,12 @@ async fn login(
     )
     .bind(&body.email)
     .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| ApiError::Unauthorized("invalid credentials".into()))?;
+    .await?;
+
+    let Some(user) = user else {
+        record_login_failure(&state.redis, &login_identifier).await?;
+        return Err(ApiError::Unauthorized("invalid credentials".into()));
+    };
 
     if user.status != "active" {
         return Err(ApiError::Forbidden("account is not active".into()));
@@ -311,8 +422,11 @@ async fn login(
     let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email);
 
     if !valid {
+        record_login_failure(&state.redis, &login_identifier).await?;
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     }
+
+    clear_login_failures(&state.redis, &login_identifier).await;
 
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
     let now = Utc::now();
@@ -335,6 +449,7 @@ async fn login(
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
     let mut headers = HeaderMap::new();
+    insert_private_no_store_headers(&mut headers);
     let cookie = build_session_cookie(
         &token,
         expiry_secs,
@@ -346,8 +461,7 @@ async fn login(
     })?;
     headers.insert("Set-Cookie", value);
 
-    Ok((headers, Json(LoginResponse {
-        token,
+    Ok((headers, Json(SessionAuthResponse {
         expires_at: exp.to_rfc3339(),
         user: UserInfo {
             id: user.id,
@@ -574,12 +688,11 @@ pub(crate) async fn verify_email_token(
     // Find user with matching verification token
     let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
         "SELECT id, tenant_id, metadata FROM users 
-         WHERE (metadata->>'verification_token_hash' = $1 OR metadata->>'verification_token' = $2) 
+            WHERE metadata->>'verification_token_hash' = $1
          AND email_verified = false
          LIMIT 1"
     )
     .bind(&token_hash)
-    .bind(token)
     .fetch_optional(&state.db)
     .await?;
 
@@ -769,12 +882,11 @@ async fn reset_password(
     let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
         "SELECT id, status, metadata FROM users
          WHERE LOWER(email) = LOWER($1)
-           AND (metadata->>'password_reset_token_hash' = $2 OR metadata->>'password_reset_token' = $3)
+                     AND metadata->>'password_reset_token_hash' = $2
          LIMIT 1",
     )
     .bind(&email)
     .bind(&token_hash)
-    .bind(&body.token)
     .fetch_optional(&state.db)
     .await?;
 
@@ -820,8 +932,12 @@ async fn logout(
     headers: HeaderMap,
     _auth: Option<AuthUser>,
 ) -> Result<(HeaderMap, StatusCode), ApiError> {
-    let token_to_blacklist = extract_cookie(&headers, "am_session")
-        .or_else(|| extract_bearer_token(&headers));
+    let session_token = extract_cookie(&headers, "am_session");
+    if session_token.is_some() {
+        validate_session_csrf(&headers, &state.config.csrf_secret)?;
+    }
+
+    let token_to_blacklist = session_token.or_else(|| extract_bearer_token(&headers));
 
     if let Some(token) = token_to_blacklist {
         use sha2::{Sha256, Digest};
@@ -848,15 +964,19 @@ async fn logout(
 
 async fn refresh_token(
     State(state): State<AppState>,
-    Json(body): Json<RefreshRequest>,
-) -> Result<(HeaderMap, Json<LoginResponse>), ApiError> {
+    headers: HeaderMap,
+) -> Result<(HeaderMap, Json<SessionAuthResponse>), ApiError> {
+    let token = extract_cookie(&headers, "am_session")
+        .ok_or_else(|| ApiError::Unauthorized("active session required".into()))?;
+    validate_session_csrf(&headers, &state.config.csrf_secret)?;
+
     // Decode existing token to get claims
     let key = jsonwebtoken::DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes())
         .map_err(|e| ApiError::Internal(format!("invalid JWT public key configuration: {e}")))?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
     validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
 
-    let token_data = jsonwebtoken::decode::<JwtClaims>(&body.token, &key, &validation)?;
+    let token_data = jsonwebtoken::decode::<JwtClaims>(&token, &key, &validation)?;
     let old_claims = token_data.claims;
 
     let user_id = old_claims.sub.clone();
@@ -878,7 +998,7 @@ async fn refresh_token(
     // Fix #20: Blacklist the old token so it cannot be reused.
     {
         use sha2::{Sha256, Digest};
-        let hash = hex::encode(Sha256::digest(body.token.as_bytes()));
+        let hash = hex::encode(Sha256::digest(token.as_bytes()));
         let bl_key = format!("apexmail:token_blacklist:{hash}");
         if let Ok(mut conn) = state.redis.get().await {
             let ttl = state.config.jwt_expiry.as_secs();
@@ -910,6 +1030,7 @@ async fn refresh_token(
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
     let mut headers = HeaderMap::new();
+    insert_private_no_store_headers(&mut headers);
     let cookie = build_session_cookie(
         &token,
         expiry_secs,
@@ -921,8 +1042,7 @@ async fn refresh_token(
     })?;
     headers.insert("Set-Cookie", value);
 
-    Ok((headers, Json(LoginResponse {
-        token,
+    Ok((headers, Json(SessionAuthResponse {
         expires_at: exp.to_rfc3339(),
         user: UserInfo {
             id: user.id,
@@ -939,6 +1059,7 @@ async fn refresh_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deadpool_redis::Config as RedisConfig;
 
     #[test]
     fn test_login_request_deserialisation() {
@@ -948,9 +1069,8 @@ mod tests {
     }
 
     #[test]
-    fn test_login_response_serialisation() {
-        let resp = LoginResponse {
-            token: "jwt.token.here".into(),
+    fn test_session_auth_response_serialisation() {
+        let resp = SessionAuthResponse {
             expires_at: "2026-01-01T00:00:00Z".into(),
             user: UserInfo {
                 id: Uuid::nil().to_string(),
@@ -962,6 +1082,7 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["user"]["role"], "admin");
+        assert!(json.get("token").is_none());
     }
 
     #[test]
@@ -1022,6 +1143,15 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_password_strength_requires_ascii_special_character() {
+        assert!(validate_password_strength("StrongPassword1!").is_ok());
+        assert!(matches!(
+            validate_password_strength("Password123é"),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
     fn test_authenticated_user_id_requires_user_session() {
         let auth = AuthUser {
             tenant_id: "tenant_123".into(),
@@ -1060,6 +1190,73 @@ mod tests {
         assert_eq!(scopes_for_role("owner"), vec!["*".to_string()]);
         assert!(scopes_for_role("developer").contains(&"messages:send".to_string()));
         assert_eq!(scopes_for_role("member"), vec!["messages:read".to_string()]);
+    }
+
+    #[test]
+    fn test_login_lockout_duration_escalates_and_caps() {
+        assert_eq!(login_lockout_duration(1), 900);
+        assert_eq!(login_lockout_duration(2), 1800);
+        assert_eq!(login_lockout_duration(3), 3600);
+        assert_eq!(login_lockout_duration(10), LOGIN_LOCKOUT_MAX_SECS);
+    }
+
+    #[test]
+    fn test_login_lockout_keys_hash_identifiers() {
+        let key = login_failure_key("Owner@Example.com");
+        assert!(key.starts_with("apexmail:auth:failures:"));
+        assert!(!key.contains("Owner@Example.com"));
+        assert_ne!(key, login_failure_key("owner2@example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_record_login_failure_sets_lock_when_redis_is_available() {
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let pool = match RedisConfig::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+
+        let mut conn = match pool.get().await {
+            Ok(conn) => conn,
+            Err(_) => return,
+        };
+        let ping: Result<String, _> = deadpool_redis::redis::cmd("PING")
+            .query_async(&mut *conn)
+            .await;
+        if ping.is_err() {
+            return;
+        }
+        drop(conn);
+
+        let identifier = format!("lockout-{}@example.com", Uuid::new_v4());
+        let failure_key = login_failure_key(&identifier);
+        let lock_key = login_lock_key(&identifier);
+        let counter_key = login_lockout_counter_key(&identifier);
+
+        if let Ok(mut conn) = pool.get().await {
+            let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                .arg(&[failure_key.as_str(), lock_key.as_str(), counter_key.as_str()])
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        for _ in 0..(LOGIN_FAILURE_THRESHOLD - 1) {
+            record_login_failure(&pool, &identifier).await.unwrap();
+        }
+        assert!(login_lock_ttl(&pool, &identifier).await.unwrap().is_none());
+
+        record_login_failure(&pool, &identifier).await.unwrap();
+        assert!(login_lock_ttl(&pool, &identifier).await.unwrap().unwrap_or_default() > 0);
+
+        if let Ok(mut conn) = pool.get().await {
+            let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                .arg(&[failure_key.as_str(), lock_key.as_str(), counter_key.as_str()])
+                .query_async(&mut *conn)
+                .await;
+        }
     }
 }
 

@@ -27,23 +27,22 @@ Relevant current implementation files:
 
 #### `POST /api/auth/login`
 - **Request:** `{ email: string, password: string, captcha?: string }`
-- **Response 200:** `{ token: string, user: { id, email, role }, expires: number }`
+- **Current Rust response 200:** `{ expires_at: string, user: { id, email, name, tenant_id, role } }`
 - **Response 401:** `{ error: "Invalid credentials" }`
-- **Response 429:** `{ error: "Too many attempts", retryAfter: number }`
-- **Cookies set:** `cp_session` (httpOnly, secure, sameSite: strict)
+- **Response 429:** rate-limited after repeated failures
+- **Cookies set:** `am_session` (httpOnly, sameSite=lax, `Secure` in production)
 
 #### `POST /api/auth/logout`
-- **Request:** Empty body
-- **Response 200:** `{ success: true }`
-- **Cookies cleared:** `cp_session`, `am_session`
+- **Request:** Empty body with `X-CSRF-Token` when using the session cookie
+- **Response 204:** empty body
+- **Cookies cleared:** `am_session`
 
 #### `GET /api/auth/session`
-- **Response 200:** `{ user: { id, email, role, name }, impersonating?: { tenantId, tenantName } }`
-- **Response 401:** `{ error: "Not authenticated" }`
+- **Response 200:** `{ authenticated: boolean, session_type?: string, user?: {...}, impersonation?: {...} }`
 
 #### `GET /api/csrf`
 - **Response 200:** `{ token: string }`
-- **Cookies set:** `csrf_token`, `csrf_token_sig`
+- **Cookies set:** `csrf_token`
 
 #### `POST /api/impersonate`
 - **Request:** `{ tenantId: string }`

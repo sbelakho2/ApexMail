@@ -10,8 +10,8 @@ services:
   # Handles email sending with retry logic
   outbound-queue:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: services/mail-server/Dockerfile
       target: outbound-queue
     ports:
       - "127.0.0.1:50052:50052"  # gRPC
@@ -59,8 +59,8 @@ services:
   # Receives incoming emails on port 25
   smtp-edge:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: services/mail-server/Dockerfile
       target: smtp-edge
     ports:
       - "${SMTP_EDGE_BIND:-127.0.0.1}:25:25"     # SMTP
@@ -109,8 +109,8 @@ services:
   # For clients to send mail via port 587
   submission:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: services/mail-server/Dockerfile
       target: submission
     ports:
       - "${SMTP_SUBMISSION_BIND:-127.0.0.1}:587:587"   # Submission
@@ -162,8 +162,8 @@ services:
   # Message storage and retrieval
   mailstore:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: services/mail-server/Dockerfile
       target: mailstore
     ports:
       - "127.0.0.1:50051:50051"  # gRPC

@@ -34,7 +34,7 @@ impl AnalyticsPredictor {
 // Length factor — sweet spot 30-60 chars
         let len_factor = if (30.0..=60.0).contains(&len) {
             1.1
-        } else if len < 15.0 || len > 100.0 {
+        } else if !(15.0..=100.0).contains(&len) {
             0.85
         } else {
             1.0

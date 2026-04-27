@@ -159,7 +159,7 @@ async fn handle_sns_notification(
 
     if !allowed_arns.is_empty() {
         let msg_arn = sns_msg.topic_arn.as_deref().unwrap_or("");
-        if !allowed_arns.iter().any(|a| *a == msg_arn) {
+        if !allowed_arns.contains(&msg_arn) {
             warn!(topic_arn = %msg_arn, "Rejected SNS message from unknown topic ARN");
             return Err(ApiError::Validation(vec!["Unknown SNS topic ARN".into()]));
         }
@@ -305,9 +305,9 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     .bind(&reason)
                     .execute(&state.db)
                     .await
-                    .map_err(|e| warn!(email = %apexmail_lib::pii::redact_email(&email), error = %e, "Failed to suppress bounced address"));
+                    .map_err(|e| warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress bounced address"));
 
-                    info!(email = %apexmail_lib::pii::redact_email(&email), reason = %reason, "Auto-suppressed hard-bounced address");
+                    info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed hard-bounced address");
                 }
 
 // Update message status if we have the internal ID
@@ -384,9 +384,9 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                 .bind(&reason)
                 .execute(&state.db)
                 .await
-                .map_err(|e| warn!(email = %apexmail_lib::pii::redact_email(&email), error = %e, "Failed to suppress complained address"));
+                .map_err(|e| warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress complained address"));
 
-                info!(email = %apexmail_lib::pii::redact_email(&email), reason = %reason, "Auto-suppressed complained address");
+                info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed complained address");
 
 // Update message status
                 if let Some(ref msg_id) = apexmail_message_id {

@@ -1260,7 +1260,7 @@ async fn encrypt_field(
 // demonstrate the encryption API works with a test key.
     let kek = crate::field_encryption::Kek::generate();
     let kek_id_hex = hex::encode(kek.id);
-    let kek_hex = hex::encode(&kek.key_bytes());
+    let kek_hex = hex::encode(kek.key_bytes());
     let encryptor = crate::field_encryption::FieldEncryptor::new(vec![kek]);
 
     match encryptor.encrypt(&body.value) {

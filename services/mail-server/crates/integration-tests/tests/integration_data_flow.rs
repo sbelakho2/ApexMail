@@ -3,8 +3,6 @@
 //! Each test simulates a realistic end-to-end pipeline that spans multiple
 //! service crates, exercising them in sequence without external dependencies.
 
-use std::sync::Arc;
-
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. Sales pipeline:create lead → enrich → score → campaign
 // ═══════════════════════════════════════════════════════════════════════════
@@ -134,7 +132,7 @@ fn ai_pipeline_register_predict_evaluate() {
 fn observability_alert_pipeline() {
     use observability_service::alerting::{AlertManager, AlertRule};
     use observability_service::metrics_collector::{MetricSummary, MetricsCollector};
-    use observability_service::types::{AlertSeverity, AlertStatus, MetricType};
+    use observability_service::types::{AlertSeverity, AlertStatus};
 
     let alert_mgr = AlertManager::new();
     let metrics = MetricsCollector::new(vec![0.1, 0.5, 1.0]);

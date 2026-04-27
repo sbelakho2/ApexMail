@@ -23,7 +23,6 @@
 //! This catches edge cases like limit=0, limit=1, limit=MAX automatically.
 
 use proptest::prelude::*;
-use std::collections::HashSet;
 
 // ===========================================================================
 // 1. RATE LIMITER PROPERTY TESTS

@@ -92,6 +92,12 @@ fn compile_regex(pattern: &str) -> Option<Regex> {
 
 pub struct SubjectLineAnalyzer;
 
+impl Default for SubjectLineAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubjectLineAnalyzer {
     pub fn new() -> Self {
         Self
@@ -171,7 +177,7 @@ pub fn classify_tokens(tokens: &[String]) -> Vec<TokenAnalysis> {
             let _is_number = token.chars().all(|c| c.is_ascii_digit());
             let _has_emoji = EMOJI_RE
                 .as_ref()
-                .map_or(false, |regex| regex.is_match(token));
+                .is_some_and(|regex| regex.is_match(token));
 
             TokenAnalysis {
                 token: token.clone(),

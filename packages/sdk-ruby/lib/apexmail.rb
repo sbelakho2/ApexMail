@@ -83,38 +83,40 @@ module ApexMail
     def request(method, path, body: nil, idempotency_key: nil)
       attempt = 0
 
-      begin
-        ensure_connection
-        uri = URI.parse("#{@base_uri}#{path}")
-        req = build_request(method, uri, body, idempotency_key)
-        body = +""
-        resp = @http.request(req) do |response|
-          response.read_body do |chunk|
-            body << chunk
-            if body.bytesize > @max_response_bytes
-              reset_connection
-              raise Error.new("Response body exceeds max_response_bytes",
-                              status_code: response.code.to_i)
+      loop do
+        begin
+          ensure_connection
+          uri = URI.parse("#{@base_uri}#{path}")
+          req = build_request(method, uri, body, idempotency_key)
+          body = +""
+          resp = @http.request(req) do |response|
+            response.read_body do |chunk|
+              body << chunk
+              if body.bytesize > @max_response_bytes
+                reset_connection
+                raise Error.new("Response body exceeds max_response_bytes",
+                                status_code: response.code.to_i)
+              end
             end
           end
-        end
-        @last_used_at = Time.now
+          @last_used_at = Time.now
 
-        if retryable_status?(resp.code.to_i) && attempt < MAX_RETRIES
-          sleep(retry_delay(resp, attempt))
-          attempt += 1
-          retry
-        end
+          if retryable_status?(resp.code.to_i) && attempt < MAX_RETRIES
+            sleep(retry_delay(resp, attempt))
+            attempt += 1
+            next
+          end
 
-        handle_response(resp, body)
-      rescue IOError, EOFError, Timeout::Error, Errno::ECONNRESET, Errno::ECONNREFUSED, SocketError, OpenSSL::SSL::SSLError => e
-        reset_connection
-        if attempt < MAX_RETRIES
-          sleep(backoff(attempt))
-          attempt += 1
-          retry
+          return handle_response(resp, body)
+        rescue IOError, EOFError, Timeout::Error, Errno::ECONNRESET, Errno::ECONNREFUSED, SocketError, OpenSSL::SSL::SSLError => e
+          reset_connection
+          if attempt < MAX_RETRIES
+            sleep(backoff(attempt))
+            attempt += 1
+            next
+          end
+          raise NetworkError, e.message
         end
-        raise NetworkError, e.message
       end
     end
 
@@ -510,11 +512,11 @@ module ApexMail
       @t.request("DELETE", "/v1/templates/#{ApexMail.encode_path(id)}")
     end
 
-    # Render a template with given data (dry-run, does not send).
+    # Render a template with given variables (dry-run, does not send).
     # @param id   [String]
     # @param data [Hash]
     def render(id, data = {})
-      @t.request("POST", "/v1/templates/#{ApexMail.encode_path(id)}/render", body: { data: data })
+      @t.request("POST", "/v1/templates/#{ApexMail.encode_path(id)}/render", body: { variables: data })
     end
   end
 

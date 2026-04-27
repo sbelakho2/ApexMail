@@ -395,7 +395,12 @@ async fn get_autopilot(
             "lastAction": autopilot.last_action,
             "lastActionAt": autopilot.last_action_at.map(|ts| ts.to_rfc3339()),
         }),
-        _ => unreachable!(),
+        unknown => {
+            return Err(ApiError::BadRequest(format!(
+                "unknown autopilot section '{}'. Valid: overview, metrics, baseline, candidates, outcomes, pending, actions, safety",
+                unknown
+            )));
+        }
     };
 
     Ok(Json(payload))
@@ -559,7 +564,8 @@ async fn post_autopilot(
                 "safeMode": updated.safe_mode,
             })
         }
-        _ => unreachable!(),
+        // All actions are validated by pre-check above, this is unreachable
+        _ => return Err(ApiError::Internal("unreachable action".into())),
     };
 
     Ok(Json(payload))

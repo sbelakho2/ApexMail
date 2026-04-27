@@ -13,6 +13,8 @@ use crate::types::{Invoice, InvoiceLineItem, InvoiceStatus};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
+type HmacSha256 = Hmac<Sha256>;
+
 // ---------------------------------------------------------------------------
 // PDF Renderer client config
 // ---------------------------------------------------------------------------
@@ -39,18 +41,6 @@ static S3_BUCKET: LazyLock<String> = LazyLock::new(|| {
 /// AWS region for Sig V4 signing.
 static S3_REGION: LazyLock<String> = LazyLock::new(|| {
     std::env::var("S3_REGION").unwrap_or_else(|_| "eu-central-1".into())
-});
-
-/// S3 access key ID — panics at first access if not set.
-static S3_ACCESS_KEY_ID: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("S3_ACCESS_KEY_ID")
-        .expect("S3_ACCESS_KEY_ID must be set for invoice PDF storage")
-});
-
-/// S3 secret access key — panics at first access if not set.
-static S3_SECRET_ACCESS_KEY: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("S3_SECRET_ACCESS_KEY")
-        .expect("S3_SECRET_ACCESS_KEY must be set for invoice PDF storage")
 });
 
 /// Optional public URL prefix for the bucket (e.g. `https://storage.apexmail.ee`).
@@ -473,6 +463,37 @@ pub enum InvoiceError {
     Serialization(#[from] serde_json::Error),
 }
 
+fn require_config_value(name: &str, value: Option<String>) -> Result<String, InvoiceError> {
+    let Some(value) = value else {
+        return Err(InvoiceError::PdfGeneration(format!(
+            "{name} must be set for invoice PDF upload"
+        )));
+    };
+
+    if value.trim().is_empty() {
+        return Err(InvoiceError::PdfGeneration(format!(
+            "{name} must be set for invoice PDF upload"
+        )));
+    }
+
+    Ok(value)
+}
+
+fn s3_credentials() -> Result<(String, String), InvoiceError> {
+    let access_key = require_config_value("S3_ACCESS_KEY_ID", std::env::var("S3_ACCESS_KEY_ID").ok())?;
+    let secret_key = require_config_value(
+        "S3_SECRET_ACCESS_KEY",
+        std::env::var("S3_SECRET_ACCESS_KEY").ok(),
+    )?;
+    Ok((access_key, secret_key))
+}
+
+fn new_hmac_sha256(key: &[u8]) -> Result<HmacSha256, InvoiceError> {
+    HmacSha256::new_from_slice(key).map_err(|e| {
+        InvoiceError::PdfGeneration(format!("failed to initialize S3 signing key: {e}"))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // S3-compatible upload (AWS Signature V4)
 // ---------------------------------------------------------------------------
@@ -484,19 +505,10 @@ async fn s3_put_object(
     body: &[u8],
     content_type: &str,
 ) -> Result<String, InvoiceError> {
-    type HmacSha256 = Hmac<Sha256>;
-
     let endpoint = &*S3_ENDPOINT;
     let bucket = &*S3_BUCKET;
     let region = &*S3_REGION;
-    let access_key = &*S3_ACCESS_KEY_ID;
-    let secret_key = &*S3_SECRET_ACCESS_KEY;
-
-    if access_key.is_empty() || secret_key.is_empty() {
-        return Err(InvoiceError::PdfGeneration(
-            "S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set for invoice PDF upload".into(),
-        ));
-    }
+    let (access_key, secret_key) = s3_credentials()?;
 
     let now = Utc::now();
     let date_stamp = now.format("%Y%m%d").to_string();
@@ -531,31 +543,26 @@ async fn s3_put_object(
     );
 
 // Derive signing key:HMAC chain date → region → service → aws4_request
-    let k_date = HmacSha256::new_from_slice(format!("AWS4{secret_key}").as_bytes())
-        .expect("HMAC key length")
+    let k_date = new_hmac_sha256(format!("AWS4{secret_key}").as_bytes())?
         .chain_update(date_stamp.as_bytes())
         .finalize()
         .into_bytes();
-    let k_region = HmacSha256::new_from_slice(&k_date)
-        .expect("HMAC key length")
+    let k_region = new_hmac_sha256(&k_date)?
         .chain_update(region.as_bytes())
         .finalize()
         .into_bytes();
-    let k_service = HmacSha256::new_from_slice(&k_region)
-        .expect("HMAC key length")
+    let k_service = new_hmac_sha256(&k_region)?
         .chain_update(b"s3")
         .finalize()
         .into_bytes();
-    let k_signing = HmacSha256::new_from_slice(&k_service)
-        .expect("HMAC key length")
+    let k_signing = new_hmac_sha256(&k_service)?
         .chain_update(b"aws4_request")
         .finalize()
         .into_bytes();
 
 // Final signature
     let signature = hex_encode(
-        &HmacSha256::new_from_slice(&k_signing)
-            .expect("HMAC key length")
+        &new_hmac_sha256(&k_signing)?
             .chain_update(string_to_sign.as_bytes())
             .finalize()
             .into_bytes(),
@@ -610,6 +617,30 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_required_config_returns_typed_error() {
+        let err = require_config_value("S3_ACCESS_KEY_ID", None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "PDF generation error: S3_ACCESS_KEY_ID must be set for invoice PDF upload"
+        );
+    }
+
+    #[test]
+    fn blank_required_config_returns_typed_error() {
+        let err = require_config_value("S3_SECRET_ACCESS_KEY", Some("   ".into())).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "PDF generation error: S3_SECRET_ACCESS_KEY must be set for invoice PDF upload"
+        );
+    }
+
+    #[test]
+    fn required_config_accepts_present_values() {
+        let value = require_config_value("S3_ACCESS_KEY_ID", Some("access-key".into())).unwrap();
+        assert_eq!(value, "access-key");
+    }
 
     #[test]
     fn vat_estonia_always_charged() {

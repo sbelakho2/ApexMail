@@ -39,7 +39,7 @@ mod email_pipeline {
         let waf_req = HttpRequest {
             client_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             method: "POST",
-            path: "/api/v1/send",
+            path: "/v1/messages",
             query_string: None,
             headers: &[("content-type".into(), "application/json".into())],
             body: Some(api_body),
@@ -49,8 +49,8 @@ mod email_pipeline {
         assert!(waf_result.total_score < 10, "WAF score too high for clean email: {}", waf_result.total_score);
 
 // Step 2:Threat-intel check
-        let ti_ip = threat_intel.check_ip("8.8.8.8");
-        let ti_domain = threat_intel.check_domain("legitimate.com");
+        let _ti_ip = threat_intel.check_ip("8.8.8.8");
+        let _ti_domain = threat_intel.check_domain("legitimate.com");
 // Clean IPs/domains should not be blocked (check risk_score if available)
 
 // Step 3:Spam filter
@@ -78,7 +78,7 @@ mod email_pipeline {
         let req = HttpRequest {
             client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             method: "POST",
-            path: "/api/v1/send",
+            path: "/v1/messages",
             query_string: None,
             headers: &[("content-type".into(), "application/json".into())],
             body: Some(api_body),
@@ -130,7 +130,7 @@ mod email_pipeline {
         let req = HttpRequest {
             client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             method: "POST",
-            path: "/api/v1/send",
+            path: "/v1/messages",
             query_string: None,
             headers: &[("content-type".into(), "text/html".into())],
             body: Some(body),

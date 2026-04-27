@@ -170,8 +170,8 @@ impl DeliveryService {
 
 /// Parse an SMTP response code + message.
     pub fn parse_smtp_response(&self, code: u16, message: &str) -> SMTPResponse {
-        let is_rate_limit = code >= 400 && code < 500 && self.is_rate_limit_message(message);
-        let is_greylist = !is_rate_limit && code >= 400 && code < 500 && self.is_greylist_message(message);
+        let is_rate_limit = (400..500).contains(&code) && self.is_rate_limit_message(message);
+        let is_greylist = !is_rate_limit && (400..500).contains(&code) && self.is_greylist_message(message);
 
         let response_type = match code {
             200..=299 => ResponseType::Success,

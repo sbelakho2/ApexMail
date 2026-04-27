@@ -89,7 +89,7 @@ impl IdsEngine {
     pub fn new(config: IdsConfig) -> Result<Self, crate::IdsError> {
         let sigs = signature::builtin_mail_signatures();
         let sig_set = SignatureSet::new(sigs)
-            .map_err(|e| crate::IdsError::Signature(e))?;
+            .map_err(crate::IdsError::Signature)?;
 
         let conn_tracker = ConnectionTracker::new(
             config.max_connections,
@@ -115,7 +115,7 @@ impl IdsEngine {
 /// Create with custom signature set
     pub fn with_signatures(config: IdsConfig, sigs: Vec<signature::Signature>) -> Result<Self, crate::IdsError> {
         let sig_set = SignatureSet::new(sigs)
-            .map_err(|e| crate::IdsError::Signature(e))?;
+            .map_err(crate::IdsError::Signature)?;
 
         let conn_tracker = ConnectionTracker::new(
             config.max_connections,
@@ -507,6 +507,7 @@ mod tests {
             ip("10.0.0.1"), 80, "http",
             b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n",
         );
+        assert!(matches!(verdict, IdsVerdict::Pass | IdsVerdict::Alert));
         assert!(
             alerts.is_empty() || alerts.iter().all(|a| matches!(a.action, IdsVerdict::Pass | IdsVerdict::Alert)),
             "Clean HTTP GET shouldn't trigger drops"

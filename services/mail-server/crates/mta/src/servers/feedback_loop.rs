@@ -601,13 +601,12 @@ pub fn parse_arf_report(message: &str) -> ComplaintInfo {
             info.reported_uris.push(extract_value(trimmed));
         } else if lower.starts_with("authentication-results:") {
             info.authentication_results = Some(extract_value(trimmed));
-        } else if lower.starts_with("original-message-id:") || lower.starts_with("message-id:") {
-            if info.original_message_id.is_none() {
+        } else if (lower.starts_with("original-message-id:") || lower.starts_with("message-id:"))
+            && info.original_message_id.is_none() {
                 let mid = extract_value(trimmed);
                 info.original_message_id =
                     Some(mid.trim_matches(|c| c == '<' || c == '>').to_string());
             }
-        }
     }
 
     info

@@ -176,16 +176,14 @@ pub fn render_route(surface: &str, path: &str) -> Option<String> {
 
 pub fn render_route_with_query(surface: &str, path: &str, query: Option<&str>) -> Option<String> {
     let html = match surface {
-        "web" => match path {
-            _ => {
-                let inner = render_inner(surface, path, query)?;
-                match path {
-            "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
-            | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
-                    _ => leptos_views::web_root_layout(
-                        &leptos_views::web_dashboard_layout(&inner),
-                    ),
-                }
+        "web" => {
+            let inner = render_inner(surface, path, query)?;
+            match path {
+        "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
+        | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
+                _ => leptos_views::web_root_layout(
+                    &leptos_views::web_dashboard_layout(&inner),
+                ),
             }
         },
         "control-plane" => {

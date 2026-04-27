@@ -62,23 +62,65 @@ services:
     image: redis:7-alpine
     container_name: apexmail-redis
     restart: unless-stopped
-    # SECURITY: Enable password authentication
-    command: >
-      sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$${REDIS_PASSWORD}\""
+    # SECURITY: Password read from Docker secret file, not visible via docker inspect
+    entrypoint: ["sh", "/usr/local/bin/redis-entrypoint.sh"]
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_MAXMEMORY: "256mb"
+      REDIS_MAXMEMORY_POLICY: "allkeys-lru"
     volumes:
       - redis_data:/data
+      - ./deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     # SECURITY: Port exposure controlled via environment variable
     ports:
       - "${REDIS_PORT:-127.0.0.1:6379}:6379"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
+      test: ["CMD-SHELL", "export REDISCLI_AUTH=\"$(cat /run/secrets/redis_password 2>/dev/null || echo '')\"; redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - apexmail_data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - redis_password
+
+  # =========================================================================
+  # OBSERVABILITY SERVICE
+  # =========================================================================
+  observability:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: observability
+    container_name: apexmail-observability
+    restart: unless-stopped
+    environment:
+      OBSERVABILITY_PORT: 4400
+      RUST_LOG: ${RUST_LOG:-info}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4400"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apexmail_monitoring
+      - apexmail_backend
+    profiles:
+      - monitoring
     deploy:
       resources:
         limits:
@@ -148,7 +190,7 @@ services:
         max-size: "10m"
         max-file: "5"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3001"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -174,8 +216,8 @@ services:
   # ==========================================================================
   enterprise:
     build:
-      context: services/mail-server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/mail-server/Dockerfile
       target: enterprise
     restart: unless-stopped
     depends_on:
@@ -206,7 +248,7 @@ services:
         max-size: "10m"
         max-file: "5"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health || exit 1"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3002"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -310,7 +352,7 @@ services:
       - "${CLICKHOUSE_HTTP_PORT:-127.0.0.1:8123}:8123"
       - "${CLICKHOUSE_NATIVE_PORT:-127.0.0.1:9000}:9000"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -331,6 +373,7 @@ services:
       - apparmor:docker-default
     read_only: true
     tmpfs:
+      - /etc/clickhouse-server/users.d
       - /tmp
       - /var/run
 
@@ -344,6 +387,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/alerting-rules.yml:/etc/prometheus/alerting-rules.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -389,7 +433,7 @@ services:
       GF_SECURITY_DISABLE_GRAVATAR: true
       GF_ANALYTICS_REPORTING_ENABLED: false
     ports:
-      - "${GRAFANA_PORT:-127.0.0.1:3002}:3000"
+      - "${GRAFANA_PORT:-127.0.0.1:3003}:3000"
     networks:
       - apexmail_monitoring
     profiles:
@@ -414,6 +458,9 @@ services:
     image: prom/alertmanager:v0.27.0
     container_name: apexmail-alertmanager
     restart: unless-stopped
+    depends_on:
+      observability:
+        condition: service_healthy
     volumes:
       - ./deploy/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager_data:/alertmanager
@@ -442,7 +489,9 @@ services:
       - no-new-privileges:true
       - apparmor:docker-default
     environment:
-      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apexmail}?sslmode=disable
+      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB:-apexmail}?sslmode=disable
+      DATA_SOURCE_USER: ${POSTGRES_USER:-apexmail}
+      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
     networks:
       - apexmail_monitoring
       - apexmail_data
@@ -546,6 +595,13 @@ volumes:
   prometheus_data:
   grafana_data:
   alertmanager_data:
+
+# ===========================================================================
+# SECRETS
+# ===========================================================================
+secrets:
+  redis_password:
+    file: ./secrets/redis_password.txt
 
 # ===========================================================================
 # NETWORKS

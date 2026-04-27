@@ -6,21 +6,19 @@
 
 use chrono::Utc;
 use flate2::write::GzEncoder;
-use flate2::read::GzDecoder;
 use flate2::Compression;
 use reqwest::Client;
 use sha2::{Sha256, Digest};
 use sqlx::PgPool;
-use std::io::{Write, Read};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 use uuid::Uuid;
 use aes_gcm::{
     aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::config::Config;
 use crate::types::{Backup, BackupRow, BackupSchedule, BackupType,
@@ -109,6 +107,29 @@ fn decrypt_backup(data: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
     Ok(plaintext)
 }
 
+fn prepare_backup_payload(data: Vec<u8>, encryption_key: Option<&str>) -> Result<Vec<u8>, String> {
+    match encryption_key {
+        Some(key) => encrypt_backup(&data, key.as_bytes()),
+        None => Ok(data),
+    }
+}
+
+fn decode_backup_payload(
+    data: Vec<u8>,
+    encrypted: bool,
+    encryption_key: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    if !encrypted {
+        return Ok(data);
+    }
+
+    let key = encryption_key.ok_or_else(|| {
+        "Backup is marked encrypted but BACKUP_ENCRYPTION_KEY is not configured".to_string()
+    })?;
+
+    decrypt_backup(&data, key.as_bytes())
+}
+
 /// BackupService manages backup creation, restore, and retention.
 pub struct BackupService {
     pool: PgPool,
@@ -164,7 +185,7 @@ impl BackupService {
 // Insert pending record
         let tables_json = tables
             .as_ref()
-            .map(|t| serde_json::to_value(t))
+            .map(serde_json::to_value)
             .transpose()
             .map_err(|e| format!("Failed to serialize table list: {e}"))?;
         sqlx::query(
@@ -223,13 +244,17 @@ impl BackupService {
         }
 
         let compressed = encoder.finish().map_err(|e| format!("Gzip finish: {e}"))?;
-        let compressed_size = compressed.len() as i64;
-        let checksum = format!("{:x}", hasher.finalize());
         let compression_ratio = if total_size > 0 {
-            compressed_size as f64 / total_size as f64
+            compressed.len() as f64 / total_size as f64
         } else {
             1.0
         };
+        let stored_payload = prepare_backup_payload(
+            compressed,
+            self.config.backup.encryption_key.as_deref(),
+        )?;
+        let stored_size = stored_payload.len() as i64;
+        let checksum = format!("{:x}", hasher.finalize());
 
 // WAL position after
         let wal_end: Option<String> = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
@@ -238,8 +263,15 @@ impl BackupService {
             .ok()
             .flatten();
 
-        let location = format!("s3://{}/backups/{}/{}.gz",
-            self.config.backup.bucket, Utc::now().format("%Y/%m/%d"), id);
+        let object_suffix = if self.config.backup.encryption_key.is_some() {
+            "gz.enc"
+        } else {
+            "gz"
+        };
+        let location = format!("s3://{}/backups/{}/{}.{}",
+            self.config.backup.bucket, Utc::now().format("%Y/%m/%d"), id, object_suffix);
+
+        self.upload_to_storage(&location, &stored_payload).await?;
 
         let completed_at = Utc::now();
         let duration_ms = (completed_at - started_at).num_milliseconds();
@@ -250,18 +282,18 @@ impl BackupService {
              checksum=$4, compression_ratio=$5, wal_start_lsn=$6, wal_end_lsn=$7,
              completed_at=$8, duration_ms=$9 WHERE id=$1"
         )
-        .bind(id).bind(compressed_size).bind(&location)
+        .bind(id).bind(stored_size).bind(&location)
         .bind(&checksum).bind(compression_ratio).bind(&wal_start).bind(&wal_end)
         .bind(completed_at).bind(duration_ms)
         .execute(&self.pool)
         .await
         .map_err(|e| format!("Update backup: {e}"))?;
 
-        info!(id = %id, size = compressed_size, duration_ms, "Backup completed");
+        info!(id = %id, size = stored_size, duration_ms, "Backup completed");
 
         Ok(Backup {
             id, backup_type: backup_type.to_string(),
-            status: "completed".into(), size_bytes: compressed_size,
+            status: "completed".into(), size_bytes: stored_size,
             tables_included: tables, location: Some(location),
             checksum: Some(checksum), encrypted: self.config.backup.encryption_key.is_some(),
             compressed: true, compression_ratio: Some(compression_ratio),
@@ -360,9 +392,14 @@ impl BackupService {
 
         let started = Utc::now();
 
-// Download backup from S3
+// Download backup from storage
         let location = backup.location.clone().ok_or("Backup location not set")?;
-        let compressed_data = self.download_from_storage(&location).await?;
+    let stored_payload = self.download_from_storage(&location).await?;
+    let compressed_data = decode_backup_payload(
+        stored_payload,
+        backup.encrypted,
+        self.config.backup.encryption_key.as_deref(),
+    )?;
 
 // Decompress the backup data
         use flate2::read::GzDecoder;
@@ -402,6 +439,56 @@ impl BackupService {
             verification: Some(verification),
             message: Some("Restore completed".into()),
         })
+    }
+
+/// Upload backup data to storage.
+    async fn upload_to_storage(&self, location: &str, data: &[u8]) -> Result<(), String> {
+        if let Some(path) = location.strip_prefix("s3://") {
+            let parts: Vec<&str> = path.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                return Err(format!("Invalid S3 location: {}", location));
+            }
+
+            let key = parts[1];
+            let local_dir = "/tmp/apexmail-backups";
+            tokio::fs::create_dir_all(local_dir)
+                .await
+                .map_err(|e| format!("Create local backup directory: {e}"))?;
+            let local_path = format!("{}/{}", local_dir, key.replace('/', "_"));
+            tokio::fs::write(&local_path, data)
+                .await
+                .map_err(|e| format!("Write local backup: {e}"))?;
+
+            if let Ok(base) = std::env::var("BACKUP_PRESIGNED_URL_BASE") {
+                let url = format!("{}/{}", base.trim_end_matches('/'), key);
+                let response = self
+                    .http_client
+                    .put(url)
+                    .body(data.to_vec())
+                    .send()
+                    .await
+                    .map_err(|e| format!("S3 upload failed: {e}"))?;
+
+                if !response.status().is_success() {
+                    return Err(format!("S3 upload returned status: {}", response.status()));
+                }
+            } else {
+                info!(path = %local_path, "Stored backup payload using local fallback path");
+            }
+
+            Ok(())
+        } else if let Some(path) = location.strip_prefix("file://") {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| format!("Create file backup directory: {e}"))?;
+            }
+            tokio::fs::write(path, data)
+                .await
+                .map_err(|e| format!("Write file backup: {e}"))
+        } else {
+            Err(format!("Unknown storage location scheme: {}", location))
+        }
     }
 
 /// Download backup data from S3/storage
@@ -778,8 +865,8 @@ mod tests {
     
 /// This test pool uses a fake connection string for unit tests only.
 /// For integration tests with a real database, see the integration test suite
-/// in tests/integration_backup.rs or use testcontainers.
-/// TODO:Add integration tests using testcontainers-rs for full backup/restore validation.
+/// in tests/integration_backup.rs or a real Postgres instance managed by
+/// testcontainers-rs.
     fn test_pool() -> PgPool {
         let _guard = test_runtime().enter();
         sqlx::postgres::PgPoolOptions::new()
@@ -924,6 +1011,27 @@ mod tests {
 
         let decrypted = decrypt_backup(&encrypted, &key).expect("Decryption should succeed");
         assert_eq!(decrypted.as_slice(), data);
+    }
+
+    #[test]
+    fn test_prepare_and_decode_backup_payload_roundtrip() {
+        let payload = b"compressed-backup-payload".to_vec();
+        let key = "12345678901234567890123456789012";
+
+        let stored = prepare_backup_payload(payload.clone(), Some(key)).unwrap();
+        assert_ne!(stored, payload);
+
+        let decoded = decode_backup_payload(stored, true, Some(key)).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn test_decode_backup_payload_requires_key_for_encrypted_backups() {
+        let payload = b"compressed-backup-payload".to_vec();
+        let stored = prepare_backup_payload(payload, Some("12345678901234567890123456789012")).unwrap();
+
+        let error = decode_backup_payload(stored, true, None).unwrap_err();
+        assert!(error.contains("BACKUP_ENCRYPTION_KEY"));
     }
 
     #[test]

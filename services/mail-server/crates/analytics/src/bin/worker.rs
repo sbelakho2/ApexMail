@@ -149,19 +149,31 @@ async fn main() -> anyhow::Result<()> {
 
 // Wait for shutdown signal (SIGINT or SIGTERM)
     {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
-        #[cfg(unix)]
-        let terminate = async {
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler")
-                .recv()
-                .await;
+        let ctrl_c = async {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => info!("received Ctrl+C"),
+                Err(e) => {
+                    error!("failed to install Ctrl+C handler: {e}");
+                    std::future::pending::<()>().await;
+                }
+            }
         };
+        #[cfg(unix)]
+        {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut terminate) => tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = terminate.recv() => info!("received SIGTERM"),
+                },
+                Err(e) => {
+                    error!("failed to install SIGTERM handler: {e}; falling back to Ctrl+C only");
+                    ctrl_c.await;
+                }
+            }
+        }
         #[cfg(not(unix))]
-        let terminate = std::future::pending::<()>();
-        tokio::select! {
-            _ = ctrl_c => info!("received Ctrl+C"),
-            _ = terminate => info!("received SIGTERM"),
+        {
+            ctrl_c.await;
         }
     }
     info!("Shutting down analytics worker");

@@ -63,14 +63,14 @@ public final class Templates {
     }
 
     /**
-     * Render a template with given data (dry-run — does not send).
+     * Render a template with given variables (dry-run — does not send).
      *
      * @param id    Template ID
      * @param data  Variable data map
      */
     public RenderResponse render(String id, Map<String, Object> data) {
         return client.request("POST", "/v1/templates/" + encode(id) + "/render",
-            Map.of("data", data != null ? data : Map.of()), RenderResponse.class);
+            Map.of("variables", data != null ? data : Map.of()), RenderResponse.class);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────

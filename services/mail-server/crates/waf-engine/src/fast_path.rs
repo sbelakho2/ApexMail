@@ -39,7 +39,7 @@ fn sqli_matcher() -> Option<&'static AhoCorasick> {
         AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostFirst)
-            .build(&patterns)
+            .build(patterns)
             .ok()
     }).as_ref()
 }
@@ -70,7 +70,7 @@ fn xss_matcher() -> Option<&'static AhoCorasick> {
         AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostFirst)
-            .build(&patterns)
+            .build(patterns)
             .ok()
     }).as_ref()
 }
@@ -101,7 +101,7 @@ fn cmdi_matcher() -> Option<&'static AhoCorasick> {
         AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostFirst)
-            .build(&patterns)
+            .build(patterns)
             .ok()
     }).as_ref()
 }

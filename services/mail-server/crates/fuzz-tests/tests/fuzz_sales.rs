@@ -3,7 +3,6 @@
 use fuzz_tests::*;
 use rand::Rng;
 use sales_autopilot::crm::CrmService;
-use sales_autopilot::enrichment::EnrichmentService;
 use sales_autopilot::inbox::InboxManager;
 use sales_autopilot::scrapers::WebScraper;
 use sales_autopilot::types::MessageCategory;
@@ -11,7 +10,6 @@ use sales_autopilot::types::MessageCategory;
 #[test]
 fn fuzz_lead_score_bounded() {
 // CrmService::score_lead must always return 0-100 for any inputs.
-    let mut rng = rand::thread_rng();
     for _ in 0..10_000 {
         let engagement = random_f64_range(-10.0, 10.0);
         let company_size = random_f64_range(-10.0, 10.0);

@@ -262,7 +262,7 @@ impl IncidentManager {
         }
 
         let db_incidents = IncidentRepo::list_active(&self.db, limit, offset).await?;
-        Ok(db_incidents
+        db_incidents
             .into_iter()
             .map(|i| {
                 let id = parse_incident_id(&i.id)?;
@@ -282,7 +282,7 @@ impl IncidentManager {
                     affected_services: i.affected_components,
                 })
             })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?)
+            .collect::<Result<Vec<_>, sqlx::Error>>()
     }
 
 /// Retrieve an incident by id from cache.

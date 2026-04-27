@@ -76,6 +76,7 @@ pub enum TrainingError {
 
 /// Trained Bayesian classifier model
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct BayesianModel {
 /// Word frequencies in spam
     spam_words: HashMap<String, u64>,
@@ -93,19 +94,6 @@ pub struct BayesianModel {
     vocab_size: u64,
 }
 
-impl Default for BayesianModel {
-    fn default() -> Self {
-        Self {
-            spam_words: HashMap::new(),
-            ham_words: HashMap::new(),
-            spam_count: 0,
-            ham_count: 0,
-            spam_total_words: 0,
-            ham_total_words: 0,
-            vocab_size: 0,
-        }
-    }
-}
 
 impl BayesianModel {
 /// Create a new empty model
@@ -556,7 +544,7 @@ mod tests {
         assert!(before_spam > 0, "Should have spam words");
         
 // Force pruning - this will remove words with count < 2
-        let pruned = model.prune_vocabulary();
+    let _pruned = model.prune_vocabulary();
         
 // Low-frequency words should be pruned (count < 2)
 // At minimum, the "common", "frequent", "repeated" should survive

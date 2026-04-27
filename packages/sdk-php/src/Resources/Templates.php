@@ -74,13 +74,13 @@ class Templates
     }
 
     /**
-     * Render a template with given data (preview / dry-run, does not send).
+     * Render a template with given variables (preview / dry-run, does not send).
      *
      * @param array $data  Key-value pairs that fill template variables
      */
     public function render(string $id, array $data = []): array
     {
-        return $this->client->request('POST', '/v1/templates/' . urlencode($id) . '/render', ['data' => $data]);
+        return $this->client->request('POST', '/v1/templates/' . urlencode($id) . '/render', ['variables' => $data]);
     }
 
 }

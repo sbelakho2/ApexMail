@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -49,6 +49,7 @@ pub trait EmailTransport: Send + Sync {
 
 /// Configuration passed to the transport layer per message.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct TransportConfig {
 /// Which dedicated IP to bind (SMTP only, ignored by SES).
     pub bind_ip: Option<String>,
@@ -60,16 +61,6 @@ pub struct TransportConfig {
     pub data_timeout: Option<Duration>,
 }
 
-impl Default for TransportConfig {
-    fn default() -> Self {
-        Self {
-            bind_ip: None,
-            dkim_selector: None,
-            helo_name: None,
-            data_timeout: None,
-        }
-    }
-}
 
 /// Result of a send operation.
 #[derive(Debug, Clone)]
@@ -128,7 +119,6 @@ impl From<sqlx::Error> for TransportError {
 /// Cached routing decision for a tenant.
 #[derive(Debug, Clone)]
 struct RoutingEntry {
-    tenant_id: Uuid,
 /// `true` → at least one active/warming dedicated IP exists.
     has_dedicated_ips: bool,
 /// The preferred dedicated IP to bind outgoing connections to.
@@ -281,7 +271,6 @@ impl TransportRouter {
         let mut entries = HashMap::with_capacity(rows.len());
         for (tid, has, ip, count) in rows {
             entries.insert(tid, RoutingEntry {
-                tenant_id: tid,
                 has_dedicated_ips: has,
                 preferred_ip: ip,
                 dedicated_ip_count: count,
@@ -317,7 +306,6 @@ impl TransportRouter {
         .await?;
 
         Ok(row.map(|(count, ip)| RoutingEntry {
-            tenant_id,
             has_dedicated_ips: count > 0,
             preferred_ip: ip,
             dedicated_ip_count: count as i32,
@@ -360,47 +348,6 @@ impl EmailTransport for RoutingTransport {
     fn name(&self) -> &'static str {
         "routing"
     }
-}
-
-// ─── Helper:check dedicated IP status directly ────────────────
-
-/// Quick check:does this tenant have any active or warming dedicated IPs?
-/// Used by rate limiter, analytics, etc. without needing a full router.
-pub async fn tenant_has_dedicated_ip(
-    db: &PgPool,
-    tenant_id: Uuid,
-) -> Result<bool, TransportError> {
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dedicated_ips
-         WHERE tenant_id = $1 AND status IN ('active', 'warming')",
-    )
-    .bind(tenant_id)
-    .fetch_one(db)
-    .await?;
-    Ok(count > 0)
-}
-
-/// Get the best dedicated IP for sending (active preferred over warming,
-/// then lowest daily send count). Used by `outbound-queue` IP rotation.
-pub async fn select_dedicated_ip(
-    db: &PgPool,
-    tenant_id: Uuid,
-) -> Result<Option<String>, TransportError> {
-    let ip: Option<(String,)> = sqlx::query_as(
-        "SELECT d.ip_address
-         FROM dedicated_ips d
-         LEFT JOIN ip_daily_usage u ON u.ip_address = d.ip_address
-             AND u.usage_date = CURRENT_DATE
-         WHERE d.tenant_id = $1 AND d.status IN ('active', 'warming')
-         ORDER BY
-             CASE d.status WHEN 'active' THEN 0 ELSE 1 END,
-             COALESCE(u.messages_sent, 0) ASC
-         LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(db)
-    .await?;
-    Ok(ip.map(|(addr,)| addr))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────

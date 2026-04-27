@@ -72,6 +72,12 @@ pub struct ImageSpec {
 
 pub struct GmailAnnotationsService;
 
+impl Default for GmailAnnotationsService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GmailAnnotationsService {
     pub fn new() -> Self {
         Self

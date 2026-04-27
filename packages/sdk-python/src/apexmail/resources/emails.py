@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from ..exceptions import ValidationError
+from ..exceptions import ApexMailError, ValidationError
 from ..models import Email, EmailListResponse, EmailStatus, SendEmailResponse
 
 if TYPE_CHECKING:
@@ -85,6 +85,29 @@ def _validate_batch_email(email: dict[str, Any], index: int) -> None:
         if not isinstance(reply_to, str):
             raise ValidationError(f'Email at index {index}: "reply_to" must be a string')
         _validate_email(reply_to, "reply_to")
+
+
+def _parse_batch_results(data: Any) -> list[SendEmailResponse]:
+    if not isinstance(data, dict):
+        raise ApexMailError(
+            "Invalid batch response: expected object payload",
+            code="INVALID_RESPONSE",
+        )
+
+    results = data.get("results")
+    if not isinstance(results, list):
+        raise ApexMailError(
+            "Invalid batch response: expected 'results' list",
+            code="INVALID_RESPONSE",
+        )
+
+    if not all(isinstance(item, dict) for item in results):
+        raise ApexMailError(
+            "Invalid batch response: each result must be an object",
+            code="INVALID_RESPONSE",
+        )
+
+    return [SendEmailResponse(**item) for item in results]
 
 
 class EmailsResource:
@@ -200,9 +223,6 @@ class EmailsResource:
         for index, email in enumerate(emails):
             _validate_batch_email(email, index)
 
-        for index, email in enumerate(emails):
-            _validate_batch_email(email, index)
-
         # Convert from_ to from in each email
         processed = []
         for email in emails:
@@ -212,7 +232,7 @@ class EmailsResource:
             processed.append(processed_email)
 
         data = self._client._request("POST", "/v1/messages/batch", json={"emails": processed})
-        return [SendEmailResponse(**item) for item in data.get("results", [])]
+        return _parse_batch_results(data)
 
     def get(self, email_id: str) -> Email:
         """
@@ -369,6 +389,9 @@ class AsyncEmailsResource:
         if len(emails) > _MAX_BATCH_SIZE:
             raise ValidationError(f'Maximum {_MAX_BATCH_SIZE} emails per batch, got {len(emails)}')
 
+        for index, email in enumerate(emails):
+            _validate_batch_email(email, index)
+
         processed = []
         for email in emails:
             processed_email = {**email}
@@ -377,7 +400,7 @@ class AsyncEmailsResource:
             processed.append(processed_email)
 
         data = await self._client._request("POST", "/v1/messages/batch", json={"emails": processed})
-        return [SendEmailResponse(**item) for item in data.get("results", [])]
+        return _parse_batch_results(data)
 
     async def get(self, email_id: str) -> Email:
         """Get email details by ID asynchronously."""

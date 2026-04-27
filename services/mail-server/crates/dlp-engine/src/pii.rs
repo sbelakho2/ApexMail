@@ -13,19 +13,21 @@
 //!
 //! ## Context-aware scanning (February 2026)
 //!
-//! The scanner now applies context modifiers based on surrounding text://! - **Negation phrases** ("not my", "don't use", "example", "test card") reduce
-//! risk scores by 75%
+//! The scanner now applies context modifiers based on surrounding text:
+//!
+//! - **Negation phrases** ("not my", "don't use", "example", "test card") reduce
+//!   risk scores by 75%
 //! - **Documentation context** ("documentation", "template", "placeholder")
-//! also reduces risk
+//!   also reduces risk
 //!
 //! ## Known limitations
 //!
-//! - **Image-based PII**:PII embedded in image attachments (screenshots,
-//! scanned documents) is not detected. An OCR preprocessing step would be
-//! needed to extract text before scanning.
-//! - **Phone false positives**:The phone regex can match sequences embedded
-//! in longer numeric strings. Context-aware detection (e.g., preceded by
-//! "call" or "phone") is not implemented.
+//! - **Image-based PII**: PII embedded in image attachments (screenshots,
+//!   scanned documents) is not detected. An OCR preprocessing step would be
+//!   needed to extract text before scanning.
+//! - **Phone false positives**: The phone regex can match sequences embedded
+//!   in longer numeric strings. Context-aware detection (e.g., preceded by
+//!   "call" or "phone") is not implemented.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -251,7 +253,7 @@ pub fn luhn_check(number: &str) -> bool {
         double = !double;
     }
 
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Redact a credit card number, keeping last 4 digits

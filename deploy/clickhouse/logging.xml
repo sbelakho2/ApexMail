@@ -1,8 +1,10 @@
 <clickhouse>
   <logger>
+    <!-- Keep the root logger at information to retain operational events without debug/trace log volume. -->
     <level>information</level>
     <log>/var/log/clickhouse-server/clickhouse-server.log</log>
     <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+    <!-- Bound on-disk retention for the mounted clickhouse_logs volume. -->
     <size>100M</size>
     <count>10</count>
   </logger>

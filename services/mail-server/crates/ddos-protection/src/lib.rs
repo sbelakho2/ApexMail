@@ -472,7 +472,7 @@ impl DdosProtector {
     fn get_or_create_reputation(&self, ip: &IpAddr) -> ReputationScore {
         self.reputation_db
             .entry(*ip)
-            .or_insert_with(ReputationScore::default)
+            .or_default()
             .clone()
     }
     
@@ -481,7 +481,7 @@ impl DdosProtector {
         let mut entry = self
             .reputation_db
             .entry(*ip)
-            .or_insert_with(ReputationScore::default);
+            .or_default();
         entry.score = entry.score.saturating_sub(amount);
         debug!(%ip, new_score = entry.score, "Reputation decreased");
     }

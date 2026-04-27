@@ -101,7 +101,7 @@ expect('send() returns message id', $resp['message']['id'] === 'msg_123');
 $client = new MockClient();
 $client->queueResponse(['message' => ['id' => 'msg_456', 'status' => 'queued', 'createdAt' => '2025-01-01']]);
 $client->emails->send([
-    'from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi',
+    'from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi', 'text' => 'Hi',
     'idempotency_key' => 'key-001',
 ]);
 expect('send() forwards idempotencyKey', $client->calls[0]['idempotencyKey'] === 'key-001');
@@ -266,7 +266,7 @@ $client->queueResponse(['html' => '<p>Hello Alice</p>', 'text' => 'Hello Alice']
 $resp = $client->templates->render('tpl_1', ['name' => 'Alice']);
 expect('templates.render() POST /v1/templates/{id}/render',
     $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/templates/tpl_1/render');
-expect('templates.render() body has data', $client->calls[0]['body']['data']['name'] === 'Alice');
+expect('templates.render() body has variables', $client->calls[0]['body']['variables']['name'] === 'Alice');
 expect('templates.render() returns html', $resp['html'] === '<p>Hello Alice</p>');
 
 // ── Suppression resource tests ────────────────────────────────────────────

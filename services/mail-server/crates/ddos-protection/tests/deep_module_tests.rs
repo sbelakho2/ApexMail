@@ -8,9 +8,7 @@
 //! 6. ML module (ml.rs) — online learning fixes
 //! 7. Cost-based limiter (cost_based.rs) — refill race fix
 
-use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ddos_protection::config::*;

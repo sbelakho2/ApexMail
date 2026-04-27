@@ -19,13 +19,3 @@ spec:
       targetPort: metrics
       protocol: TCP
   type: ClusterIP
----
-# ServiceAccount — no extra RBAC needed for the tracking service
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: tracking-service
-  namespace: apexmail
-  labels:
-    app.kubernetes.io/name: tracking-service
-automountServiceAccountToken: false

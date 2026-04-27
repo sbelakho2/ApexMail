@@ -144,16 +144,13 @@ impl CircuitBreakerService {
         circuit.total_calls += 1;
         circuit.last_success = Some(Utc::now());
 
-        match circuit.state {
-            CircuitState::HalfOpen => {
-                if circuit.success_count >= circuit.config.success_threshold as u64 {
-                    circuit.state = CircuitState::Closed;
-                    circuit.failure_count = 0;
-                    circuit.state_changed_at = Utc::now();
-                    info!(circuit = circuit_name, "Circuit closed after recovery");
-                }
+        if circuit.state == CircuitState::HalfOpen {
+            if circuit.success_count >= circuit.config.success_threshold as u64 {
+                circuit.state = CircuitState::Closed;
+                circuit.failure_count = 0;
+                circuit.state_changed_at = Utc::now();
+                info!(circuit = circuit_name, "Circuit closed after recovery");
             }
-            _ => {}
         }
         Ok(())
     }

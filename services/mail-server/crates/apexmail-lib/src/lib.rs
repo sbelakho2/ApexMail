@@ -3,6 +3,7 @@
 pub mod crypto;
 pub mod id;
 pub mod error_codes;
+pub mod http_error;
 pub mod cache;
 pub mod http_client;
 pub mod pii;
@@ -15,3 +16,4 @@ pub mod mfa;
 pub use crypto::{create_hmac_signature, timing_safe_compare, hash_api_key, hash_api_key_with_secret, verify_password, hash_password};
 pub use id::{generate_id, generate_api_key, generate_verification_token};
 pub use error_codes::ErrorCode;
+pub use http_error::{ErrorDetail, ErrorEnvelope};

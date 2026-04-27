@@ -325,7 +325,8 @@ mod adversarial_bypass_attempts {
     fn test_concat_bypass() {
         let input = format!("{}AT('sel','ect')", "CONC");
         let result = fast_path_check(&input);
-// Should detect concat(        assert!(result.has_sqli_patterns);
+// Should detect concat-based SQLi obfuscation.
+        assert!(result.has_sqli_patterns);
     }
 
 /// Stress test:many small matches

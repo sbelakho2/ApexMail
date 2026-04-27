@@ -773,7 +773,7 @@ mod bot_detection_unit_tests {
         let mut behavior = SessionBehavior::new(100);
         let eps: Vec<u64> = (0..10).map(|i| hash_ep(&format!("/api/ep{}", i))).collect();
 
-        for (i, ep) in eps.iter().cycle().take(50).enumerate() {
+        for (_i, ep) in eps.iter().cycle().take(50).enumerate() {
             behavior.record_request(*ep, "GET", false);
         }
 
@@ -942,7 +942,6 @@ mod fingerprint_fix_tests {
     use ddos_protection::config::ProtectorConfig;
     use ddos_protection::DdosProtector;
     use ddos_protection::RequestContext;
-    use std::net::IpAddr;
 
     fn make_ctx(ip: &str, fp: Option<&str>) -> RequestContext {
         RequestContext {

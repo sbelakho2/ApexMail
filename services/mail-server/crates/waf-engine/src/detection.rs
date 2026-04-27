@@ -100,7 +100,7 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
             if let Some(idx) = normalized_shell[pos..].find(meta) {
                 let abs = pos + idx;
 // Strip any repeated metachar chars (e.g. `|||` → skip extra `|`s)
-                let after_meta = normalized_shell[abs + meta.len()..].trim_start_matches(|c| c == '|' || c == '&' || c == ';');
+                let after_meta = normalized_shell[abs + meta.len()..].trim_start_matches(['|', '&', ';']);
                 if cmd_names.iter().any(|cmd| after_meta.starts_with(cmd)) {
                     return true;
                 }

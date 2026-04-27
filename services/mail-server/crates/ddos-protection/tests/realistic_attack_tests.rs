@@ -4,7 +4,6 @@
 //! the CODE is wrong, not the test. Tests are designed to find bugs, not
 //! to confirm happy paths.
 
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
@@ -205,7 +204,7 @@ mod smtp_attacks {
         let addr = ip(6);
 
 // Fill rate limit
-        for i in 0..3 {
+        for _i in 0..3 {
             tracker.register_connection(addr).unwrap();
             tracker.unregister_connection(&addr); // Close immediately
         }
@@ -563,7 +562,7 @@ mod bot_attacks {
 // Human:varied endpoints
         let mut human = SessionBehavior::new(100);
         let eps: Vec<u64> = (0..15).map(|i| hash_ep(&format!("/page/{}", i))).collect();
-        for (i, ep) in eps.iter().cycle().take(50).enumerate() {
+        for (_i, ep) in eps.iter().cycle().take(50).enumerate() {
             human.record_request(*ep, "GET", false);
         }
         let human_entropy = human.sequence_entropy();

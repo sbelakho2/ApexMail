@@ -739,7 +739,7 @@ mod tests {
         config.max_commands = 5;
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, config);
 
-        for i in 0..5 {
+        for _i in 0..5 {
 // NOOP is always valid from Connected state (except Quit)
             let _ = prot.process_command("NOOP");
         }

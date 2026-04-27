@@ -46,7 +46,6 @@ fn fuzz_sentiment_bounded() {
 // predict_unsubscribe_risk acts as our sentiment proxy — any inputs
 // must produce a value in [0.0, 1.0].
     let predictor = AnalyticsPredictor::new();
-    let mut rng = rand::thread_rng();
     for _ in 0..5_000 {
         let frequency = random_f64_range(0.0, 20.0);
         let engagement = random_f64_range(-1.0, 2.0); // intentionally out-of-range

@@ -216,7 +216,7 @@ async fn subject_analysis(
         .any(|w| subject.to_lowercase().contains(w));
 
     let mut score: f64 = 0.7;
-    if word_count >= 3 && word_count <= 10 {
+    if (3..=10).contains(&word_count) {
         score += 0.1;
     }
     if has_personalization {

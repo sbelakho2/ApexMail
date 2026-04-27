@@ -45,6 +45,8 @@ mod reputation_tests {
     fn test_default_reputation() {
         let rep = ReputationScore::new();
         assert_eq!(rep.score, 50);
+        assert!(rep.created_at <= rep.last_updated);
+        assert!(rep.events.is_empty());
     }
     
     #[test]
@@ -81,8 +83,6 @@ mod reputation_tests {
 /// ============================================================================
 #[cfg(test)]
 mod cost_based_tests {
-    use super::*;
-    
     #[derive(Debug, Clone, Default)]
     struct RequestCost {
         cpu_us: u32,
@@ -212,6 +212,7 @@ mod session_tests {
         let session = Session::new();
         assert_eq!(session.request_count, 0);
         assert_eq!(session.error_count, 0);
+        assert!(session.started_at.elapsed().as_secs() < 1);
     }
     
     #[test]
@@ -351,6 +352,25 @@ mod ja4_tests {
         let hash2 = truncated_sha256("input2", 12);
         assert_ne!(hash1, hash2);
     }
+
+    #[test]
+    fn test_ja4_fingerprint_struct_roundtrip() {
+        let fp = Ja4Fingerprint {
+            fingerprint: "t13d1516h2_8daaf6152771_b186095e22b6".into(),
+            protocol: 't',
+            sni: 'd',
+            cipher_count: 15,
+            extension_count: 16,
+            alpn: "h2".into(),
+        };
+
+        assert!(fp.fingerprint.starts_with("t13"));
+        assert_eq!(fp.protocol, 't');
+        assert_eq!(fp.sni, 'd');
+        assert_eq!(fp.cipher_count, 15);
+        assert_eq!(fp.extension_count, 16);
+        assert_eq!(fp.alpn, "h2");
+    }
 }
 
 /// ============================================================================
@@ -358,8 +378,6 @@ mod ja4_tests {
 /// ============================================================================
 #[cfg(test)]
 mod http2_tests {
-    use std::collections::BTreeMap;
-    
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum FrameType {
         Data,

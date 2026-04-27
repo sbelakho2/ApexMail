@@ -792,8 +792,18 @@ fn validate_usage_alert_channel(channel: &str) -> bool {
     matches!(channel, "email" | "webhook" | "both")
 }
 
+const DEFAULT_STRIPE_API_VERSION: &str = "2026-04-22.dahlia";
+
 fn stripe_api_base_url() -> String {
     std::env::var("STRIPE_API_BASE_URL").unwrap_or_else(|_| "https://api.stripe.com".into())
+}
+
+fn stripe_api_version() -> String {
+    std::env::var("STRIPE_API_VERSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_STRIPE_API_VERSION.into())
 }
 
 fn is_allowed_billing_redirect_url(url_string: &str, environment: crate::config::Environment) -> bool {
@@ -846,14 +856,14 @@ async fn stripe_form_post<T: DeserializeOwned>(
 ) -> Result<T, String> {
     let secret_key = std::env::var("STRIPE_SECRET_KEY")
         .map_err(|_| "Stripe secret key is not configured".to_string())?;
-    let mut request = client
-        .post(format!("{}{}", stripe_api_base_url(), path))
-        .bearer_auth(secret_key)
-        .form(form);
-
-    if let Some(idempotency_key) = idempotency_key {
-        request = request.header("Idempotency-Key", idempotency_key);
-    }
+    let request = build_stripe_form_request(
+        client,
+        path,
+        &secret_key,
+        &stripe_api_version(),
+        form,
+        idempotency_key,
+    );
 
     let response = request
         .send()
@@ -869,6 +879,27 @@ async fn stripe_form_post<T: DeserializeOwned>(
         .json::<T>()
         .await
         .map_err(|error| format!("Stripe response decode failed: {error}"))
+}
+
+fn build_stripe_form_request(
+    client: &reqwest::Client,
+    path: &str,
+    secret_key: &str,
+    api_version: &str,
+    form: &[(&str, String)],
+    idempotency_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let mut request = client
+        .post(format!("{}{}", stripe_api_base_url(), path))
+        .bearer_auth(secret_key)
+        .header("Stripe-Version", api_version)
+        .form(form);
+
+    if let Some(idempotency_key) = idempotency_key {
+        request = request.header("Idempotency-Key", idempotency_key);
+    }
+
+    request
 }
 
 async fn get_or_create_stripe_customer_id(
@@ -1036,9 +1067,83 @@ fn safe_export_date(value: &str) -> String {
         .collect()
 }
 
+fn admin_revenue_report_query(use_legacy_schema: bool) -> &'static str {
+    if use_legacy_schema {
+        r#"
+        SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.date), '[]'::json)
+        FROM (
+            SELECT
+                DATE_TRUNC('day', COALESCE(paid_at, created_at)) as date,
+                SUM(amount_cents) as total_revenue,
+                COUNT(*) as invoice_count,
+                0::bigint as total_tax,
+                currency
+            FROM invoices
+            WHERE status = 'paid' AND COALESCE(paid_at, created_at) >= $1 AND COALESCE(paid_at, created_at) < $2
+            GROUP BY DATE_TRUNC('day', COALESCE(paid_at, created_at)), currency
+            ORDER BY date
+        ) report_row
+        "#
+    } else {
+        r#"
+        SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.date), '[]'::json)
+        FROM (
+            SELECT
+                DATE_TRUNC('day', paid_at) as date,
+                SUM(total) as total_revenue,
+                COUNT(*) as invoice_count,
+                SUM(vat_total) as total_tax,
+                currency
+            FROM invoices
+            WHERE status = 'paid' AND paid_at >= $1 AND paid_at < $2
+            GROUP BY DATE_TRUNC('day', paid_at), currency
+            ORDER BY date
+        ) report_row
+        "#
+    }
+}
+
+fn admin_invoice_export_query(use_legacy_schema: bool) -> &'static str {
+    if use_legacy_schema {
+        r#"
+        SELECT COALESCE(json_agg(row_to_json(export_row) ORDER BY export_row.issued_at), '[]'::json)
+        FROM (
+            SELECT
+                i.invoice_number, i.tenant_id, t.name as tenant_name,
+                i.amount_cents as subtotal,
+                0::bigint as vat_total,
+                i.amount_cents as total,
+                i.currency,
+                i.status,
+                i.created_at as issued_at,
+                i.paid_at,
+                i.due_date as due_at
+            FROM invoices i
+            JOIN tenants t ON i.tenant_id = t.id
+            WHERE i.created_at >= $1 AND i.created_at < $2
+            ORDER BY i.created_at
+        ) export_row
+        "#
+    } else {
+        r#"
+        SELECT COALESCE(json_agg(row_to_json(export_row) ORDER BY export_row.issued_at), '[]'::json)
+        FROM (
+            SELECT
+                i.invoice_number, i.tenant_id, t.name as tenant_name,
+                i.subtotal, i.vat_total, i.total, i.currency,
+                i.status, i.issued_at, i.paid_at, i.due_at
+            FROM invoices i
+            JOIN tenants t ON i.tenant_id = t.id
+            WHERE i.issued_at >= $1 AND i.issued_at < $2
+            ORDER BY i.issued_at
+        ) export_row
+        "#
+    }
+}
+
 fn has_admin_access(auth: &AuthUser) -> bool {
     auth.scopes.iter().any(|scope| {
-        scope == "*" || scope == "billing:admin" || scope.starts_with("tenant:")
+        scope == "*" || scope == "billing:admin"
     })
 }
 
@@ -2093,18 +2198,24 @@ fn payg_pricing_payload(pricing: &PaygPricing) -> serde_json::Value {
     })
 }
 
-fn payg_cost_payload(pricing: &PaygPricing, emails_sent: u64, api_calls: u64) -> serde_json::Value {
-    let (email_cost_cents, api_cost_cents, total_cost_cents) = pricing.calculate(emails_sent, api_calls);
+fn payg_cost_payload(
+    pricing: &PaygPricing,
+    emails_sent: u64,
+    api_calls: u64,
+) -> Result<serde_json::Value, ApiError> {
+    let (email_cost_cents, api_cost_cents, total_cost_cents) = pricing
+        .calculate(emails_sent, api_calls)
+        .map_err(|err| ApiError::Validation(vec![err.to_string()]))?;
     let capped_total = total_cost_cents.max(MINIMUM_MONTHLY_CHARGE_CENTS);
 
-    serde_json::json!({
+    Ok(serde_json::json!({
         "emailCostCents": email_cost_cents,
         "apiCostCents": api_cost_cents,
         "totalCostCents": capped_total,
         "emailCostUsd": cents_to_usd_string(email_cost_cents),
         "apiCostUsd": cents_to_usd_string(api_cost_cents),
         "totalCostUsd": cents_to_usd_string(capped_total),
-    })
+    }))
 }
 
 async fn list_plans(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
@@ -2278,7 +2389,7 @@ async fn estimate_payg_cost(
             "emailsSent": emails_sent,
             "apiCalls": api_calls,
         },
-        "cost": payg_cost_payload(&pricing, emails_sent, api_calls),
+        "cost": payg_cost_payload(&pricing, emails_sent, api_calls)?,
         "pricing": payg_pricing_payload(&pricing),
     })))
 }
@@ -2313,7 +2424,7 @@ async fn get_payg_usage(
             "emailsSent": emails_sent,
             "apiCalls": api_calls,
         },
-        "cost": payg_cost_payload(&pricing, emails_sent, api_calls),
+        "cost": payg_cost_payload(&pricing, emails_sent, api_calls)?,
         "pricing": payg_pricing_payload(&pricing),
     })))
 }
@@ -3527,6 +3638,15 @@ async fn admin_create_invoice(
             .into_response());
     };
 
+    let mut tx = state.db.begin().await?;
+    let period_lock_key = format!("{}:{}", period_start.to_rfc3339(), period_end.to_rfc3339());
+
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
+        .bind(&tenant_id)
+        .bind(&period_lock_key)
+        .execute(&mut *tx)
+        .await?;
+
     let existing: Option<(String, String, String)> = sqlx::query_as(
         r#"
         SELECT id::text, invoice_number, status::text
@@ -3541,7 +3661,7 @@ async fn admin_create_invoice(
     .bind(&tenant_id)
     .bind(period_start)
     .bind(period_end)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
 
     if let Some((existing_invoice_id, invoice_number, status)) = existing {
@@ -3559,7 +3679,7 @@ async fn admin_create_invoice(
 
     let tenant_exists: Option<String> = sqlx::query_scalar("SELECT id FROM tenants WHERE id = $1")
         .bind(&tenant_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .await?;
     if tenant_exists.is_none() {
         return Ok((
@@ -3577,7 +3697,7 @@ async fn admin_create_invoice(
         "#,
     )
     .bind(&tenant_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await? {
         Some(address) => address,
         None => {
@@ -3683,8 +3803,10 @@ async fn admin_create_invoice(
     .bind(period_start)
     .bind(period_end)
     .bind(body.notes.clone())
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok((
         StatusCode::CREATED,
@@ -3732,27 +3854,22 @@ async fn admin_get_revenue_report(
         return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid startDate or endDate" }))).into_response());
     };
 
-    let report: serde_json::Value = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.date), '[]'::json)
-        FROM (
-            SELECT
-                DATE_TRUNC('day', paid_at) as date,
-                SUM(total) as total_revenue,
-                COUNT(*) as invoice_count,
-                SUM(tax_amount) as total_tax,
-                currency
-            FROM invoices
-            WHERE status = 'paid' AND paid_at >= $1 AND paid_at < $2
-            GROUP BY DATE_TRUNC('day', paid_at), currency
-            ORDER BY date
-        ) report_row
-        "#,
-    )
-    .bind(start_date)
-    .bind(end_date)
-    .fetch_one(&state.db)
-    .await?;
+    let report: serde_json::Value = match sqlx::query_scalar(admin_revenue_report_query(false))
+        .bind(start_date)
+        .bind(end_date)
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(report) => report,
+        Err(error) if is_postgres_error_code(&error, "42703") => {
+            sqlx::query_scalar(admin_revenue_report_query(true))
+                .bind(start_date)
+                .bind(end_date)
+                .fetch_one(&state.db)
+                .await?
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
@@ -3942,21 +4059,7 @@ async fn admin_export_billing_data(
     };
 
     let export_query = match export_type {
-        "invoices" => Some(
-            r#"
-            SELECT COALESCE(json_agg(row_to_json(export_row) ORDER BY export_row.issued_at), '[]'::json)
-            FROM (
-                SELECT
-                    i.invoice_number, i.tenant_id, t.name as tenant_name,
-                    i.subtotal, i.tax_amount, i.total, i.currency,
-                    i.status, i.issued_at, i.paid_at, i.due_date
-                FROM invoices i
-                JOIN tenants t ON i.tenant_id = t.id
-                WHERE i.issued_at >= $1 AND i.issued_at < $2
-                ORDER BY i.issued_at
-            ) export_row
-            "#,
-        ),
+        "invoices" => Some(admin_invoice_export_query(false)),
         "subscriptions" => Some(
             r#"
             SELECT COALESCE(json_agg(row_to_json(export_row) ORDER BY export_row.created_at), '[]'::json)
@@ -3997,11 +4100,22 @@ async fn admin_export_billing_data(
         return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid export type" }))).into_response());
     };
 
-    let data: serde_json::Value = sqlx::query_scalar(export_query)
+    let data: serde_json::Value = match sqlx::query_scalar(export_query)
         .bind(start_date_parsed)
         .bind(end_date_parsed)
         .fetch_one(&state.db)
-        .await?;
+        .await
+    {
+        Ok(data) => data,
+        Err(error) if export_type == "invoices" && is_postgres_error_code(&error, "42703") => {
+            sqlx::query_scalar(admin_invoice_export_query(true))
+                .bind(start_date_parsed)
+                .bind(end_date_parsed)
+                .fetch_one(&state.db)
+                .await?
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     if query.format.eq_ignore_ascii_case("json") {
         return Ok(Json(serde_json::json!({ "data": data })).into_response());
@@ -4034,6 +4148,17 @@ async fn admin_export_billing_data(
         use crate::ses_provider::SesIpProvider;
         use crate::state::AppStateInner;
 
+        fn initialize_billing_test_env() {
+            static INIT: std::sync::Once = std::sync::Once::new();
+            INIT.call_once(|| {
+                std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+                std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+                std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+                std::env::set_var("BILLING_COMPANY_IBAN", "EE381010220123456789");
+                std::env::set_var("BILLING_COMPANY_PHONE", "+3721234567");
+            });
+        }
+
         fn test_config() -> Config {
             Config {
                 port: 3000,
@@ -4050,12 +4175,14 @@ async fn admin_export_billing_data(
                 redis_port: 6379,
                 redis_password: None,
                 redis_db: 0,
+                redis_pool_max_size: 40,
                 jwt_private_key_pem: "BEGIN TEST".into(),
                 jwt_public_key_pem: "BEGIN TEST".into(),
                 jwt_expiry: Duration::from_secs(86_400),
                 api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
                 rate_limit_window_ms: 60_000,
                 rate_limit_max_requests: 1_000,
+                max_inflight_requests: 80,
                 cors_origins: vec!["*".into()],
                 trusted_proxies: vec![],
                 ui_web_hosts: vec!["app.apexmail.ee".into(), "127.0.0.1".into()],
@@ -4083,14 +4210,14 @@ async fn admin_export_billing_data(
                 sales_autopilot_base_url: "http://localhost:3010".into(),
                 internal_service_token: None,
                 tracking_secret_key: "test-tracking-secret-123456789012".into(),
+                billing_company_iban: "EE381010220123456789".into(),
+                billing_company_phone: "+3721234567".into(),
                 metrics_port: 9090,
             }
         }
 
         async fn test_router() -> Router {
-            std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
-            std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+            initialize_billing_test_env();
 
             let database_url = std::env::var("TEST_DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://apexmail:apexmail@127.0.0.1:5433/apexmail".into());
@@ -4136,11 +4263,11 @@ async fn admin_export_billing_data(
         }
 
         #[test]
-        fn billing_routes_admin_access_accepts_wildcard_and_billing_admin_scope() {
+        fn billing_routes_admin_access_rejects_tenant_only_scope() {
             assert!(has_admin_access(&auth_user(&["*"], "tenant_1")));
             assert!(has_admin_access(&auth_user(&["billing:admin"], "tenant_1")));
-            assert!(has_admin_access(&auth_user(&["tenant:*"], "tenant_1")));
-            assert!(has_admin_access(&auth_user(&["tenant:tenant_1"], "tenant_1")));
+            assert!(!has_admin_access(&auth_user(&["tenant:*"], "tenant_1")));
+            assert!(!has_admin_access(&auth_user(&["tenant:tenant_1"], "tenant_1")));
         }
 
         #[test]
@@ -4222,7 +4349,7 @@ async fn admin_export_billing_data(
 
     #[test]
     fn billing_routes_invoice_html_renderer_escapes_values_and_keeps_reverse_charge_note() {
-        std::env::set_var("BILLING_COMPANY_IBAN", "EE381010220123456789");
+        initialize_billing_test_env();
 
         let html = render_invoice_html(&sample_invoice());
 
@@ -4238,8 +4365,7 @@ async fn admin_export_billing_data(
 
     #[test]
     fn billing_routes_invoice_xml_renderer_escapes_values_and_includes_payment_fields() {
-        std::env::set_var("BILLING_COMPANY_IBAN", "EE381010220123456789");
-        std::env::set_var("BILLING_COMPANY_PHONE", "+3721234567");
+        initialize_billing_test_env();
 
         let xml = render_invoice_xml(&sample_invoice());
 
@@ -4250,6 +4376,17 @@ async fn admin_export_billing_data(
         assert!(xml.contains("PO-&lt;123&gt;"));
         assert!(xml.contains("<PayToAccount>EE381010220123456789</PayToAccount>"));
         assert!(xml.contains("<PhoneNumber>+3721234567</PhoneNumber>"));
+    }
+
+    #[test]
+    fn billing_routes_admin_invoice_queries_cover_current_and_legacy_schemas() {
+        assert!(admin_revenue_report_query(false).contains("SUM(vat_total) as total_tax"));
+        assert!(admin_revenue_report_query(true).contains("SUM(amount_cents) as total_revenue"));
+        assert!(admin_revenue_report_query(true).contains("0::bigint as total_tax"));
+
+        assert!(admin_invoice_export_query(false).contains("i.subtotal, i.vat_total, i.total, i.currency"));
+        assert!(admin_invoice_export_query(true).contains("i.amount_cents as subtotal"));
+        assert!(admin_invoice_export_query(true).contains("i.due_date as due_at"));
     }
 
     #[test]
@@ -4275,6 +4412,42 @@ async fn admin_export_billing_data(
             crate::config::Environment::Production,
         ));
     }
+
+    #[test]
+    fn billing_routes_stripe_request_builder_pins_api_version_and_idempotency() {
+        let request = build_stripe_form_request(
+            &reqwest::Client::new(),
+            "/v1/customers",
+            "sk_test_123",
+            DEFAULT_STRIPE_API_VERSION,
+            &[("email", "billing@example.com".to_string())],
+            Some("customer_create_tenant_123"),
+        )
+        .build()
+        .expect("request should build");
+
+        assert_eq!(request.url().as_str(), "https://api.stripe.com/v1/customers");
+        assert_eq!(
+            request
+                .headers()
+                .get("stripe-version")
+                .expect("stripe version header")
+                .to_str()
+                .expect("stripe version string"),
+            DEFAULT_STRIPE_API_VERSION,
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("idempotency-key")
+                .expect("idempotency key")
+                .to_str()
+                .expect("idempotency key string"),
+            "customer_create_tenant_123",
+        );
+        assert!(request.headers().get("authorization").is_some());
+    }
+
         #[tokio::test]
         async fn billing_routes_require_authentication_for_new_public_endpoints() {
             let app = test_router().await;

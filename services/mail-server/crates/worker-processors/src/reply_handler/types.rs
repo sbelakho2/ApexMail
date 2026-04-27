@@ -78,17 +78,21 @@ impl std::fmt::Display for ReplyClassification {
 /// Sentiment analysis result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Sentiment {
     Positive,
     Negative,
+    #[default]
     Neutral,
 }
 
 /// Urgency level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Urgency {
     High,
+    #[default]
     Medium,
     Low,
 }
@@ -125,17 +129,7 @@ pub struct ExtractedData {
     pub urgency: Urgency,
 }
 
-impl Default for Sentiment {
-    fn default() -> Self {
-        Self::Neutral
-    }
-}
 
-impl Default for Urgency {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
 
 /// Suggested action based on classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]

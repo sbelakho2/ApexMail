@@ -106,8 +106,7 @@ impl SendTimeOptimizer {
         .fetch_optional(&self.pool)
         .await?;
 
-        let age_days = first_event
-            .and_then(|(t,)| Some((Utc::now() - t).num_days() as u32))
+        let age_days = first_event.map(|(t,)| (Utc::now() - t).num_days() as u32)
             .unwrap_or(0);
 
         Ok(RecipientProfile {

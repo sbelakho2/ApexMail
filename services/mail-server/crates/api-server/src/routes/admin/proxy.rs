@@ -120,7 +120,7 @@ async fn proxy_request(
                     .split('.')
                     .nth(1)
                     .and_then(|s| s.parse::<u8>().ok())
-                    .map_or(false, |second| (16..=31).contains(&second)))
+                    .is_some_and(|second| (16..=31).contains(&second)))
 // Cloud metadata exact IPs
             || bare == "169.254.169.254"
             || bare == "metadata.google.internal"

@@ -101,11 +101,9 @@ class Client
             $headers = [
                 'X-API-Key: ' . $this->apiKey,
                 'Accept: application/json',
+                'Content-Type: application/json',
                 'User-Agent: apexmail-php/' . self::SDK_VERSION,
             ];
-            if ($body !== null) {
-                $headers[] = 'Content-Type: application/json';
-            }
             if ($idempotencyKey !== null) {
                 $headers[] = 'X-Idempotency-Key: ' . $idempotencyKey;
             }
@@ -117,7 +115,7 @@ class Client
             $ch = curl_init($url);
             curl_setopt_array($ch, [
                 CURLOPT_CUSTOMREQUEST  => strtoupper($method),
-                CURLOPT_RETURNTRANSFER => false,
+                CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_HTTPHEADER     => $headers,
                 CURLOPT_TIMEOUT        => $this->timeout,
                 CURLOPT_FOLLOWLOCATION => false,

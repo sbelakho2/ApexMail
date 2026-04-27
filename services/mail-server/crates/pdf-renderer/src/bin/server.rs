@@ -7,7 +7,7 @@
 
 use clap::Parser;
 use tracing::{info, warn};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 use pdf_renderer::pdf_router;
 

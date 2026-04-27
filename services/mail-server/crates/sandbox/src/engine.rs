@@ -216,7 +216,7 @@ impl SandboxEngine {
     pub fn any_rejected(verdicts: &[Result<SandboxVerdict, SandboxError>]) -> bool {
         verdicts.iter().any(|v| {
             matches!(v, Ok(v) if Self::is_rejected(v))
-                || matches!(v, Err(_))
+                || v.is_err()
         })
     }
 }

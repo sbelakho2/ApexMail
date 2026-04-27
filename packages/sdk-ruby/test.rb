@@ -225,7 +225,7 @@ t.queue_response({ 'html' => '<h1>Hello Alice</h1>', 'subject' => 'Welcome' })
 api = ApexMail::TemplatesAPI.new(t)
 resp = api.render('tpl_1', { name: 'Alice' })
 expect('render() POST /v1/templates/tpl_1/render', t.calls[0][:method] == 'POST' && t.calls[0][:path] == '/v1/templates/tpl_1/render')
-expect('render() body has data',                    t.calls[0][:body][:data][:name] == 'Alice')
+expect('render() body has variables',               t.calls[0][:body][:variables][:name] == 'Alice')
 expect('render() returns html',                     resp.key?('html'))
 
 # ── Suppression tests ─────────────────────────────────────────────────────

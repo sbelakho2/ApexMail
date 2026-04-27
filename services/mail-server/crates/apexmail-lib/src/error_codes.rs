@@ -94,6 +94,34 @@ impl ErrorCode {
 mod tests {
     use super::*;
 
+    const ALL_CODES: [ErrorCode; 25] = [
+        ErrorCode::Unauthorized,
+        ErrorCode::Forbidden,
+        ErrorCode::TokenExpired,
+        ErrorCode::TokenBlacklisted,
+        ErrorCode::InvalidApiKey,
+        ErrorCode::InsufficientScopes,
+        ErrorCode::ValidationError,
+        ErrorCode::InvalidInput,
+        ErrorCode::PayloadTooLarge,
+        ErrorCode::NullByteDetected,
+        ErrorCode::RateLimitExceeded,
+        ErrorCode::NotFound,
+        ErrorCode::Conflict,
+        ErrorCode::Gone,
+        ErrorCode::InternalError,
+        ErrorCode::ServiceUnavailable,
+        ErrorCode::RequestTimeout,
+        ErrorCode::GatewayTimeout,
+        ErrorCode::DomainNotVerified,
+        ErrorCode::SuppressionExists,
+        ErrorCode::WebhookDeliveryFailed,
+        ErrorCode::QuotaExceeded,
+        ErrorCode::InvalidTemplate,
+        ErrorCode::MessageCancelled,
+        ErrorCode::IdempotencyConflict,
+    ];
+
     #[test]
     fn test_error_code_display() {
         assert_eq!(ErrorCode::Unauthorized.to_string(), "UNAUTHORIZED");
@@ -114,20 +142,46 @@ mod tests {
 
     #[test]
     fn test_all_codes_have_valid_status() {
-        let codes = [
-            ErrorCode::Unauthorized, ErrorCode::Forbidden, ErrorCode::TokenExpired,
-            ErrorCode::TokenBlacklisted, ErrorCode::InvalidApiKey, ErrorCode::InsufficientScopes,
-            ErrorCode::ValidationError, ErrorCode::InvalidInput, ErrorCode::PayloadTooLarge,
-            ErrorCode::NullByteDetected, ErrorCode::RateLimitExceeded, ErrorCode::NotFound,
-            ErrorCode::Conflict, ErrorCode::Gone, ErrorCode::InternalError,
-            ErrorCode::ServiceUnavailable, ErrorCode::RequestTimeout, ErrorCode::GatewayTimeout,
-            ErrorCode::DomainNotVerified, ErrorCode::SuppressionExists,
-            ErrorCode::WebhookDeliveryFailed, ErrorCode::QuotaExceeded,
-            ErrorCode::InvalidTemplate, ErrorCode::MessageCancelled, ErrorCode::IdempotencyConflict,
-        ];
-        for code in codes {
+        for code in ALL_CODES {
             let status = code.http_status();
             assert!(status >= 400 && status < 600, "{}: {}", code, status);
+        }
+    }
+
+    #[test]
+    fn docs_error_reference_covers_canonical_error_codes() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../docs/api/errors.md");
+        let doc = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+
+        for code in ALL_CODES {
+            let rendered = code.to_string();
+            assert!(
+                doc.contains(&rendered),
+                "docs/api/errors.md is missing canonical error code {rendered}",
+            );
+        }
+
+        assert!(
+            doc.contains("BAD_REQUEST"),
+            "docs/api/errors.md is missing the api-server BAD_REQUEST fallback",
+        );
+
+        for legacy in [
+            "INVALID_TOKEN",
+            "TOKEN_REVOKED",
+            "INSUFFICIENT_SCOPE",
+            "ALL_RECIPIENTS_SUPPRESSED",
+            "INVALID_STATE",
+            "INVALID_STATUS",
+            "INVALID_ID",
+        ] {
+            let marker = format!("`{legacy}`");
+            assert!(
+                !doc.contains(&marker),
+                "docs/api/errors.md still contains stale legacy code {legacy}",
+            );
         }
     }
 }

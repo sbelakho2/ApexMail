@@ -7,3 +7,4 @@ crates/**/target/
 **/dist/
 **/.turbo/
 **/.DS_Store
+secrets/

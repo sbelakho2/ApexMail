@@ -458,7 +458,7 @@ mod tests {
         let mut behavior = SessionBehavior::new(100);
         let endpoints: Vec<u64> = (0..10).map(|i| hash_endpoint(&format!("/api/ep{}", i))).collect();
 
-        for (i, ep) in endpoints.iter().cycle().take(50).enumerate() {
+        for (_i, ep) in endpoints.iter().cycle().take(50).enumerate() {
 // Cycle through all 10 endpoints
             behavior.record_request(*ep, "GET", false);
         }

@@ -33,22 +33,26 @@ services:
     image: redis:7.4-alpine
     container_name: apexmail-redis
     restart: unless-stopped
-    command: >
-      sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$${REDIS_PASSWORD}\""
+    entrypoint: ["sh", "/usr/local/bin/redis-entrypoint.sh"]
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_MAXMEMORY: "256mb"
+      REDIS_MAXMEMORY_POLICY: "allkeys-lru"
     volumes:
       - redis_data:/data
+      - ./deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
+      test: ["CMD-SHELL", "export REDISCLI_AUTH=\"$(cat /run/secrets/redis_password 2>/dev/null || echo '')\"; redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 5
     networks:
       - apexmail_data
     security_opt: !override []
+    secrets:
+      - redis_password
 
 networks:
   apexmail_data:

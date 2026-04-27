@@ -11,7 +11,7 @@
 # =============================================================================
 
 # ── Stage 1: dependency cache ──────────────────────────────────────────────────
-FROM rust:1.82.0-slim-bookworm AS deps
+FROM rust:1.93.1-slim-bookworm AS deps
 
 # Build-time packages needed by ring / openssl-sys / etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,34 +24,12 @@ WORKDIR /build
 # Copy workspace manifest + lockfile first (invalidated only on dep changes)
 COPY services/mail-server/Cargo.toml  services/mail-server/Cargo.lock  ./
 
-# Re-create the crate tree with stub sources so cargo can resolve + compile deps
-# without touching the real application source.
-COPY services/mail-server/crates/mail-common/Cargo.toml   crates/mail-common/Cargo.toml
-COPY services/mail-server/crates/mail-proto/Cargo.toml    crates/mail-proto/Cargo.toml
-COPY services/mail-server/crates/mailstore-core/Cargo.toml crates/mailstore-core/Cargo.toml
-COPY services/mail-server/crates/outbound-queue/Cargo.toml crates/outbound-queue/Cargo.toml
-COPY services/mail-server/crates/smtp-edge/Cargo.toml     crates/smtp-edge/Cargo.toml
-COPY services/mail-server/crates/submission/Cargo.toml    crates/submission/Cargo.toml
-COPY services/mail-server/crates/tracking-service/Cargo.toml crates/tracking-service/Cargo.toml
+COPY services/mail-server/crates ./crates
 
-# Create minimal stub lib/main for every crate so cargo can pre-compile all deps
-RUN for crate in mail-common mail-proto mailstore-core outbound-queue smtp-edge submission; do \
-        mkdir -p crates/$crate/src && echo "// stub" > crates/$crate/src/lib.rs; \
-    done && \
-    mkdir -p crates/tracking-service/src && \
-    printf 'fn main() {}' > crates/tracking-service/src/main.rs
-
-# Compile deps only (the stub sources will be replaced in the next stage)
-RUN cargo build --release -p tracking-service
-# Remove stub artefacts so the real build re-compiles only the crate code
-RUN find target/release -name "tracking_service*" -not -path "*/deps/*" -delete && \
-    find target/release/deps -name "tracking_service*" -delete
+RUN cargo fetch --locked
 
 # ── Stage 2: real build ────────────────────────────────────────────────────────
 FROM deps AS builder
-
-# Overwrite stub sources with the actual workspace source
-COPY services/mail-server/crates ./crates/
 
 # Build the release binary – deps are already compiled, only crate code rebuilds
 RUN cargo build --release -p tracking-service

@@ -125,6 +125,8 @@ fn test_config() -> Config {
         github_client_id: None,
         github_client_secret: None,
         oauth_redirect_base_url: "http://localhost:3000".into(),
+        billing_company_iban: "EE381010220123456789".into(),
+        billing_company_phone: "+3721234567".into(),
         session_secret: "test-session-secret-1234567890ab".into(),
         impersonation_secret: "test-impersonation-secret-12345".into(),
         csrf_secret: "test-csrf-secret-1234567890abcd".into(),

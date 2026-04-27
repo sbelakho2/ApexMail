@@ -16,6 +16,17 @@ metadata:
   labels:
     app.kubernetes.io/name: apexmail
 data:
+  # ── API server ───────────────────────────────────────────────────────────
+  # Replace these example public URLs before applying this manifest.
+  environment: "production"
+  api-base-url: "https://app.example.invalid"
+  oauth-redirect-base-url: "https://app.example.invalid"
+  cors-origins: "https://app.example.invalid,https://admin.example.invalid"
+  db-host: "postgres.apexmail.svc.cluster.local"
+  db-port: "5432"
+  db-name: "apexmail"
+  db-user: "apexmail"
+
   # ── Redis ──────────────────────────────────────────────────────────────────
   redis-host: "redis.apexmail.svc.cluster.local"
   redis-port: "6379"
@@ -26,7 +37,7 @@ data:
   clickhouse-user: "apexmail"
 
   # ── Tracking service ───────────────────────────────────────────────────────
-  tracking-base-url: "https://track.apexmail.ee"
+  tracking-base-url: "https://track.example.invalid"
   trusted-proxies: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
   rate-limit-enabled: "true"
   rate-limit-max-per-minute: "1000"

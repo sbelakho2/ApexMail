@@ -295,7 +295,6 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
 
         let (pats, penalties, ids, descs): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) = patterns
             .into_iter()
-            .map(|(p, pen, id, desc)| (p, pen, id, desc))
             .multiunzip();
 
         let automaton = AhoCorasick::builder()

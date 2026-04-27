@@ -207,7 +207,7 @@ impl TenantService {
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"
         )
             .bind(&id).bind(name).bind(slug).bind(billing_email)
-            .bind(plan).bind("active").bind(&level.to_string())
+            .bind(plan).bind("active").bind(level.to_string())
             .bind(&schema_name).bind(Option::<String>::None)
             .bind(owner_id).bind(&settings).bind(&metadata)
             .bind(now).bind(now)

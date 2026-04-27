@@ -12,6 +12,15 @@ use url::Url;
 use super::types::{dns_cache_max_entries, dns_cache_ttl_secs, BLOCKED_HOSTNAMES};
 use crate::common::{ProcessorError, ProcessorResult};
 
+/// A webhook target that has passed SSRF checks and has a pinned set of resolved IPs.
+#[derive(Debug, Clone)]
+pub struct ResolvedWebhookTarget {
+    pub host: String,
+    pub port: u16,
+    pub resolved_ips: Vec<IpAddr>,
+    pub host_is_ip: bool,
+}
+
 /// DNS resolver with caching and SSRF protection.
 pub struct SsrfValidator {
     resolver: TokioAsyncResolver,
@@ -50,6 +59,14 @@ impl SsrfValidator {
 
 /// Validate a URL for safe webhook delivery.
     pub async fn validate_url(&self, url_str: &str) -> ProcessorResult<()> {
+        self.validate_and_resolve_url(url_str).await.map(|_| ())
+    }
+
+/// Validate a URL for safe webhook delivery and return a pinned resolution result.
+    pub async fn validate_and_resolve_url(
+        &self,
+        url_str: &str,
+    ) -> ProcessorResult<ResolvedWebhookTarget> {
         let url = Url::parse(url_str)
             .map_err(|e| ProcessorError::Job(format!("Invalid URL: {}", e)))?;
 
@@ -65,6 +82,10 @@ impl SsrfValidator {
                 url.scheme()
             )));
         }
+
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| ProcessorError::Job("URL has no known port for scheme".to_string()))?;
 
         let hostname = url
             .host_str()
@@ -86,7 +107,12 @@ impl SsrfValidator {
                     ip
                 )));
             }
-            return Ok(());
+            return Ok(ResolvedWebhookTarget {
+                host: hostname,
+                port,
+                resolved_ips: vec![ip],
+                host_is_ip: true,
+            });
         }
 
 // Resolve hostname and check all IPs
@@ -107,7 +133,12 @@ impl SsrfValidator {
             }
         }
 
-        Ok(())
+        Ok(ResolvedWebhookTarget {
+            host: hostname,
+            port,
+            resolved_ips: ips,
+            host_is_ip: false,
+        })
     }
 
 /// Check if hostname is in the blocklist.
@@ -364,5 +395,33 @@ mod tests {
 
         assert!(!validator.is_blocked_hostname("example.com"));
         assert!(!validator.is_blocked_hostname("api.stripe.com"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_and_resolve_url_public_ip_target() {
+        let validator = SsrfValidator::new().unwrap();
+        let resolved = validator
+            .validate_and_resolve_url("https://8.8.8.8/webhook")
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.host, "8.8.8.8");
+        assert_eq!(resolved.port, 443);
+        assert!(resolved.host_is_ip);
+        assert_eq!(resolved.resolved_ips, vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+    }
+
+    #[tokio::test]
+    async fn test_validate_and_resolve_url_blocks_private_ip_target() {
+        let validator = SsrfValidator::new().unwrap();
+        let err = validator
+            .validate_and_resolve_url("https://127.0.0.1/webhook")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("private IP") || msg.contains("internal/localhost"),
+            "unexpected error message: {msg}"
+        );
     }
 }

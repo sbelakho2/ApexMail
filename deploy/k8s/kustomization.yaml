@@ -20,11 +20,13 @@ resources:
   # Services
   - api-server/deployment.yaml
   - api-server/service.yaml
+  - api-server/serviceaccount.yaml
   - api-server/hpa.yaml
   - api-server/pdb.yaml
   - api-server/network-policy.yaml
   - tracking-service/deployment.yaml
   - tracking-service/service.yaml
+  - tracking-service/serviceaccount.yaml
   - tracking-service/hpa.yaml
   - tracking-service/pdb.yaml
   - tracking-service/network-policy.yaml

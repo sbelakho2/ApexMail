@@ -152,7 +152,7 @@ pub fn extract_data_attrs(html: &str) -> Vec<(String, String)> {
     while let Some(pos) = search.find("data-") {
 // Find the attribute name
         let name_end = search[pos..]
-            .find(|c: char| c == '=' || c == ' ' || c == '>' || c == '/')
+            .find(['=', ' ', '>', '/'])
             .unwrap_or(search[pos..].len());
         let name = &search[pos..pos + name_end];
 
@@ -180,7 +180,7 @@ pub fn extract_aria_attrs(html: &str) -> Vec<(String, String)> {
     let mut search = html;
     while let Some(pos) = search.find("aria-") {
         let name_end = search[pos..]
-            .find(|c: char| c == '=' || c == ' ' || c == '>' || c == '/')
+            .find(['=', ' ', '>', '/'])
             .unwrap_or(search[pos..].len());
         let name = &search[pos..pos + name_end];
 

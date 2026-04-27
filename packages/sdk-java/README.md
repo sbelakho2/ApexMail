@@ -22,6 +22,8 @@ implementation 'ee.apexmail:apexmail-java:1.0.0'
 
 ## Quick Start
 
+Use your real ApexMail API key in place of `am_live_xxxxxxxxxxxx`; the value shown below is a placeholder.
+
 ```java
 import ee.apexmail.ApexMail;
 import ee.apexmail.model.SendEmailResponse;

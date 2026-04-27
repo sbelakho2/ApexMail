@@ -985,7 +985,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         ],
         "notes": [
             "Last month volume: 52,000 emails. This month: 74,200 (growing).",
-            "PAYG billing: 0-10K at $0.001=$10 + 10K-74.2K at $0.0008=$51.36 = ~$61.36 estimated.",
+            "PAYG billing: 0-10K: 10,000 x $0.001 = $10; 10K-74.2K: 64,200 x $0.0008 = $51.36; total ~= $61.36.",
         ],
     },
 
@@ -1027,7 +1027,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "domains": ["bulksender.com: Verified (SPF: pass, DKIM: pass, DMARC: pass)"],
         "delivery": "Rate: 97.0%, Bounce rate: 1.5%, Complaint rate: 0.03%",
         "notes": [
-            "PAYG billing estimate: 10K×$0.001=$10 + 90K×$0.0008=$72 + 480K×$0.0005=$240 = $322 total",
+            "PAYG billing estimate: 0-10K: 10,000 x $0.001 = $10; 10K-100K: 90,000 x $0.0008 = $72; 100K-580K: 480,000 x $0.0005 = $240; total = $322.",
             "API overage: 150K extra at $0.10/1K = $15",
         ],
     },

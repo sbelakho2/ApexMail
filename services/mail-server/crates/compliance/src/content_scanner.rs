@@ -354,7 +354,7 @@ impl ContentScanner {
 // Fast pre-check:if combined regex doesn't match, skip text rules.
         let text_rules_may_match = FAST_SPAM_CHECK
             .as_ref()
-            .map_or(true, |regex| regex.is_match(&combined_text));
+            .is_none_or(|regex| regex.is_match(&combined_text));
 
         for rule in COMPILED_SPAM_RULES.iter() {
             match rule.target {
@@ -372,8 +372,8 @@ impl ContentScanner {
                     }
                 }
                 RuleTarget::Html => {
-                    if !html.is_empty() {
-                        if rule.regex.is_match(html) {
+                    if !html.is_empty()
+                        && rule.regex.is_match(html) {
                             score += rule.score;
                             triggers.push(SpamTrigger {
                                 rule: rule.name.into(),
@@ -381,7 +381,6 @@ impl ContentScanner {
                                 description: rule.description.into(),
                             });
                         }
-                    }
                 }
             }
         }
@@ -421,9 +420,9 @@ impl ContentScanner {
         }
 
 // Sender mismatch:check if From domain doesn't match Reply-To or visible domain
-        let from_domain = content.from_address.split('@').last().unwrap_or("");
+        let from_domain = content.from_address.split('@').next_back().unwrap_or("");
         if let Some(reply_to) = content.headers.get("Reply-To").or_else(|| content.headers.get("reply-to")) {
-            let reply_domain = reply_to.split('@').last().unwrap_or("").trim_end_matches('>');
+            let reply_domain = reply_to.split('@').next_back().unwrap_or("").trim_end_matches('>');
             if !from_domain.is_empty() && !reply_domain.is_empty() && from_domain != reply_domain {
                 score += 4.0;
                 triggers.push(SpamTrigger {
@@ -502,7 +501,7 @@ impl ContentScanner {
 // IP-based URL
             if IP_URL_REGEX
                 .as_ref()
-                .map_or(false, |regex| regex.is_match(url_str))
+                .is_some_and(|regex| regex.is_match(url_str))
             {
                 score += 15.0;
                 indicators.push(PhishingIndicator {
@@ -516,7 +515,7 @@ impl ContentScanner {
 // URL shortener
             if URL_SHORTENERS
                 .as_ref()
-                .map_or(false, |ac| ac.is_match(url_str))
+                .is_some_and(|ac| ac.is_match(url_str))
             {
                 score += 10.0;
                 indicators.push(PhishingIndicator {
@@ -530,7 +529,7 @@ impl ContentScanner {
 // Suspicious TLD
             if SUSPICIOUS_TLDS
                 .as_ref()
-                .map_or(false, |ac| ac.is_match(url_str))
+                .is_some_and(|ac| ac.is_match(url_str))
             {
                 score += 8.0;
                 indicators.push(PhishingIndicator {
@@ -577,7 +576,7 @@ impl ContentScanner {
 // Homograph detection
                     if HOMOGRAPH_REGEX
                         .as_ref()
-                        .map_or(false, |regex| regex.is_match(host))
+                        .is_some_and(|regex| regex.is_match(host))
                     {
                         score += 20.0;
                         indicators.push(PhishingIndicator {
@@ -667,7 +666,7 @@ impl ContentScanner {
 // Dangerous extension
             if DANGEROUS_EXTENSIONS
                 .as_ref()
-                .map_or(false, |ac| ac.is_match(&name_lower))
+                .is_some_and(|ac| ac.is_match(&name_lower))
             {
                 threats.push(MalwareThreat {
                     name: format!("Dangerous file type: {}", att.filename),
@@ -683,7 +682,7 @@ impl ContentScanner {
                 let last = format!(".{}", parts.last().unwrap_or(&""));
                 if DANGEROUS_EXTENSIONS
                     .as_ref()
-                    .map_or(false, |ac| ac.is_match(&last.to_lowercase()))
+                    .is_some_and(|ac| ac.is_match(&last.to_lowercase()))
                 {
                     threats.push(MalwareThreat {
                         name: format!("Double extension: {}", att.filename),
@@ -730,7 +729,7 @@ impl ContentScanner {
 // Macro-enabled documents
             if MACRO_EXTENSIONS
                 .as_ref()
-                .map_or(false, |ac| ac.is_match(&name_lower))
+                .is_some_and(|ac| ac.is_match(&name_lower))
             {
                 threats.push(MalwareThreat {
                     name: format!("Macro-enabled document: {}", att.filename),
@@ -776,7 +775,7 @@ impl ContentScanner {
 // Simplified physical address heuristic (US postal pattern)
         let has_address = PHYSICAL_ADDRESS_REGEX
             .as_ref()
-            .map_or(true, |regex| regex.is_match(&body_combined));
+            .is_none_or(|regex| regex.is_match(&body_combined));
         if !has_address {
             violations.push(PolicyViolation {
                 policy: "CAN-SPAM".into(),

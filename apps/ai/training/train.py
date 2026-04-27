@@ -8,7 +8,7 @@ Designed for 4× NVIDIA B200 (183 GB each) on vast.ai.
 Workflow:
     1. generate_dataset.py  → data/{train,val,test}.jsonl
     2. train.py             → output/  (LoRA adapter checkpoints)
-    3. export_onnx.py       → onnx_model/  (merged ONNX for prod)
+    3. Optional export step → handled by separate deployment tooling
     4. eval.py              → eval_results/ (golden-set evaluation)
 
 Usage:
@@ -25,6 +25,7 @@ import sys
 import time
 import logging
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
 
 import torch
@@ -130,9 +131,26 @@ def create_model(cfg: dict) -> AutoModelForCausalLM:
     return model
 
 
+def validate_lora_targets(model: AutoModelForCausalLM, target_modules: list[str]) -> None:
+    """Fail fast when config names modules that do not exist on the loaded model."""
+    module_names = [name for name, _ in model.named_modules()]
+    missing_targets = [
+        target
+        for target in target_modules
+        if not any(name == target or name.endswith(f".{target}") for name in module_names)
+    ]
+
+    if missing_targets:
+        raise ValueError(
+            "LoRA target_modules not found on the loaded model: "
+            + ", ".join(missing_targets)
+        )
+
+
 def create_lora(cfg: dict, model: AutoModelForCausalLM) -> AutoModelForCausalLM:
     """Apply LoRA adapter to the model."""
     lora_cfg = cfg["lora"]
+    validate_lora_targets(model, lora_cfg["target_modules"])
     peft_config = LoraConfig(
         r=lora_cfg["r"],
         lora_alpha=lora_cfg["alpha"],
@@ -222,37 +240,41 @@ def run_eval_after_training(
     total = 0
 
     with open(golden_path) as f:
-        golden = [json.loads(line) for line in f if line.strip()]
-
-    for item in golden[:50]:  # Cap at 50 for speed
-        messages = item["messages"][:2]  # system + user only
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=eval_cfg.get("max_new_tokens", 512),
-                temperature=eval_cfg.get("temperature", 0.1),
-                top_p=eval_cfg.get("top_p", 0.9),
-                do_sample=True,
-                pad_token_id=tokenizer.pad_token_id,
+        for item in islice((json.loads(line) for line in f if line.strip()), 50):
+            messages = item["messages"][:2]  # system + user only
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
             )
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-        response = tokenizer.decode(
-            outputs[0][inputs["input_ids"].shape[1]:],
-            skip_special_tokens=True,
-        ).strip()
+            with torch.inference_mode():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=eval_cfg.get("max_new_tokens", 512),
+                    temperature=eval_cfg.get("temperature", 0.1),
+                    top_p=eval_cfg.get("top_p", 0.9),
+                    do_sample=True,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
 
-        # Basic quality check: non-empty and not a repetition
-        expected = messages[1]["content"].lower()
-        if len(response) > 20 and not _is_degenerate(response):
-            correct += 1
-        total += 1
+            generated_tokens = outputs[0][inputs["input_ids"].shape[1]:].detach().cpu()
+            response = tokenizer.decode(
+                generated_tokens,
+                skip_special_tokens=True,
+            ).strip()
+
+            if len(response) > 20 and not _is_degenerate(response):
+                correct += 1
+            total += 1
+
+            del generated_tokens
+            del outputs
+            del inputs
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     pct = 100.0 * correct / total if total > 0 else 0
     console.print(f"  Quick eval: {correct}/{total} ({pct:.1f}%) non-degenerate responses")

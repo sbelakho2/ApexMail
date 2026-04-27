@@ -542,7 +542,7 @@ impl GdprAutomation {
                     tracing::error!(
                         error = %e,
                         tenant_id = %tenant_id,
-                        email = %mail_common::pii::redact_email(&email),
+                        email = %mail_common::pii::redact_email(email),
                         cascade_type = %cascade_type,
                         "GDPR VIOLATION: Failed to cascade consent withdrawal — manual intervention required"
                     );

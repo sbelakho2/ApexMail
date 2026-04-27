@@ -93,7 +93,7 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)

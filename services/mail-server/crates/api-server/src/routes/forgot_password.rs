@@ -3,13 +3,15 @@
 //! Validates email, rate-limits by IP, then delegates to password reset logic.
 
 use super::helpers::{hash_token, html_escape};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
 use crate::error::ApiError;
+use crate::middleware::rate_limiter::extract_public_client_ip;
 use crate::state::AppState;
 
 const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
@@ -34,6 +36,7 @@ pub struct ForgotPasswordResponse {
 
 async fn forgot_password(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Json(body): Json<ForgotPasswordRequest>,
 ) -> Result<Json<ForgotPasswordResponse>, ApiError> {
@@ -44,8 +47,18 @@ async fn forgot_password(
     }
 
 // Rate-limit by client IP using Redis
-    let client_ip = extract_client_ip(&headers)
-        .unwrap_or_else(|| "unknown".into());
+    let client_ip = connect_info
+        .map(|ConnectInfo(addr)| {
+            extract_public_client_ip(
+                &headers,
+                addr.ip(),
+                &state.config.trusted_proxies,
+            )
+        })
+        .unwrap_or_else(|| {
+            tracing::warn!("forgot-password request missing ConnectInfo; using shared rate-limit bucket");
+            "unknown".to_string()
+        });
 
     let rate_key = format!("apexmail:forgot_password_rate:{client_ip}");
     let window_secs: u64 = 15 * 60; // 15 minutes
@@ -180,32 +193,6 @@ fn percent_encode_component(input: &str) -> String {
 
 const HEX: [u8; 16] = *b"0123456789ABCDEF";
 
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-// Check X-Forwarded-For first
-    if let Some(xff) = headers.get("x-forwarded-for") {
-        if let Ok(val) = xff.to_str() {
-            if let Some(first) = val.split(',').next() {
-                let ip = first.trim();
-                if !ip.is_empty() {
-                    return Some(ip.to_string());
-                }
-            }
-        }
-    }
-
-// Check X-Real-IP
-    if let Some(real_ip) = headers.get("x-real-ip") {
-        if let Ok(val) = real_ip.to_str() {
-            let ip = val.trim();
-            if !ip.is_empty() {
-                return Some(ip.to_string());
-            }
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,20 +202,6 @@ mod tests {
         let json = r#"{"email":"user@example.com"}"#;
         let req: ForgotPasswordRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.email, "user@example.com");
-    }
-
-    #[test]
-    fn test_extract_client_ip_xff() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "10.0.0.1, 192.168.1.1".parse().unwrap());
-        assert_eq!(extract_client_ip(&headers), Some("10.0.0.1".into()));
-    }
-
-    #[test]
-    fn test_extract_client_ip_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", "10.0.0.2".parse().unwrap());
-        assert_eq!(extract_client_ip(&headers), Some("10.0.0.2".into()));
     }
 
     #[test]

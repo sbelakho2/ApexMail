@@ -4,9 +4,10 @@ import ast
 import json
 import os
 import sys
+from pathlib import Path
 
-os.chdir(os.path.dirname(__file__) or ".")
-sys.path.insert(0, ".")
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
 
 PASS = 0
 FAIL = 0
@@ -28,7 +29,7 @@ py_files = [
 ]
 for pf in py_files:
     try:
-        with open(pf) as f:
+        with open(SCRIPT_DIR / pf) as f:
             ast.parse(f.read())
         check(pf, True)
     except SyntaxError as e:
@@ -92,7 +93,7 @@ for stale in ["$29/mo", "$59/mo", "$129/mo", "$399/mo", "$1,299/mo"]:
 print("\n=== 6. Config File ===")
 try:
     import yaml
-    with open("config.yaml") as f:
+    with open(SCRIPT_DIR / "config.yaml") as f:
         cfg = yaml.safe_load(f)
     check("config.yaml loads", True)
     check("model.base present", "base" in cfg.get("model", {}))
@@ -103,10 +104,10 @@ except Exception as e:
 
 # ── 7. Data files ───────────────────────────────────────────────────
 print("\n=== 7. Data Files ===")
-data_dir = "../../../data"  # apps/ai/training → project root/data
+data_dir = (SCRIPT_DIR / "../../../data").resolve()  # apps/ai/training -> project root/data
 for df in ["train_agent.jsonl", "train.jsonl", "val.jsonl", "test.jsonl", "golden_qa.jsonl"]:
-    path = os.path.join(data_dir, df)
-    exists = os.path.exists(path)
+    path = data_dir / df
+    exists = path.exists()
     if exists:
         with open(path) as f:
             count = sum(1 for line in f if line.strip())
@@ -115,16 +116,16 @@ for df in ["train_agent.jsonl", "train.jsonl", "val.jsonl", "test.jsonl", "golde
         check(df, False, "file not found")
 
 # Split integrity
-train_c = sum(1 for l in open(os.path.join(data_dir, "train.jsonl")) if l.strip())
-val_c = sum(1 for l in open(os.path.join(data_dir, "val.jsonl")) if l.strip())
-test_c = sum(1 for l in open(os.path.join(data_dir, "test.jsonl")) if l.strip())
-total_c = sum(1 for l in open(os.path.join(data_dir, "train_agent.jsonl")) if l.strip())
+train_c = sum(1 for l in open(data_dir / "train.jsonl") if l.strip())
+val_c = sum(1 for l in open(data_dir / "val.jsonl") if l.strip())
+test_c = sum(1 for l in open(data_dir / "test.jsonl") if l.strip())
+total_c = sum(1 for l in open(data_dir / "train_agent.jsonl") if l.strip())
 check(f"Split integrity: {train_c}+{val_c}+{test_c}={train_c+val_c+test_c} == {total_c}",
       train_c + val_c + test_c == total_c)
 
 # ── 8. Golden QA format ─────────────────────────────────────────────
 print("\n=== 8. Golden QA Format ===")
-golden_path = os.path.join(data_dir, "golden_qa.jsonl")
+golden_path = data_dir / "golden_qa.jsonl"
 items = [json.loads(l) for l in open(golden_path) if l.strip()]
 check(f"golden_qa.jsonl: {len(items)} items", len(items) >= 50)
 all_valid = all(
@@ -135,6 +136,16 @@ all_valid = all(
     for item in items
 )
 check("All items have system+user+assistant", all_valid)
+all_non_empty = all(
+    all(str(message.get("content", "")).strip() for message in item["messages"])
+    for item in items
+)
+check("All golden QA messages have non-empty content", all_non_empty)
+all_expected_outputs = all(
+    str(item["messages"][2].get("content", "")).strip()
+    for item in items
+)
+check("All golden QA items include expected assistant outputs", all_expected_outputs)
 
 # ── Summary ─────────────────────────────────────────────────────────
 print(f"\n{'='*50}")

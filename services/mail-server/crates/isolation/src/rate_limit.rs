@@ -29,8 +29,8 @@ impl RateLimitService {
         let redis_key = format!("{}:{}", prefix, key);
         let now = Utc::now();
         let window_start = now - Duration::milliseconds(config.window_ms);
-        let now_ms = now.timestamp_millis() as i64;
-        let window_start_ms = window_start.timestamp_millis() as i64;
+        let now_ms = now.timestamp_millis();
+        let window_start_ms = window_start.timestamp_millis();
         let member = format!("{}:{}", now_ms, uuid::Uuid::new_v4());
 
         let mut conn = self.redis.get().await?;

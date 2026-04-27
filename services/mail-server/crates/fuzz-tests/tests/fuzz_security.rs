@@ -731,7 +731,7 @@ mod combined_fuzz {
                     rng.gen_range(1..255),
                 )),
                 method: "POST",
-                path: "/api/v1/send",
+                path: "/v1/messages",
                 query_string: None,
                 headers: &[("content-type".into(), "application/json".into())],
                 body: Some(&body),

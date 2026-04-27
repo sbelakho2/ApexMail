@@ -12,9 +12,7 @@ metadata:
   labels:
     app.kubernetes.io/name: api-server
     app.kubernetes.io/component: api
-    app.kubernetes.io/version: "1.0.0"
-  annotations:
-    config-checksum: ""
+    app.kubernetes.io/version: "REPLACE_TAG"
 spec:
   replicas: 2
   revisionHistoryLimit: 5
@@ -33,7 +31,7 @@ spec:
         app.kubernetes.io/component: api
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "3000"
+        prometheus.io/port: "9090"
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: api-server
@@ -48,24 +46,84 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: api-server
-          image: apexmail/api-server:latest
-          imagePullPolicy: Always
+          image: apexmail/api-server:REPLACE_TAG
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 3000
               protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
           env:
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: environment
             - name: HOST
               value: "0.0.0.0"
             - name: PORT
               value: "3000"
+            - name: METRICS_PORT
+              value: "9090"
             - name: RUST_LOG
               value: "info"
-            - name: DATABASE_URL
+            - name: BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: api-base-url
+            - name: OAUTH_REDIRECT_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: oauth-redirect-base-url
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: cors-origins
+            - name: BILLING_COMPANY_IBAN
               valueFrom:
                 secretKeyRef:
                   name: apexmail-secrets
-                  key: database-url
+                  key: billing-company-iban
+            - name: BILLING_COMPANY_PHONE
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: billing-company-phone
+            - name: TRUSTED_PROXIES
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: trusted-proxies
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: db-host
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: db-port
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: db-name
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: db-password
             - name: REDIS_HOST
               valueFrom:
                 configMapKeyRef:
@@ -86,6 +144,41 @@ spec:
                 secretKeyRef:
                   name: apexmail-secrets
                   key: tracking-secret-key
+            - name: JWT_PRIVATE_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: jwt-private-key-pem
+            - name: JWT_PUBLIC_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: jwt-public-key-pem
+            - name: API_KEY_HASH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: api-key-hash-secret
+            - name: WEBHOOK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: webhook-signing-secret
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: session-secret
+            - name: IMPERSONATION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: impersonation-secret
+            - name: CSRF_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: apexmail-secrets
+                  key: csrf-secret
           resources:
             requests:
               cpu: "250m"

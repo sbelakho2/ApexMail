@@ -5,9 +5,10 @@
 # =============================================================================
 # Dependency Cache Stage
 # =============================================================================
-FROM rust:1.82.0-slim-bookworm AS deps
+FROM rust:1.93.1-slim-bookworm AS deps
 
-WORKDIR /app
+WORKDIR /app/services/mail-server
+ENV CARGO_TARGET_DIR=/app/target
 
 # Install protobuf compiler for gRPC and native deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,8 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifests only (cacheable)
-COPY Cargo.toml Cargo.lock ./
-COPY crates/*/Cargo.toml crates/*/Cargo.toml
+COPY services/mail-server/Cargo.toml services/mail-server/Cargo.lock ./
+# This workspace relies on implicit src/lib.rs and src/main.rs targets, so
+# cargo metadata/fetch must see the full crate trees rather than manifests only.
+COPY services/mail-server/crates ./crates
 
 RUN cargo fetch --locked
 
@@ -27,7 +30,8 @@ RUN cargo fetch --locked
 # =============================================================================
 FROM deps AS builder
 
-COPY crates ./crates
+COPY docs /app/docs
+COPY apps/marketing-zola/public /app/apps/marketing-zola/public
 
 RUN cargo build --release
 
@@ -280,13 +284,12 @@ FROM runtime-base AS observability
 COPY --from=builder /app/target/release/observability-service /usr/local/bin/
 
 USER apexmail
-EXPOSE 3010
+EXPOSE 4400
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3010"]
+    CMD ["sh", "-c", "nc -z 127.0.0.1 4400"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "observability-service"]
-CMD ["--listen", "0.0.0.0:3010"]
 
 # =============================================================================
 # Ops Service

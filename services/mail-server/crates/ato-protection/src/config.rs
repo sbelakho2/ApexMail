@@ -170,11 +170,10 @@ impl AtoConfig {
         }
 
 // Production mode:require Redis or explicit opt-out
-        if self.deployment_mode == DeploymentMode::Production {
-            if self.redis_lockout_url.is_none() && !self.allow_single_node_mode {
+        if self.deployment_mode == DeploymentMode::Production
+            && self.redis_lockout_url.is_none() && !self.allow_single_node_mode {
                 return Err(AtoConfigError::RedisRequiredInProduction);
             }
-        }
 
         Ok(())
     }

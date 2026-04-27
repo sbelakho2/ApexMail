@@ -47,11 +47,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("database pool created");
 
 // ── Redis pool ──────────────────────────────────────────
-    let redis_cfg = deadpool_redis::Config::from_url(&config.redis_url());
+    let mut redis_cfg = deadpool_redis::Config::from_url(&config.redis_url());
+    redis_cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_max_size));
     let redis = redis_cfg
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .map_err(|e| anyhow::anyhow!("failed to create Redis pool: {e}"))?;
-    tracing::info!("redis pool created");
+    tracing::info!(max_size = config.redis_pool_max_size, "redis pool created");
 
 // ── AWS SES client ──────────────────────────────────────
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -81,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider, ip_provider);
+    let shutdown_state = state.clone();
 
 // ── Prometheus metrics recorder ─────────────────────────
     if config.metrics_port > 0 {
@@ -100,9 +102,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "listening");
 
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    shutdown_state.db.close().await;
+    tracing::info!("database pool closed");
 
     tracing::info!("server shut down gracefully");
     Ok(())

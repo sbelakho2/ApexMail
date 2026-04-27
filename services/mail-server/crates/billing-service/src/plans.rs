@@ -39,27 +39,31 @@ pub struct PlanUpsertInput {
 }
 
 /// All default plans shipped with ApexMail.
+fn free_plan_seed() -> PlanSeed {
+    PlanSeed {
+        name: "free",
+        display_name: "Free",
+        description: "Get started with basic email sending",
+        price_monthly: 0,
+        price_yearly: 0,
+        email_limit: 3_000,
+        api_call_limit: 50_000,
+        sort_order: 0,
+        features: PlanFeatures {
+            api_access: true,
+            max_sending_domains: 1,
+            max_retention_days: 7,
+            max_team_members: 1,
+            powered_by_footer: true,
+            support_level: SupportLevel::Community,
+            ..PlanFeatures::default()
+        },
+    }
+}
+
 pub fn default_plans() -> Vec<PlanSeed> {
     vec![
-        PlanSeed {
-            name: "free",
-            display_name: "Free",
-            description: "Get started with basic email sending",
-            price_monthly: 0,
-            price_yearly: 0,
-            email_limit: 3_000,
-            api_call_limit: 50_000,
-            sort_order: 0,
-            features: PlanFeatures {
-                api_access: true,
-                max_sending_domains: 1,
-                max_retention_days: 7,
-                max_team_members: 1,
-                powered_by_footer: true,
-                support_level: SupportLevel::Community,
-                ..PlanFeatures::default()
-            },
-        },
+        free_plan_seed(),
         PlanSeed {
             name: "starter",
             display_name: "Starter",
@@ -257,8 +261,7 @@ pub fn builtin_plan_seed(plan_name: Option<&str>) -> PlanSeed {
         .iter()
         .find(|plan| plan.name == preferred)
         .cloned()
-        .or_else(|| plans.iter().find(|plan| plan.name == "free").cloned())
-        .expect("builtin free plan must exist")
+    .unwrap_or_else(free_plan_seed)
 }
 
 pub fn builtin_quota_limits(plan_name: Option<&str>) -> (i64, i64) {

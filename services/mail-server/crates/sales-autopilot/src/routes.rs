@@ -89,7 +89,7 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().map_or(false, |p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -386,12 +386,12 @@ async fn list_inbox(
     Query(q): Query<InboxQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     use crate::types::MessageCategory;
-    let cat = q.category.and_then(|c| match c.as_str() {
-        "lead" => Some(MessageCategory::Lead),
-        "customer" => Some(MessageCategory::Customer),
-        "support" => Some(MessageCategory::Support),
-        "spam" => Some(MessageCategory::Spam),
-        _ => Some(MessageCategory::Other),
+    let cat = q.category.map(|c| match c.as_str() {
+        "lead" => MessageCategory::Lead,
+        "customer" => MessageCategory::Customer,
+        "support" => MessageCategory::Support,
+        "spam" => MessageCategory::Spam,
+        _ => MessageCategory::Other,
     });
     let msgs = if let Some(c) = cat {
         state.inbox.list_by_category(c)

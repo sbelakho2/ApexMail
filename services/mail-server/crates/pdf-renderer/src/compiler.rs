@@ -5,7 +5,7 @@
 //! 3. Export the document to PDF bytes via `typst-pdf`
 
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::world::{TypstWorld, WorldError};
 

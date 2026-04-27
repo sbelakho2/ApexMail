@@ -1,14 +1,18 @@
 //! Application builder — assembles all middleware and routes into an Axum `Router`.
 
 use base64::Engine;
+use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::{header::{CONTENT_TYPE, HOST}, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header::{self, ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST}, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use rand::RngCore;
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{BoxError, Json, Router};
 use serde::Deserialize;
 use std::time::Duration;
+use tower::limit::GlobalConcurrencyLimitLayer;
+use tower::load_shed::{error::Overloaded, LoadShedLayer};
+use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
@@ -20,9 +24,43 @@ use crate::middleware::{auth, idempotency, metrics, rate_limiter, request_logger
 use crate::routes;
 use crate::state::AppState;
 
+async fn handle_backpressure_error(error: BoxError) -> Response {
+    if error.is::<Overloaded>() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "SERVICE_OVERLOADED",
+                    "message": "too many concurrent requests"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    tracing::error!(error = %error, "unexpected backpressure middleware error");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({
+            "error": {
+                "code": "INTERNAL_SERVER_ERROR",
+                "message": "request middleware failed"
+            }
+        })),
+    )
+        .into_response()
+}
+
 /// Build the complete Axum application with all middleware and routes.
 pub fn build_app(state: AppState) -> Router {
 // ── CORS ────────────────────────────────────────────────
+    let allowed_headers = [
+        ACCEPT,
+        AUTHORIZATION,
+        CONTENT_TYPE,
+        header::HeaderName::from_static("x-api-key"),
+        header::HeaderName::from_static("x-csrf-token"),
+    ];
     let cors = if state.config.cors_origins.iter().any(|o| o == "*") {
         CorsLayer::new()
             .allow_origin(Any)
@@ -34,7 +72,7 @@ pub fn build_app(state: AppState) -> Router {
                 Method::PATCH,
                 Method::OPTIONS,
             ])
-            .allow_headers(Any)
+            .allow_headers(allowed_headers.clone())
             .max_age(Duration::from_secs(86400))
     } else {
         let origins: Vec<HeaderValue> = state
@@ -43,9 +81,7 @@ pub fn build_app(state: AppState) -> Router {
             .iter()
             .filter_map(|o| o.parse::<HeaderValue>().ok())
             .collect();
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_credentials(true)
+        let cors = CorsLayer::new()
             .allow_methods([
                 Method::GET,
                 Method::POST,
@@ -54,8 +90,14 @@ pub fn build_app(state: AppState) -> Router {
                 Method::PATCH,
                 Method::OPTIONS,
             ])
-            .allow_headers(Any)
-            .max_age(Duration::from_secs(86400))
+            .allow_headers(allowed_headers)
+            .max_age(Duration::from_secs(86400));
+
+        if origins.is_empty() {
+            cors
+        } else {
+            cors.allow_origin(origins).allow_credentials(true)
+        }
     };
 
 // ── Public routes (no auth) ─────────────────────────────
@@ -145,6 +187,13 @@ pub fn build_app(state: AppState) -> Router {
         ));
 
 // ── Assemble ────────────────────────────────────────────
+    let overload_protection = ServiceBuilder::new()
+        .layer(HandleErrorLayer::new(handle_backpressure_error))
+        .layer(LoadShedLayer::new())
+        .layer(GlobalConcurrencyLimitLayer::new(
+            state.config.max_inflight_requests,
+        ));
+
     Router::new()
         .merge(public)
         .merge(authenticated)
@@ -152,6 +201,7 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(null_byte_check))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn(request_logger::request_logger))
+        .layer(overload_protection)
 // Prometheus request metrics — placed after the router so MatchedPath is
 // available from extensions, but before compression/timeout so the
 // recorded duration is accurate end-to-end.
@@ -434,7 +484,9 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, Request};
     use deadpool_redis::Config as RedisConfig;
     use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
     use std::sync::Once;
+    use tokio::sync::Notify;
     use tower::ServiceExt;
 
     use crate::ses_provider::SesIpProvider;
@@ -519,12 +571,14 @@ mod tests {
             redis_port: 6379,
             redis_password: None,
             redis_db: 0,
+            redis_pool_max_size: 40,
             jwt_private_key_pem: "BEGIN TEST".into(),
             jwt_public_key_pem: "BEGIN TEST".into(),
             jwt_expiry: Duration::from_secs(86400),
             api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
             rate_limit_window_ms: 60000,
             rate_limit_max_requests: 1000,
+            max_inflight_requests: 80,
             cors_origins: vec!["*".into()],
             trusted_proxies: vec![],
             ui_web_hosts: vec!["app.apexmail.ee".into(), "127.0.0.1".into()],
@@ -552,8 +606,64 @@ mod tests {
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
+            billing_company_iban: "EE381010220123456789".into(),
+            billing_company_phone: "+3721234567".into(),
             metrics_port: 9090,
         }
+    }
+
+    #[derive(Clone)]
+    struct SlowRouteState {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    async fn slow_route_handler(
+        axum::extract::State(state): axum::extract::State<SlowRouteState>,
+    ) -> &'static str {
+        state.entered.notify_one();
+        state.release.notified().await;
+        "ok"
+    }
+
+    #[tokio::test]
+    async fn overload_protection_rejects_excess_inflight_requests() {
+        let state = SlowRouteState {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        let app = Router::new()
+            .route("/slow", get(slow_route_handler))
+            .with_state(state.clone())
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_backpressure_error))
+                    .layer(LoadShedLayer::new())
+                    .layer(GlobalConcurrencyLimitLayer::new(1)),
+            );
+
+        let first_app = app.clone();
+        let first_state = state.clone();
+        let first_response = tokio::spawn(async move {
+            first_app
+                .oneshot(Request::builder().uri("/slow").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        });
+
+        first_state.entered.notified().await;
+
+        let overload_response = app
+            .oneshot(Request::builder().uri("/slow").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(overload_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response_json(overload_response).await["error"]["code"], "SERVICE_OVERLOADED");
+
+        state.release.notify_waiters();
+
+        let first_response = first_response.await.unwrap();
+        assert_eq!(first_response.status(), StatusCode::OK);
     }
 
     #[test]
@@ -922,5 +1032,51 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path} should stay registered as POST-only");
         }
+    }
+
+    #[tokio::test]
+    async fn cookie_backed_auth_flows_require_csrf_on_unsafe_requests() {
+        let app = test_app().await;
+
+        for path in ["/v1/auth/logout", "/api/auth/logout"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("cookie", "am_session=session.jwt")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path} should reject cookie logout without CSRF");
+        }
+
+        for path in ["/v1/auth/refresh", "/api/auth/refresh"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("cookie", "am_session=session.jwt")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path} should reject cookie refresh without CSRF");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/auth/change-password")
+                    .header("cookie", "am_session=session.jwt")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"current_password":"old","new_password":"NewPassword123!"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "/v1/auth/change-password should reject cookie-authenticated writes without CSRF");
     }
 }

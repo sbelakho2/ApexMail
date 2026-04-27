@@ -74,7 +74,7 @@ impl WafEngine {
 
 // Check IP-level allow-lists — IP allowlist = full bypass (trusted internal scanners etc.)
         let ip_str = req.client_ip.to_string();
-        if self.config.allowlist_ips.iter().any(|a| *a == ip_str) {
+        if self.config.allowlist_ips.contains(&ip_str) {
             return ThreatInfo {
                 total_score: 0,
                 matches: Vec::new(),
@@ -319,7 +319,7 @@ impl WafEngine {
             }
             if let Some(qs) = req.query_string {
                 for pair in qs.split('&') {
-                    let value = pair.splitn(2, '=').nth(1).unwrap_or("");
+                    let value = pair.split_once('=').map(|x| x.1).unwrap_or("");
                     let decoded = decoder::canonicalize_input(
                         value, self.config.max_decode_depth, self.config.enable_unicode_normalization,
                     );
@@ -336,7 +336,7 @@ impl WafEngine {
             all_matches.extend(detection::analyze_ssrf(&decoded_path, MatchLocation::Path));
             if let Some(qs) = req.query_string {
                 for pair in qs.split('&') {
-                    let value = pair.splitn(2, '=').nth(1).unwrap_or("");
+                    let value = pair.split_once('=').map(|x| x.1).unwrap_or("");
                     let decoded = decoder::canonicalize_input(
                         value, self.config.max_decode_depth, self.config.enable_unicode_normalization,
                     );

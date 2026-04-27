@@ -123,7 +123,7 @@ async fn fuzz_warmup_schedule_valid() {
         );
 
 // Advance through all days and verify monotonic increase
-        let mut prev_volume = schedule.current_volume;
+    let prev_volume = schedule.current_volume;
         for _ in 0..days {
             manager.advance_day_sync(&ip);
         }

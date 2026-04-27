@@ -24,7 +24,7 @@ impl QueryEngine {
             "timestamp >= $2".to_string(),
             "timestamp < $3".to_string(),
         ];
-        let has_event_filter = query.event_types.as_ref().map_or(false, |t| !t.is_empty());
+        let has_event_filter = query.event_types.as_ref().is_some_and(|t| !t.is_empty());
         if has_event_filter {
             conditions.push("event_type = ANY($5::text[])".to_string());
         }

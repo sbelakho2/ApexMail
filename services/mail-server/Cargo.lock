@@ -2318,6 +2318,7 @@ dependencies = [
  "hex",
  "hmac",
  "hyper 1.8.1",
+ "mail-common",
  "reqwest",
  "serde",
  "serde_json",

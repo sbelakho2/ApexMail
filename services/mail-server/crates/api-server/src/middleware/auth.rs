@@ -1,9 +1,12 @@
 //! Authentication extractors for Axum.
 //!
-//! Supports two authentication methods://! 1. **API Key** — `X-API-Key` header, SHA-256 hashed, DB lookup (Redis-cached 60 s).
-//! 2. **JWT Bearer** — `Authorization:Bearer <token>`, RS256, extracts claims.
+//! Supports three authentication methods:
+//! 1. **API Key** — `X-API-Key` header, SHA-256 hashed, DB lookup (Redis-cached 60 s).
+//! 2. **JWT Bearer** — `Authorization: Bearer <token>`, RS256, extracts claims.
+//! 3. **Session Cookie** — `am_session` cookie, RS256, with CSRF checks on unsafe methods.
 
 use axum::extract::FromRequestParts;
+use axum::http::{HeaderMap, Method};
 use axum::http::request::Parts;
 use chrono::{DateTime, Utc};
 use deadpool_redis::redis::{self, AsyncCommands};
@@ -11,6 +14,7 @@ use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
+use crate::routes::{csrf::validate_csrf_token, helpers::extract_cookie};
 use crate::state::AppState;
 
 // ─── AuthUser ──────────────────────────────────────────────────
@@ -45,11 +49,74 @@ const API_KEY_CACHE_PREFIX: &str = "apexmail:api_key_cache:";
 const USER_STATUS_CACHE_TTL: u64 = 15; // seconds
 const USER_STATUS_CACHE_PREFIX: &str = "apexmail:user_status:";
 const USER_STATUS_CACHE_MISSING: &str = "__missing__";
+const SESSION_COOKIE_NAME: &str = "am_session";
+const CSRF_COOKIE_NAME: &str = "csrf_token";
+const CSRF_HEADER_NAME: &str = "x-csrf-token";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthMechanism {
+    ApiKey,
+    BearerToken,
+    SessionCookie,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CachedUserStatus {
     Missing,
     Present(String),
+}
+
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    let auth = headers.get("authorization")?.to_str().ok()?;
+    let mut parts = auth.splitn(2, ' ');
+    let scheme = parts.next()?.trim();
+    let token = parts.next().unwrap_or("").trim();
+    if scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_auth_credential(headers: &HeaderMap) -> Option<(AuthMechanism, String)> {
+    if let Some(api_key) = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some((AuthMechanism::ApiKey, api_key.to_string()));
+    }
+
+    if let Some(token) = extract_bearer_token(headers) {
+        return Some((AuthMechanism::BearerToken, token));
+    }
+
+    extract_cookie(headers, SESSION_COOKIE_NAME)
+        .filter(|token| !token.is_empty())
+        .map(|token| (AuthMechanism::SessionCookie, token))
+}
+
+fn requires_csrf(method: &Method, mechanism: AuthMechanism) -> bool {
+    mechanism == AuthMechanism::SessionCookie
+        && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE)
+}
+
+pub(crate) fn validate_session_csrf(headers: &HeaderMap, csrf_secret: &str) -> Result<(), ApiError> {
+    let cookie_token = extract_cookie(headers, CSRF_COOKIE_NAME)
+        .ok_or_else(|| ApiError::Forbidden("missing CSRF cookie".into()))?;
+    let header_token = headers
+        .get(CSRF_HEADER_NAME)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::Forbidden("missing X-CSRF-Token header".into()))?;
+
+    if header_token != cookie_token {
+        return Err(ApiError::Forbidden("CSRF token mismatch".into()));
+    }
+
+    validate_csrf_token(header_token, csrf_secret)
 }
 
 // ─── Extractor ─────────────────────────────────────────────────
@@ -63,28 +130,22 @@ impl FromRequestParts<AppState> for AuthUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
+        let Some((mechanism, credential)) = extract_auth_credential(headers) else {
+            return Err(ApiError::Unauthorized(
+                "missing authentication: provide X-API-Key, Authorization: Bearer <token>, or an am_session cookie".into(),
+            ));
+        };
 
-// 1. Try X-API-Key header first
-        if let Some(api_key) = headers
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-        {
-            return authenticate_api_key(api_key, state).await;
+        if requires_csrf(&parts.method, mechanism) {
+            validate_session_csrf(headers, &state.config.csrf_secret)?;
         }
 
-// 2. Fall back to Bearer JWT
-        if let Some(auth_header) = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(token) = auth_header.strip_prefix("Bearer ") {
-                return authenticate_jwt(token.trim(), state).await;
+        match mechanism {
+            AuthMechanism::ApiKey => authenticate_api_key(&credential, state).await,
+            AuthMechanism::BearerToken | AuthMechanism::SessionCookie => {
+                authenticate_jwt(&credential, state).await
             }
         }
-
-        Err(ApiError::Unauthorized(
-            "missing authentication: provide X-API-Key or Authorization: Bearer <token>".into(),
-        ))
     }
 }
 
@@ -523,6 +584,67 @@ mod tests {
         let json = serde_json::to_string(&claims).unwrap();
         let decoded: JwtClaims = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.scopes, claims.scopes);
+    }
+
+    #[test]
+    fn test_extract_auth_credential_prefers_api_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "key_123".parse().unwrap());
+        headers.insert("authorization", "Bearer jwt.123".parse().unwrap());
+        headers.insert("cookie", "am_session=session.jwt".parse().unwrap());
+
+        assert_eq!(
+            extract_auth_credential(&headers),
+            Some((AuthMechanism::ApiKey, "key_123".into()))
+        );
+    }
+
+    #[test]
+    fn test_extract_auth_credential_accepts_session_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", "other=1; am_session=session.jwt".parse().unwrap());
+
+        assert_eq!(
+            extract_auth_credential(&headers),
+            Some((AuthMechanism::SessionCookie, "session.jwt".into()))
+        );
+    }
+
+    #[test]
+    fn test_validate_session_csrf_requires_matching_cookie_and_header() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let secret = "test-csrf-secret-1234567890abcd";
+        let nonce = format!("{}:{}", Utc::now().timestamp_millis(), uuid::Uuid::new_v4());
+        let nonce_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            nonce.as_bytes(),
+        );
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(nonce.as_bytes());
+        let sig = mac.finalize().into_bytes();
+        let sig_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            &sig,
+        );
+        let token = format!("{nonce_b64}.{sig_b64}");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            format!("am_session=session.jwt; csrf_token={token}").parse().unwrap(),
+        );
+        headers.insert(CSRF_HEADER_NAME, token.parse().unwrap());
+
+        assert!(validate_session_csrf(&headers, secret).is_ok());
+
+        headers.insert(CSRF_HEADER_NAME, "different-token".parse().unwrap());
+        assert!(matches!(
+            validate_session_csrf(&headers, secret),
+            Err(ApiError::Forbidden(message)) if message == "CSRF token mismatch"
+        ));
     }
 
 // ── RBAC Security Regression Tests ─────────────────────────

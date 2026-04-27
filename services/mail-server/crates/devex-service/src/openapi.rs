@@ -120,22 +120,22 @@ impl OpenApiGenerator {
         vec![
             EndpointSummary {
                 method: "POST".into(),
-                path: "/v1/emails".into(),
-                summary: "Send an email".into(),
+                path: "/v1/messages".into(),
+                summary: "Send a message".into(),
                 tag: "Emails".into(),
                 deprecated: false,
             },
             EndpointSummary {
                 method: "POST".into(),
-                path: "/v1/emails/batch".into(),
-                summary: "Send batch emails".into(),
+                path: "/v1/messages/batch".into(),
+                summary: "Send batch messages".into(),
                 tag: "Emails".into(),
                 deprecated: false,
             },
             EndpointSummary {
                 method: "GET".into(),
-                path: "/v1/emails/{id}".into(),
-                summary: "Get email by ID".into(),
+                path: "/v1/messages/{id}".into(),
+                summary: "Get message by ID".into(),
                 tag: "Emails".into(),
                 deprecated: false,
             },
@@ -195,13 +195,6 @@ impl OpenApiGenerator {
                 tag: "Templates".into(),
                 deprecated: false,
             },
-            EndpointSummary {
-                method: "POST".into(),
-                path: "/v1/send".into(),
-                summary: "Send email (legacy)".into(),
-                tag: "Emails".into(),
-                deprecated: true,
-            },
         ]
     }
 
@@ -233,10 +226,10 @@ impl OpenApiGenerator {
 
     fn build_paths(&self) -> serde_json::Value {
         serde_json::json!({
-            "/v1/emails": {
+            "/v1/messages": {
                 "post": {
-                    "operationId": "sendEmail",
-                    "summary": "Send an email",
+                    "operationId": "sendMessage",
+                    "summary": "Send a message",
                     "tags": ["Emails"],
                     "requestBody": {
                         "required": true,
@@ -253,17 +246,17 @@ impl OpenApiGenerator {
                     }
                 }
             },
-            "/v1/emails/batch": {
+            "/v1/messages/batch": {
                 "post": {
-                    "operationId": "sendBatchEmails",
-                    "summary": "Send batch emails",
+                    "operationId": "sendBatchMessages",
+                    "summary": "Send batch messages",
                     "tags": ["Emails"]
                 }
             },
-            "/v1/emails/{id}": {
+            "/v1/messages/{id}": {
                 "get": {
-                    "operationId": "getEmail",
-                    "summary": "Get email by ID",
+                    "operationId": "getMessage",
+                    "summary": "Get message by ID",
                     "tags": ["Emails"]
                 }
             },
@@ -405,18 +398,17 @@ mod tests {
     fn test_list_endpoints() {
         let endpoints = gen().list_endpoints();
         assert!(endpoints.len() >= 10);
-// Should have at least one deprecated endpoint
-        assert!(endpoints.iter().any(|e| e.deprecated));
 // All should have non-empty method + path
         assert!(endpoints.iter().all(|e| !e.method.is_empty() && !e.path.is_empty()));
+        assert!(endpoints.iter().all(|e| !e.deprecated));
     }
 
     #[test]
     fn test_get_endpoint_schema() {
         let g = gen();
-        let schema = g.get_endpoint_schema("POST", "/v1/emails").unwrap();
+        let schema = g.get_endpoint_schema("POST", "/v1/messages").unwrap();
         assert_eq!(schema["method"], "POST");
-        assert_eq!(schema["path"], "/v1/emails");
+        assert_eq!(schema["path"], "/v1/messages");
         assert!(!schema["deprecated"].as_bool().unwrap());
 
 // Unknown endpoint returns None.

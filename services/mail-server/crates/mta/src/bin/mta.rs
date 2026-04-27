@@ -164,10 +164,13 @@ async fn main() -> anyhow::Result<()> {
         let ctrl_c = async { let _ = signal::ctrl_c().await; };
         #[cfg(unix)]
         let terminate = async {
-            signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler")
-                .recv()
-                .await;
+            match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+                Ok(mut sig) => sig.recv().await,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to install SIGTERM handler, waiting indefinitely");
+                    std::future::pending().await
+                }
+            }
         };
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();

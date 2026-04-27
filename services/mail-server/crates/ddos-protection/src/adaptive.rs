@@ -144,7 +144,7 @@ impl AdaptiveRateLimiter {
 
 // Remove old observations outside the baseline window
         let cutoff = Instant::now() - self.config.baseline_window;
-        while observations.front().map_or(false, |o| o.timestamp < cutoff) {
+        while observations.front().is_some_and(|o| o.timestamp < cutoff) {
             observations.pop_front();
         }
 

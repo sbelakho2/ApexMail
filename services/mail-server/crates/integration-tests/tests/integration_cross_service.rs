@@ -3,8 +3,6 @@
 //! Verifies that types and logic from different crates compose correctly
 //! without requiring external services.
 
-use std::sync::Arc;
-
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. Billing plans can be validated against plan feature flags
 // ═══════════════════════════════════════════════════════════════════════════
@@ -37,7 +35,7 @@ fn billing_plans_feature_compatibility() {
 #[test]
 fn pattern_matcher_and_compliance_risk_scoring() {
     use compliance::types::RiskLevel;
-    use pattern_matcher::{PatternMatcher, Rule, RuleCategory, RuleSet, Severity};
+    use pattern_matcher::{Rule, RuleCategory, RuleSet, Severity};
 
 // Build a rule set with spam patterns
     let rules = vec![
@@ -146,7 +144,7 @@ fn ai_content_score_with_sales_campaign() {
 
 #[test]
 fn rate_limiter_decision_types() {
-    use apexmail_rate_limiter::{Decision, GovernorLimiter, RateLimitConfig};
+    use apexmail_rate_limiter::{GovernorLimiter, RateLimitConfig};
 
     let config = RateLimitConfig::new(100).with_burst(10);
     let limiter = GovernorLimiter::new(&config);
@@ -211,7 +209,7 @@ fn observability_metrics_from_ops_health_checks() {
 
 #[test]
 fn enterprise_sso_types_serialize_correctly() {
-    use enterprise::types::{SSOConfigureRequest, SSOConfiguration};
+    use enterprise::types::SSOConfigureRequest;
 
 // Verify SSO types can round-trip through JSON (API compat)
     let req = SSOConfigureRequest {
@@ -327,7 +325,7 @@ fn devex_webhook_signing_verification() {
 #[test]
 fn billing_quota_with_rate_limiting() {
     use billing_service::plans::default_plans;
-    use apexmail_rate_limiter::{GovernorLimiter, RateLimitConfig};
+    use apexmail_rate_limiter::GovernorLimiter;
 
     let plans = default_plans();
     let free_plan = plans.iter().find(|p| p.name == "free").unwrap();

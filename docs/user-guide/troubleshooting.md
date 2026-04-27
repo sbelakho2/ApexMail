@@ -21,13 +21,13 @@ This guide covers the most common issues you may encounter when using ApexMail, 
 
 ## 1. Authentication Errors
 
-All API requests require authentication via either an **API key** (for server-to-server calls) or a **Bearer token** (for user sessions).
+All API requests require authentication via an **API key**, a valid **Bearer token**, or a browser **session cookie**.
 
 ### Error Codes
 
 | Status | Code               | Meaning                                        |
 | ------ | ------------------ | ---------------------------------------------- |
-| 401    | `AUTH_REQUIRED`    | No API key or Bearer token was provided.       |
+| 401    | `AUTH_REQUIRED`    | No valid API key, Bearer token, or session cookie was provided. |
 | 401    | `INVALID_API_KEY`  | The API key is revoked, expired, or malformed. |
 | 401    | `INVALID_TOKEN`    | The JWT has expired or is malformed.           |
 | 401    | `TOKEN_REVOKED`    | The JWT was blacklisted (user logged out).     |
@@ -44,11 +44,17 @@ All API requests require authentication via either an **API key** (for server-to
 - Check that the key has not been revoked in **Settings → API Keys**.
 - Ensure you are using the correct key for the environment (live vs. test).
 
+**Browser Session Authentication:**
+
+- `POST /v1/auth/login` sets an `am_session` HttpOnly cookie and returns session metadata.
+- Before any cookie-authenticated `POST`, `PUT`, `PATCH`, or `DELETE` request, fetch `GET /v1/auth/csrf` and send the returned token as `X-CSRF-Token`.
+- `POST /v1/auth/refresh` now refreshes the current session cookie. It requires both the existing `am_session` cookie and a valid `X-CSRF-Token` header.
+- If you receive `TOKEN_REVOKED`, the old session JWT was blacklisted. Sign in again with `POST /v1/auth/login`.
+
 **Bearer Token Authentication:**
 
-- Tokens are JWTs issued by `POST /v1/auth/login`.
-- Tokens expire — use `POST /v1/auth/refresh` to get a new access token before expiry.
-- If you receive `TOKEN_REVOKED`, the user has logged out and the token was blacklisted. Re-authenticate with `POST /v1/auth/login`.
+- When a trusted flow already has a JWT, send it in `Authorization: Bearer <token>`.
+- Do not store bearer tokens in `localStorage`; keep them in memory for browser clients.
 
 **Common Mistakes:**
 
@@ -58,6 +64,7 @@ All API requests require authentication via either an **API key** (for server-to
 | Extra whitespace in the key          | Trim the key value                               |
 | Using a test key in production       | Switch to `am_live_*` key                         |
 | Bearer token without `Bearer` prefix | Use `Authorization: Bearer <token>`               |
+| Cookie-authenticated write without CSRF | Fetch `/v1/auth/csrf` and send `X-CSRF-Token` |
 
 ---
 

@@ -9,6 +9,7 @@ pub mod hot_config;
 pub mod internal_auth;
 pub mod pii;
 pub mod security;
+pub mod ssrf;
 pub mod warmup;
 
 pub use config::Config;
@@ -25,6 +26,7 @@ pub use security::{
 	SecuritySeverity,
 	SecuritySystem,
 };
+pub use ssrf::{is_localhost, is_private_or_reserved_host, is_private_or_reserved_ip};
 
 /// Re-export commonly used types
 pub use chrono::{DateTime, Utc};

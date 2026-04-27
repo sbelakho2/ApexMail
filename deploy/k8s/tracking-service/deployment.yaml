@@ -22,11 +22,7 @@ metadata:
   labels:
     app.kubernetes.io/name: tracking-service
     app.kubernetes.io/component: mail-server
-    app.kubernetes.io/version: "1.0.0"
-  annotations:
-    # Trigger rolling update when ConfigMap changes (via checksum annotation
-    # injected by Helm or deployment pipeline)
-    config-checksum: ""
+    app.kubernetes.io/version: "REPLACE_TAG"
 spec:
   replicas: 3
   revisionHistoryLimit: 5
@@ -60,8 +56,8 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: tracking-service
-          image: apexmail/tracking-service:latest
-          imagePullPolicy: Always
+          image: apexmail/tracking-service:REPLACE_TAG
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 3001

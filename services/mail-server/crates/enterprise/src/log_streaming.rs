@@ -402,7 +402,7 @@ async fn verify_splunk(stream: &LogStream) -> Result<serde_json::Value, String> 
     let url = config.get("url").and_then(|v| v.as_str()).ok_or("No Splunk URL")?;
     let token = config.get("token").and_then(|v| v.as_str()).ok_or("No HEC token")?;
 
-    let resp = http_client().post(&format!("{url}/services/collector/event"))
+    let resp = http_client().post(format!("{url}/services/collector/event"))
         .header("Authorization", format!("Splunk {token}"))
         .json(&serde_json::json!({"event": "test", "sourcetype": "apexmail"}))
         .send()

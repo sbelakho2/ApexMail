@@ -62,19 +62,15 @@ impl Default for AnalyticsConfig {
 
 /// Which transport backend to use for email delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TransportType {
 /// Self-hosted SMTP (direct-to-MX via outbound queue or relay).
     Smtp,
 /// AWS SES v2 API.
+    #[default]
     Ses,
 }
 
-impl Default for TransportType {
-    fn default() -> Self {
-// Default to SES — the pragmatic choice per architecture decision.
-        Self::Ses
-    }
-}
 
 impl TransportType {
 /// Parse from env var string:"smtp" | "ses" (case-insensitive).
@@ -211,19 +207,12 @@ impl Default for WarmupConfig {
 
 /// IP rate limiting configuration.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct IpRateLimitConfig {
     pub enabled: bool,
     pub ip_address: Option<String>,
 }
 
-impl Default for IpRateLimitConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            ip_address: None,
-        }
-    }
-}
 
 /// AWS SES v2 configuration.
 #[derive(Debug, Clone)]

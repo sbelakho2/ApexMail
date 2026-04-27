@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use mail_common::{is_localhost, is_private_or_reserved_host};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
@@ -91,62 +92,11 @@ fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         return Err(format!("invalid URL scheme: {}, must be https", scheme));
     }
     
-    if is_private_or_reserved_host(host) {
+    if !is_localhost(host) && is_private_or_reserved_host(host) {
         return Err("webhook URL cannot point to private or reserved addresses".into());
     }
     
     Ok(())
-}
-
-fn is_private_or_reserved_host(host: &str) -> bool {
-// Allow localhost for development
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-        return false;
-    }
-    
-// Try parsing as IPv4
-    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-        let octets = ip.octets();
-        return ip.is_private() // 10.x, 172.16-31.x, 192.168.x
-            || ip.is_loopback() // 127.x.x.x
-            || ip.is_link_local() // 169.254.x.x
-            || ip.is_broadcast() // 255.255.255.255
-            || ip.is_documentation() // 192.0.2.0, 198.51.100.0, 203.0.113.0
-            || ip.is_unspecified() // 0.0.0.0
-            || (octets[0] == 100 && (octets[1] & 0xC0) == 64) // 100.64.0.0 - 100.127.255.255
-// Benchmark testing (198.18.0.0/15)
-            || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19));
-    }
-    
-// Try parsing as IPv6
-    if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
-        return ip.is_loopback() // ::1
-            || ip.is_unspecified() // ::            || is_ipv6_link_local(&ip) // fe80::/10
-            || is_ipv6_unique_local(&ip); // fc00::/7
-    }
-    
-// Block common internal hostnames
-    let lower = host.to_lowercase();
-    if lower.ends_with(".local")
-        || lower.ends_with(".internal")
-        || lower.ends_with(".corp")
-        || lower == "metadata.google.internal"
-        || lower == "169.254.169.254" // AWS/GCP metadata
-    {
-        return true;
-    }
-    
-    false
-}
-
-fn is_ipv6_link_local(ip: &std::net::Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    (segments[0] & 0xffc0) == 0xfe80
-}
-
-fn is_ipv6_unique_local(ip: &std::net::Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    (segments[0] & 0xfe00) == 0xfc00
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -474,5 +424,17 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["success"], true);
         assert!(json.get("error").is_none());
+    }
+
+    #[test]
+    fn test_validate_webhook_url_allows_explicit_localhost_http() {
+        assert!(validate_webhook_url("http://localhost:3000/hook").is_ok());
+        assert!(validate_webhook_url("http://127.0.0.1:3000/hook").is_ok());
+    }
+
+    #[test]
+    fn test_validate_webhook_url_blocks_ipv6_link_local_targets() {
+        let error = validate_webhook_url("https://[fe80::1]/hook").unwrap_err();
+        assert!(error.contains("private or reserved addresses"));
     }
 }

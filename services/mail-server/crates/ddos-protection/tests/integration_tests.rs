@@ -4,8 +4,6 @@
 //! and test end-to-end flows.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// ============================================================================
@@ -21,13 +19,6 @@ mod multi_layer_tests {
         RateLimit,
         Challenge,
         Block,
-    }
-    
-    #[derive(Debug, Clone, Copy)]
-    enum ChallengeType {
-        Captcha,
-        ProofOfWork,
-        JavaScriptChallenge,
     }
     
     struct MockReputationService {
@@ -67,9 +58,6 @@ mod multi_layer_tests {
             *count <= self.limit
         }
         
-        fn reset(&mut self, key: &str) {
-            self.counters.remove(key);
-        }
     }
     
     struct MockProtector {
@@ -475,7 +463,7 @@ mod challenge_e2e_tests {
         
 // Solution for challenge1 should not work for challenge2
 // (different prefix means different hash)
-        let result = challenge2.verify(solution1);
+        let _result = challenge2.verify(solution1);
 // This might pass by chance for low difficulty, so check prefixes differ
         assert_ne!(challenge1.prefix, challenge2.prefix);
     }
@@ -524,13 +512,6 @@ mod cost_session_tests {
                 session_budgets: HashMap::new(),
                 default_budget,
             }
-        }
-        
-        fn get_cost(&self, endpoint: &str) -> i64 {
-            self.endpoint_costs
-                .get(endpoint)
-                .map(|c| (c.cpu_weight + c.memory_weight + c.io_weight) as i64)
-                .unwrap_or(10)
         }
         
         fn check_and_deduct(&mut self, session: &str, endpoint: &str) -> bool {

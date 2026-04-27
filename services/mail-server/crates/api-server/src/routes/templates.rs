@@ -277,12 +277,10 @@ fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>)
                     } else {
                         var_name.push('}');
                     }
+                } else if let Some(next_ch) = chars.next() {
+                    var_name.push(next_ch);
                 } else {
-                    if let Some(next_ch) = chars.next() {
-                        var_name.push(next_ch);
-                    } else {
-                        break;
-                    }
+                    break;
                 }
             }
 // Look up and substitute

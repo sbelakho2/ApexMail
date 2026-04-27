@@ -42,7 +42,7 @@ async fn get_csrf_token(
     let sig = mac.finalize().into_bytes();
     let sig_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        &sig,
+        sig,
     );
 
     let token = format!("{}.{sig_b64}", base64::Engine::encode(
@@ -127,8 +127,6 @@ pub fn validate_csrf_token(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_csrf_token_generation_and_validation() {
         use hmac::{Hmac, Mac};

@@ -59,6 +59,42 @@ cargo run --manifest-path services/mail-server/Cargo.toml -p api-server
 zola build --root apps/marketing-zola
 ```
 
+### Compose Smoke Verification
+
+Use the repo-local smoke script to exercise the monitoring slice, the hardened prod compose subset, and the Alertmanager to Observability delivery path:
+
+```bash
+# Bring up monitoring plus the prod smoke subset
+./tools/run-compose-smoke.sh up
+
+# Verify endpoints and container health
+./tools/run-compose-smoke.sh verify
+
+# Inject a synthetic alert and confirm it lands in Observability
+./tools/run-compose-smoke.sh alert
+
+# Stop the smoke-test containers and remove target/apexmail-smoke
+./tools/run-compose-smoke.sh down
+```
+
+`./tools/run-compose-smoke.sh full` runs `up`, `verify`, and `alert` in one pass. The script keeps temporary TLS and JWT material under `target/apexmail-smoke` so Docker Desktop on macOS can mount it reliably.
+
+### Local Compose Overrides
+
+Local development uses Docker Compose's default merge behavior for [docker-compose.yml](docker-compose.yml) plus [docker-compose.override.yml](docker-compose.override.yml). The override file swaps the hardened production-oriented base service definitions for developer-friendly local settings such as direct host port bindings and writable service defaults.
+
+Use the default local merge for day-to-day development:
+
+```bash
+docker compose up -d postgres redis
+```
+
+Use the hardened production overlays explicitly when validating production wiring:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
 ## Project Structure
 
 ```text
@@ -75,9 +111,12 @@ apexmail/
 │   ├── sdk-php/
 │   ├── sdk-python/
 │   └── sdk-ruby/
+├── Lobster/                 # Standalone Lobster-language calculator proof of concept kept as an in-repo experiment
 ├── tools/                   # Python and shell operational tooling
 └── deploy/                  # Deployment manifests and configs
 ```
+
+`Lobster/` is not part of the ApexMail mail runtime. It is a small, separate proof-of-concept app kept in the repository as a language/UI experiment.
 
 ## API Reference
 

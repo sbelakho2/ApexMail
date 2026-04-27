@@ -71,7 +71,7 @@ impl MessageStorage {
 // Create default mailboxes
         self.create_default_mailboxes(&account.id).await?;
         
-        info!(account_id = %account.id, email = %mail_common::pii::redact_email(&email), "Account created");
+        info!(account_id = %account.id, email = %mail_common::pii::redact_email(email), "Account created");
         Ok(account)
     }
     
@@ -345,8 +345,8 @@ impl MessageStorage {
         let mailbox_ok: Option<i64> = sqlx::query_scalar(r#"
             SELECT 1 FROM mail_mailboxes WHERE id = $1 AND account_id = $2
         "#)
-        .bind(&message.mailbox_id)
-        .bind(&message.account_id)
+        .bind(message.mailbox_id)
+        .bind(message.account_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -367,7 +367,7 @@ impl MessageStorage {
             WHERE id = $1
             RETURNING (SELECT uid FROM next_uid) AS uid
         "#)
-        .bind(&message.mailbox_id)
+        .bind(message.mailbox_id)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -381,9 +381,9 @@ impl MessageStorage {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
             RETURNING id
         "#)
-        .bind(&message.id)
-        .bind(&message.account_id)
-        .bind(&message.mailbox_id)
+        .bind(message.id)
+        .bind(message.account_id)
+        .bind(message.mailbox_id)
         .bind(uid)
         .bind(&message.message_id)
         .bind(&message.from_address)
@@ -392,7 +392,7 @@ impl MessageStorage {
         .bind(serde_json::to_value(&message.cc_addresses)?)
         .bind(serde_json::to_value(&message.bcc_addresses)?)
         .bind(&message.subject)
-        .bind(&message.date)
+        .bind(message.date)
         .bind(&message.text_body)
         .bind(&message.html_body)
         .bind(message.raw_size)
@@ -486,7 +486,7 @@ impl MessageStorage {
         sql.push_str(" ORDER BY uid DESC NULLS LAST, date DESC");
         sql.push_str(&format!(" LIMIT ${} OFFSET ${}", param_idx, param_idx + 1));
         
-        let mut q = sqlx::query(&sql).bind(&query.account_id);
+        let mut q = sqlx::query(&sql).bind(query.account_id);
         
         if let Some(ref mailbox_id) = query.mailbox_id {
             q = q.bind(mailbox_id);

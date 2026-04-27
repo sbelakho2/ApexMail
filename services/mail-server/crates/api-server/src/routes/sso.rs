@@ -468,10 +468,10 @@ async fn complete_sso_login(
 fn generate_oauth_state(next: &str) -> String {
     use sha2::Digest;
     let random_bytes: [u8; 32] = rand_bytes();
-    let hash = sha2::Sha256::digest(&random_bytes);
+    let hash = sha2::Sha256::digest(random_bytes);
     let state_token = base64::Engine::encode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        &hash,
+        hash,
     );
 // Encode the return path into the state so we can redirect back
     format!("{state_token}:{next}")

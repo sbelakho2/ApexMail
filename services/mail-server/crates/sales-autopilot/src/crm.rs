@@ -69,8 +69,8 @@ impl CrmService {
         self.leads
             .read()
             .iter()
-            .filter(|l| status.map_or(true, |s| l.status == s))
-            .filter(|l| source.map_or(true, |src| l.source == src))
+            .filter(|l| status.is_none_or(|s| l.status == s))
+            .filter(|l| source.is_none_or(|src| l.source == src))
             .cloned()
             .collect()
     }

@@ -530,7 +530,7 @@ curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/activate" \
 
 ### POST `/v1/templates/:id/render`
 
-Render a template with custom data and return the output without sending an email.
+Render a template with custom variables and return the output without sending an email.
 
 **Scope:** `templates:read`
 
@@ -544,8 +544,7 @@ Render a template with custom data and return the output without sending an emai
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `data` | object | Yes | Merge variables to use for rendering |
-| `version` | number | No | Specific version to render (default: active) |
+| `variables` | object | Yes | Merge variables to use for rendering |
 
 #### Example Request
 
@@ -554,7 +553,7 @@ curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/render" \
   -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
-    "data": {
+    "variables": {
       "first_name": "Alice",
       "order_id": "ORD-98765"
     }
@@ -565,31 +564,17 @@ curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/render" \
 
 ```json
 {
-  "data": {
-    "subject": "Your order #ORD-98765 is confirmed",
-    "html": "<h1>Thanks, Alice!</h1><p>Order #ORD-98765 has been placed.</p>",
-    "text": "Thanks, Alice! Order #ORD-98765 has been placed.",
-    "preheader": "Your order is on its way",
-    "engine": "handlebars",
-    "version": 3
-  }
+  "subject": "Your order #ORD-98765 is confirmed",
+  "html": "<h1>Thanks, Alice!</h1><p>Order #ORD-98765 has been placed.</p>",
+  "text": "Thanks, Alice! Order #ORD-98765 has been placed."
 }
 ```
 
-#### Error Response — `400 RENDER_FAILED`
+#### Error Response — `404 Not Found`
 
 ```json
 {
-  "error": {
-    "code": "RENDER_FAILED",
-    "message": "Template rendering failed: missing helper \"formatCurrency\" at line 42",
-    "details": {
-      "engine": "handlebars",
-      "line": 42,
-      "column": 15,
-      "source": "{{formatCurrency total}}"
-    }
-  }
+  "message": "template not found"
 }
 ```
 

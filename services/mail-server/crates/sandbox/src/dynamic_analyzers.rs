@@ -554,7 +554,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
 /// Get the global default `YaraSignatureAnalyzer` (singleton).
 pub fn default_dynamic_analyzer() -> &'static YaraSignatureAnalyzer {
     static INSTANCE: OnceLock<YaraSignatureAnalyzer> = OnceLock::new();
-    INSTANCE.get_or_init(|| YaraSignatureAnalyzer::default())
+    INSTANCE.get_or_init(YaraSignatureAnalyzer::default)
 }
 
 #[cfg(test)]

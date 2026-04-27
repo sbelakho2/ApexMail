@@ -96,6 +96,7 @@ pub struct Mailbox {
 /// Mailbox type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum MailboxType {
     Inbox,
     Sent,
@@ -103,14 +104,10 @@ pub enum MailboxType {
     Trash,
     Spam,
     Archive,
+    #[default]
     Custom,
 }
 
-impl Default for MailboxType {
-    fn default() -> Self {
-        Self::Custom
-    }
-}
 
 /// Email account
 #[derive(Debug, Clone, Serialize, Deserialize)]

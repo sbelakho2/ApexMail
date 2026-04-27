@@ -16,6 +16,8 @@ gem 'apexmail'
 
 ## Quick Start
 
+Use your real ApexMail API key in place of `am_live_xxxxxxxxxxxx`; the value shown below is a placeholder.
+
 ```ruby
 require 'apexmail'
 

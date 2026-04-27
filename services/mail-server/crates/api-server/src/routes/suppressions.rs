@@ -35,6 +35,10 @@ fn default_source() -> String {
     "manual".into()
 }
 
+fn canonical_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
 #[derive(Debug, Serialize)]
 pub struct SuppressionResponse {
     pub id: String,
@@ -84,6 +88,36 @@ pub struct BulkSuppressResponse {
 
 const MAX_BULK_ENTRIES: usize = 10_000;
 
+struct PreparedBulkEntry<'a> {
+    email: String,
+    reason: &'a str,
+}
+
+fn prepare_bulk_entries<'a>(entries: &'a [BulkEntry]) -> (Vec<PreparedBulkEntry<'a>>, usize, usize) {
+    let mut invalid = 0usize;
+    let mut duplicates = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    let mut prepared = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        let email = canonical_email(&entry.email);
+        if !apexmail_lib::validation::is_valid_email(&email) {
+            invalid += 1;
+            continue;
+        }
+        if !seen.insert(email.clone()) {
+            duplicates += 1;
+            continue;
+        }
+        prepared.push(PreparedBulkEntry {
+            email,
+            reason: entry.reason.as_str(),
+        });
+    }
+
+    (prepared, duplicates, invalid)
+}
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn create_suppression(
@@ -93,16 +127,18 @@ async fn create_suppression(
 ) -> Result<(StatusCode, Json<SuppressionResponse>), ApiError> {
     require_scopes(&auth, &["suppressions:write"])?;
 
-    if !apexmail_lib::validation::is_valid_email(&body.email) {
+    let email = canonical_email(&body.email);
+
+    if !apexmail_lib::validation::is_valid_email(&email) {
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
 
 // Check duplicate
     let exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2",
+        "SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = $2",
     )
     .bind(&auth.tenant_id)
-    .bind(&body.email)
+    .bind(&email)
     .fetch_one(&state.db)
     .await?;
 
@@ -119,7 +155,7 @@ async fn create_suppression(
     )
     .bind(id)
     .bind(&auth.tenant_id)
-    .bind(&body.email)
+    .bind(&email)
     .bind(&body.reason)
     .bind(&body.source)
     .bind(now)
@@ -130,7 +166,7 @@ async fn create_suppression(
         StatusCode::CREATED,
         Json(SuppressionResponse {
             id: id.to_string(),
-            email: body.email,
+            email,
             reason: body.reason,
             source: body.source,
             created_at: now.to_rfc3339(),
@@ -184,8 +220,10 @@ async fn check_suppression(
 ) -> Result<Json<CheckResponse>, ApiError> {
     require_scopes(&auth, &["suppressions:read"])?;
 
+    let email = canonical_email(&email);
+
     let row = sqlx::query_as::<_, SuppressionReasonRow>(
-        "SELECT reason FROM suppressions WHERE tenant_id = $1 AND email = $2",
+        "SELECT reason FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = $2",
     )
     .bind(&auth.tenant_id)
     .bind(&email)
@@ -215,23 +253,13 @@ async fn bulk_suppress(
     }
 
     let mut created = 0usize;
-    let mut duplicates = 0usize;
-    let mut invalid = 0usize;
-
-    let mut valid_entries: Vec<&BulkEntry> = Vec::with_capacity(body.entries.len());
-    for entry in &body.entries {
-        if !apexmail_lib::validation::is_valid_email(&entry.email) {
-            invalid += 1;
-            continue;
-        }
-        valid_entries.push(entry);
-    }
+    let (valid_entries, mut duplicates, invalid) = prepare_bulk_entries(&body.entries);
 
 // Batch query for existing emails to avoid N+1
     if !valid_entries.is_empty() {
         let emails: Vec<&str> = valid_entries.iter().map(|e| e.email.as_str()).collect();
         let existing: Vec<(String,)> = sqlx::query_as(
-            "SELECT email FROM suppressions WHERE tenant_id = $1 AND email = ANY($2)",
+            "SELECT LOWER(email) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = ANY($2)",
         )
         .bind(&auth.tenant_id)
         .bind(&emails)
@@ -257,7 +285,7 @@ async fn bulk_suppress(
             .bind(Uuid::new_v4())
             .bind(&auth.tenant_id)
             .bind(&entry.email)
-            .bind(&entry.reason)
+            .bind(entry.reason)
             .bind(now)
             .execute(&state.db)
             .await
@@ -339,5 +367,38 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["created"], 5);
+    }
+
+    #[test]
+    fn test_canonical_email_trims_and_lowercases() {
+        assert_eq!(
+            canonical_email("  Jane.Doe+Tag@Example.COM  "),
+            "jane.doe+tag@example.com"
+        );
+    }
+
+    #[test]
+    fn test_prepare_bulk_entries_counts_casefolded_duplicates() {
+        let entries = vec![
+            BulkEntry {
+                email: "Alice@Example.com".into(),
+                reason: "manual".into(),
+            },
+            BulkEntry {
+                email: " alice@example.com ".into(),
+                reason: "manual".into(),
+            },
+            BulkEntry {
+                email: "not-an-email".into(),
+                reason: "manual".into(),
+            },
+        ];
+
+        let (prepared, duplicates, invalid) = prepare_bulk_entries(&entries);
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].email, "alice@example.com");
+        assert_eq!(duplicates, 1);
+        assert_eq!(invalid, 1);
     }
 }

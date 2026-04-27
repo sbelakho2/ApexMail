@@ -161,7 +161,8 @@ async fn warmup_action(
         "start" => "active",
         "pause" => "paused",
         "reset" => "pending",
-        _ => unreachable!(),
+        // Pre-validated above - unreachable if reached, but needed for exhaustiveness
+        _ => return Err(ApiError::Internal("unreachable warmup action".into())),
     };
 
     sqlx::query("UPDATE ip_pools SET status = $1, updated_at = NOW() WHERE id = $2")

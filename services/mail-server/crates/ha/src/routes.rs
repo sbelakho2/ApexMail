@@ -195,7 +195,7 @@ async fn failover_failback(
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
     state.failover.initiate_failback().await
-        .map(|e| Json(e))
+        .map(Json)
         .map_err(internal_err)
 }
 

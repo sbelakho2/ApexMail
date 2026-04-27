@@ -4,8 +4,8 @@
 
 | Field | Value |
 |-------|-------|
-| **API Version** | `2024-12-18.acacia` (pinned) |
-| **SDK** | Stripe-maintained server-side billing client |
+| **API Version** | `2026-04-22.dahlia` (pinned via `Stripe-Version`, overridable with `STRIPE_API_VERSION`) |
+| **SDK** | Raw Stripe REST requests via `reqwest` in `api-server`; webhook verification is implemented manually in `billing-service` |
 | **Role** | Subscription billing, payment processing, invoicing |
 | **Data Residency** | EU (Stripe account region) |
 | **Environments** | Test mode (dev/staging), Live mode (production) |
@@ -82,28 +82,27 @@ trial → canceled (no conversion)
 
 ### Endpoint
 
-- URL: `https://api.apexmail.com/v1/webhooks/stripe`
+- Route path: `/webhooks/stripe` (mounted directly by `billing-service`)
 - Signing secret: stored as `STRIPE_WEBHOOK_SECRET` env var.
-- All events are verified using `stripe.webhooks.constructEvent()` before processing.
+- All events are verified by checking the `stripe-signature` HMAC and timestamp tolerance before processing.
 
 ### Consumed Events
 
 | Event | Handler | Action |
 |-------|---------|--------|
-| `checkout.session.completed` | `handleCheckoutComplete` | Create subscription record, activate plan, send welcome email |
-| `invoice.paid` | `handleInvoicePaid` | Update `paid_through` date, reset usage counters, generate receipt |
-| `invoice.payment_failed` | `handlePaymentFailed` | Mark subscription `past_due`, notify tenant admin, schedule retry warning |
-| `customer.subscription.updated` | `handleSubscriptionUpdated` | Sync plan/status changes to local DB (handles Stripe-side changes) |
-| `customer.subscription.deleted` | `handleSubscriptionDeleted` | Downgrade tenant to Free, send churn notification, trigger data retention policy |
-| `invoice.upcoming` | `handleUpcomingInvoice` | Send "invoice coming" email 3 days before billing |
-| `customer.updated` | `handleCustomerUpdated` | Sync billing email/name changes |
-| `charge.dispute.created` | `handleDisputeCreated` | Alert ops, freeze tenant sending (anti-fraud) |
+| `checkout.session.completed` | `handle_checkout_completed` | Activate the tenant after successful checkout |
+| `customer.subscription.created` | `handle_subscription_change` | Persist subscription state from Stripe |
+| `customer.subscription.updated` | `handle_subscription_change` | Sync plan/status changes to local DB |
+| `customer.subscription.deleted` | `handle_subscription_deleted` | Downgrade tenant state after cancellation |
+| `invoice.paid` | `handle_invoice_paid` | Mark the invoice/subscription state as recovered or paid |
+| `invoice.payment_failed` | `handle_payment_failed` | Mark subscription `past_due` and track dunning state |
+| `customer.subscription.trial_will_end` | `handle_trial_ending` | Trigger trial-ending handling |
 
 ### Event Processing Rules
 
 1. Every webhook handler is **idempotent**. Events may be delivered more than once.
-2. Events are logged to the `stripe_events` table with the event ID as a unique constraint — duplicates are detected and skipped.
-3. Events are processed within a database transaction. If the transaction fails, the webhook returns 500 and Stripe retries.
+2. Events are logged to the `stripe_webhook_events` table with the Stripe event ID as a unique key — duplicates are detected and skipped.
+3. Event processing failures return non-2xx so Stripe retries, and the payload is also recorded in the Redis-backed dead-letter store.
 4. Unrecognized event types are logged and acknowledged with 200 (no action).
 5. Webhook processing MUST complete in < **10 seconds**. Heavy work is deferred to the job queue.
 

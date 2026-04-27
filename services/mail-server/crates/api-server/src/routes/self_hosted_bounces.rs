@@ -88,9 +88,9 @@ pub fn parse_smtp_response(code: u16, enhanced_code: Option<&str>, text: &str) -
         parse_from_code_and_text(code, text)
     };
 
-    let bounce_type = if code >= 500 && code < 600 {
+    let bounce_type = if (500..600).contains(&code) {
         BounceType::Hard
-    } else if code >= 400 && code < 500 {
+    } else if (400..500).contains(&code) {
         BounceType::Soft
     } else {
         BounceType::Unknown
@@ -376,7 +376,7 @@ impl SelfHostedBounceHandler {
         .bind(&event.recipient)
         .bind(&event.feedback_type)
         .bind(&event.user_agent)
-        .bind(&event.occurred_at)
+        .bind(event.occurred_at)
         .execute(&self.db)
         .await
         .map_err(|e| BounceError::Database(e.to_string()))?;
@@ -400,7 +400,7 @@ impl SelfHostedBounceHandler {
 
         warn!(
             tenant_id = %tenant_id,
-            recipient = %apexmail_lib::pii::redact_email(&recipient),
+            recipient = %apexmail_lib::pii::redact_email(recipient),
             feedback_type = %feedback_type,
             "Processed FBL complaint"
         );
@@ -428,7 +428,7 @@ impl SelfHostedBounceHandler {
         .bind(&event.diagnostic_code)
         .bind(&event.smtp_response)
         .bind(&event.source_ip)
-        .bind(&event.occurred_at)
+        .bind(event.occurred_at)
         .execute(&self.db)
         .await
         .map_err(|e| BounceError::Database(e.to_string()))?;

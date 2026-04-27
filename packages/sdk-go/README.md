@@ -10,6 +10,8 @@ go get github.com/apexmail/apexmail-go
 
 ## Quick Start
 
+Use your real ApexMail API key in place of `am_live_xxxxxxxxxxxx`; the value shown below is a placeholder.
+
 ```go
 package main
 

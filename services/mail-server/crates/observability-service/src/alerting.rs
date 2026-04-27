@@ -128,17 +128,24 @@ impl AlertManager {
             alerts_guard.push(alert);
         }
 
-// Evict if over capacity:remove resolved/acknowledged first, then oldest
-        if alerts_guard.len() > self.max_alerts {
-// Partition:keep firing alerts, evict resolved/acknowledged
-            alerts_guard.retain(|a| a.status == AlertStatus::Firing);
-        }
-        if alerts_guard.len() > self.max_alerts {
-            let excess = alerts_guard.len() - self.max_alerts;
-            alerts_guard.drain(..excess);
-        }
+        self.trim_alerts(&mut alerts_guard);
 
         new_alerts
+    }
+
+/// Upsert alerts received from an external alert source such as Alertmanager.
+    pub fn ingest_external_alerts(&self, alerts: Vec<Alert>) {
+        let mut alerts_guard = self.alerts.write();
+
+        for alert in alerts {
+            if let Some(existing) = alerts_guard.iter_mut().find(|existing| existing.id == alert.id) {
+                *existing = alert;
+            } else {
+                alerts_guard.push(alert);
+            }
+        }
+
+        self.trim_alerts(&mut alerts_guard);
     }
 
 /// List all alerts that are currently firing (not acknowledged / resolved).
@@ -171,6 +178,18 @@ impl AlertManager {
 /// Return all alerts (any status).
     pub fn list_all_alerts(&self) -> Vec<Alert> {
         self.alerts.read().clone()
+    }
+
+    fn trim_alerts(&self, alerts: &mut Vec<Alert>) {
+// Evict if over capacity:remove resolved/acknowledged first, then oldest
+        if alerts.len() > self.max_alerts {
+// Partition:keep firing alerts, evict resolved/acknowledged
+            alerts.retain(|a| a.status == AlertStatus::Firing);
+        }
+        if alerts.len() > self.max_alerts {
+            let excess = alerts.len() - self.max_alerts;
+            alerts.drain(..excess);
+        }
     }
 }
 
@@ -268,5 +287,42 @@ mod tests {
 
 // Non-existent ID
         assert!(!mgr.acknowledge("nonexistent"));
+    }
+
+    #[test]
+    fn test_ingest_external_alert_updates_existing_alert() {
+        let mgr = AlertManager::new();
+        let alert = Alert {
+            id: "fingerprint-1".to_string(),
+            rule_id: "fingerprint-1".to_string(),
+            rule_name: "TrackingServiceDown".to_string(),
+            status: AlertStatus::Firing,
+            severity: AlertSeverity::Critical,
+            summary: "Tracking down".to_string(),
+            description: "Tracking is unavailable".to_string(),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            value: 0.0,
+            threshold: 0.0,
+            fired_at: Utc::now(),
+            resolved_at: None,
+            acknowledged_at: None,
+            acknowledged_by: None,
+            silenced_until: None,
+            notifications_sent: 1,
+            last_notification_at: Some(Utc::now()),
+        };
+
+        mgr.ingest_external_alerts(vec![alert.clone()]);
+        assert_eq!(mgr.list_active_alerts().len(), 1);
+
+        let mut resolved = alert;
+        resolved.status = AlertStatus::Resolved;
+        resolved.resolved_at = Some(Utc::now());
+
+        mgr.ingest_external_alerts(vec![resolved]);
+        assert!(mgr.list_active_alerts().is_empty());
+        assert_eq!(mgr.list_all_alerts().len(), 1);
+        assert_eq!(mgr.list_all_alerts()[0].status, AlertStatus::Resolved);
     }
 }

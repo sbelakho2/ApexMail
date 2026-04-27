@@ -595,7 +595,7 @@ mod tests {
             link_id: None,
             original_url: None,
         };
-        let mut token = codec.encode(&data).expect("encode");
+        let token = codec.encode(&data).expect("encode");
 // Flip a bit in the middle of the token
         let mid = token.len() / 2;
         let b = &mut token.as_bytes().to_vec();

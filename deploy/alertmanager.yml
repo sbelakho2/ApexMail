@@ -11,5 +11,5 @@ route:
 receivers:
   - name: default-notify
     webhook_configs:
-      - url: 'http://api-server:5001/alerts'
+      - url: 'http://observability:4400/alerts'
         send_resolved: true

@@ -444,7 +444,7 @@ impl SecurityCorrelator {
         }
 
 // Scoped entry lock - only this IP is locked
-        let mut entry = self.ip_events.entry(ip.clone()).or_insert_with(Vec::new);
+        let mut entry = self.ip_events.entry(ip.clone()).or_default();
         let events = entry.value_mut();
         events.push(event);
 
@@ -716,11 +716,11 @@ mod tests {
         assert_eq!(correlator.tracked_ip_count(), 1);
         
 // Purge with a short max_age shouldn't affect recent events (they're too new)
-        let purged = correlator.purge_stale(1); // 1 second max age
+        let _purged = correlator.purge_stale(1); // 1 second max age
 // Recent event may or may not be purged depending on timing
         
 // Purge with very long max age should NOT purge anything
-        let purged_long = correlator.purge_stale(86400); // 24 hours
+        let _purged_long = correlator.purge_stale(86400); // 24 hours
 // All recent events should survive
         assert!(correlator.tracked_ip_count() <= 1);
     }
@@ -820,7 +820,7 @@ mod tests {
         let correlator = SecurityCorrelator::new();
         
 // Event without IP metadata should be ignored
-        let mut e = SecurityEvent::new(
+        let e = SecurityEvent::new(
             SecuritySystem::Waf,
             SecurityAction::Block,
             SecuritySeverity::Critical,
@@ -840,7 +840,7 @@ mod tests {
 // Try with empty IP
         let e = event(SecuritySystem::Waf, SecurityAction::Block, "src_ip", "", 10.0);
 // Empty IP should be treated as a valid (but unusual) key
-        let result = correlator.ingest(e);
+        let _result = correlator.ingest(e);
 // Should not panic, may or may not return None
     }
 

@@ -316,8 +316,8 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
     }
 
 // OLE2:Check for VBA macro indicators
-    if file_type == FileType::Ole2 {
-        if has_vba_indicators(data) {
+    if file_type == FileType::Ole2
+        && has_vba_indicators(data) {
             findings.push(InspectionFinding {
                 id: "OLE2_VBA_MACROS",
                 description: "OLE2 document contains VBA macro indicators".into(),
@@ -325,7 +325,6 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
             });
             risk_score += 6.0;
         }
-    }
 
 // ZIP-based OOXML:Check for macro-enabled formats
     if file_type == FileType::Zip {
@@ -372,8 +371,8 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
     }
     
 // RAR:Check for encryption
-    if file_type == FileType::Rar {
-        if is_rar_encrypted(data) {
+    if file_type == FileType::Rar
+        && is_rar_encrypted(data) {
             findings.push(InspectionFinding {
                 id: "ARCHIVE_ENCRYPTED",
                 description: "RAR archive is password-protected (contents cannot be inspected)".into(),
@@ -381,11 +380,10 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
             });
             risk_score += 7.0;
         }
-    }
     
 // 7-Zip:Check for encryption
-    if file_type == FileType::SevenZip {
-        if is_7z_encrypted(data) {
+    if file_type == FileType::SevenZip
+        && is_7z_encrypted(data) {
             findings.push(InspectionFinding {
                 id: "ARCHIVE_ENCRYPTED",
                 description: "7-Zip archive is encrypted (contents cannot be inspected)".into(),
@@ -393,7 +391,6 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
             });
             risk_score += 7.0;
         }
-    }
 
 // PDF:Check for suspicious elements
     if file_type == FileType::Pdf {
@@ -634,7 +631,7 @@ pub fn is_zip_encrypted(data: &[u8]) -> bool {
     
 // Also check for encryption in central directory (end of ZIP)
 // Look for AES encryption marker
-    if data.windows(2).any(|w| w == &[0x99, 0x01]) { // AES extra field ID
+    if data.windows(2).any(|w| w == [0x99, 0x01]) { // AES extra field ID
         return true;
     }
     

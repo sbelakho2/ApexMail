@@ -10,6 +10,8 @@ pip install apexmail
 
 ## Quick Start
 
+Use your real ApexMail API key in place of `am_live_xxxx`; the example value below is a placeholder.
+
 ```python
 from apexmail import ApexMail
 

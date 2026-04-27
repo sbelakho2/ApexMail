@@ -92,19 +92,33 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("billing-service listening on {}", cli.listen);
 
     let shutdown = async {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
-        #[cfg(unix)]
-        let terminate = async {
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler")
-                .recv()
-                .await;
+        let ctrl_c = async {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => tracing::info!("received Ctrl+C — shutting down"),
+                Err(e) => {
+                    tracing::error!("failed to install Ctrl+C handler: {e}");
+                    std::future::pending::<()>().await;
+                }
+            }
         };
+        #[cfg(unix)]
+        {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut terminate) => tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = terminate.recv() => tracing::info!("received SIGTERM — shutting down"),
+                },
+                Err(e) => {
+                    tracing::error!(
+                        "failed to install SIGTERM handler: {e}; falling back to Ctrl+C only"
+                    );
+                    ctrl_c.await;
+                }
+            }
+        }
         #[cfg(not(unix))]
-        let terminate = std::future::pending::<()>();
-        tokio::select! {
-            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
-            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+        {
+            ctrl_c.await;
         }
     };
     axum::serve(listener, app)

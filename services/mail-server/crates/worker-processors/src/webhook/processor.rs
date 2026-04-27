@@ -1,6 +1,7 @@
 //! Webhook processor implementation.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use tokio::sync::Notify;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use super::ssrf::SsrfValidator;
+use super::ssrf::{ResolvedWebhookTarget, SsrfValidator};
 use super::types::{
     truncate_payload, PendingSuccess, WebhookDeliveryResult, WebhookJob, MAX_CONCURRENT_PER_TENANT,
     MAX_RESPONSE_BYTES, MAX_WEBHOOK_PAYLOAD_BYTES, SIGNATURE_VERSION,
@@ -286,12 +287,27 @@ impl WebhookProcessor {
             return Ok(());
         }
 
-// Validate URL for SSRF protection
-        if let Err(e) = self.ssrf_validator.validate_url(&job.url).await {
+// Validate URL for SSRF protection and pin DNS resolution used at send time
+        let resolved_target = match self.ssrf_validator.validate_and_resolve_url(&job.url).await {
+            Ok(target) => target,
+            Err(e) => {
+                let result = WebhookDeliveryResult::failure(
+                    None,
+                    0,
+                    format!("SSRF protection: {}", e),
+                    None,
+                    None,
+                );
+                self.handle_failure(job, result).await?;
+                return Ok(());
+            }
+        };
+
+        if resolved_target.resolved_ips.is_empty() {
             let result = WebhookDeliveryResult::failure(
                 None,
                 0,
-                format!("SSRF protection: {}", e),
+                "SSRF protection: URL hostname resolved to no IP addresses".to_string(),
                 None,
                 None,
             );
@@ -320,7 +336,9 @@ impl WebhookProcessor {
             .map_err(|e| ProcessorError::Job(format!("Failed to serialize payload: {}", e)))?;
 
 // on crash between SET and HTTP delivery.
-        let result = self.deliver_webhook(job, &serialized_payload).await;
+        let result = self
+            .deliver_webhook(job, &serialized_payload, &resolved_target)
+            .await;
 
 // Update circuit breaker
         if result.success {
@@ -387,6 +405,7 @@ impl WebhookProcessor {
         &self,
         job: &WebhookJob,
         serialized_payload: &str,
+        resolved_target: &ResolvedWebhookTarget,
     ) -> WebhookDeliveryResult {
         let timestamp = Utc::now().timestamp_millis();
         let delivery_id = format!("dlv_{}", uuid::Uuid::new_v4());
@@ -405,14 +424,55 @@ impl WebhookProcessor {
 
         let start = Instant::now();
 
-// Build request
-        let mut request = self.client.post(&job.url).body(serialized_payload.to_string());
+        let send_result = if resolved_target.host_is_ip {
+            let mut request = self.client.post(&job.url).body(serialized_payload.to_string());
+            for (key, value) in &headers {
+                request = request.header(key.as_str(), value.as_str());
+            }
+            request.send().await
+        } else {
+            let socket_addrs: Vec<SocketAddr> = resolved_target
+                .resolved_ips
+                .iter()
+                .map(|ip| SocketAddr::new(*ip, resolved_target.port))
+                .collect();
 
-        for (key, value) in &headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
+            if socket_addrs.is_empty() {
+                return WebhookDeliveryResult::failure(
+                    None,
+                    start.elapsed().as_millis() as u64,
+                    "No resolved IP addresses available for pinned webhook delivery".to_string(),
+                    None,
+                    None,
+                );
+            }
 
-        match request.send().await {
+            let pinned_client = match Client::builder()
+                .timeout(self.config.request_timeout)
+                .user_agent("ApexMail-Webhook/1.0")
+                .resolve_to_addrs(resolved_target.host.as_str(), &socket_addrs)
+                .build()
+            {
+                Ok(client) => client,
+                Err(e) => {
+                    return WebhookDeliveryResult::failure(
+                        None,
+                        start.elapsed().as_millis() as u64,
+                        format!("Failed to build pinned webhook client: {}", e),
+                        None,
+                        None,
+                    );
+                }
+            };
+
+            let mut request = pinned_client.post(&job.url).body(serialized_payload.to_string());
+            for (key, value) in &headers {
+                request = request.header(key.as_str(), value.as_str());
+            }
+            request.send().await
+        };
+
+        match send_result {
             Ok(response) => {
                 let status = response.status().as_u16();
                 let response_time = start.elapsed().as_millis() as u64;
@@ -455,7 +515,7 @@ impl WebhookProcessor {
                     Err(_) => None,
                 };
 
-                if status >= 200 && status < 300 {
+                if (200..300).contains(&status) {
                     WebhookDeliveryResult::success(status, response_time, response_body)
                 } else {
                     WebhookDeliveryResult::failure(
@@ -487,7 +547,7 @@ impl WebhookProcessor {
             Ok(mac) => mac,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to initialize webhook HMAC signer");
-                return format!("{}", SIGNATURE_VERSION);
+                return SIGNATURE_VERSION.to_string();
             }
         };
         mac.update(message.as_bytes());

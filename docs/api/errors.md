@@ -1,23 +1,29 @@
 # API Error Reference
 
-Comprehensive guide to ApexMail API error codes and troubleshooting.
+Current ApexMail HTTP APIs use a shared error envelope and a canonical error-code set.
 
 ## Error Response Format
 
-All API errors follow a consistent structure:
+Most ApexMail HTTP APIs return errors in this shape:
 
 ```json
 {
   "error": {
     "code": "ERROR_CODE",
     "message": "Human-readable error message",
-    "details": {
-      "field": "Additional context"
-    }
-  },
-  "requestId": "req_abc123xyz"
+    "details": [
+      "Optional validation detail"
+    ]
+  }
 }
 ```
+
+Notes:
+
+- `details` is optional and currently appears as an array of validation messages when field-level validation fails.
+- `requestId` is not universally emitted by every service, so clients should treat it as optional even when a proxy or gateway adds one out of band.
+- The canonical shared error-code list lives in `services/mail-server/crates/apexmail-lib/src/error_codes.rs`.
+- `api-server` also emits `BAD_REQUEST` for malformed requests that do not map to a shared domain-specific error code.
 
 ---
 
@@ -25,138 +31,98 @@ All API errors follow a consistent structure:
 
 | Status | Category | Description |
 |--------|----------|-------------|
-| 200 | Success | Request succeeded |
-| 201 | Success | Resource created |
-| 204 | Success | No content (successful delete) |
-| 400 | Client Error | Bad request / validation error |
+| 400 | Client Error | Bad request, invalid input, or validation failure |
 | 401 | Client Error | Authentication failed |
 | 403 | Client Error | Permission denied |
 | 404 | Client Error | Resource not found |
+| 408 | Client Error | Request timed out |
 | 409 | Client Error | Conflict / duplicate resource |
-| 422 | Client Error | Unprocessable entity |
-| 429 | Client Error | Rate limit exceeded |
+| 410 | Client Error | Resource permanently unavailable |
+| 413 | Client Error | Payload too large |
+| 422 | Client Error | Domain or business rule violation |
+| 429 | Client Error | Rate limit or quota exceeded |
 | 500 | Server Error | Internal server error |
-| 502 | Server Error | Bad gateway |
 | 503 | Server Error | Service unavailable |
+| 504 | Server Error | Upstream gateway timeout |
 
 ---
 
-## Authentication Errors (401, 403)
+## Canonical Error Codes
 
-### `INVALID_API_KEY`
-**HTTP Status**: 401
+Source of truth: `services/mail-server/crates/apexmail-lib/src/error_codes.rs`.
 
-The API key provided is invalid, expired, or doesn't exist.
+### API-Server Generic Fallback
+
+| Code | HTTP Status | Meaning |
+|------|-------------|---------|
+| `BAD_REQUEST` | 400 | Generic malformed-request error emitted by `api-server` when the failure does not map to a shared domain code. |
+
+### Authentication And Authorization
+
+| Code | HTTP Status | Meaning |
+|------|-------------|---------|
+| `UNAUTHORIZED` | 401 | Authentication is missing, rejected, or otherwise invalid. |
+| `TOKEN_EXPIRED` | 401 | Access token or session token has expired. |
+| `TOKEN_BLACKLISTED` | 401 | Token or session was explicitly revoked or blacklisted. |
+| `INVALID_API_KEY` | 401 | API key is invalid or has been revoked. |
+| `FORBIDDEN` | 403 | Caller is authenticated but not allowed to perform the operation. |
+| `INSUFFICIENT_SCOPES` | 403 | Caller lacks one or more required scopes. |
+
+### Validation And Request Shape
+
+| Code | HTTP Status | Meaning |
+|------|-------------|---------|
+| `VALIDATION_ERROR` | 400 | Field-level validation failed. |
+| `INVALID_INPUT` | 400 | Input parsed successfully but is semantically invalid for the requested operation. |
+| `PAYLOAD_TOO_LARGE` | 413 | Request body or attachment exceeds configured limits. |
+| `NULL_BYTE_DETECTED` | 400 | Request path or query string contained null bytes. |
+
+### Resources And State
+
+| Code | HTTP Status | Meaning |
+|------|-------------|---------|
+| `NOT_FOUND` | 404 | Requested resource does not exist. |
+| `CONFLICT` | 409 | Resource already exists or the requested mutation conflicts with current state. |
+| `GONE` | 410 | Resource is intentionally no longer available. |
+| `IDEMPOTENCY_CONFLICT` | 409 | Existing idempotency key conflicts with the current request payload. |
+| `MESSAGE_CANCELLED` | 410 | Operation targeted a message that has already been cancelled. |
+
+### Availability, Rate Limits, And Infrastructure
+
+| Code | HTTP Status | Meaning |
+|------|-------------|---------|
+| `RATE_LIMIT_EXCEEDED` | 429 | Rate limit threshold was exceeded. |
+| `QUOTA_EXCEEDED` | 429 | Account or tenant quota was exceeded. |
+| `REQUEST_TIMEOUT` | 408 | Request timed out before completion. |
+| `GATEWAY_TIMEOUT` | 504 | Upstream dependency timed out while fulfilling the request. |
+| `SERVICE_UNAVAILABLE` | 503 | Service or dependency is temporarily unavailable. |
+| `WEBHOOK_DELIVERY_FAILED` | 503 | Webhook delivery failed after retry attempts or the destination remained unavailable. |
+| `INTERNAL_ERROR` | 500 | Unexpected server-side failure. |
+
+### Business Rules
+
+| Code | HTTP Status | Meaning |
+|------|-------------|---------|
+| `DOMAIN_NOT_VERIFIED` | 422 | Sending domain has not been verified. |
+| `SUPPRESSION_EXISTS` | 409 | Address already exists on the suppression list. |
+| `INVALID_TEMPLATE` | 400 | Template payload or render request is invalid. |
+
+---
+
+## Common Payload Examples
+
+### Generic Bad Request
 
 ```json
 {
   "error": {
-    "code": "INVALID_API_KEY",
-    "message": "The API key provided is invalid or has been revoked"
+    "code": "BAD_REQUEST",
+    "message": "invalid JSON: expected value at line 1 column 1"
   }
 }
 ```
 
-**Resolution**:
-1. Verify the API key is correct
-2. Check if the key has been revoked in the dashboard
-3. Generate a new API key if needed
-
----
-
-### `INVALID_TOKEN`
-**HTTP Status**: 401
-
-The JWT access token has expired or is invalid.
-
-```json
-{
-  "error": {
-    "code": "INVALID_TOKEN",
-    "message": "The access token has expired"
-  }
-}
-```
-
-**Resolution**:
-1. Re-authenticate to obtain a new token via `POST /v1/auth/refresh`
-2. Implement automatic token refresh in your application
-
----
-
-### `TOKEN_REVOKED`
-**HTTP Status**: 401
-
-The token has been explicitly revoked (logged out).
-
-```json
-{
-  "error": {
-    "code": "TOKEN_REVOKED",
-    "message": "This token has been revoked"
-  }
-}
-```
-
-**Resolution**:
-1. Authenticate again to obtain new tokens
-2. Check if the user's session was terminated
-
----
-
-### `INSUFFICIENT_SCOPE`
-**HTTP Status**: 403
-
-The API key doesn't have the required scope for this operation.
-
-```json
-{
-  "error": {
-    "code": "INSUFFICIENT_SCOPE",
-    "message": "API key does not have required scope",
-    "details": {
-      "required": ["messages:write"],
-      "provided": ["messages:read"]
-    }
-  }
-}
-```
-
-**Resolution**:
-1. Request the correct scopes during authentication
-2. Generate an API key with appropriate scopes
-
-
-## Validation Errors (400)
-
-### `DOMAIN_NOT_VERIFIED`
-**HTTP Status**: 400
-
-The sender domain hasn't been verified.
-
-```json
-{
-  "error": {
-    "code": "DOMAIN_NOT_VERIFIED",
-    "message": "Sender domain is not verified",
-    "details": {
-      "domain": "unverified.com"
-    }
-  }
-}
-```
-
-**Resolution**:
-1. Verify the sender domain in the dashboard
-2. Add DNS records (SPF, DKIM, DMARC)
-3. Wait for verification to complete
-
----
-
-### `VALIDATION_ERROR`
-**HTTP Status**: 400
-
-A required field is missing or a field value is invalid.
+### Validation Failure
 
 ```json
 {
@@ -164,213 +130,31 @@ A required field is missing or a field value is invalid.
     "code": "VALIDATION_ERROR",
     "message": "Validation failed",
     "details": [
-      { "path": "subject", "message": "Required", "code": "too_small" }
+      "subject is required",
+      "from address must be verified"
     ]
   }
 }
 ```
 
----
-
-### `PAYLOAD_TOO_LARGE`
-**HTTP Status**: 413
-
-Request body or attachment exceeds the size limit.
-
-```json
-{
-  "error": {
-    "code": "PAYLOAD_TOO_LARGE",
-    "message": "Request body exceeds the maximum allowed size of 10MB"
-  }
-}
-```
-
----
-
-## Resource Errors (404, 409)
-
-### `NOT_FOUND`
-**HTTP Status**: 404
-
-The requested resource doesn't exist.
+### Resource Not Found
 
 ```json
 {
   "error": {
     "code": "NOT_FOUND",
-    "message": "Message not found",
-    "details": {
-      "resourceType": "message",
-      "resourceId": "msg_nonexistent"
-    }
+    "message": "message not found"
   }
 }
 ```
 
----
-
-### `CONFLICT`
-**HTTP Status**: 409
-
-Resource already exists.
-
-```json
-{
-  "error": {
-    "code": "CONFLICT",
-    "message": "Resource already exists"
-  }
-}
-```
-
----
-
-## Business Logic Errors (400, 422)
-
-### `ALL_RECIPIENTS_SUPPRESSED`
-**HTTP Status**: 400
-
-Recipient(s) are on the suppression list.
-
-```json
-{
-  "error": {
-    "code": "ALL_RECIPIENTS_SUPPRESSED",
-    "message": "All recipients are suppressed",
-    "details": {
-      "suppressedEmails": ["user@example.com"]
-    }
-  }
-}
-```
-
-**Resolution**:
-1. Remove from suppression list if appropriate
-2. Use a different email address
-
----
-
-### `INVALID_STATE`
-**HTTP Status**: 400
-
-Requested action is not allowed for the resource's current state.
-
-```json
-{
-  "error": {
-    "code": "INVALID_STATE",
-    "message": "Campaign \"My Campaign\" is completed, not paused"
-  }
-}
-```
-
-**Resolution**:
-Check the current resource status before performing state-transition operations (e.g., resume, stop, pause).
-
----
-
-### `INVALID_STATUS`
-**HTTP Status**: 400
-
-Cannot perform the operation on a resource in its current status.
-
-```json
-{
-  "error": {
-    "code": "INVALID_STATUS",
-    "message": "Cannot cancel message with status 'sent'"
-  }
-}
-```
-
-**Resolution**:
-Only pending (scheduled) messages can be cancelled. Check `status` before attempting cancellation.
-
----
-
-### `INVALID_ID`
-**HTTP Status**: 400
-
-The provided resource identifier is malformed or not in the expected format.
-
-```json
-{
-  "error": {
-    "code": "INVALID_ID",
-    "message": "Invalid message ID format"
-  }
-}
-```
-
-**Resolution**:
-Ensure you are passing a valid resource ID in the correct format.
-
----
-
-## Rate Limiting Errors (429)
-
-### `RATE_LIMIT_EXCEEDED`
-**HTTP Status**: 429
-
-Too many requests in the time window.
+### Rate Limit Exceeded
 
 ```json
 {
   "error": {
     "code": "RATE_LIMIT_EXCEEDED",
-    "message": "Rate limit exceeded"
-  }
-}
-```
-
-**Headers**:
-```
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 0
-X-RateLimit-Reset: 1705312800
-Retry-After: 45
-```
-
-**Resolution**:
-1. Implement exponential backoff
-2. Batch operations where possible
-3. Upgrade to a higher rate limit tier
-
----
-
-## Server Errors (500, 502, 503)
-
-### `INTERNAL_ERROR`
-**HTTP Status**: 500
-
-Unexpected server error.
-
-```json
-{
-  "error": {
-    "code": "INTERNAL_ERROR",
-    "message": "An unexpected error occurred"
-  },
-  "requestId": "req_abc123xyz"
-}
-```
-
-**Resolution**:
-Contact support with the `requestId` for investigation.
-
----
-
-### `SERVICE_UNAVAILABLE`
-**HTTP Status**: 503
-
-Service temporarily unavailable.
-
-```json
-{
-  "error": {
-    "code": "SERVICE_UNAVAILABLE",
-    "message": "Service temporarily unavailable"
+    "message": "rate limit exceeded"
   }
 }
 ```
@@ -379,63 +163,7 @@ Service temporarily unavailable.
 
 ## Error Handling Best Practices
 
-### Retry Strategy
-
-```python
-import random
-import time
-
-
-def api_request_with_retry(fn, max_retries=3, base_delay=1.0):
-    for attempt in range(max_retries + 1):
-        try:
-            return fn()
-        except ApiError as error:
-            if not is_retryable(error) or attempt == max_retries:
-                raise
-
-            delay = base_delay * (2 ** attempt)
-            time.sleep(delay + random.random())
-
-
-def is_retryable(error) -> bool:
-    retryable_codes = {
-        'RATE_LIMIT_EXCEEDED',
-        'SERVICE_UNAVAILABLE',
-        'INTERNAL_ERROR',
-    }
-    return error.code in retryable_codes
-```
-
-### Error Logging
-
-```python
-from datetime import datetime, timezone
-
-
-def log_api_error(error) -> None:
-    logger.error(
-        'api_error',
-        extra={
-            'code': error.code,
-            'message': error.message,
-            'requestId': error.request_id,
-            'details': error.details,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-        },
-    )
-```
-
-### User-Friendly Messages
-
-```python
-USER_MESSAGES = {
-    'VALIDATION_ERROR': 'Please check your request parameters.',
-    'DOMAIN_NOT_VERIFIED': 'Please verify your sending domain first.',
-    'RATE_LIMIT_EXCEEDED': 'Too many requests. Please try again in a moment.',
-}
-
-
-def get_user_message(code: str) -> str:
-    return USER_MESSAGES.get(code, 'An error occurred. Please try again.')
-```
+- Treat `error.code` as the programmatic contract and `error.message` as a human-readable explanation.
+- Treat `details` and any request ID headers or fields as optional metadata.
+- Retry only transient errors such as `RATE_LIMIT_EXCEEDED`, `SERVICE_UNAVAILABLE`, and `GATEWAY_TIMEOUT`, and use exponential backoff.
+- Do not key client logic off exact message text; match on `error.code` and HTTP status instead.

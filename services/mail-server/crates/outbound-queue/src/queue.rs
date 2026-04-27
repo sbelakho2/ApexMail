@@ -7,7 +7,6 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
-use std::fmt::Write;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -224,25 +223,8 @@ impl EmailQueue {
                 sql.push_str(", ");
             }
             let base = i * cols + 1;
-            write!(
-                sql,
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, 'pending', ${}, ${}, ${}, ${}, ${})",
-                base,
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-                base + 6,
-                base + 7,
-                base + 8,
-                base + 9,
-                base + 10,
-                base + 11,
-            )
-            .expect("write to String is infallible");
+            push_pending_insert_row_sql(&mut sql, base);
         }
-
         sql.push_str(" RETURNING id");
 
 // Bind all parameters in order using a raw query
@@ -639,6 +621,24 @@ impl QueueStats {
     }
 }
 
+fn push_pending_insert_row_sql(sql: &mut String, base: usize) {
+    sql.push_str(&format!(
+        "(${}, ${}, ${}, ${}, ${}, ${}, ${}, 'pending', ${}, ${}, ${}, ${}, ${})",
+        base,
+        base + 1,
+        base + 2,
+        base + 3,
+        base + 4,
+        base + 5,
+        base + 6,
+        base + 7,
+        base + 8,
+        base + 9,
+        base + 10,
+        base + 11,
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Tests — unit tests that do NOT require a database
 // ---------------------------------------------------------------------------
@@ -925,12 +925,7 @@ mod tests {
                 sql.push_str(", ");
             }
             let base = i * cols + 1;
-            write!(
-                sql,
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, 'pending', ${}, ${}, ${}, ${}, ${})",
-                base, base + 1, base + 2, base + 3, base + 4, base + 5,
-                base + 6, base + 7, base + 8, base + 9, base + 10, base + 11,
-            ).unwrap();
+            super::push_pending_insert_row_sql(&mut sql, base);
         }
         sql.push_str(" RETURNING id");
         sql

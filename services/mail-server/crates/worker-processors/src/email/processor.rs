@@ -398,12 +398,11 @@ impl EmailProcessor {
         }
 
 // Check warmup limits
-        if self.config.warmup.enabled {
-            if !self.check_warmup_limit(job).await? {
+        if self.config.warmup.enabled
+            && !self.check_warmup_limit(job).await? {
                 self.requeue_job(job, "warmup_limit").await?;
                 return Ok(());
             }
-        }
 
 // Get domain
         let domain = self.get_domain(&job.domain_id, &job.tenant_id).await?;
