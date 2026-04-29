@@ -87,49 +87,203 @@ pub fn web_dashboard_layout(child_html: &str) -> String {
     shell.render_html()
 }
 
-/// Pixel-identical reproduction of the web new-campaign page contract.
-pub fn web_campaigns_new_page() -> String {
-    let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/campaigns\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li>\
-<li class=\"text-surface-300\">/</li>\
-<li class=\"text-surface-900 font-medium\">New Campaign</li></ol></nav>";
+const CAMPAIGNS_RETURN_HREF: &str = "/campaigns?page=2&status=draft&query=spring";
+
+fn pagination_storage_key(scope: &str) -> String {
+    format!("{}:{scope}:page", ui_store_persistence_key())
+}
+
+fn render_debounced_filter_bar(
+    input_id: &str,
+    search_label: &str,
+    search_value: &str,
+    search_placeholder: &str,
+    clear_href: &str,
+    filters_html: &str,
+) -> String {
+    format!(
+        "<section class=\"rounded-xl border border-border bg-card/80 p-4 shadow-sm\"><div class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{}\">{}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">⌕</span><input id=\"{}\" type=\"search\" role=\"searchbox\" aria-label=\"{}\" value=\"{}\" placeholder=\"{}\" data-debounce-ms=\"300\" data-preserve-query=\"true\" class=\"flex h-11 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary shadow-sm\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Search updates after a 300ms pause so filters do not fire on every keystroke.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{}<a href=\"{}\" class=\"inline-flex w-full items-center justify-center rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></section>",
+        input_id,
+        search_label,
+        input_id,
+        search_label,
+        search_value,
+        search_placeholder,
+        filters_html,
+        clear_href,
+    )
+}
+
+fn render_table_loading_state(label: &str, source_label: &str, column_count: usize) -> String {
+    let header_cells = (0..column_count)
+        .map(|index| {
+            let class_name = match index {
+                0 => "h-4 w-28",
+                _ if index + 1 == column_count => "ml-auto h-4 w-16",
+                _ => "h-4 w-20",
+            };
+            let skeleton = Skeleton {
+                variant: "text",
+                class_name,
+            }
+            .render_html();
+            format!("<th class=\"h-11 px-4 align-middle bg-muted/20\">{}</th>", skeleton)
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let rows = (0..4)
+        .map(|_| {
+            let cells = (0..column_count)
+                .map(|index| {
+                    let class_name = match index {
+                        0 => "h-4 w-40",
+                        1 => "h-4 w-24",
+                        _ if index + 1 == column_count => "ml-auto h-4 w-16",
+                        _ => "h-4 w-20",
+                    };
+                    let skeleton = Skeleton {
+                        variant: "text",
+                        class_name,
+                    }
+                    .render_html();
+                    format!("<td class=\"p-4 align-middle\">{}</td>", skeleton)
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!("<tr class=\"border-b\">{}</tr>", cells)
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        "<section data-view-state=\"loading\" hidden aria-busy=\"true\" class=\"space-y-4\">{}<div class=\"rounded-xl border border-border bg-card/80 p-4 shadow-sm\"><div class=\"relative w-full overflow-x-auto\"><table class=\"w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"[&_tr]:border-b sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody>{}</tbody></table></div></div></section>",
+        AsyncState::Loading {
+            label,
+            source_label: Some(source_label),
+        }
+        .render_html(),
+        header_cells,
+        rows,
+    )
+}
+
+fn render_campaign_editor_page(
+    title: &str,
+    breadcrumb_label: &str,
+    return_href: &str,
+    primary_action_label: &str,
+) -> String {
+    let breadcrumbs = format!(
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">{}</li></ol></nav>",
+        return_href,
+        breadcrumb_label,
+    );
+    let autosave_badge = Badge {
+        text: "Saved",
+        variant: "outline-success",
+        size: "default",
+        icon: Some("<span class=\"h-2.5 w-2.5 rounded-full bg-success\"></span>"),
+    }
+    .render_html();
+    let audience_select = Select {
+        placeholder: "Select audience list",
+        value_label: Some("VIP Customers"),
+        variant: "default",
+        size: "default",
+        open: false,
+        options: vec![
+            SelectOption {
+                value: "vip",
+                label: "VIP Customers",
+                disabled: false,
+                selected: true,
+            },
+            SelectOption {
+                value: "newsletter",
+                label: "Newsletter Subscribers",
+                disabled: false,
+                selected: false,
+            },
+            SelectOption {
+                value: "trial",
+                label: "Trial Accounts",
+                disabled: false,
+                selected: false,
+            },
+        ],
+    }
+    .render_html();
+    let content_input = Textarea {
+        value: "",
+        placeholder: "Paste your HTML content here...",
+        variant: "default",
+        resize: "vertical",
+        max_length: Some(25_000),
+        show_count: true,
+    }
+    .render_html();
+    let preview_button = Button {
+        variant: "ghost",
+        size: "default",
+        label: "Preview",
+        disabled: false,
+        loading: false,
+        left_icon: None,
+        right_icon: None,
+    }
+    .render_html();
+    let save_button = Button {
+        variant: "default",
+        size: "default",
+        label: primary_action_label,
+        disabled: false,
+        loading: false,
+        left_icon: None,
+        right_icon: None,
+    }
+    .render_html();
+    let schedule_button = Button {
+        variant: "outline",
+        size: "default",
+        label: "Schedule",
+        disabled: false,
+        loading: false,
+        left_icon: None,
+        right_icon: None,
+    }
+    .render_html();
+    let leave_dialog = AlertDialog {
+        title: "Leave without saving?",
+        message: "Recent changes may still be syncing. Stay on the page until autosave reports success, or leave and restore the last saved draft.",
+        confirm_label: "Leave page",
+        cancel_label: Some("Keep editing"),
+        variant: "destructive",
+        dialog_type: "confirm",
+    }
+    .render_html();
 
     format!(
-        "{breadcrumbs}\
-<div class=\"max-w-3xl\">\
-<h1 class=\"text-2xl font-bold text-surface-900 mb-6\">Create Campaign</h1>\
-<form class=\"space-y-6\">\
-<div class=\"space-y-2\">\
-{name_label}\
-{name_input}\
-</div>\
-<div class=\"space-y-2\">\
-{subject_label}\
-{subject_input}\
-</div>\
-<div class=\"space-y-2\">\
-{audience_label}\
-<select class=\"flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\"><option value=\"\">Select audience list</option></select>\
-</div>\
-<div class=\"space-y-2\">\
-{content_label}\
-<textarea class=\"flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 resize-vertical\" placeholder=\"Paste your HTML content here...\"></textarea>\
-</div>\
-<div class=\"flex gap-3\">\
-{save_button}\
-{schedule_button}\
-</div>\
-</form></div>",
+        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-xl border border-success/25 bg-success/10 p-4 shadow-sm\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-semibold uppercase tracking-[0.24em] text-success\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-900\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Autosave keeps long campaign edits safe across accidental navigation and route changes.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div aria-live=\"polite\" data-autosave-status=\"saved\" class=\"flex items-center gap-2\">{autosave_badge}<span class=\"text-xs font-medium text-success\">Last saved 20 seconds ago</span></div><p class=\"text-xs text-muted-foreground\">Changes sync every 30 seconds and before navigation.</p></div></div></section><form class=\"space-y-6\" data-autosave-endpoint=\"/v1/campaigns/drafts\" data-autosave-interval-ms=\"30000\" data-dirty-guard=\"true\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Leaving the page before autosave completes will trigger a confirmation dialog instead of discarding your work.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}{schedule_button}</div></div></form><div hidden id=\"campaign-leave-guard\">{leave_dialog}</div></div>",
         breadcrumbs = breadcrumbs,
+        title = title,
+        autosave_badge = autosave_badge,
         name_label = Label { text: "Campaign Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
         name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
         subject_label = Label { text: "Subject Line", variant: "default", size: "default", required: true, optional: false }.render_html(),
         subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
         audience_label = Label { text: "Audience", variant: "default", size: "default", required: true, optional: false }.render_html(),
+        audience_select = audience_select,
         content_label = Label { text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
-        save_button = Button { variant: "default", size: "default", label: "Save Draft", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
-        schedule_button = Button { variant: "outline", size: "default", label: "Schedule", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        content_input = content_input,
+        preview_button = preview_button,
+        save_button = save_button,
+        schedule_button = schedule_button,
+        leave_dialog = leave_dialog,
     )
+}
+
+/// Pixel-identical reproduction of the web new-campaign page contract.
+pub fn web_campaigns_new_page() -> String {
+    render_campaign_editor_page("Create Campaign", "New Campaign", "/campaigns?page=1", "Save Draft")
 }
 
 /// Pixel-identical reproduction of the dedicated-IP settings page contract.
@@ -837,73 +991,260 @@ pub fn web_dashboard_page() -> String {
 
 /// Campaigns list page.
 pub fn web_campaigns_page() -> String {
+    let status_filter = Select {
+        placeholder: "Status",
+        value_label: Some("Draft"),
+        variant: "default",
+        size: "default",
+        open: false,
+        options: vec![
+            SelectOption { value: "draft", label: "Draft", disabled: false, selected: true },
+            SelectOption { value: "scheduled", label: "Scheduled", disabled: false, selected: false },
+            SelectOption { value: "sent", label: "Sent", disabled: false, selected: false },
+        ],
+    }
+    .render_html();
+    let sort_filter = Select {
+        placeholder: "Sort",
+        value_label: Some("Recently updated"),
+        variant: "default",
+        size: "default",
+        open: false,
+        options: vec![
+            SelectOption { value: "updated", label: "Recently updated", disabled: false, selected: true },
+            SelectOption { value: "created", label: "Recently created", disabled: false, selected: false },
+            SelectOption { value: "open-rate", label: "Open rate", disabled: false, selected: false },
+        ],
+    }
+    .render_html();
+    let filters = format!(
+        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
+        status_filter,
+        sort_filter,
+    );
+    let spring_status = StatusIndicator { status: "draft" }.render_html();
+    let launch_status = StatusIndicator { status: "scheduled" }.render_html();
+    let spring_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><button type=\"button\" data-alert-dialog-target=\"campaign-delete-confirmation\" class=\"inline-flex items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/10\">Delete</button></div>";
+    let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><a href=\"/campaigns/c_launch/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a></div>";
     let table = Table {
         caption: Some("Campaigns"),
         columns: vec![
             TableColumn { label: "Name", align: "left" },
             TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "Sent", align: "right" },
+            TableColumn { label: "Audience", align: "left" },
             TableColumn { label: "Open Rate", align: "right" },
-            TableColumn { label: "Created", align: "left" },
+            TableColumn { label: "Updated", align: "left" },
+            TableColumn { label: "Actions", align: "right" },
         ],
-        rows: vec![],
+        rows: vec![
+            vec![
+                "<a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"font-semibold text-foreground hover:text-primary\">Spring Winback</a>",
+                spring_status.as_str(),
+                "VIP Customers",
+                "41.2%",
+                "2 minutes ago",
+                spring_actions,
+            ],
+            vec![
+                "<a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"font-semibold text-foreground hover:text-primary\">Launch Sequence</a>",
+                launch_status.as_str(),
+                "Trial Accounts",
+                "28.4%",
+                "15 minutes ago",
+                launch_actions,
+            ],
+        ],
     };
+    let pagination_key = pagination_storage_key("campaigns");
+    let pagination = PaginationControls {
+        page: 2,
+        total_pages: 5,
+    }
+    .render_html_with_links("/campaigns", Some("status=draft&query=spring"), Some(pagination_key.as_str()));
+    let delete_dialog = AlertDialog {
+        title: "Delete campaign?",
+        message: "This permanently removes the draft, schedule, and associated analytics snapshots.",
+        confirm_label: "Delete campaign",
+        cancel_label: Some("Keep campaign"),
+        variant: "destructive",
+        dialog_type: "confirm",
+    }
+    .render_html();
     format!(
-        "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-900\">Campaigns</h1>\
-<a href=\"/campaigns/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2\">New Campaign</a></div>\
-{table}{empty}</div>",
+        "<div class=\"space-y-6\"><div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Keep campaign lists responsive, searchable, and resumable without losing your current page.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">New Campaign</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"campaign-delete-confirmation\">{delete_dialog}</div></div>",
+        filters = render_debounced_filter_bar(
+            "campaign-search",
+            "Search campaigns",
+            "spring",
+            "Search by campaign name or audience",
+            "/campaigns",
+            filters.as_str(),
+        ),
+        loading = render_table_loading_state("Loading campaign performance", "api", 6),
         table = table.render_html(),
+        pagination = pagination,
         empty = EmptyState { title: "No campaigns yet", description: Some("Create your first email campaign"), icon_markup: None, action_label: Some("Create Campaign") }.render_html(),
+        delete_dialog = delete_dialog,
     )
 }
 
 /// Campaign detail page.
 pub fn web_campaign_detail_page() -> String {
-    "<div class=\"space-y-6\">\
-<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
-<li><a href=\"/campaigns\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li>\
-<li class=\"text-surface-300\">/</li>\
-<li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav>\
-<div class=\"flex items-center justify-between\">\
-<h1 class=\"text-2xl font-bold text-surface-900\">Campaign Detail</h1>\
-<div class=\"flex gap-2\">\
-<a href=\"#edit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium border border-input bg-background hover:bg-accent h-10 px-4 py-2\">Edit</a>\
-</div></div>\
-<div class=\"grid gap-6 md:grid-cols-3\">\
-<div class=\"rounded-xl border bg-card p-6\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold\">0</p></div>\
-<div class=\"rounded-xl border bg-card p-6\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold\">0%</p></div>\
-<div class=\"rounded-xl border bg-card p-6\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold\">0%</p></div>\
-</div></div>".to_string()
+    let delete_dialog = AlertDialog {
+        title: "Delete campaign?",
+        message: "This permanently removes the campaign and keeps the current list-page return path intact until you confirm.",
+        confirm_label: "Delete campaign",
+        cancel_label: Some("Cancel"),
+        variant: "destructive",
+        dialog_type: "confirm",
+    }
+    .render_html();
+    format!(
+        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium border border-input bg-background hover:bg-accent h-10 px-4 py-2\">Edit</a><button type=\"button\" data-alert-dialog-target=\"campaign-detail-delete\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 h-10 px-4 py-2\">Delete Campaign</button></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-xl border bg-card p-6\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold\">4,280</p></div><div class=\"rounded-xl border bg-card p-6\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold\">41.2%</p></div><div class=\"rounded-xl border bg-card p-6\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold\">8.6%</p></div></div><div hidden id=\"campaign-detail-delete\">{}</div></div>",
+        CAMPAIGNS_RETURN_HREF,
+        delete_dialog,
+    )
 }
 
 /// Campaign edit page.
 pub fn web_campaign_edit_page() -> String {
-    let mut html = web_campaigns_new_page();
-    html = html.replace("Create Campaign", "Edit Campaign");
-    html = html.replace("New Campaign", "Edit Campaign");
-    html
+    render_campaign_editor_page("Edit Campaign", "Edit Campaign", CAMPAIGNS_RETURN_HREF, "Save Changes")
 }
 
 /// Contacts list page.
 pub fn web_contacts_page() -> String {
+    let status_filter = Select {
+        placeholder: "Status",
+        value_label: Some("Subscribed"),
+        variant: "default",
+        size: "default",
+        open: false,
+        options: vec![
+            SelectOption { value: "subscribed", label: "Subscribed", disabled: false, selected: true },
+            SelectOption { value: "unsubscribed", label: "Unsubscribed", disabled: false, selected: false },
+            SelectOption { value: "bounced", label: "Bounced", disabled: false, selected: false },
+        ],
+    }
+    .render_html();
+    let segment_filter = Select {
+        placeholder: "List",
+        value_label: Some("VIP Customers"),
+        variant: "default",
+        size: "default",
+        open: false,
+        options: vec![
+            SelectOption { value: "vip", label: "VIP Customers", disabled: false, selected: true },
+            SelectOption { value: "newsletter", label: "Newsletter Subscribers", disabled: false, selected: false },
+            SelectOption { value: "trial", label: "Trial Accounts", disabled: false, selected: false },
+        ],
+    }
+    .render_html();
+    let filters = format!(
+        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
+        status_filter,
+        segment_filter,
+    );
+    let select_all = Checkbox {
+        checked: true,
+        variant: "default",
+        size: "default",
+        indeterminate: false,
+        disabled: false,
+    }
+    .render_html();
+    let row_one_checkbox = Checkbox {
+        checked: true,
+        variant: "default",
+        size: "default",
+        indeterminate: false,
+        disabled: false,
+    }
+    .render_html();
+    let row_two_checkbox = Checkbox {
+        checked: true,
+        variant: "default",
+        size: "default",
+        indeterminate: false,
+        disabled: false,
+    }
+    .render_html();
+    let row_three_checkbox = Checkbox {
+        checked: false,
+        variant: "default",
+        size: "default",
+        indeterminate: false,
+        disabled: false,
+    }
+    .render_html();
+    let subscriber_status = StatusIndicator { status: "subscribed" }.render_html();
+    let unsubscribed_status = StatusIndicator { status: "unsubscribed" }.render_html();
     let table = Table {
         caption: Some("Contacts"),
         columns: vec![
+            TableColumn { label: select_all.as_str(), align: "left" },
             TableColumn { label: "Email", align: "left" },
             TableColumn { label: "Name", align: "left" },
             TableColumn { label: "Status", align: "left" },
             TableColumn { label: "Lists", align: "right" },
             TableColumn { label: "Added", align: "left" },
         ],
-        rows: vec![],
+        rows: vec![
+            vec![
+                row_one_checkbox.as_str(),
+                "alice@example.com",
+                "Alice Ngo",
+                subscriber_status.as_str(),
+                "3",
+                "2 hours ago",
+            ],
+            vec![
+                row_two_checkbox.as_str(),
+                "jamal@example.com",
+                "Jamal Ortiz",
+                subscriber_status.as_str(),
+                "2",
+                "Yesterday",
+            ],
+            vec![
+                row_three_checkbox.as_str(),
+                "lina@example.com",
+                "Lina Park",
+                unsubscribed_status.as_str(),
+                "1",
+                "3 days ago",
+            ],
+        ],
     };
+    let bulk_bar = format!(
+        "<section class=\"rounded-xl border border-border bg-card/80 p-4 shadow-sm\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\">{}<div aria-live=\"polite\"><p class=\"text-sm font-semibold text-foreground\">2 contacts selected</p><p class=\"text-xs text-muted-foreground\">Batch actions stay visible and keyboard reachable on mobile and desktop.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{}{}</div></div></section>",
+        select_all,
+        Button { variant: "outline", size: "default", label: "Add to List", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        format!(
+            "{}{}",
+            Button { variant: "outline", size: "default", label: "Export", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+            Button { variant: "destructive", size: "default", label: "Delete", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        ),
+    );
+    let pagination_key = pagination_storage_key("contacts");
+    let pagination = PaginationControls {
+        page: 3,
+        total_pages: 8,
+    }
+    .render_html_with_links("/contacts", Some("status=subscribed&query=ali"), Some(pagination_key.as_str()));
     format!(
-        "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-900\">Contacts</h1>\
-<a href=\"/contacts/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2\">Add Contact</a></div>\
-{table}{empty}</div>",
+        "<div class=\"space-y-6\"><div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Debounced filters, deterministic loading states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">Add Contact</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></div>",
+        filters = render_debounced_filter_bar(
+            "contact-search",
+            "Search contacts",
+            "ali",
+            "Search by name or email",
+            "/contacts",
+            filters.as_str(),
+        ),
+        bulk_bar = bulk_bar,
+        loading = render_table_loading_state("Loading contacts", "api", 6),
         table = table.render_html(),
+        pagination = pagination,
         empty = EmptyState { title: "No contacts yet", description: Some("Import or add your first contact"), icon_markup: None, action_label: Some("Add Contact") }.render_html(),
     )
 }
@@ -920,7 +1261,7 @@ pub fn web_contacts_new_page() -> String {
 <form class=\"space-y-6\">\
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
-<div class=\"flex gap-3\">{save_button}</div>\
+<div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
         email_label = Label { text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
         email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
@@ -932,22 +1273,80 @@ pub fn web_contacts_new_page() -> String {
 
 /// Lists page.
 pub fn web_lists_page() -> String {
+    let segment_filter = Select {
+        placeholder: "Segment",
+        value_label: Some("Active lists"),
+        variant: "default",
+        size: "default",
+        open: false,
+        options: vec![
+            SelectOption { value: "active", label: "Active lists", disabled: false, selected: true },
+            SelectOption { value: "archived", label: "Archived lists", disabled: false, selected: false },
+        ],
+    }
+    .render_html();
+    let sort_filter = Select {
+        placeholder: "Sort",
+        value_label: Some("Largest audience"),
+        variant: "default",
+        size: "default",
+        open: false,
+        options: vec![
+            SelectOption { value: "largest", label: "Largest audience", disabled: false, selected: true },
+            SelectOption { value: "recent", label: "Recently updated", disabled: false, selected: false },
+        ],
+    }
+    .render_html();
+    let filters = format!(
+        "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
+        segment_filter,
+        sort_filter,
+    );
+    let vip_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_vip\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><button type=\"button\" data-alert-dialog-target=\"list-delete-confirmation\" class=\"inline-flex items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/10\">Delete</button></div>";
+    let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_launch\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a></div>";
     let table = Table {
         caption: Some("Contact lists"),
         columns: vec![
             TableColumn { label: "Name", align: "left" },
             TableColumn { label: "Contacts", align: "right" },
-            TableColumn { label: "Created", align: "left" },
+            TableColumn { label: "Updated", align: "left" },
+            TableColumn { label: "Actions", align: "right" },
         ],
-        rows: vec![],
+        rows: vec![
+            vec!["VIP Customers", "1,240", "8 minutes ago", vip_actions],
+            vec!["Launch Waitlist", "860", "Yesterday", launch_actions],
+        ],
     };
+    let pagination_key = pagination_storage_key("lists");
+    let pagination = PaginationControls {
+        page: 1,
+        total_pages: 3,
+    }
+    .render_html_with_links("/lists", Some("segment=active&query=vip"), Some(pagination_key.as_str()));
+    let delete_dialog = AlertDialog {
+        title: "Delete list?",
+        message: "This removes the list definition immediately. Contacts remain intact, but campaign segment links will be removed.",
+        confirm_label: "Delete list",
+        cancel_label: Some("Keep list"),
+        variant: "destructive",
+        dialog_type: "confirm",
+    }
+    .render_html();
     format!(
-        "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-900\">Lists</h1>\
-<a href=\"/lists/new\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2\">New List</a></div>\
-{table}{empty}</div>",
+        "<div class=\"space-y-6\"><div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions now surface confirmation and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">New List</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"list-delete-confirmation\">{delete_dialog}</div></div>",
+        filters = render_debounced_filter_bar(
+            "list-search",
+            "Search contact lists",
+            "vip",
+            "Search by list name",
+            "/lists",
+            filters.as_str(),
+        ),
+        loading = render_table_loading_state("Loading contact lists", "api", 4),
         table = table.render_html(),
+        pagination = pagination,
         empty = EmptyState { title: "No lists yet", description: Some("Create a list to organize your contacts"), icon_markup: None, action_label: Some("Create List") }.render_html(),
+        delete_dialog = delete_dialog,
     )
 }
 
@@ -958,7 +1357,7 @@ pub fn web_lists_new_page() -> String {
 <h1 class=\"text-2xl font-bold text-surface-900 mb-6\">Create List</h1>\
 <form class=\"space-y-6\">\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
-<div class=\"flex gap-3\">{save_button}</div>\
+<div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
         name_label = Label { text: "List Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
         name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "e.g. Newsletter Subscribers", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
@@ -1846,6 +2245,8 @@ mod tests {
         assert!(html.contains("Schedule"));
         assert!(html.contains("Audience"));
         assert!(html.contains("HTML Content"));
+        assert!(html.contains("data-autosave-interval-ms=\"30000\""));
+        assert!(html.contains("aria-live=\"polite\""));
     }
 
     #[test]
@@ -2012,6 +2413,9 @@ mod tests {
         assert!(html.contains("New Campaign"));
         assert!(html.contains("No campaigns yet"));
         assert!(html.contains("<table"));
+        assert!(html.contains("data-view-state=\"loading\""));
+        assert!(html.contains("data-pagination-storage-key=\"apexmail-ui:campaigns:page\""));
+        assert!(html.contains("Delete campaign?"));
     }
 
     #[test]
@@ -2022,6 +2426,7 @@ mod tests {
         assert!(html.contains("Recipients"));
         assert!(html.contains("Open Rate"));
         assert!(html.contains("Click Rate"));
+        assert!(html.contains("/campaigns?page=2&status=draft&query=spring"));
     }
 
     #[test]
@@ -2038,6 +2443,8 @@ mod tests {
         assert!(html.contains("Add Contact"));
         assert!(html.contains("No contacts yet"));
         assert!(html.contains("<table"));
+        assert!(html.contains("2 contacts selected"));
+        assert!(html.contains("data-debounce-ms=\"300\""));
     }
 
     #[test]
@@ -2054,6 +2461,8 @@ mod tests {
         assert!(html.contains("Lists"));
         assert!(html.contains("New List"));
         assert!(html.contains("No lists yet"));
+        assert!(html.contains("Delete list?"));
+        assert!(html.contains("data-pagination-storage-key=\"apexmail-ui:lists:page\""));
     }
 
     #[test]

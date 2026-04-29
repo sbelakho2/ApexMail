@@ -7,12 +7,26 @@ usage() {
     exit 64
 }
 
+validate_env_name() {
+    case "$1" in
+        ''|[0-9]*|*[!A-Za-z0-9_]* )
+            echo "ERROR: Invalid environment variable name: $1" >&2
+            exit 64
+            ;;
+    esac
+}
+
+lookup_env() {
+    validate_env_name "$1"
+    printenv "$1" 2>/dev/null || true
+}
+
 load_secret() {
     target_env="$1"
     file_env="$2"
 
-    eval "secret_file=\${$file_env:-}"
-    eval "secret_value=\${$target_env:-}"
+    secret_file="$(lookup_env "$file_env")"
+    secret_value="$(lookup_env "$target_env")"
 
     if [ -n "$secret_file" ]; then
         if [ ! -f "$secret_file" ]; then

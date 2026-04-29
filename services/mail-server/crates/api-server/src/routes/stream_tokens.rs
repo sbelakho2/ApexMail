@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
 
 /// Request body (optional:allows specifying filters embedded in token).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateStreamTokenRequest {
 /// Optional:restrict token to specific event types.
     #[serde(default)]

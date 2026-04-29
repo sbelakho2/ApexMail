@@ -520,6 +520,7 @@ async fn update_group(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScimPatchOp {
     op: String,
     path: Option<String>,
@@ -527,6 +528,7 @@ struct ScimPatchOp {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScimPatchRequest {
     #[serde(rename = "Operations")]
     operations: Vec<ScimPatchOp>,

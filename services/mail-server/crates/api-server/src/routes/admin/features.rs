@@ -55,6 +55,7 @@ pub struct FeaturesResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateFeatureRequest {
     pub name: String,
     #[serde(default)]
@@ -64,6 +65,7 @@ pub struct CreateFeatureRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateFeatureRequest {
     pub id: Uuid,
     #[serde(default)]

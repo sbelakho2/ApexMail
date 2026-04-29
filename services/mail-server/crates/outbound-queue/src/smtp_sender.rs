@@ -48,15 +48,22 @@ pub struct SmtpSenderConfig {
     pub mx_cache_ttl_secs: u64,
 }
 
+const DEFAULT_SMTP_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_SMTP_MAX_RETRIES: u32 = 3;
+const DEFAULT_SMTP_RETRY_DELAY_SECONDS: u64 = 30;
+const DEFAULT_SMTP_CONNECTION_POOL_SIZE: usize = 2;
+const DEFAULT_SMTP_MX_CACHE_TTL_SECS: u64 = 300;
+const DEFAULT_MAX_SMTP_RESPONSE_LINE: usize = 1_000;
+
 impl Default for SmtpSenderConfig {
     fn default() -> Self {
         Self {
             hostname: default_sender_hostname(),
-            timeout_seconds: 60,
-            max_retries: 3,
-            retry_delay_seconds: 30,
+            timeout_seconds: DEFAULT_SMTP_TIMEOUT_SECONDS,
+            max_retries: DEFAULT_SMTP_MAX_RETRIES,
+            retry_delay_seconds: DEFAULT_SMTP_RETRY_DELAY_SECONDS,
             require_starttls: true,
-            connection_pool_size: 2,
+            connection_pool_size: DEFAULT_SMTP_CONNECTION_POOL_SIZE,
             mx_cache_ttl_secs: default_mx_cache_ttl_secs(),
         }
     }
@@ -69,7 +76,7 @@ static MAX_SMTP_RESPONSE_LINE: LazyLock<usize> = LazyLock::new(|| {
         .ok()
         .and_then(|val| val.parse::<usize>().ok())
         .filter(|val| *val > 0)
-        .unwrap_or(1000)
+    .unwrap_or(DEFAULT_MAX_SMTP_RESPONSE_LINE)
 });
 const MAX_EHLO_LINES: usize = 64;
 const MAX_CONNECTION_POOL_DOMAINS: usize = 2048;
@@ -85,7 +92,7 @@ fn default_mx_cache_ttl_secs() -> u64 {
         .ok()
         .and_then(|val| val.parse::<u64>().ok())
         .filter(|val| *val > 0)
-        .unwrap_or(300)
+    .unwrap_or(DEFAULT_SMTP_MX_CACHE_TTL_SECS)
 }
 
 /// Direct SMTP Sender - Enterprise-Grade Infrastructure
@@ -1020,3 +1027,19 @@ pub async fn send_email(
     
     sender.send(from, to, subject, text_body, html_body, None).await
 }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn smtp_sender_config_default_values_are_named_policies() {
+            let config = SmtpSenderConfig::default();
+
+            assert_eq!(config.timeout_seconds, DEFAULT_SMTP_TIMEOUT_SECONDS);
+            assert_eq!(config.max_retries, DEFAULT_SMTP_MAX_RETRIES);
+            assert_eq!(config.retry_delay_seconds, DEFAULT_SMTP_RETRY_DELAY_SECONDS);
+            assert_eq!(config.connection_pool_size, DEFAULT_SMTP_CONNECTION_POOL_SIZE);
+            assert_eq!(config.mx_cache_ttl_secs, DEFAULT_SMTP_MX_CACHE_TTL_SECS);
+        }
+    }

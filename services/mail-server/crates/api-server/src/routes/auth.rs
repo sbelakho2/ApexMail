@@ -443,6 +443,7 @@ pub fn control_plane_alias_router() -> Router<AppState> {
 // ─── Request / Response types ──────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
@@ -497,6 +498,7 @@ pub struct UserInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompleteMfaChallengeRequest {
     pub challenge_token: String,
     #[serde(rename = "mfaCode", alias = "mfa_code")]
@@ -504,6 +506,7 @@ pub struct CompleteMfaChallengeRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateApiKeyRequest {
     pub name: String,
     pub scopes: Vec<String>,
@@ -534,6 +537,7 @@ pub struct ApiKeyInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListApiKeysQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -653,6 +657,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResetPasswordRequest {
     pub token: String,
     pub email: String,
@@ -863,6 +868,7 @@ struct UserRow {
 // ─── Registration types ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegisterRequest {
     pub company_name: String,
     pub email: String,
@@ -883,6 +889,7 @@ pub struct RegisterResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerifyEmailQuery {
     pub token: String,
 }
@@ -1478,6 +1485,13 @@ mod tests {
     }
 
     #[test]
+    fn test_login_request_rejects_unknown_fields() {
+        let json = r#"{"email":"a@b.com","password":"secret","unexpected":true}"#;
+
+        assert!(serde_json::from_str::<LoginRequest>(json).is_err());
+    }
+
+    #[test]
     fn test_session_auth_response_serialisation() {
         let resp = SessionAuthResponse {
             expires_at: "2026-01-01T00:00:00Z".into(),
@@ -1500,6 +1514,13 @@ mod tests {
         let req: CreateApiKeyRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.name, "prod");
         assert!(req.expires_in_days.is_none());
+    }
+
+    #[test]
+    fn test_create_api_key_request_rejects_unknown_fields() {
+        let json = r#"{"name":"prod","scopes":["messages:send"],"expires_in_days":30,"oops":"extra"}"#;
+
+        assert!(serde_json::from_str::<CreateApiKeyRequest>(json).is_err());
     }
 
     #[test]
@@ -1619,6 +1640,13 @@ mod tests {
     }
 
     #[test]
+    fn test_reset_password_request_rejects_unknown_fields() {
+        let json = r#"{"token":"tok","email":"user@example.com","password":"StrongPassword1!","confirmPassword":"StrongPassword1!","extra":"nope"}"#;
+
+        assert!(serde_json::from_str::<ResetPasswordRequest>(json).is_err());
+    }
+
+    #[test]
     fn test_scopes_for_role_mapping() {
         assert_eq!(scopes_for_role("owner"), vec!["*".to_string()]);
         assert!(scopes_for_role("developer").contains(&"messages:send".to_string()));
@@ -1662,6 +1690,13 @@ mod tests {
 
         assert_eq!(req.challenge_token, "mfa_123");
         assert_eq!(req.mfa_code, "654321");
+    }
+
+    #[test]
+    fn test_complete_mfa_challenge_request_rejects_unknown_fields() {
+        let json = r#"{"challenge_token":"mfa_123","mfaCode":"654321","unexpected":1}"#;
+
+        assert!(serde_json::from_str::<CompleteMfaChallengeRequest>(json).is_err());
     }
 
     #[test]
@@ -1741,6 +1776,7 @@ mod tests {
 // ─── Change Password / Session Revoke ──────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
@@ -1798,6 +1834,7 @@ async fn change_password(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RevokeSessionRequest {
     /// Optional: revoke a specific session ID. If omitted, revokes all other sessions.
     #[serde(default)]

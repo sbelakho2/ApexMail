@@ -138,6 +138,7 @@ async fn list_warmup(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct WarmupAction {
     pub pool_id: String,

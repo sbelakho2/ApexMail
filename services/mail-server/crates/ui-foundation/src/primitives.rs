@@ -1030,6 +1030,48 @@ impl PaginationControls {
             button("Last", is_last_page),
         )
     }
+
+    pub fn render_html_with_links(
+        &self,
+        base_path: &str,
+        extra_query: Option<&str>,
+        persistence_key: Option<&str>,
+    ) -> String {
+        let safe_total_pages = self.total_pages.max(1);
+        let current_page = self.page.clamp(1, safe_total_pages);
+        let preserved = extra_query.filter(|value| !value.is_empty()).map(|value| format!("&{}", value)).unwrap_or_default();
+        let persistence_attr = persistence_key
+            .map(|value| format!(" data-pagination-storage-key=\"{}\" data-preserve-query=\"true\"", value))
+            .unwrap_or_default();
+        let link = |label: &str, target_page: usize, disabled: bool| {
+            if disabled {
+                return format!(
+                    "<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-lg text-[14px] font-sans font-semibold tracking-[0.01em] border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground h-9 rounded-sm px-3 text-sm min-h-[44px]\" disabled aria-disabled=\"true\">{}</button>",
+                    label,
+                );
+            }
+
+            format!(
+                "<a href=\"{}?page={}{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-lg text-[14px] font-sans font-semibold tracking-[0.01em] border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground h-9 rounded-sm px-3 text-sm min-h-[44px]\">{}</a>",
+                base_path,
+                target_page,
+                preserved,
+                label,
+            )
+        };
+        format!(
+            "<div class=\"flex flex-wrap items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\" data-current-page=\"{}\" data-total-pages=\"{}\"{}>{}{}<span class=\"px-2 text-sm text-muted-foreground\">Page {} of {}</span>{}{}</div>",
+            current_page,
+            safe_total_pages,
+            persistence_attr,
+            link("First", 1, current_page == 1),
+            link("Previous", current_page.saturating_sub(1).max(1), current_page == 1),
+            current_page,
+            safe_total_pages,
+            link("Next", (current_page + 1).min(safe_total_pages), current_page == safe_total_pages),
+            link("Last", safe_total_pages, current_page == safe_total_pages),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2361,6 +2403,18 @@ mod tests {
         assert!(html.contains("Page 2 of 5"));
         assert!(html.contains("First"));
         assert!(html.contains("Last"));
+    }
+
+    #[test]
+    fn pagination_controls_can_render_query_preserving_links() {
+        let html = PaginationControls { page: 3, total_pages: 7 }
+            .render_html_with_links("/campaigns", Some("status=draft&query=spring"), Some("apexmail:campaigns:page"));
+
+        assert!(html.contains("href=\"/campaigns?page=1&status=draft&query=spring\""));
+        assert!(html.contains("href=\"/campaigns?page=2&status=draft&query=spring\""));
+        assert!(html.contains("href=\"/campaigns?page=4&status=draft&query=spring\""));
+        assert!(html.contains("data-pagination-storage-key=\"apexmail:campaigns:page\""));
+        assert!(html.contains("data-preserve-query=\"true\""));
     }
 
     #[test]

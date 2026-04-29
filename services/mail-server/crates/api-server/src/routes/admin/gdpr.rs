@@ -136,6 +136,7 @@ async fn list_gdpr_requests(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateGdprRequest {
     pub id: String,
     pub status: String,

@@ -2195,6 +2195,17 @@ impl IntoResponse for ApiError {
                     "active subscription not found".to_string(),
                 )
             }
+            ApiError::Subscription(subscriptions::SubscriptionError::UsageExceedsPlan {
+                plan_name,
+                reasons,
+            }) => {
+                let reason_summary = reasons.join("; ");
+                (
+                    StatusCode::CONFLICT,
+                    ErrorCode::Conflict,
+                    format!("cannot change to {plan_name}: {reason_summary}"),
+                )
+            }
             ApiError::Subscription(subscriptions::SubscriptionError::Db(sqlx::Error::RowNotFound)) => {
                 (
                     StatusCode::NOT_FOUND,

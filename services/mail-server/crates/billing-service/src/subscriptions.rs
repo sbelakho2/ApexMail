@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::types::{BillingInterval, Subscription, SubscriptionStatus};
+use crate::types::UsageSummary;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -101,17 +102,53 @@ pub async fn update_plan(
     tenant_id: &str,
     new_plan: &str,
 ) -> Result<(), SubscriptionError> {
-// Verify the plan exists.
-    let exists: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM plans WHERE name = $1 AND is_active = true",
+// Verify the plan exists and capture its quota limits.
+    let new_plan_limits: Option<PlanLimitRow> = sqlx::query_as(
+        "SELECT name, email_limit, api_call_limit FROM plans WHERE name = $1 AND is_active = true",
     )
     .bind(new_plan)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .map_err(SubscriptionError::Db)?;
 
-    if exists.0 == 0 {
+    let Some(new_plan_limits) = new_plan_limits else {
         return Err(SubscriptionError::PlanNotFound(new_plan.to_string()));
+    };
+
+    let current_subscription: Option<ActiveSubscriptionRow> = sqlx::query_as(
+        r#"
+                SELECT current_period_start, current_period_end
+        FROM subscriptions
+        WHERE tenant_id = $1
+          AND status IN ('active', 'trialing', 'past_due')
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(SubscriptionError::Db)?;
+
+    let Some(current_subscription) = current_subscription else {
+        return Err(SubscriptionError::NotFound);
+    };
+
+    let usage = crate::usage::get_usage(
+        pool,
+        tenant_id,
+        current_subscription.current_period_start,
+        current_subscription.current_period_end,
+    )
+    .await
+    .map_err(SubscriptionError::Usage)?;
+
+    let limit_errors = usage_limit_errors(&usage, &new_plan_limits);
+    if !limit_errors.is_empty() {
+        return Err(SubscriptionError::UsageExceedsPlan {
+            plan_name: new_plan_limits.name,
+            reasons: limit_errors,
+        });
     }
 
     let now = Utc::now();
@@ -144,9 +181,7 @@ pub async fn update_plan(
     .await
     .map_err(SubscriptionError::Db)?;
 
-    if updated_subscription_id.is_none() {
-        return Err(SubscriptionError::NotFound);
-    }
+    let updated_subscription_id = updated_subscription_id.ok_or(SubscriptionError::NotFound)?;
 
 // Update tenant plan column.
     sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
@@ -156,6 +191,8 @@ pub async fn update_plan(
         .execute(&mut *tx)
         .await
         .map_err(SubscriptionError::Db)?;
+
+    let _ = updated_subscription_id;
 
     tx.commit().await.map_err(SubscriptionError::Db)?;
 
@@ -235,6 +272,26 @@ fn parse_interval(s: &str) -> BillingInterval {
     }
 }
 
+fn usage_limit_errors(usage: &UsageSummary, limits: &PlanLimitRow) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    if limits.email_limit >= 0 && usage.emails_sent > limits.email_limit {
+        errors.push(format!(
+            "emails sent this period ({}) exceed the {} plan limit ({})",
+            usage.emails_sent, limits.name, limits.email_limit
+        ));
+    }
+
+    if limits.api_call_limit >= 0 && usage.api_calls > limits.api_call_limit {
+        errors.push(format!(
+            "API calls this period ({}) exceed the {} plan limit ({})",
+            usage.api_calls, limits.name, limits.api_call_limit
+        ));
+    }
+
+    errors
+}
+
 #[derive(sqlx::FromRow)]
 struct SubRow {
     id: Uuid,
@@ -249,6 +306,19 @@ struct SubRow {
     cancel_at_period_end: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PlanLimitRow {
+    name: String,
+    email_limit: i64,
+    api_call_limit: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct ActiveSubscriptionRow {
+    current_period_start: DateTime<Utc>,
+    current_period_end: DateTime<Utc>,
 }
 
 impl SubRow {
@@ -278,10 +348,17 @@ impl SubRow {
 pub enum SubscriptionError {
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("usage lookup failed: {0}")]
+    Usage(#[from] crate::usage::UsageError),
     #[error("plan not found: {0}")]
     PlanNotFound(String),
     #[error("active subscription not found")]
     NotFound,
+    #[error("cannot change to {plan_name}: {reasons:?}")]
+    UsageExceedsPlan {
+        plan_name: String,
+        reasons: Vec<String>,
+    },
     #[error("invalid subscription status: {0}")]
     InvalidStatus(String),
 }
@@ -293,6 +370,7 @@ pub enum SubscriptionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parse_status_variants() {
@@ -373,5 +451,75 @@ mod tests {
     fn subscription_error_display() {
         let err = SubscriptionError::PlanNotFound("gold".into());
         assert!(err.to_string().contains("gold"));
+    }
+
+    #[test]
+    fn usage_limit_errors_accepts_usage_within_limits() {
+        let usage = UsageSummary {
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
+            period_start: Utc::now(),
+            period_end: Utc::now(),
+            emails_sent: 10,
+            emails_limit: 100,
+            api_calls: 20,
+            api_calls_limit: 200,
+            percent_used: 10.0,
+            metrics: json!({}),
+        };
+        let limits = PlanLimitRow {
+            name: "starter".into(),
+            email_limit: 50,
+            api_call_limit: 100,
+        };
+
+        assert!(usage_limit_errors(&usage, &limits).is_empty());
+    }
+
+    #[test]
+    fn usage_limit_errors_reports_email_and_api_overages() {
+        let usage = UsageSummary {
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
+            period_start: Utc::now(),
+            period_end: Utc::now(),
+            emails_sent: 75,
+            emails_limit: 100,
+            api_calls: 250,
+            api_calls_limit: 500,
+            percent_used: 75.0,
+            metrics: json!({}),
+        };
+        let limits = PlanLimitRow {
+            name: "starter".into(),
+            email_limit: 50,
+            api_call_limit: 200,
+        };
+
+        let errors = usage_limit_errors(&usage, &limits);
+
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|error| error.contains("emails sent this period")));
+        assert!(errors.iter().any(|error| error.contains("API calls this period")));
+    }
+
+    #[test]
+    fn usage_limit_errors_allows_unlimited_plan_limits() {
+        let usage = UsageSummary {
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
+            period_start: Utc::now(),
+            period_end: Utc::now(),
+            emails_sent: 10_000,
+            emails_limit: 100,
+            api_calls: 20_000,
+            api_calls_limit: 500,
+            percent_used: 100.0,
+            metrics: json!({}),
+        };
+        let limits = PlanLimitRow {
+            name: "enterprise".into(),
+            email_limit: -1,
+            api_call_limit: -1,
+        };
+
+        assert!(usage_limit_errors(&usage, &limits).is_empty());
     }
 }

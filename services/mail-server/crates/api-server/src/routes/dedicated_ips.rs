@@ -41,6 +41,7 @@ pub fn router() -> Router<AppState> {
 // ─── Request / response types ──────────────────────────────────
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AllocateIpRequest {
     #[serde(default)]
     pub region: Option<String>,

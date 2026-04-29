@@ -25,6 +25,27 @@ pub fn chunk_text(text: &str, config: &ChunkConfig) -> Vec<TextChunk> {
     merge_with_overlap(&chunks, config.chunk_overlap, config.chunk_size)
 }
 
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+
+    let mut boundary = index;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
+fn safe_truncate_boundary(text: &str, max_size: usize) -> usize {
+    let boundary = floor_char_boundary(text, max_size);
+    if boundary == 0 && !text.is_empty() && max_size > 0 {
+        text.chars().next().map(|ch| ch.len_utf8()).unwrap_or(0)
+    } else {
+        boundary
+    }
+}
+
 fn recursive_split(text: &str, separators: &[String], max_size: usize) -> Vec<String> {
     if text.len() <= max_size {
         return vec![text.to_string()];
@@ -101,7 +122,7 @@ fn merge_with_overlap(chunks: &[String], overlap: usize, max_size: usize) -> Vec
 // Prepend overlap from previous chunk
         if i > 0 && overlap > 0 {
             let prev = &chunks[i - 1];
-            let overlap_start = prev.len().saturating_sub(overlap);
+            let overlap_start = floor_char_boundary(prev, prev.len().saturating_sub(overlap));
             let overlap_text = &prev[overlap_start..];
             text.push_str(overlap_text);
             overlap_len = overlap_text.len();
@@ -111,7 +132,7 @@ fn merge_with_overlap(chunks: &[String], overlap: usize, max_size: usize) -> Vec
 
 // Truncate if overlap made it too long
         if text.len() > max_size {
-            text.truncate(max_size);
+            text.truncate(safe_truncate_boundary(&text, max_size));
         }
 
         let start_offset = offset.saturating_sub(overlap_len);
@@ -245,5 +266,21 @@ mod tests {
         let text = "Part1|Part2|Part3";
         let parts: Vec<&str> = text.split('|').collect();
         assert_eq!(parts.len(), 3);
+    }
+
+    #[test]
+    fn test_overlap_preserves_utf8_boundaries() {
+        let text = "你好你好 你好你好 你好你好";
+        let config = ChunkConfig {
+            chunk_size: 13,
+            chunk_overlap: 2,
+            separators: vec![" ".into()],
+        };
+
+        let chunks = chunk_text(text, &config);
+
+        assert!(chunks.len() >= 2);
+        assert!(chunks[1].text.starts_with('好'));
+        assert!(chunks.iter().all(|chunk| !chunk.text.is_empty()));
     }
 }

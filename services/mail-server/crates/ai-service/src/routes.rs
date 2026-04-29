@@ -10,8 +10,9 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
+use std::time::{Duration, Instant};
 use std::sync::Arc;
-use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::{
@@ -27,6 +28,45 @@ use crate::{
 
 // ── Shared application state ─────────────────────────────────────
 
+struct RateLimitWindow {
+    started_at: Instant,
+    count: usize,
+}
+
+struct RequestRateLimiter {
+    window: Mutex<RateLimitWindow>,
+    max_requests: usize,
+    interval: Duration,
+}
+
+impl RequestRateLimiter {
+    fn new(max_requests: usize, interval: Duration) -> Self {
+        Self {
+            window: Mutex::new(RateLimitWindow {
+                started_at: Instant::now(),
+                count: 0,
+            }),
+            max_requests,
+            interval,
+        }
+    }
+
+    fn allow(&self, now: Instant) -> bool {
+        let mut window = self.window.lock();
+        if now.duration_since(window.started_at) >= self.interval {
+            window.started_at = now;
+            window.count = 0;
+        }
+
+        if window.count >= self.max_requests {
+            return false;
+        }
+
+        window.count += 1;
+        true
+    }
+}
+
 /// Shared state for all route handlers.
 pub struct AppState {
     pub config: AiConfig,
@@ -38,10 +78,15 @@ pub struct AppState {
     pub sto: SendTimeOptimizer,
     pub training: TrainingManager,
     pub service_token: String,
+    inference_rate_limiter: RequestRateLimiter,
 }
 
 impl AppState {
     pub fn new(config: AiConfig) -> Self {
+        let inference_rate_limiter = RequestRateLimiter::new(
+            config.inference_rate_limit,
+            Duration::from_secs(config.inference_rate_limit_window_secs),
+        );
         Self {
             bandits: BanditOptimizer::new(config.bandit_epsilon),
             config,
@@ -52,6 +97,7 @@ impl AppState {
             sto: SendTimeOptimizer::new(),
             training: TrainingManager::new(),
             service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
+            inference_rate_limiter,
         }
     }
 }
@@ -122,8 +168,12 @@ impl<T: Serialize> ApiResponse<T> {
     }
 
     pub fn err(msg: impl Into<String>) -> (StatusCode, Json<Self>) {
+        Self::err_with_status(StatusCode::INTERNAL_SERVER_ERROR, msg)
+    }
+
+    pub fn err_with_status(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Self>) {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             Json(Self {
                 success: false,
                 data: None,
@@ -146,6 +196,14 @@ async fn predict_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PredictRequest>,
 ) -> impl IntoResponse {
+    if !state.inference_rate_limiter.allow(Instant::now()) {
+        let (status, body) = ApiResponse::<()>::err_with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "inference rate limit exceeded",
+        );
+        return (status, body).into_response();
+    }
+
     match state.inference.run_prediction(&req.model_id, req.input) {
         Ok(pred) => (StatusCode::OK, ApiResponse::ok(pred)).into_response(),
         Err(e) => {
@@ -341,5 +399,47 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_predict_endpoint_is_rate_limited() {
+        let mut state = default_app_state();
+        let state_mut = Arc::get_mut(&mut state).expect("exclusive test state");
+        state_mut.service_token = "test-key".into();
+        state_mut.inference_rate_limiter = RequestRateLimiter::new(1, Duration::from_secs(60));
+        state_mut.inference.register_model(Model {
+            id: "m1".into(),
+            name: "test".into(),
+            version: "1".into(),
+            model_type: ModelType::Classification,
+            accuracy: 0.9,
+            trained_at: chrono::Utc::now(),
+            status: ModelStatus::Ready,
+        });
+        let router = build_router(state);
+        let body = serde_json::json!({
+            "model_id": "m1",
+            "input": {"feature": 42},
+        });
+
+        let first = Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let first_resp = router.clone().oneshot(first).await.unwrap();
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second = Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let second_resp = router.oneshot(second).await.unwrap();
+        assert_eq!(second_resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }

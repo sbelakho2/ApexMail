@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable, TypeVar
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 
@@ -15,6 +16,11 @@ DEFAULT_BROWSER = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
 DEFAULT_BASE_URL = "http://127.0.0.1:3000"
 DEFAULT_ARTIFACT_DIR = "reports/visual-parity/live-browser-smoke"
 DEFAULT_TIMEOUT_MS = 2000
+DEFAULT_RETRIES = 2
+DEFAULT_RETRY_DELAY_MS = 250
+
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -181,6 +187,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TIMEOUT_MS,
         help=f"Virtual time budget passed to Brave (default: {DEFAULT_TIMEOUT_MS}).",
     )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help=f"Number of retries for flaky browser operations (default: {DEFAULT_RETRIES}).",
+    )
     return parser.parse_args()
 
 
@@ -264,6 +276,22 @@ def dump_dom(
     return result.stdout
 
 
+def with_retries(operation: Callable[[], T], retries: int) -> T:
+    last_error: Exception | None = None
+
+    for attempt in range(retries + 1):
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt == retries:
+                break
+            time.sleep((DEFAULT_RETRY_DELAY_MS * (2**attempt)) / 1000)
+
+    assert last_error is not None
+    raise last_error
+
+
 def capture_screenshot(
     browser_binary: str,
     viewport: Viewport,
@@ -310,25 +338,31 @@ def main() -> int:
             resolver_rule = host_resolver_rule(args.base_url, check)
             label = f"{check.route_id}@{viewport.name}"
             try:
-                dom = dump_dom(
-                    args.browser_binary,
-                    viewport,
-                    args.timeout_ms,
-                    url,
-                    resolver_rule,
+                dom = with_retries(
+                    lambda: dump_dom(
+                        args.browser_binary,
+                        viewport,
+                        args.timeout_ms,
+                        url,
+                        resolver_rule,
+                    ),
+                    args.retries,
                 )
                 missing = summarize_missing(check.expected_fragments, dom)
                 if args.update_artifacts:
                     base = artifact_base(artifact_dir, check, viewport)
                     base.parent.mkdir(parents=True, exist_ok=True)
                     base.with_suffix(".html").write_text(dom, encoding="utf-8")
-                    capture_screenshot(
-                        args.browser_binary,
-                        viewport,
-                        args.timeout_ms,
-                        url,
-                        base.with_suffix(".png"),
-                        resolver_rule,
+                    with_retries(
+                        lambda: capture_screenshot(
+                            args.browser_binary,
+                            viewport,
+                            args.timeout_ms,
+                            url,
+                            base.with_suffix(".png"),
+                            resolver_rule,
+                        ),
+                        args.retries,
                     )
 
                 if missing:

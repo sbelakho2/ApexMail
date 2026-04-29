@@ -23,6 +23,8 @@ use uuid::Uuid;
 use crate::config::ContentScanningConfig;
 use crate::types::*;
 
+const BLOCKED_POLICY_SCAN_PREFIX_BYTES: usize = 50_000;
+
 // ─── Spam Rules ────────────────────────────────────────────────
 
 struct SpamRule {
@@ -859,7 +861,7 @@ impl ContentScanner {
                         compiled
                     };
 
-                    let check_text = utf8_prefix(&body_combined, 50_000);
+                    let check_text = utf8_prefix(&body_combined, BLOCKED_POLICY_SCAN_PREFIX_BYTES);
 
                     for (pattern, re) in compiled.iter() {
                         if re.is_match(check_text) {
@@ -1075,7 +1077,7 @@ mod tests {
     fn test_utf8_prefix_truncates_on_char_boundary() {
         let input = format!("{}😀blocked", "a".repeat(49_999));
 
-        let prefix = utf8_prefix(&input, 50_000);
+        let prefix = utf8_prefix(&input, BLOCKED_POLICY_SCAN_PREFIX_BYTES);
 
         assert_eq!(prefix.len(), 49_999);
         assert!(input.is_char_boundary(prefix.len()));

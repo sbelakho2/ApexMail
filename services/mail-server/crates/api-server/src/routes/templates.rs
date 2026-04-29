@@ -25,6 +25,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTemplateRequest {
     pub name: String,
     pub subject: String,
@@ -34,6 +35,7 @@ pub struct CreateTemplateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateTemplateRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -59,6 +61,7 @@ pub struct TemplateResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenderRequest {
     pub variables: serde_json::Value,
 }
@@ -377,6 +380,7 @@ async fn duplicate_template(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RollbackRequest {
     pub version: i32,
 }

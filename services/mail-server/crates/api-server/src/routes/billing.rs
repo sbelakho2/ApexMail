@@ -314,6 +314,7 @@ fn usage_payload(summary: billing_service::types::UsageSummary) -> serde_json::V
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct PaygEstimateBody {
     emails_sent: i64,
@@ -322,6 +323,7 @@ struct PaygEstimateBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct OverageEstimateBody {
     emails_sent: i64,
@@ -370,6 +372,7 @@ struct LegacyProrationDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct LegacySwitchPlanBody {
     plan_name: String,
@@ -378,6 +381,7 @@ struct LegacySwitchPlanBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct LegacyCancelBody {
     reason: Option<String>,
@@ -430,6 +434,7 @@ impl From<UsageAlertThresholdRow> for UsageAlertThresholdDto {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct UsageAlertThresholdInput {
     metric_type: String,
@@ -438,12 +443,14 @@ struct UsageAlertThresholdInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct UsageAlertThresholdsBody {
     thresholds: Vec<UsageAlertThresholdInput>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct CheckoutSessionBody {
     price_id: String,
@@ -452,6 +459,7 @@ struct CheckoutSessionBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct PortalSessionBody {
     return_url: String,
@@ -506,6 +514,7 @@ struct AdminTenantListQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct AdminCreditBody {
     amount: i64,
@@ -515,6 +524,7 @@ struct AdminCreditBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct AdminPlanOverrideBody {
     plan_id: String,
@@ -523,17 +533,20 @@ struct AdminPlanOverrideBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AdminSubscriptionStatusBody {
     status: String,
     reason: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AdminDunningResetBody {
     reason: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct AdminInvoiceLineItemInput {
     description: String,
@@ -542,6 +555,7 @@ struct AdminInvoiceLineItemInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct AdminCreateInvoiceBody {
     period_start: String,

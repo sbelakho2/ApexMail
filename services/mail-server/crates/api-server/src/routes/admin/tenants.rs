@@ -113,6 +113,7 @@ pub struct TenantRow {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateTenantRequest {
     pub id: String,
     #[serde(default)]
@@ -203,8 +204,25 @@ async fn update_tenant(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteTenantRequest {
     pub id: String,
+    pub confirmation: String,
+}
+
+fn expected_delete_confirmation(tenant_id: &str) -> String {
+    format!("DELETE {tenant_id}")
+}
+
+fn validate_delete_confirmation(tenant_id: &str, confirmation: &str) -> Result<(), ApiError> {
+    let expected = expected_delete_confirmation(tenant_id);
+    if confirmation.trim() != expected {
+        return Err(ApiError::Validation(vec![format!(
+            "confirmation must match '{expected}'"
+        )]));
+    }
+
+    Ok(())
 }
 
 async fn delete_tenant(
@@ -213,6 +231,7 @@ async fn delete_tenant(
     Json(body): Json<DeleteTenantRequest>,
 ) -> Result<StatusCode, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    validate_delete_confirmation(&body.id, &body.confirmation)?;
     let deleted = delete_tenant_records(&state.db, &body.id).await?;
 
     if !deleted {
@@ -247,5 +266,32 @@ async fn log_tenant_audit(state: &AppState, action: &str, tenant_id: Option<&str
         } else {
             tracing::warn!(action = %action, error = %e, "Failed to write tenant audit log");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_confirmation_requires_exact_tenant_phrase() {
+        validate_delete_confirmation("tenant_123", "DELETE tenant_123")
+            .expect("matching confirmation should be accepted");
+    }
+
+    #[test]
+    fn delete_confirmation_rejects_missing_prefix() {
+        assert!(matches!(
+            validate_delete_confirmation("tenant_123", "tenant_123"),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn delete_confirmation_rejects_other_tenant_ids() {
+        assert!(matches!(
+            validate_delete_confirmation("tenant_123", "DELETE tenant_456"),
+            Err(ApiError::Validation(_))
+        ));
     }
 }

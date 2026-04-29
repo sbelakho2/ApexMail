@@ -103,6 +103,7 @@ async fn list_secrets(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSecretRequest {
     pub name: String,
@@ -171,6 +172,7 @@ async fn create_secret(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateSecretRequest {
     pub id: String,
     pub action: String,
@@ -249,6 +251,7 @@ pub struct DeleteSecretQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteSecretBody {
     pub id: Option<String>,
 }

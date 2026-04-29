@@ -23,6 +23,13 @@ struct StoreInner {
     vectors: HashMap<Uuid, EmbeddingVector>,
 }
 
+fn metadata_tenant_id(metadata: &serde_json::Value) -> Option<&str> {
+    metadata
+        .get("tenant_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+}
+
 impl VectorStore {
     pub fn new(dimension: usize, max_vectors: usize, eviction_threshold: usize) -> Self {
         Self {
@@ -42,6 +49,10 @@ impl VectorStore {
         vector: Vec<f32>,
         metadata: serde_json::Value,
     ) -> Result<Uuid, EmbeddingError> {
+        if metadata_tenant_id(&metadata).is_none() {
+            return Err(EmbeddingError::MissingTenantScope);
+        }
+
         if vector.len() != self.dimension {
             return Err(EmbeddingError::DimensionMismatch {
                 got: vector.len(),
@@ -111,8 +122,8 @@ impl VectorStore {
     }
 
 /// Search for the top-K most similar vectors using a min-heap.
-    pub fn search(&self, query_vector: &[f32], top_k: usize) -> Vec<SearchResult> {
-        if query_vector.len() != self.dimension {
+    pub fn search(&self, query_vector: &[f32], top_k: usize, tenant_id: &str) -> Vec<SearchResult> {
+        if query_vector.len() != self.dimension || tenant_id.trim().is_empty() {
             return vec![];
         }
 
@@ -120,6 +131,10 @@ impl VectorStore {
         let mut heap: BinaryHeap<MinScoreEntry> = BinaryHeap::new();
 
         for (_, entry) in store.vectors.iter() {
+            if metadata_tenant_id(&entry.metadata) != Some(tenant_id) {
+                continue;
+            }
+
             let score = cosine_similarity(query_vector, &entry.vector);
 
             if heap.len() < top_k {
@@ -272,11 +287,15 @@ mod tests {
         VectorStore::new(3, 1000, 900)
     }
 
+    fn tenant_metadata(tenant_id: &str) -> serde_json::Value {
+        serde_json::json!({"tenant_id": tenant_id})
+    }
+
     #[test]
     fn test_add_and_get() {
         let store = make_store();
         let id = store
-            .add("hello".into(), vec![1.0, 0.0, 0.0], serde_json::json!({}))
+            .add("hello".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a"))
             .unwrap();
         let v = store.get(id).unwrap();
         assert_eq!(v.text, "hello");
@@ -287,16 +306,25 @@ mod tests {
     fn test_add_dimension_mismatch() {
         let store = make_store();
         let err = store
-            .add("bad".into(), vec![1.0, 2.0], serde_json::json!({}))
+            .add("bad".into(), vec![1.0, 2.0], tenant_metadata("tenant-a"))
             .unwrap_err();
         assert!(matches!(err, EmbeddingError::DimensionMismatch { .. }));
+    }
+
+    #[test]
+    fn test_add_requires_tenant_scope() {
+        let store = make_store();
+        let err = store
+            .add("bad".into(), vec![1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap_err();
+        assert!(matches!(err, EmbeddingError::MissingTenantScope));
     }
 
     #[test]
     fn test_remove() {
         let store = make_store();
         let id = store
-            .add("rm".into(), vec![1.0, 0.0, 0.0], serde_json::json!({}))
+            .add("rm".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a"))
             .unwrap();
         assert!(store.remove(id));
         assert!(store.get(id).is_none());
@@ -311,13 +339,13 @@ mod tests {
     #[test]
     fn test_search_top_k() {
         let store = make_store();
-        store.add("a".into(), l2_normalize(vec![1.0, 0.0, 0.0]), serde_json::json!({})).unwrap();
-        store.add("b".into(), l2_normalize(vec![0.9, 0.1, 0.0]), serde_json::json!({})).unwrap();
-        store.add("c".into(), l2_normalize(vec![0.0, 1.0, 0.0]), serde_json::json!({})).unwrap();
-        store.add("d".into(), l2_normalize(vec![0.0, 0.0, 1.0]), serde_json::json!({})).unwrap();
+        store.add("a".into(), l2_normalize(vec![1.0, 0.0, 0.0]), tenant_metadata("tenant-a")).unwrap();
+        store.add("b".into(), l2_normalize(vec![0.9, 0.1, 0.0]), tenant_metadata("tenant-a")).unwrap();
+        store.add("c".into(), l2_normalize(vec![0.0, 1.0, 0.0]), tenant_metadata("tenant-a")).unwrap();
+        store.add("d".into(), l2_normalize(vec![0.0, 0.0, 1.0]), tenant_metadata("tenant-a")).unwrap();
 
         let query = l2_normalize(vec![1.0, 0.0, 0.0]);
-        let results = store.search(&query, 2);
+        let results = store.search(&query, 2, "tenant-a");
 
         assert_eq!(results.len(), 2);
 // Most similar should be "a" (identical direction)
@@ -326,25 +354,39 @@ mod tests {
     }
 
     #[test]
+    fn test_search_filters_by_tenant() {
+        let store = make_store();
+        store.add("tenant-a-match".into(), l2_normalize(vec![1.0, 0.0, 0.0]), tenant_metadata("tenant-a")).unwrap();
+        store.add("tenant-b-match".into(), l2_normalize(vec![1.0, 0.0, 0.0]), tenant_metadata("tenant-b")).unwrap();
+
+        let query = l2_normalize(vec![1.0, 0.0, 0.0]);
+        let results = store.search(&query, 5, "tenant-a");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text, "tenant-a-match");
+        assert_eq!(results[0].metadata["tenant_id"], "tenant-a");
+    }
+
+    #[test]
     fn test_search_empty_store() {
         let store = make_store();
-        let results = store.search(&[1.0, 0.0, 0.0], 5);
+        let results = store.search(&[1.0, 0.0, 0.0], 5, "tenant-a");
         assert!(results.is_empty());
     }
 
     #[test]
     fn test_search_wrong_dimension() {
         let store = make_store();
-        store.add("a".into(), vec![1.0, 0.0, 0.0], serde_json::json!({})).unwrap();
-        let results = store.search(&[1.0, 0.0], 5); // wrong dimension
+        store.add("a".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a")).unwrap();
+        let results = store.search(&[1.0, 0.0], 5, "tenant-a"); // wrong dimension
         assert!(results.is_empty());
     }
 
     #[test]
     fn test_stats() {
         let store = make_store();
-        store.add("a".into(), vec![1.0, 0.0, 0.0], serde_json::json!({})).unwrap();
-        store.add("b".into(), vec![0.0, 1.0, 0.0], serde_json::json!({})).unwrap();
+        store.add("a".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a")).unwrap();
+        store.add("b".into(), vec![0.0, 1.0, 0.0], tenant_metadata("tenant-a")).unwrap();
         let stats = store.stats();
         assert_eq!(stats.total_vectors, 2);
         assert_eq!(stats.dimension, 3);
@@ -354,8 +396,8 @@ mod tests {
     #[test]
     fn test_export_import_ndjson() {
         let store = make_store();
-        store.add("hello".into(), vec![1.0, 0.0, 0.0], serde_json::json!({"k":"v"})).unwrap();
-        store.add("world".into(), vec![0.0, 1.0, 0.0], serde_json::json!({})).unwrap();
+        store.add("hello".into(), vec![1.0, 0.0, 0.0], serde_json::json!({"k":"v", "tenant_id":"tenant-a"})).unwrap();
+        store.add("world".into(), vec![0.0, 1.0, 0.0], tenant_metadata("tenant-a")).unwrap();
 
         let mut buf = Vec::new();
         let exported = store.export_ndjson(&mut buf).unwrap();
@@ -371,9 +413,9 @@ mod tests {
     fn test_batch_add() {
         let store = make_store();
         let items = vec![
-            ("a".into(), vec![1.0, 0.0, 0.0], serde_json::json!({})),
-            ("b".into(), vec![0.0, 1.0, 0.0], serde_json::json!({})),
-            ("c".into(), vec![0.0, 0.0, 1.0], serde_json::json!({})),
+            ("a".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a")),
+            ("b".into(), vec![0.0, 1.0, 0.0], tenant_metadata("tenant-a")),
+            ("c".into(), vec![0.0, 0.0, 1.0], tenant_metadata("tenant-a")),
         ];
         let ids = store.add_batch(items).unwrap();
         assert_eq!(ids.len(), 3);
@@ -383,9 +425,9 @@ mod tests {
     #[test]
     fn test_store_full() {
         let store = VectorStore::new(2, 2, 3); // max 2 vectors, eviction at 3
-        store.add("a".into(), vec![1.0, 0.0], serde_json::json!({})).unwrap();
-        store.add("b".into(), vec![0.0, 1.0], serde_json::json!({})).unwrap();
-        let err = store.add("c".into(), vec![1.0, 1.0], serde_json::json!({})).unwrap_err();
+        store.add("a".into(), vec![1.0, 0.0], tenant_metadata("tenant-a")).unwrap();
+        store.add("b".into(), vec![0.0, 1.0], tenant_metadata("tenant-a")).unwrap();
+        let err = store.add("c".into(), vec![1.0, 1.0], tenant_metadata("tenant-a")).unwrap_err();
         assert!(matches!(err, EmbeddingError::StoreFull { .. }));
     }
 
@@ -393,9 +435,9 @@ mod tests {
     fn test_lru_eviction() {
 // eviction_threshold = 3, max = 5 → when reaching 3 entries, evict 10% (at least 0, but we round)
         let store = VectorStore::new(2, 100, 3);
-        store.add("a".into(), vec![1.0, 0.0], serde_json::json!({})).unwrap();
-        store.add("b".into(), vec![0.0, 1.0], serde_json::json!({})).unwrap();
-        store.add("c".into(), vec![1.0, 1.0], serde_json::json!({})).unwrap();
+        store.add("a".into(), vec![1.0, 0.0], tenant_metadata("tenant-a")).unwrap();
+        store.add("b".into(), vec![0.0, 1.0], tenant_metadata("tenant-a")).unwrap();
+        store.add("c".into(), vec![1.0, 1.0], tenant_metadata("tenant-a")).unwrap();
 // This should trigger eviction of LRU entries, then succeed
 // (eviction_threshold/10 = 0, so no entries get evicted, but it shouldn't error since we're at threshold not max)
 // Actually with max=100 and threshold=3, after eviction count stays under max

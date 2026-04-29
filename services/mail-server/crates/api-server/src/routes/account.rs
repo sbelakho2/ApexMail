@@ -30,6 +30,7 @@ pub struct ProfileResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteAccountRequest {
 /// Current password for verification
     pub password: String,

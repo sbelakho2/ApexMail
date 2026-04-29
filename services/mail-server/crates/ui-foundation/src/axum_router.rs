@@ -475,6 +475,23 @@ mod tests {
     }
 
     #[test]
+    fn web_console_routes_render_enhanced_ux_contracts() {
+        let campaigns = render_route("web", "/campaigns").expect("campaigns route should render");
+        assert!(campaigns.contains("data-view-state=\"loading\""));
+        assert!(campaigns.contains("data-pagination-storage-key=\"apexmail-ui:campaigns:page\""));
+        assert!(campaigns.contains("Delete campaign?"));
+
+        let contacts = render_route("web", "/contacts").expect("contacts route should render");
+        assert!(contacts.contains("2 contacts selected"));
+        assert!(contacts.contains("data-debounce-ms=\"300\""));
+        assert!(contacts.contains("data-pagination-storage-key=\"apexmail-ui:contacts:page\""));
+
+        let lists = render_route("web", "/lists").expect("lists route should render");
+        assert!(lists.contains("Delete list?"));
+        assert!(lists.contains("data-pagination-storage-key=\"apexmail-ui:lists:page\""));
+    }
+
+    #[test]
     fn unknown_paths_are_not_rendered() {
         let unknown = [
             ("web", "/definitely-not-a-page"),

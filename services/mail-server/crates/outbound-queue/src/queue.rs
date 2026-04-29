@@ -77,20 +77,25 @@ pub struct QueueConfig {
     pub worker_count: usize,
 }
 
+const DEFAULT_QUEUE_MAX_ATTEMPTS: i32 = 5;
+const DEFAULT_QUEUE_RETRY_DELAY_SECS: [u64; 5] = [60, 300, 1_800, 7_200, 21_600];
+const DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS: u64 = 300;
+const DEFAULT_QUEUE_BATCH_SIZE: usize = 100;
+const DEFAULT_QUEUE_POLL_INTERVAL_SECS: u64 = 5;
+const DEFAULT_QUEUE_WORKER_COUNT: usize = 4;
+
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 5,
-            retry_delays: vec![
-                Duration::from_secs(60), // 1 minute
-                Duration::from_secs(300), // 5 minutes
-                Duration::from_secs(1800), // 30 minutes
-                Duration::from_secs(7200), // 2 hours
-                Duration::from_secs(21600), // 6 hours
-            ],
-            batch_size: 100,
-            poll_interval: Duration::from_secs(5),
-            worker_count: 4,
+            max_attempts: DEFAULT_QUEUE_MAX_ATTEMPTS,
+            retry_delays: DEFAULT_QUEUE_RETRY_DELAY_SECS
+                .iter()
+                .copied()
+                .map(Duration::from_secs)
+                .collect(),
+            batch_size: DEFAULT_QUEUE_BATCH_SIZE,
+            poll_interval: Duration::from_secs(DEFAULT_QUEUE_POLL_INTERVAL_SECS),
+            worker_count: DEFAULT_QUEUE_WORKER_COUNT,
         }
     }
 }
@@ -419,7 +424,7 @@ impl EmailQueue {
         if defer && new_attempts < max_attempts {
 // #113:Guard against empty retry_delays causing integer underflow
             let delay = if self.config.retry_delays.is_empty() {
-                Duration::from_secs(300) // 5 minute default fallback
+                Duration::from_secs(DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS)
             } else {
                 let delay_index = (new_attempts - 1).max(0) as usize;
                 let delay_index = delay_index.min(self.config.retry_delays.len() - 1);
@@ -749,10 +754,10 @@ mod tests {
     #[test]
     fn queue_config_default_values() {
         let cfg = QueueConfig::default();
-        assert_eq!(cfg.max_attempts, 5);
-        assert_eq!(cfg.worker_count, 4);
-        assert_eq!(cfg.batch_size, 100);
-        assert_eq!(cfg.retry_delays.len(), 5);
+        assert_eq!(cfg.max_attempts, DEFAULT_QUEUE_MAX_ATTEMPTS);
+        assert_eq!(cfg.worker_count, DEFAULT_QUEUE_WORKER_COUNT);
+        assert_eq!(cfg.batch_size, DEFAULT_QUEUE_BATCH_SIZE);
+        assert_eq!(cfg.retry_delays.len(), DEFAULT_QUEUE_RETRY_DELAY_SECS.len());
     }
 
     #[test]
@@ -769,7 +774,7 @@ mod tests {
     #[test]
     fn queue_config_first_retry_under_5_minutes() {
         let cfg = QueueConfig::default();
-        assert!(cfg.retry_delays[0] <= Duration::from_secs(300));
+        assert!(cfg.retry_delays[0] <= Duration::from_secs(DEFAULT_QUEUE_RETRY_DELAY_SECS[1]));
     }
 
 // -----------------------------------------------------------------------
@@ -842,7 +847,7 @@ mod tests {
             headers: serde_json::json!({"X-Custom": "value"}),
             status: EmailStatus::Pending,
             attempts: 0,
-            max_attempts: 5,
+            max_attempts: DEFAULT_QUEUE_MAX_ATTEMPTS,
             last_error: None,
             next_retry_at: None,
             created_at: Utc::now(),

@@ -54,6 +54,7 @@ async fn log_proxy_audit(db: &sqlx::PgPool, host: &str, metadata: serde_json::Va
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyRequest {
     pub url: String,
     #[serde(default)]

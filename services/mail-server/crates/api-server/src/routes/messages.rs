@@ -45,6 +45,7 @@ static MAX_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub from: String,
     pub to: Vec<String>,
@@ -99,6 +100,7 @@ pub struct ListMessagesQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BatchSendRequest {
     pub messages: Vec<SendMessageRequest>,
 }

@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateContactRequest {
     pub email: String,
     #[serde(default)]
@@ -40,6 +41,7 @@ pub struct CreateContactRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateContactRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -76,6 +78,7 @@ pub struct ListContactsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BulkImportRequest {
     pub contacts: Vec<CreateContactRequest>,
 }
@@ -401,6 +404,7 @@ async fn contact_counts(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BulkIdsRequest {
     pub ids: Vec<Uuid>,
 }
@@ -451,6 +455,7 @@ async fn bulk_restore(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BulkTagRequest {
     pub ids: Vec<Uuid>,
     pub tags: Vec<String>,

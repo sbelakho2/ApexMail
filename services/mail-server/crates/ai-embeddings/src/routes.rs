@@ -77,6 +77,7 @@ struct EmbedRequest {
 struct AddVectorRequest {
     text: String,
     vector: Vec<f32>,
+    tenant_id: String,
     #[serde(default)]
     metadata: serde_json::Value,
 }
@@ -84,6 +85,7 @@ struct AddVectorRequest {
 #[derive(Deserialize)]
 struct SearchRequest {
     vector: Vec<f32>,
+    tenant_id: String,
     #[serde(default = "default_top_k")]
     top_k: usize,
     min_score: Option<f64>,
@@ -117,7 +119,15 @@ async fn add_vector_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddVectorRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state.vector_store.add(req.text, req.vector, req.metadata) {
+    let mut metadata = match req.metadata {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    metadata.insert("tenant_id".into(), req.tenant_id.into());
+
+    match state
+        .vector_store
+        .add(req.text, req.vector, serde_json::Value::Object(metadata)) {
         Ok(id) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"id": id})),
@@ -133,7 +143,7 @@ async fn search_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let mut results = state.vector_store.search(&req.vector, req.top_k);
+    let mut results = state.vector_store.search(&req.vector, req.top_k, &req.tenant_id);
     if let Some(min) = req.min_score {
         results.retain(|r| r.score >= min);
     }
@@ -193,9 +203,10 @@ mod tests {
 
     #[test]
     fn test_search_request_defaults() {
-        let json = r#"{"vector": [1.0, 0.0, 0.0]}"#;
+        let json = r#"{"vector": [1.0, 0.0, 0.0], "tenant_id": "tenant-a"}"#;
         let req: SearchRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.top_k, 10);
         assert!(req.min_score.is_none());
+        assert_eq!(req.tenant_id, "tenant-a");
     }
 }

@@ -23,6 +23,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateSuppressionRequest {
     pub email: String,
     pub reason: String,
@@ -72,11 +73,13 @@ pub struct CheckResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BulkSuppressRequest {
     pub entries: Vec<BulkEntry>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BulkEntry {
     pub email: String,
     pub reason: String,

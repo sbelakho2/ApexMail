@@ -17,6 +17,10 @@ pub struct AiConfig {
     pub bandit_epsilon: f64,
 /// Look-back window in days for STO engagement data.
     pub sto_lookback_days: u32,
+/// Maximum number of inference requests allowed per window.
+    pub inference_rate_limit: usize,
+/// Sliding window size for inference rate limiting.
+    pub inference_rate_limit_window_secs: u64,
 }
 
 impl Default for AiConfig {
@@ -28,6 +32,8 @@ impl Default for AiConfig {
             temperature: 0.0,
             bandit_epsilon: 0.1,
             sto_lookback_days: 90,
+            inference_rate_limit: 60,
+            inference_rate_limit_window_secs: 60,
         }
     }
 }
@@ -59,6 +65,14 @@ impl AiConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.sto_lookback_days),
+            inference_rate_limit: std::env::var("AI_INFERENCE_RATE_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.inference_rate_limit),
+            inference_rate_limit_window_secs: std::env::var("AI_INFERENCE_RATE_LIMIT_WINDOW_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.inference_rate_limit_window_secs),
         };
         config.validate()?;
         Ok(config)
@@ -86,6 +100,12 @@ impl AiConfig {
         if self.sto_lookback_days == 0 {
             return Err("AI_STO_LOOKBACK_DAYS must be > 0".into());
         }
+        if self.inference_rate_limit == 0 {
+            return Err("AI_INFERENCE_RATE_LIMIT must be > 0".into());
+        }
+        if self.inference_rate_limit_window_secs == 0 {
+            return Err("AI_INFERENCE_RATE_LIMIT_WINDOW_SECS must be > 0".into());
+        }
         Ok(())
     }
 }
@@ -102,6 +122,8 @@ mod tests {
         assert_eq!(cfg.sto_lookback_days, 90);
         assert!((cfg.bandit_epsilon - 0.1).abs() < f64::EPSILON);
         assert_eq!(cfg.max_tokens, 768);
+        assert_eq!(cfg.inference_rate_limit, 60);
+        assert_eq!(cfg.inference_rate_limit_window_secs, 60);
     }
 
     #[test]

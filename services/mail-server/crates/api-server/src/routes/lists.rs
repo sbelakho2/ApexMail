@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateListRequest {
     pub name: String,
     #[serde(default)]
@@ -50,6 +51,7 @@ fn default_opt_in() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateListRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -98,11 +100,13 @@ pub struct SubscriberResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddSubscribersRequest {
     pub contact_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveSubscribersRequest {
     pub contact_ids: Vec<Uuid>,
 }

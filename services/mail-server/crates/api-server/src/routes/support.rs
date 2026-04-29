@@ -23,6 +23,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTicketRequest {
     pub subject: String,
     pub description: String,
@@ -35,6 +36,7 @@ fn default_priority() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateTicketRequest {
     #[serde(default)]
     pub status: Option<String>,
@@ -233,6 +235,7 @@ impl From<TicketRow> for TicketResponse {
 // ─── Ticket Message Handlers ───────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateMessageRequest {
     pub body: String,
 }

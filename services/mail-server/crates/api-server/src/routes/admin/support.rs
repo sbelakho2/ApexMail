@@ -96,6 +96,7 @@ pub struct TicketMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct AddReplyRequest {
     pub ticket_id: String,
@@ -111,6 +112,7 @@ fn default_author() -> String { "System".into() }
 fn default_author_type() -> String { "agent".into() }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTicketRequest {
     pub id: String,

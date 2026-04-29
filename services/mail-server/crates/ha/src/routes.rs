@@ -792,6 +792,9 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
+    const TEST_INTERNAL_API_KEY: &str = "internal-key";
+    const TEST_ADMIN_API_KEY: &str = "admin-key";
+
     fn test_runtime() -> &'static tokio::runtime::Runtime {
         use std::sync::OnceLock;
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -805,8 +808,15 @@ mod tests {
             .unwrap()
     }
 
+    fn test_config() -> Arc<Config> {
+        let mut config = Config::from_env();
+        config.internal_api_key = TEST_INTERNAL_API_KEY.into();
+        config.admin_api_key = TEST_ADMIN_API_KEY.into();
+        Arc::new(config)
+    }
+
     fn test_state() -> Arc<AppState> {
-        let config = Arc::new(Config::from_env());
+        let config = test_config();
         let config_for_services = Arc::clone(&config);
         let pool = test_pool();
         Arc::new(AppState {
@@ -850,7 +860,7 @@ mod tests {
             let app: Router<()> = build_router(test_state());
             let req = Request::builder()
                 .uri("/api/v1/circuit-breakers")
-                .header("x-api-key", "internal-key")
+                .header("x-api-key", TEST_INTERNAL_API_KEY)
                 .body(Body::empty()).unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
@@ -863,7 +873,7 @@ mod tests {
             let app: Router<()> = build_router(test_state());
             let req = Request::builder()
                 .uri("/api/v1/failover/status")
-                .header("x-api-key", "internal-key")
+                .header("x-api-key", TEST_INTERNAL_API_KEY)
                 .body(Body::empty()).unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
@@ -876,7 +886,7 @@ mod tests {
             let app: Router<()> = build_router(test_state());
             let req = Request::builder()
                 .uri("/api/v1/backup/schedule")
-                .header("x-api-key", "internal-key")
+                .header("x-api-key", TEST_INTERNAL_API_KEY)
                 .body(Body::empty()).unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
@@ -889,7 +899,7 @@ mod tests {
             let app: Router<()> = build_router(test_state());
             let req = Request::builder()
                 .uri("/api/v1/failover/status")
-                .header("x-api-key", "admin-key")
+                .header("x-api-key", TEST_ADMIN_API_KEY)
                 .body(Body::empty()).unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);

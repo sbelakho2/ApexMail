@@ -152,6 +152,7 @@ async fn list_inbox(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInboxMessage {
     pub id: String,

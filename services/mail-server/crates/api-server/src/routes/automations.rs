@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAutomationRequest {
     pub name: String,
     pub trigger: serde_json::Value,
@@ -33,6 +34,7 @@ pub struct CreateAutomationRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAutomationRequest {
     #[serde(default)]
     pub name: Option<String>,

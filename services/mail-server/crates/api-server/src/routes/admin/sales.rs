@@ -406,6 +406,7 @@ async fn update_leads(
 // ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct EnrichRequest {
     pub lead_ids: Vec<String>,
@@ -672,6 +673,7 @@ async fn update_campaign(
 // ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveryRequest {
     pub sources: Vec<String>,
@@ -825,6 +827,7 @@ const OUTREACH_RATE_LIMIT: u32 = 5;
 const OUTREACH_RATE_WINDOW_SECS: u64 = 600;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct OutreachRequest {
     pub lead_ids: Vec<String>,

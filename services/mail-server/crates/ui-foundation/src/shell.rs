@@ -80,7 +80,7 @@ impl<'a> ShellHeader<'a> {
         let safe_query = html_escape(self.search_query);
         let safe_avatar = html_escape(self.avatar_fallback);
         format!(
-            "<header class=\"sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-background via-background to-brand-50/50 backdrop-blur-2xl px-6\"><div class=\"flex items-center gap-4\"><button class=\"md:hidden\" aria-label=\"{} menu\" aria-expanded=\"{}\"><span class=\"h-5 w-5\">≡</span></button><div class=\"relative hidden md:block\"><input type=\"search\" role=\"searchbox\" aria-label=\"Search campaigns and contacts\" value=\"{}\" class=\"w-64 pl-9 lg:w-80\" /><kbd class=\"pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border\">{}</kbd></div></div><div class=\"flex items-center gap-2\"><button aria-label=\"Notifications\">{}</button>{}<div class=\"relative flex shrink-0 overflow-hidden rounded-lg border border-surface-200 shadow-sm h-10 w-10 rounded-lg\"><span class=\"flex h-full w-full items-center justify-center bg-surface-100 text-surface-600 font-bold text-xs uppercase tracking-wide\">{}</span></div></div></header>",
+            "<header class=\"sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-background via-background to-brand-50/50 backdrop-blur-2xl px-6\"><div class=\"flex items-center gap-4\"><button class=\"md:hidden\" aria-label=\"{} menu\" aria-expanded=\"{}\"><span class=\"h-5 w-5\">≡</span></button><div class=\"relative hidden md:block\"><input type=\"search\" role=\"searchbox\" aria-label=\"Search campaigns and contacts\" value=\"{}\" data-debounce-ms=\"300\" data-search-scope=\"campaigns,contacts\" class=\"w-64 pl-9 lg:w-80\" /><kbd class=\"pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border\">{}</kbd></div></div><div class=\"flex items-center gap-2\"><button aria-label=\"Notifications\">{}</button>{}<div class=\"relative flex shrink-0 overflow-hidden rounded-lg border border-surface-200 shadow-sm h-10 w-10 rounded-lg\"><span class=\"flex h-full w-full items-center justify-center bg-surface-100 text-surface-600 font-bold text-xs uppercase tracking-wide\">{}</span></div></div></header>",
             if self.mobile_menu_open { "Close" } else { "Open" },
             if self.mobile_menu_open { "true" } else { "false" },
             safe_query,
@@ -276,6 +276,7 @@ mod tests {
         let toast_surface = ToastSurface { toasts: vec!["<div>Toast</div>"] }.render_html();
 
         assert!(header.contains("role=\"searchbox\""));
+        assert!(header.contains("data-debounce-ms=\"300\""));
         assert!(header.contains("⌘K"));
         assert!(header.contains("3 unread notifications"));
         assert!(header.contains("aria-label=\"Open menu\""));

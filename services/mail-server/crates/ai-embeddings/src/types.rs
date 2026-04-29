@@ -50,6 +50,9 @@ pub enum EmbeddingError {
     #[error("Batch too large: {size} (max {max})")]
     BatchTooLarge { size: usize, max: usize },
 
+    #[error("tenant_id missing from embedding metadata")]
+    MissingTenantScope,
+
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -165,6 +168,9 @@ mod tests {
 
         let err = EmbeddingError::EmptyText;
         assert!(err.to_string().contains("Empty"));
+
+        let err = EmbeddingError::MissingTenantScope;
+        assert!(err.to_string().contains("tenant_id"));
     }
 
     #[test]
