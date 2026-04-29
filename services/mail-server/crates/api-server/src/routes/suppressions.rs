@@ -7,7 +7,6 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
@@ -33,6 +32,10 @@ pub struct CreateSuppressionRequest {
 
 fn default_source() -> String {
     "manual".into()
+}
+
+fn next_suppression_id() -> String {
+    apexmail_lib::id::generate_id("sup", 22)
 }
 
 fn canonical_email(email: &str) -> String {
@@ -146,14 +149,14 @@ async fn create_suppression(
         return Err(ApiError::Conflict("email already suppressed".into()));
     }
 
-    let id = Uuid::new_v4();
+    let id = next_suppression_id();
     let now = Utc::now();
 
     sqlx::query(
-        "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+        "INSERT INTO suppressions (id, tenant_id, email, type, source, created_at)
          VALUES ($1,$2,$3,$4,$5,$6)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .bind(&email)
     .bind(&body.reason)
@@ -165,7 +168,7 @@ async fn create_suppression(
     Ok((
         StatusCode::CREATED,
         Json(SuppressionResponse {
-            id: id.to_string(),
+            id,
             email,
             reason: body.reason,
             source: body.source,
@@ -182,7 +185,7 @@ async fn list_suppressions(
     require_scopes(&auth, &["suppressions:read"])?;
     let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, SuppressionRow>(
-        "SELECT id, email, reason, source, created_at
+        "SELECT id, email, type AS reason, source, created_at
          FROM suppressions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(&auth.tenant_id)
@@ -197,12 +200,12 @@ async fn list_suppressions(
 async fn delete_suppression(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["suppressions:write"])?;
 
     let result = sqlx::query("DELETE FROM suppressions WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
+        .bind(&id)
         .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
@@ -223,7 +226,7 @@ async fn check_suppression(
     let email = canonical_email(&email);
 
     let row = sqlx::query_as::<_, SuppressionReasonRow>(
-        "SELECT reason FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = $2",
+        "SELECT type AS reason FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = $2",
     )
     .bind(&auth.tenant_id)
     .bind(&email)
@@ -278,11 +281,11 @@ async fn bulk_suppress(
             }
 
             match sqlx::query(
-                "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+                "INSERT INTO suppressions (id, tenant_id, email, type, source, created_at)
                  VALUES ($1,$2,$3,$4,'bulk',$5)
                  ON CONFLICT (tenant_id, email) DO NOTHING",
             )
-            .bind(Uuid::new_v4())
+            .bind(next_suppression_id())
             .bind(&auth.tenant_id)
             .bind(&entry.email)
             .bind(entry.reason)

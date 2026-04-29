@@ -30,13 +30,10 @@ fn derive_key(master_key: &str, salt: &[u8], info: &str) -> anyhow::Result<[u8; 
 }
 
 fn hash_code(s: &str) -> i64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in s.as_bytes() {
-        h = h
-            .wrapping_mul(0x100000001b3)
-            .wrapping_add(b as u64);
-    }
-    (h & 0x7fff_ffff_ffff_ffff) as i64
+    let digest = Sha256::digest(format!("apexmail:isolation:lock:{s}").as_bytes());
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    (u64::from_be_bytes(bytes) & 0x7fff_ffff_ffff_ffff) as i64
 }
 
 // ── Encryption Service ─────────────────────────────────────

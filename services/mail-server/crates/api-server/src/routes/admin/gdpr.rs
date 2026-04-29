@@ -5,6 +5,7 @@ use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -12,6 +13,24 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list_gdpr_requests).patch(update_gdpr_request))
+}
+
+fn build_gdpr_audit_metadata(body: &UpdateGdprRequest) -> serde_json::Value {
+    json!({ "status": body.status })
+}
+
+async fn log_gdpr_audit(db: &sqlx::PgPool, request_id: &str, metadata: serde_json::Value) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
+         VALUES (NOW(), 'control_plane.gdpr.request_updated', 'gdpr_request', $1, $2::jsonb)",
+    )
+    .bind(request_id)
+    .bind(metadata)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(request_id = %request_id, error = %error, "Failed to write GDPR audit log");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,7 +153,7 @@ async fn update_gdpr_request(
         return Err(ApiError::Validation(vec!["Invalid status".into()]));
     }
 
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE gdpr_requests
          SET status = $2,
              verified_at = CASE WHEN $2 = 'verified' THEN NOW() ELSE verified_at END,
@@ -145,6 +164,12 @@ async fn update_gdpr_request(
     .bind(&body.status)
     .execute(&state.db)
     .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("gdpr request not found".into()));
+    }
+
+    log_gdpr_audit(&state.db, &body.id, build_gdpr_audit_metadata(&body)).await;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

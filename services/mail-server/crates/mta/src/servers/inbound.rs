@@ -3,13 +3,14 @@
 //! Implements rate limiting, SPF/DKIM/DMARC authentication, VERP reply detection,
 //! and message storage.
 
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use bytes::BytesMut;
 use dashmap::DashMap;
 use governor::RateLimiter;
+use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
@@ -17,10 +18,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
 use crate::auth::EmailAuthenticator;
 use crate::config::{InboundConfig, RateLimitConfig};
+
+// Shared resolver to avoid allocating a new DNS client per PTR verification.
+static INBOUND_RDNS_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+});
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -51,6 +59,8 @@ pub struct InboundServer {
 /// Rate limiter per IP (token bucket).
     #[allow(unused)]
     ip_limiters: Arc<DashMap<IpAddr, Arc<RateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>>>,
+/// Bounded PTR/FCrDNS cache to avoid repeated DNS lookups per source IP.
+    rdns_cache: Cache<IpAddr, bool>,
     shutdown: Arc<Notify>,
 }
 
@@ -72,6 +82,10 @@ impl InboundServer {
             hostname,
             connections: Arc::new(DashMap::new()),
             ip_limiters: Arc::new(DashMap::new()),
+            rdns_cache: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(600))
+                .build(),
             shutdown: Arc::new(Notify::new()),
         }
     }
@@ -353,11 +367,9 @@ impl InboundServer {
         ctx: &mut SessionContext,
     ) -> String {
         if cmd_upper.starts_with("EHLO") || cmd_upper.starts_with("HELO") {
-            let host = raw_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("unknown")
-                .trim();
+            let Some(host) = parse_helo_hostname(raw_line) else {
+                return "501 Invalid HELO/EHLO hostname\r\n".into();
+            };
             ctx.helo_hostname = host.to_string();
             let mut caps = format!("250-{} Hello {}\r\n", self.hostname, host);
             caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
@@ -373,6 +385,10 @@ impl InboundServer {
         } else if cmd_upper.starts_with("MAIL FROM") {
             if self.config.auth_required && !ctx.authenticated {
                 return "530 Authentication required\r\n".into();
+            }
+            if !self.verify_inbound_source(ctx.client_ip).await {
+                warn!(client_ip = %ctx.client_ip, "Rejected inbound sender without forward-confirmed PTR record");
+                return "550 Reverse DNS lookup required\r\n".into();
             }
             let addr = extract_address(raw_line);
             ctx.mail_from = Some(addr);
@@ -552,6 +568,56 @@ impl InboundServer {
 
         Ok(exists)
     }
+
+    async fn verify_inbound_source(&self, ip: IpAddr) -> bool {
+        if ptr_verification_exempt(ip) {
+            return true;
+        }
+
+        if let Some(cached) = self.rdns_cache.get(&ip) {
+            return cached;
+        }
+
+        let resolver = &*INBOUND_RDNS_RESOLVER;
+        let result = match resolver.reverse_lookup(ip).await {
+            Ok(lookup) => {
+                let hostnames: Vec<String> = lookup
+                    .iter()
+                    .map(|name| name.to_string().trim_end_matches('.').to_ascii_lowercase())
+                    .filter(|hostname| !hostname.is_empty())
+                    .collect();
+
+                if hostnames.is_empty() {
+                    debug!(ip = %ip, "Inbound PTR lookup returned no hostnames");
+                    false
+                } else {
+                    let mut confirmed = false;
+                    for hostname in hostnames {
+                        match resolver.lookup_ip(hostname.as_str()).await {
+                            Ok(forward) => {
+                                if forward.iter().any(|addr| addr == ip) {
+                                    confirmed = true;
+                                    break;
+                                }
+                                debug!(ip = %ip, hostname = %hostname, "Inbound FCrDNS failed: forward lookup doesn't match IP");
+                            }
+                            Err(error) => {
+                                debug!(ip = %ip, hostname = %hostname, error = %error, "Inbound FCrDNS forward lookup failed");
+                            }
+                        }
+                    }
+                    confirmed
+                }
+            }
+            Err(error) => {
+                debug!(ip = %ip, error = %error, "Inbound PTR lookup failed");
+                false
+            }
+        };
+
+        self.rdns_cache.insert(ip, result);
+        result
+    }
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -577,6 +643,64 @@ fn recipient_domain(recipient: &str) -> Option<&str> {
         None
     } else {
         Some(domain)
+    }
+}
+
+fn parse_helo_hostname(raw_line: &str) -> Option<&str> {
+    let mut parts = raw_line.split_whitespace();
+    let _command = parts.next()?;
+    let host = parts.next()?.trim();
+    if parts.next().is_some() {
+        return None;
+    }
+    if is_valid_helo_hostname(host) {
+        Some(host)
+    } else {
+        None
+    }
+}
+
+fn is_valid_helo_hostname(host: &str) -> bool {
+    if host.is_empty() || host.len() > 255 || !host.is_ascii() {
+        return false;
+    }
+
+    if let Some(literal) = host.strip_prefix('[').and_then(|value| value.strip_suffix(']')) {
+        return literal
+            .strip_prefix("IPv6:")
+            .unwrap_or(literal)
+            .parse::<IpAddr>()
+            .is_ok();
+    }
+
+    host.split('.').all(is_valid_helo_label)
+}
+
+fn is_valid_helo_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
+fn ptr_verification_exempt(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4 == Ipv4Addr::BROADCAST
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
     }
 }
 
@@ -636,6 +760,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_helo_hostname_accepts_domain_and_address_literals() {
+        assert_eq!(parse_helo_hostname("EHLO mail.example.com\r\n"), Some("mail.example.com"));
+        assert_eq!(parse_helo_hostname("HELO [127.0.0.1]\r\n"), Some("[127.0.0.1]"));
+        assert_eq!(parse_helo_hostname("EHLO [IPv6:2001:db8::1]\r\n"), Some("[IPv6:2001:db8::1]"));
+    }
+
+    #[test]
+    fn test_parse_helo_hostname_rejects_invalid_hosts() {
+        assert_eq!(parse_helo_hostname("EHLO bad host\r\n"), None);
+        assert_eq!(parse_helo_hostname("EHLO -bad.example\r\n"), None);
+        assert_eq!(parse_helo_hostname("EHLO mail_.example.com\r\n"), None);
+        assert_eq!(parse_helo_hostname("EHLO \r\n"), None);
+    }
+
+    #[test]
     fn test_session_context_defaults() {
         let ctx = SessionContext {
             id: "test".into(),
@@ -650,5 +789,20 @@ mod tests {
         };
         assert!(!ctx.authenticated);
         assert_eq!(ctx.message_count, 0);
+    }
+
+    #[test]
+    fn test_ptr_verification_exempt_for_local_and_private_ips() {
+        assert!(ptr_verification_exempt(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(ptr_verification_exempt(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(ptr_verification_exempt(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn test_ptr_verification_required_for_public_ips() {
+        assert!(!ptr_verification_exempt(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!ptr_verification_exempt(IpAddr::V6(
+            "2606:4700:4700::1111".parse().unwrap()
+        )));
     }
 }

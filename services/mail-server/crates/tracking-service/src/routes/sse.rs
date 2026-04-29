@@ -1,11 +1,11 @@
 //! Server-Sent Events (SSE) endpoint for real-time delivery event streaming.
 //!
-//! `GET /v1/stream?token=<JWT>`
+//! `GET /v1/stream`
 //!
 //! Clients connect via EventSource / fetch and receive a continuous stream of
 //! tracking events (opened, clicked, unsubscribed, delivered, bounced) as they
 //! happen. Events are scoped to the authenticated tenant via a JWT bearer
-//! token passed as a query parameter (SSE does not support Authorization headers).
+//! token passed in the `Authorization: Bearer <token>` header.
 //!
 //! Architecture://! 1. Client connects with a short-lived JWT containing `tenant_id` + `sub` (user id).
 //! 2. Handler validates token, subscribes to Redis Pub/Sub channel `events:{tenant_id}`.
@@ -26,11 +26,11 @@ use std::time::Duration;
 
 use axum::{
     extract::{Query, State},
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    http::StatusCode,
 };
 use futures::stream::Stream;
 use serde::Deserialize;
@@ -43,8 +43,6 @@ use crate::state::AppState;
 /// Query parameters for SSE endpoint.
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
-/// JWT token with `tenant_id` claim and `stream` scope.
-    pub token: String,
 /// Optional:filter by event types (comma-separated).
 /// Values:opened, clicked, unsubscribed, delivered, bounced
     #[serde(default)]
@@ -68,13 +66,40 @@ struct StreamClaims {
     pub exp: u64,
 }
 
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    let authorization = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let mut parts = authorization.splitn(2, ' ');
+    let scheme = parts.next()?.trim();
+    let token = parts.next().unwrap_or("").trim();
+
+    if scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
 /// SSE handler:validates token, subscribes to Redis Pub/Sub, streams events.
 pub async fn handle_stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<StreamQuery>,
 ) -> Response {
 // ── Validate JWT ──────────────────────────────────────────────────
-    let claims = match validate_stream_token(&params.token, &state) {
+    let Some(token) = extract_bearer_token(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({
+                "error": {
+                    "code": "UNAUTHORIZED",
+                    "message": "missing Authorization: Bearer token"
+                }
+            })),
+        )
+            .into_response();
+    };
+
+    let claims = match validate_stream_token(&token, &state) {
         Ok(c) => c,
         Err(msg) => {
             return (
@@ -182,6 +207,31 @@ pub async fn handle_stream(
                 .text("keepalive"),
         )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_bearer_token_accepts_authorization_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::AUTHORIZATION, "Bearer stream.jwt".parse().unwrap());
+
+        assert_eq!(extract_bearer_token(&headers).as_deref(), Some("stream.jwt"));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_rejects_missing_or_invalid_values() {
+        let mut headers = HeaderMap::new();
+        assert!(extract_bearer_token(&headers).is_none());
+
+        headers.insert(axum::http::header::AUTHORIZATION, "Basic abc123".parse().unwrap());
+        assert!(extract_bearer_token(&headers).is_none());
+
+        headers.insert(axum::http::header::AUTHORIZATION, "Bearer   ".parse().unwrap());
+        assert!(extract_bearer_token(&headers).is_none());
+    }
 }
 
 /// Create the SSE event stream backed by a Redis Pub/Sub subscription.

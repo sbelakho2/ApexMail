@@ -859,11 +859,7 @@ impl ContentScanner {
                         compiled
                     };
 
-                    let check_text = if body_combined.len() > 50_000 {
-                        &body_combined[..50_000]
-                    } else {
-                        &body_combined
-                    };
+                    let check_text = utf8_prefix(&body_combined, 50_000);
 
                     for (pattern, re) in compiled.iter() {
                         if re.is_match(check_text) {
@@ -936,6 +932,19 @@ fn policy_cache_key(policy_name: &str, patterns: &[String]) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     patterns.hash(&mut hasher);
     format!("{policy_name}:{:x}", hasher.finish())
+}
+
+fn utf8_prefix(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    &input[..end]
 }
 
 #[cfg(test)]
@@ -1060,6 +1069,17 @@ mod tests {
         email.html_body = Some("<html><body><img src='spam.png'><img src='ad.png'></body></html>".into());
         let result = scanner.analyze_spam(&email);
         assert!(result.triggers.iter().any(|t| t.rule == "IMAGE_ONLY"));
+    }
+
+    #[test]
+    fn test_utf8_prefix_truncates_on_char_boundary() {
+        let input = format!("{}😀blocked", "a".repeat(49_999));
+
+        let prefix = utf8_prefix(&input, 50_000);
+
+        assert_eq!(prefix.len(), 49_999);
+        assert!(input.is_char_boundary(prefix.len()));
+        assert!(!prefix.contains("blocked"));
     }
 
 // ── Phishing Tests ──────────────────────────────────────

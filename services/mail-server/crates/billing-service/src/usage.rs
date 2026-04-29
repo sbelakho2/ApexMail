@@ -11,7 +11,22 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::plans::builtin_quota_limits;
+use crate::routes::append_audit_log;
 use crate::types::{MeterEventType, UsageSummary};
+
+pub(crate) fn build_metering_audit_metadata(
+    event_type: &str,
+    quantity: i64,
+    recorded_at: DateTime<Utc>,
+    metadata: &serde_json::Value,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut audit_metadata = serde_json::Map::new();
+    audit_metadata.insert("eventType".into(), json!(event_type));
+    audit_metadata.insert("quantity".into(), json!(quantity));
+    audit_metadata.insert("recordedAt".into(), json!(recorded_at.to_rfc3339()));
+    audit_metadata.insert("metadata".into(), metadata.clone());
+    audit_metadata
+}
 
 /// Record a single metering event with deduplication.
 /// Returns `true` if the event was newly recorded, `false` if it was a
@@ -47,23 +62,47 @@ pub async fn record_usage(
     }
 
 
-// 2. Persist to DB.
-    sqlx::query(
-        r#"
-        INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-        VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
-        ON CONFLICT (id) DO NOTHING
-        "#,
-    )
-    .bind(id)
-    .bind(tenant_id)
-    .bind(event_type_to_str(event_type))
-    .bind(quantity)
-    .bind(now)
-    .bind(&meta)
-    .execute(pool)
-    .await
-    .map_err(UsageError::Db)?;
+// 2. Persist to DB and append an immutable audit record in the same transaction.
+    let mut tx = pool.begin().await.map_err(UsageError::Db)?;
+    let event_type_str = event_type_to_str(event_type);
+    let audit_result = async {
+        sqlx::query(
+            r#"
+            INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
+            VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(event_type_str)
+        .bind(quantity)
+        .bind(now)
+        .bind(&meta)
+        .execute(&mut *tx)
+        .await
+        .map_err(UsageError::Db)?;
+
+        append_audit_log(
+            &mut tx,
+            tenant_id,
+            "billing.metering_event_recorded",
+            "metering_event",
+            Some(&id.to_string()),
+            serde_json::Value::Object(build_metering_audit_metadata(event_type_str, quantity, now, &meta)),
+            now,
+        )
+        .await
+        .map_err(UsageError::Audit)?;
+
+        tx.commit().await.map_err(UsageError::Db)
+    }
+    .await;
+
+    if let Err(error) = audit_result {
+        let _: Result<(), _> = conn.del(&dedup_key).await;
+        return Err(error);
+    }
 
 // 3. Bump real-time Redis counter.
     let period_key = usage_counter_key(tenant_id, event_type, now);
@@ -504,23 +543,42 @@ pub async fn record_with_quota_check(
         });
     }
 
-// 4. Persist to DB.
-    if let Err(db_error) = sqlx::query(
-        r#"
-        INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-        VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
-        ON CONFLICT (id) DO NOTHING
-        "#,
-    )
-    .bind(id)
-    .bind(tenant_id)
-    .bind(event_type_to_str(event_type))
-    .bind(quantity)
-    .bind(now)
-    .bind(&meta)
-    .execute(pool)
-    .await
-    {
+// 4. Persist to DB and append an immutable audit record in the same transaction.
+    let mut tx = pool.begin().await.map_err(UsageError::Db)?;
+    let event_type_str = event_type_to_str(event_type);
+    if let Err(error) = async {
+        sqlx::query(
+            r#"
+            INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
+            VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(event_type_str)
+        .bind(quantity)
+        .bind(now)
+        .bind(&meta)
+        .execute(&mut *tx)
+        .await
+        .map_err(UsageError::Db)?;
+
+        append_audit_log(
+            &mut tx,
+            tenant_id,
+            "billing.metering_event_recorded",
+            "metering_event",
+            Some(&id.to_string()),
+            serde_json::Value::Object(build_metering_audit_metadata(event_type_str, quantity, now, &meta)),
+            now,
+        )
+        .await
+        .map_err(UsageError::Audit)?;
+
+        tx.commit().await.map_err(UsageError::Db)
+    }
+    .await {
         if let Err(rollback_error) = rollback_quota_reservation(
             redis,
             tenant_id,
@@ -539,7 +597,7 @@ pub async fn record_with_quota_check(
             );
         }
 
-        return Err(UsageError::Db(db_error));
+        return Err(error);
     }
 
     Ok(QuotaRecordResult {
@@ -558,11 +616,36 @@ pub async fn rollback_usage_record(
     event_id: Uuid,
     recorded_at: DateTime<Utc>,
 ) -> Result<(), UsageError> {
+    let mut tx = pool.begin().await.map_err(UsageError::Db)?;
+    let rolled_back_at = Utc::now();
+
     sqlx::query("DELETE FROM metering_events WHERE id = $1")
         .bind(event_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(UsageError::Db)?;
+
+    let mut audit_metadata = build_metering_audit_metadata(
+        event_type_to_str(event_type),
+        quantity,
+        recorded_at,
+        &serde_json::Value::Null,
+    );
+    audit_metadata.insert("rolledBackAt".into(), json!(rolled_back_at.to_rfc3339()));
+
+    append_audit_log(
+        &mut tx,
+        tenant_id,
+        "billing.metering_event_rolled_back",
+        "metering_event",
+        Some(&event_id.to_string()),
+        serde_json::Value::Object(audit_metadata),
+        rolled_back_at,
+    )
+    .await
+    .map_err(UsageError::Audit)?;
+
+    tx.commit().await.map_err(UsageError::Db)?;
 
     rollback_quota_reservation(
         redis,
@@ -693,6 +776,8 @@ async fn rollback_quota_reservation(
 pub enum UsageError {
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("audit error: {0}")]
+    Audit(String),
     #[error("redis pool error: {0}")]
     Redis(#[from] deadpool_redis::PoolError),
     #[error("redis command error: {0}")]
@@ -814,6 +899,26 @@ mod tests {
         let normalized = normalize_usage_metadata(Some(serde_json::json!("email-123")));
 
         assert_eq!(normalized.get("value"), Some(&serde_json::json!("email-123")));
+    }
+
+    #[test]
+    fn build_metering_audit_metadata_preserves_event_context() {
+        let recorded_at = chrono::DateTime::parse_from_rfc3339("2026-04-15T12:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let metadata = serde_json::json!({ "source": "api" });
+
+        let audit_metadata = build_metering_audit_metadata(
+            "emails_sent",
+            42,
+            recorded_at,
+            &metadata,
+        );
+
+        assert_eq!(audit_metadata.get("eventType"), Some(&serde_json::json!("emails_sent")));
+        assert_eq!(audit_metadata.get("quantity"), Some(&serde_json::json!(42)));
+        assert_eq!(audit_metadata.get("recordedAt"), Some(&serde_json::json!("2026-04-15T12:30:00+00:00")));
+        assert_eq!(audit_metadata.get("metadata"), Some(&metadata));
     }
 
     #[test]

@@ -158,6 +158,42 @@ fn delivery_recipients(body: &SendMessageRequest) -> Vec<&str> {
     recipients
 }
 
+fn canonical_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+async fn suppressed_recipients(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    body: &SendMessageRequest,
+) -> Result<Vec<String>, ApiError> {
+    let recipients: std::collections::HashSet<String> = delivery_recipients(body)
+        .into_iter()
+        .map(canonical_email)
+        .collect();
+
+    if recipients.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let recipient_list: Vec<String> = recipients.into_iter().collect();
+    let mut suppressed: Vec<String> = sqlx::query_scalar(
+        "SELECT LOWER(email) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = ANY($2)",
+    )
+    .bind(tenant_id)
+    .bind(&recipient_list)
+    .fetch_all(db)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, tenant_id = %tenant_id, "suppression lookup failed");
+        ApiError::Internal("suppression lookup error".into())
+    })?;
+
+    suppressed.sort();
+    suppressed.dedup();
+    Ok(suppressed)
+}
+
 async fn insert_message_and_queue(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
@@ -173,7 +209,9 @@ async fn insert_message_and_queue(
         .map(|(_, domain)| domain.to_lowercase())
         .unwrap_or_default();
     let domain_id = sqlx::query_scalar::<_, String>(
-        "SELECT id FROM domains WHERE tenant_id = $1 AND domain = $2 AND is_verified = true LIMIT 1",
+        "SELECT id FROM domains
+         WHERE tenant_id = $1 AND domain = $2 AND (status = 'verified' OR is_verified = true)
+         LIMIT 1",
     )
     .bind(tenant_id)
     .bind(&sender_domain)
@@ -301,7 +339,7 @@ async fn send_message(
     Json(body): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
     require_scopes(&auth, &["messages:send"])?;
-    validate_send(&body, &state, &auth.tenant_id).await?;
+    validate_send(&body, &state.db, &auth.tenant_id).await?;
 
 // existing message instead of creating a duplicate.
     if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
@@ -417,7 +455,7 @@ async fn send_batch(
     })?;
 
     for (i, msg) in body.messages.iter().enumerate() {
-        if let Err(e) = validate_send(msg, &state, &auth.tenant_id).await {
+        if let Err(e) = validate_send(msg, &state.db, &auth.tenant_id).await {
             rejected += 1;
             results.push(BatchResult {
                 index: i,
@@ -623,7 +661,7 @@ fn row_to_detail(r: MessageRow) -> MessageDetail {
 /// Validate a send request before enqueueing.
 async fn validate_send(
     body: &SendMessageRequest,
-    state: &AppState,
+    db: &sqlx::PgPool,
     tenant_id: &str,
 ) -> Result<(), ApiError> {
     let mut errors = Vec::new();
@@ -677,12 +715,14 @@ async fn validate_send(
 // Extract domain from the "from" email.
     if !body.from.is_empty() {
         if let Some(domain) = body.from.split('@').nth(1) {
-            let exists: Option<(i64,)> = sqlx::query_as(
-                "SELECT 1 FROM domains WHERE tenant_id = $1 AND domain = $2 AND is_verified = true",
+            let exists: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM domains
+                 WHERE tenant_id = $1 AND domain = $2 AND (status = 'verified' OR is_verified = true)
+                 LIMIT 1",
             )
             .bind(tenant_id)
             .bind(domain.to_lowercase())
-            .fetch_optional(&state.db)
+            .fetch_optional(db)
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "domain ownership check failed");
@@ -700,6 +740,20 @@ async fn validate_send(
     if !errors.is_empty() {
         return Err(ApiError::Validation(errors));
     }
+
+    let suppressed = suppressed_recipients(db, tenant_id, body).await?;
+    if !suppressed.is_empty() {
+        errors.extend(
+            suppressed
+                .into_iter()
+                .map(|email| format!("recipient is suppressed: {email}")),
+        );
+    }
+
+    if !errors.is_empty() {
+        return Err(ApiError::Validation(errors));
+    }
+
     Ok(())
 }
 
@@ -838,8 +892,8 @@ mod tests {
     async fn insert_verified_domain(pool: &PgPool, tenant_id: &str, domain: &str) -> String {
         let id = bounded_id("dom");
         sqlx::query(
-            "INSERT INTO domains (id, tenant_id, domain, is_verified)
-             VALUES ($1, $2, $3, true)",
+            "INSERT INTO domains (id, tenant_id, domain, status)
+             VALUES ($1, $2, $3, 'verified')",
         )
         .bind(&id)
         .bind(tenant_id)
@@ -937,6 +991,51 @@ mod tests {
         assert!(queue_rows.iter().all(|row| row.1 == persisted.id));
         assert!(queue_rows.iter().all(|row| row.2 == domain_id));
         assert!(queue_rows.iter().all(|row| row.3 == Some(scheduled_at)));
+    }
+
+    #[sqlx::test]
+    async fn api_messages_validate_send_rejects_suppressed_recipients(pool: PgPool) {
+        apply_tool_migrations(&pool).await;
+
+        let tenant_id = insert_test_tenant(&pool, "message-suppression").await;
+        insert_verified_domain(&pool, &tenant_id, "example.com").await;
+
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, type, source, created_at)
+             VALUES ($1, $2, $3, $4, $5, NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("sup", 22))
+        .bind(&tenant_id)
+        .bind("blocked@example.com")
+        .bind("unsubscribe")
+        .bind("test")
+        .execute(&pool)
+        .await
+        .expect("failed to insert suppression record");
+
+        let body = SendMessageRequest {
+            from: "sender@example.com".into(),
+            to: vec!["Blocked@Example.com".into(), "allowed@example.com".into()],
+            cc: None,
+            bcc: None,
+            subject: "Respect suppressions".into(),
+            html: Some("<p>Hello</p>".into()),
+            text: Some("Hello".into()),
+            tags: None,
+            metadata: None,
+            scheduled_at: None,
+        };
+
+        let error = validate_send(&body, &pool, &tenant_id)
+            .await
+            .expect_err("suppressed recipients should be rejected");
+
+        match error {
+            ApiError::Validation(errors) => {
+                assert!(errors.iter().any(|error| error.contains("blocked@example.com")));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
     }
 
     // ── Aggressive fail-first: validation edge cases ────────────

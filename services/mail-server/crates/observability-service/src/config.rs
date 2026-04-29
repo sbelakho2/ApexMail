@@ -106,7 +106,7 @@ impl Default for ObservabilityConfig {
             db_port: 5432,
             database: "apexmail".into(),
             db_user: "apexmail".into(),
-            db_password: "change-me".into(),
+            db_password: String::new(),
             db_pool_max: 20,
 
             redis_host: "localhost".into(),

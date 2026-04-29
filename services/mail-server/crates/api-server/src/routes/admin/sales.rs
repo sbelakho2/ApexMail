@@ -6,6 +6,7 @@ use axum::extract::{Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -22,6 +23,28 @@ pub fn router() -> Router<AppState> {
         .route("/discovery/run", post(run_discovery))
         .route("/outreach/start", post(start_outreach))
         .route("/settings", get(get_settings).put(save_settings))
+}
+
+async fn log_sales_audit(
+    db: &sqlx::PgPool,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+    metadata: serde_json::Value,
+) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
+         VALUES (NOW(), $1, $2, $3, $4::jsonb)",
+    )
+    .bind(action)
+    .bind(resource_type)
+    .bind(resource_id)
+    .bind(metadata)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(action = %action, resource_type = %resource_type, error = %error, "Failed to write sales audit log");
+    }
 }
 
 fn sales_autopilot_base_url(state: &AppState) -> String {
@@ -354,6 +377,24 @@ async fn update_leads(
 
     let result = query.execute(&state.db).await?;
 
+    log_sales_audit(
+        &state.db,
+        "control_plane.sales.leads_updated",
+        "sales_lead",
+        if ids.len() == 1 { Some(ids[0].as_str()) } else { None },
+        json!({
+            "ids": ids,
+            "updated": result.rows_affected(),
+            "status": body.status,
+            "notes": body.notes,
+            "tags": body.tags,
+            "contactEmail": body.contact_email,
+            "contactName": body.contact_name,
+            "dealValue": body.deal_value,
+        }),
+    )
+    .await;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "updated": result.rows_affected()
@@ -382,6 +423,19 @@ async fn enrich_leads(
     }
 
     if !table_exists(&state.db, "sales_leads").await {
+        log_sales_audit(
+            &state.db,
+            "control_plane.sales.leads_enriched",
+            "sales_lead",
+            None,
+            json!({
+                "leadIds": body.lead_ids,
+                "enriched": 0,
+                "status": "unavailable",
+            }),
+        )
+        .await;
+
         return Ok(Json(serde_json::json!({
             "success": true,
             "enriched": 0,
@@ -455,6 +509,19 @@ async fn enrich_leads(
             "company": company
         }));
     }
+
+    log_sales_audit(
+        &state.db,
+        "control_plane.sales.leads_enriched",
+        "sales_lead",
+        None,
+        json!({
+            "leadIds": body.lead_ids,
+            "enriched": results.len(),
+            "skipped": skipped.len(),
+        }),
+    )
+    .await;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -582,6 +649,18 @@ async fn update_campaign(
         return Err(ApiError::NotFound("campaign not found".into()));
     }
 
+    log_sales_audit(
+        &state.db,
+        "control_plane.sales.campaign_updated",
+        "drip_campaign",
+        Some(&body.id),
+        json!({
+            "action": body.action,
+            "status": new_status,
+        }),
+    )
+    .await;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "status": new_status
@@ -619,6 +698,19 @@ async fn run_discovery(
 
     let job_id = apexmail_lib::id::generate_id("disc", 22);
     if !table_exists(&state.db, "sales_leads").await || !table_exists(&state.db, "enriched_companies").await {
+        log_sales_audit(
+            &state.db,
+            "control_plane.sales.discovery_run",
+            "sales_discovery_job",
+            Some(&job_id),
+            json!({
+                "sources": body.sources,
+                "categories": body.categories,
+                "status": "unavailable",
+            }),
+        )
+        .await;
+
         return Ok(Json(serde_json::json!({
             "jobId": job_id,
             "status": "unavailable",
@@ -699,6 +791,21 @@ async fn run_discovery(
         .await?;
         imported += 1;
     }
+
+    log_sales_audit(
+        &state.db,
+        "control_plane.sales.discovery_run",
+        "sales_discovery_job",
+        Some(&job_id),
+        json!({
+            "sources": body.sources,
+            "categories": normalized_categories,
+            "source": primary_source,
+            "discovered": discovered,
+            "imported": imported,
+        }),
+    )
+    .await;
 
     Ok(Json(serde_json::json!({
         "jobId": job_id,
@@ -838,6 +945,20 @@ async fn start_outreach(
         .await?;
     }
 
+    log_sales_audit(
+        &state.db,
+        "control_plane.sales.outreach_started",
+        "drip_campaign",
+        Some(&campaign_id),
+        json!({
+            "leadCount": valid_recipients.len(),
+            "offerId": body.offer_id,
+            "template": template,
+            "skipped": skipped.len(),
+        }),
+    )
+    .await;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "campaignId": campaign_id,
@@ -932,6 +1053,19 @@ async fn save_settings(
     .bind(&body.notifications)
     .execute(&state.db)
     .await?;
+
+    log_sales_audit(
+        &state.db,
+        "control_plane.sales.settings_saved",
+        "sales_settings",
+        Some("1"),
+        json!({
+            "scoringWeightKeys": body.scoring_weights.as_object().map(|value| value.len()).unwrap_or(0),
+            "scheduleKeys": body.schedule.as_object().map(|value| value.len()).unwrap_or(0),
+            "notificationKeys": body.notifications.as_object().map(|value| value.len()).unwrap_or(0),
+        }),
+    )
+    .await;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

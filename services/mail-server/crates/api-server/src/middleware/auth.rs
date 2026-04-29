@@ -51,6 +51,7 @@ const API_KEY_CACHE_PREFIX: &str = "apexmail:api_key_cache:";
 const USER_STATUS_CACHE_TTL: u64 = 15; // seconds
 const USER_STATUS_CACHE_PREFIX: &str = "apexmail:user_status:";
 const USER_STATUS_CACHE_MISSING: &str = "__missing__";
+const SESSION_REVOCATION_PREFIX: &str = "apexmail:session_revoked_after:";
 const SESSION_COOKIE_NAME: &str = "am_session";
 const CSRF_COOKIE_NAME: &str = "csrf_token";
 const CSRF_HEADER_NAME: &str = "x-csrf-token";
@@ -354,6 +355,14 @@ fn user_status_cache_key(tenant_id: &str, user_id: &str) -> String {
     format!("{USER_STATUS_CACHE_PREFIX}{tenant_id}:{user_id}")
 }
 
+pub(crate) fn session_revocation_key(tenant_id: &str, user_id: &str) -> String {
+    format!("{SESSION_REVOCATION_PREFIX}{tenant_id}:{user_id}")
+}
+
+fn issued_before_or_at_revocation(iat: i64, revoked_after: Option<i64>) -> bool {
+    revoked_after.is_some_and(|timestamp| iat <= timestamp)
+}
+
 fn parse_cached_user_status(value: &str) -> CachedUserStatus {
     if value == USER_STATUS_CACHE_MISSING {
         CachedUserStatus::Missing
@@ -375,6 +384,23 @@ async fn lookup_cached_user_status(
         tracing::warn!(error = %e, tenant_id, user_id, "redis GET error in user status cache lookup");
     })?;
     Ok(cached.as_deref().map(parse_cached_user_status))
+}
+
+async fn lookup_session_revoked_after(
+    tenant_id: &str,
+    user_id: &str,
+    state: &AppState,
+) -> Result<Option<i64>, ApiError> {
+    let cache_key = session_revocation_key(tenant_id, user_id);
+    let mut conn = state.redis.get().await.map_err(|error| {
+        tracing::error!(error = %error, tenant_id, user_id, "redis unavailable for session revocation lookup");
+        ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
+    })?;
+
+    conn.get(&cache_key).await.map_err(|error| {
+        tracing::error!(error = %error, tenant_id, user_id, "redis GET failed for session revocation lookup");
+        ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
+    })
 }
 
 async fn cache_user_status(
@@ -493,6 +519,11 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
         return Err(ApiError::Unauthorized(
             format!("user account is {user_status}"),
         ));
+    }
+
+    let revoked_after = lookup_session_revoked_after(&tenant_id, &user_id, state).await?;
+    if issued_before_or_at_revocation(claims.iat, revoked_after) {
+        return Err(ApiError::Unauthorized("session has been revoked".into()));
     }
 
     Ok(AuthUser {
@@ -844,6 +875,22 @@ mod tests {
             user_status_cache_key("ten_test_001", "usr_test_001"),
             "apexmail:user_status:ten_test_001:usr_test_001"
         );
+    }
+
+    #[test]
+    fn test_session_revocation_key_is_scoped_by_tenant_and_user() {
+        assert_eq!(
+            session_revocation_key("ten_test_001", "usr_test_001"),
+            "apexmail:session_revoked_after:ten_test_001:usr_test_001"
+        );
+    }
+
+    #[test]
+    fn test_issued_before_or_at_revocation_rejects_old_tokens() {
+        assert!(issued_before_or_at_revocation(100, Some(100)));
+        assert!(issued_before_or_at_revocation(100, Some(101)));
+        assert!(!issued_before_or_at_revocation(102, Some(101)));
+        assert!(!issued_before_or_at_revocation(100, None));
     }
 
     #[test]

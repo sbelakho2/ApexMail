@@ -29,10 +29,14 @@ impl Default for OpsConfig {
             warmup_default_days: 14,
             port: 4400,
             database_url: "postgres://localhost/apexmail".to_string(),
-            ops_api_key: "dev-ops-key".to_string(),
+            ops_api_key: String::new(),
             environment: "development".to_string(),
         }
     }
+}
+
+fn generated_ops_api_key() -> String {
+    format!("ops_{}", uuid::Uuid::new_v4().simple())
 }
 
 impl OpsConfig {
@@ -65,13 +69,14 @@ impl OpsConfig {
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or(default.database_url),
             ops_api_key: std::env::var("OPS_API_KEY")
-                .unwrap_or(default.ops_api_key),
+                .unwrap_or_else(|_| generated_ops_api_key()),
             environment,
         };
         if let Err(err) = config.validate() {
             eprintln!("Invalid ops-service config: {err}; falling back to defaults");
             let mut fallback = Self::default();
             fallback.environment = config.environment;
+            fallback.ops_api_key = generated_ops_api_key();
             fallback.harden_production();
             return fallback;
         }
@@ -98,20 +103,17 @@ impl OpsConfig {
         if self.database_url.trim().is_empty() {
             return Err("DATABASE_URL must not be empty".into());
         }
+        if self.ops_api_key.trim().is_empty() {
+            return Err("OPS_API_KEY must not be empty".into());
+        }
         Ok(())
     }
 
     pub fn harden_production(&mut self) {
-        if self.environment == "production" && (self.ops_api_key.is_empty() || self.ops_api_key == "dev-ops-key") {
-            self.ops_api_key = format!(
-                "auto-ops-key-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            );
+        if self.environment == "production" && self.ops_api_key.trim().is_empty() {
+            self.ops_api_key = generated_ops_api_key();
             eprintln!(
-                "SECURITY: OPS_API_KEY missing/weak in production; generated an ephemeral runtime key"
+                "SECURITY: OPS_API_KEY missing in production; generated an ephemeral runtime key"
             );
         }
     }
@@ -128,7 +130,7 @@ mod tests {
         assert_eq!(cfg.incident_auto_resolve_mins, 120);
         assert_eq!(cfg.warmup_default_days, 14);
         assert_eq!(cfg.port, 4400);
-        assert_eq!(cfg.ops_api_key, "dev-ops-key");
+        assert!(cfg.ops_api_key.is_empty());
     }
 
     #[test]
@@ -145,6 +147,6 @@ mod tests {
         assert_eq!(cfg.incident_auto_resolve_mins, def.incident_auto_resolve_mins);
         assert_eq!(cfg.warmup_default_days, def.warmup_default_days);
         assert_eq!(cfg.port, def.port);
-        assert_eq!(cfg.ops_api_key, def.ops_api_key);
+        assert!(!cfg.ops_api_key.trim().is_empty());
     }
 }

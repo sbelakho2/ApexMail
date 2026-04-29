@@ -11,6 +11,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -20,6 +21,20 @@ const PENDING_APPROVAL_SCORE: i32 = 80;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(get_autopilot).post(post_autopilot))
+}
+
+async fn log_autopilot_audit(db: &sqlx::PgPool, action: &str, metadata: serde_json::Value) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
+         VALUES (NOW(), $1, 'sales_autopilot', 'default', $2::jsonb)",
+    )
+    .bind(action)
+    .bind(metadata)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(action = %action, error = %error, "Failed to write autopilot audit log");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -451,6 +466,16 @@ async fn post_autopilot(
             )
             .await?;
 
+            log_autopilot_audit(
+                &state.db,
+                "control_plane.autopilot.started",
+                json!({
+                    "safeMode": updated.safe_mode,
+                    "rules": updated.rules,
+                }),
+            )
+            .await;
+
             serde_json::json!({
                 "success": true,
                 "status": updated.status,
@@ -468,6 +493,13 @@ async fn post_autopilot(
                 None,
             )
             .await?;
+
+            log_autopilot_audit(
+                &state.db,
+                "control_plane.autopilot.stopped",
+                json!({ "previousStatus": current.status }),
+            )
+            .await;
 
             serde_json::json!({
                 "success": true,
@@ -497,6 +529,12 @@ async fn post_autopilot(
             }
 
             persist_autopilot_state(&state.db, &current, "approve", None, None, None).await?;
+            log_autopilot_audit(
+                &state.db,
+                "control_plane.autopilot.approved",
+                json!({ "candidateId": candidate_id }),
+            )
+            .await;
             serde_json::json!({
                 "success": true,
                 "candidateId": candidate_id,
@@ -521,6 +559,12 @@ async fn post_autopilot(
             }
 
             persist_autopilot_state(&state.db, &current, "reject", None, None, None).await?;
+            log_autopilot_audit(
+                &state.db,
+                "control_plane.autopilot.rejected",
+                json!({ "candidateId": candidate_id }),
+            )
+            .await;
             serde_json::json!({
                 "success": true,
                 "candidateId": candidate_id,
@@ -542,6 +586,12 @@ async fn post_autopilot(
             .await?;
 
             persist_autopilot_state(&state.db, &current, "approve-all", None, None, None).await?;
+            log_autopilot_audit(
+                &state.db,
+                "control_plane.autopilot.approved_all",
+                json!({ "approved": result.rows_affected() }),
+            )
+            .await;
             serde_json::json!({
                 "success": true,
                 "approved": result.rows_affected(),
@@ -557,6 +607,13 @@ async fn post_autopilot(
                 None,
             )
             .await?;
+
+            log_autopilot_audit(
+                &state.db,
+                "control_plane.autopilot.exited_safe_mode",
+                json!({ "status": updated.status }),
+            )
+            .await;
 
             serde_json::json!({
                 "success": true,

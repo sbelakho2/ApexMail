@@ -6,6 +6,7 @@ use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Mutex;
 use std::collections::HashMap;
 
@@ -15,6 +16,70 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(get_risk_tenants).patch(update_risk))
+}
+
+#[derive(Debug, PartialEq)]
+struct RiskAuditEntry {
+    action: &'static str,
+    resource_id: Option<String>,
+    tenant_id: Option<String>,
+    metadata: serde_json::Value,
+}
+
+fn build_risk_audit_entry(mutation: &RiskMutation) -> RiskAuditEntry {
+    match mutation {
+        RiskMutation::SetLimit {
+            tenant_id,
+            limit_type,
+            value,
+        } => RiskAuditEntry {
+            action: "control_plane.risk.limit_set",
+            resource_id: Some(tenant_id.clone()),
+            tenant_id: Some(tenant_id.clone()),
+            metadata: json!({
+                "limitType": limit_type,
+                "value": value,
+            }),
+        },
+        RiskMutation::ResolveFlag { tenant_id, flag_id } => RiskAuditEntry {
+            action: "control_plane.risk.flag_resolved",
+            resource_id: Some(flag_id.clone()),
+            tenant_id: Some(tenant_id.clone()),
+            metadata: json!({
+                "tenantId": tenant_id,
+            }),
+        },
+        RiskMutation::SaveThresholds { thresholds } => RiskAuditEntry {
+            action: "control_plane.risk.thresholds_saved",
+            resource_id: None,
+            tenant_id: None,
+            metadata: json!({ "thresholds": thresholds }),
+        },
+        RiskMutation::RunAssessment => RiskAuditEntry {
+            action: "control_plane.risk.assessment_run",
+            resource_id: None,
+            tenant_id: None,
+            metadata: json!({}),
+        },
+    }
+}
+
+async fn log_risk_audit(state: &AppState, mutation: &RiskMutation) {
+    let entry = build_risk_audit_entry(mutation);
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
+         VALUES (NOW(), $1, 'risk', $2, $3, $4::jsonb)",
+    )
+    .bind(entry.action)
+    .bind(entry.resource_id)
+    .bind(entry.tenant_id)
+    .bind(entry.metadata)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(action = entry.action, error = %error, "Failed to write risk audit log");
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +308,8 @@ async fn update_risk(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
+    let audit_entry = build_risk_audit_entry(&body);
+
     match body {
         RiskMutation::SetLimit { tenant_id, limit_type, value } => {
             if let Ok(mut guard) = TENANT_LIMITS.lock() {
@@ -274,6 +341,12 @@ async fn update_risk(
                 tracing::warn!(tenant_id = %tenant_id, error = %e, "Failed to persist risk limits");
             }
 
+            log_risk_audit(&state, &RiskMutation::SetLimit {
+                tenant_id,
+                limit_type,
+                value,
+            }).await;
+
             Ok(Json(serde_json::json!({ "success": true })))
         }
         RiskMutation::ResolveFlag { tenant_id, flag_id } => {
@@ -289,16 +362,54 @@ async fn update_risk(
                     tracing::warn!(tenant_id = %tenant_id, flag_id = %flag_id, error = %e, "Failed to resolve reputation flag");
                 }
             }
+
+            log_risk_audit(&state, &RiskMutation::ResolveFlag { tenant_id, flag_id }).await;
             Ok(Json(serde_json::json!({ "success": true })))
         }
         RiskMutation::SaveThresholds { thresholds } => {
             if let Ok(mut guard) = THRESHOLDS.lock() {
                 *guard = Some(thresholds.clone());
             }
+
+            log_risk_audit(&state, &RiskMutation::SaveThresholds {
+                thresholds: thresholds.clone(),
+            }).await;
             Ok(Json(serde_json::json!({ "success": true, "thresholds": thresholds })))
         }
         RiskMutation::RunAssessment => {
+            let _ = audit_entry;
+            log_risk_audit(&state, &RiskMutation::RunAssessment).await;
             Ok(Json(serde_json::json!({ "success": true, "assessedAt": chrono::Utc::now().to_rfc3339() })))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_risk_audit_entry_for_set_limit_includes_target_and_value() {
+        let entry = build_risk_audit_entry(&RiskMutation::SetLimit {
+            tenant_id: "tenant_123".into(),
+            limit_type: "daily".into(),
+            value: Some(5000),
+        });
+
+        assert_eq!(entry.action, "control_plane.risk.limit_set");
+        assert_eq!(entry.resource_id.as_deref(), Some("tenant_123"));
+        assert_eq!(entry.tenant_id.as_deref(), Some("tenant_123"));
+        assert_eq!(entry.metadata["limitType"], "daily");
+        assert_eq!(entry.metadata["value"], 5000);
+    }
+
+    #[test]
+    fn build_risk_audit_entry_for_run_assessment_is_global() {
+        let entry = build_risk_audit_entry(&RiskMutation::RunAssessment);
+
+        assert_eq!(entry.action, "control_plane.risk.assessment_run");
+        assert!(entry.resource_id.is_none());
+        assert!(entry.tenant_id.is_none());
+        assert_eq!(entry.metadata, json!({}));
     }
 }

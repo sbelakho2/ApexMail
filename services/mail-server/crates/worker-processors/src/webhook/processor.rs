@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use deadpool_redis::Pool as RedisPool;
+use futures::stream::{self, StreamExt};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use sha2::Sha256;
@@ -120,11 +121,13 @@ impl WebhookProcessor {
                     }
                 }
                 Ok(jobs) => {
-                    for job in jobs {
-                        if let Err(e) = self.process_job(job).await {
-                            error!(error = %e, "Failed to process webhook job");
-                        }
-                    }
+                    stream::iter(jobs)
+                        .for_each_concurrent(available, |job| async {
+                            if let Err(error) = self.process_job(job).await {
+                                error!(error = %error, "Failed to process webhook job");
+                            }
+                        })
+                        .await;
 // Flush pending successes in batch
                     self.flush_pending_successes().await;
                     sleep(Duration::from_millis(100)).await;

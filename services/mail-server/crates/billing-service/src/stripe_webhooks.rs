@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tracing::{debug, error, info, warn};
 
+use crate::routes::append_audit_log;
 use crate::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -861,6 +862,11 @@ async fn record_failed_payment(
 ) -> Result<DunningResult, String> {
     let config = get_dunning_config_for_tenant(state, tenant_id).await;
     let now = Utc::now();
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin payment failure transaction: {error}"))?;
 
     let existing = sqlx::query_as::<_, DunningRecordRow>(
         r#"
@@ -870,7 +876,7 @@ async fn record_failed_payment(
         "#,
     )
     .bind(tenant_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|error| format!("Failed to load dunning record: {error}"))?;
 
@@ -971,9 +977,31 @@ async fn record_failed_payment(
         "daysSinceFirstFailure": days_since_first_failure,
     }))
     .bind(new_status == "hard_suspended")
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert dunning state: {error}"))?;
+
+    append_audit_log(
+        &mut tx,
+        tenant_id,
+        "billing.payment_failed",
+        "invoice",
+        Some(invoice_id),
+        serde_json::json!({
+            "amount": amount,
+            "failedPaymentCount": failed_payment_count,
+            "daysSinceFirstFailure": days_since_first_failure,
+            "status": new_status,
+            "nextRetryAt": next_retry_at.map(|value| value.to_rfc3339()),
+        }),
+        now,
+    )
+    .await
+    .map_err(|error| format!("Failed to insert payment failure audit log: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit payment failure transaction: {error}"))?;
 
     send_dunning_notification(
         state,

@@ -2343,6 +2343,7 @@ async fn get_usage(
         .await
         .map_err(|error| match error {
             usage::UsageError::Db(db_error) => ApiError::from(db_error),
+            usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
             usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
             usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
         })?;
@@ -2407,6 +2408,7 @@ async fn get_payg_usage(
         .await
         .map_err(|error| match error {
             usage::UsageError::Db(db_error) => ApiError::from(db_error),
+            usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
             usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
             usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
         })?;
@@ -3133,6 +3135,7 @@ async fn check_quota(
         .await
         .map_err(|error| match error {
             usage::UsageError::Db(db_error) => ApiError::from(db_error),
+            usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
             usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
             usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
         })?;

@@ -131,6 +131,10 @@ fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+fn generated_dev_secret(label: &str) -> String {
+    format!("dev-{label}-{}", uuid::Uuid::new_v4().simple())
+}
+
 fn env_required(key: &str) -> Result<String, ConfigError> {
     env::var(key).map_err(|_| ConfigError::MissingVar(key.to_string()))
 }
@@ -306,6 +310,10 @@ impl Config {
             "staging" => Environment::Staging,
             _ => Environment::Development,
         };
+        let session_secret_env = env::var("SESSION_SECRET").ok().filter(|value| !value.trim().is_empty());
+        let impersonation_secret_env = env::var("IMPERSONATION_SECRET").ok().filter(|value| !value.trim().is_empty());
+        let csrf_secret_env = env::var("CSRF_SECRET").ok().filter(|value| !value.trim().is_empty());
+        let tracking_secret_key_env = env::var("TRACKING_SECRET_KEY").ok().filter(|value| !value.trim().is_empty());
 
         let jwt_private_key_pem = env_required_pem("JWT_PRIVATE_KEY_PEM")?;
         let jwt_public_key_pem = env_required_pem("JWT_PUBLIC_KEY_PEM")?;
@@ -430,15 +438,23 @@ impl Config {
             github_client_secret: env::var("GITHUB_CLIENT_SECRET").ok(),
             oauth_redirect_base_url: env_or("OAUTH_REDIRECT_BASE_URL", "http://localhost:3000"),
 
-            session_secret: env_or("SESSION_SECRET", "dev-session-secret-change-me"),
-            impersonation_secret: env_or("IMPERSONATION_SECRET", "dev-impersonation-secret-change-me"),
-            csrf_secret: env_or("CSRF_SECRET", "dev-csrf-secret-change-me"),
+            session_secret: session_secret_env
+                .clone()
+                .unwrap_or_else(|| generated_dev_secret("session-secret")),
+            impersonation_secret: impersonation_secret_env
+                .clone()
+                .unwrap_or_else(|| generated_dev_secret("impersonation-secret")),
+            csrf_secret: csrf_secret_env
+                .clone()
+                .unwrap_or_else(|| generated_dev_secret("csrf-secret")),
 
             control_plane_api_key: env::var("CONTROL_PLANE_API_KEY").ok().filter(|s| !s.is_empty()),
             sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://localhost:3010"),
             internal_service_token: env::var("INTERNAL_SERVICE_TOKEN").ok().filter(|s| !s.is_empty()),
 
-            tracking_secret_key: env_or("TRACKING_SECRET_KEY", "dev-tracking-secret-change-me-32chars!!"),
+            tracking_secret_key: tracking_secret_key_env
+                .clone()
+                .unwrap_or_else(|| generated_dev_secret("tracking-secret")),
             billing_company_iban: env_or("BILLING_COMPANY_IBAN", ""),
             billing_company_phone: env_or("BILLING_COMPANY_PHONE", ""),
 
@@ -447,6 +463,16 @@ impl Config {
 
 // Production security checks
         if config.environment.is_production() {
+            for (name, value) in [
+                ("SESSION_SECRET", session_secret_env.as_deref()),
+                ("IMPERSONATION_SECRET", impersonation_secret_env.as_deref()),
+                ("CSRF_SECRET", csrf_secret_env.as_deref()),
+                ("TRACKING_SECRET_KEY", tracking_secret_key_env.as_deref()),
+            ] {
+                if value.is_none() {
+                    return Err(ConfigError::MissingVar(name.to_string()));
+                }
+            }
             config.validate_production()?;
         }
 

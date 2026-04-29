@@ -2,6 +2,10 @@
 
 use std::env;
 
+fn generated_dev_secret(label: &str) -> String {
+    format!("dev-{label}-{}", uuid::Uuid::new_v4().simple())
+}
+
 /// Configuration for the DevEx service.
 #[derive(Debug, Clone)]
 pub struct DevExConfig {
@@ -28,7 +32,7 @@ impl Default for DevExConfig {
             host: "0.0.0.0".into(),
             database_url: "postgres://127.0.0.1:5432/apexmail".into(),
             redis_url: "redis://127.0.0.1:6379".into(),
-            webhook_signing_secret: "devex-local-signing-secret".into(),
+            webhook_signing_secret: generated_dev_secret("devex-webhook-signing-secret"),
             cors_origins: vec!["*".into()],
             api_base_url: "https://api.apexmail.ee".into(),
             docs_base_url: "https://apexmail.ee/docs".into(),

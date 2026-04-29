@@ -3,8 +3,8 @@
 //! `POST /v1/stream/token`
 //!
 //! Authenticated users call this endpoint to receive a short-lived HMAC-SHA256
-//! signed JWT that can be passed as a query parameter to the tracking-service's
-//! SSE endpoint (`GET /v1/stream?token=<TOKEN>`).
+//! signed JWT that can be sent as a Bearer token to the tracking-service's
+//! SSE endpoint (`GET /v1/stream`).
 //!
 //! The token is intentionally://! - Short-lived (5 minutes) to limit replay window.
 //! - Signed with HMAC-SHA256 using the shared `TRACKING_SECRET_KEY`
@@ -54,7 +54,7 @@ pub struct StreamTokenResponse {
     pub token: String,
 /// Expiration Unix timestamp.
     pub expires_at: u64,
-/// SSE endpoint URL hint.
+/// SSE endpoint URL hint. Send `token` as `Authorization: Bearer <token>`.
     pub stream_url: String,
 }
 

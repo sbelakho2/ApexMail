@@ -9,6 +9,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use billing_service::{plans, types::RateLimitTier};
 use deadpool_redis::redis::{self, AsyncCommands};
 use ipnetwork::IpNetwork;
 
@@ -32,13 +33,12 @@ pub async fn rate_limit_middleware(
         .get::<AuthUser>()
         .map(|u| u.tenant_id.clone());
 
-    let tenant_key = match tenant_id {
-        Some(id) => id,
-        None => "anonymous".to_string(),
-    };
+    let tenant_key = tenant_id
+        .clone()
+        .unwrap_or_else(|| "anonymous".to_string());
 
     let window_ms = state.config.rate_limit_window_ms;
-    let max_requests = state.config.rate_limit_max_requests;
+    let max_requests = resolve_rate_limit_max_requests(&state, tenant_id.as_deref(), window_ms).await;
     let redis_key = format!("apexmail:ratelimit:{}:{}", tenant_key, current_window(window_ms));
 
     match check_rate_limit(&state, &redis_key, max_requests, window_ms).await {
@@ -96,6 +96,30 @@ struct RateLimitInfo {
 enum RateLimitOutcome {
     Exceeded { reset_at: u64 },
     RedisDown,
+}
+
+fn requests_per_window_for_tier(tier: RateLimitTier, window_ms: u64) -> u64 {
+    let window_seconds = (window_ms.saturating_add(999) / 1000).max(1);
+    u64::from(tier.rps()) * window_seconds
+}
+
+async fn resolve_rate_limit_max_requests(
+    state: &AppState,
+    tenant_id: Option<&str>,
+    window_ms: u64,
+) -> u64 {
+    let Some(tenant_id) = tenant_id.filter(|tenant_id| *tenant_id != "anonymous" && *tenant_id != "system") else {
+        return state.config.rate_limit_max_requests;
+    };
+
+    match plans::get_quota_for_tenant(&state.db, tenant_id).await {
+        Ok(Some(quota)) => requests_per_window_for_tier(quota.rate_limit_tier, window_ms),
+        Ok(None) => state.config.rate_limit_max_requests,
+        Err(error) => {
+            tracing::warn!(tenant_id = %tenant_id, error = %error, "Failed to resolve tenant plan for rate limiting");
+            state.config.rate_limit_max_requests
+        }
+    }
 }
 
 fn current_time_ms() -> u64 {
@@ -409,6 +433,19 @@ mod tests {
             reset_at: 1_700_000_000_000,
         };
         assert_eq!(info.remaining, 999);
+    }
+
+    #[test]
+    fn test_requests_per_window_for_rate_limit_tiers() {
+        assert_eq!(requests_per_window_for_tier(RateLimitTier::Free, 60_000), 600);
+        assert_eq!(requests_per_window_for_tier(RateLimitTier::Standard, 60_000), 6_000);
+        assert_eq!(requests_per_window_for_tier(RateLimitTier::High, 60_000), 30_000);
+        assert_eq!(requests_per_window_for_tier(RateLimitTier::Unlimited, 60_000), 300_000);
+    }
+
+    #[test]
+    fn test_requests_per_window_rounds_up_subsecond_windows() {
+        assert_eq!(requests_per_window_for_tier(RateLimitTier::Free, 500), 10);
     }
 
     #[test]

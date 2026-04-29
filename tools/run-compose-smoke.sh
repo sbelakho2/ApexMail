@@ -19,6 +19,55 @@ error() {
   exit 1
 }
 
+generate_secret() {
+  local bytes="${1:-32}"
+  openssl rand -hex "$bytes" 2>/dev/null || error "Failed to generate secret material"
+}
+
+load_or_seed_secret() {
+  local secret_file="$1"
+  local bytes="${2:-32}"
+
+  mkdir -p "$(dirname "$secret_file")"
+  if [[ -s "$secret_file" ]]; then
+    tr -d '\r\n' < "$secret_file"
+    return 0
+  fi
+
+  local secret_value
+  secret_value="$(generate_secret "$bytes")"
+  printf '%s' "$secret_value" > "$secret_file"
+  chmod 600 "$secret_file"
+  printf '%s' "$secret_value"
+}
+
+resolve_env_or_seed_secret() {
+  local env_name="$1"
+  local secret_file="$2"
+  local bytes="${3:-32}"
+  local current_value="${!env_name:-}"
+
+  if [[ -n "$current_value" ]]; then
+    printf '%s' "$current_value"
+    return 0
+  fi
+
+  load_or_seed_secret "$secret_file" "$bytes"
+}
+
+resolve_env_or_generate_secret() {
+  local env_name="$1"
+  local bytes="${2:-32}"
+  local current_value="${!env_name:-}"
+
+  if [[ -n "$current_value" ]]; then
+    printf '%s' "$current_value"
+    return 0
+  fi
+
+  generate_secret "$bytes"
+}
+
 usage() {
   cat <<'EOF'
 Usage: tools/run-compose-smoke.sh <command>
@@ -57,13 +106,6 @@ compose() {
   )
 }
 
-existing_postgres_password() {
-  local secret_file="$PROJECT_ROOT/secrets/postgres_password.txt"
-  if [[ -f "$secret_file" ]]; then
-    tr -d '\r\n' < "$secret_file"
-  fi
-}
-
 existing_internal_service_token() {
   docker inspect apexmail-observability --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
     | sed -n 's/^INTERNAL_SERVICE_TOKEN=//p' \
@@ -71,19 +113,7 @@ existing_internal_service_token() {
 }
 
 resolved_postgres_password() {
-  if [[ -n "${POSTGRES_PASSWORD:-}" ]]; then
-    printf '%s\n' "$POSTGRES_PASSWORD"
-    return 0
-  fi
-
-  local detected_password=""
-  detected_password="$(existing_postgres_password || true)"
-  if [[ -n "$detected_password" ]]; then
-    printf '%s\n' "$detected_password"
-    return 0
-  fi
-
-  printf '%s\n' 'dev-postgres-password-minimum-32'
+  resolve_env_or_seed_secret POSTGRES_PASSWORD "$PROJECT_ROOT/secrets/postgres_password.txt" 32
 }
 
 ensure_smoke_assets() {
@@ -115,23 +145,24 @@ export_smoke_env() {
   detected_internal_service_token="$(existing_internal_service_token || true)"
 
   export POSTGRES_PASSWORD="$(resolved_postgres_password)"
-  mkdir -p "$PROJECT_ROOT/secrets"
-  printf '%s' "$POSTGRES_PASSWORD" > "$PROJECT_ROOT/secrets/postgres_password.txt"
-  chmod 600 "$PROJECT_ROOT/secrets/postgres_password.txt"
-  export REDIS_PASSWORD="${REDIS_PASSWORD:-$(<"$PROJECT_ROOT/secrets/redis_password.txt")}"
-  export CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-clickhouse-password-smoke-1234567890}"
-  export JWT_SECRET="${JWT_SECRET:-enterprise-jwt-secret-smoke-1234567890123456}"
+  export REDIS_PASSWORD="$(resolve_env_or_seed_secret REDIS_PASSWORD "$PROJECT_ROOT/secrets/redis_password.txt" 32)"
+  export CLICKHOUSE_PASSWORD="$(resolve_env_or_seed_secret CLICKHOUSE_PASSWORD "$PROJECT_ROOT/secrets/clickhouse_password.txt" 32)"
+  export JWT_SECRET="$(resolve_env_or_generate_secret JWT_SECRET 32)"
   export GRAFANA_USER="${GRAFANA_USER:-smoke-admin}"
-  export GRAFANA_PASSWORD="${GRAFANA_PASSWORD:-smoke-grafana-password-123456}"
-  export TRACKING_SECRET_KEY="${TRACKING_SECRET_KEY:-tracking-secret-key-smoke-12345678901234567890}"
+  export GRAFANA_PASSWORD="$(resolve_env_or_generate_secret GRAFANA_PASSWORD 24)"
+  export TRACKING_SECRET_KEY="$(resolve_env_or_generate_secret TRACKING_SECRET_KEY 32)"
   export BASE_URL="${BASE_URL:-https://api.apexmail.ee}"
   export OAUTH_REDIRECT_BASE_URL="${OAUTH_REDIRECT_BASE_URL:-https://app.apexmail.ee/auth/callback}"
-  export API_KEY_HASH_SECRET="${API_KEY_HASH_SECRET:-api-key-hash-secret-smoke-123456789012345}"
-  export WEBHOOK_SIGNING_SECRET="${WEBHOOK_SIGNING_SECRET:-webhook-signing-secret-smoke-1234567890}"
-  export SESSION_SECRET="${SESSION_SECRET:-session-secret-smoke-12345678901234567890}"
-  export IMPERSONATION_SECRET="${IMPERSONATION_SECRET:-impersonation-secret-smoke-1234567890123}"
-  export CSRF_SECRET="${CSRF_SECRET:-csrf-secret-smoke-123456789012345678901234}"
-  export INTERNAL_SERVICE_TOKEN="${detected_internal_service_token:-${INTERNAL_SERVICE_TOKEN:-smoke-internal-service-token-32chars}}"
+  export API_KEY_HASH_SECRET="$(resolve_env_or_generate_secret API_KEY_HASH_SECRET 32)"
+  export WEBHOOK_SIGNING_SECRET="$(resolve_env_or_generate_secret WEBHOOK_SIGNING_SECRET 32)"
+  export SESSION_SECRET="$(resolve_env_or_generate_secret SESSION_SECRET 32)"
+  export IMPERSONATION_SECRET="$(resolve_env_or_generate_secret IMPERSONATION_SECRET 32)"
+  export CSRF_SECRET="$(resolve_env_or_generate_secret CSRF_SECRET 32)"
+  if [[ -n "$detected_internal_service_token" ]]; then
+    export INTERNAL_SERVICE_TOKEN="$detected_internal_service_token"
+  else
+    export INTERNAL_SERVICE_TOKEN="$(resolve_env_or_generate_secret INTERNAL_SERVICE_TOKEN 32)"
+  fi
   export ENTERPRISE_BASE_URL="${ENTERPRISE_BASE_URL:-https://api.apexmail.ee}"
   export TRACKING_BASE_URL="${TRACKING_BASE_URL:-https://track.apexmail.ee}"
   export BILLING_COMPANY_IBAN="${BILLING_COMPANY_IBAN:-EE381010220123456789}"

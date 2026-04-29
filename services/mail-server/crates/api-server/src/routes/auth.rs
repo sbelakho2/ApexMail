@@ -10,15 +10,23 @@ use super::helpers::{
 };
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::middleware::auth::{invalidate_api_key_cache, validate_session_csrf, AuthUser, JwtClaims};
+use crate::middleware::auth::{
+    invalidate_api_key_cache,
+    session_revocation_key,
+    validate_session_csrf,
+    AuthUser,
+    JwtClaims,
+};
 use crate::state::AppState;
 
 const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
@@ -27,6 +35,11 @@ const LOGIN_FAILURE_WINDOW_SECS: u64 = 5 * 60;
 const LOGIN_LOCKOUT_BASE_SECS: u64 = 15 * 60;
 const LOGIN_LOCKOUT_MAX_SECS: u64 = 24 * 60 * 60;
 const LOGIN_LOCKOUT_ESCALATION_WINDOW_SECS: u64 = 24 * 60 * 60;
+const DEFAULT_API_KEY_EXPIRY_DAYS: i64 = 90;
+const MAX_API_KEY_EXPIRY_DAYS: i64 = 365;
+const MFA_CHALLENGE_TTL_SECS: u64 = 10 * 60;
+const MFA_CHALLENGE_PREFIX: &str = "apexmail:auth:mfa_challenge:";
+const MFA_SECRET_BYTES: usize = 20;
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
@@ -74,6 +87,59 @@ fn scopes_for_role(role: &str) -> Vec<String> {
         ],
         _ => vec!["messages:read".into()],
     }
+}
+
+fn role_requires_mfa(role: &str) -> bool {
+    matches!(role, "admin" | "owner")
+}
+
+fn base32_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+    let mut output = String::new();
+    let mut buffer: u16 = 0;
+    let mut bits_left: u8 = 0;
+
+    for &byte in bytes {
+        buffer = (buffer << 8) | u16::from(byte);
+        bits_left += 8;
+
+        while bits_left >= 5 {
+            let index = ((buffer >> (bits_left - 5)) & 0x1f) as usize;
+            output.push(ALPHABET[index] as char);
+            bits_left -= 5;
+        }
+    }
+
+    if bits_left > 0 {
+        let index = ((buffer << (5 - bits_left)) & 0x1f) as usize;
+        output.push(ALPHABET[index] as char);
+    }
+
+    output
+}
+
+fn generate_mfa_secret() -> String {
+    let mut secret = [0u8; MFA_SECRET_BYTES];
+    rand::rngs::OsRng.fill_bytes(&mut secret);
+    base32_encode(&secret)
+}
+
+fn build_mfa_otpauth_url(email: &str, secret: &str) -> String {
+    let label = format!("ApexMail:{email}");
+    let encoded_label: String = url::form_urlencoded::byte_serialize(label.as_bytes()).collect();
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("secret", secret);
+    serializer.append_pair("issuer", "ApexMail");
+    serializer.append_pair("algorithm", "SHA256");
+    serializer.append_pair("digits", "6");
+    serializer.append_pair("period", "30");
+
+    format!("otpauth://totp/{encoded_label}?{}", serializer.finish())
+}
+
+fn mfa_challenge_key(token: &str) -> String {
+    format!("{MFA_CHALLENGE_PREFIX}{token}")
 }
 
 fn validate_password_strength(password: &str) -> Result<(), ApiError> {
@@ -221,6 +287,89 @@ async fn clear_login_failures(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MfaChallengeKind {
+    Setup,
+    Verify,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MfaChallengeState {
+    user_id: String,
+    tenant_id: String,
+    email: String,
+    name: Option<String>,
+    role: String,
+    secret: String,
+    kind: MfaChallengeKind,
+}
+
+async fn store_mfa_challenge(
+    redis_pool: &deadpool_redis::Pool,
+    challenge: &MfaChallengeState,
+) -> Result<String, ApiError> {
+    let token = apexmail_lib::id::generate_id("mfa", 22);
+    let key = mfa_challenge_key(&token);
+    let payload = serde_json::to_string(challenge)
+        .map_err(|error| ApiError::Internal(format!("failed to serialize MFA challenge: {error}")))?;
+
+    let mut conn = redis_pool.get().await?;
+    let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
+        &mut *conn,
+        &key,
+        payload,
+        MFA_CHALLENGE_TTL_SECS,
+    )
+    .await?;
+
+    Ok(token)
+}
+
+async fn load_mfa_challenge(
+    redis_pool: &deadpool_redis::Pool,
+    token: &str,
+) -> Result<MfaChallengeState, ApiError> {
+    let mut conn = redis_pool.get().await?;
+    let key = mfa_challenge_key(token);
+    let payload: Option<String> = deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await?;
+    let payload = payload.ok_or_else(|| ApiError::Unauthorized("invalid or expired MFA challenge".into()))?;
+
+    serde_json::from_str(&payload)
+        .map_err(|error| ApiError::Internal(format!("failed to decode MFA challenge: {error}")))
+}
+
+async fn delete_mfa_challenge(
+    redis_pool: &deadpool_redis::Pool,
+    token: &str,
+) -> Result<(), ApiError> {
+    let key = mfa_challenge_key(token);
+    let mut conn = redis_pool.get().await?;
+    let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &key).await?;
+    Ok(())
+}
+
+async fn revoke_user_sessions(
+    redis_pool: &deadpool_redis::Pool,
+    tenant_id: &str,
+    user_id: &str,
+    ttl_secs: u64,
+) -> Result<(), ApiError> {
+    let mut conn = redis_pool.get().await?;
+    let key = session_revocation_key(tenant_id, user_id);
+    let revoked_after = Utc::now().timestamp();
+
+    let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
+        &mut *conn,
+        &key,
+        revoked_after,
+        ttl_secs,
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn enqueue_verification_email(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     base_url: &str,
@@ -266,6 +415,7 @@ async fn enqueue_verification_email(
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
+        .route("/mfa/verify", post(complete_mfa_challenge))
         .route("/register", post(register))
         .route("/signup", post(register))
         .route("/verify-email", get(verify_email))
@@ -281,6 +431,7 @@ pub fn router() -> Router<AppState> {
 pub fn control_plane_alias_router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
+        .route("/mfa/verify", post(complete_mfa_challenge))
         .route("/register", post(register))
         .route("/signup", post(register))
         .route("/verify-email", get(verify_email))
@@ -295,6 +446,8 @@ pub fn control_plane_alias_router() -> Router<AppState> {
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    #[serde(default, rename = "mfaCode", alias = "mfa_code")]
+    pub mfa_code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -304,12 +457,50 @@ pub struct SessionAuthResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MfaChallengeResponse {
+    pub status: String,
+    pub challenge_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub otpauth_url: Option<String>,
+}
+
+impl MfaChallengeResponse {
+    fn verify(challenge_token: String) -> Self {
+        Self {
+            status: "mfa_required".into(),
+            challenge_token,
+            secret: None,
+            otpauth_url: None,
+        }
+    }
+
+    fn setup(challenge_token: String, email: &str, secret: &str) -> Self {
+        Self {
+            status: "mfa_setup_required".into(),
+            challenge_token,
+            secret: Some(secret.to_string()),
+            otpauth_url: Some(build_mfa_otpauth_url(email, secret)),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct UserInfo {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
     pub tenant_id: String,
     pub role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompleteMfaChallengeRequest {
+    pub challenge_token: String,
+    #[serde(rename = "mfaCode", alias = "mfa_code")]
+    pub mfa_code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +519,7 @@ pub struct CreateApiKeyResponse {
     pub name: String,
     pub scopes: Vec<String>,
     pub created_at: String,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -338,6 +530,7 @@ pub struct ApiKeyInfo {
     pub scopes: serde_json::Value,
     pub last_used_at: Option<String>,
     pub created_at: String,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,75 +562,23 @@ fn insert_private_no_store_headers(headers: &mut HeaderMap) {
     headers.insert("Pragma", HeaderValue::from_static("no-cache"));
 }
 
-fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
-    let auth = headers.get("authorization")?.to_str().ok()?;
-    let mut parts = auth.splitn(2, ' ');
-    let scheme = parts.next()?.trim();
-    let token = parts.next().unwrap_or("").trim();
-    if scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() {
-        Some(token.to_string())
-    } else {
-        None
+fn no_store_json_response<T: Serialize>(status: StatusCode, body: T) -> Response {
+    let mut headers = HeaderMap::new();
+    insert_private_no_store_headers(&mut headers);
+    (status, headers, Json(body)).into_response()
+}
+
+fn build_user_info(user: &UserRow) -> UserInfo {
+    UserInfo {
+        id: user.id.clone(),
+        email: user.email.clone(),
+        name: user.name.clone(),
+        tenant_id: user.tenant_id.clone(),
+        role: user.role.clone(),
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ResetPasswordRequest {
-    pub token: String,
-    pub email: String,
-    pub password: String,
-    #[serde(default, rename = "confirmPassword", alias = "confirm_password")]
-    pub confirm_password: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ResetPasswordResponse {
-    pub success: bool,
-    pub message: String,
-}
-
-// ─── Handlers ──────────────────────────────────────────────────
-
-async fn login(
-    State(state): State<AppState>,
-    Json(body): Json<LoginRequest>,
-) -> Result<(HeaderMap, Json<SessionAuthResponse>), ApiError> {
-    if body.email.is_empty() || body.password.is_empty() {
-        return Err(ApiError::Validation(vec![
-            "email and password are required".into(),
-        ]));
-    }
-
-    let login_identifier = normalized_login_identifier(&body.email);
-    if login_lock_ttl(&state.redis, &login_identifier).await?.is_some() {
-        return Err(ApiError::RateLimited);
-    }
-
-    let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, tenant_id, email, name, password_hash, role, status FROM users WHERE LOWER(email) = LOWER($1)",
-    )
-    .bind(&body.email)
-    .fetch_optional(&state.db)
-    .await?;
-
-    let Some(user) = user else {
-        record_login_failure(&state.redis, &login_identifier).await?;
-        return Err(ApiError::Unauthorized("invalid credentials".into()));
-    };
-
-    if user.status != "active" {
-        return Err(ApiError::Forbidden("account is not active".into()));
-    }
-
-    let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email);
-
-    if !valid {
-        record_login_failure(&state.redis, &login_identifier).await?;
-        return Err(ApiError::Unauthorized("invalid credentials".into()));
-    }
-
-    clear_login_failures(&state.redis, &login_identifier).await?;
-
+fn issue_session_response(state: &AppState, user: &UserRow) -> Result<Response, ApiError> {
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
     let now = Utc::now();
     let exp = now + ChronoDuration::seconds(expiry_secs);
@@ -473,14 +614,237 @@ async fn login(
 
     Ok((headers, Json(SessionAuthResponse {
         expires_at: exp.to_rfc3339(),
-        user: UserInfo {
-            id: user.id,
-            email: user.email,
-            name: user.name,
-            tenant_id: user.tenant_id,
-            role: user.role,
-        },
-    })))
+        user: build_user_info(user),
+    }))
+        .into_response())
+}
+
+async fn insert_auth_audit_log(
+    state: &AppState,
+    tenant_id: &str,
+    user_id: &str,
+    action: &str,
+    metadata: serde_json::Value,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource_type, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'auth', $4::jsonb, NOW())",
+    )
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(action)
+    .bind(metadata)
+    .execute(&state.db)
+    .await?;
+
+    Ok(())
+}
+
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    let auth = headers.get("authorization")?.to_str().ok()?;
+    let mut parts = auth.splitn(2, ' ');
+    let scheme = parts.next()?.trim();
+    let token = parts.next().unwrap_or("").trim();
+    if scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordRequest {
+    pub token: String,
+    pub email: String,
+    pub password: String,
+    #[serde(default, rename = "confirmPassword", alias = "confirm_password")]
+    pub confirm_password: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResetPasswordResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+// ─── Handlers ──────────────────────────────────────────────────
+
+async fn login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> Result<Response, ApiError> {
+    if body.email.is_empty() || body.password.is_empty() {
+        return Err(ApiError::Validation(vec![
+            "email and password are required".into(),
+        ]));
+    }
+
+    let login_identifier = normalized_login_identifier(&body.email);
+    if login_lock_ttl(&state.redis, &login_identifier).await?.is_some() {
+        return Err(ApiError::RateLimited);
+    }
+
+    let user = sqlx::query_as::<_, UserRow>(
+        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret
+         FROM users WHERE LOWER(email) = LOWER($1)",
+    )
+    .bind(&body.email)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some(user) = user else {
+        record_login_failure(&state.redis, &login_identifier).await?;
+        return Err(ApiError::Unauthorized("invalid credentials".into()));
+    };
+
+    if user.status != "active" {
+        return Err(ApiError::Forbidden("account is not active".into()));
+    }
+
+    let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email);
+
+    if !valid {
+        record_login_failure(&state.redis, &login_identifier).await?;
+        return Err(ApiError::Unauthorized("invalid credentials".into()));
+    }
+
+    clear_login_failures(&state.redis, &login_identifier).await?;
+
+    if role_requires_mfa(&user.role) {
+        if user.mfa_enabled {
+            let secret = user
+                .mfa_secret
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ApiError::Forbidden("MFA is not configured for this admin account".into()))?;
+
+            if let Some(mfa_code) = body.mfa_code.as_deref() {
+                if !apexmail_lib::mfa::verify_totp_code(secret, mfa_code) {
+                    record_login_failure(&state.redis, &login_identifier).await?;
+                    return Err(ApiError::Unauthorized("invalid MFA code".into()));
+                }
+            } else {
+                let challenge_token = store_mfa_challenge(
+                    &state.redis,
+                    &MfaChallengeState {
+                        user_id: user.id.clone(),
+                        tenant_id: user.tenant_id.clone(),
+                        email: user.email.clone(),
+                        name: user.name.clone(),
+                        role: user.role.clone(),
+                        secret: secret.to_string(),
+                        kind: MfaChallengeKind::Verify,
+                    },
+                )
+                .await?;
+
+                return Ok(no_store_json_response(
+                    StatusCode::ACCEPTED,
+                    MfaChallengeResponse::verify(challenge_token),
+                ));
+            }
+        } else {
+            let secret = generate_mfa_secret();
+            let challenge_token = store_mfa_challenge(
+                &state.redis,
+                &MfaChallengeState {
+                    user_id: user.id.clone(),
+                    tenant_id: user.tenant_id.clone(),
+                    email: user.email.clone(),
+                    name: user.name.clone(),
+                    role: user.role.clone(),
+                    secret: secret.clone(),
+                    kind: MfaChallengeKind::Setup,
+                },
+            )
+            .await?;
+
+            return Ok(no_store_json_response(
+                StatusCode::ACCEPTED,
+                MfaChallengeResponse::setup(challenge_token, &user.email, &secret),
+            ));
+        }
+    }
+
+    issue_session_response(&state, &user)
+}
+
+async fn complete_mfa_challenge(
+    State(state): State<AppState>,
+    Json(body): Json<CompleteMfaChallengeRequest>,
+) -> Result<Response, ApiError> {
+    if body.challenge_token.trim().is_empty() {
+        return Err(ApiError::Validation(vec!["challenge_token is required".into()]));
+    }
+    if body.mfa_code.trim().is_empty() {
+        return Err(ApiError::Validation(vec!["mfa_code is required".into()]));
+    }
+
+    let challenge = load_mfa_challenge(&state.redis, &body.challenge_token).await?;
+    let login_identifier = normalized_login_identifier(&challenge.email);
+    if !apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code) {
+        record_login_failure(&state.redis, &login_identifier).await?;
+        return Err(ApiError::Unauthorized("invalid MFA code".into()));
+    }
+
+    clear_login_failures(&state.redis, &login_identifier).await?;
+
+    let mut user = sqlx::query_as::<_, UserRow>(
+        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret
+         FROM users WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(&challenge.user_id)
+    .bind(&challenge.tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::Unauthorized("user no longer exists".into()))?;
+
+    if user.status != "active" {
+        return Err(ApiError::Forbidden(format!("account is {}", user.status)));
+    }
+
+    match challenge.kind {
+        MfaChallengeKind::Setup => {
+            sqlx::query(
+                "UPDATE users
+                 SET mfa_secret = $1, mfa_enabled = true, updated_at = NOW()
+                 WHERE id = $2 AND tenant_id = $3",
+            )
+            .bind(&challenge.secret)
+            .bind(&challenge.user_id)
+            .bind(&challenge.tenant_id)
+            .execute(&state.db)
+            .await?;
+
+            insert_auth_audit_log(
+                &state,
+                &challenge.tenant_id,
+                &challenge.user_id,
+                "auth.mfa_enabled",
+                serde_json::json!({
+                    "role": challenge.role,
+                    "enforced_for_admin": true,
+                }),
+            )
+            .await?;
+
+            user.mfa_enabled = true;
+            user.mfa_secret = Some(challenge.secret.clone());
+        }
+        MfaChallengeKind::Verify => {
+            let current_secret = user
+                .mfa_secret
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ApiError::Unauthorized("MFA is no longer configured".into()))?;
+            if !user.mfa_enabled || current_secret != challenge.secret {
+                return Err(ApiError::Unauthorized("MFA challenge is no longer valid".into()));
+            }
+        }
+    }
+
+    delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
+    issue_session_response(&state, &user)
 }
 
 #[derive(sqlx::FromRow)]
@@ -492,6 +856,8 @@ struct UserRow {
     password_hash: String,
     role: String,
     status: String,
+    mfa_enabled: bool,
+    mfa_secret: Option<String>,
 }
 
 // ─── Registration types ────────────────────────────────────────
@@ -772,9 +1138,7 @@ async fn create_api_key(
 
     let id = apexmail_lib::id::generate_id("key", 22);
     let now = Utc::now();
-    let expires_at = body
-        .expires_in_days
-        .map(|d| now + ChronoDuration::days(d));
+    let expires_at = Some(resolve_api_key_expiry(body.expires_in_days, now)?);
 
     sqlx::query(
         "INSERT INTO api_keys (id, tenant_id, user_id, name, prefix, key_hash, scopes, expires_at, created_at)
@@ -801,6 +1165,7 @@ async fn create_api_key(
             name: body.name,
             scopes: body.scopes,
             created_at: now.to_rfc3339(),
+            expires_at: expires_at.map(|value| value.to_rfc3339()),
         }),
     ))
 }
@@ -812,7 +1177,7 @@ async fn list_api_keys(
 ) -> Result<Json<Vec<ApiKeyInfo>>, ApiError> {
     let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, ApiKeyInfoRow>(
-        "SELECT id, name, prefix AS key_prefix, scopes, last_used_at, created_at
+        "SELECT id, name, prefix AS key_prefix, scopes, last_used_at, created_at, expires_at
          FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
@@ -830,6 +1195,7 @@ async fn list_api_keys(
             scopes: r.scopes,
             last_used_at: r.last_used_at.map(|t| t.to_rfc3339()),
             created_at: r.created_at.to_rfc3339(),
+            expires_at: r.expires_at.map(|value| value.to_rfc3339()),
         })
         .collect();
 
@@ -844,6 +1210,21 @@ struct ApiKeyInfoRow {
     scopes: serde_json::Value,
     last_used_at: Option<chrono::DateTime<Utc>>,
     created_at: chrono::DateTime<Utc>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+fn resolve_api_key_expiry(
+    expires_in_days: Option<i64>,
+    now: chrono::DateTime<Utc>,
+) -> Result<chrono::DateTime<Utc>, ApiError> {
+    let days = expires_in_days.unwrap_or(DEFAULT_API_KEY_EXPIRY_DAYS);
+    if !(1..=MAX_API_KEY_EXPIRY_DAYS).contains(&days) {
+        return Err(ApiError::Validation(vec![format!(
+            "expires_in_days must be between 1 and {MAX_API_KEY_EXPIRY_DAYS}"
+        )]));
+    }
+
+    Ok(now + ChronoDuration::days(days))
 }
 
 async fn revoke_api_key(
@@ -940,7 +1321,7 @@ async fn reset_password(
 async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
-    _auth: Option<AuthUser>,
+    auth: Option<AuthUser>,
 ) -> Result<(HeaderMap, StatusCode), ApiError> {
     let session_token = extract_cookie(&headers, "am_session");
     if session_token.is_some() {
@@ -959,6 +1340,19 @@ async fn logout(
             .await;
         }
     }
+
+    if let Some(auth_user) = auth.as_ref() {
+        if let Some(user_id) = auth_user.user_id.as_deref() {
+            revoke_user_sessions(
+                &state.redis,
+                &auth_user.tenant_id,
+                user_id,
+                state.config.jwt_expiry.as_secs(),
+            )
+            .await?;
+        }
+    }
+
     let mut headers = HeaderMap::new();
     let clear_cookie = build_clear_session_cookie(state.config.environment.is_production());
     let value = clear_cookie.parse().map_err(|e| {
@@ -1072,6 +1466,15 @@ mod tests {
         let json = r#"{"email":"a@b.com","password":"secret"}"#;
         let req: LoginRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.email, "a@b.com");
+        assert!(req.mfa_code.is_none());
+    }
+
+    #[test]
+    fn test_login_request_accepts_mfa_code_alias() {
+        let json = r#"{"email":"a@b.com","password":"secret","mfaCode":"123456"}"#;
+        let req: LoginRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(req.mfa_code.as_deref(), Some("123456"));
     }
 
     #[test]
@@ -1108,9 +1511,33 @@ mod tests {
             scopes: serde_json::json!(["*"]),
             last_used_at: None,
             created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: Some("2026-04-01T00:00:00Z".into()),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert!(json["last_used_at"].is_null());
+        assert_eq!(json["expires_at"], "2026-04-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_resolve_api_key_expiry_defaults_to_ninety_days() {
+        let now = Utc::now();
+        let expires_at = resolve_api_key_expiry(None, now).expect("default expiry should resolve");
+
+        assert_eq!(expires_at, now + ChronoDuration::days(DEFAULT_API_KEY_EXPIRY_DAYS));
+    }
+
+    #[test]
+    fn test_resolve_api_key_expiry_rejects_out_of_range_values() {
+        let now = Utc::now();
+
+        assert!(matches!(
+            resolve_api_key_expiry(Some(0), now),
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            resolve_api_key_expiry(Some(MAX_API_KEY_EXPIRY_DAYS + 1), now),
+            Err(ApiError::Validation(_))
+        ));
     }
 
     #[test]
@@ -1199,6 +1626,45 @@ mod tests {
     }
 
     #[test]
+    fn test_role_requires_mfa_for_admin_and_owner_only() {
+        assert!(role_requires_mfa("admin"));
+        assert!(role_requires_mfa("owner"));
+        assert!(!role_requires_mfa("developer"));
+    }
+
+    #[test]
+    fn test_base32_encode_matches_known_secret() {
+        assert_eq!(base32_encode(b"Hello!\xDE\xAD\xBE\xEF"), "JBSWY3DPEHPK3PXP");
+    }
+
+    #[test]
+    fn test_build_mfa_otpauth_url_contains_expected_fields() {
+        let url = build_mfa_otpauth_url("owner@example.com", "JBSWY3DPEHPK3PXP");
+
+        assert!(url.starts_with("otpauth://totp/ApexMail%3Aowner%40example.com?"));
+        assert!(url.contains("secret=JBSWY3DPEHPK3PXP"));
+        assert!(url.contains("issuer=ApexMail"));
+        assert!(url.contains("algorithm=SHA256"));
+    }
+
+    #[test]
+    fn test_mfa_challenge_key_namespaces_tokens() {
+        assert_eq!(
+            mfa_challenge_key("mfa_123"),
+            "apexmail:auth:mfa_challenge:mfa_123"
+        );
+    }
+
+    #[test]
+    fn test_complete_mfa_challenge_request_aliases() {
+        let json = r#"{"challenge_token":"mfa_123","mfaCode":"654321"}"#;
+        let req: CompleteMfaChallengeRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(req.challenge_token, "mfa_123");
+        assert_eq!(req.mfa_code, "654321");
+    }
+
+    #[test]
     fn test_login_lockout_duration_escalates_and_caps() {
         assert_eq!(login_lockout_duration(1), 900);
         assert_eq!(login_lockout_duration(2), 1800);
@@ -1212,6 +1678,12 @@ mod tests {
         assert!(key.starts_with("apexmail:auth:failures:"));
         assert!(!key.contains("Owner@Example.com"));
         assert_ne!(key, login_failure_key("owner2@example.com"));
+    }
+
+    #[test]
+    fn test_revoke_user_sessions_uses_tenant_scoped_revocation_key() {
+        let key = session_revocation_key("ten_test_001", "usr_test_001");
+        assert_eq!(key, "apexmail:session_revoked_after:ten_test_001:usr_test_001");
     }
 
     #[tokio::test]

@@ -1153,6 +1153,28 @@ async fn insert_audit_log(
     Ok(())
 }
 
+pub(crate) async fn append_audit_log(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+    metadata: serde_json::Value,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    insert_audit_log(
+        tx,
+        tenant_id,
+        action,
+        resource_type,
+        resource_id,
+        metadata,
+        timestamp,
+    )
+    .await
+    .map_err(|error| format!("{error:?}"))
+}
+
 async fn get_route_subscription(
     pool: &sqlx::PgPool,
     tenant_id: &str,

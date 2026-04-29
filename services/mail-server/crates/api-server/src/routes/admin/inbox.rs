@@ -5,6 +5,7 @@ use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -12,6 +13,28 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list_inbox).patch(update_message))
+}
+
+fn build_inbox_audit_metadata(body: &UpdateInboxMessage) -> serde_json::Value {
+    json!({
+        "isRead": body.is_read,
+        "isArchived": body.is_archived,
+        "actionTaken": body.action_taken,
+    })
+}
+
+async fn log_inbox_audit(db: &sqlx::PgPool, message_id: &str, metadata: serde_json::Value) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
+         VALUES (NOW(), 'control_plane.inbox.updated', 'autopilot_inbox_message', $1, $2::jsonb)",
+    )
+    .bind(message_id)
+    .bind(metadata)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(message_id = %message_id, error = %error, "Failed to write inbox audit log");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +49,40 @@ pub struct InboxQuery {
 
 fn default_limit() -> i64 {
     50
+}
+
+fn build_list_inbox_sql(params: &InboxQuery, tenant_scoped: bool) -> String {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut idx = 1u32;
+
+    if tenant_scoped {
+        conditions.push(format!("tenant_id = ${idx}"));
+        idx += 1;
+    }
+    if params.classification.is_some() {
+        conditions.push(format!("classification = ${idx}"));
+        idx += 1;
+    }
+    if params.archived.is_some() {
+        conditions.push(format!("is_archived = ${idx}"));
+        idx += 1;
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    format!(
+        "SELECT id, classification, subject, from_address, to_address,
+                summary, is_read, is_archived, action_taken, created_at
+         FROM autopilot_inbox_messages
+         {where_clause}
+         ORDER BY created_at DESC
+         LIMIT ${idx} OFFSET ${}",
+        idx + 1
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -52,48 +109,21 @@ async fn list_inbox(
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
-
-    let mut conditions: Vec<String> = Vec::new();
-    let mut bind_values: Vec<String> = Vec::new();
-    let mut archived_val: Option<bool> = None;
-    let mut idx = 1u32;
-
-    if let Some(ref classification) = params.classification {
-        conditions.push(format!("classification = ${idx}"));
-        idx += 1;
-        bind_values.push(classification.clone());
-    }
-    if let Some(archived) = params.archived {
-        conditions.push(format!("is_archived = ${idx}"));
-        idx += 1;
-        archived_val = Some(archived);
-    }
-
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
-
-    let sql = format!(
-        "SELECT id, classification, subject, from_address, to_address,
-                summary, is_read, is_archived, action_taken, created_at
-         FROM autopilot_inbox_messages
-         {where_clause}
-         ORDER BY created_at DESC
-         LIMIT ${idx} OFFSET ${}",
-        idx + 1
-    );
+    let tenant_scoped = auth.tenant_id != "system";
+    let sql = build_list_inbox_sql(&params, tenant_scoped);
 
     let mut query = sqlx::query_as::<_, (
         String, String, String, String, String,
         Option<String>, bool, bool, Option<String>, chrono::DateTime<chrono::Utc>,
     )>(&sql);
 
-    for val in &bind_values {
-        query = query.bind(val);
+    if tenant_scoped {
+        query = query.bind(&auth.tenant_id);
     }
-    if let Some(archived) = archived_val {
+    if let Some(ref classification) = params.classification {
+        query = query.bind(classification);
+    }
+    if let Some(archived) = params.archived {
         query = query.bind(archived);
     }
     query = query.bind(limit).bind(offset);
@@ -133,15 +163,9 @@ pub struct UpdateInboxMessage {
     pub action_taken: Option<String>,
 }
 
-async fn update_message(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Json(body): Json<UpdateInboxMessage>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::middleware::auth::require_scopes(&auth, &["*"])?;
-
+fn build_update_inbox_sql(body: &UpdateInboxMessage, tenant_scoped: bool) -> Result<String, ApiError> {
     let mut sets: Vec<String> = Vec::new();
-    let mut idx = 2u32; // $1 is id
+    let mut idx = if tenant_scoped { 3u32 } else { 2u32 };
 
     if body.is_read.is_some() {
         sets.push(format!("is_read = ${idx}"));
@@ -163,12 +187,27 @@ async fn update_message(
 
     sets.push("updated_at = NOW()".into());
 
-    let sql = format!(
-        "UPDATE autopilot_inbox_messages SET {} WHERE id = $1",
-        sets.join(", ")
-    );
+    Ok(format!(
+        "UPDATE autopilot_inbox_messages SET {} WHERE id = $1{}",
+        sets.join(", "),
+        if tenant_scoped { " AND tenant_id = $2" } else { "" }
+    ))
+}
+
+async fn update_message(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<UpdateInboxMessage>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    let tenant_scoped = auth.tenant_id != "system";
+    let sql = build_update_inbox_sql(&body, tenant_scoped)?;
 
     let mut query = sqlx::query(&sql).bind(&body.id);
+
+    if tenant_scoped {
+        query = query.bind(&auth.tenant_id);
+    }
 
     if let Some(is_read) = body.is_read {
         query = query.bind(is_read);
@@ -180,7 +219,78 @@ async fn update_message(
         query = query.bind(action_taken);
     }
 
-    query.execute(&state.db).await?;
+    let result = query.execute(&state.db).await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("message not found".into()));
+    }
+
+    log_inbox_audit(&state.db, &body.id, build_inbox_audit_metadata(&body)).await;
 
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_list_inbox_sql_scopes_non_system_tenants() {
+        let params = InboxQuery {
+            classification: Some("sales".into()),
+            archived: Some(false),
+            limit: 50,
+            offset: 0,
+        };
+
+        let sql = build_list_inbox_sql(&params, true);
+
+        assert!(sql.contains("WHERE tenant_id = $1 AND classification = $2 AND is_archived = $3"));
+        assert!(sql.contains("LIMIT $4 OFFSET $5"));
+    }
+
+    #[test]
+    fn build_list_inbox_sql_allows_system_admins() {
+        let params = InboxQuery {
+            classification: Some("sales".into()),
+            archived: None,
+            limit: 50,
+            offset: 0,
+        };
+
+        let sql = build_list_inbox_sql(&params, false);
+
+        assert!(!sql.contains("tenant_id = $1"));
+        assert!(sql.contains("WHERE classification = $1"));
+        assert!(sql.contains("LIMIT $2 OFFSET $3"));
+    }
+
+    #[test]
+    fn build_inbox_audit_metadata_only_contains_mutated_fields() {
+        let metadata = build_inbox_audit_metadata(&UpdateInboxMessage {
+            id: "msg_123".into(),
+            is_read: Some(true),
+            is_archived: None,
+            action_taken: Some("triaged".into()),
+        });
+
+        assert_eq!(metadata["isRead"], true);
+        assert!(metadata["isArchived"].is_null());
+        assert_eq!(metadata["actionTaken"], "triaged");
+    }
+
+    #[test]
+    fn build_update_inbox_sql_scopes_non_system_tenants() {
+        let body = UpdateInboxMessage {
+            id: "msg_123".into(),
+            is_read: Some(true),
+            is_archived: None,
+            action_taken: Some("triaged".into()),
+        };
+
+        let sql = build_update_inbox_sql(&body, true).expect("sql should build");
+
+        assert!(sql.contains("WHERE id = $1 AND tenant_id = $2"));
+        assert!(sql.contains("is_read = $3"));
+        assert!(sql.contains("action_taken = $4"));
+    }
 }

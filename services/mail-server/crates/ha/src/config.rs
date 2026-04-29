@@ -242,6 +242,10 @@ fn env_or_bool(key: &str, default: bool) -> bool {
     std::env::var(key).ok().map(|v| v == "true" || v == "1").unwrap_or(default)
 }
 
+fn generated_runtime_secret(label: &str) -> String {
+    format!("{label}-{}", uuid::Uuid::new_v4().simple())
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let environment = env_or("NODE_ENV", "development");
@@ -252,8 +256,14 @@ impl Config {
             environment: environment.clone(),
             service_name: "apexmail-ha".into(),
             version: env_or("VERSION", "1.0.0"),
-            internal_api_key: env_or("INTERNAL_API_KEY", "internal-key"),
-            admin_api_key: env_or("ADMIN_API_KEY", "admin-key"),
+            internal_api_key: std::env::var("INTERNAL_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| generated_runtime_secret("ha-internal-api-key")),
+            admin_api_key: std::env::var("ADMIN_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| generated_runtime_secret("ha-admin-api-key")),
             database: DatabaseConfig {
                 host: env_or("DB_HOST", "localhost"),
                 port: env_or_u16("DB_PORT", 5432),
@@ -347,16 +357,16 @@ impl Config {
 impl Config {
     pub fn harden_production(&mut self) {
         if self.environment == "production" {
-            if self.internal_api_key.is_empty() || self.internal_api_key == "internal-key" {
-                self.internal_api_key = format!(
-                    "auto-internal-key-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                );
+            if self.internal_api_key.trim().is_empty() {
+                self.internal_api_key = generated_runtime_secret("ha-internal-api-key");
                 eprintln!(
-                    "SECURITY: INTERNAL_API_KEY missing/weak in production; generated an ephemeral runtime key"
+                    "SECURITY: INTERNAL_API_KEY missing in production; generated an ephemeral runtime key"
+                );
+            }
+            if self.admin_api_key.trim().is_empty() {
+                self.admin_api_key = generated_runtime_secret("ha-admin-api-key");
+                eprintln!(
+                    "SECURITY: ADMIN_API_KEY missing in production; generated an ephemeral runtime key"
                 );
             }
             if self.database.password.is_empty() || self.database.password == "apexmail" {

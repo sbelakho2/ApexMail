@@ -50,6 +50,26 @@ fn range_to_interval(range: &str) -> &str {
     }
 }
 
+fn build_export_query(type_col: &str, time_col: &str, interval: &str, tenant_scoped: bool) -> String {
+    let tenant_filter = if tenant_scoped {
+        "tenant_id = $1 AND "
+    } else {
+        ""
+    };
+
+    format!(
+        "SELECT DATE({time_col})::text as d,
+            COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {type_col} = 'delivered' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {type_col} = 'opened' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {type_col} = 'clicked' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {type_col} = 'bounced' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {type_col} = 'complained' THEN 1 ELSE 0 END), 0)
+         FROM events WHERE {tenant_filter}{time_col} >= NOW() - '{interval}'::interval
+         GROUP BY d ORDER BY d ASC"
+    )
+}
+
 async fn export_analytics(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -67,21 +87,19 @@ async fn export_analytics(
         .await
         .unwrap_or_else(|| "created_at".into());
 
-    let sql = format!(
-        "SELECT DATE({time_col})::text as d,
-            COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'delivered' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'opened' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'clicked' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'bounced' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'complained' THEN 1 ELSE 0 END), 0)
-         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval
-         GROUP BY d ORDER BY d ASC"
-    );
+    let tenant_scoped = auth.tenant_id != "system";
+    let sql = build_export_query(&type_col, &time_col, interval, tenant_scoped);
 
-    let rows = sqlx::query_as::<_, (String, i64, i64, i64, i64, i64, i64)>(&sql)
-        .fetch_all(&state.db)
-        .await?;
+    let rows = if tenant_scoped {
+        sqlx::query_as::<_, (String, i64, i64, i64, i64, i64, i64)>(&sql)
+            .bind(&auth.tenant_id)
+            .fetch_all(&state.db)
+            .await?
+    } else {
+        sqlx::query_as::<_, (String, i64, i64, i64, i64, i64, i64)>(&sql)
+            .fetch_all(&state.db)
+            .await?
+    };
 
     let data: Vec<ExportRow> = rows
         .into_iter()
@@ -115,5 +133,25 @@ async fn export_analytics(
             "data": data,
         });
         Ok(axum::Json(payload).into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_export_query_scopes_non_system_tenants() {
+        let sql = build_export_query("event_type", "created_at", "30 days", true);
+
+        assert!(sql.contains("WHERE tenant_id = $1 AND created_at >= NOW() - '30 days'::interval"));
+    }
+
+    #[test]
+    fn build_export_query_allows_system_exports() {
+        let sql = build_export_query("event_type", "created_at", "30 days", false);
+
+        assert!(sql.contains("WHERE created_at >= NOW() - '30 days'::interval"));
+        assert!(!sql.contains("tenant_id = $1"));
     }
 }

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Months, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -270,10 +270,19 @@ impl ContractService {
         };
 
         let now = Utc::now();
-        let contract_start = contract.start_date;
-        let months_since_start = ((now - contract_start).num_days() / 30).max(0) as i32;
-        let period_start = contract_start + chrono::Duration::days(i64::from(months_since_start) * 30);
-        let period_end = period_start + chrono::Duration::days(30);
+        let periods = contract_billing_periods(contract.start_date, contract.end_date);
+        let Some(period_index) = resolve_contract_billing_period(&periods, now) else {
+            return Ok(ApiResult::ok(ContractUsageSummary {
+                current_usage: 0,
+                committed_volume: 0,
+                percent_used: 0.0,
+                projected_usage: 0,
+                overage_estimate: 0,
+            }));
+        };
+        let current_period = &periods[period_index];
+        let period_start = current_period.start;
+        let period_end = current_period.end;
 
         let current_usage: i64 = sqlx::query_scalar(
             r#"
@@ -292,12 +301,10 @@ impl ContractService {
         .await
         .map_err(|error| format!("Get contract usage: {error}"))?;
 
-        let months_in_contract = ((contract.end_date - contract.start_date).num_days() / 30)
-            .max(1) as i32;
-        let committed_volume = calculate_monthly_committed_volume(
+        let committed_volume = calculate_period_committed_volume(
             contract.committed_volume,
-            months_in_contract,
-            months_since_start.min(months_in_contract - 1),
+            &periods,
+            period_index,
         );
         let percent_used = if committed_volume > 0 {
             (current_usage as f64 / committed_volume as f64) * 100.0
@@ -305,10 +312,20 @@ impl ContractService {
             0.0
         };
 
-        let days_since_start = ((now - period_start).num_days()).max(1);
-        let days_in_period = ((period_end - period_start).num_days()).max(1);
-        let projected_usage = ((current_usage as f64 / days_since_start as f64) * days_in_period as f64)
-            .floor() as i64;
+        let reference_time = if now < period_start {
+            period_start
+        } else if now > period_end {
+            period_end
+        } else {
+            now
+        };
+        let elapsed_seconds = ((reference_time - period_start).num_seconds()).max(1) as f64;
+        let period_seconds = ((period_end - period_start).num_seconds()).max(1) as f64;
+        let projected_usage = if reference_time >= period_end {
+            current_usage
+        } else {
+            ((current_usage as f64 / elapsed_seconds) * period_seconds).floor() as i64
+        };
         let overage_estimate = (projected_usage - committed_volume).max(0) * contract.overage_rate;
 
         Ok(ApiResult::ok(ContractUsageSummary {
@@ -644,16 +661,127 @@ impl ContractService {
     }
 }
 
-fn calculate_monthly_committed_volume(
+#[derive(Debug, Clone, PartialEq)]
+struct ContractBillingPeriod {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    full_end: DateTime<Utc>,
+}
+
+fn contract_billing_periods(
+    contract_start: DateTime<Utc>,
+    contract_end: DateTime<Utc>,
+) -> Vec<ContractBillingPeriod> {
+    if contract_end <= contract_start {
+        return Vec::new();
+    }
+
+    let mut periods = Vec::new();
+    let mut period_start = contract_start;
+
+    loop {
+        let Some(full_end) = period_start.checked_add_months(Months::new(1)) else {
+            periods.push(ContractBillingPeriod {
+                start: period_start,
+                end: contract_end,
+                full_end: contract_end,
+            });
+            break;
+        };
+
+        let period_end = full_end.min(contract_end);
+        periods.push(ContractBillingPeriod {
+            start: period_start,
+            end: period_end,
+            full_end,
+        });
+
+        if period_end >= contract_end {
+            break;
+        }
+
+        period_start = full_end;
+    }
+
+    periods
+}
+
+fn resolve_contract_billing_period(
+    periods: &[ContractBillingPeriod],
+    at: DateTime<Utc>,
+) -> Option<usize> {
+    if periods.is_empty() {
+        return None;
+    }
+
+    for (index, period) in periods.iter().enumerate() {
+        if at < period.end {
+            return Some(index);
+        }
+    }
+
+    Some(periods.len() - 1)
+}
+
+fn billing_period_weight(period: &ContractBillingPeriod) -> f64 {
+    let full_seconds = ((period.full_end - period.start).num_seconds()).max(1) as f64;
+    let billed_seconds = ((period.end - period.start).num_seconds()).max(0) as f64;
+
+    (billed_seconds / full_seconds).clamp(0.0, 1.0)
+}
+
+fn calculate_period_committed_volume(
     committed_volume: i64,
-    months_in_contract: i32,
-    month_index: i32,
+    periods: &[ContractBillingPeriod],
+    period_index: usize,
 ) -> i64 {
-    let safe_months = months_in_contract.max(1);
-    let bounded_month_index = month_index.clamp(0, safe_months - 1);
-    let base_monthly = committed_volume / i64::from(safe_months);
-    let remainder = committed_volume % i64::from(safe_months);
-    base_monthly + if i64::from(bounded_month_index) < remainder { 1 } else { 0 }
+    if committed_volume <= 0 || periods.is_empty() {
+        return 0;
+    }
+
+    let weights: Vec<f64> = periods.iter().map(billing_period_weight).collect();
+    let total_weight: f64 = weights.iter().sum();
+    if total_weight <= f64::EPSILON {
+        return 0;
+    }
+
+    let exact_allocations: Vec<f64> = weights
+        .iter()
+        .map(|weight| committed_volume as f64 * (*weight / total_weight))
+        .collect();
+    let mut allocations: Vec<i64> = exact_allocations
+        .iter()
+        .map(|allocation| allocation.floor() as i64)
+        .collect();
+
+    let mut remainder = committed_volume - allocations.iter().sum::<i64>();
+    if remainder > 0 {
+        let mut fractions: Vec<(usize, f64)> = exact_allocations
+            .iter()
+            .enumerate()
+            .map(|(index, allocation)| (index, allocation - allocations[index] as f64))
+            .collect();
+        fractions.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
+        for (index, _) in fractions {
+            if remainder == 0 {
+                break;
+            }
+            allocations[index] += 1;
+            remainder -= 1;
+        }
+    }
+
+    allocations
+        .get(period_index.min(allocations.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0)
 }
 
 fn generate_contract_pdf(contract: &EnterpriseContract) -> String {
@@ -738,10 +866,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn monthly_committed_volume_spreads_remainder() {
-        assert_eq!(calculate_monthly_committed_volume(10, 3, 0), 4);
-        assert_eq!(calculate_monthly_committed_volume(10, 3, 1), 3);
-        assert_eq!(calculate_monthly_committed_volume(10, 3, 2), 3);
+    fn contract_billing_periods_clip_partial_final_month() {
+        let start = DateTime::parse_from_rfc3339("2026-01-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let periods = contract_billing_periods(start, end);
+
+        assert_eq!(periods.len(), 3);
+        assert_eq!(periods[0].start, start);
+        assert_eq!(periods[0].end, DateTime::parse_from_rfc3339("2026-02-15T00:00:00Z").unwrap().with_timezone(&Utc));
+        assert_eq!(periods[2].start, DateTime::parse_from_rfc3339("2026-03-15T00:00:00Z").unwrap().with_timezone(&Utc));
+        assert_eq!(periods[2].end, end);
+        assert_eq!(periods[2].full_end, DateTime::parse_from_rfc3339("2026-04-15T00:00:00Z").unwrap().with_timezone(&Utc));
+    }
+
+    #[test]
+    fn period_committed_volume_prorates_partial_final_month() {
+        let start = DateTime::parse_from_rfc3339("2026-01-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let periods = contract_billing_periods(start, end);
+
+        let allocations: Vec<i64> = (0..periods.len())
+            .map(|index| calculate_period_committed_volume(300, &periods, index))
+            .collect();
+
+        assert_eq!(allocations.iter().sum::<i64>(), 300);
+        assert_eq!(allocations[0], allocations[1]);
+        assert!(allocations[2] < allocations[1]);
     }
 
     #[test]

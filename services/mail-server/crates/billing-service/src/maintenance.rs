@@ -15,6 +15,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::routes::append_audit_log;
+use crate::usage::build_metering_audit_metadata;
 
 const HOURLY_TASK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const DEDICATED_IP_TASK_INTERVAL: Duration = Duration::from_secs(30);
@@ -622,6 +624,11 @@ async fn insert_metering_events(
     state: &AppState,
     events: &[PreparedMeterEvent],
 ) -> Result<Vec<Uuid>, String> {
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to start metering recovery transaction: {error}"))?;
     let mut query_builder = QueryBuilder::<Postgres>::new(
         r#"
         INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
@@ -647,11 +654,41 @@ async fn insert_metering_events(
             "#,
         );
 
-    query_builder
+    let inserted_ids = query_builder
         .build_query_scalar::<Uuid>()
-        .fetch_all(&state.db)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(|error| format!("Failed to persist pending metering events: {error}"))
+        .map_err(|error| format!("Failed to persist pending metering events: {error}"))?;
+
+    let inserted_set: HashSet<Uuid> = inserted_ids.iter().copied().collect();
+    for event in events.iter().filter(|event| inserted_set.contains(&event.normalized_id)) {
+        let mut audit_metadata = build_metering_audit_metadata(
+            &event.event_type,
+            event.quantity,
+            event.timestamp,
+            &event.metadata,
+        );
+        audit_metadata.insert("recovered".into(), json!(true));
+        audit_metadata.insert("rawEventId".into(), json!(&event.raw_id));
+
+        append_audit_log(
+            &mut tx,
+            &event.tenant_id,
+            "billing.metering_event_recovered",
+            "metering_event",
+            Some(&event.normalized_id.to_string()),
+            Value::Object(audit_metadata),
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| format!("Failed to audit recovered metering event: {error}"))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit metering recovery transaction: {error}"))?;
+
+    Ok(inserted_ids)
 }
 
 fn normalize_metering_event_id(raw_id: &str) -> Uuid {

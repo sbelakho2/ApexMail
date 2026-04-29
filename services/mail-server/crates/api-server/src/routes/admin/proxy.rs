@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -13,6 +14,43 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", post(proxy_request).get(proxy_disabled))
+}
+
+fn build_proxy_audit_metadata(
+    body: &ProxyRequest,
+    method: &str,
+    host: &str,
+    status: u16,
+) -> serde_json::Value {
+    let forwarded_headers: Vec<String> = body
+        .headers
+        .as_ref()
+        .and_then(|headers| headers.as_object())
+        .map(|headers| headers.keys().cloned().collect())
+        .unwrap_or_default();
+
+    json!({
+        "url": body.url,
+        "host": host,
+        "method": method,
+        "forwardedHeaders": forwarded_headers,
+        "hasBody": body.body.is_some(),
+        "responseStatus": status,
+    })
+}
+
+async fn log_proxy_audit(db: &sqlx::PgPool, host: &str, metadata: serde_json::Value) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
+         VALUES (NOW(), 'control_plane.proxy.requested', 'proxy_request', $1, $2::jsonb)",
+    )
+    .bind(host)
+    .bind(metadata)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(host = %host, error = %error, "Failed to write proxy audit log");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,9 +169,10 @@ async fn proxy_request(
         }
     }
 
-    let method = body.method.as_deref().unwrap_or("GET");
+    let method = body.method.as_deref().unwrap_or("GET").to_uppercase();
+    let host = parsed.host_str().unwrap_or("").to_string();
 
-    let mut request = match method.to_uppercase().as_str() {
+    let mut request = match method.as_str() {
         "GET" => state.http_client.get(&body.url),
         "POST" => state.http_client.post(&body.url),
         "PUT" => state.http_client.put(&body.url),
@@ -170,6 +209,13 @@ async fn proxy_request(
         })?;
 
     let status = response.status().as_u16();
+    log_proxy_audit(
+        &state.db,
+        &host,
+        build_proxy_audit_metadata(&body, &method, &host, status),
+    )
+    .await;
+
     let resp_headers = serde_json::json!({
         "content-type": response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("")
     });

@@ -4,6 +4,7 @@
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -22,14 +23,52 @@ pub struct AuditListQuery {
     pub tenant_id: Option<String>,
     pub user_id: Option<String>,
     pub resource_type: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
 }
 
+const DEFAULT_AUDIT_WINDOW_DAYS: i64 = 30;
+const MAX_AUDIT_WINDOW_DAYS: i64 = 90;
+
 fn default_limit() -> i64 {
     50
+}
+
+fn parse_audit_timestamp(raw: &str, field_name: &str) -> Result<DateTime<Utc>, ApiError> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|_| ApiError::Validation(vec![format!("{field_name} must be a valid RFC3339 timestamp")]))
+}
+
+fn resolve_audit_window(
+    from: Option<&str>,
+    to: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
+    let window_end = match to {
+        Some(value) => parse_audit_timestamp(value, "to")?,
+        None => now,
+    };
+    let window_start = match from {
+        Some(value) => parse_audit_timestamp(value, "from")?,
+        None => window_end - Duration::days(DEFAULT_AUDIT_WINDOW_DAYS),
+    };
+
+    if window_start > window_end {
+        return Err(ApiError::Validation(vec!["from must be before to".into()]));
+    }
+
+    if window_end - window_start > Duration::days(MAX_AUDIT_WINDOW_DAYS) {
+        return Err(ApiError::Validation(vec![format!(
+            "audit log window cannot exceed {MAX_AUDIT_WINDOW_DAYS} days"
+        )]));
+    }
+
+    Ok((window_start, window_end))
 }
 
 #[derive(Debug, Serialize)]
@@ -58,10 +97,18 @@ async fn list_audit_logs(
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
+    let (window_start, window_end) = resolve_audit_window(
+        params.from.as_deref(),
+        params.to.as_deref(),
+        Utc::now(),
+    )?;
 
 // Build dynamic WHERE clause
-    let mut conditions: Vec<String> = Vec::new();
-    let mut param_idx = 1u32;
+    let mut conditions: Vec<String> = vec![
+        "timestamp >= $1".into(),
+        "timestamp <= $2".into(),
+    ];
+    let mut param_idx = 3u32;
     let mut bind_values: Vec<String> = Vec::new();
 
     if let Some(ref action) = params.action {
@@ -90,11 +137,7 @@ async fn list_audit_logs(
         bind_values.push(status.clone());
     }
 
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
     let sql = format!(
         "SELECT id, timestamp, action, resource_type, resource_id,
@@ -118,6 +161,8 @@ async fn list_audit_logs(
         Option<String>,
         Option<serde_json::Value>,
     )>(&sql);
+
+    query = query.bind(window_start).bind(window_end);
 
     for val in &bind_values {
         query = query.bind(val);
@@ -158,4 +203,47 @@ async fn list_audit_logs(
         .collect();
 
     Ok(Json(entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn resolve_audit_window_defaults_to_last_thirty_days() {
+        let now = Utc.with_ymd_and_hms(2026, 2, 1, 12, 0, 0).unwrap();
+        let (from, to) = resolve_audit_window(None, None, now).expect("default window should resolve");
+
+        assert_eq!(to, now);
+        assert_eq!(from, now - Duration::days(DEFAULT_AUDIT_WINDOW_DAYS));
+    }
+
+    #[test]
+    fn resolve_audit_window_rejects_inverted_ranges() {
+        let now = Utc.with_ymd_and_hms(2026, 2, 1, 12, 0, 0).unwrap();
+
+        assert!(matches!(
+            resolve_audit_window(
+                Some("2026-02-02T00:00:00Z"),
+                Some("2026-02-01T00:00:00Z"),
+                now,
+            ),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_audit_window_rejects_ranges_wider_than_ninety_days() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+
+        assert!(matches!(
+            resolve_audit_window(
+                Some("2026-01-01T00:00:00Z"),
+                Some("2026-04-15T00:00:00Z"),
+                now,
+            ),
+            Err(ApiError::Validation(_))
+        ));
+    }
 }

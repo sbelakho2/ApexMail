@@ -1,6 +1,6 @@
 //! Messages repository.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::types::Message;
@@ -143,41 +143,25 @@ impl MessagesRepo {
             return Ok(Vec::new());
         }
 
-// Build a multi-row INSERT dynamically.
-        let mut query = String::from(
-            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, created_at) VALUES "
+        let mut query_builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, created_at) ",
         );
-        let mut binds: Vec<Box<dyn std::fmt::Display>> = Vec::new();
-        let mut param_idx = 1u32;
 
-        for (i, (from, to, subject, html, text)) in messages.iter().enumerate() {
-            if i > 0 {
-                query.push_str(", ");
-            }
-            query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, 'queued', NOW())",
-                param_idx, param_idx + 1, param_idx + 2, param_idx + 3,
-                param_idx + 4, param_idx + 5, param_idx + 6
-            ));
-            param_idx += 7;
-            let _ = (from, to, subject, html, text, &mut binds); // suppress unused
-        }
-        query.push_str(" RETURNING *");
+        query_builder.push_values(messages, |mut builder, (from, to, subject, html, text)| {
+            builder
+                .push_bind(Uuid::new_v4())
+                .push_bind(tenant_id)
+                .push_bind(from.as_str())
+                .push_bind(to.clone())
+                .push_bind(subject.as_str())
+                .push_bind(html.as_deref())
+                .push_bind(text.as_deref())
+                .push("'queued'")
+                .push("NOW()");
+        });
+        query_builder.push(" RETURNING *");
 
-// Build the query dynamically and bind params.
-        let mut q = sqlx::query_as::<_, Message>(&query);
-        for (from, to, subject, html, text) in messages {
-            q = q
-                .bind(Uuid::new_v4())
-                .bind(tenant_id)
-                .bind(from.as_str())
-                .bind(to.clone())
-                .bind(subject.as_str())
-                .bind(html.as_deref())
-                .bind(text.as_deref());
-        }
-
-        q.fetch_all(pool).await
+        query_builder.build_query_as::<Message>().fetch_all(pool).await
     }
 }
 

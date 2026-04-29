@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -15,6 +16,26 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_features).post(create_feature).patch(update_feature))
+}
+
+async fn log_feature_audit(
+    db: &sqlx::PgPool,
+    action: &str,
+    feature_id: Uuid,
+    metadata: serde_json::Value,
+) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
+         VALUES (NOW(), $1, 'feature_flag', $2, $3::jsonb)",
+    )
+    .bind(action)
+    .bind(feature_id.to_string())
+    .bind(metadata)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(feature_id = %feature_id, action = %action, error = %error, "Failed to write feature flag audit log");
+    }
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -102,6 +123,18 @@ async fn create_feature(
     .execute(&state.db)
     .await?;
 
+    log_feature_audit(
+        &state.db,
+        "control_plane.feature.created",
+        id,
+        json!({
+            "name": body.name,
+            "enabled": body.enabled,
+            "description": body.description,
+        }),
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(FeatureFlag {
@@ -122,6 +155,7 @@ async fn update_feature(
 ) -> Result<StatusCode, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     let id = body.id;
+    let mut changes = serde_json::Map::new();
 
     if let Some(enabled) = body.enabled {
         sqlx::query("UPDATE feature_flags SET enabled = $1, updated_at = NOW() WHERE id = $2")
@@ -129,6 +163,7 @@ async fn update_feature(
             .bind(id)
             .execute(&state.db)
             .await?;
+        changes.insert("enabled".into(), json!(enabled));
     }
     if let Some(desc) = &body.description {
         sqlx::query("UPDATE feature_flags SET description = $1, updated_at = NOW() WHERE id = $2")
@@ -136,6 +171,17 @@ async fn update_feature(
             .bind(id)
             .execute(&state.db)
             .await?;
+        changes.insert("description".into(), json!(desc));
+    }
+
+    if !changes.is_empty() {
+        log_feature_audit(
+            &state.db,
+            "control_plane.feature.updated",
+            id,
+            serde_json::Value::Object(changes),
+        )
+        .await;
     }
 
     Ok(StatusCode::OK)

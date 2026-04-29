@@ -10,7 +10,7 @@
 # - Marketing routes served by the Rust web surface (port 3001)
 # =============================================================================
 
-set -eu
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Colors for output
@@ -23,18 +23,41 @@ log() { echo -e "${GREEN}[dev-start]${NC} $1"; }
 warn() { echo -e "${YELLOW}[dev-start]${NC} $1"; }
 error() { echo -e "${RED}[dev-start]${NC} $1"; exit 1; }
 
+generate_secret() {
+    local bytes="${1:-32}"
+    openssl rand -hex "$bytes" 2>/dev/null || error "Failed to generate secret material"
+}
+
 load_or_seed_secret() {
     local path="$1"
-    local default_value="$2"
+    local bytes="${2:-32}"
+
+    mkdir -p "$(dirname "$path")"
 
     if [[ -s "$path" ]]; then
         tr -d '\r\n' < "$path"
         return
     fi
 
-    printf '%s' "$default_value" > "$path"
+    local secret_value
+    secret_value="$(generate_secret "$bytes")"
+    printf '%s' "$secret_value" > "$path"
     chmod 600 "$path"
-    printf '%s' "$default_value"
+    printf '%s' "$secret_value"
+}
+
+resolve_secret() {
+    local env_name="$1"
+    local path="$2"
+    local bytes="${3:-32}"
+    local existing_value="${!env_name:-}"
+
+    if [[ -n "$existing_value" ]]; then
+        printf '%s' "$existing_value"
+        return
+    fi
+
+    load_or_seed_secret "$path" "$bytes"
 }
 
 # -----------------------------------------------------------------------------
@@ -43,17 +66,17 @@ load_or_seed_secret() {
 export POSTGRES_USER=apexmail
 mkdir -p secrets
 
-export POSTGRES_PASSWORD="$(load_or_seed_secret secrets/postgres_password.txt dev-postgres-password-minimum-32)"
+export POSTGRES_PASSWORD="$(resolve_secret POSTGRES_PASSWORD secrets/postgres_password.txt 32)"
 export POSTGRES_DB=apexmail
-export REDIS_PASSWORD="$(load_or_seed_secret secrets/redis_password.txt dev-redis-password-minimum-32-chars)"
-export TRACKING_SECRET_KEY="dev-tracking-secret-key-minimum-32"
-export CLICKHOUSE_PASSWORD="$(load_or_seed_secret secrets/clickhouse_password.txt dev-clickhouse-password-minimum-32)"
-export INTERNAL_SERVICE_TOKEN="dev-internal-service-token-minimum-32"
-export JWT_SECRET="dev-jwt-secret-minimum-32-chars"
+export REDIS_PASSWORD="$(resolve_secret REDIS_PASSWORD secrets/redis_password.txt 32)"
+export TRACKING_SECRET_KEY="$(resolve_secret TRACKING_SECRET_KEY secrets/tracking_secret_key.txt 32)"
+export CLICKHOUSE_PASSWORD="$(resolve_secret CLICKHOUSE_PASSWORD secrets/clickhouse_password.txt 32)"
+export INTERNAL_SERVICE_TOKEN="$(resolve_secret INTERNAL_SERVICE_TOKEN secrets/internal_service_token.txt 32)"
+export JWT_SECRET="$(resolve_secret JWT_SECRET secrets/jwt_secret.txt 32)"
 export GRAFANA_USER=admin
-export GRAFANA_PASSWORD=adminadmin
+export GRAFANA_PASSWORD="$(resolve_secret GRAFANA_PASSWORD secrets/grafana_password.txt 24)"
 
-chmod 600 secrets/postgres_password.txt secrets/redis_password.txt secrets/clickhouse_password.txt
+chmod 600 secrets/*.txt
 
 HOST_POSTGRES_PORT=5432
 if lsof -nP -iTCP:5432 -sTCP:LISTEN >/dev/null 2>&1; then
@@ -121,8 +144,8 @@ export DB_USER=${POSTGRES_USER}
 export DB_PASSWORD=${POSTGRES_PASSWORD}
 export REDIS_HOST=localhost
 export REDIS_PORT=${HOST_REDIS_PORT}
-export API_KEY_HASH_SECRET="dev-api-key-secret-minimum-32-chars"
-export WEBHOOK_SIGNING_SECRET="dev-webhook-signing-secret-minimum-32"
+export API_KEY_HASH_SECRET="$(resolve_secret API_KEY_HASH_SECRET secrets/api_key_hash_secret.txt 32)"
+export WEBHOOK_SIGNING_SECRET="$(resolve_secret WEBHOOK_SIGNING_SECRET secrets/webhook_signing_secret.txt 32)"
 export AWS_REGION=us-east-1
 export JWT_PRIVATE_KEY_PEM="$(cat /tmp/jwt_private.pem)"
 export JWT_PUBLIC_KEY_PEM="$(cat /tmp/jwt_public.pem)"
@@ -162,6 +185,4 @@ echo "  API Server:     http://localhost:3001/health/live"
 echo "  Web Surface:    http://127.0.0.1:3001 (Rust SSR via api-server host map)"
 echo "  Control Plane:  http://localhost:3001 (Rust SSR via api-server host map)"
 echo "  Marketing:      http://127.0.0.1:3001 (exported marketing routes via api-server)"
-echo ""
-echo "  Test user:      aaron / &&Pw20354491"
 echo ""

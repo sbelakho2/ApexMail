@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -13,6 +14,43 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list_tickets).post(add_reply).put(update_ticket))
+}
+
+fn build_support_reply_audit_metadata(body: &AddReplyRequest, message_id: &uuid::Uuid) -> serde_json::Value {
+    json!({
+        "messageId": message_id.to_string(),
+        "author": body.author,
+        "authorType": body.author_type,
+        "newStatus": body.new_status,
+    })
+}
+
+fn build_support_update_audit_metadata(body: &UpdateTicketRequest) -> serde_json::Value {
+    json!({
+        "status": body.status,
+        "priority": body.priority,
+        "assignee": body.assignee,
+    })
+}
+
+async fn log_support_audit(
+    db: &sqlx::PgPool,
+    action: &str,
+    ticket_id: &str,
+    metadata: serde_json::Value,
+) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
+         VALUES (NOW(), $1, 'support_ticket', $2, $3::jsonb)",
+    )
+    .bind(action)
+    .bind(ticket_id)
+    .bind(metadata)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(ticket_id = %ticket_id, action = %action, error = %error, "Failed to write support audit log");
+    }
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -194,6 +232,14 @@ async fn add_reply(
         }
     }
 
+    log_support_audit(
+        &state.db,
+        "control_plane.support.reply_added",
+        &body.ticket_id,
+        build_support_reply_audit_metadata(&body, &msg_id),
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -214,6 +260,10 @@ async fn update_ticket(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
+    if body.status.is_none() && body.priority.is_none() && body.assignee.is_none() {
+        return Err(ApiError::Validation(vec!["No fields to update".into()]));
+    }
+
     if let Some(ref s) = body.status {
         if !VALID_STATUSES.contains(&s.as_str()) {
             return Err(ApiError::Validation(vec![format!("invalid status: {s}")]));
@@ -225,18 +275,35 @@ async fn update_ticket(
         }
     }
 
+    let mut rows_affected: u64 = 0;
+
     if let Some(ref s) = body.status {
-        sqlx::query("UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id::text = $2")
-            .bind(s).bind(&body.id).execute(&state.db).await?;
+        rows_affected += sqlx::query("UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id::text = $2")
+            .bind(s).bind(&body.id).execute(&state.db).await?
+            .rows_affected();
     }
     if let Some(ref p) = body.priority {
-        sqlx::query("UPDATE support_tickets SET priority = $1, updated_at = NOW() WHERE id::text = $2")
-            .bind(p).bind(&body.id).execute(&state.db).await?;
+        rows_affected += sqlx::query("UPDATE support_tickets SET priority = $1, updated_at = NOW() WHERE id::text = $2")
+            .bind(p).bind(&body.id).execute(&state.db).await?
+            .rows_affected();
     }
     if let Some(ref a) = body.assignee {
-        sqlx::query("UPDATE support_tickets SET assignee = $1, updated_at = NOW() WHERE id::text = $2")
-            .bind(a).bind(&body.id).execute(&state.db).await?;
+        rows_affected += sqlx::query("UPDATE support_tickets SET assignee = $1, updated_at = NOW() WHERE id::text = $2")
+            .bind(a).bind(&body.id).execute(&state.db).await?
+            .rows_affected();
     }
+
+    if rows_affected == 0 {
+        return Err(ApiError::NotFound("ticket not found".into()));
+    }
+
+    log_support_audit(
+        &state.db,
+        "control_plane.support.ticket_updated",
+        &body.id,
+        build_support_update_audit_metadata(&body),
+    )
+    .await;
 
     Ok(Json(serde_json::json!({
         "id": body.id,

@@ -25,6 +25,10 @@ impl std::fmt::Debug for SecretString {
     }
 }
 
+fn generated_dev_secret(label: &str) -> String {
+    format!("dev-{label}-{}", uuid::Uuid::new_v4().simple())
+}
+
 // ── Enums ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,23 +282,17 @@ impl Config {
     pub fn from_env() -> Result<Self, String> {
         let node_env = env::var("NODE_ENV").unwrap_or_default();
         let is_production = node_env == "production" || node_env == "prod";
-        
-// JWT secret with production enforcement
-        let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| {
-            "dev-secret-change-in-production-please-32ch".into()
-        });
-        
-// Validate JWT secret in production
-        if is_production {
-            if env::var("JWT_SECRET").is_err() {
+
+        let jwt_secret = match env::var("JWT_SECRET").ok().filter(|value| !value.trim().is_empty()) {
+            Some(secret) => secret,
+            None if is_production => {
                 return Err("JWT_SECRET environment variable must be set in production".into());
             }
-            if jwt_secret == "dev-secret-change-in-production-please-32ch" {
-                return Err("JWT_SECRET must not be the default dev secret in production".into());
-            }
-            if jwt_secret.len() < 32 {
-                return Err("JWT_SECRET must be at least 32 characters in production".into());
-            }
+            None => generated_dev_secret("enterprise-jwt"),
+        };
+
+        if is_production && jwt_secret.len() < 32 {
+            return Err("JWT_SECRET must be at least 32 characters in production".into());
         }
         
         Ok(Self {
