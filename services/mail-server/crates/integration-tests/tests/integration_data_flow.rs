@@ -42,6 +42,7 @@ fn sales_pipeline_lead_to_campaign() {
 // Step 4:Create a campaign targeting this lead
     let campaign = campaigns
         .create_campaign(
+            "tenant-a".into(),
             "Acme Outreach Q1".into(),
             "tmpl-acme".into(),
             format!("lead_id={}", lead.id),

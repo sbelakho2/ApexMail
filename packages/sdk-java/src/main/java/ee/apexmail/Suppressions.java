@@ -60,7 +60,7 @@ public final class Suppressions {
      */
     public SuppressionCheckResponse check(String email) {
         return client.request("GET",
-            "/v1/suppressions/check?email=" + encode(email), null,
+            "/v1/suppressions/check/" + encode(email), null,
             SuppressionCheckResponse.class);
     }
 

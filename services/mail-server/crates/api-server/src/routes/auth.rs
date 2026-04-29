@@ -1,6 +1,13 @@
 //! Authentication routes: login, logout, refresh, register, reset password, and API key management.
 
-use super::helpers::{clamp_limit, default_limit, extract_cookie, hash_token, html_escape};
+use super::helpers::{
+    clamp_limit,
+    default_limit,
+    extract_cookie,
+    hash_token,
+    html_escape,
+    token_blacklist_key,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::routing::{delete, get, post};
@@ -204,11 +211,14 @@ async fn record_login_failure(
     Ok(())
 }
 
-async fn clear_login_failures(redis_pool: &deadpool_redis::Pool, identifier: &str) {
+async fn clear_login_failures(
+    redis_pool: &deadpool_redis::Pool,
+    identifier: &str,
+) -> Result<(), ApiError> {
     let failure_key = login_failure_key(identifier);
-    if let Ok(mut conn) = redis_pool.get().await {
-        let _: Result<i64, _> = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &failure_key).await;
-    }
+    let mut conn = redis_pool.get().await?;
+    let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &failure_key).await?;
+    Ok(())
 }
 
 async fn enqueue_verification_email(
@@ -426,7 +436,7 @@ async fn login(
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     }
 
-    clear_login_failures(&state.redis, &login_identifier).await;
+    clear_login_failures(&state.redis, &login_identifier).await?;
 
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
     let now = Utc::now();
@@ -940,9 +950,7 @@ async fn logout(
     let token_to_blacklist = session_token.or_else(|| extract_bearer_token(&headers));
 
     if let Some(token) = token_to_blacklist {
-        use sha2::{Sha256, Digest};
-        let hash = hex::encode(Sha256::digest(token.as_bytes()));
-        let key = format!("apexmail:token_blacklist:{hash}");
+        let key = token_blacklist_key(&token);
         if let Ok(mut conn) = state.redis.get().await {
             let ttl = state.config.jwt_expiry.as_secs();
             let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
@@ -997,9 +1005,7 @@ async fn refresh_token(
 
     // Fix #20: Blacklist the old token so it cannot be reused.
     {
-        use sha2::{Sha256, Digest};
-        let hash = hex::encode(Sha256::digest(token.as_bytes()));
-        let bl_key = format!("apexmail:token_blacklist:{hash}");
+        let bl_key = token_blacklist_key(&token);
         if let Ok(mut conn) = state.redis.get().await {
             let ttl = state.config.jwt_expiry.as_secs();
             let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(

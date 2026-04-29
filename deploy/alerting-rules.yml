@@ -4,28 +4,6 @@
 groups:
   - name: apexmail-availability
     rules:
-      # API service down
-      - alert: ApiServiceDown
-        expr: up{job="apexmail-api"} == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "ApexMail API service is down"
-          description: "API service {{ $labels.instance }} has been unreachable for more than 1 minute."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/ApiServiceDown"
-
-      # Worker service down
-      - alert: WorkerServiceDown
-        expr: up{job="apexmail-worker"} == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "ApexMail Worker service is down"
-          description: "Worker service {{ $labels.instance }} has been unreachable for more than 1 minute."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/WorkerServiceDown"
-
       # Tracking service down
       - alert: TrackingServiceDown
         expr: up{job="apexmail-tracking"} == 0
@@ -35,7 +13,7 @@ groups:
         annotations:
           summary: "ApexMail Tracking service is down"
           description: "Tracking service {{ $labels.instance }} has been unreachable for more than 1 minute."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/TrackingServiceDown"
+          runbook_url: "https://apexmail.ee/docs/alerts#tracking-service-down"
 
   - name: apexmail-performance
     rules:
@@ -48,7 +26,7 @@ groups:
         annotations:
           summary: "High API p95 latency"
           description: "API p95 latency is {{ $value }}s, exceeding 1s threshold for 5 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/HighApiLatency"
+          runbook_url: "https://apexmail.ee/docs/alerts#high-api-latency"
 
       # High error rate
       - alert: HighApiErrorRate
@@ -59,7 +37,7 @@ groups:
         annotations:
           summary: "High API error rate"
           description: "API 5xx error rate is {{ $value | humanizePercentage }}, exceeding 5% threshold."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/HighApiErrorRate"
+          runbook_url: "https://apexmail.ee/docs/alerts#high-api-error-rate"
 
       - alert: CriticalApiErrorRate
         expr: sum(rate(http_requests_total{job="apexmail-api",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="apexmail-api"}[5m])) > 0.15
@@ -69,7 +47,7 @@ groups:
         annotations:
           summary: "Critical API error rate"
           description: "API 5xx error rate is {{ $value | humanizePercentage }}, exceeding 15% threshold."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/CriticalApiErrorRate"
+          runbook_url: "https://apexmail.ee/docs/alerts#critical-api-error-rate"
 
   - name: apexmail-resources
     rules:
@@ -82,7 +60,7 @@ groups:
         annotations:
           summary: "High CPU usage on {{ $labels.job }}"
           description: "CPU usage is above 1 core for more than 10 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/HighCpuUsage"
+          runbook_url: "https://apexmail.ee/docs/alerts#high-cpu-usage"
 
       # High memory usage
       - alert: HighMemoryUsage
@@ -93,7 +71,7 @@ groups:
         annotations:
           summary: "High memory usage on {{ $labels.job }}"
           description: "Memory usage is {{ $value }}GB, exceeding 1.5GB threshold."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/HighMemoryUsage"
+          runbook_url: "https://apexmail.ee/docs/alerts#high-memory-usage"
 
       # Event loop lag
       - alert: HighEventLoopLag
@@ -104,7 +82,7 @@ groups:
         annotations:
           summary: "High event loop lag on {{ $labels.job }}"
           description: "Event loop lag is {{ $value }}s, exceeding 100ms threshold."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/HighEventLoopLag"
+          runbook_url: "https://apexmail.ee/docs/alerts#high-event-loop-lag"
 
   - name: apexmail-email-delivery
     rules:
@@ -117,7 +95,7 @@ groups:
         annotations:
           summary: "Email queue backlog growing"
           description: "Email queue has {{ $value }} pending jobs, exceeding 10k threshold for 10 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/EmailQueueBacklog"
+          runbook_url: "https://apexmail.ee/docs/alerts#email-queue-backlog"
 
       - alert: CriticalEmailQueueBacklog
         expr: apexmail_queue_depth{queue="email"} > 50000
@@ -127,7 +105,7 @@ groups:
         annotations:
           summary: "Critical email queue backlog"
           description: "Email queue has {{ $value }} pending jobs, exceeding 50k threshold."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/CriticalEmailQueueBacklog"
+          runbook_url: "https://apexmail.ee/docs/alerts#critical-email-queue-backlog"
 
       # Webhook delivery failures
       - alert: HighWebhookFailureRate
@@ -138,7 +116,7 @@ groups:
         annotations:
           summary: "High webhook delivery failure rate"
           description: "Webhook failure rate is {{ $value | humanizePercentage }}, exceeding 10% threshold."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/HighWebhookFailureRate"
+          runbook_url: "https://apexmail.ee/docs/alerts#high-webhook-failure-rate"
 
       # Tracking events processing
       - alert: TrackingProcessingBacklog
@@ -149,7 +127,7 @@ groups:
         annotations:
           summary: "No tracking events being processed"
           description: "Tracking service is up but processing zero events for 15 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/TrackingProcessingBacklog"
+          runbook_url: "https://apexmail.ee/docs/alerts#tracking-processing-backlog"
 
   - name: apexmail-billing
     rules:
@@ -162,7 +140,7 @@ groups:
         annotations:
           summary: "Multiple Stripe webhook processing failures"
           description: "{{ $value }} Stripe webhook errors in the last hour."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/StripeWebhookFailures"
+          runbook_url: "https://apexmail.ee/docs/alerts#stripe-webhook-failures"
 
   - name: apexmail-database
     rules:
@@ -174,7 +152,7 @@ groups:
         annotations:
           summary: "Postgres is down"
           description: "Postgres exporter is reporting down for more than 2 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/PostgresDown"
+          runbook_url: "https://apexmail.ee/docs/alerts#postgres-down"
 
       - alert: RedisDown
         expr: up{job="redis"} == 0
@@ -184,7 +162,7 @@ groups:
         annotations:
           summary: "Redis is down"
           description: "Redis exporter is reporting down for more than 2 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/RedisDown"
+          runbook_url: "https://apexmail.ee/docs/alerts#redis-down"
 
       - alert: ClickHouseDown
         expr: up{job="clickhouse"} == 0
@@ -194,7 +172,7 @@ groups:
         annotations:
           summary: "ClickHouse is down"
           description: "ClickHouse exporter is reporting down for more than 2 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/ClickHouseDown"
+          runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-down"
 
       - alert: PostgresHighConnections
         expr: pg_stat_activity_count / pg_settings_max_connections > 0.9
@@ -204,7 +182,7 @@ groups:
         annotations:
           summary: "Postgres connections near limit"
           description: "Postgres connection usage above 90% for 5 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/PostgresHighConnections"
+          runbook_url: "https://apexmail.ee/docs/alerts#postgres-high-connections"
 
   - name: apexmail-storage
     rules:
@@ -216,7 +194,7 @@ groups:
         annotations:
           summary: "Low disk space on {{ $labels.instance }}"
           description: "Disk free space below 15% for 10 minutes."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/LowDiskSpace"
+          runbook_url: "https://apexmail.ee/docs/alerts#low-disk-space"
 
   - name: apexmail-tls
     rules:
@@ -228,7 +206,7 @@ groups:
         annotations:
           summary: "TLS certificate expiring soon"
           description: "TLS certificate for {{ $labels.instance }} expires in less than 7 days."
-          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/TlsCertificateExpiringSoon"
+          runbook_url: "https://apexmail.ee/docs/alerts#tls-certificate-expiring-soon"
 
   - name: apexmail-watchdog
     rules:

@@ -58,9 +58,10 @@ compose() {
 }
 
 existing_postgres_password() {
-  docker inspect apexmail-postgres --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
-    | sed -n 's/^POSTGRES_PASSWORD=//p' \
-    | head -n 1
+  local secret_file="$PROJECT_ROOT/secrets/postgres_password.txt"
+  if [[ -f "$secret_file" ]]; then
+    tr -d '\r\n' < "$secret_file"
+  fi
 }
 
 existing_internal_service_token() {
@@ -82,7 +83,7 @@ resolved_postgres_password() {
     return 0
   fi
 
-  printf '%s\n' 'devpass123'
+  printf '%s\n' 'dev-postgres-password-minimum-32'
 }
 
 ensure_smoke_assets() {
@@ -114,6 +115,9 @@ export_smoke_env() {
   detected_internal_service_token="$(existing_internal_service_token || true)"
 
   export POSTGRES_PASSWORD="$(resolved_postgres_password)"
+  mkdir -p "$PROJECT_ROOT/secrets"
+  printf '%s' "$POSTGRES_PASSWORD" > "$PROJECT_ROOT/secrets/postgres_password.txt"
+  chmod 600 "$PROJECT_ROOT/secrets/postgres_password.txt"
   export REDIS_PASSWORD="${REDIS_PASSWORD:-$(<"$PROJECT_ROOT/secrets/redis_password.txt")}"
   export CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-clickhouse-password-smoke-1234567890}"
   export JWT_SECRET="${JWT_SECRET:-enterprise-jwt-secret-smoke-1234567890123456}"

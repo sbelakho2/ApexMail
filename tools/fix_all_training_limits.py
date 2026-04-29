@@ -7,6 +7,8 @@ Corrects plan limits to match canonical pricing from plans.ts
 import json
 import re
 
+from common_paths import data_path
+
 # Canonical limits from plans.ts
 CANONICAL = {
     'Free': {'email': 3000, 'api': 50000, 'team': 1},
@@ -18,7 +20,7 @@ CANONICAL = {
 }
 
 def fix_training_data():
-    filepath = '/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl'
+    filepath = str(data_path("train_agent.jsonl"))
     
     with open(filepath, 'r') as f:
         lines = f.readlines()

@@ -1,9 +1,14 @@
 <!DOCTYPE html>
-<html lang="en" id="top">
+<html lang="en" dir="ltr" id="top">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
   <meta name="theme-color" content="#2563EB" />
+
+  {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
+  {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.ttf", cachebust=true) %}
+  {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
+  {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
 
   <title>{% block title %}{{ config.title }}{% endblock title %}</title>
   <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}" />
@@ -44,12 +49,12 @@
   <link rel="manifest" href="/manifest.json" />
 
   {# ── Font Preloads ────────────────────────────────── #}
-  <link rel="preload" href="/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
-  <link rel="preload" href="/fonts/JetBrainsMono-Variable.ttf" as="font" type="font/ttf" crossorigin />
+  <link rel="preload" href="{{ inter_font_url }}" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="{{ mono_font_url }}" as="font" type="font/ttf" crossorigin />
 
   {# ── CSS ───────────────────────────────────────────── #}
-  <link rel="stylesheet" href="/css/styles.css" />
-  <link rel="stylesheet" href="/css/no-js.css" />
+  <link rel="stylesheet" href="{{ styles_css_url }}" />
+  <link rel="stylesheet" href="{{ no_js_css_url }}" />
 
   {# ── Organization JSON-LD ─────────────────────────── #}
   <script type="application/ld+json">
@@ -71,15 +76,16 @@
   {% block head %}{% endblock head %}
 </head>
 <body class="font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom flex flex-col">
+  <a href="#main-content" id="skip-to-content">Skip to main content</a>
+
   {# ── Hidden state inputs for CSS-only interactivity ──── #}
   <input type="checkbox" id="mobile-menu-state" class="sr-only" aria-hidden="true" />
-  <input type="checkbox" id="cookie-consent-state" class="sr-only" aria-hidden="true" />
 
   {# ── Header (pure CSS interactivity) ─────────────────── #}
   {% include "partials/header.html" %}
 
   {# ── Main Content ──────────────────────────────────── #}
-  <main class="flex-1">
+  <main id="main-content" class="flex-1" tabindex="-1">
     {% block content %}{% endblock content %}
   </main>
 
@@ -101,8 +107,94 @@
     </svg>
   </a>
 
-  {# ── Analytics: server-side tracking pixel (no JS) ──── #}
-  <noscript><img src="https://plausible.apexmail.ee/api/event?name=pageview" alt="" width="1" height="1" style="position:absolute;left:-9999px" /></noscript>
-  <img src="https://plausible.apexmail.ee/api/event?name=pageview" alt="" width="1" height="1" referrerpolicy="no-referrer-when-downgrade" style="position:absolute;left:-9999px" />
+  <script>
+    (() => {
+      const consentCookie = "apexmail_cookie_consent";
+      const analyticsUrl = "https://plausible.apexmail.ee/api/event?name=pageview";
+
+      function readConsent() {
+        const prefix = consentCookie + "=";
+        const entry = document.cookie
+          .split(";")
+          .map((part) => part.trim())
+          .find((part) => part.startsWith(prefix));
+        return entry ? decodeURIComponent(entry.slice(prefix.length)) : "";
+      }
+
+      function writeConsent(value) {
+        document.cookie = `${consentCookie}=${encodeURIComponent(value)}; Path=/; Max-Age=31536000; SameSite=Lax`;
+      }
+
+      function injectAnalyticsPixel() {
+        if (document.querySelector('[data-analytics-pixel="plausible"]')) {
+          return;
+        }
+        const pixel = document.createElement("img");
+        pixel.src = analyticsUrl;
+        pixel.alt = "";
+        pixel.width = 1;
+        pixel.height = 1;
+        pixel.referrerPolicy = "no-referrer-when-downgrade";
+        pixel.style.position = "absolute";
+        pixel.style.left = "-9999px";
+        pixel.dataset.analyticsPixel = "plausible";
+        document.body.appendChild(pixel);
+      }
+
+      function hideBanner() {
+        const banner = document.getElementById("cookie-consent-banner");
+        if (banner) {
+          banner.hidden = true;
+        }
+      }
+
+      function applyConsent(value) {
+        writeConsent(value);
+        hideBanner();
+        if (value === "all") {
+          injectAnalyticsPixel();
+        }
+      }
+
+      function syncMobileMenuAria() {
+        const mobileMenuState = document.getElementById("mobile-menu-state");
+        const mobileMenuToggle = document.getElementById("mobile-menu-toggle");
+        if (!mobileMenuState || !mobileMenuToggle) {
+          return;
+        }
+        mobileMenuToggle.setAttribute("aria-expanded", mobileMenuState.checked ? "true" : "false");
+      }
+
+      document.getElementById("cookie-consent-necessary")?.addEventListener("click", () => {
+        applyConsent("necessary");
+      });
+      document.getElementById("cookie-consent-accept")?.addEventListener("click", () => {
+        applyConsent("all");
+      });
+
+      const mobileMenuState = document.getElementById("mobile-menu-state");
+      const mobileMenuToggle = document.getElementById("mobile-menu-toggle");
+      if (mobileMenuState && mobileMenuToggle) {
+        syncMobileMenuAria();
+        mobileMenuState.addEventListener("change", syncMobileMenuAria);
+        mobileMenuToggle.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") {
+            return;
+          }
+          event.preventDefault();
+          mobileMenuState.checked = !mobileMenuState.checked;
+          mobileMenuState.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+      }
+
+      const existingConsent = readConsent();
+      if (existingConsent === "necessary") {
+        hideBanner();
+      } else if (existingConsent === "all") {
+        hideBanner();
+        injectAnalyticsPixel();
+      }
+    })();
+  </script>
 </body>
 </html>

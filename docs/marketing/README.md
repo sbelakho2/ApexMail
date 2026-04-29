@@ -67,6 +67,6 @@ This writes the generated static site to `apps/marketing-zola/public/`.
 
 ## Related Documentation
 
-- [API Documentation](../api/README.md)
-- [Architecture Overview](../architecture/README.md)
+- [API Documentation](../api/openapi.yaml)
+- [Architecture Overview](../architecture/overview.md)
 - [Navigation Taxonomy](../development/navigation-taxonomy.md)

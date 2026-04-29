@@ -8,7 +8,7 @@
 #
 # Security posture
 # ─────────────────
-#  • Non-root UID/GID 1000
+#  • Non-root UID/GID 10001
 #  • Read-only root filesystem (scratch layers in Dockerfile)
 #  • All capabilities dropped; NET_BIND_SERVICE not required (port > 1024)
 #  • seccompProfile RuntimeDefault
@@ -22,7 +22,7 @@ metadata:
   labels:
     app.kubernetes.io/name: tracking-service
     app.kubernetes.io/component: mail-server
-    app.kubernetes.io/version: "REPLACE_TAG"
+    app.kubernetes.io/version: "1.0.0"
 spec:
   replicas: 3
   revisionHistoryLimit: 5
@@ -48,15 +48,15 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 30
       containers:
         - name: tracking-service
-          image: apexmail/tracking-service:REPLACE_TAG
+          image: apexmail/tracking-service:1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

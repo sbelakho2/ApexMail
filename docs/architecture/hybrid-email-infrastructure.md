@@ -195,7 +195,7 @@ When a tenant downgrades or releases an IP:
 | `HETZNER_API_TOKEN` | Yes (for dedicated IPs) | — | Hetzner Cloud API token |
 | `HETZNER_DEFAULT_LOCATION` | No | `fsn1` | Default datacenter for new IPs |
 | `HETZNER_MTA_SERVER_ID` | No | — | Single-server mode: assign all IPs here |
-| `AWS_REGION` | Yes | `us-east-1` | SES region for shared sending |
+| `AWS_DEFAULT_REGION` | Yes | `eu-west-1` | SES region for shared sending |
 | `AWS_ACCESS_KEY_ID` | Yes | — | SES API access |
 | `AWS_SECRET_ACCESS_KEY` | Yes | — | SES API secret |
 

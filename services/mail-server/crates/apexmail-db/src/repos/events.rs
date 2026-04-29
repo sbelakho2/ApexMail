@@ -63,6 +63,8 @@ impl EventsRepo {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Event>, sqlx::Error> {
+        let limit = limit.clamp(1, 200);
+        let offset = offset.clamp(0, 100_000);
         sqlx::query_as::<_, Event>(
             "SELECT id, tenant_id, message_id, event_type, recipient, metadata, timestamp \
              FROM events WHERE tenant_id = $1 ORDER BY timestamp DESC LIMIT $2 OFFSET $3"

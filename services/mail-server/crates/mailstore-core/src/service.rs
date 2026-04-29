@@ -11,6 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 use uuid::Uuid;
+use mail_parser::{Address, MessageParser};
 
 use mail_proto::generated::{
     mailstore_service_server::MailstoreService,
@@ -36,7 +37,13 @@ use mail_proto::generated::{
     mailbox_event, MailboxUpdated,
     MessageMeta, Mailbox, MessageFlags, EmailEnvelope, Quota,
 };
-use crate::models::{Mailbox as StoredMailbox, MessageFlags as StoredMessageFlags, MessageQuery, StoredMessage};
+use crate::models::{
+    EmailAddress as StoredEmailAddress,
+    Mailbox as StoredMailbox,
+    MessageFlags as StoredMessageFlags,
+    MessageQuery,
+    StoredMessage,
+};
 use crate::storage::MessageStorage;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
@@ -48,6 +55,186 @@ use argon2::{
 /// Mailstore gRPC service
 pub struct MailstoreServiceImpl {
     storage: Arc<MessageStorage>,
+}
+
+#[derive(Debug)]
+struct ParsedMessageMetadata {
+    message_id: String,
+    from_address: String,
+    from_name: Option<String>,
+    to_addresses: Vec<StoredEmailAddress>,
+    cc_addresses: Vec<StoredEmailAddress>,
+    bcc_addresses: Vec<StoredEmailAddress>,
+    subject: String,
+    text_body: Option<String>,
+    html_body: Option<String>,
+    headers: serde_json::Value,
+}
+
+fn parse_message_metadata(raw_message: &[u8]) -> ParsedMessageMetadata {
+    let raw_message_text = String::from_utf8_lossy(raw_message).into_owned();
+    let (raw_headers, raw_body) = split_raw_message(&raw_message_text);
+    let headers = extract_headers_json(raw_headers);
+
+    let mut metadata = ParsedMessageMetadata {
+        message_id: header_value(&headers, "Message-ID")
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        from_address: "unknown@localhost".to_string(),
+        from_name: None,
+        to_addresses: vec![],
+        cc_addresses: vec![],
+        bcc_addresses: vec![],
+        subject: header_value(&headers, "Subject").unwrap_or_default(),
+        text_body: (!raw_body.is_empty()).then(|| raw_body.to_string()),
+        html_body: None,
+        headers,
+    };
+
+    let Some(message) = MessageParser::new().parse(raw_message) else {
+        return metadata;
+    };
+
+    let collect_addresses = |field| -> Vec<StoredEmailAddress> {
+        let collect_mailboxes = |items: Vec<&mail_parser::Addr<'_>>| {
+            items
+                .into_iter()
+                .filter_map(|addr| {
+                    let address = addr.address.as_deref()?.trim();
+                    if address.is_empty() {
+                        return None;
+                    }
+
+                    Some(StoredEmailAddress {
+                        address: address.to_string(),
+                        name: addr
+                            .name
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string),
+                    })
+                })
+                .collect()
+        };
+
+        match field {
+            Some(Address::List(addresses)) => collect_mailboxes(addresses.iter().collect()),
+            Some(Address::Group(groups)) => {
+                collect_mailboxes(groups.iter().flat_map(|group| group.addresses.iter()).collect())
+            }
+            None => Vec::new(),
+        }
+    };
+
+    let from_addresses = collect_addresses(message.from().cloned());
+    if let Some(from) = from_addresses.first() {
+        metadata.from_address = from.address.clone();
+        metadata.from_name = from.name.clone();
+    }
+
+    metadata.to_addresses = collect_addresses(message.to().cloned());
+    metadata.cc_addresses = collect_addresses(message.cc().cloned());
+    metadata.bcc_addresses = collect_addresses(message.bcc().cloned());
+
+    if let Some(subject) = message.subject().map(|value| value.to_string()) {
+        if !subject.trim().is_empty() {
+            metadata.subject = subject;
+        }
+    }
+
+    metadata
+}
+
+fn split_raw_message(raw_message: &str) -> (&str, &str) {
+    if let Some((headers, body)) = raw_message.split_once("\r\n\r\n") {
+        return (headers, body);
+    }
+    if let Some((headers, body)) = raw_message.split_once("\n\n") {
+        return (headers, body);
+    }
+    (raw_message, "")
+}
+
+fn extract_headers_json(raw_headers: &str) -> serde_json::Value {
+    let mut headers = serde_json::Map::new();
+    let mut current_name: Option<String> = None;
+    let mut current_value = String::new();
+
+    for line in raw_headers.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if !current_value.is_empty() {
+                current_value.push(' ');
+            }
+            current_value.push_str(line.trim());
+            continue;
+        }
+
+        if let Some(name) = current_name.replace(String::new()) {
+            insert_header_value(&mut headers, &name, &current_value);
+            current_value.clear();
+        }
+
+        if let Some((name, value)) = line.split_once(':') {
+            current_name = Some(name.trim().to_string());
+            current_value = value.trim().to_string();
+        } else {
+            current_name = None;
+            current_value.clear();
+        }
+    }
+
+    if let Some(name) = current_name {
+        insert_header_value(&mut headers, &name, &current_value);
+    }
+
+    serde_json::Value::Object(headers)
+}
+
+fn insert_header_value(
+    headers: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    value: &str,
+) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    match headers.get_mut(name) {
+        Some(existing) if existing.is_array() => {
+            if let Some(values) = existing.as_array_mut() {
+                values.push(serde_json::Value::String(trimmed.to_string()));
+            }
+        }
+        Some(existing) => {
+            let first = existing.take();
+            *existing = serde_json::Value::Array(vec![
+                first,
+                serde_json::Value::String(trimmed.to_string()),
+            ]);
+        }
+        None => {
+            headers.insert(name.to_string(), serde_json::Value::String(trimmed.to_string()));
+        }
+    }
+}
+
+fn header_value(headers: &serde_json::Value, name: &str) -> Option<String> {
+    let object = headers.as_object()?;
+
+    object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .and_then(|(_, value)| match value {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Array(values) => values.first()?.as_str().map(str::to_string),
+            _ => None,
+        })
 }
 
 impl MailstoreServiceImpl {
@@ -222,29 +409,29 @@ impl MailstoreService for MailstoreServiceImpl {
             .unwrap_or_else(chrono::Utc::now);
 
         let flags = req.flags.unwrap_or_default();
-        let raw_message_text = String::from_utf8_lossy(&req.raw_message).into_owned();
+        let metadata = parse_message_metadata(&req.raw_message);
         let stored = StoredMessage {
             id: Uuid::new_v4(),
             account_id,
             mailbox_id: mailbox.id,
             uid: 0,
-            message_id: Uuid::new_v4().to_string(),
-            from_address: "unknown@localhost".to_string(),
-            from_name: None,
-            to_addresses: vec![],
-            cc_addresses: vec![],
-            bcc_addresses: vec![],
-            subject: String::new(),
+            message_id: metadata.message_id,
+            from_address: metadata.from_address,
+            from_name: metadata.from_name,
+            to_addresses: metadata.to_addresses,
+            cc_addresses: metadata.cc_addresses,
+            bcc_addresses: metadata.bcc_addresses,
+            subject: metadata.subject,
             date: internal_date,
-            text_body: Some(raw_message_text),
-            html_body: None,
+            text_body: metadata.text_body,
+            html_body: metadata.html_body,
             raw_size: req.raw_message.len() as i64,
             is_read: flags.seen,
             is_starred: flags.flagged,
             is_deleted: flags.deleted,
             is_spam: false,
             labels: vec![],
-            headers: serde_json::json!({}),
+            headers: metadata.headers,
             attachments: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -1020,5 +1207,51 @@ impl MailstoreService for MailstoreServiceImpl {
         
         let stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(stream) as Self::SubscribeMailboxStream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_message_metadata_extracts_envelope_fields() {
+        let raw = concat!(
+            "From: Example Sender <sender@example.com>\r\n",
+            "To: first@example.com, Second Recipient <second@example.com>\r\n",
+            "Cc: Carbon Copy <cc@example.com>\r\n",
+            "Bcc: Blind Copy <bcc@example.com>\r\n",
+            "Subject: Quarterly Update\r\n",
+            "Message-ID: <msg-123@example.com>\r\n",
+            "X-Custom: alpha\r\n",
+            "\r\n",
+            "Hello from ApexMail.\r\n"
+        );
+
+        let metadata = parse_message_metadata(raw.as_bytes());
+
+        assert_eq!(metadata.message_id, "<msg-123@example.com>");
+        assert_eq!(metadata.from_address, "sender@example.com");
+        assert_eq!(metadata.from_name.as_deref(), Some("Example Sender"));
+        assert_eq!(metadata.subject, "Quarterly Update");
+        assert_eq!(metadata.to_addresses.len(), 2);
+        assert_eq!(metadata.to_addresses[0].address, "first@example.com");
+        assert_eq!(metadata.to_addresses[1].address, "second@example.com");
+        assert_eq!(metadata.to_addresses[1].name.as_deref(), Some("Second Recipient"));
+        assert_eq!(metadata.cc_addresses.len(), 1);
+        assert_eq!(metadata.cc_addresses[0].address, "cc@example.com");
+        assert_eq!(metadata.bcc_addresses.len(), 1);
+        assert_eq!(metadata.bcc_addresses[0].address, "bcc@example.com");
+        assert_eq!(metadata.text_body.as_deref(), Some("Hello from ApexMail.\r\n"));
+        assert_eq!(header_value(&metadata.headers, "X-Custom").as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn parse_message_metadata_falls_back_when_message_is_unparseable() {
+        let metadata = parse_message_metadata(&[0xff, 0xfe, 0xfd]);
+
+        assert_eq!(metadata.from_address, "unknown@localhost");
+        assert!(metadata.to_addresses.is_empty());
+        assert!(metadata.subject.is_empty());
     }
 }

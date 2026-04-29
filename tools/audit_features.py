@@ -5,7 +5,7 @@ Audit feature limits and capabilities in training data.
 
 import json
 import re
-from collections import defaultdict
+from pathlib import Path
 
 # Canonical feature limits from plans.ts and pricing.md
 FEATURE_LIMITS = {
@@ -81,7 +81,7 @@ def audit_features():
     issues = []
     warnings = []
     
-    filepath = '/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl'
+    filepath = Path(__file__).resolve().parents[1] / 'data' / 'train_agent.jsonl'
     
     with open(filepath) as f:
         lines = f.readlines()

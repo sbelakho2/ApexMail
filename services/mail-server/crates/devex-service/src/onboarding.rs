@@ -120,8 +120,8 @@ client.emails().send(SendEmailParams.builder()
     .build());"#,
             ),
             _ => (
-                "# See https://docs.apexmail.ee/sdks for install instructions",
-                " // See https://docs.apexmail.ee/quickstart",
+                "# See https://apexmail.ee/docs/sdks for install instructions",
+                " // See https://apexmail.ee/docs",
             ),
         };
 

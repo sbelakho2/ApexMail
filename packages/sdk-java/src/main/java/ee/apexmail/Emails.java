@@ -26,6 +26,8 @@ public final class Emails {
         String templateId,
         Object cc,
         Object bcc,
+        Object replyTo,
+        String scheduledAt,
         String idempotencyKey
     ) {
         Map<String, Object> toMap() {
@@ -47,6 +49,12 @@ public final class Emails {
             }
             if (bcc != null) {
                 body.put("bcc", bcc);
+            }
+            if (replyTo != null) {
+                body.put("replyTo", replyTo);
+            }
+            if (scheduledAt != null) {
+                body.put("scheduledAt", scheduledAt);
             }
             return body;
         }
@@ -83,6 +91,8 @@ public final class Emails {
             (String) params.get("templateId"),
             params.get("cc"),
             params.get("bcc"),
+            params.get("replyTo"),
+            (String) params.get("scheduledAt"),
             (String) params.get("idempotencyKey")
         ));
     }
@@ -108,6 +118,9 @@ public final class Emails {
         }
         if (params.containsKey("bcc")) {
             validateRecipients(params.get("bcc"), "bcc");
+        }
+        if (params.containsKey("replyTo")) {
+            validateRecipients(params.get("replyTo"), "replyTo");
         }
     }
 

@@ -25,9 +25,6 @@ ALTER TABLE events DROP COLUMN IF EXISTS provider_message_id;
 ALTER TABLE events DROP COLUMN IF EXISTS provider;
 ALTER TABLE events DROP COLUMN IF EXISTS domain;
 
-ALTER TABLE events RENAME COLUMN message_data TO raw_data;
-ALTER TABLE events RENAME COLUMN type TO event_type;
-
 -- =============================================================================
 -- TEMPLATES — Drop added columns
 -- =============================================================================

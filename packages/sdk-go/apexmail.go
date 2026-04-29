@@ -673,6 +673,23 @@ func (a *EmailsAPI) Get(ctx context.Context, id string) (*GetEmailResponse, erro
 	return &resp, err
 }
 
+// MessageQueueResponse is returned by queue-oriented message actions.
+type MessageQueueResponse struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// Cancel stops a queued or scheduled email before delivery.
+func (a *EmailsAPI) Cancel(ctx context.Context, id string) (*MessageQueueResponse, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("apexmail: message id is required")
+	}
+	var resp MessageQueueResponse
+	err := a.client.do(ctx, http.MethodPost, "/v1/messages/"+url.PathEscape(id)+"/cancel", nil, &resp)
+	return &resp, err
+}
+
 // ListEmailsOptions filters for the List endpoint.
 type ListEmailsOptions struct {
 	Status string
@@ -1089,9 +1106,7 @@ type CheckSuppressionResponse struct {
 // Check whether a specific email address is on the suppression list.
 func (a *SuppressionsAPI) Check(ctx context.Context, email string) (*CheckSuppressionResponse, error) {
 	var resp CheckSuppressionResponse
-	values := url.Values{}
-	values.Set("email", email)
-	err := a.client.do(ctx, http.MethodGet, "/v1/suppressions/check?"+values.Encode(), nil, &resp)
+	err := a.client.do(ctx, http.MethodGet, "/v1/suppressions/check/"+url.PathEscape(email), nil, &resp)
 	return &resp, err
 }
 

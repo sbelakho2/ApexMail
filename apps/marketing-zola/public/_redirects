@@ -2,10 +2,6 @@
 # Compatible with Netlify, Cloudflare Pages, and similar hosting platforms.
 # For nginx, convert these to rewrite rules in the server block.
 
-# Docs → external docs site (permanent 301)
-/docs                https://docs.apexmail.ee          301
-/docs/*              https://docs.apexmail.ee/:splat    301
-
 # App shortcuts (temporary 302)
 /app                 https://app.apexmail.ee            302
 /signup              https://app.apexmail.ee/signup     302

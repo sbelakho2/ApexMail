@@ -7,6 +7,7 @@ API operations for sending and managing emails.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from ..exceptions import ApexMailError, ValidationError
@@ -130,7 +131,7 @@ class EmailsResource:
         tags: Optional[list[dict[str, str]]] = None,
         attachments: Optional[list[dict[str, Any]]] = None,
         headers: Optional[dict[str, str]] = None,
-        scheduled_at: Optional[str] = None,
+        scheduled_at: Optional[Union[str, datetime]] = None,
         metadata: Optional[dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendEmailResponse:
@@ -149,7 +150,7 @@ class EmailsResource:
             tags: Tags for categorization
             attachments: File attachments
             headers: Custom headers
-            scheduled_at: ISO 8601 datetime for scheduled sending
+            scheduled_at: ISO 8601 datetime or datetime object for scheduled sending
             metadata: Custom metadata
             idempotency_key: Idempotency key for safe retries
 
@@ -193,7 +194,7 @@ class EmailsResource:
         if headers:
             payload["headers"] = headers
         if scheduled_at:
-            payload["scheduledAt"] = scheduled_at
+            payload["scheduledAt"] = scheduled_at.isoformat() if isinstance(scheduled_at, datetime) else scheduled_at
         if metadata:
             payload["metadata"] = metadata
 
@@ -204,12 +205,15 @@ class EmailsResource:
     def batch(
         self,
         emails: list[dict[str, Any]],
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> list[SendEmailResponse]:
         """
         Send multiple emails in a batch (up to 1000).
 
         Args:
             emails: List of email objects with same fields as send()
+            idempotency_key: Idempotency key for safe retries
 
         Returns:
             List of SendEmailResponse objects
@@ -231,7 +235,12 @@ class EmailsResource:
                 processed_email["from"] = processed_email.pop("from_")
             processed.append(processed_email)
 
-        data = self._client._request("POST", "/v1/messages/batch", json={"emails": processed})
+        data = self._client._request(
+            "POST",
+            "/v1/messages/batch",
+            json={"messages": processed},
+            idempotency_key=idempotency_key,
+        )
         return _parse_batch_results(data)
 
     def get(self, email_id: str) -> Email:
@@ -331,7 +340,7 @@ class AsyncEmailsResource:
         tags: Optional[list[dict[str, str]]] = None,
         attachments: Optional[list[dict[str, Any]]] = None,
         headers: Optional[dict[str, str]] = None,
-        scheduled_at: Optional[str] = None,
+        scheduled_at: Optional[Union[str, datetime]] = None,
         metadata: Optional[dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendEmailResponse:
@@ -373,7 +382,7 @@ class AsyncEmailsResource:
         if headers:
             payload["headers"] = headers
         if scheduled_at:
-            payload["scheduledAt"] = scheduled_at
+            payload["scheduledAt"] = scheduled_at.isoformat() if isinstance(scheduled_at, datetime) else scheduled_at
         if metadata:
             payload["metadata"] = metadata
 
@@ -381,7 +390,12 @@ class AsyncEmailsResource:
         data = await self._client._request("POST", "/v1/messages", json=payload, idempotency_key=idempotency_key)
         return SendEmailResponse(**data)
 
-    async def batch(self, emails: list[dict[str, Any]]) -> list[SendEmailResponse]:
+    async def batch(
+        self,
+        emails: list[dict[str, Any]],
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> list[SendEmailResponse]:
         """Send multiple emails in a batch asynchronously."""
         # FIX-500-286: Validate batch size
         if not emails:
@@ -399,7 +413,12 @@ class AsyncEmailsResource:
                 processed_email["from"] = processed_email.pop("from_")
             processed.append(processed_email)
 
-        data = await self._client._request("POST", "/v1/messages/batch", json={"emails": processed})
+        data = await self._client._request(
+            "POST",
+            "/v1/messages/batch",
+            json={"messages": processed},
+            idempotency_key=idempotency_key,
+        )
         return _parse_batch_results(data)
 
     async def get(self, email_id: str) -> Email:

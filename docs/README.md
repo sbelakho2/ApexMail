@@ -9,39 +9,53 @@ docs/
 ├── adr/                    # Architecture Decision Records
 │   ├── 0001-database-choice.md     ✅
 │   ├── 0002-mta-stack.md           ✅
-│   ├── 0003-sales-autopilot.md     ✅
-│   ├── 0004-ai-local-inference.md  ✅
-│   └── 0005-slo-management.md      ✅
+│   ├── 0006-testing-strategy.md    ✅
+│   ├── 0007-sdk-design-philosophy.md ✅
+│   ├── 0008-multi-tenant-architecture.md ✅
+│   ├── 0009-observability-architecture.md ✅
+│   ├── 0010-security-architecture.md ✅
+│   └── 0011-dual-delivery-ses-primary.md ✅
 ├── api/                    # API Documentation
 │   ├── authentication.md           ✅
 │   ├── endpoints/
+│   │   ├── analytics.md            ✅
 │   │   ├── messages.md             ✅
 │   │   ├── campaigns.md            ✅
-│   │   └── domains.md              ✅ (NEW)
+│   │   ├── contacts.md             ✅
+│   │   ├── domains.md              ✅
+│   │   ├── events.md               ✅
+│   │   └── templates.md            ✅
 │   ├── errors.md                   ✅
 │   ├── rate-limits.md              ✅
 │   └── webhooks.md                 ✅
 ├── architecture/           # System Architecture
+│   ├── ai-pipeline.md              ✅
+│   ├── control-plane-data-contracts.md ✅
+│   ├── delivery-transport.md       ✅
+│   ├── hybrid-email-infrastructure.md ✅
+│   ├── mta-configuration.md        ✅
 │   ├── overview.md                 ✅
 │   ├── data-flow.md                ✅
-│   ├── control-plane-isolation.md  ✅
-│   └── analytics-data-science.md   ✅ (NEW)
+│   ├── sales-autopilot.md          ✅
+│   ├── billing-lifecycle.md        ✅
+│   └── queue-system.md             ✅
 ├── deployment/             # Deployment Guides
+│   ├── HETZNER_SIMULATION_CHECKLIST.md ✅
+│   ├── configuration.md            ✅
+│   ├── helm.md                     ✅
 │   ├── quickstart.md               ✅
-│   ├── docker.md                   ✅
-│   └── configuration.md            ✅
+│   └── ses-setup.md                ✅
 ├── development/            # Development Guides
-│   ├── getting-started.md          ✅
+│   ├── application-route-inventory.md ✅
 │   ├── contributing.md             ✅
-│   ├── style-system.md             ✅ (NEW)
-│   ├── control-plane-ui-ux.md      ✅ (NEW)
-│   ├── premium-experience-spec.md  ✅ (NEW)
-│   ├── interactive-state-matrix.md ✅ (NEW)
-│   ├── premium-performance-budgets.md ✅ (NEW)
-│   ├── navigation-taxonomy.md ✅ (NEW)
-│   ├── jtbd-nav-mapping.md ✅ (NEW)
-│   ├── setup-migration-checklists.md ✅ (NEW)
-│   └── premium-ui-ux-master-audit-2026-03-05.md ✅ (NEW)
+│   ├── interactive-state-matrix.md ✅
+│   ├── jtbd-nav-mapping.md         ✅
+│   ├── navigation-taxonomy.md      ✅
+│   ├── premium-experience-spec.md  ✅
+│   ├── premium-performance-budgets.md ✅
+│   ├── setup-migration-checklists.md ✅
+│   ├── style-system.md             ✅
+│   └── ux-qa-checklist.md          ✅
 ├── enterprise/             # Enterprise Features
 │   ├── README.md                   ✅
 │   ├── sso.md                      ✅
@@ -56,20 +70,28 @@ docs/
 ├── marketing/              # Marketing Website
 │   └── README.md                   ✅
 ├── operations/             # Operations Guides
+│   ├── disaster-recovery.md        ✅
+│   ├── monitoring.md               ✅
+│   ├── on-call.md                  ✅
 │   ├── runbooks/
 │   │   └── incident-response.md    ✅
 │   ├── slo-management.md           ✅
-│   └── control-plane-sales-automation.md ✅ (NEW)
+│   └── (additional runbooks)       ✅
 ├── security/               # Security Documentation
-│   ├── Security_Systems.md         ✅ (NEW — 8 security crates)
+│   ├── Security_Systems.md         ✅
+│   ├── rbac-implementation.md      ✅
 │   ├── compliance.md               ✅
 │   ├── data-protection.md          ✅
-│   ├── email-authentication.md     ✅ (NEW)
-│   ├── advanced-analytics.md       ✅ (NEW)
-│   └── mcaptcha-login.md           ✅ (NEW)
+│   ├── email-authentication.md     ✅
+│   ├── advanced-analytics.md       ✅
+│   └── mcaptcha-login.md           ✅
 └── user-guide/            # User Documentation
-    ├── getting-started.md          ✅
-    └── inbox-placement-testing.md  ✅ (NEW)
+  ├── contacts.md                 ✅
+  ├── delivery-options.md         ✅
+  ├── getting-started.md          ✅
+  ├── glossary.md                 ✅
+  ├── inbox-placement-testing.md  ✅
+  └── troubleshooting.md          ✅
 ```
 
 ## Quick Links
@@ -82,7 +104,8 @@ docs/
 
 ### Analytics & Data Science
 
-- [Analytics Module Overview](architecture/analytics-data-science.md)
+- [Analytics API Overview](api/endpoints/analytics.md)
+- [Sales Autopilot](architecture/sales-autopilot.md) (NEW)
 - Send Time Optimizer (Bayesian STO)
 - Churn Prediction Engine
 - Subject Line NLP Analyzer
@@ -101,6 +124,11 @@ docs/
 - [Private Cloud Deployment](enterprise/private-cloud.md)
 - [Premium Support](enterprise/support.md)
 - [Quarterly Business Reviews](enterprise/qbr.md)
+
+### Billing
+
+- [Pricing Reference](pricing.md)
+- [Billing Lifecycle](architecture/billing-lifecycle.md) (NEW)
 
 ### Email Authentication & Deliverability
 
@@ -137,28 +165,28 @@ docs/
 
 - [Security & Compliance](security/compliance.md)
 - [Operations Runbooks](operations/runbooks/incident-response.md)
+- [Monitoring](operations/monitoring.md)
+- [On-Call Procedures](operations/on-call.md)
 - [SLO Management](operations/slo-management.md)
-- [Control Plane Sales Automation](operations/control-plane-sales-automation.md) (NEW)
 
 ### Development
 
 - [Marketing Website](marketing/README.md)
 - [Contributing Guide](development/contributing.md)
 - [Apex Style System (Premium UI + Apex Icons)](development/style-system.md) (NEW)
-- [Control Plane UI/UX Standards](development/control-plane-ui-ux.md) (NEW)
+- [Control Plane UX Checklist](development/ux-qa-checklist.md) (NEW)
 - [Premium Experience Spec](development/premium-experience-spec.md) (NEW)
 - [Interactive State Matrix](development/interactive-state-matrix.md) (NEW)
 - [Premium Performance Budgets](development/premium-performance-budgets.md) (NEW)
 - [Global Navigation Taxonomy](development/navigation-taxonomy.md) (NEW)
 - [JTBD Navigation Mapping](development/jtbd-nav-mapping.md) (NEW)
 - [Setup & Migration Checklists](development/setup-migration-checklists.md) (NEW)
-- [Premium UI/UX Master Audit (2026-03-05)](development/premium-ui-ux-master-audit-2026-03-05.md) (NEW)
 
 ## Version
 
 - Documentation Version: 1.0.0
 - ApexMail Version: 1.0.0
-- Last Updated: 2026-02-27
+- Last Updated: 2026-04-29
 
 ---
 

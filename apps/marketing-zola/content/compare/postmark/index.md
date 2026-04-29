@@ -8,6 +8,7 @@ competitor = "Postmark"
 competitor_slug = "postmark"
 competitor_name = "Postmark"
 competitor_description = "Postmark by ActiveCampaign focuses on fast, reliable transactional email delivery."
+pricing_as_of = "2026-04-29"
 og_image = "/images/og-compare-postmark.png"
 apexmail_wins = 13
 competitor_wins = 3

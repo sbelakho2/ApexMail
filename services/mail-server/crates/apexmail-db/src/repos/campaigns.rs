@@ -56,6 +56,8 @@ impl CampaignsRepo {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Campaign>, sqlx::Error> {
+        let limit = limit.clamp(1, 100);
+        let offset = offset.clamp(0, 100_000);
         sqlx::query_as::<_, Campaign>(
             "SELECT * FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )

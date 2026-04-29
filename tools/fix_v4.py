@@ -5,7 +5,9 @@ Also fix L334/L814 comparison tables and L310/L1044 comprehensive tables.
 """
 import json, re
 
-filepath = 'data/train_agent.jsonl'
+from common_paths import data_path
+
+filepath = str(data_path("train_agent.jsonl"))
 
 with open(filepath) as f:
     lines = f.readlines()

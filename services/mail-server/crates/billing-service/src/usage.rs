@@ -27,7 +27,7 @@ pub async fn record_usage(
 ) -> Result<bool, UsageError> {
     let id = event_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
-    let meta = metadata.unwrap_or_else(|| json!({}));
+    let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
 
 // 1. Check idempotency key in Redis.
     let dedup_key = usage_dedup_key(id);
@@ -45,6 +45,7 @@ pub async fn record_usage(
     if !was_set {
         return Ok(false); // duplicate
     }
+
 
 // 2. Persist to DB.
     sqlx::query(
@@ -277,6 +278,121 @@ pub async fn reset_monthly_counters(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct MeteringSubscriptionContext {
+    subscription_id: String,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MeteringSubscriptionContextRow {
+    subscription_id: String,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+}
+
+async fn enrich_usage_metadata(
+    pool: &PgPool,
+    tenant_id: &str,
+    recorded_at: DateTime<Utc>,
+    metadata: Option<serde_json::Value>,
+) -> Result<serde_json::Value, UsageError> {
+    let metadata = normalize_usage_metadata(metadata);
+    if metadata.contains_key("subscriptionId") {
+        return Ok(serde_json::Value::Object(metadata));
+    }
+
+    let context = load_metering_subscription_context(pool, tenant_id, recorded_at).await?;
+    Ok(attach_subscription_context(metadata, context.as_ref()))
+}
+
+async fn load_metering_subscription_context(
+    pool: &PgPool,
+    tenant_id: &str,
+    recorded_at: DateTime<Utc>,
+) -> Result<Option<MeteringSubscriptionContext>, UsageError> {
+    let matched = sqlx::query_as::<_, MeteringSubscriptionContextRow>(
+        r#"
+        SELECT id::text AS subscription_id,
+               current_period_start AS period_start,
+               current_period_end AS period_end
+        FROM subscriptions
+        WHERE tenant_id = $1
+          AND status IN ('active', 'trialing', 'past_due')
+          AND current_period_start <= $2
+          AND current_period_end > $2
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(recorded_at)
+    .fetch_optional(pool)
+    .await
+    .map_err(UsageError::Db)?;
+
+    let fallback = if matched.is_none() {
+        sqlx::query_as::<_, MeteringSubscriptionContextRow>(
+            r#"
+            SELECT id::text AS subscription_id,
+                   current_period_start AS period_start,
+                   current_period_end AS period_end
+            FROM subscriptions
+            WHERE tenant_id = $1
+              AND status IN ('active', 'trialing', 'past_due')
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(UsageError::Db)?
+    } else {
+        None
+    };
+
+    Ok(matched.or(fallback).map(|row| MeteringSubscriptionContext {
+        subscription_id: row.subscription_id,
+        period_start: row.period_start,
+        period_end: row.period_end,
+    }))
+}
+
+fn normalize_usage_metadata(
+    metadata: Option<serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    match metadata {
+        Some(serde_json::Value::Object(map)) => map,
+        Some(value) => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".into(), value);
+            map
+        }
+        None => serde_json::Map::new(),
+    }
+}
+
+fn attach_subscription_context(
+    mut metadata: serde_json::Map<String, serde_json::Value>,
+    context: Option<&MeteringSubscriptionContext>,
+) -> serde_json::Value {
+    if let Some(context) = context {
+        metadata
+            .entry("subscriptionId")
+            .or_insert_with(|| json!(context.subscription_id));
+        metadata
+            .entry("subscriptionPeriodStart")
+            .or_insert_with(|| json!(context.period_start.to_rfc3339()));
+        metadata
+            .entry("subscriptionPeriodEnd")
+            .or_insert_with(|| json!(context.period_end.to_rfc3339()));
+    }
+
+    serde_json::Value::Object(metadata)
+}
+
 // ---------------------------------------------------------------------------
 // Supporting types
 // ---------------------------------------------------------------------------
@@ -320,7 +436,7 @@ pub async fn record_with_quota_check(
 ) -> Result<QuotaRecordResult, UsageError> {
     let id = event_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
-    let meta = metadata.unwrap_or_else(|| json!({}));
+    let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
 
 // 1. Dedup check (same as record_usage).
     let dedup_key = usage_dedup_key(id);
@@ -684,5 +800,57 @@ mod tests {
             usage_counter_key("tenant_123", MeterEventType::EmailsSent, at),
             "meter:rt:tenant_123:emails_sent:2026-04"
         );
+    }
+
+    #[test]
+    fn normalize_usage_metadata_preserves_object_payloads() {
+        let normalized = normalize_usage_metadata(Some(serde_json::json!({ "source": "api" })));
+
+        assert_eq!(normalized.get("source"), Some(&serde_json::json!("api")));
+    }
+
+    #[test]
+    fn normalize_usage_metadata_wraps_scalar_payloads() {
+        let normalized = normalize_usage_metadata(Some(serde_json::json!("email-123")));
+
+        assert_eq!(normalized.get("value"), Some(&serde_json::json!("email-123")));
+    }
+
+    #[test]
+    fn attach_subscription_context_adds_subscription_fields() {
+        let context = MeteringSubscriptionContext {
+            subscription_id: "sub_123".into(),
+            period_start: chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            period_end: chrono::DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+
+        let enriched = attach_subscription_context(serde_json::Map::new(), Some(&context));
+
+        assert_eq!(enriched["subscriptionId"], serde_json::json!("sub_123"));
+        assert_eq!(enriched["subscriptionPeriodStart"], serde_json::json!("2026-04-01T00:00:00+00:00"));
+        assert_eq!(enriched["subscriptionPeriodEnd"], serde_json::json!("2026-05-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn attach_subscription_context_keeps_existing_subscription_id() {
+        let context = MeteringSubscriptionContext {
+            subscription_id: "sub_new".into(),
+            period_start: chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            period_end: chrono::DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("subscriptionId".into(), serde_json::json!("sub_existing"));
+
+        let enriched = attach_subscription_context(metadata, Some(&context));
+
+        assert_eq!(enriched["subscriptionId"], serde_json::json!("sub_existing"));
     }
 }

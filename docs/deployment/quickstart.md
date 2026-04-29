@@ -46,7 +46,6 @@ Essential configuration:
 ```env
 # PostgreSQL
 POSTGRES_USER=apexmail
-POSTGRES_PASSWORD=your-secure-password
 POSTGRES_DB=apexmail
 
 # Redis (optional password)
@@ -64,6 +63,15 @@ MCAPTCHA_ENABLED=false
 # MCAPTCHA_SITE_KEY=...
 # MCAPTCHA_SECRET=...
 ```
+
+For the repo Docker Compose stack, store the Postgres password in the repo-local secret file:
+
+```bash
+printf '%s' 'your-secure-password' > secrets/postgres_password.txt
+chmod 600 secrets/postgres_password.txt
+```
+
+If you run Rust services directly outside Compose, keep your normal `DB_PASSWORD` or `DATABASE_URL` settings aligned with that secret.
 
 Generate secure secrets:
 
@@ -272,7 +280,7 @@ docker compose logs tracking
 
 Common issues:
 - `TRACKING_SECRET_KEY must be set` - Set in `.env`
-- `POSTGRES_PASSWORD must be set` - Set in `.env`
+- `secrets/postgres_password.txt` missing or mismatched - Write the intended password to that file and restart the affected Compose services.
 
 ### Port Already in Use
 

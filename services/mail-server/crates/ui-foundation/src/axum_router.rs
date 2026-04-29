@@ -112,6 +112,24 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing", "/dpa") | ("marketing-zola", "/dpa") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/dpa/index.html"
         )),
+        ("marketing", "/docs") | ("marketing-zola", "/docs") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/index.html"
+        )),
+        ("marketing", "/docs/analytics") | ("marketing-zola", "/docs/analytics") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/analytics/index.html"
+        )),
+        ("marketing", "/docs/api") | ("marketing-zola", "/docs/api") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/api/index.html"
+        )),
+        ("marketing", "/docs/alerts") | ("marketing-zola", "/docs/alerts") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/alerts/index.html"
+        )),
+        ("marketing", "/docs/sdks") | ("marketing-zola", "/docs/sdks") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/sdks/index.html"
+        )),
+        ("marketing", "/docs/webhooks") | ("marketing-zola", "/docs/webhooks") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/webhooks/index.html"
+        )),
         ("marketing", "/features") | ("marketing-zola", "/features") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/features/index.html"
         )),
@@ -408,7 +426,7 @@ mod tests {
     #[test]
     fn marketing_routes_include_marketing_shell() {
         let html = render_route("marketing", "/pricing").unwrap();
-        assert!(html.contains("<link href=/css/styles.css rel=stylesheet>"));
+        assert!(html.contains("css/styles.css?h="));
         assert!(html.contains("<footer class="));
         assert!(html.contains("href=/pricing/calculator"));
     }

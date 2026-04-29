@@ -2,7 +2,9 @@
 """Show exact text matched by deep_scan for each flagged line to identify false positives."""
 import json, re
 
-filepath = 'data/train_agent.jsonl'
+from common_paths import data_path
+
+filepath = str(data_path("train_agent.jsonl"))
 
 with open(filepath) as f:
     lines = f.readlines()

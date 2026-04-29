@@ -134,14 +134,14 @@ mod observability {
 
     fn app() -> (axum::Router, Arc<MetricsCollector>) {
         let metrics = Arc::new(MetricsCollector::new(vec![0.1, 0.5, 1.0]));
-        let mut state = AppState::new(
+        let state = AppState::new(
             metrics.clone(),
             Arc::new(TraceCollector::new()),
             Arc::new(LogAggregator::new()),
             Arc::new(AlertManager::new()),
             Arc::new(SloMonitor::new()),
+            "test-key".into(),
         );
-        state.service_token = "test-key".into();
         (router(state), metrics)
     }
 

@@ -16,10 +16,9 @@ info:
     
     ## Rate Limits
     
-    The API enforces rate limits based on your plan:
-    - Free: 100 requests/minute
-    - Pro: 1,000 requests/minute
-    - Enterprise: Custom limits
+    The API enforces a default tenant-wide limit of 1,000 requests/minute.
+    Authentication and other sensitive endpoints may apply stricter caps.
+    Enterprise deployments may negotiate higher limits.
     
     Rate limit headers are included in all responses:
     - `X-RateLimit-Limit`: Maximum requests allowed

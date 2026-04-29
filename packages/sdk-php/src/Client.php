@@ -42,6 +42,7 @@ class Client
     private int    $timeout;
     private int    $maxRetries;
     private int    $maxResponseBytes;
+    private ?array $lastRateLimit = null;
 
     public Resources\Emails      $emails;
     public Resources\Domains     $domains;
@@ -98,6 +99,12 @@ class Client
         $attempt = 0;
         while (true) {
             $retryAfter = null;
+            $rateLimit = [
+                'limit' => null,
+                'remaining' => null,
+                'reset' => null,
+                'retryAfter' => null,
+            ];
             $headers = [
                 'X-API-Key: ' . $this->apiKey,
                 'Accept: application/json',
@@ -121,10 +128,29 @@ class Client
                 CURLOPT_FOLLOWLOCATION => false,
                 CURLOPT_SSL_VERIFYPEER => true,
                 CURLOPT_SSL_VERIFYHOST => 2,
-                CURLOPT_HEADERFUNCTION => static function ($curl, $header) use (&$retryAfter) {
+                CURLOPT_HEADERFUNCTION => static function ($curl, $header) use (&$retryAfter, &$rateLimit) {
                     $len = strlen($header);
-                    if (stripos($header, 'Retry-After:') === 0) {
-                        $retryAfter = trim(substr($header, strlen('Retry-After:')));
+                    $trimmed = trim($header);
+                    if ($trimmed === '' || !str_contains($trimmed, ':')) {
+                        return $len;
+                    }
+
+                    [$name, $value] = explode(':', $trimmed, 2);
+                    $value = trim($value);
+                    switch (strtolower($name)) {
+                        case 'retry-after':
+                            $retryAfter = $value;
+                            $rateLimit['retryAfter'] = $value;
+                            break;
+                        case 'x-ratelimit-limit':
+                            $rateLimit['limit'] = $value;
+                            break;
+                        case 'x-ratelimit-remaining':
+                            $rateLimit['remaining'] = $value;
+                            break;
+                        case 'x-ratelimit-reset':
+                            $rateLimit['reset'] = $value;
+                            break;
                     }
                     return $len;
                 },
@@ -160,6 +186,8 @@ class Client
                 throw new Exceptions\NetworkException('cURL error: ' . $curlError, 0);
             }
 
+            $this->lastRateLimit = $this->normalizeRateLimit($rateLimit);
+
             if (in_array($statusCode, [429, 500, 502, 503, 504], true) && $attempt < $this->maxRetries) {
                 $this->sleepRetryAfter($retryAfter, $attempt);
                 $attempt++;
@@ -171,11 +199,16 @@ class Client
                 : [];
 
             if ($statusCode >= 400) {
-                $this->throwApiError($statusCode, $decoded);
+                $this->throwApiError($statusCode, $decoded, $this->lastRateLimit);
             }
 
             return $decoded;
         }
+    }
+
+    public function getLastRateLimit(): ?array
+    {
+        return $this->lastRateLimit;
     }
 
     private function sleepRetryAfter(?string $retryAfter, int $attempt): void
@@ -294,20 +327,38 @@ class Client
         return [];
     }
 
+    private function normalizeRateLimit(array $rateLimit): ?array
+    {
+        $normalized = [];
+
+        foreach (['limit', 'remaining', 'reset'] as $key) {
+            if ($rateLimit[$key] !== null && ctype_digit((string) $rateLimit[$key])) {
+                $normalized[$key] = (int) $rateLimit[$key];
+            }
+        }
+
+        if ($rateLimit['retryAfter'] !== null && $rateLimit['retryAfter'] !== '') {
+            $normalized['retryAfter'] = $rateLimit['retryAfter'];
+        }
+
+        return $normalized === [] ? null : $normalized;
+    }
+
     /** @throws ApexMailException */
-    private function throwApiError(int $statusCode, array $body): void
+    private function throwApiError(int $statusCode, array $body, ?array $rateLimit = null): void
     {
         $message = $body['error'] ?? "HTTP {$statusCode}";
         $code    = $body['code']  ?? null;
+        $metadata = $rateLimit ?? [];
 
         $exception = match (true) {
-            $statusCode === 401 => new Exceptions\AuthenticationException($message, $statusCode, $code),
-            $statusCode === 403 => new Exceptions\ForbiddenException($message, $statusCode, $code),
-            $statusCode === 409 => new Exceptions\ConflictException($message, $statusCode, $code),
-            $statusCode === 404 => new Exceptions\NotFoundException($message, $statusCode, $code),
-            $statusCode === 422 => new Exceptions\ValidationException($message, $statusCode, $code),
-            $statusCode === 429 => new Exceptions\RateLimitException($message, $statusCode, $code),
-            default             => new Exceptions\ApiException($message, $statusCode, $code),
+            $statusCode === 401 => new Exceptions\AuthenticationException($message, $statusCode, $code, $metadata),
+            $statusCode === 403 => new Exceptions\ForbiddenException($message, $statusCode, $code, $metadata),
+            $statusCode === 409 => new Exceptions\ConflictException($message, $statusCode, $code, $metadata),
+            $statusCode === 404 => new Exceptions\NotFoundException($message, $statusCode, $code, $metadata),
+            $statusCode === 422 => new Exceptions\ValidationException($message, $statusCode, $code, $metadata),
+            $statusCode === 429 => new Exceptions\RateLimitException($message, $statusCode, $code, $metadata),
+            default             => new Exceptions\ApiException($message, $statusCode, $code, $metadata),
         };
 
         throw $exception;

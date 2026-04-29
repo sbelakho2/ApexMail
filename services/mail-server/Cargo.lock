@@ -320,6 +320,7 @@ dependencies = [
  "calamine",
  "chrono",
  "csv",
+ "ddos-protection",
  "deadpool-redis",
  "dirs",
  "futures",
@@ -338,8 +339,11 @@ dependencies = [
  "redis",
  "regex",
  "reqwest",
+ "rsa",
+ "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "sqlx",
  "thiserror 2.0.18",
@@ -351,6 +355,7 @@ dependencies = [
  "ui-foundation",
  "url",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]
@@ -8827,6 +8832,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

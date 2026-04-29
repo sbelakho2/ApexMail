@@ -5,7 +5,9 @@ This script works on the raw text directly (not escaped JSON).
 """
 import json, re
 
-FILEPATH = 'data/train_agent.jsonl'
+from common_paths import data_path
+
+FILEPATH = str(data_path("train_agent.jsonl"))
 
 with open(FILEPATH) as f:
     lines = f.readlines()

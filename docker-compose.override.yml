@@ -13,21 +13,23 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-apexmail}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB:-apexmail}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./tools/migrations:/docker-entrypoint-initdb.d:ro
     ports:
-      - "127.0.0.1:5432:5432"
+      - "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U apexmail -d apexmail"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apexmail} -d ${POSTGRES_DB:-apexmail}"]
       interval: 5s
       timeout: 3s
       retries: 5
     networks:
       - apexmail_data
     security_opt: !override []
+    secrets:
+      - postgres_password
 
   redis:
     image: redis:7.4-alpine
@@ -42,7 +44,7 @@ services:
       - redis_data:/data
       - ./deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     ports:
-      - "127.0.0.1:6379:6379"
+      - "${REDIS_PORT:-127.0.0.1:6379}:6379"
     healthcheck:
       test: ["CMD-SHELL", "export REDISCLI_AUTH=\"$(cat /run/secrets/redis_password 2>/dev/null || echo '')\"; redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 5s

@@ -65,7 +65,7 @@ This is the simulation/staging deployment runbook for ApexMail on Hetzner infras
 │                            │  │                            │  │                            │
 │  ┌──────────────────────┐  │  │  ┌──────────────────────┐  │  │  ┌──────────────────────┐  │
 │  │  API Server :3000    │  │  │  │  Queue Workers       │  │  │  │  PostgreSQL 16       │  │
-│  │  - REST API          │  │  │  │  - BullMQ processors │  │  │  │  - apexmail database │  │
+│  │  - REST API          │  │  │  │  - PostgreSQL queue  │  │  │  │  - apexmail database │  │
 │  │  - GraphQL           │  │  │  │  - Email sender      │  │  │  │  - Message ledger    │  │
 │  │  - Rate limiting     │  │  │  │  - Event processor   │  │  │  │  - Billing ledger    │  │
 │  └──────────────────────┘  │  │  └──────────────────────┘  │  │  └──────────────────────┘  │
@@ -178,7 +178,7 @@ RECIPIENT_ALLOWLIST=@example.com,@test.apexmail.dev
 - [x] SSH key access configured
 
 **Services running:**
-- [x] Queue workers (BullMQ processors)
+- [x] Queue workers (PostgreSQL-backed processors)
 - [x] Email sender service
 - [x] SES event consumer (SQS polling)
 - [x] Webhook dispatcher
@@ -331,7 +331,7 @@ HAVING ABS(COUNT(m.id) - COALESCE(t.stripe_usage_reported, 0)) > 0;
 
 | Invariant | Detection | Severity |
 |-----------|-----------|----------|
-| **C1:** Queue age exceeds threshold (backlog runaway) | Monitor oldest job age in BullMQ | HIGH |
+| **C1:** Queue age exceeds threshold (backlog runaway) | Monitor oldest pending job age in PostgreSQL-backed queue tables | HIGH |
 | **C2:** Worker crash loop | Monitor process restarts/uptime | CRITICAL |
 | **C3:** DB pool exhaustion | Monitor active connections vs max | HIGH |
 | **C4:** SES throttling not backing off (retry storm) | Monitor retry rate vs throttle events | HIGH |

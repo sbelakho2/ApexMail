@@ -6,6 +6,8 @@ Fix incorrect PAYG calculations in training data.
 import json
 import re
 
+from common_paths import data_path
+
 def calculate_payg(emails):
     """Calculate correct PAYG cost based on canonical pricing."""
     total = 0
@@ -35,7 +37,7 @@ def calculate_payg(emails):
     return total
 
 def fix_payg_calculations():
-    filepath = '/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl'
+    filepath = str(data_path("train_agent.jsonl"))
     
     with open(filepath, 'r') as f:
         lines = f.readlines()

@@ -46,11 +46,13 @@ fn test_stress_campaign_manager() {
 // Set max_campaigns high enough so we don't hit the active limit
 // (campaigns are created in Draft status, so max is for Active ones)
     let mgr = CampaignManager::new(10_000);
+    let tenant_id = "tenant-a";
     let mut campaign_ids = Vec::with_capacity(1_000);
 
     for i in 0..1_000 {
         let c = mgr
             .create_campaign(
+                tenant_id.into(),
                 format!("Campaign {i}"),
                 format!("tmpl_{i}"),
                 format!("audience_{}", i % 10),
@@ -59,7 +61,7 @@ fn test_stress_campaign_manager() {
         campaign_ids.push(c.id);
     }
 
-    let all = mgr.list_campaigns();
+    let all = mgr.list_campaigns(tenant_id);
     assert_eq!(all.len(), 1_000);
 }
 

@@ -1,23 +1,25 @@
-{# ── Cookie Consent Banner (CSS-only dismiss) ────────────────── #}
-{# Uses checkbox hack: clicking "Accept" checks a hidden input,  #}
-{# which hides the banner via CSS :checked selector.              #}
-{# The server sets the consent cookie on the next page load via   #}
-{# the Rust middleware checking for the form submission.           #}
+{# ── Cookie Consent Banner ────────────────────────────────────── #}
+{# The banner stays visible until the inline base template script #}
+{# stores an explicit consent choice and hides it. Analytics only #}
+{# load after the user chooses “Accept All”.                      #}
 
-<div id="cookie-consent-banner" class="fixed inset-x-0 bottom-0 z-50 border-t border-surface-200 bg-surface-50/95 backdrop-blur px-4 py-3">
+<div id="cookie-consent-banner" role="dialog" aria-labelledby="cookie-consent-heading" aria-describedby="cookie-consent-copy" class="fixed inset-x-0 bottom-0 z-50 border-t border-surface-200 bg-surface-50/95 backdrop-blur px-4 py-3">
   <div class="mx-auto flex max-w-6xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-    <p class="text-sm text-surface-600">
+    <div>
+      <h2 id="cookie-consent-heading" class="sr-only">Cookie preferences</h2>
+      <p id="cookie-consent-copy" class="text-sm text-surface-600">
       We use essential cookies and privacy-friendly analytics to improve ApexMail.
       See our
       <a href="/cookies" class="font-semibold text-surface-900 underline">Cookie Policy</a>.
-    </p>
+      </p>
+    </div>
     <div class="flex gap-2">
-      <label for="cookie-consent-state" class="border border-surface-300 text-surface-700 hover:bg-surface-100 px-4 py-2 text-sm cursor-pointer text-center rounded">
+      <button id="cookie-consent-necessary" type="button" class="border border-surface-300 text-surface-700 hover:bg-surface-100 px-4 py-2 text-sm cursor-pointer text-center rounded">
         Necessary Only
-      </label>
-      <label for="cookie-consent-state" class="btn-primary px-4 py-2 text-sm cursor-pointer text-center">
+      </button>
+      <button id="cookie-consent-accept" type="button" class="btn-primary px-4 py-2 text-sm cursor-pointer text-center">
         Accept All
-      </label>
+      </button>
     </div>
   </div>
 </div>

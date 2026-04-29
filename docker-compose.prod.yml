@@ -23,6 +23,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+      - /var/log/nginx
       - /var/cache/nginx
       - /var/run
     security_opt:
@@ -79,7 +80,7 @@ services:
     # Production: Do NOT expose database port to host
     ports: !override []
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     deploy:
       resources:
         limits:
@@ -138,6 +139,7 @@ services:
       context: .
       dockerfile: services/mail-server/Dockerfile
       target: api-server
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "--", "/usr/bin/tini", "--", "/usr/local/bin/api-server"]
     restart: unless-stopped
     environment:
       RUST_LOG: info
@@ -150,10 +152,10 @@ services:
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-apexmail}
       DB_USER: ${POSTGRES_USER:-apexmail}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       JWT_PRIVATE_KEY_PEM: ${JWT_PRIVATE_KEY_PEM:?JWT_PRIVATE_KEY_PEM is required in production}
       JWT_PUBLIC_KEY_PEM: ${JWT_PUBLIC_KEY_PEM:?JWT_PUBLIC_KEY_PEM is required in production}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:?API_KEY_HASH_SECRET is required in production}
@@ -166,6 +168,8 @@ services:
       BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required in production}
       METRICS_PORT: 9090
+    volumes:
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -192,6 +196,9 @@ services:
         condition: on-failure
         delay: 10s
         max_attempts: 5
+    secrets:
+      - postgres_password
+      - redis_password
 
   enterprise:
     environment:
@@ -212,6 +219,7 @@ services:
 
   postgres-backup:
     image: prodrigestivill/postgres-backup-local:16-alpine
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "POSTGRES_PASSWORD", "POSTGRES_PASSWORD_FILE"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -220,7 +228,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-apexmail}
       POSTGRES_USER: ${POSTGRES_USER:-apexmail}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       BACKUP_DIR: /backups
       SCHEDULE: "@daily"
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
@@ -228,15 +236,18 @@ services:
       BACKUP_KEEP_MONTHS: ${BACKUP_KEEP_MONTHS:-6}
     volumes:
       - postgres_backups:/backups
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_data
+    secrets:
+      - postgres_password
 
   clickhouse:
     ports: !override []
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required in production}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
     logging:
       driver: json-file

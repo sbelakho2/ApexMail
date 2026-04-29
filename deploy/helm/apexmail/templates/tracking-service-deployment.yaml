@@ -132,7 +132,7 @@ spec:
           {{- include "apexmail.containerSecurityContext" . | nindent 10 }}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -146,7 +146,7 @@ spec:
             failureThreshold: 4
           startupProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5

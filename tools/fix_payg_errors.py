@@ -15,6 +15,8 @@ import json
 import re
 import sys
 
+from common_paths import data_path
+
 def fix_payg_errors(filepath: str) -> int:
     """Fix known PAYG calculation errors. Returns count of fixes."""
     fixes = 0
@@ -78,7 +80,7 @@ Total for 50,000 emails: **$42**''',
     return fixes
 
 def main():
-    filepath = '/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl'
+    filepath = str(data_path("train_agent.jsonl"))
     
     print("Fixing PAYG calculation errors...")
     fixes = fix_payg_errors(filepath)

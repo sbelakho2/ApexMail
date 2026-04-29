@@ -4,17 +4,18 @@ ApexMail implements rate limiting to ensure fair usage and protect service stabi
 
 ## Rate Limits
 
-Rate limits vary by plan. Higher-tier plans receive higher rate limits. You can check your current limits via the `X-RateLimit-*` response headers on any API response, or in **Settings → API** in your dashboard.
+The API enforces a default tenant-wide limit of 1,000 requests per minute. Some endpoints, especially public authentication flows, use stricter limits to protect sensitive operations. Enterprise deployments may negotiate higher limits.
+
+You can check the active limit for your current request via the `X-RateLimit-*` response headers on any API response.
 
 ## Rate Limit Headers
 
 Every API response includes rate limit headers:
 
 ```http
-X-RateLimit-Limit: 50
-X-RateLimit-Remaining: 45
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 999
 X-RateLimit-Reset: 1705312800
-X-RateLimit-Retry-After: 60
 ```
 
 | Header | Description |
@@ -22,7 +23,7 @@ X-RateLimit-Retry-After: 60
 | `X-RateLimit-Limit` | Maximum requests allowed in window |
 | `X-RateLimit-Remaining` | Requests remaining in current window |
 | `X-RateLimit-Reset` | Unix timestamp when window resets |
-| `X-RateLimit-Retry-After` | Seconds until rate limit resets |
+| `Retry-After` | Present on `429` responses; seconds until retry |
 
 ## Endpoint-Specific Limits
 
@@ -35,14 +36,8 @@ When rate limited, the API returns `429 Too Many Requests`:
 ```json
 {
   "error": {
-    "code": "rate_limit_exceeded",
-    "message": "Rate limit exceeded. Please retry after 60 seconds.",
-    "details": {
-      "limit": 50,
-      "remaining": 0,
-      "resetAt": "2024-01-15T12:00:00Z",
-      "retryAfter": 60
-    }
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "too many requests"
   }
 }
 ```
@@ -64,7 +59,7 @@ def request_with_backoff(fn, max_retries=5):
             if error.status != 429 or attempt == max_retries - 1:
                 raise
 
-            retry_after = int(error.headers.get('X-RateLimit-Retry-After', 1))
+      retry_after = int(error.headers.get('Retry-After', 1))
             delay = min(retry_after, (2 ** attempt) + random.random())
             time.sleep(delay)
 ```

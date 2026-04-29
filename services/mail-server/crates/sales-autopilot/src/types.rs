@@ -99,6 +99,7 @@ pub struct Company {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Campaign {
     pub id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub template_id: String,
 /// Audience filter description (e.g. JSON filter).
@@ -393,6 +394,7 @@ mod tests {
     fn campaign_serde_roundtrip() {
         let campaign = Campaign {
             id: Uuid::new_v4(),
+            tenant_id: "tenant-a".into(),
             name: "Launch".into(),
             template_id: "tpl-1".into(),
             audience: "{}".into(),
@@ -404,6 +406,7 @@ mod tests {
         };
         let json = serde_json::to_string(&campaign).unwrap();
         let parsed: Campaign = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tenant_id, "tenant-a");
         assert_eq!(parsed.name, "Launch");
         assert_eq!(parsed.status, CampaignStatus::Active);
         assert_eq!(parsed.sent, 1000);

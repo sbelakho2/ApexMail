@@ -892,6 +892,27 @@ fn legacy_billing_interval(interval: BillingInterval) -> &'static str {
     }
 }
 
+fn prorated_amount(total_price_cents: i64, days_remaining: i64, days_in_period: i64) -> Result<i64, String> {
+    if days_remaining <= 0 {
+        return Ok(0);
+    }
+    if days_in_period <= 0 {
+        return Err("Invalid period: daysInPeriod must be greater than 0".to_string());
+    }
+
+    let numerator = i128::from(total_price_cents)
+        .checked_mul(i128::from(days_remaining))
+        .ok_or_else(|| "Proration amount overflowed supported billing range".to_string())?;
+    let denominator = i128::from(days_in_period);
+    let rounded = numerator
+        .checked_add(denominator / 2)
+        .ok_or_else(|| "Proration amount overflowed supported billing range".to_string())?
+        / denominator;
+
+    i64::try_from(rounded)
+        .map_err(|_| "Proration amount overflowed supported billing range".to_string())
+}
+
 fn ceil_day_count(duration_ms: i64) -> i64 {
     if duration_ms <= 0 {
         0
@@ -922,24 +943,19 @@ fn preview_plan_proration(
             .num_milliseconds(),
     );
     let days_remaining = (days_in_period - days_elapsed).max(0);
-    let is_yearly = matches!(subscription.billing_interval, BillingInterval::Yearly);
-    let current_price_numerator = if is_yearly {
+    let current_period_price = if matches!(subscription.billing_interval, BillingInterval::Yearly) {
         current_plan.price_yearly
     } else {
         current_plan.price_monthly
     };
-    let new_price_numerator = if is_yearly {
+    let new_period_price = if matches!(subscription.billing_interval, BillingInterval::Yearly) {
         new_plan.price_yearly
     } else {
         new_plan.price_monthly
     };
-    let price_divisor = if is_yearly { 12.0 } else { 1.0 };
-    let period_divisor = days_in_period as f64 * price_divisor;
 
-    let credit_amount =
-        ((current_price_numerator as f64 * days_remaining as f64) / period_divisor).round() as i64;
-    let charge_amount =
-        ((new_price_numerator as f64 * days_remaining as f64) / period_divisor).round() as i64;
+    let credit_amount = prorated_amount(current_period_price, days_remaining, days_in_period)?;
+    let charge_amount = prorated_amount(new_period_price, days_remaining, days_in_period)?;
     let net_amount = charge_amount - credit_amount;
 
     if net_amount > config.max_proration_charge_cents {
@@ -977,8 +993,8 @@ fn preview_plan_proration(
         explanation: build_proration_explanation(
             current_plan,
             new_plan,
-            (current_price_numerator as f64 / price_divisor).round() as i64,
-            (new_price_numerator as f64 / price_divisor).round() as i64,
+            current_period_price,
+            new_period_price,
             days_remaining,
             days_in_period,
             credit_amount,
@@ -2388,7 +2404,7 @@ mod tests {
         );
     }
 
-    async fn test_router() -> Router {
+    async fn test_router_with_config(mut config: BillingConfig) -> Router {
         let db = PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:5433/apexmail")
@@ -2397,10 +2413,13 @@ mod tests {
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("failed to create lazy test redis pool");
 
-        let mut config = BillingConfig::default();
         config.service_auth_token = "test-service-token".into();
 
         router(AppState::new(db, redis, config))
+    }
+
+    async fn test_router() -> Router {
+        test_router_with_config(BillingConfig::default()).await
     }
 
     #[tokio::test]
@@ -2451,6 +2470,30 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("stripe-signature", "t=1,v1=deadbeef")
                     .body(Body::from("not valid json {{{"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn stripe_webhook_route_rejects_invalid_signature_before_processing() {
+        let mut config = BillingConfig::default();
+        config.stripe_webhook_secret = "whsec_test_secret".into();
+
+        let app = test_router_with_config(config).await;
+        let signature = format!("t={},v1=deadbeef", chrono::Utc::now().timestamp());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/stripe")
+                    .header("content-type", "application/json")
+                    .header("stripe-signature", signature)
+                    .body(Body::from(r#"{"id":"evt_bad_sig","type":"checkout.session.completed","data":{"object":{}}}"#))
                     .expect("request"),
             )
             .await
@@ -2576,6 +2619,69 @@ mod tests {
             .as_str()
             .expect("explanation should be a string")
             .contains("Plan change from Starter to Growth"));
+    }
+
+    #[test]
+    fn yearly_proration_uses_full_year_price_for_remaining_period() {
+        let now = chrono::Utc::now();
+        let current_plan = Plan {
+            id: Uuid::new_v4(),
+            name: "starter".into(),
+            display_name: "Starter".into(),
+            description: String::new(),
+            price_monthly: 1000,
+            price_yearly: 12_000,
+            email_limit: 10_000,
+            api_call_limit: 100_000,
+            features: PlanFeatures::default(),
+            stripe_price_id_monthly: None,
+            stripe_price_id_yearly: None,
+            is_active: true,
+            sort_order: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let new_plan = Plan {
+            id: Uuid::new_v4(),
+            name: "growth".into(),
+            display_name: "Growth".into(),
+            description: String::new(),
+            price_monthly: 2000,
+            price_yearly: 24_000,
+            email_limit: 50_000,
+            api_call_limit: 250_000,
+            features: PlanFeatures::default(),
+            stripe_price_id_monthly: None,
+            stripe_price_id_yearly: None,
+            is_active: true,
+            sort_order: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        let subscription = RouteSubscription {
+            plan_name: "starter".into(),
+            billing_interval: BillingInterval::Yearly,
+            current_period_start: now - chrono::TimeDelta::days(180),
+            current_period_end: now + chrono::TimeDelta::days(180),
+        };
+
+        let payload = serde_json::to_value(
+            preview_plan_proration(&BillingConfig::default(), &current_plan, &new_plan, &subscription)
+                .expect("yearly proration preview should succeed"),
+        )
+        .expect("yearly proration preview should serialize");
+
+        assert_eq!(payload["creditAmount"], serde_json::json!(6000));
+        assert_eq!(payload["chargeAmount"], serde_json::json!(12000));
+        assert_eq!(payload["netAmount"], serde_json::json!(6000));
+        assert!(payload["explanation"]
+            .as_str()
+            .expect("explanation should be a string")
+            .contains("$120.00 / 360 days × 180 days"));
+        assert!(payload["explanation"]
+            .as_str()
+            .expect("explanation should be a string")
+            .contains("$240.00 / 360 days × 180 days"));
     }
 
     #[test]

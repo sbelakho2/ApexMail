@@ -138,7 +138,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
         }
         "marketing" | "marketing-zola" => {
             assert!(
-                html.contains("<link href=/css/styles.css rel=stylesheet>"),
+                html.contains("css/styles.css?h="),
                 "[{}] {} missing marketing stylesheet",
                 route.surface,
                 route.pattern
@@ -202,8 +202,12 @@ fn migration_docs_define_rust_ui_and_current_stripe_boundary() {
         "migration plan no longer requires Rust-native primitive replacement"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD.contains("**SDK** | Stripe-maintained server-side billing client"),
-        "Stripe tool contract no longer documents the current Stripe SDK boundary"
+        STRIPE_TOOL_CONTRACT_MD.contains("**SDK** | Raw Stripe REST requests via `reqwest` in `api-server`"),
+        "Stripe tool contract no longer documents the current server-side Stripe integration boundary"
+    );
+    assert!(
+        STRIPE_TOOL_CONTRACT_MD.contains("webhook verification is implemented manually in `billing-service`"),
+        "Stripe tool contract no longer documents manual webhook verification ownership"
     );
     assert!(
         STRIPE_TOOL_CONTRACT_MD.contains("User redirected to Stripe Checkout"),

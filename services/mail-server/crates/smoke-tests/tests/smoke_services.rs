@@ -172,7 +172,9 @@ mod billing_tests {
         assert_eq!(payg.free_api_calls_per_month, 100_000);
 
 // Verify PAYG calculation
-        let (email_cost, api_cost, total) = payg.calculate(5_000, 50_000);
+        let (email_cost, api_cost, total) = payg
+            .calculate(5_000, 50_000)
+            .expect("bounded smoke input should not overflow PAYG pricing");
         assert!(email_cost > 0, "should charge for 5k emails");
         assert_eq!(api_cost, 0, "50k API calls should be within free tier");
         assert_eq!(total, email_cost);
@@ -406,6 +408,7 @@ mod sales_tests {
     fn test_sales_campaigns() {
         let mgr = sales_autopilot::campaigns::CampaignManager::new(10);
         let campaign = mgr.create_campaign(
+            "tenant-a".into(),
             "Q1 Outreach".into(),
             "tmpl_123".into(),
             "saas-founders".into(),
@@ -415,7 +418,7 @@ mod sales_tests {
         assert_eq!(campaign.name, "Q1 Outreach");
         assert_eq!(campaign.status, sales_autopilot::types::CampaignStatus::Draft);
 
-        let campaigns = mgr.list_campaigns();
+        let campaigns = mgr.list_campaigns("tenant-a");
         assert_eq!(campaigns.len(), 1);
     }
 }

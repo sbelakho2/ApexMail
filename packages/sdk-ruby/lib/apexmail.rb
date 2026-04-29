@@ -539,7 +539,7 @@ module ApexMail
     end
 
     def check(email)
-      @t.request("GET", "/v1/suppressions/#{ApexMail.encode_path(email)}")
+      @t.request("GET", "/v1/suppressions/check/#{ApexMail.encode_path(email)}")
     end
 
     def delete(email)

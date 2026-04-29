@@ -34,6 +34,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to connect to database")?;
 
+    routes::initialize_schema(&db)
+        .await
+        .context("Failed to initialize sales-autopilot schema")?;
+
     let state = AppState {
         db,
         crm: CrmService::new(),

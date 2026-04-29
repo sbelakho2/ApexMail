@@ -556,9 +556,9 @@ If you've worked through this guide and still need assistance:
 
 1. **Search the docs:** Check the [Glossary](glossary.md) for term definitions and the [API Changelog](../api/changelog.md) for recent changes.
 2. **Community forum:** Post questions and search existing answers.
-3. **Support ticket:** Email support@apexmail.dev with:
+3. **Support ticket:** Email support@apexmail.ee with:
    - Your account ID or tenant ID
    - The `requestId` from the error response
    - Steps to reproduce the issue
    - Any relevant request/response payloads (redact sensitive data)
-4. **Status page:** Check https://status.apexmail.dev for ongoing incidents.
+4. **Status page:** Check https://status.apexmail.ee for ongoing incidents.

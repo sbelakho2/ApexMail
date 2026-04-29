@@ -41,7 +41,7 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tini \
-    netcat-openbsd \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged service account (UID/GID 10001 avoids clash with system users)
@@ -63,7 +63,7 @@ EXPOSE 3001 9092
 
 # Health-check via the /health endpoint exposed by the Axum router
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3001"]
+    CMD ["sh", "-c", "wget -q --spider http://127.0.0.1:3001/health || exit 1"]
 
 # tini as PID-1 handles zombie reaping and forwards SIGTERM to the service
 ENTRYPOINT ["/usr/bin/tini", "--"]

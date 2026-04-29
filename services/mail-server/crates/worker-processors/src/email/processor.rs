@@ -195,7 +195,14 @@ impl EmailProcessor {
                         if let Some(reason) = suppression {
 // Skip suppressed recipients
                             if let Err(e) = self.handle_suppressed(&job, reason).await {
-                                error!(job_id = %job.id, error = %e, "Failed to handle suppression");
+                                error!(
+                                    job_id = %job.id,
+                                    message_id = %job.message_id,
+                                    tenant_id = %job.tenant_id,
+                                    recipient = %job.to,
+                                    error = %e,
+                                    "Failed to handle suppression"
+                                );
                             }
                             continue;
                         }

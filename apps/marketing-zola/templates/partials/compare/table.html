@@ -34,5 +34,11 @@
         {{ page.content | safe }}
       </div>
     </div>
+
+    {% if page.extra.pricing_as_of %}
+    <p class="mt-4 text-xs font-medium text-surface-500">
+      Competitor pricing and plan snapshots were last reviewed on {{ page.extra.pricing_as_of }} and may change.
+    </p>
+    {% endif %}
   </div>
 </section>

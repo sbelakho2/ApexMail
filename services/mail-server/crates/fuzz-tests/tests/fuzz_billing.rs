@@ -14,7 +14,9 @@ fn fuzz_payg_cost_never_negative() {
     for _ in 0..5_000 {
         let emails: u64 = rng.gen_range(0..10_000_000);
         let api_calls: u64 = rng.gen_range(0..50_000_000);
-        let (email_cost, api_cost, total) = pricing.calculate(emails, api_calls);
+        let (email_cost, api_cost, total) = pricing
+            .calculate(emails, api_calls)
+            .expect("bounded fuzz inputs should not overflow PAYG pricing");
         assert!(
             email_cost >= 0,
             "Email cost negative for emails={emails}: {email_cost}"

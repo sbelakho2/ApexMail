@@ -21,16 +21,16 @@ Use your real ApexMail API key in place of `am_live_xxxxxxxxxxxx`; the value sho
 ```ruby
 require 'apexmail'
 
-client = ApexMail::Client.new(api_key: 'am_live_xxxxxxxxxxxx')
+client = ApexMail::Client.new('am_live_xxxxxxxxxxxx')
 
-response = client.emails.send(
+response = client.emails.send_email(
   from:    'hello@yourdomain.com',
   to:      'user@example.com',
   subject: 'Welcome to ApexMail!',
   html:    '<h1>Hello World</h1><p>Your email was sent successfully.</p>'
 )
 
-puts "Email sent! ID: #{response.id}"
+puts "Email sent! ID: #{response[:message][:id]}"
 ```
 
 ## Features
@@ -46,7 +46,7 @@ puts "Email sent! ID: #{response.id}"
 
 ```ruby
 # Send a single email
-response = client.emails.send(
+response = client.emails.send_email(
   from:         'hello@example.com',
   to:           'user@example.com',
   subject:      'Hello',
@@ -60,20 +60,17 @@ response = client.emails.send(
 )
 
 # Batch send (up to 1000 emails)
-responses = client.emails.batch([
+batch = client.emails.batch(messages: [
   { from: 'hello@example.com', to: 'user1@example.com', subject: 'Hi', html: '<p>Hello</p>' },
   { from: 'hello@example.com', to: 'user2@example.com', subject: 'Hi', html: '<p>Hello</p>' }
 ])
 
 # Get email status
 email = client.emails.get('email_id')
-puts email.status # => "delivered"
+puts email[:message][:status] # => "delivered"
 
 # List emails
 emails = client.emails.list(status: 'delivered', limit: 50)
-
-# Cancel scheduled email
-client.emails.cancel('email_id')
 ```
 
 ### Domains
@@ -83,10 +80,13 @@ client.emails.cancel('email_id')
 domain = client.domains.create(domain: 'example.com')
 
 # Verify domain DNS configuration
-domain = client.domains.verify(domain.id)
+verification = client.domains.verify('domain_id')
 
 # List domains
 domains = client.domains.list
+
+# Check domain health
+health = client.domains.health('domain_id')
 ```
 
 ### Webhooks
@@ -111,13 +111,13 @@ client.webhooks.delete('webhook_id')
 require 'apexmail'
 
 begin
-  client.emails.send(params)
+  client.emails.send_email(**params)
 rescue ApexMail::ValidationError => e
   puts "Validation failed: #{e.message}"
-  puts "Field errors: #{e.errors}"
+  puts "HTTP status: #{e.status_code}, code: #{e.code}"
 rescue ApexMail::RateLimitError => e
-  puts "Rate limited. Retry after #{e.retry_after} seconds"
-rescue ApexMail::APIError => e
+  puts "Rate limited: #{e.message} (#{e.status_code})"
+rescue ApexMail::Error => e
   puts "API error: #{e.message} (#{e.code})"
 end
 ```
@@ -126,16 +126,17 @@ end
 
 ```ruby
 client = ApexMail::Client.new(
-  api_key:     'am_live_xxxx',
-  base_url:    'https://api.apexmail.ee',  # Custom API endpoint
-  timeout:     30,                          # Request timeout in seconds
-  max_retries: 3                            # Number of retries
+  'am_live_xxxx',
+  base_url: 'https://api.apexmail.ee',      # Custom API endpoint
+  open_timeout: 10,                         # TCP connect timeout in seconds
+  read_timeout: 30,                         # Response timeout in seconds
+  max_response_bytes: 20 * 1024 * 1024      # Maximum response size
 )
 ```
 
 ## Documentation
 
-Full documentation is available at [https://docs.apexmail.ee](https://docs.apexmail.ee).
+Full documentation is available at [https://apexmail.ee/docs](https://apexmail.ee/docs).
 
 ## License
 

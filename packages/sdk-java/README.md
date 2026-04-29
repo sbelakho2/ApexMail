@@ -25,31 +25,31 @@ implementation 'ee.apexmail:apexmail-java:1.0.0'
 Use your real ApexMail API key in place of `am_live_xxxxxxxxxxxx`; the value shown below is a placeholder.
 
 ```java
-import ee.apexmail.ApexMail;
-import ee.apexmail.model.SendEmailResponse;
+import ee.apexmail.ApexMailClient;
+import ee.apexmail.Emails;
+
+import java.util.Map;
 
 public class Main {
     public static void main(String[] args) {
-        ApexMail client = new ApexMail("am_live_xxxxxxxxxxxx");
+        ApexMailClient client = new ApexMailClient("am_live_xxxxxxxxxxxx");
 
-        SendEmailResponse response = client.emails().send(
-            SendEmailParams.builder()
-                .from("hello@yourdomain.com")
-                .to("user@example.com")
-                .subject("Welcome to ApexMail!")
-                .html("<h1>Hello World</h1><p>Your email was sent successfully.</p>")
-                .build()
-        );
+        Emails.SendResponse response = client.emails().send(Map.of(
+            "from", "hello@yourdomain.com",
+            "to", "user@example.com",
+            "subject", "Welcome to ApexMail!",
+            "html", "<h1>Hello World</h1><p>Your email was sent successfully.</p>"
+        ));
 
-        System.out.println("Email sent! ID: " + response.getId());
+        System.out.println("Email sent! ID: " + response.message().id());
     }
 }
 ```
 
 ## Features
 
-- **Type-safe builders**: Fluent builder pattern for all request objects
-- **Zero required transitive dependencies**: Minimal dependency footprint
+- **Typed response records**: Java records for message, domain, webhook, and event responses
+- **Java HTTP client transport**: Uses the JDK HTTP client with TLS verification enabled
 - **Automatic retries**: Built-in retry logic with exponential backoff
 - **Comprehensive**: Covers all ApexMail API endpoints
 
@@ -58,76 +58,71 @@ public class Main {
 ### Emails
 
 ```java
+import ee.apexmail.Emails;
+
+import java.util.List;
+import java.util.Map;
+
 // Send a single email
-SendEmailResponse response = client.emails().send(
-    SendEmailParams.builder()
-        .from("hello@example.com")
-        .to("user@example.com")
-        .subject("Hello")
-        .html("<p>Hello World</p>")
-        .text("Hello World")                           // Optional plain text
-        .cc(List.of("cc@example.com"))                 // Optional
-        .bcc(List.of("bcc@example.com"))               // Optional
-        .replyTo("support@example.com")                // Optional
-        .tags(List.of(new Tag("category", "welcome"))) // Optional
-        .scheduledAt("2024-01-15T10:00:00Z")           // Optional
-        .build()
-);
+Emails.SendResponse response = client.emails().send(Map.of(
+    "from", "hello@example.com",
+    "to", "user@example.com",
+    "subject", "Hello",
+    "html", "<p>Hello World</p>",
+    "text", "Hello World"
+));
 
 // Batch send (up to 1000 emails)
-BatchResponse batch = client.emails().batch(List.of(
-    SendEmailParams.builder()
-        .from("hello@example.com").to("user1@example.com")
-        .subject("Hi").html("<p>Hello</p>").build(),
-    SendEmailParams.builder()
-        .from("hello@example.com").to("user2@example.com")
-        .subject("Hi").html("<p>Hello</p>").build()
+Emails.BatchResponse batch = client.emails().batch(List.of(
+    Map.of("from", "hello@example.com", "to", "user1@example.com", "subject", "Hi", "html", "<p>Hello</p>"),
+    Map.of("from", "hello@example.com", "to", "user2@example.com", "subject", "Hi", "html", "<p>Hello</p>")
 ));
 
 // Get email status
-Email email = client.emails().get("email_id");
-System.out.println(email.getStatus()); // "delivered"
+Emails.GetResponse email = client.emails().get("email_id");
+System.out.println(email.message().status()); // "delivered"
 
 // List emails
-EmailList emails = client.emails().list(
-    ListEmailsParams.builder()
-        .status("delivered")
-        .limit(50)
-        .build()
-);
-
-// Cancel scheduled email
-client.emails().cancel("email_id");
+Emails.ListResponse emails = client.emails().list(Map.of(
+    "status", "delivered",
+    "limit", 50
+));
 ```
 
 ### Domains
 
 ```java
+import ee.apexmail.Domains;
+
 // Add a domain
-Domain domain = client.domains().create(
-    CreateDomainParams.builder().domain("example.com").build()
-);
+Domains.CreateResponse domain = client.domains().create("example.com");
 
 // Verify domain DNS configuration
-Domain verified = client.domains().verify(domain.getId());
+Domains.VerifyResponse verified = client.domains().verify("domain_id");
 
 // List domains
-DomainList domains = client.domains().list();
+Domains.ListResponse domains = client.domains().list();
+
+// Check domain health
+Domains.HealthResponse health = client.domains().health("domain_id");
 ```
 
 ### Webhooks
 
 ```java
+import ee.apexmail.Webhooks;
+
+import java.util.List;
+import java.util.Map;
+
 // Create a webhook
-Webhook webhook = client.webhooks().create(
-    CreateWebhookParams.builder()
-        .url("https://your-app.com/webhooks/apexmail")
-        .events(List.of("email.delivered", "email.bounced", "email.opened"))
-        .build()
-);
+Webhooks.WebhookResponse webhook = client.webhooks().create(Map.of(
+    "url", "https://your-app.com/webhooks/apexmail",
+    "events", List.of("email.delivered", "email.bounced", "email.opened")
+));
 
 // List webhooks
-WebhookList webhooks = client.webhooks().list();
+Webhooks.WebhookListResponse webhooks = client.webhooks().list();
 
 // Delete webhook
 client.webhooks().delete("webhook_id");
@@ -136,15 +131,17 @@ client.webhooks().delete("webhook_id");
 ## Error Handling
 
 ```java
-import ee.apexmail.exception.*;
+import ee.apexmail.ApexMailException;
+import ee.apexmail.RateLimitException;
+import ee.apexmail.ValidationException;
 
 try {
     client.emails().send(params);
 } catch (ValidationException e) {
     System.err.println("Validation failed: " + e.getMessage());
-    System.err.println("Field errors: " + e.getErrors());
+    System.err.println("HTTP " + e.getStatusCode() + ", code=" + e.getCode());
 } catch (RateLimitException e) {
-    System.err.println("Rate limited. Retry after " + e.getRetryAfter() + " seconds");
+    System.err.println("Rate limited: " + e.getMessage() + " (HTTP " + e.getStatusCode() + ")");
 } catch (ApexMailException e) {
     System.err.println("API error: " + e.getMessage() + " (" + e.getCode() + ")");
 }
@@ -153,17 +150,20 @@ try {
 ## Configuration
 
 ```java
-ApexMail client = ApexMail.builder()
-    .apiKey("am_live_xxxx")
-    .baseUrl("https://api.apexmail.ee")   // Custom API endpoint
-    .timeout(Duration.ofSeconds(30))       // Request timeout
-    .maxRetries(3)                         // Number of retries
-    .build();
+import ee.apexmail.ApexMailClient;
+
+import java.time.Duration;
+
+ApexMailClient client = new ApexMailClient(
+    "am_live_xxxx",
+    "https://api.apexmail.ee",
+    Duration.ofSeconds(30)
+);
 ```
 
 ## Documentation
 
-Full documentation is available at [https://docs.apexmail.ee](https://docs.apexmail.ee).
+Full documentation is available at [https://apexmail.ee/docs](https://apexmail.ee/docs).
 
 ## License
 

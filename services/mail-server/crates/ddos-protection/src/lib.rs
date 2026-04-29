@@ -85,6 +85,7 @@ pub use smtp_protection::{SmtpConnectionProtection, SmtpConnectionTracker, SmtpP
 pub use fingerprint::{Ja4Fingerprint, Http2Fingerprint};
 
 /// Main DDoS protection orchestrator
+#[derive(Clone)]
 pub struct DdosProtector {
     config: Arc<ProtectorConfig>,
     
@@ -178,7 +179,7 @@ impl DdosProtector {
             config.max_sessions,
         ));
         
-        Ok(Self {
+        let protector = Self {
             config,
             reputation_db: Arc::new(DashMap::new()),
             session_tracker,
@@ -191,7 +192,28 @@ impl DdosProtector {
             challenge_manager: None,
             #[cfg(feature = "coordinator")]
             threat_intel: None,
-        })
+        };
+
+        protector.start_background_tasks();
+
+        Ok(protector)
+    }
+
+    fn start_background_tasks(&self) {
+        let refill_limiter = Arc::clone(&self.cost_limiter);
+        tokio::spawn(async move {
+            refill_limiter.run_refill_loop().await;
+        });
+
+        let cleanup_interval = if self.config.cleanup_interval.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            self.config.cleanup_interval
+        };
+        let cleanup_protector = self.clone();
+        tokio::spawn(async move {
+            cleanup_protector.run_cleanup_loop(cleanup_interval).await;
+        });
     }
     
 /// Evaluate a request and return protection decision
@@ -669,5 +691,61 @@ mod tests {
         let (_decision, event) = protector.evaluate_with_event(&ctx, None).await;
         assert_eq!(event.system, SecuritySystem::Ddos);
         assert!(!event.correlation.correlation_id.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_new_starts_cost_refill_loop() {
+        let config = ProtectorConfig {
+            system_cost_capacity: 120,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config).await.unwrap();
+
+        let ctx = RequestContext {
+            ip: "127.0.0.1".parse().unwrap(),
+            path: "/v1/health".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+        };
+
+        for _ in 0..12 {
+            assert!(matches!(protector.evaluate(&ctx).await, ProtectionDecision::Allow));
+        }
+        assert_eq!(protector.cost_limiter.system_remaining(), 0);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(protector.cost_limiter.system_remaining() > 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_new_starts_cleanup_loop() {
+        let config = ProtectorConfig {
+            cleanup_interval: Duration::from_secs(1),
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config).await.unwrap();
+
+        let ip: IpAddr = "10.10.10.10".parse().unwrap();
+        protector.blocklist.insert(
+            ip,
+            BlockEntry {
+                reason: "expired".to_string(),
+                expires_at: std::time::Instant::now() - Duration::from_secs(1),
+                from_region: None,
+            },
+        );
+        assert!(protector.blocklist.contains_key(&ip));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(!protector.blocklist.contains_key(&ip));
     }
 }

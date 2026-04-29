@@ -54,6 +54,7 @@ from .models import (
     WebhookEvent,
     WebhookListResponse,
 )
+from .webhooks import verify_signature
 
 __version__ = "1.0.0"
 __all__ = [
@@ -96,4 +97,5 @@ __all__ = [
     "Webhook",
     "WebhookEvent",
     "WebhookListResponse",
+    "verify_signature",
 ]

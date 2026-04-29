@@ -219,38 +219,23 @@ async fn process_webhook(
 ) -> Result<ProcessWebhookResult, String> {
     let event = verify_and_parse_event(state, payload, signature)?;
 
-    let existing_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = $1",
-    )
-    .bind(&event.id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|error| format!("Failed to load Stripe webhook event: {error}"))?;
-
-    if let Some(status) = existing_status.as_deref() {
-        if status == "processed" {
+    match claim_webhook_event(state, &event.id, &event.event_type).await? {
+        WebhookEventClaim::Claimed => {}
+        WebhookEventClaim::AlreadyProcessed => {
             info!(event_id = %event.id, event_type = %event.event_type, "duplicate stripe webhook already processed");
             return Ok(ProcessWebhookResult {
                 event_type: event.event_type,
                 processed: false,
             });
         }
-
-        info!(event_id = %event.id, event_type = %event.event_type, previous_status = %status, "retrying stripe webhook event");
+        WebhookEventClaim::AlreadyPending => {
+            info!(event_id = %event.id, event_type = %event.event_type, "stripe webhook is already being processed by another worker");
+            return Ok(ProcessWebhookResult {
+                event_type: event.event_type,
+                processed: false,
+            });
+        }
     }
-
-    sqlx::query(
-        r#"
-        INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status, created_at, updated_at)
-        VALUES (gen_random_uuid(), $1, $2, 'pending', NOW(), NOW())
-        ON CONFLICT (stripe_event_id) DO UPDATE SET status = 'pending', updated_at = NOW()
-        "#,
-    )
-    .bind(&event.id)
-    .bind(&event.event_type)
-    .execute(&state.db)
-    .await
-    .map_err(|error| format!("Failed to upsert Stripe webhook event: {error}"))?;
 
     let event_id = event.id.clone();
     let event_type = event.event_type.clone();
@@ -293,6 +278,53 @@ async fn process_webhook(
 
             Err(error_message)
         }
+    }
+}
+
+async fn claim_webhook_event(
+    state: &AppState,
+    event_id: &str,
+    event_type: &str,
+) -> Result<WebhookEventClaim, String> {
+    let row = sqlx::query_as::<_, WebhookEventClaimRow>(
+        r#"
+        WITH claimed AS (
+            INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status, created_at, updated_at)
+            VALUES (gen_random_uuid(), $1, $2, 'pending', NOW(), NOW())
+            ON CONFLICT (stripe_event_id) DO UPDATE
+            SET event_type = EXCLUDED.event_type,
+                status = 'pending',
+                error = NULL,
+                updated_at = NOW()
+            WHERE stripe_webhook_events.status <> 'processed'
+              AND stripe_webhook_events.status <> 'pending'
+            RETURNING true AS claimed, status
+        )
+        SELECT claimed, status FROM claimed
+        UNION ALL
+        SELECT false AS claimed, status
+        FROM stripe_webhook_events
+        WHERE stripe_event_id = $1
+          AND NOT EXISTS (SELECT 1 FROM claimed)
+        LIMIT 1
+        "#,
+    )
+    .bind(event_id)
+    .bind(event_type)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| format!("Failed to claim Stripe webhook event: {error}"))?;
+
+    Ok(classify_webhook_claim(row))
+}
+
+fn classify_webhook_claim(row: Option<WebhookEventClaimRow>) -> WebhookEventClaim {
+    match row {
+        Some(WebhookEventClaimRow { claimed: true, .. }) => WebhookEventClaim::Claimed,
+        Some(WebhookEventClaimRow { status, .. }) if status == "processed" => {
+            WebhookEventClaim::AlreadyProcessed
+        }
+        _ => WebhookEventClaim::AlreadyPending,
     }
 }
 
@@ -479,6 +511,19 @@ async fn handle_subscription_change(
             subscription.id
         ));
     };
+    let plan_name = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT name
+        FROM plans
+        WHERE stripe_price_id_monthly = $1 OR stripe_price_id_yearly = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(price_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| format!("Failed to resolve plan for Stripe price {price_id}: {error}"))?
+    .ok_or_else(|| format!("Unknown Stripe price ID: {price_id}"))?;
 
     sqlx::query(
         r#"
@@ -503,14 +548,9 @@ async fn handle_subscription_change(
                 updated_at = NOW()
             RETURNING tenant_id
         ),
-        plan_lookup AS (
-            SELECT name FROM plans
-            WHERE stripe_price_id_monthly = $4 OR stripe_price_id_yearly = $4
-            LIMIT 1
-        ),
         update_tenant AS (
             UPDATE tenants
-            SET plan = COALESCE((SELECT name FROM plan_lookup), plan), updated_at = NOW()
+            SET plan = $12, updated_at = NOW()
             WHERE id = $1
             RETURNING id
         )
@@ -528,6 +568,7 @@ async fn handle_subscription_change(
     .bind(subscription.cancel_at_period_end)
     .bind(subscription.canceled_at)
     .bind(subscription.trial_end)
+    .bind(&plan_name)
     .execute(&state.db)
     .await
     .map_err(|error| format!("Failed to upsert Stripe subscription: {error}"))?;
@@ -1102,6 +1143,19 @@ struct ProcessWebhookResult {
     processed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebhookEventClaim {
+    Claimed,
+    AlreadyProcessed,
+    AlreadyPending,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct WebhookEventClaimRow {
+    claimed: bool,
+    status: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct StripeEventPayload {
     id: String,
@@ -1290,4 +1344,39 @@ impl Default for DunningConfig {
 struct DunningResult {
     status: String,
     next_retry_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_webhook_claim_allows_claimed_event() {
+        let decision = classify_webhook_claim(Some(WebhookEventClaimRow {
+            claimed: true,
+            status: "pending".into(),
+        }));
+
+        assert_eq!(decision, WebhookEventClaim::Claimed);
+    }
+
+    #[test]
+    fn classify_webhook_claim_skips_processed_event() {
+        let decision = classify_webhook_claim(Some(WebhookEventClaimRow {
+            claimed: false,
+            status: "processed".into(),
+        }));
+
+        assert_eq!(decision, WebhookEventClaim::AlreadyProcessed);
+    }
+
+    #[test]
+    fn classify_webhook_claim_skips_pending_event() {
+        let decision = classify_webhook_claim(Some(WebhookEventClaimRow {
+            claimed: false,
+            status: "pending".into(),
+        }));
+
+        assert_eq!(decision, WebhookEventClaim::AlreadyPending);
+    }
 }

@@ -31,7 +31,7 @@ impl Default for DevExConfig {
             webhook_signing_secret: "devex-local-signing-secret".into(),
             cors_origins: vec!["*".into()],
             api_base_url: "https://api.apexmail.ee".into(),
-            docs_base_url: "https://docs.apexmail.ee".into(),
+            docs_base_url: "https://apexmail.ee/docs".into(),
             current_api_version: "2024-01".into(),
             supported_api_versions: vec![
                 "2024-01".into(),
@@ -94,7 +94,7 @@ impl DevExConfig {
             api_base_url: env::var("API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.apexmail.ee".into()),
             docs_base_url: env::var("DOCS_BASE_URL")
-                .unwrap_or_else(|_| "https://docs.apexmail.ee".into()),
+                .unwrap_or_else(|_| "https://apexmail.ee/docs".into()),
             current_api_version: env::var("CURRENT_API_VERSION")
                 .unwrap_or_else(|_| "2024-01".into()),
             supported_api_versions,

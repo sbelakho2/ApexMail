@@ -587,11 +587,14 @@ impl EventProcessor {
         let payload_str = payload.to_string();
         tokio::spawn(async move {
             if let Ok(mut conn) = redis.get().await {
-                let _ = redis::cmd("PUBLISH")
+                if let Err(error) = redis::cmd("PUBLISH")
                     .arg("suppression:added")
                     .arg(payload_str)
                     .query_async::<()>(&mut *conn)
-                    .await;
+                    .await
+                {
+                    warn!(error = %error, "Failed to publish suppression update");
+                }
             }
         });
     }

@@ -4,9 +4,11 @@
 import json
 import re
 
+from common_paths import data_path
+
 PAYG_LINES = [3, 115, 160, 189, 263, 264, 287, 398, 416, 505, 763, 779, 823, 906, 1001]
 
-with open('/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl') as f:
+with open(data_path("train_agent.jsonl")) as f:
     for i, line in enumerate(f, 1):
         if i in PAYG_LINES:
             data = json.loads(line)

@@ -70,6 +70,8 @@ impl ContactsRepo {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Contact>, sqlx::Error> {
+        let limit = limit.clamp(1, 200);
+        let offset = offset.clamp(0, 100_000);
         sqlx::query_as::<_, Contact>(
             "SELECT * FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )

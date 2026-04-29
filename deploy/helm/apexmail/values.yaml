@@ -156,6 +156,12 @@ enterprise:
   service:
     type: ClusterIP
     port: 3002
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
   env: {}
   envFrom: []
 

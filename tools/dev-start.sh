@@ -7,7 +7,7 @@
 # - Rust API server (port 3001)
 # - Rust web surface via 127.0.0.1 host mapping
 # - Rust control-plane surface via localhost host mapping
-# - Marketing site (port 1111)
+# - Marketing routes served by the Rust web surface (port 3001)
 # =============================================================================
 
 set -eu
@@ -23,6 +23,56 @@ log() { echo -e "${GREEN}[dev-start]${NC} $1"; }
 warn() { echo -e "${YELLOW}[dev-start]${NC} $1"; }
 error() { echo -e "${RED}[dev-start]${NC} $1"; exit 1; }
 
+load_or_seed_secret() {
+    local path="$1"
+    local default_value="$2"
+
+    if [[ -s "$path" ]]; then
+        tr -d '\r\n' < "$path"
+        return
+    fi
+
+    printf '%s' "$default_value" > "$path"
+    chmod 600 "$path"
+    printf '%s' "$default_value"
+}
+
+# -----------------------------------------------------------------------------
+# Export local defaults required during compose interpolation
+# -----------------------------------------------------------------------------
+export POSTGRES_USER=apexmail
+mkdir -p secrets
+
+export POSTGRES_PASSWORD="$(load_or_seed_secret secrets/postgres_password.txt dev-postgres-password-minimum-32)"
+export POSTGRES_DB=apexmail
+export REDIS_PASSWORD="$(load_or_seed_secret secrets/redis_password.txt dev-redis-password-minimum-32-chars)"
+export TRACKING_SECRET_KEY="dev-tracking-secret-key-minimum-32"
+export CLICKHOUSE_PASSWORD="$(load_or_seed_secret secrets/clickhouse_password.txt dev-clickhouse-password-minimum-32)"
+export INTERNAL_SERVICE_TOKEN="dev-internal-service-token-minimum-32"
+export JWT_SECRET="dev-jwt-secret-minimum-32-chars"
+export GRAFANA_USER=admin
+export GRAFANA_PASSWORD=adminadmin
+
+chmod 600 secrets/postgres_password.txt secrets/redis_password.txt secrets/clickhouse_password.txt
+
+HOST_POSTGRES_PORT=5432
+if lsof -nP -iTCP:5432 -sTCP:LISTEN >/dev/null 2>&1; then
+    warn "Port 5432 is already in use; remapping local Postgres to 55432"
+    export POSTGRES_PORT=127.0.0.1:55432
+    HOST_POSTGRES_PORT=55432
+else
+    export POSTGRES_PORT=127.0.0.1:5432
+fi
+
+HOST_REDIS_PORT=6379
+if lsof -nP -iTCP:6379 -sTCP:LISTEN >/dev/null 2>&1; then
+    warn "Port 6379 is already in use; remapping local Redis to 56379"
+    export REDIS_PORT=127.0.0.1:56379
+    HOST_REDIS_PORT=56379
+else
+    export REDIS_PORT=127.0.0.1:6379
+fi
+
 # -----------------------------------------------------------------------------
 # Start Docker containers
 # -----------------------------------------------------------------------------
@@ -36,9 +86,12 @@ until docker exec apexmail-postgres pg_isready -U apexmail -d apexmail >/dev/nul
 done
 log "PostgreSQL ready"
 
+escaped_postgres_password=${POSTGRES_PASSWORD//\'/\'\'}
+docker exec apexmail-postgres sh -lc "psql -v ON_ERROR_STOP=1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"ALTER USER \\\"$POSTGRES_USER\\\" WITH PASSWORD '$escaped_postgres_password';\"" >/dev/null
+
 # Wait for redis
 log "Waiting for Redis..."
-until docker exec apexmail-redis redis-cli -a devredis123 ping >/dev/null 2>&1; do
+until docker exec apexmail-redis redis-cli -a "$REDIS_PASSWORD" ping >/dev/null 2>&1; do
     sleep 1
 done
 log "Redis ready"
@@ -62,13 +115,12 @@ export HOST=0.0.0.0
 export BASE_URL=http://localhost:3001
 export ENVIRONMENT=development
 export DB_HOST=localhost
-export DB_PORT=5432
-export DB_NAME=apexmail
-export DB_USER=apexmail
-export DB_PASSWORD=devpass123
+export DB_PORT=${HOST_POSTGRES_PORT}
+export DB_NAME=${POSTGRES_DB}
+export DB_USER=${POSTGRES_USER}
+export DB_PASSWORD=${POSTGRES_PASSWORD}
 export REDIS_HOST=localhost
-export REDIS_PORT=6379
-export REDIS_PASSWORD=devredis123
+export REDIS_PORT=${HOST_REDIS_PORT}
 export API_KEY_HASH_SECRET="dev-api-key-secret-minimum-32-chars"
 export WEBHOOK_SIGNING_SECRET="dev-webhook-signing-secret-minimum-32"
 export AWS_REGION=us-east-1
@@ -109,7 +161,7 @@ echo ""
 echo "  API Server:     http://localhost:3001/health/live"
 echo "  Web Surface:    http://127.0.0.1:3001 (Rust SSR via api-server host map)"
 echo "  Control Plane:  http://localhost:3001 (Rust SSR via api-server host map)"
-echo "  Marketing:      cd apps/marketing-zola && zola serve (port 1111)"
+echo "  Marketing:      http://127.0.0.1:3001 (exported marketing routes via api-server)"
 echo ""
 echo "  Test user:      aaron / &&Pw20354491"
 echo ""

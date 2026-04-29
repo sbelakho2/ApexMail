@@ -68,6 +68,8 @@ pub struct ObservabilityConfig {
     pub environment: String,
 /// Application version tag.
     pub version: String,
+/// Shared bearer token required for protected internal routes.
+    pub internal_service_token: String,
 
 // Database
     pub db_host: String,
@@ -98,6 +100,7 @@ impl Default for ObservabilityConfig {
             port: 4400,
             environment: "development".into(),
             version: "1.0.0".into(),
+            internal_service_token: String::new(),
 
             db_host: "localhost".into(),
             db_port: 5432,
@@ -181,6 +184,7 @@ impl ObservabilityConfig {
                 .unwrap_or(default.port),
             environment: env_or("NODE_ENV", &default.environment),
             version: env_or("APP_VERSION", &default.version),
+            internal_service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
 
             db_host: env_or("DB_HOST", &default.db_host),
             db_port: env_or("DB_PORT", &default.db_port.to_string())
@@ -270,6 +274,9 @@ impl ObservabilityConfig {
         if self.port == 0 {
             return Err("OBSERVABILITY_PORT must be > 0".into());
         }
+        if self.internal_service_token.trim().is_empty() {
+            return Err("INTERNAL_SERVICE_TOKEN must be set".into());
+        }
         if self.db_port == 0 {
             return Err("DB_PORT must be > 0".into());
         }
@@ -314,6 +321,7 @@ mod tests {
         let cfg = ObservabilityConfig::default();
         assert_eq!(cfg.port, 4400);
         assert_eq!(cfg.environment, "development");
+        assert!(cfg.internal_service_token.is_empty());
         assert!(cfg.tracing.enabled);
         assert!(!cfg.alerting.enabled);
         assert_eq!(cfg.metrics.histogram_buckets.len(), 11);
@@ -341,5 +349,15 @@ mod tests {
                 .map(|value| value.logging.sensitive_fields.clone()),
             Some(cfg.logging.sensitive_fields.clone())
         );
+    }
+
+    #[test]
+    fn test_validate_requires_internal_service_token() {
+        let mut cfg = ObservabilityConfig::default();
+        cfg.internal_service_token = "   ".into();
+
+        let err = cfg.validate().unwrap_err();
+
+        assert_eq!(err, "INTERNAL_SERVICE_TOKEN must be set");
     }
 }

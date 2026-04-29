@@ -37,7 +37,8 @@ ApexMail now runs as a Rust-focused monorepo. The browser surfaces are served by
 
 ```bash
 git clone https://github.com/sbelakho2/ApexMail.git
-cd apexmail
+cd ApexMail
+cp .env.example .env
 
 docker compose up -d postgres redis
 cargo test --manifest-path services/mail-server/Cargo.toml

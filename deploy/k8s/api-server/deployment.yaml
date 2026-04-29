@@ -12,7 +12,7 @@ metadata:
   labels:
     app.kubernetes.io/name: api-server
     app.kubernetes.io/component: api
-    app.kubernetes.io/version: "REPLACE_TAG"
+    app.kubernetes.io/version: "1.0.0"
 spec:
   replicas: 2
   revisionHistoryLimit: 5
@@ -46,7 +46,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: api-server
-          image: apexmail/api-server:REPLACE_TAG
+          image: apexmail/api-server:1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

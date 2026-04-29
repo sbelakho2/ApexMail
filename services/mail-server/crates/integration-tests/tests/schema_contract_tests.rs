@@ -99,12 +99,14 @@ fn test_config() -> Config {
         redis_port: 6379,
         redis_password: None,
         redis_db: 0,
+        redis_pool_max_size: 40,
         jwt_private_key_pem: "BEGIN TEST".into(),
         jwt_public_key_pem: "BEGIN TEST".into(),
         jwt_expiry: Duration::from_secs(86_400),
         api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
         rate_limit_window_ms: 60_000,
         rate_limit_max_requests: 1_000,
+        max_inflight_requests: 80,
         cors_origins: vec!["*".into()],
         trusted_proxies: vec![],
         ui_web_hosts: vec!["app.apexmail.ee".into(), "localhost".into()],
@@ -158,14 +160,18 @@ async fn registration_test_app(pool: PgPool) -> Router {
         "us-east-1".into(),
     );
 
-    build_app(AppStateInner::new(
-        pool,
-        redis,
-        test_config(),
-        reqwest::Client::new(),
-        ses_provider,
-        None,
-    ))
+    build_app(
+        AppStateInner::new(
+            pool,
+            redis,
+            test_config(),
+            reqwest::Client::new(),
+            ses_provider,
+            None,
+        )
+        .await
+        .expect("failed to create test app state"),
+    )
 }
 
 /// Helper:create a test tenant and return its ID.
@@ -656,7 +662,7 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables(pool: P
     let feature_flag_key = format!("delete-coverage-{}", Uuid::new_v4().simple());
 
     sqlx::query(
-        "INSERT INTO events (id, tenant_id, type)
+        "INSERT INTO events (id, tenant_id, event_type)
          VALUES ($1, $2, 'delivered')",
     )
     .bind(bounded_id("evt"))

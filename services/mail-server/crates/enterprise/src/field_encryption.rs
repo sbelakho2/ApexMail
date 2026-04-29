@@ -30,6 +30,7 @@ use aes_gcm::{
 };
 use base64::Engine;
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -145,6 +146,38 @@ impl Drop for Kek {
     fn drop(&mut self) {
         self.key.zeroize();
     }
+}
+
+/// Derive a stable KEK from server-managed secret material for a specific purpose.
+pub fn derive_kek_from_secret(secret: &str, purpose: &str) -> Result<Kek, EncryptionError> {
+    let trimmed_secret = secret.trim();
+    let trimmed_purpose = purpose.trim();
+
+    if trimmed_secret.is_empty() {
+        return Err(EncryptionError::KeyDerivation(
+            "secret must not be empty".into(),
+        ));
+    }
+    if trimmed_purpose.is_empty() {
+        return Err(EncryptionError::KeyDerivation(
+            "purpose must not be empty".into(),
+        ));
+    }
+
+    let key_hash = Sha256::digest(format!("apexmail:{trimmed_purpose}:key:{trimmed_secret}").as_bytes());
+    let id_hash = Sha256::digest(format!("apexmail:{trimmed_purpose}:id:{trimmed_secret}").as_bytes());
+
+    let mut id = [0u8; KEK_ID_LEN];
+    let mut key = [0u8; AES_KEY_LEN];
+    id.copy_from_slice(&id_hash[..KEK_ID_LEN]);
+    key.copy_from_slice(&key_hash[..AES_KEY_LEN]);
+
+    Ok(Kek::new(id, key))
+}
+
+/// Build a single-KEK encryptor from server-managed secret material.
+pub fn encryptor_from_secret(secret: &str, purpose: &str) -> Result<FieldEncryptor, EncryptionError> {
+    Ok(FieldEncryptor::new(vec![derive_kek_from_secret(secret, purpose)?]))
 }
 
 impl fmt::Debug for Kek {
@@ -482,6 +515,19 @@ mod tests {
     fn is_encrypted_detection() {
         assert!(FieldEncryptor::is_encrypted("ENC:v1:AAAA"));
         assert!(!FieldEncryptor::is_encrypted("plain@example.com"));
+    }
+
+    #[test]
+    fn derived_kek_is_stable_and_domain_separated() {
+        let secret = "server-managed-secret-material";
+        let a = derive_kek_from_secret(secret, "enterprise/sso").unwrap();
+        let b = derive_kek_from_secret(secret, "enterprise/sso").unwrap();
+        let c = derive_kek_from_secret(secret, "enterprise/encryption-tooling").unwrap();
+
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.key_bytes(), b.key_bytes());
+        assert_ne!(a.id, c.id);
+        assert_ne!(a.key_bytes(), c.key_bytes());
     }
 
     #[test]

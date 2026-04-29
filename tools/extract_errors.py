@@ -2,16 +2,24 @@
 """Extract COMPLETE assistant responses for lines with math errors."""
 import json
 import re
+import sys
 
 filepath = 'data/train_agent.jsonl'
 target_lines = [42, 104, 310, 341, 603, 689, 851, 1044]
 
-with open(filepath) as f:
+with open(filepath, encoding='utf-8') as f:
     lines = f.readlines()
 
+findings = 0
+
 for target in target_lines:
+    if target < 1 or target > len(lines):
+        print(f"Skipping missing line {target}", file=sys.stderr)
+        continue
+
     data = json.loads(lines[target - 1])
     text = data['text']
+    findings += 1
     
     print(f"\n{'#'*70}")
     print(f"# LINE {target}")
@@ -39,3 +47,5 @@ for target in target_lines:
     for j, part in enumerate(assist_parts):
         print(f"\nASSISTANT [{j+1}]:")
         print(part.strip())
+
+raise SystemExit(1 if findings else 0)

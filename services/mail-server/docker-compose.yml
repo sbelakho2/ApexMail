@@ -241,13 +241,15 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     command: >
-      sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru"
+      sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$${REDIS_PASSWORD}\""
+    environment:
+      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
     ports:
       - "127.0.0.1:6379:6379"
     networks:
       - apexmail
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "sh", "-c", "redis-cli -a \"$(cat /run/secrets/redis_password)\" ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -263,6 +265,8 @@ services:
           cpus: '0.25'
         reservations:
           memory: 64M
+    secrets:
+      - redis_password
 
 networks:
   apexmail:

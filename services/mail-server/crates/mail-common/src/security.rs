@@ -212,8 +212,8 @@ impl SecurityEvent {
         mac.update(timestamp.to_rfc3339().as_bytes());
         mac.update(&[system as u8]);
         mac.update(&[action as u8]);
-        mac.update(&risk_score.to_le_bytes());
-        mac.update(&nonce.to_le_bytes());
+    mac.update(&risk_score.to_be_bytes());
+    mac.update(&nonce.to_be_bytes());
         
         let result = mac.finalize();
         hex::encode(result.into_bytes())
@@ -241,8 +241,8 @@ impl SecurityEvent {
         mac.update(self.timestamp.to_rfc3339().as_bytes());
         mac.update(&[self.system as u8]);
         mac.update(&[self.action as u8]);
-        mac.update(&self.risk_score.to_le_bytes());
-        mac.update(&self.nonce.to_le_bytes());
+        mac.update(&self.risk_score.to_be_bytes());
+        mac.update(&self.nonce.to_be_bytes());
 // verify_slice uses subtle::ConstantTimeEq internally — truly constant-time.
         mac.verify_slice(&sig_bytes).is_ok()
     }
@@ -569,6 +569,23 @@ fn extract_source_ip(event: &SecurityEvent) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn manual_signature(
+        timestamp: &DateTime<Utc>,
+        system: SecuritySystem,
+        action: SecurityAction,
+        risk_score_bytes: [u8; 8],
+        nonce_bytes: [u8; 8],
+    ) -> String {
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(get_signing_key()).expect("valid key length");
+        mac.update(timestamp.to_rfc3339().as_bytes());
+        mac.update(&[system as u8]);
+        mac.update(&[action as u8]);
+        mac.update(&risk_score_bytes);
+        mac.update(&nonce_bytes);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
     fn event(system: SecuritySystem, action: SecurityAction, ip_key: &str, ip: &str, risk: f64) -> SecurityEvent {
         SecurityEvent::new(
             system,
@@ -627,7 +644,15 @@ mod tests {
         
 // Event should have signature on creation
         assert!(!event.signature.is_empty(), "Event should be signed");
-        assert!(event.nonce > 0, "Event should have nonce");
+        let next_event = SecurityEvent::new(
+            SecuritySystem::Waf,
+            SecurityAction::Block,
+            SecuritySeverity::Critical,
+            9.5,
+            "Test event 2",
+            CorrelationContext::generated(),
+        );
+        assert_ne!(event.nonce, next_event.nonce, "Event nonce should advance between events");
         
 // Signature should verify
         assert!(event.verify_signature(), "Signature should verify");
@@ -655,6 +680,41 @@ mod tests {
         
 // Signature wasn't changed, just the data
         assert_eq!(event.signature, original_sig);
+    }
+
+    #[test]
+    fn event_signing_uses_network_byte_order() {
+        let timestamp = DateTime::parse_from_rfc3339("2026-04-28T02:30:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let risk_score = 9.5;
+        let nonce = 42_u64;
+
+        let canonical = SecurityEvent::compute_signature(
+            &timestamp,
+            SecuritySystem::Waf,
+            SecurityAction::Block,
+            risk_score,
+            nonce,
+        );
+
+        let expected_be = manual_signature(
+            &timestamp,
+            SecuritySystem::Waf,
+            SecurityAction::Block,
+            risk_score.to_be_bytes(),
+            nonce.to_be_bytes(),
+        );
+        let old_le = manual_signature(
+            &timestamp,
+            SecuritySystem::Waf,
+            SecurityAction::Block,
+            risk_score.to_le_bytes(),
+            nonce.to_le_bytes(),
+        );
+
+        assert_eq!(canonical, expected_be);
+        assert_ne!(canonical, old_le);
     }
 
     #[test]

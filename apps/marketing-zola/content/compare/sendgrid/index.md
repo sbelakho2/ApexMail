@@ -8,6 +8,7 @@ competitor = "SendGrid"
 competitor_slug = "sendgrid"
 competitor_name = "SendGrid"
 competitor_description = "Twilio SendGrid is a popular email delivery platform owned by Twilio."
+pricing_as_of = "2026-04-29"
 og_image = "/images/og-compare-sendgrid.png"
 apexmail_wins = 14
 competitor_wins = 3

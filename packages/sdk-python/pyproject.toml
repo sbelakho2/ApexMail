@@ -51,7 +51,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://apexmail.ee"
-Documentation = "https://docs.apexmail.ee/sdks/python"
+Documentation = "https://apexmail.ee/docs/sdks"
 Repository = "https://github.com/Bel-Consulting-OU/ApexMail"
 Changelog = "https://github.com/Bel-Consulting-OU/ApexMail/blob/main/packages/sdk-python/CHANGELOG.md"
 

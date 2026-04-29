@@ -12,6 +12,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -336,7 +337,7 @@ public final class ApexMailClient implements AutoCloseable {
     }
 
     private static void ensureResponseWithinLimit(String responseBody) {
-        if (responseBody != null && responseBody.length() > DEFAULT_MAX_RESPONSE_BYTES) {
+        if (responseBody != null && responseBody.getBytes(StandardCharsets.UTF_8).length > DEFAULT_MAX_RESPONSE_BYTES) {
             throw new ApexMailException("Response body exceeds max size limit", "response_too_large", 0);
         }
     }

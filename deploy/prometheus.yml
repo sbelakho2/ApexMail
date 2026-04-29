@@ -15,6 +15,13 @@ rule_files:
 # targets that actually provision those services.
 
 scrape_configs:
+  # API server metrics
+  - job_name: 'apexmail-api'
+    static_configs:
+      - targets: ['api:9090']
+    # The API server exposes Prometheus metrics on a dedicated recorder port.
+    scrape_interval: 15s
+
   # Tracking service metrics
   - job_name: 'apexmail-tracking'
     static_configs:

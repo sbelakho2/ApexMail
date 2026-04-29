@@ -138,9 +138,8 @@ ALTER TABLE template_versions ADD COLUMN IF NOT EXISTS variables TEXT[];
 -- EVENTS — Add missing columns, rename for consistency
 -- =============================================================================
 
--- Events table: repo uses 'type' not 'event_type', 'message_data' not 'raw_data'
-ALTER TABLE events RENAME COLUMN event_type TO type;
-ALTER TABLE events RENAME COLUMN raw_data TO message_data;
+-- Events table: preserve the live application contract (`event_type`, `raw_data`)
+-- and only add the missing metadata columns required by newer services.
 
 -- Add missing columns
 ALTER TABLE events ADD COLUMN IF NOT EXISTS domain VARCHAR(255);

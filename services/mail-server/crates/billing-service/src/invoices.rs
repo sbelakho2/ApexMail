@@ -54,6 +54,7 @@ static S3_PUBLIC_URL: LazyLock<Option<String>> = LazyLock::new(|| {
 // ---------------------------------------------------------------------------
 
 const ESTONIA_VAT_RATE: i32 = 22;
+const INVOICE_LINE_ITEMS_SCHEMA_VERSION: u32 = 1;
 
 static EU_COUNTRIES: LazyLock<HashSet<String>> = LazyLock::new(|| {
     let default = vec![
@@ -186,7 +187,7 @@ pub async fn create_invoice(
     });
     let currency = input.currency.unwrap_or_else(|| "eur".into());
     let id = Uuid::new_v4();
-    let items_json = serde_json::to_value(&line_items)?;
+    let items_json = encode_invoice_line_items(&line_items)?;
 
     sqlx::query(
         r#"
@@ -410,6 +411,31 @@ struct InvoiceRow {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredInvoiceLineItems {
+    schema_version: u32,
+    items: Vec<InvoiceLineItem>,
+}
+
+fn encode_invoice_line_items(
+    line_items: &[InvoiceLineItem],
+) -> Result<serde_json::Value, InvoiceError> {
+    serde_json::to_value(StoredInvoiceLineItems {
+        schema_version: INVOICE_LINE_ITEMS_SCHEMA_VERSION,
+        items: line_items.to_vec(),
+    })
+    .map_err(InvoiceError::from)
+}
+
+fn decode_invoice_line_items(value: serde_json::Value) -> Vec<InvoiceLineItem> {
+    if let Ok(versioned) = serde_json::from_value::<StoredInvoiceLineItems>(value.clone()) {
+        return versioned.items;
+    }
+
+    serde_json::from_value(value).unwrap_or_default()
+}
+
 impl InvoiceRow {
     fn into_invoice(self) -> Invoice {
         let status = match self.status.as_str() {
@@ -420,10 +446,7 @@ impl InvoiceRow {
             _ => InvoiceStatus::Draft,
         };
 
-        let line_items: Vec<InvoiceLineItem> = self
-            .line_items
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
+        let line_items = self.line_items.map(decode_invoice_line_items).unwrap_or_default();
 
         Invoice {
             id: self.id,
@@ -693,6 +716,51 @@ mod tests {
         };
         let inv = row.into_invoice();
         assert_eq!(inv.status, InvoiceStatus::Paid);
+    }
+
+    #[test]
+    fn invoice_row_decodes_legacy_line_items_array() {
+        let line_items = vec![InvoiceLineItem {
+            description: "Monthly plan".into(),
+            quantity: 1,
+            unit_price: 1000,
+            amount: 1000,
+            vat_rate: 22,
+            vat_amount: 220,
+        }];
+
+        let decoded = decode_invoice_line_items(serde_json::to_value(&line_items).unwrap());
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].description, "Monthly plan");
+        assert_eq!(decoded[0].amount, 1000);
+    }
+
+    #[test]
+    fn invoice_row_decodes_versioned_line_items_wrapper() {
+        let encoded = encode_invoice_line_items(&[InvoiceLineItem {
+            description: "Extra seats".into(),
+            quantity: 2,
+            unit_price: 500,
+            amount: 1000,
+            vat_rate: 0,
+            vat_amount: 0,
+        }])
+        .expect("versioned invoice line items should serialize");
+
+        let decoded = decode_invoice_line_items(encoded);
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].description, "Extra seats");
+        assert_eq!(decoded[0].quantity, 2);
+    }
+
+    #[test]
+    fn encode_invoice_line_items_includes_schema_version() {
+        let encoded = encode_invoice_line_items(&[]).expect("empty invoice line items should serialize");
+
+        assert_eq!(encoded["schemaVersion"], serde_json::json!(INVOICE_LINE_ITEMS_SCHEMA_VERSION));
+        assert_eq!(encoded["items"], serde_json::json!([]));
     }
 
     #[test]

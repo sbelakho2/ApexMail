@@ -22,7 +22,7 @@ We chose **PostgreSQL 15+** as the primary database with the following architect
 ### Primary Database (PostgreSQL)
 - OLTP workloads: messages, recipients, campaigns, users
 - System-versioned temporal tables for audit history
-- Connection pooling via PgBouncer (transaction mode)
+- Connection pooling via Rust-managed `deadpool-postgres` pools with per-service limits
 - Native partitioning for event logs
 
 ### Analytics Layer (ClickHouse)
@@ -56,7 +56,7 @@ Total: 100 max connections to PostgreSQL
 - Need separate OLAP solution for heavy analytics
 
 ### Risks Mitigated
-- Connection exhaustion: PgBouncer with strict limits
+- Connection exhaustion: Rust-managed `deadpool-postgres` pools with strict per-service limits
 - Schema drift: Startup fingerprint validation
 - Data loss: WAL archiving + continuous PITR
 

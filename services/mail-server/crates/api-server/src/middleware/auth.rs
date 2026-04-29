@@ -14,7 +14,10 @@ use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
-use crate::routes::{csrf::validate_csrf_token, helpers::extract_cookie};
+use crate::routes::{
+    csrf::validate_csrf_token,
+    helpers::{extract_cookie, token_blacklist_key},
+};
 use crate::state::AppState;
 
 // ─── AuthUser ──────────────────────────────────────────────────
@@ -44,7 +47,6 @@ pub struct JwtClaims {
 
 // Revoked API keys will be invalid within 10 seconds instead of 60
 const API_KEY_CACHE_TTL: u64 = 10; // seconds
-const TOKEN_BLACKLIST_PREFIX: &str = "apexmail:token_blacklist:";
 const API_KEY_CACHE_PREFIX: &str = "apexmail:api_key_cache:";
 const USER_STATUS_CACHE_TTL: u64 = 15; // seconds
 const USER_STATUS_CACHE_PREFIX: &str = "apexmail:user_status:";
@@ -119,6 +121,10 @@ pub(crate) fn validate_session_csrf(headers: &HeaderMap, csrf_secret: &str) -> R
     validate_csrf_token(header_token, csrf_secret)
 }
 
+fn is_control_plane_static_key_request(path: &str, on_control_plane_host: bool) -> bool {
+    on_control_plane_host && path.starts_with("/v1/admin/")
+}
+
 // ─── Extractor ─────────────────────────────────────────────────
 
 #[axum::async_trait]
@@ -130,6 +136,11 @@ impl FromRequestParts<AppState> for AuthUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok());
+        let on_control_plane_host = host.is_some()
+            && matches!(state.config.ui_surface_for_host(host), Some("control-plane"));
         let Some((mechanism, credential)) = extract_auth_credential(headers) else {
             return Err(ApiError::Unauthorized(
                 "missing authentication: provide X-API-Key, Authorization: Bearer <token>, or an am_session cookie".into(),
@@ -141,7 +152,15 @@ impl FromRequestParts<AppState> for AuthUser {
         }
 
         match mechanism {
-            AuthMechanism::ApiKey => authenticate_api_key(&credential, state).await,
+            AuthMechanism::ApiKey => {
+                authenticate_api_key(
+                    &credential,
+                    parts.uri.path(),
+                    on_control_plane_host,
+                    state,
+                )
+                .await
+            }
             AuthMechanism::BearerToken | AuthMechanism::SessionCookie => {
                 authenticate_jwt(&credential, state).await
             }
@@ -151,10 +170,24 @@ impl FromRequestParts<AppState> for AuthUser {
 
 // ─── API Key authentication ────────────────────────────────────
 
-async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, ApiError> {
+async fn authenticate_api_key(
+    key: &str,
+    request_path: &str,
+    on_control_plane_host: bool,
+    state: &AppState,
+) -> Result<AuthUser, ApiError> {
 // ── Control-plane static key (no DB lookup) ────────────
     if let Some(ref cp_key) = state.config.control_plane_api_key {
         if apexmail_lib::timing_safe_compare(cp_key, key) {
+            if !is_control_plane_static_key_request(request_path, on_control_plane_host) {
+                tracing::warn!(
+                    path = %request_path,
+                    control_plane_host = on_control_plane_host,
+                    "rejected control-plane static API key outside control-plane admin surface"
+                );
+                return Err(ApiError::Unauthorized("invalid API key".into()));
+            }
+
             tracing::debug!("authenticated via control-plane static API key");
             return Ok(AuthUser {
                 tenant_id: "system".into(), // sentinel:system-level admin
@@ -472,9 +505,7 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
 
 /// Check if a JWT has been blacklisted (revoked).
 async fn is_token_blacklisted(token: &str, state: &AppState) -> Result<bool, ApiError> {
-    use sha2::{Sha256, Digest};
-    let hash = hex::encode(Sha256::digest(token.as_bytes()));
-    let key = format!("{TOKEN_BLACKLIST_PREFIX}{hash}");
+    let key = token_blacklist_key(token);
     let mut conn = state.redis.get().await.map_err(|e| {
         tracing::error!(error = %e, "Redis unavailable for token blacklist check");
         ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
@@ -611,6 +642,19 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_auth_credential_ignores_bearer_like_cookie_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            "authorization=Bearer%20jwt.123; access_token=jwt.123; other=1"
+                .parse()
+                .unwrap(),
+        );
+
+        assert_eq!(extract_auth_credential(&headers), None);
+    }
+
+    #[test]
     fn test_validate_session_csrf_requires_matching_cookie_and_header() {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
@@ -645,6 +689,14 @@ mod tests {
             validate_session_csrf(&headers, secret),
             Err(ApiError::Forbidden(message)) if message == "CSRF token mismatch"
         ));
+    }
+
+    #[test]
+    fn test_control_plane_static_key_request_requires_admin_path_and_control_plane_host() {
+        assert!(is_control_plane_static_key_request("/v1/admin/tenants", true));
+        assert!(!is_control_plane_static_key_request("/v1/messages", true));
+        assert!(!is_control_plane_static_key_request("/v1/admin/tenants", false));
+        assert!(!is_control_plane_static_key_request("/api/auth/login", true));
     }
 
 // ── RBAC Security Regression Tests ─────────────────────────

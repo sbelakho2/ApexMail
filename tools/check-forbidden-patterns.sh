@@ -14,8 +14,40 @@ red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
 check() {
   local label="$1" pattern="$2" path="$3" opts="${4:-}"
-  # shellcheck disable=SC2086
-  if matches=$(grep -rn $opts "$pattern" --include='*.rs' "$path" 2>/dev/null | grep -v '#\[cfg(test' | grep -v 'tests/' | grep -v '/// '); then
+  local matches
+  local -a opts_array=()
+  local -a grep_args=(-Hn)
+  local -a search_roots=()
+  local -a files=()
+
+  if [[ -n "$opts" ]]; then
+    read -r -a opts_array <<< "$opts"
+    grep_args+=("${opts_array[@]}")
+  fi
+
+  shopt -s nullglob
+  for root in $path; do
+    search_roots+=("$root")
+  done
+  shopt -u nullglob
+
+  if [[ ${#search_roots[@]} -eq 0 ]]; then
+    green "PASS: $label"
+    return
+  fi
+
+  while IFS= read -r -d '' file; do
+    files+=("$file")
+  done < <(find "${search_roots[@]}" -type f -name '*.rs' -print0 2>/dev/null)
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    green "PASS: $label"
+    return
+  fi
+
+  grep_args+=(-- "$pattern")
+
+  if matches=$(grep "${grep_args[@]}" "${files[@]}" 2>/dev/null | grep -v '#\[cfg(test' | grep -v 'tests/' | grep -v '/// '); then
     count=$(echo "$matches" | wc -l)
     red "FAIL: $label ($count matches)"
     echo "$matches" | head -5

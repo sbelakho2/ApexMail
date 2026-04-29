@@ -217,6 +217,19 @@ $client->webhooks->delete('wh_1');
 expect('webhooks.delete() DELETE /v1/webhooks/{id}',
     $client->calls[0]['method'] === 'DELETE' && $client->calls[0]['path'] === '/v1/webhooks/wh_1');
 
+echo "\nRate limiting\n";
+
+$rateLimitException = new \ApexMail\Exceptions\RateLimitException(
+    'Too many requests',
+    429,
+    'rate_limit',
+    ['limit' => 100, 'remaining' => 0, 'reset' => 1_900_000_000, 'retryAfter' => '60']
+);
+expect('RateLimitException exposes limit', $rateLimitException->getLimit() === 100);
+expect('RateLimitException exposes remaining', $rateLimitException->getRemaining() === 0);
+expect('RateLimitException exposes reset', $rateLimitException->getReset() === 1_900_000_000);
+expect('RateLimitException exposes retryAfter', $rateLimitException->getRetryAfter() === '60');
+
 // ── Template resource tests ───────────────────────────────────────────────
 
 echo "\nTemplates\n";
@@ -296,8 +309,8 @@ expect('suppressions.list() has reason param', str_contains($client->calls[0]['p
 $client = new MockClient();
 $client->queueResponse(['suppressed' => true, 'reason' => 'bounce']);
 $resp = $client->suppressions->check('bad@example.com');
-expect('suppressions.check() GET /v1/suppressions/check?email=...',
-    $client->calls[0]['method'] === 'GET' && str_contains($client->calls[0]['path'], '/v1/suppressions/check'));
+expect('suppressions.check() GET /v1/suppressions/check/{email}',
+    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/suppressions/check/bad%40example.com');
 expect('suppressions.check() returns suppressed', $resp['suppressed'] === true);
 
 $client = new MockClient();
@@ -338,7 +351,7 @@ echo "\nError handling\n";
 $client = new MockClient();
 $client->queueException(new \ApexMail\Exceptions\AuthenticationException('Invalid API key', 401));
 try {
-    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi']);
+    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi', 'text' => 'Hi']);
     assert_fail('401 throws AuthenticationException', 'no exception thrown');
 } catch (\ApexMail\Exceptions\AuthenticationException $e) {
     expect('401 throws AuthenticationException', true);
@@ -357,7 +370,7 @@ try {
 $client = new MockClient();
 $client->queueException(new \ApexMail\Exceptions\RateLimitException('Rate limit exceeded', 429));
 try {
-    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi']);
+    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi', 'text' => 'Hi']);
     assert_fail('429 throws RateLimitException', 'no exception thrown');
 } catch (\ApexMail\Exceptions\RateLimitException $e) {
     expect('429 throws RateLimitException', true);
@@ -366,7 +379,7 @@ try {
 $client = new MockClient();
 $client->queueException(new \ApexMail\Exceptions\ValidationException('Invalid params', 422));
 try {
-    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi']);
+    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi', 'text' => 'Hi']);
     assert_fail('422 throws ValidationException', 'no exception thrown');
 } catch (\ApexMail\Exceptions\ValidationException $e) {
     expect('422 throws ValidationException', true);
@@ -376,7 +389,7 @@ try {
 $client = new MockClient();
 $client->queueException(new \ApexMail\Exceptions\NetworkException('Connection timed out', 0));
 try {
-    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi']);
+    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi', 'text' => 'Hi']);
     assert_fail('NetworkException on transport failure', 'no exception thrown');
 } catch (\ApexMail\Exceptions\NetworkException $e) {
     expect('NetworkException raised on transport failure', true);

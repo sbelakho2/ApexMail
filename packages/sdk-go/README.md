@@ -152,7 +152,7 @@ client := apexmail.New("am_live_xxxx",
 
 ## Documentation
 
-Full documentation is available at [https://docs.apexmail.ee](https://docs.apexmail.ee).
+Full documentation is available at [https://apexmail.ee/docs](https://apexmail.ee/docs).
 
 ## License
 

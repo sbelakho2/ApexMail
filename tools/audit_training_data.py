@@ -5,7 +5,10 @@ Comprehensive audit of AI training data against canonical pricing from plans.ts
 
 import json
 import re
+import sys
 from collections import defaultdict
+
+from common_paths import data_path
 
 # Canonical limits from plans.ts
 CANONICAL = {
@@ -29,9 +32,9 @@ def audit_training_data():
     issues = []
     plan_counts = defaultdict(int)
     
-    filepath = '/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl'
+    filepath = str(data_path("train_agent.jsonl"))
     
-    with open(filepath) as f:
+    with open(filepath, encoding='utf-8') as f:
         for i, line in enumerate(f, 1):
             try:
                 data = json.loads(line)
@@ -156,4 +159,4 @@ def audit_training_data():
     return issues
 
 if __name__ == '__main__':
-    audit_training_data()
+    raise SystemExit(1 if audit_training_data() else 0)

@@ -17,7 +17,9 @@ Strategy: Parse each line, fix in assistant text only, use context-aware replace
 """
 import json, re, sys
 
-FILEPATH = 'data/train_agent.jsonl'
+from common_paths import data_path
+
+FILEPATH = str(data_path("train_agent.jsonl"))
 
 with open(FILEPATH) as f:
     lines = f.readlines()

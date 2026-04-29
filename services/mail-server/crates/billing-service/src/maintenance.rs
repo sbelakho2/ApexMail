@@ -760,7 +760,7 @@ async fn process_scheduled_retries(
             }
             Err(error_message) => {
                 warn!(tenant_id = %row.tenant_id, error = %error_message, "scheduled Stripe retry failed");
-                let _ = sqlx::query(
+                if let Err(error) = sqlx::query(
                     r#"
                     UPDATE dunning_records
                     SET next_retry_at = NOW() + INTERVAL '1 day', updated_at = NOW()
@@ -769,7 +769,10 @@ async fn process_scheduled_retries(
                 )
                 .bind(&row.tenant_id)
                 .execute(&state.db)
-                .await;
+                .await
+                {
+                    error!(tenant_id = %row.tenant_id, error = %error, "failed to reschedule dunning retry after Stripe retry failure");
+                }
             }
         }
     }

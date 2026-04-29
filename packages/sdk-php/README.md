@@ -17,9 +17,9 @@ Use your real ApexMail API key in place of `am_live_xxxxxxxxxxxx`; the value sho
 
 require 'vendor/autoload.php';
 
-use ApexMail\ApexMail;
+use ApexMail\Client;
 
-$client = new ApexMail('am_live_xxxxxxxxxxxx');
+$client = new Client('am_live_xxxxxxxxxxxx');
 
 $response = $client->emails->send([
     'from'    => 'hello@yourdomain.com',
@@ -28,13 +28,13 @@ $response = $client->emails->send([
     'html'    => '<h1>Hello World</h1><p>Your email was sent successfully.</p>',
 ]);
 
-echo "Email sent! ID: " . $response->id . "\n";
+echo "Email sent! ID: " . $response['message']['id'] . "\n";
 ```
 
 ## Features
 
 - **PHP 8.1+**: Uses modern PHP features and strict types
-- **PSR-18 compatible**: Works with any PSR-18 HTTP client
+- **Zero framework dependency**: Uses PHP's cURL extension directly
 - **Automatic retries**: Built-in retry logic with exponential backoff
 - **Comprehensive**: Covers all ApexMail API endpoints
 
@@ -65,29 +65,29 @@ $responses = $client->emails->batch([
 
 // Get email status
 $email = $client->emails->get('email_id');
-echo $email->status; // "delivered"
+echo $email['message']['status']; // "delivered"
 
 // List emails
 $emails = $client->emails->list([
     'status' => 'delivered',
     'limit'  => 50,
 ]);
-
-// Cancel scheduled email
-$client->emails->cancel('email_id');
 ```
 
 ### Domains
 
 ```php
 // Add a domain
-$domain = $client->domains->create(['domain' => 'example.com']);
+$domain = $client->domains->create('example.com');
 
 // Verify domain DNS configuration
-$domain = $client->domains->verify($domain->id);
+$verification = $client->domains->verify('domain_id');
 
 // List domains
 $domains = $client->domains->list();
+
+// Check domain health
+$health = $client->domains->health('domain_id');
 ```
 
 ### Webhooks
@@ -109,35 +109,36 @@ $client->webhooks->delete('webhook_id');
 ## Error Handling
 
 ```php
-use ApexMail\Exception\ValidationException;
-use ApexMail\Exception\RateLimitException;
-use ApexMail\Exception\ApexMailException;
+use ApexMail\Exceptions\ValidationException;
+use ApexMail\Exceptions\RateLimitException;
+use ApexMail\Exceptions\ApexMailException;
 
 try {
     $client->emails->send($params);
 } catch (ValidationException $e) {
     echo "Validation failed: " . $e->getMessage() . "\n";
-    print_r($e->getErrors());
+    echo "HTTP status: " . $e->getStatusCode() . ", code: " . $e->getApiCode() . "\n";
 } catch (RateLimitException $e) {
-    echo "Rate limited. Retry after " . $e->getRetryAfter() . " seconds\n";
+    echo "Rate limited: " . $e->getMessage() . " (HTTP " . $e->getStatusCode() . ")\n";
 } catch (ApexMailException $e) {
-    echo "API error: " . $e->getMessage() . " (" . $e->getCode() . ")\n";
+    echo "API error: " . $e->getMessage() . " (" . $e->getApiCode() . ")\n";
 }
 ```
 
 ## Configuration
 
 ```php
-$client = new ApexMail('am_live_xxxx', [
-    'base_url'    => 'https://api.apexmail.ee',  // Custom API endpoint
-    'timeout'     => 30,                          // Request timeout in seconds
-    'max_retries' => 3,                           // Number of retries
+$client = new Client('am_live_xxxx', [
+    'baseUrl'          => 'https://api.apexmail.ee',  // Custom API endpoint
+    'timeout'          => 30,                          // Request timeout in seconds
+    'maxRetries'       => 3,                           // Number of retries
+    'maxResponseBytes' => 20 * 1024 * 1024,           // Maximum response size
 ]);
 ```
 
 ## Documentation
 
-Full documentation is available at [https://docs.apexmail.ee](https://docs.apexmail.ee).
+Full documentation is available at [https://apexmail.ee/docs](https://apexmail.ee/docs).
 
 ## License
 

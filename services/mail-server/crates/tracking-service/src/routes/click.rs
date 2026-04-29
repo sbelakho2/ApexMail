@@ -88,11 +88,14 @@ pub async fn handle_click(
             let url2 = redirect_url.clone();
             tokio::spawn(async move {
                 if let Ok(mut conn) = redis.get().await {
-                    let _ = redis::pipe()
+                    if let Err(error) = redis::pipe()
                         .hset(&link_key, &lid, &url2)
                         .expire(&link_key, 86400 * 90)
                         .query_async::<()>(&mut *conn)
-                        .await;
+                        .await
+                    {
+                        warn!(link_key = %link_key, link_id = %lid, error = %error, "Failed to cache click-tracking link metadata");
+                    }
                 }
             });
         }
@@ -142,15 +145,7 @@ async fn validate_redirect_url(
     data: Option<&crate::codec::TrackingData>,
     state: &AppState,
 ) -> Result<String, ()> {
-    let parsed = url.parse::<url::Url>().map_err(|_| ())?;
-
-    match parsed.scheme() {
-        "http" | "https" => {}
-        scheme => {
-            warn!(scheme, "Click: blocked non-http redirect");
-            return Err(());
-        }
-    }
+    let parsed = parse_allowed_redirect_url(url)?;
 
     if let Some(d) = data {
         let domain = parsed.host_str().unwrap_or("").to_owned();
@@ -166,6 +161,18 @@ async fn validate_redirect_url(
     }
 
     Ok(url.to_owned())
+}
+
+fn parse_allowed_redirect_url(url: &str) -> Result<url::Url, ()> {
+    let parsed = url.parse::<url::Url>().map_err(|_| ())?;
+
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        scheme => {
+            warn!(scheme, "Click: blocked non-http redirect");
+            Err(())
+        }
+    }
 }
 
 /// Check if `domain` is authorised for `tenant_id`.
@@ -278,4 +285,62 @@ fn csp_redirect(url: &str, status: u16) -> Response {
         .header("content-security-policy", "frame-ancestors 'none'")
         .body(axum::body::Body::empty())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::TrackingData;
+
+    #[test]
+    fn determine_redirect_url_prefers_token_original_url() {
+        let data = Some(TrackingData {
+            tenant_id: "tenant_1".into(),
+            message_id: "msg_1".into(),
+            recipient: "user@example.com".into(),
+            link_id: Some("link_1".into()),
+            original_url: Some("https://safe.example.com/path".into()),
+        });
+
+        let redirect = determine_redirect_url(
+            &data,
+            Some("https%3A%2F%2Fevil.example.com"),
+            "https://fallback.example.com",
+        );
+
+        assert_eq!(redirect, "https://safe.example.com/path");
+    }
+
+    #[test]
+    fn determine_redirect_url_decodes_query_only_once() {
+        let data = Some(TrackingData {
+            tenant_id: "tenant_1".into(),
+            message_id: "msg_1".into(),
+            recipient: "user@example.com".into(),
+            link_id: Some("link_1".into()),
+            original_url: None,
+        });
+
+        let redirect = determine_redirect_url(
+            &data,
+            Some("https%253A%252F%252Fevil.example.com%252Flanding"),
+            "https://fallback.example.com",
+        );
+
+        assert_eq!(redirect, "https%3A%2F%2Fevil.example.com%2Flanding");
+        assert!(parse_allowed_redirect_url(&redirect).is_err());
+    }
+
+    #[test]
+    fn parse_allowed_redirect_url_rejects_javascript_scheme() {
+        assert!(parse_allowed_redirect_url("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn parse_allowed_redirect_url_accepts_https_scheme() {
+        let parsed = parse_allowed_redirect_url("https://app.example.com/path").unwrap();
+
+        assert_eq!(parsed.scheme(), "https");
+        assert_eq!(parsed.host_str(), Some("app.example.com"));
+    }
 }

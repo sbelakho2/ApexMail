@@ -81,7 +81,9 @@ async fn main() -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider, ip_provider);
+    let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider, ip_provider)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to initialize DDoS protector: {e}"))?;
     let shutdown_state = state.clone();
 
 // ── Prometheus metrics recorder ─────────────────────────

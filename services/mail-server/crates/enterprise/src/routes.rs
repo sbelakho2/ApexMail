@@ -1107,36 +1107,22 @@ async fn sso_oidc_login(State(state): State<S>, Path(domain): Path<String>) -> i
     service_result(state.sso.initiate_oidc_login(&domain).await)
 }
 
-#[derive(Deserialize)]
-pub struct SessionQuery { 
-/// Deprecated:Use Authorization header instead
-    pub token: Option<String> 
-}
-
-/// Validate an SSO session
-/// #251:Now accepts token from Authorization header (preferred) or query param (deprecated)
+/// Validate an SSO session.
+/// Requires the session token in the Authorization header.
 async fn sso_validate_session(
     State(state): State<S>,
     headers: axum::http::HeaderMap,
-    Query(q): Query<SessionQuery>
 ) -> impl IntoResponse {
-// #251:Prefer token from Authorization header to avoid URL logging/Referer leaks
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string())
-        .or(q.token);
+        .map(|s| s.to_string());
     
     let token = match token {
         Some(t) => t,
-        None => return err_json(StatusCode::BAD_REQUEST, "Missing token in Authorization header or query parameter"),
+        None => return err_json(StatusCode::BAD_REQUEST, "Missing bearer token in Authorization header"),
     };
-    
-// Log warning if using deprecated query parameter
-    if headers.get(axum::http::header::AUTHORIZATION).is_none() {
-        tracing::warn!("SSO session validation using deprecated query parameter - use Authorization header");
-    }
     
     match state.sso.validate_session(&token).await {
         Ok(Some(session)) => ok_json(session),
@@ -1247,21 +1233,30 @@ struct EncryptFieldBody {
     pub value: String,
 }
 
+const ENTERPRISE_FIELD_TOOLING_PURPOSE: &str = "enterprise/routes/field-tooling";
+
+fn managed_field_encryptor(config: &Config) -> Result<crate::field_encryption::FieldEncryptor, String> {
+    crate::field_encryption::encryptor_from_secret(
+        &config.log_stream.encryption_key,
+        ENTERPRISE_FIELD_TOOLING_PURPOSE,
+    )
+    .map_err(|error| format!("server-managed encryption key unavailable: {error}"))
+}
+
 /// Encrypt a single field value (for testing/migration tooling).
 /// In production, encryption happens transparently at the data access layer.
 /// This endpoint exists for:/// - Verifying encryption is working correctly after setup.
 /// - Batch migration of existing unencrypted PHI data.
 async fn encrypt_field(
-    State(_state): State<S>,
+    State(state): State<S>,
     Json(body): Json<EncryptFieldBody>,
 ) -> impl IntoResponse {
-// In a real deployment, the KEK would be loaded from a secure key store
-// (AWS KMS, HashiCorp Vault, etc.) keyed by tenant_id. For now, we
-// demonstrate the encryption API works with a test key.
-    let kek = crate::field_encryption::Kek::generate();
-    let kek_id_hex = hex::encode(kek.id);
-    let kek_hex = hex::encode(kek.key_bytes());
-    let encryptor = crate::field_encryption::FieldEncryptor::new(vec![kek]);
+    let encryptor = match managed_field_encryptor(&state.config) {
+        Ok(encryptor) => encryptor,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": { "code": "ENCRYPTION_CONFIG_ERROR", "message": error }
+        }))).into_response(),
+    };
 
     match encryptor.encrypt(&body.value) {
         Ok(encrypted) => (StatusCode::OK, Json(serde_json::json!({
@@ -1270,9 +1265,7 @@ async fn encrypt_field(
             "encrypted": true,
             "value": encrypted,
             "is_phi": crate::field_encryption::PHI_FIELDS.contains(&body.field_name.as_str()),
-            "kek_id_hex": kek_id_hex,
-            "kek_hex": kek_hex,
-            "note": "Store the KEK material securely. You will need kek_id_hex and kek_hex to decrypt."
+            "key_reference": "server-managed"
         }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
             "error": { "code": "ENCRYPTION_FAILED", "message": format!("{e}") }
@@ -1287,25 +1280,19 @@ struct DecryptFieldBody {
     #[allow(unused)]
     pub field_name: String,
     pub value: String,
-/// Hex-encoded KEK ID (required for decryption).
-    kek_id_hex: String,
-/// Hex-encoded KEK (required for decryption). In production, this would come from a key store.
-    kek_hex: String,
 }
 
 /// Decrypt a single field value (for testing/migration tooling).
 async fn decrypt_field(
-    State(_state): State<S>,
+    State(state): State<S>,
     Json(body): Json<DecryptFieldBody>,
 ) -> impl IntoResponse {
-    let kek = match crate::field_encryption::Kek::from_hex(&body.kek_id_hex, &body.kek_hex) {
-        Ok(k) => k,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": { "code": "INVALID_KEY", "message": format!("{e}") }
+    let encryptor = match managed_field_encryptor(&state.config) {
+        Ok(encryptor) => encryptor,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": { "code": "ENCRYPTION_CONFIG_ERROR", "message": error }
         }))).into_response(),
     };
-
-    let encryptor = crate::field_encryption::FieldEncryptor::new(vec![kek]);
 
     match encryptor.decrypt(&body.value) {
         Ok(decrypted) => (StatusCode::OK, Json(serde_json::json!({

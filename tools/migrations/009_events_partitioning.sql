@@ -40,7 +40,7 @@ CREATE TABLE events (
     id VARCHAR(26) NOT NULL,
     tenant_id VARCHAR(26) NOT NULL,
     message_id VARCHAR(26),
-    type VARCHAR(50) NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
     recipient VARCHAR(255),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     user_agent TEXT,
@@ -52,7 +52,7 @@ CREATE TABLE events (
     diagnostic_code TEXT,
     complaint_type VARCHAR(50),
     complaint_user_agent TEXT,
-    message_data JSONB,
+    raw_data JSONB,
     deduplication_key VARCHAR(255),
     processed_at TIMESTAMPTZ,
     metadata JSONB,
@@ -77,12 +77,12 @@ DROP INDEX IF EXISTS idx_events_tenant_type_timestamp;
 -- (These will be automatically created on each partition)
 CREATE INDEX idx_events_tenant ON events(tenant_id);
 CREATE INDEX idx_events_message ON events(message_id);
-CREATE INDEX idx_events_type ON events(type);
+CREATE INDEX idx_events_type ON events(event_type);
 CREATE INDEX idx_events_timestamp ON events(timestamp);
 CREATE INDEX idx_events_recipient ON events(recipient);
 CREATE INDEX idx_events_dedup ON events(deduplication_key) WHERE deduplication_key IS NOT NULL;
 CREATE INDEX idx_events_tenant_timestamp ON events(tenant_id, timestamp);
-CREATE INDEX idx_events_tenant_type_timestamp ON events(tenant_id, type, timestamp);
+CREATE INDEX idx_events_tenant_type_timestamp ON events(tenant_id, event_type, timestamp);
 
 -- Step 5: Create monthly partitions (2024-01 through 2027-12)
 -- Using a DO block to generate them programmatically
@@ -120,7 +120,56 @@ CREATE TABLE events_default PARTITION OF events DEFAULT;
 
 -- Step 7: Migrate existing data from the old table
 -- This INSERT will route each row to the correct partition based on timestamp
-INSERT INTO events SELECT * FROM events_old;
+INSERT INTO events (
+    id,
+    tenant_id,
+    message_id,
+    event_type,
+    recipient,
+    timestamp,
+    user_agent,
+    ip_address,
+    link_id,
+    link_url,
+    bounce_type,
+    bounce_subtype,
+    diagnostic_code,
+    complaint_type,
+    complaint_user_agent,
+    raw_data,
+    deduplication_key,
+    processed_at,
+    metadata,
+    domain,
+    provider,
+    provider_message_id,
+    feedback_id
+)
+SELECT
+    id,
+    tenant_id,
+    message_id,
+    event_type,
+    recipient,
+    timestamp,
+    user_agent,
+    ip_address,
+    link_id,
+    link_url,
+    bounce_type,
+    bounce_subtype,
+    diagnostic_code,
+    complaint_type,
+    complaint_user_agent,
+    raw_data,
+    deduplication_key,
+    processed_at,
+    metadata,
+    domain,
+    provider,
+    provider_message_id,
+    feedback_id
+FROM events_old;
 
 DO $$
 DECLARE

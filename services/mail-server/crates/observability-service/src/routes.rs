@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{DefaultBodyLimit, Query, State},
-    http::{header::AUTHORIZATION, Method, StatusCode},
+    http::{header::AUTHORIZATION, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::get,
@@ -49,6 +49,7 @@ impl AppState {
         logs: Arc<LogAggregator>,
         alerts: Arc<AlertManager>,
         slos: Arc<SloMonitor>,
+        service_token: String,
     ) -> Self {
         Self {
             metrics,
@@ -56,7 +57,7 @@ impl AppState {
             logs,
             alerts,
             slos,
-            service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
+            service_token,
         }
     }
 }
@@ -69,6 +70,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/health/details", get(health_details))
         .route("/metrics/summary", get(metrics_summary))
         .route("/traces", get(traces_list))
         .route("/logs", get(logs_query))
@@ -89,9 +91,7 @@ async fn require_service_token(
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if req.uri().path() == "/health"
-        || (req.method() == Method::POST && req.uri().path() == "/alerts")
-    {
+    if req.uri().path() == "/health" {
         return Ok(next.run(req).await);
     }
     if state.service_token.is_empty() {
@@ -128,11 +128,13 @@ struct LogsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AlertmanagerWebhook {
     alerts: Vec<AlertmanagerAlert>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AlertmanagerAlert {
     status: String,
     #[serde(default)]
@@ -152,6 +154,11 @@ struct AlertmanagerAlert {
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DetailedHealthResponse {
     status: String,
     uptime_secs: u64,
     metrics_count: usize,
@@ -218,8 +225,14 @@ async fn slos_list(
     Json(results)
 }
 
-async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
+        status: "ok".to_string(),
+    })
+}
+
+async fn health_details(State(state): State<AppState>) -> Json<DetailedHealthResponse> {
+    Json(DetailedHealthResponse {
         status: "ok".to_string(),
         uptime_secs: state.metrics.uptime_secs(),
         metrics_count: state.metrics.get_summary().len(),
@@ -331,15 +344,14 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
 
     fn test_state() -> AppState {
-        let mut state = AppState::new(
+        AppState::new(
             Arc::new(MetricsCollector::new(vec![0.1, 0.5, 1.0])),
             Arc::new(TraceCollector::new()),
             Arc::new(LogAggregator::new()),
             Arc::new(AlertManager::new()),
             Arc::new(SloMonitor::new()),
-        );
-        state.service_token = "test-token".to_string();
-        state
+            "test-token".to_string(),
+        )
     }
 
     #[tokio::test]
@@ -347,6 +359,38 @@ mod tests {
         let app = router(test_state());
         let req = Request::builder()
             .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert!(json.get("uptime_secs").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_health_details_endpoint_requires_service_token() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .uri("/health/details")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_health_details_endpoint() {
+        let app = router(test_state());
+        let req = Request::builder()
+            .uri("/health/details")
+            .header("x-api-key", "test-token")
             .body(Body::empty())
             .unwrap();
 
@@ -432,6 +476,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/alerts")
+            .header("x-api-key", "test-token")
             .header("content-type", "application/json")
             .body(Body::from(payload.to_string()))
             .unwrap();
@@ -455,5 +500,55 @@ mod tests {
         assert_eq!(json.len(), 1);
         assert_eq!(json[0]["rule_name"], "TrackingServiceDown");
         assert_eq!(json[0]["severity"], "critical");
+    }
+
+    #[tokio::test]
+    async fn test_alertmanager_webhook_requires_service_token() {
+        let app = router(test_state());
+        let payload = json!({
+            "alerts": [
+                {
+                    "status": "firing",
+                    "labels": { "alertname": "UnauthorizedAlert" },
+                    "annotations": { "summary": "Unauthorized" }
+                }
+            ]
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/alerts")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_alertmanager_webhook_rejects_unknown_fields() {
+        let app = router(test_state());
+        let payload = json!({
+            "alerts": [
+                {
+                    "status": "firing",
+                    "labels": { "alertname": "SchemaAlert" },
+                    "annotations": { "summary": "Schema validation" },
+                    "unexpected": "value"
+                }
+            ]
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/alerts")
+            .header("x-api-key", "test-token")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

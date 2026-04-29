@@ -56,7 +56,7 @@ puts "\nEmails"
 t = FakeTransport.new
 t.queue_response({ 'message' => { 'id' => 'msg_123', 'status' => 'queued' } })
 api = ApexMail::EmailsAPI.new(t)
-resp = api.send(from: 'a@b.com', to: 'x@y.com', subject: 'Hi', html: '<p>Hi</p>')
+resp = api.send_email(from: 'a@b.com', to: 'x@y.com', subject: 'Hi', html: '<p>Hi</p>')
 expect('send() POST /v1/messages',  t.calls[0][:method] == 'POST' && t.calls[0][:path] == '/v1/messages')
 expect('send() returns message id', resp.dig('message', 'id') == 'msg_123')
 expect('send() body has from key',  t.calls[0][:body].key?(:from))
@@ -65,7 +65,7 @@ expect('send() body has subject',   t.calls[0][:body][:subject] == 'Hi')
 t = FakeTransport.new
 t.queue_response({ 'message' => { 'id' => 'msg_456' } })
 api = ApexMail::EmailsAPI.new(t)
-api.send(from: 'a@b.com', to: 'x@y.com', subject: 'Hi', idempotency_key: 'ik-001')
+api.send_email(from: 'a@b.com', to: 'x@y.com', subject: 'Hi', html: '<p>Hi</p>', idempotency_key: 'ik-001')
 expect('send() forwards idempotency_key', t.calls[0][:idempotency_key] == 'ik-001')
 
 t = FakeTransport.new
@@ -73,8 +73,8 @@ t.queue_response({ 'results' => [{ 'index' => 0, 'success' => true }, { 'index' 
                    'summary' => { 'total' => 2, 'success' => 2, 'failed' => 0 } })
 api = ApexMail::EmailsAPI.new(t)
 resp = api.batch(messages: [
-  { from: 'a@b.com', to: 'x@y.com', subject: 'msg1' },
-  { from: 'a@b.com', to: 'p@q.com', subject: 'msg2' },
+  { from: 'a@b.com', to: 'x@y.com', subject: 'msg1', text: 'msg1' },
+  { from: 'a@b.com', to: 'p@q.com', subject: 'msg2', text: 'msg2' },
 ])
 expect('batch() POST /v1/messages/batch', t.calls[0][:path] == '/v1/messages/batch')
 expect('batch() sends 2 items',           t.calls[0][:body][:messages].length == 2)
@@ -256,7 +256,7 @@ t = FakeTransport.new
 t.queue_response({ 'suppressed' => true, 'reason' => 'bounce' })
 api = ApexMail::SuppressionsAPI.new(t)
 resp = api.check('bad@example.com')
-expect('check() GET /v1/suppressions/{email}', t.calls[0][:method] == 'GET' && t.calls[0][:path].include?('bad'))
+expect('check() GET /v1/suppressions/check/{email}', t.calls[0][:method] == 'GET' && t.calls[0][:path] == '/v1/suppressions/check/bad%40example.com')
 expect('check() returns suppressed field',     resp.key?('suppressed'))
 
 t = FakeTransport.new
@@ -298,7 +298,7 @@ t = FakeTransport.new
 t.queue_error(ApexMail::AuthenticationError.new('Invalid API key', status_code: 401))
 api = ApexMail::EmailsAPI.new(t)
 begin
-  api.send(from: 'a@b.com', to: 'x@y.com', subject: 'Hi')
+  api.send_email(from: 'a@b.com', to: 'x@y.com', subject: 'Hi', html: '<p>Hi</p>')
   assert_fail('401 raises AuthenticationError', 'no exception raised')
 rescue ApexMail::AuthenticationError => e
   expect('401 raises AuthenticationError', true)
@@ -319,7 +319,7 @@ t = FakeTransport.new
 t.queue_error(ApexMail::RateLimitError.new('Rate limit exceeded', status_code: 429))
 api = ApexMail::EmailsAPI.new(t)
 begin
-  api.send(from: 'a@b.com', to: 'x@y.com', subject: 'Hi')
+  api.send_email(from: 'a@b.com', to: 'x@y.com', subject: 'Hi', html: '<p>Hi</p>')
   assert_fail('429 raises RateLimitError', 'no exception raised')
 rescue ApexMail::RateLimitError => e
   expect('429 raises RateLimitError', true)
@@ -329,7 +329,7 @@ t = FakeTransport.new
 t.queue_error(ApexMail::ValidationError.new('Invalid params', status_code: 422))
 api = ApexMail::EmailsAPI.new(t)
 begin
-  api.send(from: 'a@b.com', to: 'x@y.com', subject: 'Hi')
+  api.send_email(from: 'a@b.com', to: 'x@y.com', subject: 'Hi', html: '<p>Hi</p>')
   assert_fail('422 raises ValidationError', 'no exception raised')
 rescue ApexMail::ValidationError => e
   expect('422 raises ValidationError', true)
@@ -340,7 +340,7 @@ t = FakeTransport.new
 t.queue_error(ApexMail::NetworkError.new('Connection refused'))
 api = ApexMail::EmailsAPI.new(t)
 begin
-  api.send(from: 'a@b.com', to: 'x@y.com', subject: 'Hi')
+  api.send_email(from: 'a@b.com', to: 'x@y.com', subject: 'Hi', html: '<p>Hi</p>')
   assert_fail('NetworkError raised on transport failure', 'no exception raised')
 rescue ApexMail::NetworkError => e
   expect('NetworkError raised on transport failure', true)
@@ -351,7 +351,7 @@ end
 
 puts "\nClient integration"
 
-client = ApexMail::Client.new('test_key')
+client = ApexMail::Client.new('am_test_0123456789abcdef')
 expect('Client has emails API',       client.emails.is_a?(ApexMail::EmailsAPI))
 expect('Client has domains API',      client.domains.is_a?(ApexMail::DomainsAPI))
 expect('Client has webhooks API',     client.webhooks.is_a?(ApexMail::WebhooksAPI))

@@ -13,14 +13,24 @@
 //! ## Setup
 //!
 //! In AWS SES → Configuration Set → Event destinations → add SNS topic.
-//! In SNS → Subscription → HTTPS → `https://api.apexmail.io/v1/ses/notifications`.
+//! In SNS → Subscription → HTTPS → `https://api.apexmail.ee/v1/ses/notifications`.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use rsa::RsaPublicKey;
+use rsa::pkcs1::DecodeRsaPublicKey;
+use rsa::pkcs1v15::{Signature as RsaSignature, VerifyingKey};
+use rsa::signature::Verifier;
 use serde::Deserialize;
+use sha1::Sha1;
+use sha2::Sha256;
 use tracing::{debug, error, info, warn};
+use x509_parser::certificate::X509Certificate;
+use x509_parser::pem::parse_x509_pem;
+use x509_parser::prelude::FromDer;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -46,6 +56,13 @@ struct SnsMessage {
     message: Option<String>,
 /// SNS message ID.
     message_id: Option<String>,
+    subject: Option<String>,
+    timestamp: Option<String>,
+    token: Option<String>,
+    signature: Option<String>,
+    signature_version: Option<String>,
+    #[serde(alias = "SigningCertURL")]
+    signing_cert_url: Option<String>,
 /// Topic ARN for validation.
     topic_arn: Option<String>,
 }
@@ -148,22 +165,8 @@ async fn handle_sns_notification(
         ApiError::Validation(vec![format!("Invalid SNS message: {e}")])
     })?;
 
-// ── Topic ARN validation ────────────────────────────────
-// Only process messages from configured SNS topic ARNs.
     let allowed_arns_raw = std::env::var("SNS_ALLOWED_TOPIC_ARNS").unwrap_or_default();
-    let allowed_arns: Vec<&str> = allowed_arns_raw
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if !allowed_arns.is_empty() {
-        let msg_arn = sns_msg.topic_arn.as_deref().unwrap_or("");
-        if !allowed_arns.contains(&msg_arn) {
-            warn!(topic_arn = %msg_arn, "Rejected SNS message from unknown topic ARN");
-            return Err(ApiError::Validation(vec!["Unknown SNS topic ARN".into()]));
-        }
-    }
+    validate_sns_message(&state.http_client, &sns_msg, &allowed_arns_raw).await?;
 
     match sns_msg.message_type.as_str() {
         "SubscriptionConfirmation" => {
@@ -222,6 +225,194 @@ async fn handle_subscription_confirmation(
 
     info!(topic = ?msg.topic_arn, "SNS subscription confirmed");
     Ok(StatusCode::OK)
+}
+
+async fn validate_sns_message(
+    http_client: &reqwest::Client,
+    msg: &SnsMessage,
+    allowed_arns_raw: &str,
+) -> Result<(), ApiError> {
+    validate_sns_topic_arn(msg, allowed_arns_raw)?;
+    validate_sns_signature(http_client, msg).await
+}
+
+fn validate_sns_topic_arn(msg: &SnsMessage, allowed_arns_raw: &str) -> Result<(), ApiError> {
+    let allowed_arns: Vec<&str> = allowed_arns_raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if allowed_arns.is_empty() {
+        warn!("SNS_ALLOWED_TOPIC_ARNS is not configured; rejecting SNS request");
+        return Err(ApiError::ServiceUnavailable(
+            "SNS notifications are not configured".into(),
+        ));
+    }
+
+    let msg_arn = msg.topic_arn.as_deref().unwrap_or("");
+    if !allowed_arns.iter().any(|arn| *arn == msg_arn) {
+        warn!(topic_arn = %msg_arn, "Rejected SNS message from unknown topic ARN");
+        return Err(ApiError::Forbidden("Unknown SNS topic ARN".into()));
+    }
+
+    Ok(())
+}
+
+async fn validate_sns_signature(
+    http_client: &reqwest::Client,
+    msg: &SnsMessage,
+) -> Result<(), ApiError> {
+    let cert_url = msg.signing_cert_url.as_deref().ok_or_else(|| {
+        ApiError::Validation(vec!["Missing SigningCertURL in SNS message".into()])
+    })?;
+    validate_signing_cert_url(cert_url)?;
+
+    let public_key = fetch_sns_signing_key(http_client, cert_url).await?;
+    verify_sns_signature_with_key(msg, &public_key)
+}
+
+fn validate_signing_cert_url(cert_url: &str) -> Result<(), ApiError> {
+    let parsed = url::Url::parse(cert_url).map_err(|_| {
+        ApiError::Validation(vec!["Invalid SigningCertURL in SNS message".into()])
+    })?;
+
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    let path = parsed.path();
+    let is_allowed_host = (host == "sns.amazonaws.com"
+        || host.starts_with("sns."))
+        && (host.ends_with(".amazonaws.com") || host.ends_with(".amazonaws.com.cn"));
+    let is_allowed_path = path.starts_with("/SimpleNotificationService-") && path.ends_with(".pem");
+    let port_ok = parsed.port_or_known_default().unwrap_or(443) == 443;
+
+    if parsed.scheme() != "https" || !is_allowed_host || !is_allowed_path || !port_ok {
+        warn!(cert_url = %cert_url, "Rejected invalid SNS SigningCertURL");
+        return Err(ApiError::Validation(vec![
+            "SigningCertURL must reference an AWS SNS certificate".into(),
+        ]));
+    }
+
+    Ok(())
+}
+
+async fn fetch_sns_signing_key(
+    http_client: &reqwest::Client,
+    cert_url: &str,
+) -> Result<RsaPublicKey, ApiError> {
+    let response = http_client
+        .get(cert_url)
+        .send()
+        .await
+        .map_err(|e| {
+            error!(error = %e, cert_url = %cert_url, "Failed to fetch SNS signing certificate");
+            ApiError::ServiceUnavailable("Failed to fetch SNS signing certificate".into())
+        })?
+        .error_for_status()
+        .map_err(|e| {
+            error!(error = %e, cert_url = %cert_url, "SNS signing certificate request failed");
+            ApiError::ServiceUnavailable("Failed to fetch SNS signing certificate".into())
+        })?;
+
+    let cert_bytes = response.bytes().await.map_err(|e| {
+        error!(error = %e, cert_url = %cert_url, "Failed to read SNS signing certificate");
+        ApiError::ServiceUnavailable("Failed to fetch SNS signing certificate".into())
+    })?;
+
+    let (_, pem) = parse_x509_pem(&cert_bytes).map_err(|e| {
+        warn!(error = ?e, cert_url = %cert_url, "Invalid SNS signing certificate PEM");
+        ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
+    })?;
+    let (_, certificate) = X509Certificate::from_der(&pem.contents).map_err(|e| {
+        warn!(error = ?e, cert_url = %cert_url, "Invalid SNS signing certificate DER");
+        ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
+    })?;
+
+    RsaPublicKey::from_pkcs1_der(&certificate.public_key().subject_public_key.data).map_err(|e| {
+        warn!(error = %e, cert_url = %cert_url, "Invalid SNS signing certificate public key");
+        ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
+    })
+}
+
+fn verify_sns_signature_with_key(msg: &SnsMessage, public_key: &RsaPublicKey) -> Result<(), ApiError> {
+    let encoded_signature = msg.signature.as_deref().ok_or_else(|| {
+        ApiError::Validation(vec!["Missing Signature in SNS message".into()])
+    })?;
+    let signature = BASE64.decode(encoded_signature).map_err(|_| {
+        ApiError::Validation(vec!["Invalid SNS signature encoding".into()])
+    })?;
+    let signature = RsaSignature::try_from(signature.as_slice()).map_err(|_| {
+        ApiError::Validation(vec!["Invalid SNS signature".into()])
+    })?;
+    let string_to_sign = build_sns_string_to_sign(msg)?;
+
+    match msg.signature_version.as_deref() {
+        Some("1") => VerifyingKey::<Sha1>::new(public_key.clone())
+            .verify(string_to_sign.as_bytes(), &signature),
+        Some("2") => VerifyingKey::<Sha256>::new(public_key.clone())
+            .verify(string_to_sign.as_bytes(), &signature),
+        Some(other) => {
+            warn!(signature_version = %other, "Rejected unsupported SNS signature version");
+            return Err(ApiError::Validation(vec!["Unsupported SNS signature version".into()]));
+        }
+        None => {
+            return Err(ApiError::Validation(vec![
+                "Missing SignatureVersion in SNS message".into(),
+            ]));
+        }
+    }
+    .map_err(|_| ApiError::Forbidden("Invalid SNS signature".into()))
+}
+
+fn build_sns_string_to_sign(msg: &SnsMessage) -> Result<String, ApiError> {
+    let mut string_to_sign = String::new();
+
+    match msg.message_type.as_str() {
+        "Notification" => {
+            append_required_field(&mut string_to_sign, "Message", msg.message.as_deref())?;
+            append_required_field(&mut string_to_sign, "MessageId", msg.message_id.as_deref())?;
+            if let Some(subject) = msg.subject.as_deref() {
+                append_field(&mut string_to_sign, "Subject", subject);
+            }
+            append_required_field(&mut string_to_sign, "Timestamp", msg.timestamp.as_deref())?;
+            append_required_field(&mut string_to_sign, "TopicArn", msg.topic_arn.as_deref())?;
+            append_field(&mut string_to_sign, "Type", &msg.message_type);
+        }
+        "SubscriptionConfirmation" | "UnsubscribeConfirmation" => {
+            append_required_field(&mut string_to_sign, "Message", msg.message.as_deref())?;
+            append_required_field(&mut string_to_sign, "MessageId", msg.message_id.as_deref())?;
+            append_required_field(&mut string_to_sign, "SubscribeURL", msg.subscribe_url.as_deref())?;
+            append_required_field(&mut string_to_sign, "Timestamp", msg.timestamp.as_deref())?;
+            append_required_field(&mut string_to_sign, "Token", msg.token.as_deref())?;
+            append_required_field(&mut string_to_sign, "TopicArn", msg.topic_arn.as_deref())?;
+            append_field(&mut string_to_sign, "Type", &msg.message_type);
+        }
+        other => {
+            return Err(ApiError::Validation(vec![format!(
+                "Unsupported SNS message type: {other}"
+            )]));
+        }
+    }
+
+    Ok(string_to_sign)
+}
+
+fn append_required_field(
+    string_to_sign: &mut String,
+    name: &str,
+    value: Option<&str>,
+) -> Result<(), ApiError> {
+    let value = value.ok_or_else(|| {
+        ApiError::Validation(vec![format!("Missing {name} in SNS message")])
+    })?;
+    append_field(string_to_sign, name, value);
+    Ok(())
+}
+
+fn append_field(string_to_sign: &mut String, name: &str, value: &str) {
+    string_to_sign.push_str(name);
+    string_to_sign.push('\n');
+    string_to_sign.push_str(value);
+    string_to_sign.push('\n');
 }
 
 /// Process an SES event notification.
@@ -296,7 +487,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
 
 // Auto-suppress hard bounces
                 if is_permanent {
-                    let _ = sqlx::query(
+                    if let Err(e) = sqlx::query(
                         "INSERT INTO suppression_list (id, email, reason, source, created_at)
                          VALUES (gen_random_uuid(), $1, $2, 'ses_bounce', NOW())
                          ON CONFLICT (email) DO NOTHING",
@@ -305,9 +496,11 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     .bind(&reason)
                     .execute(&state.db)
                     .await
-                    .map_err(|e| warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress bounced address"));
-
-                    info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed hard-bounced address");
+                    {
+                        warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress bounced address");
+                    } else {
+                        info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed hard-bounced address");
+                    }
                 }
 
 // Update message status if we have the internal ID
@@ -375,7 +568,7 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                 let reason = format!("ses_complaint:{feedback_type}");
 
 // Always suppress — complaints are serious
-                let _ = sqlx::query(
+                if let Err(e) = sqlx::query(
                     "INSERT INTO suppression_list (id, email, reason, source, created_at)
                      VALUES (gen_random_uuid(), $1, $2, 'ses_complaint', NOW())
                      ON CONFLICT (email) DO NOTHING",
@@ -384,9 +577,11 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                 .bind(&reason)
                 .execute(&state.db)
                 .await
-                .map_err(|e| warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress complained address"));
-
-                info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed complained address");
+                {
+                    warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress complained address");
+                } else {
+                    info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed complained address");
+                }
 
 // Update message status
                 if let Some(ref msg_id) = apexmail_message_id {
@@ -508,6 +703,9 @@ async fn queue_webhook_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::{SignatureEncoding, Signer};
 
     #[test]
     fn test_parse_sns_subscription_confirmation() {
@@ -515,7 +713,12 @@ mod tests {
             "Type": "SubscriptionConfirmation",
             "MessageId": "test-id",
             "TopicArn": "arn:aws:sns:us-east-1:123:test",
-            "SubscribeURL": "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=abc"
+            "SubscribeURL": "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=abc",
+            "Timestamp": "2026-02-27T09:00:00Z",
+            "Token": "abc",
+            "SignatureVersion": "2",
+            "Signature": "ZmFrZQ==",
+            "SigningCertURL": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem"
         }"#;
         let msg: SnsMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.message_type, "SubscriptionConfirmation");
@@ -608,7 +811,7 @@ mod tests {
     fn test_parse_sns_notification_with_ses_event() {
         let ses_event = r#"{"eventType":"Send","mail":{"messageId":"test"}}"#;
         let sns_json = format!(
-            r#"{{"Type":"Notification","MessageId":"sns-123","Message":{}}}"#,
+            r#"{{"Type":"Notification","MessageId":"sns-123","Message":{},"Timestamp":"2026-02-27T10:00:00Z","TopicArn":"arn:aws:sns:us-east-1:123:test","SignatureVersion":"2","Signature":"ZmFrZQ==","SigningCertURL":"https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem"}}"#,
             serde_json::to_string(ses_event).unwrap()
         );
         let msg: SnsMessage = serde_json::from_str(&sns_json).unwrap();
@@ -641,5 +844,61 @@ mod tests {
             common_headers: None,
         };
         assert_eq!(extract_apexmail_header(&mail, "X-ApexMail-MessageId"), None);
+    }
+
+    #[test]
+    fn test_validate_signing_cert_url_rejects_non_aws_host() {
+        let err = validate_signing_cert_url("https://evil.example.com/SimpleNotificationService-test.pem")
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Validation(_)));
+    }
+
+    #[test]
+    fn test_validate_sns_topic_arn_requires_configuration() {
+        let msg = sample_notification_message();
+        let err = validate_sns_topic_arn(&msg, "").unwrap_err();
+        assert!(matches!(err, ApiError::ServiceUnavailable(_)));
+    }
+
+    #[test]
+    fn test_build_sns_string_to_sign_notification_includes_subject() {
+        let mut msg = sample_notification_message();
+        msg.subject = Some("ApexMail event".into());
+
+        let string_to_sign = build_sns_string_to_sign(&msg).unwrap();
+        assert!(string_to_sign.contains("Subject\nApexMail event\n"));
+        assert!(string_to_sign.ends_with("Type\nNotification\n"));
+    }
+
+    #[test]
+    fn test_verify_sns_signature_with_generated_key() {
+        let mut rng = rand::thread_rng();
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public_key = RsaPublicKey::from(&private_key);
+        let mut msg = sample_notification_message();
+        let string_to_sign = build_sns_string_to_sign(&msg).unwrap();
+        let signature = SigningKey::<Sha256>::new(private_key).sign(string_to_sign.as_bytes());
+
+        msg.signature = Some(BASE64.encode(signature.to_bytes()));
+
+        assert!(verify_sns_signature_with_key(&msg, &public_key).is_ok());
+    }
+
+    fn sample_notification_message() -> SnsMessage {
+        SnsMessage {
+            message_type: "Notification".into(),
+            subscribe_url: None,
+            message: Some("{\"eventType\":\"Send\"}".into()),
+            message_id: Some("sns-123".into()),
+            subject: None,
+            timestamp: Some("2026-02-27T10:00:00Z".into()),
+            token: None,
+            signature: Some("ZmFrZQ==".into()),
+            signature_version: Some("2".into()),
+            signing_cert_url: Some(
+                "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem".into(),
+            ),
+            topic_arn: Some("arn:aws:sns:us-east-1:123:test".into()),
+        }
     }
 }

@@ -1,6 +1,6 @@
-# Send Your First Email in 5 Minutes
+# Send Your First Test Email in Minutes
 
-Get up and running with ApexMail in just a few minutes. This guide will walk you through sending your first transactional email.
+Get up and running with ApexMail in just a few minutes. This guide walks through sending a first test email; production sending should follow after domain verification, which can take time for DNS propagation.
 
 ## Prerequisites
 
@@ -12,7 +12,9 @@ Get up and running with ApexMail in just a few minutes. This guide will walk you
 1. Log in to [ApexMail Dashboard](https://app.apexmail.ee)
 2. Navigate to **Settings** → **API Keys**
 3. Click **Create API Key**
-4. Copy your API key (starts with `am_live_` or `am_test_`)
+4. Copy your API key.
+
+Use `am_test_` keys for sandbox and smoke tests. Use `am_live_` keys only after you are ready to send against a verified production domain.
 
 > ⚠️ **Important**: Store your API key securely. It won't be shown again.
 
@@ -29,7 +31,7 @@ pip install apexmail
 
 ```bash
 curl -X POST https://api.apexmail.ee/v1/messages \
-  -H "X-API-Key: am_live_your_api_key" \
+  -H "X-API-Key: am_test_your_api_key" \
   -H "Content-Type: application/json" \
   -d '{
     "from": "hello@yourdomain.com",
@@ -47,6 +49,8 @@ curl -X POST https://api.apexmail.ee/v1/messages \
   "status": "queued"
 }
 ```
+
+For a first smoke test, prefer an `am_test_` key. Once your domain is verified and you are ready for production traffic, switch to an `am_live_` key.
 
 ## Step 4: Verify Your Domain (Recommended)
 
@@ -71,11 +75,11 @@ For better deliverability, verify your sending domain:
 
 Now that you've sent your first email, explore more features:
 
-- 📧 **[Send emails with attachments](https://docs.apexmail.ee/emails/attachments)**
-- 📝 **[Use email templates](https://docs.apexmail.ee/templates)**
-- 📊 **[Track opens and clicks](https://docs.apexmail.ee/tracking)**
-- 🔔 **[Set up webhooks](https://docs.apexmail.ee/webhooks)**
-- 📈 **[View analytics](https://docs.apexmail.ee/analytics)**
+- 📧 **[Send emails with attachments](https://apexmail.ee/docs/api)**
+- 📝 **[Use email templates](https://apexmail.ee/docs/api)**
+- 📊 **[Track opens and clicks](https://apexmail.ee/docs/analytics)**
+- 🔔 **[Set up webhooks](https://apexmail.ee/docs/webhooks)**
+- 📈 **[View analytics](https://apexmail.ee/docs/analytics)**
 
 ## Common Issues
 
@@ -89,11 +93,11 @@ Double-check that your API key starts with `am_live_` or `am_test_` and hasn't b
 
 ### "Rate limit exceeded"
 
-The free tier allows 100 requests/minute. Upgrade your plan or wait for the rate limit to reset.
+The API enforces a default tenant-wide limit of 1,000 requests/minute. Authentication and other sensitive endpoints may use stricter caps, so check the `Retry-After` header before retrying.
 
 ## Need Help?
 
-- 📚 [Full API Documentation](https://docs.apexmail.ee)
+- 📚 [Full API Documentation](https://apexmail.ee/docs)
 - 🛡️ [Login mCaptcha Protection](./security/mcaptcha-login.md)
 - 💬 [Discord Community](https://discord.gg/apexmail)
 - 📧 [Email Support](mailto:contact@apexmail.ee)

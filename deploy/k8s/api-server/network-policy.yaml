@@ -29,6 +29,9 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+    - ports:
+        - port: 443
+          protocol: TCP
     - to:
         - podSelector:
             matchLabels:

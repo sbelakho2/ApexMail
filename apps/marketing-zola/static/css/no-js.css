@@ -14,6 +14,23 @@ html { scroll-behavior: smooth; }
   html { scroll-behavior: auto; }
 }
 
+/* ── Skip Link ──────────────────────────────────────────────── */
+#skip-to-content {
+  position: absolute;
+  left: -9999px;
+  top: 1rem;
+  z-index: 60;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  background: rgb(var(--surface-50));
+  color: rgb(var(--surface-900));
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+}
+
+#skip-to-content:focus {
+  left: 1rem;
+}
+
 /* ── Header Dropdowns (CSS :focus-within) ──────────────────── */
 [data-dropdown] [data-dropdown-menu] {
   display: none;
@@ -46,13 +63,6 @@ html { scroll-behavior: smooth; }
 }
 /* Ensure close icon is hidden by default (overrides header partial) */
 #menu-icon-close { display: none; }
-
-/* ── Cookie Consent (checkbox dismiss) ──────────────────────── */
-#cookie-consent-state { display: none; }
-#cookie-consent-state:checked ~ #cookie-consent-banner,
-#cookie-consent-state:checked ~ * #cookie-consent-banner {
-  display: none;
-}
 
 /* ── FAQ Accordion (<details>/<summary>) ────────────────────── */
 details.faq-item summary {
@@ -119,4 +129,19 @@ details.faq-item[open] .faq-icon {
   color: rgb(var(--surface-500));
   text-align: center;
   padding: 0.5rem;
+}
+
+/* ── Private Cloud latency comparison ────────────────────────── */
+@keyframes grow-bar {
+  from { width: 0; }
+  to { width: var(--bar-width); }
+}
+
+.latency-bar {
+  width: var(--bar-width);
+  animation: grow-bar 1s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .latency-bar { animation: none; }
 }

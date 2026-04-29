@@ -53,7 +53,7 @@ class Suppressions
     {
         return $this->client->request(
             'GET',
-            '/v1/suppressions/check?email=' . urlencode($email)
+            '/v1/suppressions/check/' . urlencode($email)
         );
     }
 

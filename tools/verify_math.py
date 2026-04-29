@@ -3,7 +3,9 @@
 import json
 import re
 
-filepath = 'data/train_agent.jsonl'
+from common_paths import data_path
+
+filepath = str(data_path("train_agent.jsonl"))
 
 def check_overage_math(line_num, text):
     """Verify overage calculations in assistant responses."""

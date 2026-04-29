@@ -266,9 +266,10 @@ def check_dedicated_ip(ln, assistant):
     # Check IP price
     for m in re.finditer(r'dedicated\s+ip.*?\$([\d]+)(?:/mo)?', lower):
         price = int(m.group(1))
-        if price != 30 and price not in (50,):  # $50 was mentioned in old docs — flag it
-            if price == 50:
-                add_issue(ln, 'wrong_ip_price', f"Dedicated IP shown as ${price}/mo (should be $30/mo)")
+        if price == 50:
+            add_issue(ln, 'wrong_ip_price', f"Dedicated IP shown as ${price}/mo (should be $30/mo)")
+        elif price != 30:
+            add_issue(ln, 'wrong_ip_price', f"Dedicated IP shown as ${price}/mo (should be $30/mo)")
     
     # Check IP inclusion counts
     ip_patterns = [

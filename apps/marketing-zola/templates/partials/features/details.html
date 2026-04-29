@@ -26,7 +26,7 @@
             </li>
             {% endfor %}
           </ul>
-          <a href="https://docs.apexmail.ee/api" class="inline-flex items-center gap-2 text-primary-600 font-semibold hover:text-primary-700 transition-colors">
+          <a href="/docs/api" class="inline-flex items-center gap-2 text-primary-600 font-semibold hover:text-primary-700 transition-colors">
             Read API Docs
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
@@ -49,7 +49,7 @@ email = client.emails.send(
     from_="hello@company.com",
     to=["user@example.com"],
     subject="Welcome!",
-    html="&lt;h1&gt;Hello {{name}}!&lt;/h1&gt;",
+  html="&lt;h1&gt;Hello {% raw %}{{name}}{% endraw %}!&lt;/h1&gt;",
     tags=[{"name": "type", "value": "welcome"}],
 )
 
@@ -130,7 +130,7 @@ await apexmail.compliance.consent.record({
             </li>
             {% endfor %}
           </ul>
-          <a href="https://docs.apexmail.ee/analytics" class="inline-flex items-center gap-2 text-primary-600 font-semibold hover:text-primary-700 transition-colors">
+          <a href="/docs/analytics" class="inline-flex items-center gap-2 text-primary-600 font-semibold hover:text-primary-700 transition-colors">
             View Analytics Docs
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>

@@ -39,29 +39,42 @@ pub struct ImpersonationInfo {
     pub expires_at: Option<i64>,
 }
 
+fn e2e_bypass_enabled(
+    debug_build: bool,
+    environment: crate::config::Environment,
+    e2e_mode: Option<&str>,
+    bypass_key: Option<&str>,
+) -> bool {
+    debug_build
+        && !environment.is_production()
+        && matches!(e2e_mode, Some("true"))
+        && matches!(bypass_key, Some(key) if !key.is_empty())
+}
+
 // ─── Handler ───────────────────────────────────────────────────
 
 async fn get_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SessionResponse>, ApiError> {
-// Check for E2E bypass (non-production only)
-    if !state.config.environment.is_production() {
-        if let Ok(e2e_mode) = std::env::var("E2E_TEST_MODE") {
-            if e2e_mode == "true" {
-                if let Some(provided) = headers.get("x-e2e-bypass-key") {
-                    if let Ok(expected) = std::env::var("E2E_BYPASS_KEY") {
-                        if let Ok(provided_str) = provided.to_str() {
-                            if constant_time_eq(provided_str.as_bytes(), expected.as_bytes()) {
-                                return Ok(Json(SessionResponse {
-                                    authenticated: true,
-                                    impersonation: None,
-                                    session_type: Some("e2e".into()),
-                                    user: None,
-                                }));
-                            }
-                        }
-                    }
+// Check for E2E bypass (debug builds only, non-production only)
+    let e2e_mode = std::env::var("E2E_TEST_MODE").ok();
+    let expected_bypass_key = std::env::var("E2E_BYPASS_KEY").ok();
+    if e2e_bypass_enabled(
+        cfg!(debug_assertions),
+        state.config.environment,
+        e2e_mode.as_deref(),
+        expected_bypass_key.as_deref(),
+    ) {
+        if let Some(provided) = headers.get("x-e2e-bypass-key") {
+            if let (Ok(provided_str), Some(expected)) = (provided.to_str(), expected_bypass_key.as_deref()) {
+                if constant_time_eq(provided_str.as_bytes(), expected.as_bytes()) {
+                    return Ok(Json(SessionResponse {
+                        authenticated: true,
+                        impersonation: None,
+                        session_type: Some("e2e".into()),
+                        user: None,
+                    }));
                 }
             }
         }
@@ -240,5 +253,45 @@ mod tests {
         assert!(constant_time_eq(b"hello", b"hello"));
         assert!(!constant_time_eq(b"hello", b"world"));
         assert!(!constant_time_eq(b"hello", b"hell"));
+    }
+
+    #[test]
+    fn test_e2e_bypass_enabled_only_for_debug_non_production() {
+        assert!(e2e_bypass_enabled(
+            true,
+            crate::config::Environment::Development,
+            Some("true"),
+            Some("secret"),
+        ));
+        assert!(e2e_bypass_enabled(
+            true,
+            crate::config::Environment::Staging,
+            Some("true"),
+            Some("secret"),
+        ));
+        assert!(!e2e_bypass_enabled(
+            false,
+            crate::config::Environment::Development,
+            Some("true"),
+            Some("secret"),
+        ));
+        assert!(!e2e_bypass_enabled(
+            true,
+            crate::config::Environment::Production,
+            Some("true"),
+            Some("secret"),
+        ));
+        assert!(!e2e_bypass_enabled(
+            true,
+            crate::config::Environment::Development,
+            Some("false"),
+            Some("secret"),
+        ));
+        assert!(!e2e_bypass_enabled(
+            true,
+            crate::config::Environment::Development,
+            Some("true"),
+            Some(""),
+        ));
     }
 }

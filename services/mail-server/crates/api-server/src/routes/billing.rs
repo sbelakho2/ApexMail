@@ -4250,7 +4250,9 @@ async fn admin_export_billing_data(
                 reqwest::Client::new(),
                 ses_provider,
                 None,
-            ))
+            )
+            .await
+            .expect("failed to build app state"))
         }
 
         fn auth_user(scopes: &[&str], tenant_id: &str) -> AuthUser {

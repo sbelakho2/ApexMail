@@ -12,6 +12,11 @@ import json
 import re
 from collections import defaultdict
 
+from common_paths import data_path
+
+
+TRAIN_AGENT_FILE = str(data_path("train_agent.jsonl"))
+
 def check_pricing_tables():
     """Verify pricing tables match canonical values."""
     print("=" * 60)
@@ -30,7 +35,7 @@ def check_pricing_tables():
     issues = []
     tables_checked = 0
     
-    with open('/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl') as f:
+    with open(TRAIN_AGENT_FILE) as f:
         for i, line in enumerate(f, 1):
             data = json.loads(line)
             text = data.get('text', '')
@@ -65,7 +70,7 @@ def check_company_info():
     issues = []
     system_prompts_with_company = 0
     
-    with open('/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl') as f:
+    with open(TRAIN_AGENT_FILE) as f:
         for i, line in enumerate(f, 1):
             data = json.loads(line)
             text = data.get('text', '')
@@ -107,7 +112,7 @@ def check_key_features():
     features_found = defaultdict(int)
     issues = []
     
-    with open('/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl') as f:
+    with open(TRAIN_AGENT_FILE) as f:
         for i, line in enumerate(f, 1):
             data = json.loads(line)
             text = data.get('text', '')
@@ -142,7 +147,7 @@ def sample_responses():
     
     samples = {}
     
-    with open('/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl') as f:
+    with open(TRAIN_AGENT_FILE) as f:
         for i, line in enumerate(f, 1):
             data = json.loads(line)
             text = data.get('text', '')

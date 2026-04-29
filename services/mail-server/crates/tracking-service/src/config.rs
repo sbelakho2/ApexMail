@@ -118,6 +118,19 @@ fn parse_trusted_proxies(s: &str) -> Vec<IpNetwork> {
 const DEFAULT_TRUSTED_PROXIES: &str =
     "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
 
+fn build_redis_url(host: &str, port: u16, db: u32, password: Option<&str>) -> String {
+    match password.filter(|pw| !pw.is_empty()) {
+        Some(password) => format!(
+            "redis://:{}@{}:{}/{}",
+            urlencoding::encode(password),
+            host,
+            port,
+            db
+        ),
+        None => format!("redis://{}:{}/{}", host, port, db),
+    }
+}
+
 /// Load and validate configuration from environment.
 pub fn load() -> Result<Config> {
     dotenvy::dotenv().ok();
@@ -148,10 +161,8 @@ pub fn load() -> Result<Config> {
         let host = var_or("REDIS_HOST", "localhost");
         let port = var_or_u16("REDIS_PORT", 6379);
         let db = var_or_u32("REDIS_DB", 0);
-        match std::env::var("REDIS_PASSWORD").ok().filter(|p| !p.is_empty()) {
-            Some(pw) => format!("redis://:{}@{}:{}/{}", pw, host, port, db),
-            None => format!("redis://{}:{}/{}", host, port, db),
-        }
+        let password = std::env::var("REDIS_PASSWORD").ok();
+        build_redis_url(&host, port, db, password.as_deref())
     };
 
     let trusted_proxies = parse_trusted_proxies(
@@ -216,4 +227,23 @@ pub fn load() -> Result<Config> {
         },
         secret_key: zeroize::Zeroizing::new(secret_key),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_redis_url;
+
+    #[test]
+    fn redis_password_is_percent_encoded() {
+        let redis_url = build_redis_url("redis", 6379, 4, Some("abc+/=:@"));
+
+        assert_eq!(redis_url, "redis://:abc%2B%2F%3D%3A%40@redis:6379/4");
+    }
+
+    #[test]
+    fn empty_redis_password_uses_plain_url() {
+        let redis_url = build_redis_url("redis", 6379, 2, Some(""));
+
+        assert_eq!(redis_url, "redis://redis:6379/2");
+    }
 }

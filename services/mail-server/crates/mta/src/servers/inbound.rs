@@ -385,6 +385,17 @@ impl InboundServer {
                 return "452 Too many recipients\r\n".into();
             }
             let addr = extract_address(raw_line);
+            if recipient_domain(&addr).is_none() {
+                return "550 Invalid recipient\r\n".into();
+            }
+            match self.is_managed_recipient(&addr).await {
+                Ok(true) => {}
+                Ok(false) => return "550 No such user here\r\n".into(),
+                Err(error) => {
+                    warn!(recipient = %addr, %error, "Failed to validate inbound recipient domain");
+                    return "451 Temporary local problem\r\n".into();
+                }
+            }
             ctx.rcpt_to.push(addr);
             "250 OK\r\n".into()
         } else if cmd_upper.starts_with("DATA") {
@@ -526,6 +537,21 @@ impl InboundServer {
             self.connections.remove_if(&ip, |_, c| *c == 0);
         }
     }
+
+    async fn is_managed_recipient(&self, recipient: &str) -> anyhow::Result<bool> {
+        let Some(domain) = recipient_domain(recipient) else {
+            return Ok(false);
+        };
+
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM domains WHERE LOWER(name) = LOWER($1) AND status = 'verified')",
+        )
+        .bind(domain)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(exists)
+    }
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -542,6 +568,16 @@ fn extract_address(line: &str) -> String {
         .unwrap_or("")
         .trim_matches(|c| c == '<' || c == '>')
         .to_string()
+}
+
+fn recipient_domain(recipient: &str) -> Option<&str> {
+    let (_, domain) = recipient.rsplit_once('@')?;
+    let domain = domain.trim();
+    if domain.is_empty() {
+        None
+    } else {
+        Some(domain)
+    }
 }
 
 /// #138:Write all bytes to a raw TcpStream, handling partial writes.
@@ -586,6 +622,17 @@ mod tests {
     #[test]
     fn test_extract_address_empty_sender() {
         assert_eq!(extract_address("MAIL FROM:<>"), "");
+    }
+
+    #[test]
+    fn test_recipient_domain_extracts_domain() {
+        assert_eq!(recipient_domain("user@example.com"), Some("example.com"));
+    }
+
+    #[test]
+    fn test_recipient_domain_rejects_missing_domain() {
+        assert_eq!(recipient_domain("invalid-recipient"), None);
+        assert_eq!(recipient_domain("user@"), None);
     }
 
     #[test]

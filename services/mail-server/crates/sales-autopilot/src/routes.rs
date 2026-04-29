@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -37,6 +37,52 @@ pub struct AppState {
     pub calendar: CalendarService,
     pub inbox: InboxManager,
     pub service_token: String,
+}
+
+pub async fn initialize_schema(db: &PgPool) -> Result<(), SalesError> {
+    sqlx::query(
+        r#"
+            CREATE TABLE IF NOT EXISTS enriched_companies (
+                id UUID PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                company_name TEXT,
+                industry TEXT,
+                employee_count TEXT,
+                annual_revenue TEXT,
+                funding_stage TEXT,
+                headquarters TEXT,
+                founded_year INTEGER,
+                description TEXT,
+                linkedin_url TEXT,
+                email_provider TEXT,
+                confidence_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                last_enriched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (tenant_id, domain)
+            )
+        "#,
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_enriched_companies_last_enriched_at ON enriched_companies(last_enriched_at DESC)",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_enriched_companies_industry ON enriched_companies(industry)",
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    Ok(())
 }
 
 /// Build the axum `Router` with all sales-autopilot routes.
@@ -290,28 +336,62 @@ async fn enrich(
 
 // -- Campaigns --------------------------------------------------------------
 
+fn campaign_tenant_id(
+    headers: &HeaderMap,
+    explicit_tenant_id: Option<&str>,
+) -> Result<String, SalesError> {
+    let header_tenant_id = headers
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let explicit_tenant_id = explicit_tenant_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match (header_tenant_id, explicit_tenant_id) {
+        (Some(header_tenant_id), Some(explicit_tenant_id)) if header_tenant_id != explicit_tenant_id => {
+            Err(SalesError::InvalidInput("tenant_id mismatch between header and request payload".into()))
+        }
+        (Some(header_tenant_id), _) => Ok(header_tenant_id.to_string()),
+        (_, Some(explicit_tenant_id)) => Ok(explicit_tenant_id.to_string()),
+        _ => Err(SalesError::InvalidInput("tenant_id is required for campaign routes".into())),
+    }
+}
+
 #[derive(Deserialize)]
 struct CreateCampaignBody {
     name: String,
     template_id: String,
     #[serde(default)]
     audience: String,
+    tenant_id: Option<String>,
 }
 
 async fn create_campaign(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<CreateCampaignBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = campaign_tenant_id(&headers, body.tenant_id.as_deref())?;
     let c = state
         .campaigns
-        .create_campaign(body.name, body.template_id, body.audience)?;
+        .create_campaign(tenant_id, body.name, body.template_id, body.audience)?;
     json_response(&c)
+}
+
+#[derive(Deserialize)]
+struct CampaignQuery {
+    tenant_id: Option<String>,
 }
 
 async fn list_campaigns(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<CampaignQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let campaigns = state.campaigns.list_campaigns();
+    let tenant_id = campaign_tenant_id(&headers, q.tenant_id.as_deref())?;
+    let campaigns = state.campaigns.list_campaigns(&tenant_id);
     json_response(&campaigns)
 }
 
@@ -322,6 +402,7 @@ struct RecipientBody {
 
 async fn add_campaign_recipients(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<RecipientBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
@@ -329,23 +410,28 @@ async fn add_campaign_recipients(
         return Err(SalesError::InvalidInput("at least one recipient email is required".into()));
     }
 
-    let added = state.campaigns.add_recipients(id, body.emails)?;
+    let tenant_id = campaign_tenant_id(&headers, None)?;
+    let added = state.campaigns.add_recipients(&tenant_id, id, body.emails)?;
     json_response(&serde_json::json!({ "campaignId": id, "added": added }))
 }
 
 async fn start_campaign(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let campaign = state.campaigns.start_campaign(id)?;
+    let tenant_id = campaign_tenant_id(&headers, None)?;
+    let campaign = state.campaigns.start_campaign(&tenant_id, id)?;
     json_response(&campaign)
 }
 
 async fn pause_campaign(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let campaign = state.campaigns.pause_campaign(id)?;
+    let tenant_id = campaign_tenant_id(&headers, None)?;
+    let campaign = state.campaigns.pause_campaign(&tenant_id, id)?;
     json_response(&campaign)
 }
 
@@ -525,7 +611,8 @@ mod tests {
         let create_body = serde_json::json!({
             "name": "Migration wave",
             "template_id": "tmpl_competitor_migration",
-            "audience": "selected-leads"
+            "audience": "selected-leads",
+            "tenant_id": "tenant-a"
         });
 
         let create_resp = app
@@ -533,6 +620,7 @@ mod tests {
             .oneshot(
                 Request::post("/campaigns")
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                     .unwrap(),
@@ -557,6 +645,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/recipients"))
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&recipients_body).unwrap()))
                     .unwrap(),
@@ -570,6 +659,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/start"))
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -589,6 +679,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/pause"))
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -603,5 +694,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paused["status"], "paused");
+    }
+
+    #[tokio::test]
+    async fn test_campaign_routes_reject_cross_tenant_mutation() {
+        let app = test_app();
+        let create_body = serde_json::json!({
+            "name": "Tenant scoped",
+            "template_id": "tmpl_scoped",
+            "audience": "selected-leads",
+            "tenant_id": "tenant-a"
+        });
+
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::post("/campaigns")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::OK);
+
+        let created: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let campaign_id = created["id"].as_str().unwrap();
+
+        let cross_tenant_resp = app
+            .oneshot(
+                Request::post(format!("/campaigns/{campaign_id}/start"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cross_tenant_resp.status(), StatusCode::NOT_FOUND);
     }
 }

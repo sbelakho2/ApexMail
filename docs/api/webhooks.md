@@ -172,13 +172,13 @@ Triggered when recipient marks email as spam.
 }
 ```
 
-### `contact.unsubscribed`
+### `recipient.unsubscribed`
 
 Triggered when recipient unsubscribes.
 
 ```json
 {
-  "event": "contact.unsubscribed",
+  "event": "recipient.unsubscribed",
   "timestamp": "2024-01-15T14:40:00Z",
   "data": {
     "email": "user@example.com",
@@ -203,7 +203,104 @@ X-ApexMail-Signature: sha256=abc123...
 X-ApexMail-Timestamp: 1705312200
 ```
 
-Verify the signature:
+The canonical signed payload is:
+
+```
+{unix_timestamp}.{raw_request_body}
+```
+
+Compute an HMAC-SHA256 digest of that string with your webhook secret, then
+compare it in constant time against the value from `X-ApexMail-Signature`
+(without the `sha256=` prefix).
+
+### SDK Helpers
+
+#### Python
+
+```python
+from apexmail import verify_signature
+
+
+def webhook(request):
+    signature = request.headers["X-ApexMail-Signature"]
+    timestamp = int(request.headers["X-ApexMail-Timestamp"])
+    payload = request.get_data()
+
+    if not verify_signature(payload, signature, WEBHOOK_SECRET, timestamp=timestamp):
+        return "Invalid signature", 401
+
+    return "OK", 200
+```
+
+#### Go
+
+```go
+valid := apexmail.VerifyWebhookSignature(apexmail.WebhookSignatureOptions{
+    Payload:   body,
+    Signature: r.Header.Get("X-ApexMail-Signature"),
+    Timestamp: r.Header.Get("X-ApexMail-Timestamp"),
+    Secret:    webhookSecret,
+})
+
+if !valid {
+    http.Error(w, "invalid signature", http.StatusUnauthorized)
+    return
+}
+```
+
+#### PHP
+
+```php
+$valid = \ApexMail\Client::verifyWebhookSignature(
+    $payload,
+    $_SERVER['HTTP_X_APEXMAIL_SIGNATURE'] ?? null,
+    $webhookSecret,
+    300,
+    (int) ($_SERVER['HTTP_X_APEXMAIL_TIMESTAMP'] ?? 0),
+);
+
+if (!$valid) {
+    http_response_code(401);
+    exit('Invalid signature');
+}
+```
+
+#### Ruby
+
+```ruby
+require 'openssl'
+require 'rack/utils'
+
+def verify_webhook_signature(payload:, signature:, timestamp:, secret:)
+  signed_payload = "#{timestamp}.#{payload}"
+  expected = OpenSSL::HMAC.hexdigest('SHA256', secret, signed_payload)
+  actual = signature.delete_prefix('sha256=')
+
+  Rack::Utils.secure_compare(expected, actual)
+end
+```
+
+#### Java
+
+```java
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
+import java.util.HexFormat;
+
+String signedPayload = timestamp + "." + payload;
+Mac mac = Mac.getInstance("HmacSHA256");
+mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+String expected = HexFormat.of().formatHex(mac.doFinal(signedPayload.getBytes(StandardCharsets.UTF_8)));
+String actual = signature.replaceFirst("^sha256=", "");
+
+if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), actual.getBytes(StandardCharsets.UTF_8))) {
+    throw new SecurityException("Invalid webhook signature");
+}
+```
+
+#### Manual Verification Reference
 
 ```python
 import hashlib
@@ -236,6 +333,7 @@ def verify_webhook_signature(
 
 ```python
 from flask import Flask, request
+from apexmail import verify_signature
 
 app = Flask(__name__)
 
@@ -243,10 +341,10 @@ app = Flask(__name__)
 @app.post('/webhook')
 def webhook():
     signature = request.headers['X-ApexMail-Signature']
-    timestamp = request.headers['X-ApexMail-Timestamp']
-    payload = request.get_data(as_text=True)
+    timestamp = int(request.headers['X-ApexMail-Timestamp'])
+    payload = request.get_data()
 
-    if not verify_webhook_signature(payload, signature, timestamp, WEBHOOK_SECRET):
+    if not verify_signature(payload, signature, WEBHOOK_SECRET, timestamp=timestamp):
         return 'Invalid signature', 401
 
     event = request.get_json(force=True)
@@ -263,7 +361,17 @@ def webhook():
 
 ## Retry Policy
 
-Failed webhook deliveries are retried automatically with increasing delays over approximately 24 hours. After multiple consecutive failures, the webhook event is marked as failed.
+Retry timing is driven by each webhook's stored retry policy, not by a single fixed public schedule.
+
+Retryable failures are:
+- Network errors
+- HTTP `408`
+- HTTP `429`
+- HTTP `5xx`
+
+The worker schedules retries with exponential backoff using the webhook's `retryDelay`, `backoffMultiplier`, and `maxRetries` settings. When a receiving endpoint returns `429` or `503` with a `Retry-After` header, ApexMail honors that delay instead of the computed backoff. Individual retry delays are capped at 1 hour.
+
+At the worker layer, the default processor configuration uses a 30-second base delay and 3 retries unless a webhook-specific retry policy overrides those values. After the retry budget is exhausted, the failed delivery is recorded and removed from the pending queue.
 
 ### Failure Handling
 

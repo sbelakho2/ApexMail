@@ -18,7 +18,7 @@ ApexMail requires a Mail Transfer Agent (MTA) that:
 - Provides enterprise-grade reliability and full delivery control
 
 ## Decision
-We chose **Postfix** as the MTA with the following configuration:
+We chose a **Rust-native SMTP stack with hybrid outbound transport**: AWS SES is the shared default path, while self-hosted Rust SMTP remains available for operators who need dedicated IP control.
 
 ### Architecture
 ```
@@ -41,26 +41,27 @@ We chose **Postfix** as the MTA with the following configuration:
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   Postfix Cluster                           │
+│                 Outbound Delivery Layer                     │
 │                                                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │  MTA Node 1 │  │  MTA Node 2 │  │  MTA Node 3 │        │
-│  │  Shared IP  │  │  Shared IP  │  │ Dedicated IP│        │
-│  └─────────────┘  └─────────────┘  └─────────────┘        │
+│  ┌────────────────────┐  ┌──────────────────────────────┐  │
+│  │ AWS SES shared pool│  │ Rust-native SMTP nodes       │  │
+│  │ Default shared path│  │ Dedicated-IP / warmup path   │  │
+│  └────────────────────┘  └──────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Postfix Configuration
-- TLS 1.2+ enforcement (no SSLv2/v3, TLSv1.0/1.1)
-- Per-IP queue directories for isolation
-- Opportunistic DANE support
-- IPv4/IPv6 dual-stack sending
+### Outbound Transport Configuration
+- AWS SES for the shared pool path
+- Rust-native SMTP for dedicated-IP traffic and full IP control
+- TLS 1.2+ enforcement on the self-hosted SMTP path
+- Per-IP warmup and rate isolation for dedicated-IP traffic
+- Opportunistic DANE support and IPv4/IPv6 dual-stack sending on the SMTP path
 
 ### Authentication Stack
 | Protocol | Implementation |
 |----------|----------------|
-| DKIM | OpenDKIM with weekly rotation (selector: `apexmail{YYYYWW}`) |
-| SPF | DNS-based, include mechanism |
+| DKIM | AWS Easy DKIM for SES shared sending; self-hosted signing on the Rust SMTP path |
+| SPF | DNS-based records for both SES shared sending and dedicated-IP SMTP |
 | DMARC | Policy + RUA/RUF report ingestion |
 | ARC | Signing for forwarded messages |
 | BIMI | VMC certificate caching |

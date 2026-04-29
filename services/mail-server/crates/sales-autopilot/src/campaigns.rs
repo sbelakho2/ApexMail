@@ -29,6 +29,7 @@ impl CampaignManager {
 /// Create a campaign in Draft status.
     pub fn create_campaign(
         &self,
+        tenant_id: String,
         name: String,
         template_id: String,
         audience: String,
@@ -44,6 +45,7 @@ impl CampaignManager {
 
         let campaign = Campaign {
             id: Uuid::new_v4(),
+            tenant_id,
             name,
             template_id,
             audience,
@@ -60,16 +62,21 @@ impl CampaignManager {
     }
 
 /// List all campaigns.
-    pub fn list_campaigns(&self) -> Vec<Campaign> {
-        self.campaigns.read().clone()
+    pub fn list_campaigns(&self, tenant_id: &str) -> Vec<Campaign> {
+        self.campaigns
+            .read()
+            .iter()
+            .filter(|campaign| campaign.tenant_id == tenant_id)
+            .cloned()
+            .collect()
     }
 
 /// Transition a draft/paused campaign to Active.
-    pub fn start_campaign(&self, id: Uuid) -> Result<Campaign, SalesError> {
+    pub fn start_campaign(&self, tenant_id: &str, id: Uuid) -> Result<Campaign, SalesError> {
         let mut store = self.campaigns.write();
         let c = store
             .iter_mut()
-            .find(|c| c.id == id)
+            .find(|c| c.id == id && c.tenant_id == tenant_id)
             .ok_or(SalesError::CampaignNotFound(id))?;
         match c.status {
             CampaignStatus::Draft | CampaignStatus::Paused => {
@@ -84,11 +91,11 @@ impl CampaignManager {
     }
 
 /// Pause an active campaign.
-    pub fn pause_campaign(&self, id: Uuid) -> Result<Campaign, SalesError> {
+    pub fn pause_campaign(&self, tenant_id: &str, id: Uuid) -> Result<Campaign, SalesError> {
         let mut store = self.campaigns.write();
         let c = store
             .iter_mut()
-            .find(|c| c.id == id)
+            .find(|c| c.id == id && c.tenant_id == tenant_id)
             .ok_or(SalesError::CampaignNotFound(id))?;
         if c.status != CampaignStatus::Active {
             return Err(SalesError::InvalidInput("campaign is not active".into()));
@@ -122,11 +129,17 @@ impl CampaignManager {
 /// Add recipient emails to a campaign.
     pub fn add_recipients(
         &self,
+        tenant_id: &str,
         id: Uuid,
         emails: Vec<String>,
     ) -> Result<usize, SalesError> {
 // verify campaign exists
-        if !self.campaigns.read().iter().any(|c| c.id == id) {
+        if !self
+            .campaigns
+            .read()
+            .iter()
+            .any(|c| c.id == id && c.tenant_id == tenant_id)
+        {
             return Err(SalesError::CampaignNotFound(id));
         }
         let mut map = self.recipients.write();
@@ -153,26 +166,27 @@ mod tests {
     fn test_create_and_list() {
         let mgr = make_mgr();
         let c = mgr
-            .create_campaign("Welcome".into(), "tmpl_1".into(), "all_leads".into())
+            .create_campaign("tenant-a".into(), "Welcome".into(), "tmpl_1".into(), "all_leads".into())
             .unwrap();
         assert_eq!(c.status, CampaignStatus::Draft);
-        assert_eq!(mgr.list_campaigns().len(), 1);
+        assert_eq!(mgr.list_campaigns("tenant-a").len(), 1);
+        assert!(mgr.list_campaigns("tenant-b").is_empty());
     }
 
     #[test]
     fn test_start_pause_lifecycle() {
         let mgr = make_mgr();
         let c = mgr
-            .create_campaign("Drip".into(), "tmpl_2".into(), "new_leads".into())
+            .create_campaign("tenant-a".into(), "Drip".into(), "tmpl_2".into(), "new_leads".into())
             .unwrap();
-        let started = mgr.start_campaign(c.id).unwrap();
+        let started = mgr.start_campaign("tenant-a", c.id).unwrap();
         assert_eq!(started.status, CampaignStatus::Active);
 
-        let paused = mgr.pause_campaign(c.id).unwrap();
+        let paused = mgr.pause_campaign("tenant-a", c.id).unwrap();
         assert_eq!(paused.status, CampaignStatus::Paused);
 
 // re-start after pause
-        let restarted = mgr.start_campaign(c.id).unwrap();
+        let restarted = mgr.start_campaign("tenant-a", c.id).unwrap();
         assert_eq!(restarted.status, CampaignStatus::Active);
     }
 
@@ -180,12 +194,12 @@ mod tests {
     fn test_max_campaigns_enforced() {
         let mgr = CampaignManager::new(1);
         let c = mgr
-            .create_campaign("C1".into(), "t".into(), "a".into())
+            .create_campaign("tenant-a".into(), "C1".into(), "t".into(), "a".into())
             .unwrap();
-        mgr.start_campaign(c.id).unwrap();
+        mgr.start_campaign("tenant-a", c.id).unwrap();
 
 // second active campaign should be rejected
-        let c2 = mgr.create_campaign("C2".into(), "t".into(), "a".into());
+        let c2 = mgr.create_campaign("tenant-a".into(), "C2".into(), "t".into(), "a".into());
         assert!(c2.is_err());
     }
 
@@ -193,15 +207,32 @@ mod tests {
     fn test_recipients_and_stats() {
         let mgr = make_mgr();
         let c = mgr
-            .create_campaign("Outreach".into(), "tmpl".into(), "saas".into())
+            .create_campaign("tenant-a".into(), "Outreach".into(), "tmpl".into(), "saas".into())
             .unwrap();
         let added = mgr
-            .add_recipients(c.id, vec!["a@x.com".into(), "b@x.com".into()])
+            .add_recipients("tenant-a", c.id, vec!["a@x.com".into(), "b@x.com".into()])
             .unwrap();
         assert_eq!(added, 2);
 
         let stats = mgr.get_stats(c.id).unwrap();
         assert_eq!(stats["recipients"], 2);
         assert_eq!(stats["sent"], 0);
+    }
+
+    #[test]
+    fn test_campaign_operations_are_tenant_scoped() {
+        let mgr = make_mgr();
+        let campaign = mgr
+            .create_campaign("tenant-a".into(), "Scoped".into(), "tmpl".into(), "all".into())
+            .unwrap();
+
+        assert!(matches!(
+            mgr.start_campaign("tenant-b", campaign.id),
+            Err(SalesError::CampaignNotFound(id)) if id == campaign.id
+        ));
+        assert!(matches!(
+            mgr.add_recipients("tenant-b", campaign.id, vec!["user@example.com".into()]),
+            Err(SalesError::CampaignNotFound(id)) if id == campaign.id
+        ));
     }
 }

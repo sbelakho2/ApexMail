@@ -5,7 +5,9 @@ Each fix is based on manual review of the full assistant response.
 """
 import json, re
 
-FILEPATH = 'data/train_agent.jsonl'
+from common_paths import data_path
+
+FILEPATH = str(data_path("train_agent.jsonl"))
 
 with open(FILEPATH) as f:
     lines = f.readlines()

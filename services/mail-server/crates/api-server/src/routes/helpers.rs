@@ -3,6 +3,8 @@
 use axum::http::HeaderMap;
 use sha2::{Digest, Sha256};
 
+pub const TOKEN_BLACKLIST_PREFIX: &str = "apexmail:token_blacklist:";
+
 /// Clamp a pagination `limit` to the range `[1, max]`.
 pub fn clamp_limit(limit: i64, max: i64) -> i64 {
     limit.clamp(1, max)
@@ -53,6 +55,11 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// Build the Redis key used for revoked JWT/session tokens.
+pub fn token_blacklist_key(token: &str) -> String {
+    format!("{TOKEN_BLACKLIST_PREFIX}{}", hash_token(token))
+}
+
 /// Check whether a table exists in the `public` schema.
 pub async fn table_exists(db: &sqlx::PgPool, name: &str) -> bool {
     let table_ref = format!("public.{name}");
@@ -79,4 +86,34 @@ pub async fn column_exists(db: &sqlx::PgPool, table: &str, column: &str) -> bool
     .fetch_one(db)
     .await
     .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn token_blacklist_key_reuses_hash_token() {
+        let token = "header.payload.signature";
+
+        assert_eq!(
+            token_blacklist_key(token),
+            format!("{TOKEN_BLACKLIST_PREFIX}{}", hash_token(token))
+        );
+    }
+
+    #[test]
+    fn token_blacklist_key_hashes_null_bytes_consistently() {
+        let token = "abc\0def";
+
+        assert_eq!(
+            hash_token(token),
+            hex::encode(Sha256::digest(token.as_bytes()))
+        );
+        assert_eq!(
+            token_blacklist_key(token),
+            format!("{TOKEN_BLACKLIST_PREFIX}{}", hash_token(token))
+        );
+    }
 }

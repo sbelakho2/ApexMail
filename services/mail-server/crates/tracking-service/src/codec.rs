@@ -22,6 +22,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 use tracing::warn;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -339,14 +340,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 
 /// Constant-time equality check (mitigates timing oracle on HMAC validation).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    bool::from(a.ct_eq(b))
 }
 
 // ── Unsubscribe payload parser ────────────────────────────────────────────────

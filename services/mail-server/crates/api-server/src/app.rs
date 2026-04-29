@@ -20,7 +20,7 @@ use tower_http::trace::TraceLayer;
 use ui_foundation::axum_router as ui_router;
 
 use crate::config::Config;
-use crate::middleware::{auth, idempotency, metrics, rate_limiter, request_logger};
+use crate::middleware::{auth, ddos, idempotency, metrics, rate_limiter, request_logger};
 use crate::routes;
 use crate::state::AppState;
 
@@ -121,7 +121,11 @@ pub fn build_app(state: AppState) -> Router {
         .route("/verify-email", get(browser_verify_email_page))
         .nest("/health", routes::health::router())
         .nest("/v1/ses", routes::ses_notifications::router())
-        .merge(rate_limited_public);
+        .merge(rate_limited_public)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ddos::ddos_protection_middleware,
+        ));
 
 // ── Authenticated v1 routes ─────────────────────────────
     let authenticated = Router::new()
@@ -173,6 +177,10 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/admin/support", routes::admin::support::router())
         .nest("/v1/admin/support/analytics", routes::admin::support_analytics::router())
         .nest("/v1/admin/system/health", routes::admin::system_health::router())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ddos::ddos_protection_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -483,6 +491,7 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::{HeaderMap, HeaderValue, Request};
     use deadpool_redis::Config as RedisConfig;
+    use ddos_protection::{DdosProtector, ProtectorConfig};
     use sqlx::postgres::PgPoolOptions;
     use std::sync::Arc;
     use std::sync::Once;
@@ -513,6 +522,15 @@ mod tests {
     }
 
     async fn test_app() -> Router {
+        let ddos_protector = Arc::new(
+            DdosProtector::new(ProtectorConfig::default())
+                .await
+                .expect("failed to create default ddos protector"),
+        );
+        test_app_with_ddos(ddos_protector).await
+    }
+
+    async fn test_app_with_ddos(ddos_protector: Arc<DdosProtector>) -> Router {
         install_test_metrics_recorder();
 
         let database_url = std::env::var("TEST_DATABASE_URL")
@@ -539,13 +557,14 @@ mod tests {
             "us-east-1".into(),
         );
 
-        build_app(AppStateInner::new(
+        build_app(AppStateInner::with_ddos_protector(
             db,
             redis,
             test_config(),
             reqwest::Client::new(),
             ses_provider,
             None,
+            ddos_protector,
         ))
     }
 
@@ -610,6 +629,42 @@ mod tests {
             billing_company_phone: "+3721234567".into(),
             metrics_port: 9090,
         }
+    }
+
+    #[tokio::test]
+    async fn test_public_routes_run_through_ddos_protection() {
+        let ddos_protector = Arc::new(
+            DdosProtector::new(ProtectorConfig {
+                system_cost_capacity: 1020,
+                ..ProtectorConfig::default()
+            })
+                .await
+                .expect("failed to create constrained ddos protector"),
+        );
+        let app = test_app_with_ddos(ddos_protector).await;
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[derive(Clone)]

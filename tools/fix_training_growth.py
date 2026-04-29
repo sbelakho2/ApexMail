@@ -9,7 +9,9 @@ Canonical Growth plan values (from plans.ts):
 
 import re
 
-INPUT_FILE = '/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl'
+from common_paths import data_path
+
+INPUT_FILE = str(data_path("train_agent.jsonl"))
 
 with open(INPUT_FILE, 'r') as f:
     lines = f.readlines()
@@ -30,7 +32,7 @@ for line in lines:
         # Fix team members limit: X/10 -> X/25 for Growth plan
         # In JSONL, newlines are escaped as \n (literal backslash-n)
         if 'Team members:' in line:
-            line = re.sub(r'Team members: (\d+)/10(\\\\n)', r'Team members: \1/25\2', line)
+            line = re.sub(r'Team members: (\d+)/10(\\n)', r'Team members: \1/25\2', line)
         
         if line != original:
             modified = True

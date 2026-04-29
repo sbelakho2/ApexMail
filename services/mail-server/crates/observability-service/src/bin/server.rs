@@ -44,6 +44,7 @@ async fn main() {
         Arc::new(LogAggregator::new()),
         Arc::new(AlertManager::new()),
         Arc::new(SloMonitor::new()),
+        config.internal_service_token.clone(),
     );
 
     let app = routes::router(state);

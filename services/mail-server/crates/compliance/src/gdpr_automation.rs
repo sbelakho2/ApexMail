@@ -91,12 +91,19 @@ impl GdprAutomation {
     ) -> Result<bool, String> {
         let token_hash = sha256_hex(token);
 
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT verification_token_hash FROM data_subject_requests
-             WHERE id = $1 AND status = 'pending_verification'",
+             WHERE id = $1 AND status = 'pending_verification'
+             FOR UPDATE",
         )
         .bind(request_id)
-        .fetch_optional(&self.db)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
@@ -109,15 +116,21 @@ impl GdprAutomation {
             return Ok(false);
         }
 
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE data_subject_requests
              SET status = 'verified', verified = true, verified_at = NOW()
-             WHERE id = $1",
+             WHERE id = $1 AND status = 'pending_verification'",
         )
         .bind(request_id)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
+
+        if updated.rows_affected() != 1 {
+            return Ok(false);
+        }
+
+        tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
 
 // Enqueue for processing
         self.enqueue_request(request_id).await?;
@@ -436,13 +449,19 @@ impl GdprAutomation {
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
 // Similar to restriction — suppress + withdraw consents
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
+
         let r = sqlx::query(
             "UPDATE consent_records SET granted = false, revoked_at = NOW()
              WHERE email = $1 AND tenant_id = $2 AND granted = true",
         )
         .bind(&request.email)
         .bind(&request.tenant_id)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("DB: {e}"))?;
 
@@ -454,9 +473,11 @@ impl GdprAutomation {
         .bind(Uuid::new_v4().to_string())
         .bind(&request.tenant_id)
         .bind(&request.email)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("DB: {e}"))?;
+
+        tx.commit().await.map_err(|e| format!("DB: {e}"))?;
 
         info!(request_id = %request.id, affected = r.rows_affected(), "Objection request completed");
         Ok(DataSubjectRequestResult {

@@ -24,6 +24,8 @@ import re
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any
 
+from common_paths import data_path
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CANONICAL VALUES FROM docs/pricing.md (February 2026)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -417,7 +419,7 @@ class TrainingDataAuditor:
 
 
 def main():
-    filepath = '/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl'
+    filepath = str(data_path("train_agent.jsonl"))
     auditor = TrainingDataAuditor(filepath)
     auditor.audit()
     success = auditor.report()

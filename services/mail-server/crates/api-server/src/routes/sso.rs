@@ -3,7 +3,9 @@
 //! These endpoints generate OAuth state tokens, set state cookies,
 //! and redirect to the OAuth provider authorization URLs.
 
+use super::helpers::extract_cookie;
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
@@ -46,6 +48,27 @@ pub struct OAuthCallbackQuery {
     pub code: Option<String>,
     pub state: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleTokenExchangeResponse {
+    id_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleTokenInfoResponse {
+    aud: String,
+    iss: String,
+    exp: Option<String>,
+    email: Option<String>,
+    email_verified: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct VerifiedGoogleProfile {
+    email: String,
+    name: String,
 }
 
 // ─── SSO Initiation Handlers ──────────────────────────────────
@@ -121,12 +144,19 @@ async fn sso_github(
 
 async fn sso_google_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> Result<Response, ApiError> {
     if let Some(error) = &params.error {
         tracing::warn!(error = %error, "Google OAuth error");
         return Ok(Redirect::to("/login?error=sso_denied").into_response());
     }
+
+    let redirect_target = validate_oauth_state(
+        &headers,
+        "am_sso_state_google",
+        params.state.as_deref(),
+    )?;
 
     let code = params
         .code
@@ -167,46 +197,50 @@ async fn sso_google_callback(
         return Ok(Redirect::to("/login?error=sso_failed").into_response());
     }
 
-    let token_data: serde_json::Value = token_resp
+    let token_data: GoogleTokenExchangeResponse = token_resp
         .json()
         .await
         .map_err(|e| ApiError::Internal(format!("Google token parse failed: {e}")))?;
 
-    let id_token = token_data["id_token"]
-        .as_str()
+    let id_token = token_data
+        .id_token
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("missing id_token from Google".into()))?;
 
-// Decode the ID token (we trust Google's signing)
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(ApiError::Internal("invalid Google ID token format".into()));
-    }
-    let payload = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        parts[1],
-    )
-    .map_err(|_| ApiError::Internal("invalid Google ID token encoding".into()))?;
-
-    let claims: serde_json::Value = serde_json::from_slice(&payload)
-        .map_err(|_| ApiError::Internal("invalid Google ID token payload".into()))?;
-
-    let google_email = claims["email"]
-        .as_str()
-        .ok_or_else(|| ApiError::Internal("email not in Google ID token".into()))?;
-    let google_name = claims["name"].as_str().unwrap_or("");
+    let google_profile = verify_google_id_token(&state.http_client, id_token, client_id).await?;
 
 // Find or create user
-    complete_sso_login(&state, google_email, google_name, "google").await
+    let mut response = complete_sso_login(
+        &state,
+        &google_profile.email,
+        &google_profile.name,
+        "google",
+        &redirect_target,
+    )
+    .await?;
+    clear_state_cookie(
+        &mut response,
+        "am_sso_state_google",
+        state.config.environment.is_production(),
+    )?;
+    Ok(response)
 }
 
 async fn sso_github_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> Result<Response, ApiError> {
     if let Some(error) = &params.error {
         tracing::warn!(error = %error, "GitHub OAuth error");
         return Ok(Redirect::to("/login?error=sso_denied").into_response());
     }
+
+    let redirect_target = validate_oauth_state(
+        &headers,
+        "am_sso_state_github",
+        params.state.as_deref(),
+    )?;
 
     let code = params
         .code
@@ -302,7 +336,13 @@ async fn sso_github_callback(
         .or_else(|| user_data["login"].as_str())
         .unwrap_or("");
 
-    complete_sso_login(&state, &email, name, "github").await
+    let mut response = complete_sso_login(&state, &email, name, "github", &redirect_target).await?;
+    clear_state_cookie(
+        &mut response,
+        "am_sso_state_github",
+        state.config.environment.is_production(),
+    )?;
+    Ok(response)
 }
 
 // ─── Shared SSO completion ────────────────────────────────────
@@ -312,6 +352,7 @@ async fn complete_sso_login(
     email: &str,
     name: &str,
     provider: &str,
+    redirect_target: &str,
 ) -> Result<Response, ApiError> {
     use chrono::Utc;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -447,7 +488,7 @@ async fn complete_sso_login(
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
 // Redirect to dashboard with token in cookie
-    let mut response = Redirect::to("/dashboard").into_response();
+    let mut response = Redirect::to(redirect_target).into_response();
     let cookie_value = format!(
         "am_session={token}; HttpOnly; Path=/; Max-Age={expiry_secs}; SameSite=Lax{}",
         if state.config.environment.is_production() { "; Secure" } else { "" }
@@ -475,6 +516,98 @@ fn generate_oauth_state(next: &str) -> String {
     );
 // Encode the return path into the state so we can redirect back
     format!("{state_token}:{next}")
+}
+
+fn redirect_from_oauth_state(state: &str) -> String {
+    state
+        .split_once(':')
+        .map(|(_, next)| sanitize_redirect(next))
+        .unwrap_or_else(|| "/dashboard".to_string())
+}
+
+async fn verify_google_id_token(
+    http_client: &reqwest::Client,
+    id_token: &str,
+    expected_client_id: &str,
+) -> Result<VerifiedGoogleProfile, ApiError> {
+    let token_info_resp = http_client
+        .get("https://oauth2.googleapis.com/tokeninfo")
+        .query(&[("id_token", id_token)])
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Google token verification failed: {e}")))?;
+
+    if !token_info_resp.status().is_success() {
+        tracing::warn!(status = %token_info_resp.status(), "Google tokeninfo rejected the provided id_token");
+        return Err(ApiError::Unauthorized("invalid Google ID token".into()));
+    }
+
+    let token_info: GoogleTokenInfoResponse = token_info_resp
+        .json()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Google tokeninfo parse failed: {e}")))?;
+
+    validate_google_token_info(token_info, expected_client_id, chrono::Utc::now().timestamp())
+}
+
+fn validate_google_token_info(
+    token_info: GoogleTokenInfoResponse,
+    expected_client_id: &str,
+    now_timestamp: i64,
+) -> Result<VerifiedGoogleProfile, ApiError> {
+    if token_info.aud != expected_client_id {
+        return Err(ApiError::Unauthorized("invalid Google ID token".into()));
+    }
+
+    if !matches!(
+        token_info.iss.as_str(),
+        "accounts.google.com" | "https://accounts.google.com"
+    ) {
+        return Err(ApiError::Unauthorized("invalid Google ID token".into()));
+    }
+
+    let exp = token_info
+        .exp
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+        .ok_or_else(|| ApiError::Unauthorized("invalid Google ID token".into()))?;
+    if exp <= now_timestamp {
+        return Err(ApiError::Unauthorized("invalid Google ID token".into()));
+    }
+
+    if !google_email_verified(token_info.email_verified.as_deref()) {
+        return Err(ApiError::Unauthorized("invalid Google ID token".into()));
+    }
+
+    let email = token_info
+        .email
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::Unauthorized("invalid Google ID token".into()))?;
+
+    Ok(VerifiedGoogleProfile {
+        email,
+        name: token_info.name.unwrap_or_default(),
+    })
+}
+
+fn google_email_verified(value: Option<&str>) -> bool {
+    matches!(value, Some(raw) if raw.eq_ignore_ascii_case("true") || raw == "1")
+}
+
+fn validate_oauth_state(
+    headers: &HeaderMap,
+    cookie_name: &str,
+    returned_state: Option<&str>,
+) -> Result<String, ApiError> {
+    let returned_state = returned_state.ok_or_else(|| ApiError::BadRequest("missing OAuth state".into()))?;
+    let expected_state = extract_cookie(headers, cookie_name)
+        .ok_or_else(|| ApiError::Unauthorized("missing SSO state cookie".into()))?;
+
+    if !apexmail_lib::timing_safe_compare(&expected_state, returned_state) {
+        return Err(ApiError::Unauthorized("invalid OAuth state".into()));
+    }
+
+    Ok(redirect_from_oauth_state(returned_state))
 }
 
 fn rand_bytes() -> [u8; 32] {
@@ -506,6 +639,19 @@ fn set_state_cookie(response: &mut Response, name: &str, value: &str, secure: bo
     Ok(())
 }
 
+fn clear_state_cookie(response: &mut Response, name: &str, secure: bool) -> Result<(), ApiError> {
+    let cookie = format!(
+        "{name}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax{}",
+        if secure { "; Secure" } else { "" }
+    );
+    let val = cookie.parse().map_err(|e| {
+        tracing::error!(error = %e, cookie_name = name, "failed to clear SSO state cookie header");
+        ApiError::Internal("failed to clear SSO state cookie".into())
+    })?;
+    response.headers_mut().append("Set-Cookie", val);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,9 +666,99 @@ mod tests {
     }
 
     #[test]
+    fn test_redirect_from_oauth_state() {
+        assert_eq!(redirect_from_oauth_state("opaque-token:/dashboard"), "/dashboard");
+        assert_eq!(redirect_from_oauth_state("opaque-token:/settings/billing"), "/settings/billing");
+        assert_eq!(redirect_from_oauth_state("opaque-token:https://evil.com"), "/dashboard");
+        assert_eq!(redirect_from_oauth_state("opaque-token"), "/dashboard");
+    }
+
+    #[test]
     fn test_generate_oauth_state() {
         let state = generate_oauth_state("/dashboard");
         assert!(state.contains("/dashboard"));
         assert!(state.len() > 10);
+    }
+
+    #[test]
+    fn validate_google_token_info_accepts_expected_claims() {
+        let profile = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: Some("Example User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect("valid token info");
+
+        assert_eq!(
+            profile,
+            VerifiedGoogleProfile {
+                email: "user@example.com".into(),
+                name: "Example User".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_google_token_info_rejects_wrong_audience() {
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "other-client".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: Some("Example User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("audience mismatch should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn validate_google_token_info_rejects_unverified_email() {
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                email: Some("user@example.com".into()),
+                email_verified: Some("false".into()),
+                name: Some("Example User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("unverified email should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn validate_google_token_info_rejects_expired_token() {
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("1699999999".into()),
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: Some("Example User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("expired token should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
     }
 }

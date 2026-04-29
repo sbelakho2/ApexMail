@@ -4,7 +4,9 @@
 import json
 import re
 
-with open('/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl') as f:
+from common_paths import data_path
+
+with open(data_path("train_agent.jsonl")) as f:
     for i, line in enumerate(f, 1):
         if i == 22:
             data = json.loads(line)

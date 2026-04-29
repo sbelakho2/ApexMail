@@ -9,6 +9,8 @@ import json
 import re
 from collections import defaultdict
 
+from common_paths import data_path
+
 # Canonical limits from plans.ts
 CANONICAL = {
     'Free': {'email': 3000, 'api': 50000, 'team': 1, 'domains': 1, 'price': 0, 'retention': 7, 'contacts': 500},
@@ -50,7 +52,7 @@ def audit_training_data():
     warnings = []
     plan_counts = defaultdict(int)
     
-    filepath = '/Users/sabelakhoua/IdeaProjects/ApexMail/data/train_agent.jsonl'
+    filepath = str(data_path("train_agent.jsonl"))
     
     with open(filepath) as f:
         lines = f.readlines()

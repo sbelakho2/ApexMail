@@ -17,6 +17,72 @@ spec:
   ingress: []
   egress: []
 ---
+# ── Common service egress — DNS, stateful backends, internal services, and required external ports ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "apexmail.fullname" . }}-common-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: apexmail
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-redis-master
+      ports:
+        - port: 6379
+          protocol: TCP
+    # ClickHouse HTTP + native ports
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-clickhouse
+      ports:
+        - port: 8123
+          protocol: TCP
+        - port: 9000
+          protocol: TCP
+    # Internal API -> enterprise traffic
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "apexmail.selectorLabels" (dict "name" "enterprise" "context" .) | nindent 14 }}
+      ports:
+        - port: {{ .Values.enterprise.port }}
+          protocol: TCP
+    # External HTTPS plus SMTP delivery paths
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 25
+          protocol: TCP
+        - port: 465
+          protocol: TCP
+        - port: 587
+          protocol: TCP
+---
 # ── API Server — allow ingress from ingress controller ───────────────────────
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

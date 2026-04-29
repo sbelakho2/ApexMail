@@ -227,7 +227,11 @@ fn default_cors_origins(environment: Environment, base_url: &str) -> Vec<String>
 }
 
 fn default_max_inflight_requests(db_max_connections: u32) -> usize {
-    std::cmp::max(64usize, (db_max_connections as usize).saturating_mul(4))
+    // Keep request concurrency close to the DB pool so database-heavy traffic
+    // cannot build an unbounded queue in front of SQLx while still leaving a
+    // small amount of headroom for non-DB routes.
+    let db_connections = db_max_connections.max(1) as usize;
+    std::cmp::max(16usize, db_connections.saturating_mul(3).saturating_div(2))
 }
 
 fn validate_secret(
@@ -643,9 +647,9 @@ mod tests {
 
     #[test]
     fn default_max_inflight_requests_scales_from_db_pool() {
-        assert_eq!(default_max_inflight_requests(1), 64);
-        assert_eq!(default_max_inflight_requests(20), 80);
-        assert_eq!(default_max_inflight_requests(128), 512);
+        assert_eq!(default_max_inflight_requests(1), 16);
+        assert_eq!(default_max_inflight_requests(20), 30);
+        assert_eq!(default_max_inflight_requests(128), 192);
     }
 
     fn valid_production_config() -> Config {
@@ -671,7 +675,7 @@ mod tests {
             api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
             rate_limit_window_ms: 60000,
             rate_limit_max_requests: 1000,
-            max_inflight_requests: 80,
+            max_inflight_requests: 30,
             cors_origins: vec!["https://app.example.com".into()],
             trusted_proxies: vec![],
             ui_web_hosts: vec!["app.example.com".into()],
@@ -762,7 +766,7 @@ mod tests {
             api_key_hash_secret: "a-very-long-secret-value-for-tests-1234".into(),
             rate_limit_window_ms: 60000,
             rate_limit_max_requests: 1000,
-            max_inflight_requests: 80,
+            max_inflight_requests: 30,
             cors_origins: vec!["*".into()],
             trusted_proxies: vec![],
             ui_web_hosts: vec!["app.apexmail.ee".into(), "127.0.0.1".into()],

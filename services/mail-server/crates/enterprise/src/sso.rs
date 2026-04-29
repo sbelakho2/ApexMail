@@ -14,6 +14,7 @@ use crate::types::*;
 pub type RedisPool = deadpool_redis::Pool;
 
 static SSO_SESSIONS_MISSING_WARNING: Once = Once::new();
+const OIDC_SECRET_ENCRYPTION_PURPOSE: &str = "enterprise/sso/oidc-client-secret";
 
 fn is_missing_relation_error(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("42P01"))
@@ -26,6 +27,23 @@ fn log_missing_sso_sessions_once() {
             "Enterprise SSO sessions table missing; skipping session cleanup until migrations are applied"
         );
     });
+}
+
+fn encrypt_optional_oidc_secret(secret: Option<&str>, config: &Config) -> Result<Option<String>, String> {
+    let Some(secret) = secret.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+
+    let encryptor = crate::field_encryption::encryptor_from_secret(
+        &config.log_stream.encryption_key,
+        OIDC_SECRET_ENCRYPTION_PURPOSE,
+    )
+    .map_err(|error| format!("Encrypt OIDC client secret: {error}"))?;
+
+    encryptor
+        .encrypt(secret)
+        .map(Some)
+        .map_err(|error| format!("Encrypt OIDC client secret: {error}"))
 }
 
 /// SSO Service:SAML 2.0 + OIDC authentication
@@ -51,19 +69,20 @@ impl SSOService {
         let enabled = req.enabled.unwrap_or(true);
         let enforce = req.enforce_sso.unwrap_or(false);
         let session_hours = req.session_duration_hours.unwrap_or(8);
+                let encrypted_oidc_secret = encrypt_optional_oidc_secret(req.oidc_client_secret.as_deref(), &self.config)?;
 
         let row = sqlx::query_as::<_, SSOConfiguration>(
             "INSERT INTO ent_sso_configurations (id, tenant_id, provider_type, enabled, domain, entity_id, sso_url, certificate, oidc_client_id, oidc_client_secret_encrypted, oidc_issuer, attribute_mapping, enforce_sso, session_duration_hours, created_at, updated_at, allow_idp_initiated)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15, false)
              ON CONFLICT (tenant_id, domain) DO UPDATE SET
                provider_type=$3, enabled=$4, entity_id=$6, sso_url=$7, certificate=$8,
-               oidc_client_id=$9, oidc_client_secret_encrypted=$10, oidc_issuer=$11,
+                             oidc_client_id=$9, oidc_client_secret_encrypted=COALESCE($10, ent_sso_configurations.oidc_client_secret_encrypted), oidc_issuer=$11,
                attribute_mapping=$12, enforce_sso=$13, session_duration_hours=$14, updated_at=$15
              RETURNING *"
         )
            .bind(id).bind(&req.tenant_id).bind(&req.provider_type).bind(enabled)
         .bind(&req.domain).bind(&req.entity_id).bind(&req.sso_url).bind(&req.certificate)
-        .bind(&req.oidc_client_id).bind(&req.oidc_client_secret).bind(&req.oidc_issuer)
+                .bind(&req.oidc_client_id).bind(&encrypted_oidc_secret).bind(&req.oidc_issuer)
         .bind(&req.attribute_mapping).bind(enforce).bind(session_hours).bind(now)
         .fetch_one(&self.db)
         .await
@@ -498,5 +517,25 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("saml"));
+    }
+
+    #[test]
+    fn test_encrypt_optional_oidc_secret_produces_encrypted_blob() {
+        let mut config = Config::from_env().unwrap();
+        config.log_stream.encryption_key = "enterprise-secret-material-for-tests".into();
+
+        let encrypted = encrypt_optional_oidc_secret(Some("oidc-top-secret"), &config)
+            .unwrap()
+            .expect("encrypted secret");
+
+        assert!(crate::field_encryption::FieldEncryptor::is_encrypted(&encrypted));
+        assert_ne!(encrypted, "oidc-top-secret");
+
+        let decryptor = crate::field_encryption::encryptor_from_secret(
+            &config.log_stream.encryption_key,
+            OIDC_SECRET_ENCRYPTION_PURPOSE,
+        )
+        .unwrap();
+        assert_eq!(decryptor.decrypt(&encrypted).unwrap(), "oidc-top-secret");
     }
 }

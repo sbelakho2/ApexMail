@@ -392,6 +392,7 @@ def main():
         was_mouse_down = is_mouse_down
         
         // Keyboard input
+        if gl.button("escape") == 1 or gl.button("esc") == 1: return
         if gl.button("enter") == 1: handle_click("=")
         if gl.button("+") == 1: handle_click("+")
         if gl.button("-") == 1: handle_click("-")

@@ -79,23 +79,19 @@ async fn start_impersonation(
     let exp = payload.exp.unwrap_or(0);
     let jti = payload.jti.as_deref().unwrap_or_default();
 
-// Audit log the impersonation start
-    if let Err(e) = sqlx::query(
-        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
-         VALUES (NOW(), 'impersonation_session_started', 'session', $1, $2, $3::jsonb)",
+// Audit log the impersonation start before creating the session cookie.
+    write_impersonation_audit_log(
+        &state,
+        "impersonation_session_started",
+        jti,
+        tenant_id,
+        serde_json::json!({
+            "operator_id": operator_id,
+            "operator_name": operator_name,
+            "token_id": jti,
+        }),
     )
-    .bind(jti)
-    .bind(tenant_id)
-    .bind(serde_json::json!({
-        "operator_id": operator_id,
-        "operator_name": operator_name,
-        "token_id": jti,
-    }))
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!(error = %e, operator_id = %operator_id, tenant_id = %tenant_id, "Failed to write impersonation audit log — compliance risk");
-    }
+    .await?;
 
     tracing::info!(
         operator_id = %operator_id,
@@ -148,19 +144,15 @@ async fn end_impersonation(
     let imp_token = extract_cookie(&headers, "impersonation_session");
     if let Some(token) = imp_token {
         if let Ok(payload) = verify_session_token_soft(&token, &state.config.session_secret) {
-// Audit log the end
-            if let Err(e) = sqlx::query(
-                "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
-                 VALUES (NOW(), 'impersonation_session_ended', 'session', $1, $2, $3::jsonb)",
+// Audit log the end before clearing the impersonation cookie.
+            write_impersonation_audit_log(
+                &state,
+                "impersonation_session_ended",
+                payload.get("tokenId").and_then(|v| v.as_str()).unwrap_or(""),
+                payload.get("tenantId").and_then(|v| v.as_str()).unwrap_or(""),
+                payload.clone(),
             )
-            .bind(payload.get("tokenId").and_then(|v| v.as_str()).unwrap_or(""))
-            .bind(payload.get("tenantId").and_then(|v| v.as_str()).unwrap_or(""))
-            .bind(&payload)
-            .execute(&state.db)
-            .await
-            {
-                tracing::error!(error = %e, "Failed to write impersonation end audit log — compliance risk");
-            }
+            .await?;
 
             tracing::info!(
                 operator_id = payload.get("operatorId").and_then(|v| v.as_str()).unwrap_or("unknown"),
@@ -188,6 +180,31 @@ async fn end_impersonation(
     response.headers_mut().insert("Set-Cookie", val);
 
     Ok(response)
+}
+
+async fn write_impersonation_audit_log(
+    state: &AppState,
+    action: &str,
+    resource_id: &str,
+    tenant_id: &str,
+    metadata: serde_json::Value,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, tenant_id, metadata)
+         VALUES (NOW(), $1, 'session', $2, $3, $4::jsonb)",
+    )
+    .bind(action)
+    .bind(resource_id)
+    .bind(tenant_id)
+    .bind(metadata)
+    .execute(&state.db)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, action = %action, resource_id = %resource_id, tenant_id = %tenant_id, "failed to write impersonation audit log");
+        ApiError::Internal("impersonation audit logging failed".into())
+    })?;
+
+    Ok(())
 }
 
 // ─── Token helpers ─────────────────────────────────────────────

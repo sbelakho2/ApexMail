@@ -1,4 +1,4 @@
-# ApexMail Pricing — Canonical Reference (February 2026)
+# ApexMail Pricing — Canonical Reference (April 2026)
 
 > **This is the single source of truth for all pricing.**
 > Every document, marketing page, AI training file, support playbook, and backend
@@ -45,14 +45,14 @@ retention, SSO/HIPAA/SOC2 compliance, and white-label.
 
 ### Subscription Plans
 
-| Plan       | Price/mo | Annual  | Emails/mo   | API calls/mo | Team | Domains | Contacts    | Retention |
-|------------|----------|---------|-------------|--------------|------|---------|-------------|-----------|
-| Free       | $0       | $0      | 3,000       | 50,000       | 1    | 1       | 500         | 7 days    |
-| Starter    | $25      | $250/yr | 50,000      | 500,000      | 5    | 5       | 10,000      | 30 days   |
-| Pro        | $65      | $650/yr | 150,000     | 2,000,000    | 10   | 25      | 50,000      | 60 days   |
-| Growth     | $150     | $1,500/yr | 500,000   | 5,000,000    | 25   | 100     | 200,000     | 90 days   |
-| Scale      | $350     | $3,500/yr | 2,000,000 | 20,000,000   | 50   | Unlimited | 500,000   | 365 days  |
-| Enterprise | $800     | $8,000/yr | 5,000,000 | Unlimited    | Unlimited | Unlimited | Unlimited | 730 days |
+| Plan       | Price/mo | Annual  | Emails/mo   | API calls/mo | Team | Domains | Retention |
+|------------|----------|---------|-------------|--------------|------|---------|-----------|
+| Free       | $0       | $0      | 3,000       | 50,000       | 1    | 1       | 7 days    |
+| Starter    | $25      | $250/yr | 50,000      | 500,000      | 5    | 5       | 30 days   |
+| Pro        | $65      | $650/yr | 150,000     | 2,000,000    | 10   | 25      | 60 days   |
+| Growth     | $150     | $1,500/yr | 500,000   | 5,000,000    | 25   | 100     | 90 days   |
+| Scale      | $350     | $3,500/yr | 2,000,000 | 20,000,000   | 50   | Unlimited | 365 days |
+| Enterprise | $800     | $8,000/yr | 5,000,000 | Unlimited    | Unlimited | Unlimited | 730 days |
 
 Annual billing = 10 months (2 months free; ~17% discount).
 
@@ -72,7 +72,8 @@ No monthly commitment. API calls: first 100K free, then $0.10/1K.
 | Item             | Rate             |
 |------------------|------------------|
 | Extra emails     | $0.40 per 1,000  |
-| Extra API calls  | $0.10 per 1,000 (first 100K free on all plans) |
+
+The current billing-service plan contract does not define a separate subscription-plan API-call overage price. PAYG API-call billing remains `first 100K free, then $0.10 / 1K`.
 
 ### Dedicated IPs
 
@@ -97,7 +98,7 @@ Warmup, monitoring, and autoscaling included.
 | REST API + SMTP relay          | ✓    | ✓       | ✓         | ✓         | ✓           | ✓           |
 | SDKs (Node, Python, Go, Ruby, PHP, Java) | ✓ | ✓  | ✓         | ✓         | ✓           | ✓           |
 | Basic analytics                | ✓    | ✓       | ✓         | ✓         | ✓           | ✓           |
-| Webhooks                       | —    | ✓ (5)   | ✓ (10)    | ✓ (25)    | ✓ (Unlim)   | ✓ (Unlim)   |
+| Webhooks                       | —    | ✓       | ✓         | ✓         | ✓           | ✓           |
 | Custom templates               | —    | ✓       | ✓         | ✓         | ✓           | ✓           |
 | Data export                    | —    | ✓       | ✓         | ✓         | ✓           | ✓           |
 | Custom tracking domain         | —    | —       | ✓         | ✓         | ✓           | ✓           |
@@ -143,9 +144,9 @@ Dedicated IP cost: ~€4/mo per IP (Hetzner Cloud floating IP).
 | Free       | $0      | $0.30          | N/A (lead gen) |
 | Starter    | $25     | $5.00          | 80%          |
 | Pro        | $65     | $15.00         | 77%          |
-| Growth     | $150    | $50.00 + ~$4 (1 IP) | 64%  |
-| Scale      | $350    | $200 + ~$12 (3 IPs) | 39%  |
-| Enterprise | $800    | $500 + ~$40 (10 IPs) | 33%  |
+| Growth     | $150    | ~$54.00 (includes 1 IP) | 64%  |
+| Scale      | $350    | ~$212.00 (includes 3 IPs) | 39%  |
+| Enterprise | $800    | ~$540.00 (includes 10 IPs) | 33%  |
 
 Scale and Enterprise margins improve significantly when customers use
 less than their email allocation (typical utilisation: 40–60%).
@@ -169,23 +170,16 @@ migrated to the nearest equivalent new tier (always to their benefit).
 
 ---
 
-## Contact Limits by Plan
-
-| Plan       | Contacts  |
-|------------|-----------|
-| Free       | 500       |
-| Starter    | 10,000    |
-| Pro        | 50,000    |
-| Growth     | 200,000   |
-| Scale      | 500,000   |
-| Enterprise | Unlimited |
-
----
-
 ## API Rate Limits
 
-All plans: **1,000 requests/min** (sliding window).
-Enterprise may negotiate higher limits.
+The current billing-service quota model maps plans to request-rate tiers:
+
+| Plan tier | Throughput |
+|-----------|------------|
+| Free | 10 requests / second |
+| Starter / Pro / PAYG | 100 requests / second |
+| Growth / Scale | 500 requests / second |
+| Enterprise | 5,000 requests / second |
 
 ---
 

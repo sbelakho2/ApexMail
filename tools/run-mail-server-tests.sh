@@ -60,9 +60,7 @@ fi
 require_command cargo
 require_command psql
 
-if [[ -n "${DATABASE_URL:-}" ]]; then
-  DATABASE_URL="$DATABASE_URL"
-else
+if [[ -z "${DATABASE_URL:-}" ]]; then
   DATABASE_URL="$(select_database_url)" || error "DATABASE_URL is not set and no reachable local Postgres default was detected"
   log "Auto-selected reachable local DATABASE_URL"
 fi

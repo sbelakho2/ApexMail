@@ -9,7 +9,7 @@ last_updated = "2025-12-01"
 
 ## 1. Scope
 
-This Data Processing Agreement ("DPA") supplements the Terms of Service and governs the processing of personal data by ApexMail OÜ ("Processor") on behalf of the Customer ("Controller") under GDPR Article 28.
+This Data Processing Agreement ("DPA") supplements the Terms of Service and governs the processing of personal data by Bel Consulting OÜ, trading as ApexMail ("Processor") on behalf of the Customer ("Controller") under GDPR Article 28.
 
 ## 2. Definitions
 

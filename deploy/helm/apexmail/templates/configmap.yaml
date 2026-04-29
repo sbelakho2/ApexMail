@@ -18,8 +18,8 @@ data:
   {{- end }}
 
   # ── Tracking service ───────────────────────────────────────────────────────
-  {{- if .Values.tracking.baseUrl }}
-  tracking-base-url: {{ .Values.tracking.baseUrl | quote }}
+  {{- if .Values.trackingService.baseUrl }}
+  tracking-base-url: {{ .Values.trackingService.baseUrl | quote }}
   {{- else }}
   {{- with (index .Values.ingress.hosts 0) }}
   tracking-base-url: "https://{{ .host }}"

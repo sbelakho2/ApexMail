@@ -8,7 +8,6 @@ CREATE TABLE events_unpartitioned (
     message_id VARCHAR(26),
     event_type VARCHAR(50) NOT NULL,
     recipient VARCHAR(255),
-    recipient_email VARCHAR(255),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     user_agent TEXT,
     ip_address VARCHAR(45),
@@ -20,18 +19,66 @@ CREATE TABLE events_unpartitioned (
     complaint_type VARCHAR(50),
     complaint_user_agent TEXT,
     raw_data JSONB,
-    deduplication_key VARCHAR(64),
+    deduplication_key VARCHAR(255),
     processed_at TIMESTAMPTZ,
+    metadata JSONB,
     domain VARCHAR(255),
     provider VARCHAR(100),
     provider_message_id VARCHAR(255),
-    feedback_id VARCHAR(255),
-    location JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    feedback_id VARCHAR(255)
 );
 
 -- Step 2: Copy data from partitioned table
-INSERT INTO events_unpartitioned SELECT * FROM events;
+INSERT INTO events_unpartitioned (
+    id,
+    tenant_id,
+    message_id,
+    event_type,
+    recipient,
+    timestamp,
+    user_agent,
+    ip_address,
+    link_id,
+    link_url,
+    bounce_type,
+    bounce_subtype,
+    diagnostic_code,
+    complaint_type,
+    complaint_user_agent,
+    raw_data,
+    deduplication_key,
+    processed_at,
+    metadata,
+    domain,
+    provider,
+    provider_message_id,
+    feedback_id
+)
+SELECT
+    id,
+    tenant_id,
+    message_id,
+    event_type,
+    recipient,
+    timestamp,
+    user_agent,
+    ip_address,
+    link_id,
+    link_url,
+    bounce_type,
+    bounce_subtype,
+    diagnostic_code,
+    complaint_type,
+    complaint_user_agent,
+    raw_data,
+    deduplication_key,
+    processed_at,
+    metadata,
+    domain,
+    provider,
+    provider_message_id,
+    feedback_id
+FROM events;
 
 DO $$
 DECLARE

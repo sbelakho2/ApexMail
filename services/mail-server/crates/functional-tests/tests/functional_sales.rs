@@ -111,17 +111,19 @@ fn categorize_spam_message() {
 #[test]
 fn campaign_lifecycle_draft_active_paused() {
     let mgr = CampaignManager::new(10);
-    let c = mgr.create_campaign("Drip".into(), "tmpl_1".into(), "leads".into()).unwrap();
+    let c = mgr
+        .create_campaign("tenant-a".into(), "Drip".into(), "tmpl_1".into(), "leads".into())
+        .unwrap();
     assert_eq!(c.status, CampaignStatus::Draft);
 
-    let started = mgr.start_campaign(c.id).unwrap();
+    let started = mgr.start_campaign("tenant-a", c.id).unwrap();
     assert_eq!(started.status, CampaignStatus::Active);
 
-    let paused = mgr.pause_campaign(c.id).unwrap();
+    let paused = mgr.pause_campaign("tenant-a", c.id).unwrap();
     assert_eq!(paused.status, CampaignStatus::Paused);
 
 // Re-start from paused
-    let restarted = mgr.start_campaign(c.id).unwrap();
+    let restarted = mgr.start_campaign("tenant-a", c.id).unwrap();
     assert_eq!(restarted.status, CampaignStatus::Active);
 }
 
@@ -182,8 +184,11 @@ fn crm_search_by_name() {
 #[test]
 fn campaign_stats_track_sends() {
     let mgr = CampaignManager::new(10);
-    let c = mgr.create_campaign("Test".into(), "tmpl".into(), "all".into()).unwrap();
-    mgr.add_recipients(c.id, vec!["a@x.com".into(), "b@x.com".into()]).unwrap();
+    let c = mgr
+        .create_campaign("tenant-a".into(), "Test".into(), "tmpl".into(), "all".into())
+        .unwrap();
+    mgr.add_recipients("tenant-a", c.id, vec!["a@x.com".into(), "b@x.com".into()])
+        .unwrap();
 
     let stats = mgr.get_stats(c.id).unwrap();
     assert_eq!(stats["recipients"], 2);

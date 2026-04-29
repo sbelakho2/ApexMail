@@ -21,10 +21,9 @@ services:
     container_name: apexmail-postgres
     restart: unless-stopped
     environment:
-      # SECURITY: In production, POSTGRES_PASSWORD must be set via environment
-      # Never use default values in production!
+      # SECURITY: Read the Postgres password from a Docker secret, not compose env.
       POSTGRES_USER: ${POSTGRES_USER:-apexmail}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB:-apexmail}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -54,6 +53,8 @@ services:
     tmpfs:
       - /tmp
       - /var/run/postgresql
+    secrets:
+      - postgres_password
 
   # ===========================================================================
   # REDIS
@@ -109,7 +110,7 @@ services:
     environment:
       OBSERVABILITY_PORT: 4400
       RUST_LOG: ${RUST_LOG:-info}
-      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set}
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 4400"]
       interval: 15s
@@ -141,6 +142,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.tracking
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "--", "/usr/bin/tini", "--"]
+    command: ["/usr/local/bin/tracking-service"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -153,12 +156,16 @@ services:
       # ── Required ──────────────────────────────────────────────────────────
       TRACKING_SECRET_KEY: ${TRACKING_SECRET_KEY:?TRACKING_SECRET_KEY must be set (min 32 chars)}
       # ── Database ──────────────────────────────────────────────────────────
-      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apexmail}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
       DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-50}
       # ── Redis (individual vars; Rust service builds its own URL) ───────────
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_POOL_SIZE: ${REDIS_POOL_SIZE:-16}
       # ── Server bind ───────────────────────────────────────────────────────
       TRACKING_HOST: 0.0.0.0
@@ -179,8 +186,10 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-apexmail}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
       CLICKHOUSE_MAX_CONNECTIONS: ${CLICKHOUSE_MAX_CONNECTIONS:-20}
+    volumes:
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
       - "127.0.0.1:${TRACKING_PORT:-3001}:3001"
       - "127.0.0.1:${TRACKING_METRICS_PORT:-9092}:9092"
@@ -210,6 +219,10 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    secrets:
+      - postgres_password
+      - clickhouse_password
+      - redis_password
 
   # ==========================================================================
   # ENTERPRISE SERVER
@@ -219,6 +232,7 @@ services:
       context: .
       dockerfile: services/mail-server/Dockerfile
       target: enterprise
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "--", "/usr/bin/tini", "--", "/usr/local/bin/enterprise-server"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -234,12 +248,14 @@ services:
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-apexmail}
       DB_USER: ${POSTGRES_USER:-apexmail}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_DB: 0
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set (min 32 chars)}
+    volumes:
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
       - "127.0.0.1:${ENTERPRISE_PORT:-3002}:3002"
     logging:
@@ -268,6 +284,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
 
   # ===========================================================================
   # PDF RENDERER (Typst-based PDF generation)
@@ -316,8 +335,8 @@ services:
     container_name: apexmail-mailpit
     restart: unless-stopped
     ports:
-      - "${MAILPIT_SMTP_PORT:-1025}:1025"  # SMTP
-      - "${MAILPIT_WEB_PORT:-8025}:8025"   # Web UI
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"  # SMTP
+      - "127.0.0.1:${MAILPIT_WEB_PORT:-8025}:8025"   # Web UI
     environment:
       MP_SMTP_AUTH_ALLOW_INSECURE: ${MAILPIT_ALLOW_INSECURE:-0}
       MP_MAX_MESSAGES: 5000
@@ -338,16 +357,18 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     container_name: apexmail-clickhouse
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_PASSWORD_FILE", "/entrypoint.sh"]
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
       - ./deploy/clickhouse/logging.xml:/etc/clickhouse-server/config.d/logging.xml:ro
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
       - "${CLICKHOUSE_HTTP_PORT:-127.0.0.1:8123}:8123"
       - "${CLICKHOUSE_NATIVE_PORT:-127.0.0.1:9000}:9000"
@@ -368,6 +389,8 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+    secrets:
+      - clickhouse_password
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default
@@ -483,6 +506,7 @@ services:
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     container_name: apexmail-postgres-exporter
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DATA_SOURCE_PASS", "DATA_SOURCE_PASS_FILE", "/bin/postgres_exporter"]
     restart: unless-stopped
     read_only: true
     security_opt:
@@ -491,12 +515,16 @@ services:
     environment:
       DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB:-apexmail}?sslmode=disable
       DATA_SOURCE_USER: ${POSTGRES_USER:-apexmail}
-      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
+      DATA_SOURCE_PASS_FILE: /run/secrets/postgres_password
+    volumes:
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_monitoring
       - apexmail_data
     profiles:
       - monitoring
+    secrets:
+      - postgres_password
 
   # =========================================================================
   # REDIS EXPORTER
@@ -504,6 +532,7 @@ services:
   redis-exporter:
     image: oliver006/redis_exporter:v1.62.0
     container_name: apexmail-redis-exporter
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "/redis_exporter"]
     restart: unless-stopped
     read_only: true
     security_opt:
@@ -511,33 +540,42 @@ services:
       - apparmor:docker-default
     environment:
       REDIS_ADDR: redis://redis:6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+    volumes:
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_monitoring
       - apexmail_data
     profiles:
       - monitoring
+    secrets:
+      - redis_password
 
   # =========================================================================
   # CLICKHOUSE EXPORTER
   # =========================================================================
   clickhouse-exporter:
-    image: f1yegor/clickhouse-exporter:v0.4.4
+    image: f1yegor/clickhouse-exporter@sha256:c58e572e5b2516f0a40e338d354ef16aaa5f31b4f3c15978bbd7e6c06887c4c6
     container_name: apexmail-clickhouse-exporter
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_PASSWORD_FILE", "/usr/local/bin/clickhouse_exporter"]
+    command: ["-scrape_uri=http://clickhouse:8123/"]
     restart: unless-stopped
     read_only: true
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default
     environment:
-      CLICKHOUSE_SERVER: http://clickhouse:8123
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+    volumes:
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_monitoring
       - apexmail_data
     profiles:
       - monitoring
+    secrets:
+      - clickhouse_password
 
   # =========================================================================
   # NODE EXPORTER
@@ -600,8 +638,12 @@ volumes:
 # SECRETS
 # ===========================================================================
 secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
   redis_password:
     file: ./secrets/redis_password.txt
+  clickhouse_password:
+    file: ./secrets/clickhouse_password.txt
 
 # ===========================================================================
 # NETWORKS

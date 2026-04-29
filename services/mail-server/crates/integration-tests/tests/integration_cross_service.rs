@@ -108,6 +108,7 @@ fn ai_content_score_with_sales_campaign() {
 // Create a campaign
     let campaign = campaigns
         .create_campaign(
+            "tenant-a".into(),
             "Q1 Outreach".into(),
             "tmpl-001".into(),
             "all-leads".into(),
