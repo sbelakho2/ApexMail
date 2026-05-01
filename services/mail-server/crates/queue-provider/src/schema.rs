@@ -68,7 +68,7 @@ mod tests {
         assert!(QUEUE_SCHEMA.contains("attempts"));
         assert!(QUEUE_SCHEMA.contains("visibility_timeout"));
         assert!(!QUEUE_SCHEMA.contains("SKIP LOCKED"));
-// SKIP LOCKED is in the query, not the schema
+        // SKIP LOCKED is in the query, not the schema
     }
 
     #[test]

@@ -43,20 +43,28 @@ pub async fn handle_unsub_post(
             .unwrap_or_default();
     }
 
-// F-210:trim trailing CRLF / whitespace
+    // F-210:trim trailing CRLF / whitespace
     let body = body.trim().to_owned();
 
-    let ua = headers.get("user-agent").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let ua = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let ip = extract_client_ip(&headers, addr.ip(), &state);
 
-    info!(token_prefix = &token[..token.len().min(20)], "One-click unsubscribe request");
+    info!(
+        token_prefix = &token[..token.len().min(20)],
+        "One-click unsubscribe request"
+    );
 
     if body != "List-Unsubscribe=One-Click" {
         warn!(body = %body, "Invalid unsubscribe body");
         return axum::http::Response::builder()
             .status(400)
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(r#"{"error":"Invalid request body"}"#))
+            .body(axum::body::Body::from(
+                r#"{"error":"Invalid request body"}"#,
+            ))
             .unwrap_or_default();
     }
 
@@ -67,7 +75,9 @@ pub async fn handle_unsub_post(
             return axum::http::Response::builder()
                 .status(400)
                 .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Invalid or expired token"}"#))
+                .body(axum::body::Body::from(
+                    r#"{"error":"Invalid or expired token"}"#,
+                ))
                 .unwrap_or_default();
         }
     };
@@ -76,16 +86,18 @@ pub async fn handle_unsub_post(
         .await
         .unwrap_or_else(|| new_id("msg"));
 
-    if let Err(e) = state.processor.record_unsubscribe(UnsubscribeData {
-        tenant_id: data.tenant_id.clone(),
-        message_id,
-        recipient: data.recipient.clone(),
-        reason: Some("one-click".into()),
-        category: None,
-        user_agent: ua,
-        ip_address: Some(ip),
-    })
-    .await
+    if let Err(e) = state
+        .processor
+        .record_unsubscribe(UnsubscribeData {
+            tenant_id: data.tenant_id.clone(),
+            message_id,
+            recipient: data.recipient.clone(),
+            reason: Some("one-click".into()),
+            category: None,
+            user_agent: ua,
+            ip_address: Some(ip),
+        })
+        .await
     {
         error!(error = %e, "Failed to record unsubscribe");
         return axum::http::Response::builder()
@@ -95,7 +107,7 @@ pub async fn handle_unsub_post(
             .unwrap_or_default();
     }
 
-// Fire-and-forget webhook queue (F-215)
+    // Fire-and-forget webhook queue (F-215)
     queue_unsub_webhook_async(&state, &data.tenant_id, &data.recipient, "one-click");
 
     axum::http::Response::builder()
@@ -125,32 +137,40 @@ pub async fn handle_unsub_get(
 
     let data = match state.codec.verify_unsubscribe_token(&token, None) {
         Some(d) => d,
-        None => return Html(render_error_page("Invalid or expired unsubscribe link")).into_response(),
+        None => {
+            return Html(render_error_page("Invalid or expired unsubscribe link")).into_response()
+        }
     };
 
     let unsub_path = &state.config.tracking.unsubscribe_path;
 
     if q.confirm.as_deref() == Some("1") {
-        let ua = headers.get("user-agent").and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let ua = headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let ip = extract_client_ip(&headers, addr.ip(), &state);
 
         let message_id = find_latest_message_id(&state, &data.tenant_id, &data.recipient)
             .await
             .unwrap_or_else(|| new_id("msg"));
 
-        if let Err(e) = state.processor.record_unsubscribe(UnsubscribeData {
-            tenant_id: data.tenant_id.clone(),
-            message_id,
-            recipient: data.recipient.clone(),
-            reason: Some("link-click".into()),
-            category: None,
-            user_agent: ua,
-            ip_address: Some(ip),
-        })
-        .await
+        if let Err(e) = state
+            .processor
+            .record_unsubscribe(UnsubscribeData {
+                tenant_id: data.tenant_id.clone(),
+                message_id,
+                recipient: data.recipient.clone(),
+                reason: Some("link-click".into()),
+                category: None,
+                user_agent: ua,
+                ip_address: Some(ip),
+            })
+            .await
         {
             error!(error = %e, "Failed to record unsubscribe");
-            return Html(render_error_page("Something went wrong. Please try again.")).into_response();
+            return Html(render_error_page("Something went wrong. Please try again."))
+                .into_response();
         }
 
         queue_unsub_webhook_async(&state, &data.tenant_id, &data.recipient, "link-click");
@@ -158,7 +178,12 @@ pub async fn handle_unsub_get(
         return Html(render_success_page(&data.recipient)).into_response();
     }
 
-    Html(render_confirmation_page(&token, &data.recipient, unsub_path)).into_response()
+    Html(render_confirmation_page(
+        &token,
+        &data.recipient,
+        unsub_path,
+    ))
+    .into_response()
 }
 
 // ── GET /p/:token ─────────────────────────────────────────────────────────────
@@ -180,7 +205,9 @@ pub async fn handle_prefs_get(
 
     let data = match state.codec.verify_preferences_token(&token) {
         Some(d) => d,
-        None => return Html(render_error_page("Invalid or expired preferences link")).into_response(),
+        None => {
+            return Html(render_error_page("Invalid or expired preferences link")).into_response()
+        }
     };
 
     let email_lc = data.recipient.to_lowercase();
@@ -214,19 +241,27 @@ pub async fn handle_prefs_get(
 
     let pref_map: std::collections::HashMap<String, bool> = prefs_res.into_iter().collect();
 
-// Collect into owned strings first, then build Category slices from those.
+    // Collect into owned strings first, then build Category slices from those.
     let cat_rows: Vec<(String, String)> = cats_res;
     let cats: Vec<OwnedCategory> = cat_rows
         .into_iter()
         .map(|(name, desc)| {
             let subscribed = *pref_map.get(&name).unwrap_or(&true);
-            OwnedCategory { name, description: desc, subscribed }
+            OwnedCategory {
+                name,
+                description: desc,
+                subscribed,
+            }
         })
         .collect();
 
     let cat_refs: Vec<Category<'_>> = cats
         .iter()
-        .map(|c| Category { name: &c.name, description: &c.description, subscribed: c.subscribed })
+        .map(|c| Category {
+            name: &c.name,
+            description: &c.description,
+            subscribed: c.subscribed,
+        })
         .collect();
 
     let globally_unsubscribed = sup_res.is_some();
@@ -277,7 +312,9 @@ pub async fn handle_prefs_post(
             return axum::http::Response::builder()
                 .status(400)
                 .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Invalid or expired token"}"#))
+                .body(axum::body::Body::from(
+                    r#"{"error":"Invalid or expired token"}"#,
+                ))
                 .unwrap_or_default();
         }
     };
@@ -285,7 +322,7 @@ pub async fn handle_prefs_post(
     let email = data.recipient.to_lowercase();
     let prefs_path = &state.config.tracking.preferences_path;
 
-// Global unsubscribe
+    // Global unsubscribe
     if form.unsubscribe_all.as_deref() == Some("true") {
         let sup_id = new_id("sup");
         if let Err(e) = sqlx::query(r#"
@@ -308,18 +345,23 @@ pub async fn handle_prefs_post(
         return Redirect::to(&redirect_url).into_response();
     }
 
-// Resubscribe
+    // Resubscribe
     if form.resubscribe_all.as_deref() == Some("true") {
         if let Err(e) = sqlx::query(
-            "DELETE FROM suppressions WHERE tenant_id=$1 AND email=$2 AND reason='unsubscribe'"
+            "DELETE FROM suppressions WHERE tenant_id=$1 AND email=$2 AND reason='unsubscribe'",
         )
-        .bind(&data.tenant_id).bind(&email)
-        .execute(&state.db).await {
+        .bind(&data.tenant_id)
+        .bind(&email)
+        .execute(&state.db)
+        .await
+        {
             tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "Failed to delete suppression record for resubscribe");
             return axum::http::Response::builder()
                 .status(500)
                 .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Failed to save resubscribe preference. Please try again."}"#))
+                .body(axum::body::Body::from(
+                    r#"{"error":"Failed to save resubscribe preference. Please try again."}"#,
+                ))
                 .unwrap_or_default();
         }
 
@@ -327,7 +369,7 @@ pub async fn handle_prefs_post(
         return Redirect::to(&redirect_url).into_response();
     }
 
-// Update category preferences (B-033:single multi-row INSERT)
+    // Update category preferences (B-033:single multi-row INSERT)
     let cats: Vec<(String, bool)> = form
         .categories
         .iter()
@@ -336,7 +378,7 @@ pub async fn handle_prefs_post(
         .collect();
 
     if !cats.is_empty() {
-// #203:Use batch INSERT via sqlx::QueryBuilder instead of N individual INSERTs
+        // #203:Use batch INSERT via sqlx::QueryBuilder instead of N individual INSERTs
         let mut tx = match state.db.begin().await {
             Ok(tx) => tx,
             Err(e) => {
@@ -344,12 +386,14 @@ pub async fn handle_prefs_post(
                 return axum::http::Response::builder()
                     .status(500)
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"error":"Failed to save preferences. Please try again."}"#))
+                    .body(axum::body::Body::from(
+                        r#"{"error":"Failed to save preferences. Please try again."}"#,
+                    ))
                     .unwrap_or_default();
             }
         };
 
-// Batch UPSERT all category preferences in a single statement
+        // Batch UPSERT all category preferences in a single statement
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at) "
         );
@@ -367,11 +411,13 @@ pub async fn handle_prefs_post(
 
         if let Err(e) = builder.build().execute(&mut *tx).await {
             error!(error = %e, "Failed to batch update subscription preferences");
-// tx will be rolled back on drop
+            // tx will be rolled back on drop
             return axum::http::Response::builder()
                 .status(500)
                 .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Failed to save preferences. Please try again."}"#))
+                .body(axum::body::Body::from(
+                    r#"{"error":"Failed to save preferences. Please try again."}"#,
+                ))
                 .unwrap_or_default();
         }
 
@@ -380,7 +426,9 @@ pub async fn handle_prefs_post(
             return axum::http::Response::builder()
                 .status(500)
                 .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Failed to save preferences. Please try again."}"#))
+                .body(axum::body::Body::from(
+                    r#"{"error":"Failed to save preferences. Please try again."}"#,
+                ))
                 .unwrap_or_default();
         }
     }
@@ -391,7 +439,11 @@ pub async fn handle_prefs_post(
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-async fn find_latest_message_id(state: &AppState, tenant_id: &str, recipient: &str) -> Option<String> {
+async fn find_latest_message_id(
+    state: &AppState,
+    tenant_id: &str,
+    recipient: &str,
+) -> Option<String> {
     sqlx::query_as::<_, (String,)>(
         "SELECT id FROM messages WHERE tenant_id=$1 AND to_address=$2 ORDER BY created_at DESC LIMIT 1"
     )
@@ -425,20 +477,25 @@ async fn queue_unsub_webhook(
     email: &str,
     method: &str,
 ) -> anyhow::Result<()> {
-// Cache webhook IDs per tenant (1-minute TTL).
+    // Cache webhook IDs per tenant (1-minute TTL).
     let webhook_ids = if let Some(ids) = state.webhook_cache.get(tenant_id).await {
         ids
     } else {
-        let rows = sqlx::query_as::<_, (String,)>(r#"
+        let rows = sqlx::query_as::<_, (String,)>(
+            r#"
             SELECT id FROM webhooks
             WHERE tenant_id=$1 AND enabled=true
               AND (events @> '"recipient.unsubscribed"'::jsonb OR events @> '"*"'::jsonb)
-        "#)
+        "#,
+        )
         .bind(tenant_id)
         .fetch_all(&state.db)
         .await?;
         let ids: Vec<String> = rows.into_iter().map(|(id,)| id).collect();
-        state.webhook_cache.insert(tenant_id.to_owned(), ids.clone()).await;
+        state
+            .webhook_cache
+            .insert(tenant_id.to_owned(), ids.clone())
+            .await;
         ids
     };
 
@@ -446,7 +503,7 @@ async fn queue_unsub_webhook(
         return Ok(());
     }
 
-// Batch INSERT all webhook jobs (F-216)
+    // Batch INSERT all webhook jobs (F-216)
     let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "INSERT INTO webhook_queue (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) "
     );

@@ -15,16 +15,9 @@ pub mod warmup;
 pub use config::Config;
 pub use error::{Error, Result};
 pub use security::{
-	generate_correlation_id,
-	global_security_correlator,
-	ingest_security_event,
-	CompositeAlert,
-	CorrelationContext,
-	SecurityAction,
-	SecurityCorrelator,
-	SecurityEvent,
-	SecuritySeverity,
-	SecuritySystem,
+    generate_correlation_id, global_security_correlator, ingest_security_event, CompositeAlert,
+    CorrelationContext, SecurityAction, SecurityCorrelator, SecurityEvent, SecuritySeverity,
+    SecuritySystem,
 };
 pub use ssrf::{is_localhost, is_private_or_reserved_host, is_private_or_reserved_ip};
 

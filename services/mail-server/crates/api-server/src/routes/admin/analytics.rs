@@ -63,15 +63,163 @@ pub struct ProviderBreakdown {
     pub count: i64,
 }
 
-fn range_to_interval(range: &str) -> &str {
-    match range {
-        "24h" => "24 hours",
-        "7d" => "7 days",
-        "30d" => "30 days",
-        "90d" => "90 days",
-        "12m" => "365 days",
-        _ => "7 days",
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventTypeColumn {
+    EventType,
+    LegacyType,
+}
+
+impl EventTypeColumn {
+    pub(crate) fn as_sql(self) -> &'static str {
+        match self {
+            Self::EventType => "event_type",
+            Self::LegacyType => "type",
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventTimeColumn {
+    CreatedAt,
+    Timestamp,
+}
+
+impl EventTimeColumn {
+    pub(crate) fn as_sql(self) -> &'static str {
+        match self {
+            Self::CreatedAt => "created_at",
+            Self::Timestamp => "timestamp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventColumns {
+    pub type_col: EventTypeColumn,
+    pub time_col: EventTimeColumn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyticsRange {
+    Hours24,
+    Days7,
+    Days30,
+    Days90,
+    Months12,
+}
+
+impl AnalyticsRange {
+    pub(crate) fn interval_sql(self) -> &'static str {
+        match self {
+            Self::Hours24 => "24 hours",
+            Self::Days7 => "7 days",
+            Self::Days30 => "30 days",
+            Self::Days90 => "90 days",
+            Self::Months12 => "365 days",
+        }
+    }
+}
+
+pub fn parse_analytics_range(range: &str) -> AnalyticsRange {
+    match range {
+        "24h" => AnalyticsRange::Hours24,
+        "7d" => AnalyticsRange::Days7,
+        "30d" => AnalyticsRange::Days30,
+        "90d" => AnalyticsRange::Days90,
+        "12m" => AnalyticsRange::Months12,
+        _ => AnalyticsRange::Days7,
+    }
+}
+
+pub fn select_event_columns(type_col: Option<&str>, time_col: Option<&str>) -> EventColumns {
+    EventColumns {
+        type_col: match type_col {
+            Some("type") => EventTypeColumn::LegacyType,
+            _ => EventTypeColumn::EventType,
+        },
+        time_col: match time_col {
+            Some("timestamp") => EventTimeColumn::Timestamp,
+            _ => EventTimeColumn::CreatedAt,
+        },
+    }
+}
+
+fn build_stats_query(columns: EventColumns, range: AnalyticsRange) -> String {
+    let type_col = columns.type_col.as_sql();
+    let time_col = columns.time_col.as_sql();
+    let interval = range.interval_sql();
+
+    format!(
+        "SELECT
+            COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0) as sent,
+            COALESCE(SUM(CASE WHEN {type_col} = 'delivered' THEN 1 ELSE 0 END), 0) as delivered,
+            COALESCE(SUM(CASE WHEN {type_col} = 'opened' THEN 1 ELSE 0 END), 0) as opened,
+            COALESCE(SUM(CASE WHEN {type_col} = 'clicked' THEN 1 ELSE 0 END), 0) as clicked,
+            COALESCE(SUM(CASE WHEN {type_col} = 'bounced' THEN 1 ELSE 0 END), 0) as bounced,
+            COALESCE(SUM(CASE WHEN {type_col} = 'complained' THEN 1 ELSE 0 END), 0) as complaints
+         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval"
+    )
+}
+
+fn build_time_series_query(columns: EventColumns, range: AnalyticsRange) -> String {
+    let type_col = columns.type_col.as_sql();
+    let time_col = columns.time_col.as_sql();
+    let interval = range.interval_sql();
+
+    format!(
+        "SELECT DATE({time_col})::text as d,
+            COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {type_col} = 'delivered' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {type_col} = 'opened' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {type_col} = 'clicked' THEN 1 ELSE 0 END), 0)
+         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval
+         GROUP BY d ORDER BY d ASC"
+    )
+}
+
+fn build_provider_breakdown_query(columns: EventColumns, range: AnalyticsRange) -> String {
+    let type_col = columns.type_col.as_sql();
+    let time_col = columns.time_col.as_sql();
+    let interval = range.interval_sql();
+
+    format!(
+        "SELECT
+            CASE
+              WHEN recipient LIKE '%@gmail.com' THEN 'Gmail'
+              WHEN recipient LIKE '%@yahoo.%' THEN 'Yahoo'
+              WHEN recipient LIKE '%@outlook.%' OR recipient LIKE '%@hotmail.%' THEN 'Microsoft'
+              WHEN recipient LIKE '%@icloud.com' OR recipient LIKE '%@me.com' THEN 'iCloud'
+              ELSE 'Other'
+            END as provider,
+            COUNT(*) as cnt
+         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval AND {type_col} = 'sent'
+         GROUP BY provider ORDER BY cnt DESC"
+    )
+}
+
+async fn detect_column(state: &AppState, table: &str, candidates: &[&str]) -> Option<String> {
+    for col in candidates {
+        let exists: Option<(bool,)> = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2)",
+        )
+        .bind(table)
+        .bind(*col)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        if exists.map(|r| r.0).unwrap_or(false) {
+            return Some((*col).to_string());
+        }
+    }
+    None
+}
+
+pub async fn detect_event_columns(state: &AppState) -> EventColumns {
+    let type_col = detect_column(state, "events", &["event_type", "type"]).await;
+    let time_col = detect_column(state, "events", &["created_at", "timestamp"]).await;
+
+    select_event_columns(type_col.as_deref(), time_col.as_deref())
 }
 
 async fn get_analytics(
@@ -81,27 +229,11 @@ async fn get_analytics(
 ) -> Result<Json<AnalyticsResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    let interval = range_to_interval(&params.range);
+    let range = parse_analytics_range(&params.range);
+    let columns = detect_event_columns(&state).await;
 
-// Detect column names (event_type vs type, created_at vs timestamp)
-    let type_col = detect_column(&state, "events", &["event_type", "type"])
-        .await
-        .unwrap_or_else(|| "event_type".into());
-    let time_col = detect_column(&state, "events", &["created_at", "timestamp"])
-        .await
-        .unwrap_or_else(|| "created_at".into());
-
-// Aggregate stats
-    let stats_sql = format!(
-        "SELECT
-            COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0) as sent,
-            COALESCE(SUM(CASE WHEN {type_col} = 'delivered' THEN 1 ELSE 0 END), 0) as delivered,
-            COALESCE(SUM(CASE WHEN {type_col} = 'opened' THEN 1 ELSE 0 END), 0) as opened,
-            COALESCE(SUM(CASE WHEN {type_col} = 'clicked' THEN 1 ELSE 0 END), 0) as clicked,
-            COALESCE(SUM(CASE WHEN {type_col} = 'bounced' THEN 1 ELSE 0 END), 0) as bounced,
-            COALESCE(SUM(CASE WHEN {type_col} = 'complained' THEN 1 ELSE 0 END), 0) as complaints
-         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval"
-    );
+    // Aggregate stats
+    let stats_sql = build_stats_query(columns, range);
 
     let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(&stats_sql)
         .fetch_optional(&state.db)
@@ -126,16 +258,8 @@ async fn get_analytics(
         complaint_rate: (complaints as f64 / safe_sent * 100.0).min(100.0),
     };
 
-// Time series
-    let ts_sql = format!(
-        "SELECT DATE({time_col})::text as d,
-            COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'delivered' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'opened' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'clicked' THEN 1 ELSE 0 END), 0)
-         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval
-         GROUP BY d ORDER BY d ASC"
-    );
+    // Time series
+    let ts_sql = build_time_series_query(columns, range);
 
     let ts_rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(&ts_sql)
         .fetch_all(&state.db)
@@ -143,23 +267,17 @@ async fn get_analytics(
 
     let time_series: Vec<TimeSeriesPoint> = ts_rows
         .into_iter()
-        .map(|(date, s, d, o, c)| TimeSeriesPoint { date, sent: s, delivered: d, opened: o, clicked: c })
+        .map(|(date, s, d, o, c)| TimeSeriesPoint {
+            date,
+            sent: s,
+            delivered: d,
+            opened: o,
+            clicked: c,
+        })
         .collect();
 
-// Provider breakdown by recipient domain
-    let prov_sql = format!(
-        "SELECT
-            CASE
-              WHEN recipient LIKE '%@gmail.com' THEN 'Gmail'
-              WHEN recipient LIKE '%@yahoo.%' THEN 'Yahoo'
-              WHEN recipient LIKE '%@outlook.%' OR recipient LIKE '%@hotmail.%' THEN 'Microsoft'
-              WHEN recipient LIKE '%@icloud.com' OR recipient LIKE '%@me.com' THEN 'iCloud'
-              ELSE 'Other'
-            END as provider,
-            COUNT(*) as cnt
-         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval AND {type_col} = 'sent'
-         GROUP BY provider ORDER BY cnt DESC"
-    );
+    // Provider breakdown by recipient domain
+    let prov_sql = build_provider_breakdown_query(columns, range);
 
     let prov_rows = sqlx::query_as::<_, (String, i64)>(&prov_sql)
         .fetch_all(&state.db)
@@ -170,24 +288,27 @@ async fn get_analytics(
         .map(|(provider, count)| ProviderBreakdown { provider, count })
         .collect();
 
-    Ok(Json(AnalyticsResponse { stats, time_series, providers }))
+    Ok(Json(AnalyticsResponse {
+        stats,
+        time_series,
+        providers,
+    }))
 }
 
-/// Detect which column name exists in a table.
-pub async fn detect_column(state: &AppState, table: &str, candidates: &[&str]) -> Option<String> {
-    for col in candidates {
-        let exists: Option<(bool,)> = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2)",
-        )
-        .bind(table)
-        .bind(*col)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-        if exists.map(|r| r.0).unwrap_or(false) {
-            return Some((*col).to_string());
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_event_columns_only_returns_whitelisted_variants() {
+        let columns = select_event_columns(Some("unexpected"), Some("timestamp"));
+
+        assert_eq!(columns.type_col, EventTypeColumn::EventType);
+        assert_eq!(columns.time_col, EventTimeColumn::Timestamp);
     }
-    None
+
+    #[test]
+    fn parse_analytics_range_defaults_to_seven_days() {
+        assert_eq!(parse_analytics_range("bogus"), AnalyticsRange::Days7);
+    }
 }

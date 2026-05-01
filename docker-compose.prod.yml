@@ -76,9 +76,13 @@ services:
     networks:
       - apexmail_frontend
 
+  observability:
+    environment:
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required in production}
+
   postgres:
     # Production: Do NOT expose database port to host
-    ports: !override []
+    ports: []
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     deploy:
@@ -96,12 +100,12 @@ services:
 
   redis:
     # Production: Do NOT expose Redis port to host
-    ports: !override []
+    ports: []
     # SECURITY: Password from Docker secret, not environment variable
     environment:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_MAXMEMORY: "1gb"
-      REDIS_MAXMEMORY_POLICY: "allkeys-lru"
+      REDIS_MAXMEMORY_POLICY: "noeviction"
     secrets:
       - redis_password
     deploy:
@@ -120,7 +124,8 @@ services:
   tracking:
     environment:
       RUST_LOG: info
-    ports: !override []
+      TRACKING_SECRET_KEY: ${TRACKING_SECRET_KEY:?TRACKING_SECRET_KEY is required in production}
+    ports: []
     deploy:
       replicas: 2
       resources:
@@ -175,7 +180,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    ports: !override []
+    ports: []
     networks:
       - apexmail_backend
       - apexmail_data
@@ -203,7 +208,8 @@ services:
   enterprise:
     environment:
       RUST_LOG: info
-    ports: !override []
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
+    ports: []
     deploy:
       replicas: 2
       resources:
@@ -243,7 +249,7 @@ services:
       - postgres_password
 
   clickhouse:
-    ports: !override []
+    ports: []
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}

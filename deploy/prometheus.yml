@@ -69,6 +69,12 @@ scrape_configs:
       - target_label: __address__
         replacement: blackbox-exporter:9115
 
+  - job_name: 'synthetic-transactions'
+    static_configs:
+      - targets: ['synthetic-monitor:9128']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
 alerting:
   alertmanagers:
     - dns_sd_configs:

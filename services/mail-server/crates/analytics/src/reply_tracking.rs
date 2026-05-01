@@ -67,19 +67,13 @@ static NEGATIVE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ])
 });
 static INQUIRY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    compile_regexes(&[
-        r"(?i)\b(question|how|when|where|what|why|can you|could you|please help)\b",
-    ])
+    compile_regexes(&[r"(?i)\b(question|how|when|where|what|why|can you|could you|please help)\b"])
 });
 static UNSUB_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    compile_regexes(&[
-        r"(?i)\b(unsubscribe|opt.out|stop (sending|emailing)|remove me)\b",
-    ])
+    compile_regexes(&[r"(?i)\b(unsubscribe|opt.out|stop (sending|emailing)|remove me)\b"])
 });
 static OOO_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    compile_regexes(&[
-        r"(?i)\b(out of office|ooo|on vacation|away|on leave|returning)\b",
-    ])
+    compile_regexes(&[r"(?i)\b(out of office|ooo|on vacation|away|on leave|returning)\b"])
 });
 
 fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
@@ -109,13 +103,13 @@ impl ReplyTrackingService {
         Self { pool, cache }
     }
 
-/// Process a reply event.
+    /// Process a reply event.
     pub async fn process_reply(&self, event: &ReplyEvent) -> anyhow::Result<ProcessedReply> {
         let is_auto = detect_auto_reply(&event.subject, &event.headers);
         let sentiment = analyze_sentiment(&event.body);
         let thread_depth = self.get_thread_depth(&event.in_reply_to).await?;
 
-// Store in DB
+        // Store in DB
         sqlx::query(
             "INSERT INTO reply_events (message_id, in_reply_to, tenant_id, recipient, \
              subject, is_auto_reply, sentiment, thread_depth, timestamp) \
@@ -133,7 +127,7 @@ impl ReplyTrackingService {
         .execute(&self.pool)
         .await?;
 
-// Invalidate cache for this tenant
+        // Invalidate cache for this tenant
         self.cache.invalidate(&event.tenant_id);
 
         Ok(ProcessedReply {
@@ -144,12 +138,8 @@ impl ReplyTrackingService {
         })
     }
 
-/// Get reply metrics for a tenant.
-    pub async fn get_metrics(
-        &self,
-        tenant_id: &str,
-        days: i64,
-    ) -> anyhow::Result<ReplyMetrics> {
+    /// Get reply metrics for a tenant.
+    pub async fn get_metrics(&self, tenant_id: &str, days: i64) -> anyhow::Result<ReplyMetrics> {
         if let Some(cached) = self.cache.get(tenant_id) {
             return Ok(cached);
         }
@@ -212,13 +202,12 @@ impl ReplyTrackingService {
     }
 
     async fn get_thread_depth(&self, in_reply_to: &str) -> anyhow::Result<i32> {
-        let (depth,): (Option<i32>,) = sqlx::query_as(
-            "SELECT MAX(thread_depth) FROM reply_events WHERE message_id = $1",
-        )
-        .bind(in_reply_to)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("reply metrics thread_depth query failed: {e}"))?;
+        let (depth,): (Option<i32>,) =
+            sqlx::query_as("SELECT MAX(thread_depth) FROM reply_events WHERE message_id = $1")
+                .bind(in_reply_to)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("reply metrics thread_depth query failed: {e}"))?;
 
         Ok(depth.unwrap_or(0) + 1)
     }
@@ -238,14 +227,14 @@ pub fn detect_auto_reply(
     subject: &str,
     headers: &std::collections::HashMap<String, String>,
 ) -> bool {
-// Check subject patterns
+    // Check subject patterns
     for pattern in AUTO_REPLY_PATTERNS.iter() {
         if pattern.is_match(subject) {
             return true;
         }
     }
 
-// Check headers
+    // Check headers
     for (header_name, header_value) in AUTO_REPLY_HEADERS.iter() {
         if let Some(val) = headers.get(*header_name) {
             if header_value.is_empty() || val.to_lowercase().contains(header_value) {
@@ -259,7 +248,7 @@ pub fn detect_auto_reply(
 
 /// Analyze sentiment of reply body.
 pub fn analyze_sentiment(body: &str) -> ReplySentiment {
-// Check specific categories first (most specific)
+    // Check specific categories first (most specific)
     for p in UNSUB_PATTERNS.iter() {
         if p.is_match(body) {
             return ReplySentiment::Unsubscribe;
@@ -272,10 +261,19 @@ pub fn analyze_sentiment(body: &str) -> ReplySentiment {
         }
     }
 
-// Count positive/negative/inquiry signal strength
-    let positive_count: usize = POSITIVE_PATTERNS.iter().map(|p| p.find_iter(body).count()).sum();
-    let negative_count: usize = NEGATIVE_PATTERNS.iter().map(|p| p.find_iter(body).count()).sum();
-    let inquiry_count: usize = INQUIRY_PATTERNS.iter().map(|p| p.find_iter(body).count()).sum();
+    // Count positive/negative/inquiry signal strength
+    let positive_count: usize = POSITIVE_PATTERNS
+        .iter()
+        .map(|p| p.find_iter(body).count())
+        .sum();
+    let negative_count: usize = NEGATIVE_PATTERNS
+        .iter()
+        .map(|p| p.find_iter(body).count())
+        .sum();
+    let inquiry_count: usize = INQUIRY_PATTERNS
+        .iter()
+        .map(|p| p.find_iter(body).count())
+        .sum();
 
     if inquiry_count > positive_count && inquiry_count > negative_count {
         return ReplySentiment::Inquiry;
@@ -316,7 +314,10 @@ mod tests {
     #[test]
     fn test_detect_not_auto_reply() {
         let headers = HashMap::new();
-        assert!(!detect_auto_reply("Re: Your proposal looks great!", &headers));
+        assert!(!detect_auto_reply(
+            "Re: Your proposal looks great!",
+            &headers
+        ));
         assert!(!detect_auto_reply("Re: Meeting tomorrow", &headers));
     }
 
@@ -371,7 +372,10 @@ mod tests {
     #[test]
     fn test_delivery_notification_auto_reply() {
         let headers = HashMap::new();
-        assert!(detect_auto_reply("Delivery Status Notification (Failure)", &headers));
+        assert!(detect_auto_reply(
+            "Delivery Status Notification (Failure)",
+            &headers
+        ));
     }
 
     #[test]

@@ -7,8 +7,7 @@ use chrono::Utc;
 use rsa::pkcs1v15::SigningKey;
 use rsa::RsaPrivateKey;
 use serde::{Deserialize, Serialize};
-use 
-sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 /// A complete ARC set (i=N).
@@ -59,7 +58,7 @@ pub fn generate_arc_headers(
 
     let timestamp = Utc::now().timestamp();
 
-// 1. ARC-Authentication-Results (AAR)
+    // 1. ARC-Authentication-Results (AAR)
     let aar = format!(
         "ARC-Authentication-Results: i={instance}; {hostname};\r\n\
          \tspf={spf};\r\n\
@@ -71,7 +70,7 @@ pub fn generate_arc_headers(
         dmarc = auth_result.dmarc,
     );
 
-// 2. ARC-Message-Signature (AMS) – sign canonicalized message headers + body hash
+    // 2. ARC-Message-Signature (AMS) – sign canonicalized message headers + body hash
     let body_hash = {
         let mut hasher = Sha256::new();
         hasher.update(canonicalize_body_relaxed(message_body));
@@ -90,8 +89,8 @@ pub fn generate_arc_headers(
 
     let signing_key = SigningKey::<Sha256>::new(config.private_key.clone());
 
-// #123:Build proper AMS signing input – canonicalized headers listed in h= tag,
-// then the AMS header itself (with empty b=) per RFC 8617 §5.1
+    // #123:Build proper AMS signing input – canonicalized headers listed in h= tag,
+    // then the AMS header itself (with empty b=) per RFC 8617 §5.1
     let h_list = ["from", "to", "subject", "date", "message-id"];
     let canonicalized_headers = extract_signing_headers(message_headers, &h_list);
     let ams_signing_input = if canonicalized_headers.is_empty() {
@@ -107,7 +106,7 @@ pub fn generate_arc_headers(
     };
     let ams = format!("{ams_template}{ams_sig}");
 
-// #125:Actually validate existing chain instead of hardcoding "pass"
+    // #125:Actually validate existing chain instead of hardcoding "pass"
     let chain_validation = if existing_chain.is_empty() {
         "none"
     } else {
@@ -127,8 +126,8 @@ pub fn generate_arc_headers(
         selector = config.selector,
     );
 
-// #124:Build proper seal signing input – all previous ARC headers + current AAR/AMS
-// + seal template (with empty b=) per RFC 8617 §5.1.2
+    // #124:Build proper seal signing input – all previous ARC headers + current AAR/AMS
+    // + seal template (with empty b=) per RFC 8617 §5.1.2
     let mut seal_signing_parts = Vec::new();
     for prev in existing_chain {
         seal_signing_parts.push(canonicalize_header_relaxed(&prev.authentication_results));
@@ -161,7 +160,7 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
         return ArcChainStatus::None;
     }
 
-// Check instances are sequential 1..=N
+    // Check instances are sequential 1..=N
     for (i, set) in arc_sets.iter().enumerate() {
         let expected = i as u32 + 1;
         if set.instance != expected {
@@ -174,7 +173,7 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
         }
     }
 
-// Check all sets have non-empty fields and valid structure
+    // Check all sets have non-empty fields and valid structure
     for set in arc_sets {
         if set.authentication_results.is_empty()
             || set.message_signature.is_empty()
@@ -183,7 +182,7 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
             return ArcChainStatus::Fail;
         }
 
-// #126:Verify AMS b= tag is present and valid base64
+        // #126:Verify AMS b= tag is present and valid base64
         match extract_tag_value(&set.message_signature, "b") {
             Some(sig) if !sig.is_empty() => {
                 let clean: String = sig.chars().filter(|c| !c.is_ascii_whitespace()).collect();
@@ -198,7 +197,7 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
             }
         }
 
-// #126:Verify seal b= tag is present and valid base64
+        // #126:Verify seal b= tag is present and valid base64
         match extract_tag_value(&set.seal, "b") {
             Some(sig) if !sig.is_empty() => {
                 let clean: String = sig.chars().filter(|c| !c.is_ascii_whitespace()).collect();
@@ -213,7 +212,7 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
             }
         }
 
-// #126:Verify cv= values throughout the chain
+        // #126:Verify cv= values throughout the chain
         let cv = extract_tag_value(&set.seal, "cv");
         if set.instance == 1 {
             if cv != Some("none") {
@@ -221,14 +220,17 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
                 return ArcChainStatus::Fail;
             }
         } else if cv != Some("pass") {
-            warn!(instance = set.instance, "ARC chain intermediate seal should have cv=pass");
+            warn!(
+                instance = set.instance,
+                "ARC chain intermediate seal should have cv=pass"
+            );
             return ArcChainStatus::Fail;
         }
     }
 
-// #E-005:Do not return pass without cryptographic verification.
-// Full ARC validation requires AMS/AS signature verification against
-// selector keys. Until implemented, fail closed instead of reporting pass.
+    // #E-005:Do not return pass without cryptographic verification.
+    // Full ARC validation requires AMS/AS signature verification against
+    // selector keys. Until implemented, fail closed instead of reporting pass.
     warn!("ARC structural checks passed but cryptographic verification is not implemented; failing closed");
     ArcChainStatus::Fail
 }
@@ -238,7 +240,7 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
 pub fn parse_arc_headers(raw_headers: &str) -> Vec<ArcSet> {
     let mut sets: std::collections::BTreeMap<u32, ArcSet> = std::collections::BTreeMap::new();
 
-// #127:Unfold headers first – join continuation lines starting with whitespace
+    // #127:Unfold headers first – join continuation lines starting with whitespace
     let unfolded = unfold_headers(raw_headers);
 
     for line in unfolded.split("\r\n") {
@@ -307,7 +309,7 @@ fn canonicalize_body_relaxed(body: &[u8]) -> Vec<u8> {
     let mut result = String::new();
     for line in text.split('\n') {
         let trimmed = line.trim_end();
-// Collapse whitespace runs to single space
+        // Collapse whitespace runs to single space
         let mut prev_ws = false;
         for ch in trimmed.chars() {
             if ch == ' ' || ch == '\t' {
@@ -322,7 +324,7 @@ fn canonicalize_body_relaxed(body: &[u8]) -> Vec<u8> {
         }
         result.push_str("\r\n");
     }
-// Remove trailing empty lines
+    // Remove trailing empty lines
     while result.ends_with("\r\n\r\n") {
         result.truncate(result.len() - 2);
     }
@@ -381,7 +383,7 @@ fn unfold_headers(raw: &str) -> String {
     let mut result = String::with_capacity(raw.len());
     for line in raw.split("\r\n") {
         if line.starts_with(' ') || line.starts_with('\t') {
-// Continuation line – replace fold with single space
+            // Continuation line – replace fold with single space
             result.push(' ');
             result.push_str(line.trim_start());
         } else {
@@ -456,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_parse_arc_headers_folded() {
-// #127:Folded header should be unfolded and parsed correctly
+        // #127:Folded header should be unfolded and parsed correctly
         let raw = "ARC-Seal: i=1; cv=none;\r\n\tb=abc\r\nARC-Message-Signature: i=1;\r\n a=rsa-sha256; b=def\r\nARC-Authentication-Results: i=1; mx.test; spf=pass";
         let sets = parse_arc_headers(raw);
         assert_eq!(sets.len(), 1);
@@ -494,7 +496,7 @@ mod tests {
         let text = String::from_utf8(result).unwrap();
         assert!(text.contains("Hello world"));
         assert!(text.contains("Test tabs"));
-// Trailing empty lines removed
+        // Trailing empty lines removed
         assert!(!text.ends_with("\r\n\r\n"));
     }
 }

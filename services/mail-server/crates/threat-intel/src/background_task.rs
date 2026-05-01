@@ -33,9 +33,9 @@ use crate::ThreatIntelEngine;
 /// Configuration for the background purge task
 #[derive(Debug, Clone)]
 pub struct PurgeTaskConfig {
-/// How often to run the purge (default:60 seconds)
+    /// How often to run the purge (default:60 seconds)
     pub interval: Duration,
-/// Whether the task is enabled
+    /// Whether the task is enabled
     pub enabled: bool,
 }
 
@@ -51,15 +51,15 @@ impl Default for PurgeTaskConfig {
 /// Statistics from a purge operation
 #[derive(Debug, Clone, Default)]
 pub struct PurgeStats {
-/// Number of expired IP entries removed
+    /// Number of expired IP entries removed
     pub expired_ips_removed: usize,
-/// Number of expired domain entries removed
+    /// Number of expired domain entries removed
     pub expired_domains_removed: usize,
-/// Total entries remaining in IP blocklist
+    /// Total entries remaining in IP blocklist
     pub ip_entries_remaining: usize,
-/// Total entries remaining in domain blocklist
+    /// Total entries remaining in domain blocklist
     pub domain_entries_remaining: usize,
-/// Duration of the purge operation
+    /// Duration of the purge operation
     pub duration_ms: u64,
 }
 
@@ -85,10 +85,10 @@ pub async fn run_purge_loop(engine: Arc<ThreatIntelEngine>, config: PurgeTaskCon
 
     loop {
         ticker.tick().await;
-        
+
         let stats = purge_once(&engine);
-        
-// Reserved for optional observability hooks.
+
+        // Reserved for optional observability hooks.
         let _ = &stats;
     }
 }
@@ -97,23 +97,23 @@ pub async fn run_purge_loop(engine: Arc<ThreatIntelEngine>, config: PurgeTaskCon
 /// This is useful for testing or manual triggering.
 pub fn purge_once(engine: &ThreatIntelEngine) -> PurgeStats {
     let start = std::time::Instant::now();
-    
-// Get counts before purge
+
+    // Get counts before purge
     let stats_before = engine.stats();
     let ips_before = stats_before.ip_exact_entries + stats_before.ip_cidr_entries;
     let domains_before = stats_before.domain_entries;
-    
-// Run purge on both blocklists
+
+    // Run purge on both blocklists
     engine.ip_blocklist().purge_expired();
     engine.domain_blocklist().purge_expired();
-    
-// Get counts after purge
+
+    // Get counts after purge
     let stats_after = engine.stats();
     let ips_after = stats_after.ip_exact_entries + stats_after.ip_cidr_entries;
     let domains_after = stats_after.domain_entries;
-    
+
     let elapsed = start.elapsed();
-    
+
     PurgeStats {
         expired_ips_removed: ips_before.saturating_sub(ips_after),
         expired_domains_removed: domains_before.saturating_sub(domains_after),
@@ -159,9 +159,9 @@ pub fn spawn_purge_task(
 /// ```
 #[derive(Debug, Clone)]
 pub struct FeedRefreshConfig {
-/// How often to reload feeds. Default:every 24 hours (matching default TTL).
+    /// How often to reload feeds. Default:every 24 hours (matching default TTL).
     pub interval: Duration,
-/// Whether the task is enabled.
+    /// Whether the task is enabled.
     pub enabled: bool,
 }
 
@@ -190,11 +190,11 @@ pub async fn run_refresh_loop<F>(
         return;
     }
 
-// Wrap in Arc so we can clone a reference for each spawn_blocking call
+    // Wrap in Arc so we can clone a reference for each spawn_blocking call
     let loader = Arc::new(loader);
     let mut ticker = interval(config.interval);
 
-// Skip the first immediate tick so we don't reload right at startup
+    // Skip the first immediate tick so we don't reload right at startup
     ticker.tick().await;
 
     loop {
@@ -250,7 +250,7 @@ mod tests {
     async fn test_purge_once_empty() {
         let engine = ThreatIntelEngine::new();
         let stats = purge_once(&engine);
-        
+
         assert_eq!(stats.expired_ips_removed, 0);
         assert_eq!(stats.expired_domains_removed, 0);
         assert!(stats.duration_ms < 1000); // Should be fast
@@ -259,10 +259,10 @@ mod tests {
     #[tokio::test]
     async fn test_purge_removes_expired() {
         let engine = ThreatIntelEngine::new();
-        
-// Add an entry with immediate expiration (in the past)
-// This requires access to add_ip_with_ttl or similar
-// For now, just verify the purge runs without error
+
+        // Add an entry with immediate expiration (in the past)
+        // This requires access to add_ip_with_ttl or similar
+        // For now, just verify the purge runs without error
         let stats = purge_once(&engine);
         assert!(stats.duration_ms < 1000);
     }

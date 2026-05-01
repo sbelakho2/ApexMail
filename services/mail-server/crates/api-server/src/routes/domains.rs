@@ -107,28 +107,25 @@ async fn create_domain(
         )]));
     }
 
-    let existing: Option<(bool,)> = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2)",
-    )
-    .bind(&auth.tenant_id)
-    .bind(&body.name)
-    .fetch_one(&state.db)
-    .await
-    .map(Some)
-    .unwrap_or(None);
+    let existing: Option<(bool,)> =
+        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2)")
+            .bind(&auth.tenant_id)
+            .bind(&body.name)
+            .fetch_one(&state.db)
+            .await
+            .map(Some)
+            .unwrap_or(None);
 
     if existing.is_some_and(|r| r.0) {
         return Err(ApiError::Conflict("domain already exists".into()));
     }
 
-// Look up the plan's max_sending_domains and the current domain count.
-    let domain_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM domains WHERE tenant_id = $1",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
+    // Look up the plan's max_sending_domains and the current domain count.
+    let domain_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
+        .bind(&auth.tenant_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
 
     let max_domains: Option<(i64,)> = sqlx::query_as(
         r#"SELECT COALESCE((p.features->>'max_sending_domains')::bigint, -1)
@@ -141,7 +138,7 @@ async fn create_domain(
     .unwrap_or(None);
 
     if let Some((limit,)) = max_domains {
-// -1 means unlimited
+        // -1 means unlimited
         if limit >= 0 && domain_count >= limit {
             return Err(ApiError::Forbidden(format!(
                 "domain limit reached: your plan allows {} sending domain{}",
@@ -231,14 +228,13 @@ async fn delete_domain(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["domains:write"])?;
 
-// Fetch domain name before deleting (for SES cleanup)
-    let domain_name: Option<(String,)> = sqlx::query_as(
-        "SELECT name FROM domains WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(&auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+    // Fetch domain name before deleting (for SES cleanup)
+    let domain_name: Option<(String,)> =
+        sqlx::query_as("SELECT name FROM domains WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(&auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
 
     let result = sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
         .bind(id)
@@ -250,7 +246,7 @@ async fn delete_domain(
         return Err(ApiError::NotFound("domain not found".into()));
     }
 
-// Clean up SES identity (best-effort, non-blocking)
+    // Clean up SES identity (best-effort, non-blocking)
     if let Some((name,)) = domain_name {
         tokio::spawn({
             let state = state.clone();
@@ -279,16 +275,16 @@ async fn verify_domain(
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
 
-// Perform real DNS lookups
+    // Perform real DNS lookups
     let dns = DNS_LOOKUP.as_ref().map_err(|e| {
         tracing::error!(error = %e, "DNS resolver initialization failed");
         ApiError::ServiceUnavailable("DNS verification is temporarily unavailable".into())
     })?;
 
-// Check SPF record
+    // Check SPF record
     let spf = match dns.lookup_spf(&row.name).await {
         Ok(Some(spf_record)) => {
-// Verify our include is present
+            // Verify our include is present
             spf_record.raw.contains("include:spf.apexmail.io")
         }
         Ok(None) => false,
@@ -298,7 +294,7 @@ async fn verify_domain(
         }
     };
 
-// Check DKIM record
+    // Check DKIM record
     let selector = row.dkim_selector.as_deref().unwrap_or("apexmail");
     let dkim = match dns.lookup_dkim(selector, &row.name).await {
         Ok(Some(_)) => true,
@@ -309,7 +305,7 @@ async fn verify_domain(
         }
     };
 
-// Check DMARC record
+    // Check DMARC record
     let dmarc = match dns.lookup_dmarc(&row.name).await {
         Ok(Some(_)) => true,
         Ok(None) => false,
@@ -319,20 +315,21 @@ async fn verify_domain(
         }
     };
 
-// Check return path (CNAME for bounces subdomain)
-    let return_path = match dns
-        .lookup_txt(&format!("bounces.{}", row.name))
-        .await
-    {
+    // Check return path (CNAME for bounces subdomain)
+    let return_path = match dns.lookup_txt(&format!("bounces.{}", row.name)).await {
         Ok(txts) => txts.iter().any(|t| t.contains("apexmail.io")),
         Err(_) => false,
     };
 
-    let status = if spf && dkim && dmarc { "verified" } else { "pending" };
+    let status = if spf && dkim && dmarc {
+        "verified"
+    } else {
+        "pending"
+    };
 
-// ── SES identity creation ──────────────────────────────────
-// When DNS verification passes, create/verify the domain identity in SES
-// so that SES can send on behalf of this domain.
+    // ── SES identity creation ──────────────────────────────────
+    // When DNS verification passes, create/verify the domain identity in SES
+    // so that SES can send on behalf of this domain.
     let mut ses_verified = false;
     if status == "verified" {
         match create_ses_domain_identity(&state, &row.name).await {
@@ -341,8 +338,8 @@ async fn verify_domain(
                 info!(domain = %row.name, "SES domain identity created/verified");
             }
             Err(e) => {
-// SES identity creation is best-effort — domain is still verified
-// in our system even if SES call fails (can be retried).
+                // SES identity creation is best-effort — domain is still verified
+                // in our system even if SES call fails (can be retried).
                 warn!(domain = %row.name, error = %e, "SES identity creation failed (non-blocking)");
             }
         }
@@ -432,8 +429,8 @@ async fn get_dns_records(
 async fn create_ses_domain_identity(state: &AppState, domain: &str) -> Result<(), ApiError> {
     let _ses_provider = &state.ses_provider;
 
-// We access the raw SES client through the provider's client.
-// For now, construct a fresh client from the provider's region.
+    // We access the raw SES client through the provider's client.
+    // For now, construct a fresh client from the provider's region.
     let region = aws_sdk_sesv2::config::Region::new(state.config.aws_region.clone());
     let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(region)
@@ -441,7 +438,7 @@ async fn create_ses_domain_identity(state: &AppState, domain: &str) -> Result<()
         .await;
     let client = aws_sdk_sesv2::Client::new(&sdk_config);
 
-// Create the email identity with Easy DKIM
+    // Create the email identity with Easy DKIM
     let dkim_attrs = aws_sdk_sesv2::types::DkimSigningAttributes::builder()
         .domain_signing_selector("apexmail")
         .next_signing_key_length(DkimSigningKeyLength::Rsa2048Bit)
@@ -474,14 +471,14 @@ async fn create_ses_domain_identity(state: &AppState, domain: &str) -> Result<()
         }
         Err(e) => {
             let msg = format!("{e}");
-// If identity already exists, that's fine
+            // If identity already exists, that's fine
             if msg.contains("AlreadyExistsException") || msg.contains("already exists") {
                 info!(domain = %domain, "SES email identity already exists");
                 Ok(())
             } else {
                 tracing::error!(domain = %domain, error = %msg, "SES CreateEmailIdentity failed");
                 Err(ApiError::ServiceUnavailable(
-                    "email identity creation failed — please retry or contact support".into()
+                    "email identity creation failed — please retry or contact support".into(),
                 ))
             }
         }
@@ -504,7 +501,9 @@ async fn delete_ses_domain_identity(state: &AppState, domain: &str) {
         .await
     {
         Ok(_) => info!(domain = %domain, "SES email identity deleted"),
-        Err(e) => warn!(domain = %domain, error = %e, "Failed to delete SES identity (non-blocking)"),
+        Err(e) => {
+            warn!(domain = %domain, error = %e, "Failed to delete SES identity (non-blocking)")
+        }
     }
 }
 
@@ -560,14 +559,12 @@ mod tests {
 
     #[test]
     fn test_dns_records_generation() {
-        let records = vec![
-            DnsRecord {
-                record_type: "TXT".into(),
-                hostname: "example.com".into(),
-                value: "v=spf1 include:spf.apexmail.io ~all".into(),
-                priority: None,
-            },
-        ];
+        let records = vec![DnsRecord {
+            record_type: "TXT".into(),
+            hostname: "example.com".into(),
+            value: "v=spf1 include:spf.apexmail.io ~all".into(),
+            priority: None,
+        }];
         let json = serde_json::to_value(&records).unwrap();
         assert_eq!(json[0]["record_type"], "TXT");
     }
@@ -622,7 +619,11 @@ async fn get_auth_status(
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
 
     let check = |verified: bool| AuthCheckResult {
-        status: if verified { "pass".into() } else { "fail".into() },
+        status: if verified {
+            "pass".into()
+        } else {
+            "fail".into()
+        },
         value: None,
         expected: None,
     };
@@ -632,7 +633,7 @@ async fn get_auth_status(
     let dmarc = domain.dmarc_verified.unwrap_or(false);
     let mx = domain.mx_verified.unwrap_or(false);
     let return_path = domain.return_path_verified.unwrap_or(false);
-    
+
     let all_pass = spf && dkim && dmarc && mx && return_path;
     let any_pass = spf || dkim;
 

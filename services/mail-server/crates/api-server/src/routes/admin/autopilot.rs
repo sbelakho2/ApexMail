@@ -12,12 +12,18 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::task::JoinHandle;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 const PENDING_APPROVAL_SCORE: i32 = 80;
+const AUTOPILOT_POLL_INTERVAL_SECS: u64 = 30;
+
+static AUTOPILOT_WORKER: OnceLock<tokio::sync::Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/", get(get_autopilot).post(post_autopilot))
@@ -89,7 +95,13 @@ async fn ensure_autopilot_state_table(db: &sqlx::PgPool) -> Result<(), ApiError>
 async fn load_autopilot_state(db: &sqlx::PgPool) -> Result<AutopilotStateRow, ApiError> {
     ensure_autopilot_state_table(db).await?;
 
-    let row: (String, bool, Option<String>, Option<DateTime<Utc>>, serde_json::Value) = sqlx::query_as(
+    let row: (
+        String,
+        bool,
+        Option<String>,
+        Option<DateTime<Utc>>,
+        serde_json::Value,
+    ) = sqlx::query_as(
         "SELECT status, safe_mode, last_action, last_action_at, rules
          FROM sales_autopilot_state
          WHERE id = 1",
@@ -116,7 +128,13 @@ async fn persist_autopilot_state(
 ) -> Result<AutopilotStateRow, ApiError> {
     ensure_autopilot_state_table(db).await?;
 
-    let row: (String, bool, Option<String>, Option<DateTime<Utc>>, serde_json::Value) = sqlx::query_as(
+    let row: (
+        String,
+        bool,
+        Option<String>,
+        Option<DateTime<Utc>>,
+        serde_json::Value,
+    ) = sqlx::query_as(
         "UPDATE sales_autopilot_state
          SET status = $1,
              safe_mode = $2,
@@ -143,6 +161,105 @@ async fn persist_autopilot_state(
     })
 }
 
+fn worker_handle() -> &'static tokio::sync::Mutex<Option<JoinHandle<()>>> {
+    AUTOPILOT_WORKER.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+fn max_approvals_per_cycle(rules: &serde_json::Value) -> i64 {
+    rules
+        .get("maxApprovalsPerCycle")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(5)
+        .clamp(1, 25)
+}
+
+async fn process_autopilot_cycle(
+    state: &AppState,
+    rules: &serde_json::Value,
+) -> Result<usize, ApiError> {
+    if !table_exists(&state.db, "sales_leads").await {
+        return Ok(0);
+    }
+
+    let approved_ids: Vec<String> = sqlx::query_scalar(
+        "UPDATE sales_leads
+         SET status = 'qualified', updated_at = NOW()
+         WHERE id IN (
+             SELECT id
+             FROM sales_leads
+             WHERE status IN ('new', 'prospect')
+               AND COALESCE(score, 0) >= $1
+             ORDER BY COALESCE(score, 0) DESC, created_at ASC
+             LIMIT $2
+         )
+         RETURNING id",
+    )
+    .bind(PENDING_APPROVAL_SCORE)
+    .bind(max_approvals_per_cycle(rules))
+    .fetch_all(&state.db)
+    .await?;
+
+    if !approved_ids.is_empty() {
+        log_autopilot_audit(
+            &state.db,
+            "control_plane.autopilot.cycle_applied",
+            json!({
+                "approved": approved_ids.len(),
+                "leadIds": approved_ids,
+            }),
+        )
+        .await;
+    }
+
+    Ok(approved_ids.len())
+}
+
+async fn run_autopilot_worker(state: AppState) {
+    loop {
+        let current = match load_autopilot_state(&state.db).await {
+            Ok(current) => current,
+            Err(error) => {
+                tracing::warn!(error = %error, "autopilot worker failed to load state");
+                break;
+            }
+        };
+
+        if current.status != "running" {
+            break;
+        }
+
+        if !current.safe_mode {
+            if let Err(error) = process_autopilot_cycle(&state, &current.rules).await {
+                tracing::warn!(error = %error, "autopilot worker cycle failed");
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(AUTOPILOT_POLL_INTERVAL_SECS)).await;
+    }
+}
+
+async fn ensure_autopilot_worker_running(state: AppState) {
+    let mut guard = worker_handle().lock().await;
+    if guard
+        .as_ref()
+        .map(|handle| !handle.is_finished())
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    *guard = Some(tokio::spawn(async move {
+        run_autopilot_worker(state).await;
+    }));
+}
+
+async fn stop_autopilot_worker() {
+    let mut guard = worker_handle().lock().await;
+    if let Some(handle) = guard.take() {
+        handle.abort();
+    }
+}
+
 async fn pending_candidates(db: &sqlx::PgPool) -> Result<Vec<serde_json::Value>, ApiError> {
     if !table_exists(db, "sales_leads").await {
         return Ok(Vec::new());
@@ -156,32 +273,84 @@ async fn pending_candidates(db: &sqlx::PgPool) -> Result<Vec<serde_json::Value>,
         Option<i32>,
         Option<String>,
         DateTime<Utc>,
-    )> = sqlx::query_as(
+    )> = sqlx::query_as(build_pending_candidates_sql(false))
+        .bind(PENDING_APPROVAL_SCORE)
+        .fetch_all(db)
+        .await?;
+
+    Ok(map_pending_candidates(rows))
+}
+
+fn build_pending_candidates_sql(tenant_scoped: bool) -> &'static str {
+    if tenant_scoped {
+        "SELECT id, company_name, domain, contact_email, score, source, created_at
+         FROM sales_leads
+         WHERE tenant_id = $1
+           AND status IN ('new', 'prospect')
+           AND COALESCE(score, 0) >= $2
+         ORDER BY COALESCE(score, 0) DESC, created_at DESC
+         LIMIT 25"
+    } else {
         "SELECT id, company_name, domain, contact_email, score, source, created_at
          FROM sales_leads
          WHERE status IN ('new', 'prospect')
            AND COALESCE(score, 0) >= $1
          ORDER BY COALESCE(score, 0) DESC, created_at DESC
-         LIMIT 25",
-    )
-    .bind(PENDING_APPROVAL_SCORE)
-    .fetch_all(db)
-    .await?;
+         LIMIT 25"
+    }
+}
 
-    Ok(rows
-        .into_iter()
-        .map(|(id, company_name, domain, contact_email, score, source, created_at)| {
-            serde_json::json!({
-                "id": id,
-                "companyName": company_name,
-                "domain": domain,
-                "contactEmail": contact_email,
-                "score": score.unwrap_or(0),
-                "source": source,
-                "createdAt": created_at.to_rfc3339(),
-            })
-        })
-        .collect())
+fn map_pending_candidates(
+    rows: Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
+        Option<String>,
+        DateTime<Utc>,
+    )>,
+) -> Vec<serde_json::Value> {
+    rows.into_iter()
+        .map(
+            |(id, company_name, domain, contact_email, score, source, created_at)| {
+                serde_json::json!({
+                    "id": id,
+                    "companyName": company_name,
+                    "domain": domain,
+                    "contactEmail": contact_email,
+                    "score": score.unwrap_or(0),
+                    "source": source,
+                    "createdAt": created_at.to_rfc3339(),
+                })
+            },
+        )
+        .collect()
+}
+
+async fn pending_candidates_for_tenant(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+) -> Result<Vec<serde_json::Value>, ApiError> {
+    if !table_exists(db, "sales_leads").await {
+        return Ok(Vec::new());
+    }
+
+    let rows: Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
+        Option<String>,
+        DateTime<Utc>,
+    )> = sqlx::query_as(build_pending_candidates_sql(true))
+        .bind(tenant_id)
+        .bind(PENDING_APPROVAL_SCORE)
+        .fetch_all(db)
+        .await?;
+
+    Ok(map_pending_candidates(rows))
 }
 
 async fn load_sales_settings(db: &sqlx::PgPool) -> Result<serde_json::Value, ApiError> {
@@ -261,18 +430,22 @@ async fn metrics_payload(
         0
     };
     let queued_recipients: i64 = if has_campaign_recipients {
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM campaign_recipients WHERE status = 'queued'")
-            .fetch_one(db)
-            .await
-            .unwrap_or(0)
+        sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM campaign_recipients WHERE status = 'queued'",
+        )
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
     } else {
         0
     };
     let replied_recipients: i64 = if has_campaign_recipients {
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM campaign_recipients WHERE replied_at IS NOT NULL")
-            .fetch_one(db)
-            .await
-            .unwrap_or(0)
+        sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM campaign_recipients WHERE replied_at IS NOT NULL",
+        )
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
     } else {
         0
     };
@@ -364,7 +537,11 @@ async fn get_autopilot(
     }
 
     let autopilot = load_autopilot_state(&state.db).await?;
-    let pending = pending_candidates(&state.db).await?;
+    let pending = if auth.tenant_id == "system" {
+        pending_candidates(&state.db).await?
+    } else {
+        pending_candidates_for_tenant(&state.db, &auth.tenant_id).await?
+    };
 
     let payload = match section {
         "overview" => {
@@ -445,7 +622,14 @@ async fn post_autopilot(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    let allowed = ["start", "stop", "approve", "reject", "approve-all", "exit-safe-mode"];
+    let allowed = [
+        "start",
+        "stop",
+        "approve",
+        "reject",
+        "approve-all",
+        "exit-safe-mode",
+    ];
     if !allowed.contains(&body.action.as_str()) {
         return Err(ApiError::Validation(vec!["Invalid action".into()]));
     }
@@ -466,6 +650,8 @@ async fn post_autopilot(
             )
             .await?;
 
+            ensure_autopilot_worker_running(state.clone()).await;
+
             log_autopilot_audit(
                 &state.db,
                 "control_plane.autopilot.started",
@@ -484,15 +670,11 @@ async fn post_autopilot(
             })
         }
         "stop" => {
-            let updated = persist_autopilot_state(
-                &state.db,
-                &current,
-                "stop",
-                Some("stopped"),
-                None,
-                None,
-            )
-            .await?;
+            let updated =
+                persist_autopilot_state(&state.db, &current, "stop", Some("stopped"), None, None)
+                    .await?;
+
+            stop_autopilot_worker().await;
 
             log_autopilot_audit(
                 &state.db,
@@ -641,5 +823,25 @@ mod tests {
         };
 
         assert_eq!(extract_candidate_id(&body).as_deref(), Some("lead_123"));
+    }
+
+    #[test]
+    fn build_pending_candidates_sql_scopes_non_system_tenants() {
+        let sql = build_pending_candidates_sql(true);
+
+        assert!(sql.contains("WHERE tenant_id = $1"));
+        assert!(sql.contains("COALESCE(score, 0) >= $2"));
+    }
+
+    #[test]
+    fn max_approvals_per_cycle_honors_rules_override() {
+        let rules = serde_json::json!({ "maxApprovalsPerCycle": 12 });
+
+        assert_eq!(max_approvals_per_cycle(&rules), 12);
+        assert_eq!(max_approvals_per_cycle(&serde_json::json!({})), 5);
+        assert_eq!(
+            max_approvals_per_cycle(&serde_json::json!({ "maxApprovalsPerCycle": 100 })),
+            25
+        );
     }
 }

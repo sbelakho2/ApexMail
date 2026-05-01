@@ -33,19 +33,24 @@ impl SupportService {
         Self { db }
     }
 
-/// Create a support ticket with SLA deadline calculation
+    /// Create a support ticket with SLA deadline calculation
     pub async fn create_ticket(
-        &self, tenant_id: &str, subject: &str, description: &str,
-        priority: &str, category: &str, contact_email: Option<&str>,
+        &self,
+        tenant_id: &str,
+        subject: &str,
+        description: &str,
+        priority: &str,
+        category: &str,
+        contact_email: Option<&str>,
     ) -> Result<ApiResult<SupportTicket>, String> {
         let id = Uuid::new_v4();
 
-// Calculate SLA deadlines based on priority
+        // Calculate SLA deadlines based on priority
         let (fr_minutes, res_minutes) = sla_deadlines(priority);
         let sla_first_response_due = Utc::now() + Duration::minutes(fr_minutes);
         let sla_resolution_due = Utc::now() + Duration::minutes(res_minutes);
 
-// Auto-assign to least loaded agent with specialty matching
+        // Auto-assign to least loaded agent with specialty matching
         let assigned_to = self.auto_assign_agent(category).await?;
 
         let row = sqlx::query_as::<_, SupportTicket>(
@@ -65,15 +70,14 @@ impl SupportService {
         Ok(ApiResult::ok(row))
     }
 
-/// Get a ticket by ID
+    /// Get a ticket by ID
     pub async fn get_ticket(&self, id: Uuid) -> Result<ApiResult<SupportTicket>, String> {
-        let row = sqlx::query_as::<_, SupportTicket>(
-            "SELECT * FROM ent_support_tickets WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("Get ticket: {e}"))?;
+        let row =
+            sqlx::query_as::<_, SupportTicket>("SELECT * FROM ent_support_tickets WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| format!("Get ticket: {e}"))?;
 
         match row {
             Some(t) => Ok(ApiResult::ok(t)),
@@ -81,10 +85,14 @@ impl SupportService {
         }
     }
 
-/// List tickets with optional filters
+    /// List tickets with optional filters
     pub async fn list_tickets(
-        &self, tenant_id: &str, status: Option<&str>, priority: Option<&str>,
-        limit: i64, offset: i64,
+        &self,
+        tenant_id: &str,
+        status: Option<&str>,
+        priority: Option<&str>,
+        limit: i64,
+        offset: i64,
     ) -> Result<ApiResult<Vec<SupportTicket>>, String> {
         let mut query = String::from("SELECT * FROM ent_support_tickets WHERE tenant_id = $1");
         let mut param_idx = 2u32;
@@ -111,13 +119,19 @@ impl SupportService {
         }
         q = q.bind(limit).bind(offset);
 
-        let rows = q.fetch_all(&self.db).await.map_err(|e| format!("List tickets: {e}"))?;
+        let rows = q
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| format!("List tickets: {e}"))?;
         Ok(ApiResult::ok(rows))
     }
 
-/// Update a ticket's status
+    /// Update a ticket's status
     pub async fn update_ticket(
-        &self, id: Uuid, status: Option<&str>, priority: Option<&str>,
+        &self,
+        id: Uuid,
+        status: Option<&str>,
+        priority: Option<&str>,
         assigned_to: Option<Uuid>,
     ) -> Result<ApiResult<SupportTicket>, String> {
         let now = Utc::now();
@@ -142,10 +156,15 @@ impl SupportService {
         }
     }
 
-/// Add a comment to a ticket
+    /// Add a comment to a ticket
     pub async fn add_comment(
-        &self, ticket_id: Uuid, author_id: &str, author_name: &str,
-        author_type: &str, content: &str, is_internal: bool,
+        &self,
+        ticket_id: Uuid,
+        author_id: &str,
+        author_name: &str,
+        author_type: &str,
+        content: &str,
+        is_internal: bool,
     ) -> Result<ApiResult<TicketComment>, String> {
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, TicketComment>(
@@ -159,7 +178,7 @@ impl SupportService {
         .await
         .map_err(|e| format!("Add comment: {e}"))?;
 
-// Mark first response time if this is an agent reply
+        // Mark first response time if this is an agent reply
         if author_type == "agent" {
             if let Err(e) = sqlx::query(
                 "UPDATE ent_support_tickets SET first_response_at = COALESCE(first_response_at, NOW()), updated_at = NOW() WHERE id = $1"
@@ -175,9 +194,11 @@ impl SupportService {
         Ok(ApiResult::ok(row))
     }
 
-/// Get comments for a ticket
+    /// Get comments for a ticket
     pub async fn get_comments(
-        &self, ticket_id: Uuid, include_internal: bool,
+        &self,
+        ticket_id: Uuid,
+        include_internal: bool,
     ) -> Result<ApiResult<Vec<TicketComment>>, String> {
         let rows = if include_internal {
             sqlx::query_as::<_, TicketComment>(
@@ -198,11 +219,14 @@ impl SupportService {
         Ok(ApiResult::ok(rows))
     }
 
-/// Escalate a ticket
+    /// Escalate a ticket
     pub async fn escalate(
-        &self, id: Uuid, reason: &str, escalated_by: Uuid,
+        &self,
+        id: Uuid,
+        reason: &str,
+        escalated_by: Uuid,
     ) -> Result<ApiResult<SupportTicket>, String> {
-// #263:Store reason and escalated_by in the update
+        // #263:Store reason and escalated_by in the update
         let row = sqlx::query_as::<_, SupportTicket>(
             "UPDATE ent_support_tickets SET
              status = 'escalated',
@@ -211,7 +235,7 @@ impl SupportService {
              escalation_reason = $2,
              escalated_by = $3,
              updated_at = NOW()
-             WHERE id = $1 RETURNING *"
+             WHERE id = $1 RETURNING *",
         )
         .bind(id)
         .bind(reason)
@@ -229,19 +253,24 @@ impl SupportService {
         }
     }
 
-/// Submit customer satisfaction rating
+    /// Submit customer satisfaction rating
     pub async fn submit_satisfaction(
-        &self, id: Uuid, rating: i32, feedback: Option<&str>,
+        &self,
+        id: Uuid,
+        rating: i32,
+        feedback: Option<&str>,
     ) -> Result<ApiResult<SupportTicket>, String> {
-// #262:Store feedback in the satisfaction_feedback column
+        // #262:Store feedback in the satisfaction_feedback column
         let row = sqlx::query_as::<_, SupportTicket>(
             "UPDATE ent_support_tickets SET 
              satisfaction_rating = $2, 
              satisfaction_feedback = $3,
              updated_at = NOW()
-             WHERE id = $1 RETURNING *"
+             WHERE id = $1 RETURNING *",
         )
-        .bind(id).bind(rating).bind(feedback)
+        .bind(id)
+        .bind(rating)
+        .bind(feedback)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Submit satisfaction: {e}"))?;
@@ -252,7 +281,7 @@ impl SupportService {
         }
     }
 
-/// Get aggregate support metrics for a tenant
+    /// Get aggregate support metrics for a tenant
     pub async fn get_metrics(&self, tenant_id: &str) -> Result<ApiResult<SupportMetrics>, String> {
         let row: (i64, i64, Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
             "SELECT
@@ -268,7 +297,7 @@ impl SupportService {
         .await
         .map_err(|e| format!("Get metrics: {e}"))?;
 
-// SLA compliance
+        // SLA compliance
         let sla_row: (i64, i64) = sqlx::query_as(
             "SELECT
              COUNT(*) FILTER (WHERE first_response_at IS NOT NULL AND first_response_at <= sla_first_response_due),
@@ -298,7 +327,7 @@ impl SupportService {
         }))
     }
 
-/// Get agent workload for ticket assignment
+    /// Get agent workload for ticket assignment
     pub async fn get_agent_workload(&self) -> Result<Vec<(SupportAgent, i64)>, String> {
         let rows: Vec<SupportAgent> = sqlx::query_as::<_, SupportAgent>(
             "SELECT * FROM ent_support_agents WHERE available = true ORDER BY current_ticket_count ASC"
@@ -307,16 +336,19 @@ impl SupportService {
         .await
         .map_err(|e| format!("Agent workload: {e}"))?;
 
-        Ok(rows.into_iter().map(|a| {
-            let count = a.current_ticket_count as i64;
-            (a, count)
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|a| {
+                let count = a.current_ticket_count as i64;
+                (a, count)
+            })
+            .collect())
     }
 
-/// Auto-assign to least loaded agent with optional specialty match
-/// #264:Now increments the assigned agent's current_ticket_count
+    /// Auto-assign to least loaded agent with optional specialty match
+    /// #264:Now increments the assigned agent's current_ticket_count
     async fn auto_assign_agent(&self, category: &str) -> Result<Option<Uuid>, String> {
-// Try to find an agent with matching specialty first
+        // Try to find an agent with matching specialty first
         let row: Option<(Uuid,)> = sqlx::query_as(
             "UPDATE ent_support_agents 
              SET current_ticket_count = current_ticket_count + 1
@@ -327,7 +359,7 @@ impl SupportService {
                  LIMIT 1
                  FOR UPDATE SKIP LOCKED
              )
-             RETURNING id"
+             RETURNING id",
         )
         .bind(category)
         .fetch_optional(&self.db)
@@ -338,7 +370,7 @@ impl SupportService {
             return Ok(Some(id));
         }
 
-// Fallback:assign to any available agent
+        // Fallback:assign to any available agent
         let row: Option<(Uuid,)> = sqlx::query_as(
             "UPDATE ent_support_agents 
              SET current_ticket_count = current_ticket_count + 1
@@ -349,7 +381,7 @@ impl SupportService {
                  LIMIT 1
                  FOR UPDATE SKIP LOCKED
              )
-             RETURNING id"
+             RETURNING id",
         )
         .fetch_optional(&self.db)
         .await
@@ -358,7 +390,7 @@ impl SupportService {
         Ok(row.map(|(id,)| id))
     }
 
-/// Check SLA breaches (background job)
+    /// Check SLA breaches (background job)
     pub async fn check_sla_breaches(&self) -> Result<Vec<SupportTicket>, String> {
         let now = Utc::now();
         let tickets = match sqlx::query_as::<_, SupportTicket>(
@@ -368,7 +400,7 @@ impl SupportService {
              AND (
                (first_response_at IS NULL AND sla_first_response_due < $1)
                OR (sla_resolution_due < $1)
-             )"
+             )",
         )
         .bind(now)
         .fetch_all(&self.db)
@@ -383,10 +415,11 @@ impl SupportService {
         };
 
         for ticket in &tickets {
-            if let Err(e) = sqlx::query("UPDATE ent_support_tickets SET sla_breached = true WHERE id = $1")
-                .bind(ticket.id)
-                .execute(&self.db)
-                .await
+            if let Err(e) =
+                sqlx::query("UPDATE ent_support_tickets SET sla_breached = true WHERE id = $1")
+                    .bind(ticket.id)
+                    .execute(&self.db)
+                    .await
             {
                 tracing::error!(error = %e, ticket_id = %ticket.id, "Failed to mark SLA breach — ticket will be retried next cycle");
             }
@@ -395,7 +428,7 @@ impl SupportService {
         Ok(tickets)
     }
 
-/// Auto-escalation (background job)
+    /// Auto-escalation (background job)
     pub async fn auto_escalate(&self) -> Result<i64, String> {
         let now = Utc::now();
         let rules = vec![
@@ -404,7 +437,10 @@ impl SupportService {
                 TimeDelta::try_minutes(30).unwrap_or(TimeDelta::zero()),
             ),
             ("high", TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero())),
-            ("medium", TimeDelta::try_hours(2).unwrap_or(TimeDelta::zero())),
+            (
+                "medium",
+                TimeDelta::try_hours(2).unwrap_or(TimeDelta::zero()),
+            ),
         ];
 
         let mut escalated = 0i64;
@@ -437,11 +473,7 @@ impl SupportService {
 
 /// Calculate auto-escalation thresholds in minutes
 pub fn auto_escalation_thresholds() -> Vec<(&'static str, i64)> {
-    vec![
-        ("critical", 30),
-        ("high", 60),
-        ("medium", 120),
-    ]
+    vec![("critical", 30), ("high", 60), ("medium", 120)]
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

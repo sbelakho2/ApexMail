@@ -11,7 +11,7 @@ use crate::types::{Company, SalesError};
 /// hermetic and deterministic.
 #[derive(Debug, Clone)]
 pub struct EnrichmentService {
-/// Base URL of the external enrichment API (unused in mock mode).
+    /// Base URL of the external enrichment API (unused in mock mode).
     api_url: String,
 }
 
@@ -22,8 +22,8 @@ impl EnrichmentService {
         }
     }
 
-/// Extract the domain portion from an email address.
-/// Returns `None` if the address is malformed.
+    /// Extract the domain portion from an email address.
+    /// Returns `None` if the address is malformed.
     pub fn extract_domain(email: &str) -> Option<String> {
         let parts: Vec<&str> = email.splitn(2, '@').collect();
         if parts.len() == 2 && !parts[1].is_empty() {
@@ -33,26 +33,26 @@ impl EnrichmentService {
         }
     }
 
-/// Enrich a lead by email – extracts the domain and delegates to
-/// [`enrich_company`].
+    /// Enrich a lead by email – extracts the domain and delegates to
+    /// [`enrich_company`].
     pub fn enrich_lead(&self, email: &str) -> Result<Company, SalesError> {
         let domain = Self::extract_domain(email)
             .ok_or_else(|| SalesError::InvalidInput(format!("bad email: {email}")))?;
         self.enrich_company(&domain)
     }
 
-/// Look up (or mock) company data for a domain.
+    /// Look up (or mock) company data for a domain.
     pub fn enrich_company(&self, domain: &str) -> Result<Company, SalesError> {
         if !self.api_url.is_empty() {
             debug!(api_url = %self.api_url, "using mock enrichment backend");
         }
-// Deterministic mock data keyed on domain.
+        // Deterministic mock data keyed on domain.
         let (name, industry, size, revenue) = match domain {
             "acme.com" => ("Acme Corp", "SaaS", "50-200", "$5M-$20M"),
             "beta.io" => ("Beta Inc", "FinTech", "10-50", "$1M-$5M"),
             "gamma.dev" => ("Gamma Labs", "DevTools", "200-1000", "$20M-$50M"),
             other => {
-// Fallback:derive a name from the domain
+                // Fallback:derive a name from the domain
                 let name_part = other.split('.').next().unwrap_or(other);
                 return Ok(Company {
                     id: Uuid::new_v4(),
@@ -77,7 +77,7 @@ impl EnrichmentService {
         })
     }
 
-/// Enrich multiple emails in batch (convenience wrapper).
+    /// Enrich multiple emails in batch (convenience wrapper).
     pub fn batch_enrich(&self, emails: &[String]) -> Vec<Result<Company, SalesError>> {
         emails.iter().map(|e| self.enrich_lead(e)).collect()
     }
@@ -126,17 +126,14 @@ mod tests {
     fn test_enrich_unknown_and_batch() {
         let svc = EnrichmentService::new("http://mock");
 
-// unknown domain still succeeds with fallback
+        // unknown domain still succeeds with fallback
         let c = svc.enrich_company("startup.xyz").unwrap();
         assert!(c.name.contains("Startup"));
         assert_eq!(c.industry, "Unknown");
 
-// batch
-        let results = svc.batch_enrich(&[
-            "a@acme.com".into(),
-            "b@beta.io".into(),
-            "bad-email".into(),
-        ]);
+        // batch
+        let results =
+            svc.batch_enrich(&["a@acme.com".into(), "b@beta.io".into(), "bad-email".into()]);
         assert_eq!(results.len(), 3);
         assert!(results[0].is_ok());
         assert!(results[1].is_ok());

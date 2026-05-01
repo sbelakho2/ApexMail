@@ -41,6 +41,9 @@ static MAX_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
         .filter(|value| *value > 0)
         .unwrap_or(100)
 });
+const TENANT_MESSAGE_CIRCUIT_FAILURE_THRESHOLD: i64 = 5;
+const TENANT_MESSAGE_CIRCUIT_FAILURE_WINDOW_SECONDS: i64 = 60;
+const TENANT_MESSAGE_CIRCUIT_OPEN_SECONDS: i64 = 300;
 
 // ─── Types ─────────────────────────────────────────────────────
 
@@ -229,8 +232,16 @@ async fn insert_message_and_queue(
     .bind(tenant_id)
     .bind(&body.from)
     .bind(serde_json::json!(body.to))
-    .bind(body.cc.as_ref().map(|recipients| serde_json::json!(recipients)))
-    .bind(body.bcc.as_ref().map(|recipients| serde_json::json!(recipients)))
+    .bind(
+        body.cc
+            .as_ref()
+            .map(|recipients| serde_json::json!(recipients)),
+    )
+    .bind(
+        body.bcc
+            .as_ref()
+            .map(|recipients| serde_json::json!(recipients)),
+    )
     .bind(&body.subject)
     .bind(&body.html)
     .bind(&body.text)
@@ -321,13 +332,11 @@ async fn cancel_message_and_queue(
     .execute(&mut **tx)
     .await?;
 
-    sqlx::query(
-        "UPDATE messages SET status = 'cancelled' WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(message_id)
-    .bind(tenant_id)
-    .execute(&mut **tx)
-    .await?;
+    sqlx::query("UPDATE messages SET status = 'cancelled' WHERE id = $1 AND tenant_id = $2")
+        .bind(message_id)
+        .bind(tenant_id)
+        .execute(&mut **tx)
+        .await?;
 
     Ok(CancelDeliveryResult::Cancelled(created_at))
 }
@@ -343,7 +352,7 @@ async fn send_message(
     require_scopes(&auth, &["messages:send"])?;
     validate_send(&body, &state.db, &auth.tenant_id).await?;
 
-// existing message instead of creating a duplicate.
+    // existing message instead of creating a duplicate.
     if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
         if !idem_key.is_empty() && idem_key.len() <= 255 {
             let existing: Option<(String, String, DateTime<Utc>)> = sqlx::query_as(
@@ -369,11 +378,16 @@ async fn send_message(
         }
     }
 
+    ensure_tenant_message_circuit_closed(&state, &auth.tenant_id).await?;
+
     let quota_reservation = reserve_email_quota(&state, &auth.tenant_id).await?;
 
-// Merge idempotency key into metadata if present.
+    // Merge idempotency key into metadata if present.
     let metadata = {
-        let mut meta = body.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
+        let mut meta = body
+            .metadata
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
         if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
             if !idem_key.is_empty() && idem_key.len() <= 255 {
                 meta.as_object_mut()
@@ -388,12 +402,15 @@ async fn send_message(
         ApiError::Internal("database error".into())
     })?;
 
-    let persisted = match insert_message_and_queue(&mut tx, &auth.tenant_id, &body, &metadata).await {
+    let persisted = match insert_message_and_queue(&mut tx, &auth.tenant_id, &body, &metadata).await
+    {
         Ok(persisted) => persisted,
         Err(error) => {
             let _ = tx.rollback().await;
 
-            if let Err(rollback_error) = rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await {
+            if let Err(rollback_error) =
+                rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
+            {
                 tracing::error!(
                     error = %rollback_error,
                     tenant_id = %auth.tenant_id,
@@ -402,13 +419,16 @@ async fn send_message(
                 );
             }
 
+            record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
             tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to persist message delivery");
             return Err(ApiError::Internal("database error".into()));
         }
     };
 
     if let Err(error) = tx.commit().await {
-        if let Err(rollback_error) = rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await {
+        if let Err(rollback_error) =
+            rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
+        {
             tracing::error!(
                 error = %rollback_error,
                 tenant_id = %auth.tenant_id,
@@ -417,9 +437,12 @@ async fn send_message(
             );
         }
 
+        record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
         tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to commit message delivery");
         return Err(ApiError::Internal("database error".into()));
     }
+
+    record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -449,7 +472,8 @@ async fn send_batch(
     let mut accepted = 0usize;
     let mut rejected = 0usize;
     let mut results = Vec::with_capacity(body.messages.len());
-    let mut committed_quota_reservations: Vec<QuotaReservation> = Vec::with_capacity(body.messages.len());
+    let mut committed_quota_reservations: Vec<QuotaReservation> =
+        Vec::with_capacity(body.messages.len());
 
     let mut tx = state.db.begin().await.map_err(|e| {
         tracing::error!(error = %e, "failed to begin batch transaction");
@@ -495,7 +519,9 @@ async fn send_batch(
                 });
             }
             Err(e) => {
-                if let Err(rollback_error) = rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await {
+                if let Err(rollback_error) =
+                    rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
+                {
                     tracing::error!(
                         error = %rollback_error,
                         tenant_id = %auth.tenant_id,
@@ -516,11 +542,13 @@ async fn send_batch(
         }
     }
 
-// Commit only if at least one message was accepted.
+    // Commit only if at least one message was accepted.
     if accepted > 0 {
         if let Err(error) = tx.commit().await {
             for reservation in &committed_quota_reservations {
-                if let Err(rollback_error) = rollback_email_quota(&state, &auth.tenant_id, reservation).await {
+                if let Err(rollback_error) =
+                    rollback_email_quota(&state, &auth.tenant_id, reservation).await
+                {
                     tracing::error!(
                         error = %rollback_error,
                         tenant_id = %auth.tenant_id,
@@ -613,7 +641,9 @@ async fn cancel_message(
         CancelDeliveryResult::Cancelled(created_at) => created_at,
         CancelDeliveryResult::NotFound | CancelDeliveryResult::NotCancellable => {
             let _ = tx.rollback().await;
-            return Err(ApiError::Conflict("message cannot be cancelled (already sent or not found)".into()));
+            return Err(ApiError::Conflict(
+                "message cannot be cancelled (already sent or not found)".into(),
+            ));
         }
     };
 
@@ -697,7 +727,7 @@ async fn validate_send(
             errors.push(format!("invalid recipient email: {email}"));
         }
     }
-// Validate CC recipients
+    // Validate CC recipients
     if let Some(ref cc) = body.cc {
         for email in cc {
             if !apexmail_lib::validation::is_valid_email(email) {
@@ -705,7 +735,7 @@ async fn validate_send(
             }
         }
     }
-// Validate BCC recipients
+    // Validate BCC recipients
     if let Some(ref bcc) = body.bcc {
         for email in bcc {
             if !apexmail_lib::validation::is_valid_email(email) {
@@ -714,7 +744,7 @@ async fn validate_send(
         }
     }
 
-// Extract domain from the "from" email.
+    // Extract domain from the "from" email.
     if !body.from.is_empty() {
         if let Some(domain) = body.from.split('@').nth(1) {
             let exists: Option<String> = sqlx::query_scalar(
@@ -751,7 +781,6 @@ async fn validate_send(
                 .map(|email| format!("recipient is suppressed: {email}")),
         );
     }
-
     if !errors.is_empty() {
         return Err(ApiError::Validation(errors));
     }
@@ -765,7 +794,10 @@ struct QuotaReservation {
     recorded_at: DateTime<Utc>,
 }
 
-async fn reserve_email_quota(state: &AppState, tenant_id: &str) -> Result<QuotaReservation, ApiError> {
+async fn reserve_email_quota(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<QuotaReservation, ApiError> {
     let reservation = QuotaReservation {
         event_id: Uuid::new_v4(),
         recorded_at: Utc::now(),
@@ -780,17 +812,105 @@ async fn reserve_email_quota(state: &AppState, tenant_id: &str) -> Result<QuotaR
         Some(reservation.event_id),
         None,
     )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, tenant_id = %tenant_id, "quota reservation failed");
-            ApiError::ServiceUnavailable("billing quota enforcement is temporarily unavailable".into())
-        })?;
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, tenant_id = %tenant_id, "quota reservation failed");
+        ApiError::ServiceUnavailable("billing quota enforcement is temporarily unavailable".into())
+    })?;
 
     if !quota.allowed {
         return Err(ApiError::Forbidden("email quota exceeded".into()));
     }
 
     Ok(reservation)
+}
+
+fn tenant_message_circuit_open_key(tenant_id: &str) -> String {
+    format!("apexmail:tenant-circuit:messages:{tenant_id}:open")
+}
+
+fn tenant_message_circuit_failure_key(tenant_id: &str) -> String {
+    format!("apexmail:tenant-circuit:messages:{tenant_id}:failures")
+}
+
+async fn ensure_tenant_message_circuit_closed(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<(), ApiError> {
+    let mut conn = match state.redis.get().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(tenant_id = %tenant_id, error = %error, "tenant circuit Redis unavailable; allowing send");
+            return Ok(());
+        }
+    };
+
+    let open: Option<String> = deadpool_redis::redis::cmd("GET")
+        .arg(tenant_message_circuit_open_key(tenant_id))
+        .query_async(&mut *conn)
+        .await
+        .unwrap_or(None);
+
+    if open.is_some() {
+        return Err(ApiError::ServiceUnavailable(
+            "tenant message delivery circuit is temporarily open".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+async fn record_tenant_message_circuit_failure(state: &AppState, tenant_id: &str) {
+    let mut conn = match state.redis.get().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(tenant_id = %tenant_id, error = %error, "tenant circuit failure not recorded");
+            return;
+        }
+    };
+
+    let failure_key = tenant_message_circuit_failure_key(tenant_id);
+    let failures: i64 = match deadpool_redis::redis::cmd("INCR")
+        .arg(&failure_key)
+        .query_async(&mut *conn)
+        .await
+    {
+        Ok(failures) => failures,
+        Err(error) => {
+            tracing::warn!(tenant_id = %tenant_id, error = %error, "tenant circuit failure counter update failed");
+            return;
+        }
+    };
+
+    if failures == 1 {
+        let _: Result<i64, _> = deadpool_redis::redis::cmd("EXPIRE")
+            .arg(&failure_key)
+            .arg(TENANT_MESSAGE_CIRCUIT_FAILURE_WINDOW_SECONDS)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    if failures >= TENANT_MESSAGE_CIRCUIT_FAILURE_THRESHOLD {
+        let _: Result<(), _> = deadpool_redis::redis::cmd("SETEX")
+            .arg(tenant_message_circuit_open_key(tenant_id))
+            .arg(TENANT_MESSAGE_CIRCUIT_OPEN_SECONDS)
+            .arg("1")
+            .query_async(&mut *conn)
+            .await;
+        tracing::warn!(tenant_id = %tenant_id, failures, "tenant message delivery circuit opened");
+    }
+}
+
+async fn record_tenant_message_circuit_success(state: &AppState, tenant_id: &str) {
+    let mut conn = match state.redis.get().await {
+        Ok(conn) => conn,
+        Err(_) => return,
+    };
+
+    let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+        .arg(tenant_message_circuit_failure_key(tenant_id))
+        .query_async(&mut *conn)
+        .await;
 }
 
 async fn rollback_email_quota(
@@ -808,9 +928,7 @@ async fn rollback_email_quota(
         reservation.recorded_at,
     )
     .await
-    .map_err(|e| {
-        ApiError::ServiceUnavailable(format!("failed to roll back reserved quota: {e}"))
-    })
+    .map_err(|e| ApiError::ServiceUnavailable(format!("failed to roll back reserved quota: {e}")))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -843,7 +961,9 @@ mod tests {
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .map(|name| !name.ends_with("_down.sql") && !name.contains("performance_indexes"))
+                    .map(|name| {
+                        !name.ends_with("_down.sql") && !name.contains("performance_indexes")
+                    })
                     .unwrap_or(false)
             })
             .collect();
@@ -856,8 +976,9 @@ mod tests {
             let normalized = raw
                 .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
                 .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
-            fs::write(temp_dir.join(file_name), normalized)
-                .unwrap_or_else(|error| panic!("failed to write copied migration {:?}: {error}", path));
+            fs::write(temp_dir.join(file_name), normalized).unwrap_or_else(|error| {
+                panic!("failed to write copied migration {:?}: {error}", path)
+            });
         }
 
         let migrator = Migrator::new(temp_dir.clone())
@@ -914,12 +1035,29 @@ mod tests {
             "subject": "Hello",
             "html": "<p>Hi</p>"
         }"#;
+
         let req: SendMessageRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.to.len(), 1);
     }
 
-// Note:validate_send tests removed because the function is now async and
-// requires AppState + tenant_id. Integration tests should verify validation.
+    #[test]
+    fn tenant_message_circuit_keys_are_tenant_scoped() {
+        assert_eq!(
+            tenant_message_circuit_open_key("tenant_a"),
+            "apexmail:tenant-circuit:messages:tenant_a:open"
+        );
+        assert_eq!(
+            tenant_message_circuit_failure_key("tenant_a"),
+            "apexmail:tenant-circuit:messages:tenant_a:failures"
+        );
+        assert_ne!(
+            tenant_message_circuit_open_key("tenant_a"),
+            tenant_message_circuit_open_key("tenant_b")
+        );
+    }
+
+    // Note:validate_send tests removed because the function is now async and
+    // requires AppState + tenant_id. Integration tests should verify validation.
 
     #[test]
     fn test_batch_send_response_serialisation() {
@@ -927,8 +1065,18 @@ mod tests {
             accepted: 2,
             rejected: 1,
             results: vec![
-                BatchResult { index: 0, id: Some("msg_test_id".into()), status: "queued".into(), error: None },
-                BatchResult { index: 1, id: None, status: "rejected".into(), error: Some("bad email".into()) },
+                BatchResult {
+                    index: 0,
+                    id: Some("msg_test_id".into()),
+                    status: "queued".into(),
+                    error: None,
+                },
+                BatchResult {
+                    index: 1,
+                    id: None,
+                    status: "rejected".into(),
+                    error: Some("bad email".into()),
+                },
             ],
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -955,13 +1103,18 @@ mod tests {
             scheduled_at: Some(scheduled_at),
         };
 
-        let mut tx = pool.begin().await.expect("failed to begin message transaction");
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("failed to begin message transaction");
         let persisted = insert_message_and_queue(&mut tx, &tenant_id, &body, &body.metadata)
             .await
             .expect("failed to persist message delivery");
-        tx.commit().await.expect("failed to commit message transaction");
+        tx.commit()
+            .await
+            .expect("failed to commit message transaction");
 
-        let message_row: (String, Option<DateTime<Utc>>,) = sqlx::query_as(
+        let message_row: (String, Option<DateTime<Utc>>) = sqlx::query_as(
             "SELECT status, scheduled_at FROM messages WHERE id = $1 AND tenant_id = $2",
         )
         .bind(&persisted.id)
@@ -983,7 +1136,10 @@ mod tests {
 
         assert_eq!(queue_rows.len(), 3);
         assert_eq!(
-            queue_rows.iter().map(|row| row.0.clone()).collect::<Vec<_>>(),
+            queue_rows
+                .iter()
+                .map(|row| row.0.clone())
+                .collect::<Vec<_>>(),
             vec![
                 "bcc@example.com".to_string(),
                 "cc@example.com".to_string(),
@@ -1034,7 +1190,9 @@ mod tests {
 
         match error {
             ApiError::Validation(errors) => {
-                assert!(errors.iter().any(|error| error.contains("blocked@example.com")));
+                assert!(errors
+                    .iter()
+                    .any(|error| error.contains("blocked@example.com")));
             }
             other => panic!("expected validation error, got {other:?}"),
         }
@@ -1091,7 +1249,15 @@ mod tests {
             scheduled_at: None,
         };
         let recipients = delivery_recipients(&body);
-        assert_eq!(recipients, vec!["a@example.com", "b@example.com", "c@example.com", "d@example.com"]);
+        assert_eq!(
+            recipients,
+            vec![
+                "a@example.com",
+                "b@example.com",
+                "c@example.com",
+                "d@example.com"
+            ]
+        );
     }
 
     #[test]
@@ -1117,8 +1283,10 @@ mod tests {
         // When both html and text are None, this should fail validation
         let json = r#"{"from":"a@b.com","to":["c@d.com"],"subject":"X"}"#;
         let req: SendMessageRequest = serde_json::from_str(json).unwrap();
-        assert!(req.html.is_none() && req.text.is_none(),
-            "request with no body content should fail validation downstream");
+        assert!(
+            req.html.is_none() && req.text.is_none(),
+            "request with no body content should fail validation downstream"
+        );
     }
 
     #[test]
@@ -1147,7 +1315,10 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "msg_test123");
         // error must be skipped when None
-        assert!(json.get("error").is_none(), "error must be skipped when None");
+        assert!(
+            json.get("error").is_none(),
+            "error must be skipped when None"
+        );
     }
 
     #[test]
@@ -1189,7 +1360,10 @@ mod tests {
             scheduled_at: None,
         };
 
-        let mut create_tx = pool.begin().await.expect("failed to begin create transaction");
+        let mut create_tx = pool
+            .begin()
+            .await
+            .expect("failed to begin create transaction");
         let persisted = insert_message_and_queue(&mut create_tx, &tenant_id, &body, &body.metadata)
             .await
             .expect("failed to persist message delivery");
@@ -1198,7 +1372,10 @@ mod tests {
             .await
             .expect("failed to commit create transaction");
 
-        let mut cancel_tx = pool.begin().await.expect("failed to begin cancel transaction");
+        let mut cancel_tx = pool
+            .begin()
+            .await
+            .expect("failed to begin cancel transaction");
         let result = cancel_message_and_queue(&mut cancel_tx, &tenant_id, &persisted.id)
             .await
             .expect("failed to cancel message delivery");
@@ -1209,23 +1386,21 @@ mod tests {
 
         assert!(matches!(result, CancelDeliveryResult::Cancelled(_)));
 
-        let message_status: (String,) = sqlx::query_as(
-            "SELECT status FROM messages WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(&persisted.id)
-        .bind(&tenant_id)
-        .fetch_one(&pool)
-        .await
-        .expect("failed to fetch cancelled message");
+        let message_status: (String,) =
+            sqlx::query_as("SELECT status FROM messages WHERE id = $1 AND tenant_id = $2")
+                .bind(&persisted.id)
+                .bind(&tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed to fetch cancelled message");
         assert_eq!(message_status.0, "cancelled");
 
-        let queue_statuses: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT status FROM email_queue WHERE message_id = $1",
-        )
-        .bind(&persisted.id)
-        .fetch_all(&pool)
-        .await
-        .expect("failed to fetch cancelled queue rows");
+        let queue_statuses: Vec<(String,)> =
+            sqlx::query_as("SELECT DISTINCT status FROM email_queue WHERE message_id = $1")
+                .bind(&persisted.id)
+                .fetch_all(&pool)
+                .await
+                .expect("failed to fetch cancelled queue rows");
         assert_eq!(queue_statuses, vec![("cancelled".to_string(),)]);
     }
 }

@@ -2,9 +2,9 @@
 //!
 //! Reads the shared environment variables used by the tracking service.
 
-use std::net::SocketAddr;
 use anyhow::{Context, Result};
 use ipnetwork::IpNetwork;
+use std::net::SocketAddr;
 
 /// Top-level configuration assembled from env vars.
 #[derive(Debug, Clone)]
@@ -32,7 +32,8 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone)]
 pub struct RedisConfig {
     pub url: String,
-    #[allow(unused)] // key_prefix used in processor; flagged only because binary target sees no external consumer
+    #[allow(unused)]
+    // key_prefix used in processor; flagged only because binary target sees no external consumer
     pub key_prefix: String,
     pub pool_size: usize,
 }
@@ -105,7 +106,7 @@ fn parse_trusted_proxies(s: &str) -> Vec<IpNetwork> {
                 return None;
             }
             trimmed.parse::<IpNetwork>().ok().or_else(|| {
-// Try bare IP without prefix — default to /32 or /128
+                // Try bare IP without prefix — default to /32 or /128
                 trimmed
                     .parse::<std::net::IpAddr>()
                     .ok()
@@ -115,8 +116,7 @@ fn parse_trusted_proxies(s: &str) -> Vec<IpNetwork> {
         .collect()
 }
 
-const DEFAULT_TRUSTED_PROXIES: &str =
-    "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+const DEFAULT_TRUSTED_PROXIES: &str = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
 
 fn build_redis_url(host: &str, port: u16, db: u32, password: Option<&str>) -> String {
     match password.filter(|pw| !pw.is_empty()) {
@@ -165,9 +165,8 @@ pub fn load() -> Result<Config> {
         build_redis_url(&host, port, db, password.as_deref())
     };
 
-    let trusted_proxies = parse_trusted_proxies(
-        &var_or("TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
-    );
+    let trusted_proxies =
+        parse_trusted_proxies(&var_or("TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES));
 
     let redirect_status = var_or_u16("TRACKING_REDIRECT_STATUS", 302);
     let max_connections = var_or_u32("DB_MAX_CONNECTIONS", 50);
@@ -175,7 +174,7 @@ pub fn load() -> Result<Config> {
     let max_per_minute = var_or_u32("RATE_LIMIT_MAX_PER_MINUTE", 1000);
     let metrics_port = var_or_u16("METRICS_PORT", 9092);
 
-// #199:Runtime validation of config values
+    // #199:Runtime validation of config values
     if max_connections == 0 || max_connections > 10_000 {
         anyhow::bail!("DB_MAX_CONNECTIONS must be between 1 and 10,000 (got {max_connections})");
     }
@@ -185,8 +184,14 @@ pub fn load() -> Result<Config> {
     if max_per_minute == 0 {
         anyhow::bail!("RATE_LIMIT_MAX_PER_MINUTE must be > 0");
     }
-    if redirect_status != 301 && redirect_status != 302 && redirect_status != 307 && redirect_status != 308 {
-        anyhow::bail!("TRACKING_REDIRECT_STATUS must be 301, 302, 307, or 308 (got {redirect_status})");
+    if redirect_status != 301
+        && redirect_status != 302
+        && redirect_status != 307
+        && redirect_status != 308
+    {
+        anyhow::bail!(
+            "TRACKING_REDIRECT_STATUS must be 301, 302, 307, or 308 (got {redirect_status})"
+        );
     }
     if port == metrics_port {
         anyhow::bail!("TRACKING_PORT and METRICS_PORT must differ (both {port})");

@@ -1,14 +1,17 @@
-use std::sync::Arc;
 use clap::Parser;
+use std::sync::Arc;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use ai_embeddings::config::*;
 use ai_embeddings::embeddings::EmbeddingService;
-use ai_embeddings::vector_store::VectorStore;
 use ai_embeddings::routes::{self, AppState};
+use ai_embeddings::vector_store::VectorStore;
 
 #[derive(Parser)]
-#[command(name = "ai-embeddings", about = "AI embedding and vector search service")]
+#[command(
+    name = "ai-embeddings",
+    about = "AI embedding and vector search service"
+)]
 struct Cli {
     #[arg(long, env = "INFERENCE_URL", default_value = "http://localhost:8080")]
     inference_url: String,
@@ -29,7 +32,10 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    fmt().with_env_filter(EnvFilter::from_default_env()).json().init();
+    fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .json()
+        .init();
 
     let cli = Cli::parse();
 
@@ -68,7 +74,9 @@ async fn main() -> anyhow::Result<()> {
         service_token: {
             let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
             if token.is_empty() {
-                tracing::warn!("INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled");
+                tracing::warn!(
+                    "INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled"
+                );
             }
             token
         },
@@ -81,7 +89,9 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     let shutdown = async {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

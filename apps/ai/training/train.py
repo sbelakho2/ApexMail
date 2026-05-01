@@ -35,6 +35,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from datasets import load_dataset
+from training_data import expand_system_prompt_refs
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -180,13 +181,16 @@ def load_data(cfg: dict, tokenizer: AutoTokenizer):
     train_cfg = cfg["training"]
     ds_cfg = cfg["dataset"]
 
+    data_files = {
+        "train": ds_cfg["train_file"],
+        "validation": ds_cfg["val_file"],
+    }
     dataset = load_dataset(
         "json",
-        data_files={
-            "train": ds_cfg["train_file"],
-            "validation": ds_cfg["val_file"],
-        },
+        data_files=data_files,
     )
+    dataset["train"] = expand_system_prompt_refs(dataset["train"], data_files["train"])
+    dataset["validation"] = expand_system_prompt_refs(dataset["validation"], data_files["validation"])
 
     def format_chat(example):
         """Apply the chat template to produce the full text."""

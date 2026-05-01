@@ -80,11 +80,7 @@ fn test_parallel_scoring_threads() {
                         "Dev".into(),
                         "parallel".into(),
                     );
-                    let score = CrmService::score_lead(
-                        (i % 100) as f64 / 100.0,
-                        0.5,
-                        0.5,
-                    );
+                    let score = CrmService::score_lead((i % 100) as f64 / 100.0, 0.5, 0.5);
                     assert!(score <= 100);
                 }
             })
@@ -112,9 +108,9 @@ fn test_parallel_billing_threads() {
             let p = Arc::clone(&pricing);
             thread::spawn(move || {
                 for vol in 0..10_000u64 {
-                    let (email_cost, api_cost, total) = p
-                        .calculate(vol * 10, vol * 100)
-                        .expect("parallel billing load test should stay within supported PAYG bounds");
+                    let (email_cost, api_cost, total) = p.calculate(vol * 10, vol * 100).expect(
+                        "parallel billing load test should stay within supported PAYG bounds",
+                    );
                     assert!(email_cost >= 0);
                     assert!(api_cost >= 0);
                     assert!(total >= 0);

@@ -41,7 +41,11 @@ fn default_limit() -> i64 {
 fn parse_audit_timestamp(raw: &str, field_name: &str) -> Result<DateTime<Utc>, ApiError> {
     DateTime::parse_from_rfc3339(raw)
         .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|_| ApiError::Validation(vec![format!("{field_name} must be a valid RFC3339 timestamp")]))
+        .map_err(|_| {
+            ApiError::Validation(vec![format!(
+                "{field_name} must be a valid RFC3339 timestamp"
+            )])
+        })
 }
 
 fn resolve_audit_window(
@@ -97,17 +101,11 @@ async fn list_audit_logs(
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
-    let (window_start, window_end) = resolve_audit_window(
-        params.from.as_deref(),
-        params.to.as_deref(),
-        Utc::now(),
-    )?;
+    let (window_start, window_end) =
+        resolve_audit_window(params.from.as_deref(), params.to.as_deref(), Utc::now())?;
 
-// Build dynamic WHERE clause
-    let mut conditions: Vec<String> = vec![
-        "timestamp >= $1".into(),
-        "timestamp <= $2".into(),
-    ];
+    // Build dynamic WHERE clause
+    let mut conditions: Vec<String> = vec!["timestamp >= $1".into(), "timestamp <= $2".into()];
     let mut param_idx = 3u32;
     let mut bind_values: Vec<String> = Vec::new();
 
@@ -132,7 +130,9 @@ async fn list_audit_logs(
         bind_values.push(resource_type.clone());
     }
     if let Some(ref status) = params.status {
-        conditions.push(format!("COALESCE(metadata->>'status', 'success') = ${param_idx}"));
+        conditions.push(format!(
+            "COALESCE(metadata->>'status', 'success') = ${param_idx}"
+        ));
         param_idx += 1;
         bind_values.push(status.clone());
     }
@@ -149,18 +149,21 @@ async fn list_audit_logs(
         param_idx + 1
     );
 
-    let mut query = sqlx::query_as::<_, (
-        String,
-        chrono::DateTime<chrono::Utc>,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<serde_json::Value>,
-    )>(&sql);
+    let mut query = sqlx::query_as::<
+        _,
+        (
+            String,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<serde_json::Value>,
+        ),
+    >(&sql);
 
     query = query.bind(window_start).bind(window_end);
 
@@ -191,7 +194,11 @@ async fn list_audit_logs(
                 action: r.2,
                 resource: r.3,
                 resource_id: r.4.unwrap_or_default(),
-                actor_type: if r.5.is_some() { "user".into() } else { "system".into() },
+                actor_type: if r.5.is_some() {
+                    "user".into()
+                } else {
+                    "system".into()
+                },
                 actor_id: r.5.unwrap_or_else(|| "system".into()),
                 tenant_id: r.6,
                 status,
@@ -213,7 +220,8 @@ mod tests {
     #[test]
     fn resolve_audit_window_defaults_to_last_thirty_days() {
         let now = Utc.with_ymd_and_hms(2026, 2, 1, 12, 0, 0).unwrap();
-        let (from, to) = resolve_audit_window(None, None, now).expect("default window should resolve");
+        let (from, to) =
+            resolve_audit_window(None, None, now).expect("default window should resolve");
 
         assert_eq!(to, now);
         assert_eq!(from, now - Duration::days(DEFAULT_AUDIT_WINDOW_DAYS));

@@ -3,10 +3,14 @@ use serde::Deserialize;
 
 const WEB_USE_API_SOURCE: &str = include_str!("../baselines/web/use-api.baseline.txt");
 const WEB_CSRF_SOURCE: &str = include_str!("../baselines/web/csrf.baseline.txt");
-const CONTROL_PLANE_MIDDLEWARE_SOURCE: &str = include_str!("../baselines/control-plane/middleware.baseline.txt");
-const FRONTEND_ENDPOINT_BASELINE_SOURCE: &str = include_str!("../baselines/shared/frontend-endpoints.baseline.txt");
-const API_CONTRACT_MANIFEST_SOURCE: &str = include_str!("../../../../../docs/api-contract-manifest.json");
-const UI_BEHAVIOR_MANIFEST_SOURCE: &str = include_str!("../../../../../docs/development/ui-behavior-baseline-manifest.json");
+const CONTROL_PLANE_MIDDLEWARE_SOURCE: &str =
+    include_str!("../baselines/control-plane/middleware.baseline.txt");
+const FRONTEND_ENDPOINT_BASELINE_SOURCE: &str =
+    include_str!("../baselines/shared/frontend-endpoints.baseline.txt");
+const API_CONTRACT_MANIFEST_SOURCE: &str =
+    include_str!("../../../../../docs/api-contract-manifest.json");
+const UI_BEHAVIOR_MANIFEST_SOURCE: &str =
+    include_str!("../../../../../docs/development/ui-behavior-baseline-manifest.json");
 
 #[derive(Debug, Clone, Deserialize)]
 struct ApiContractManifest {
@@ -142,7 +146,10 @@ pub fn source_catalog() -> [(&'static str, &'static str); 6] {
         ("web_use_api", WEB_USE_API_SOURCE),
         ("web_csrf", WEB_CSRF_SOURCE),
         ("control_plane_middleware", CONTROL_PLANE_MIDDLEWARE_SOURCE),
-        ("frontend_endpoint_baseline", FRONTEND_ENDPOINT_BASELINE_SOURCE),
+        (
+            "frontend_endpoint_baseline",
+            FRONTEND_ENDPOINT_BASELINE_SOURCE,
+        ),
         ("api_contract_manifest", API_CONTRACT_MANIFEST_SOURCE),
         ("ui_behavior_manifest", UI_BEHAVIOR_MANIFEST_SOURCE),
     ]
@@ -193,8 +200,16 @@ mod tests {
         assert!(patterns.contains(&"/v1/campaigns*"));
         assert!(auth_scenarios.contains(&"web-login-invalid-keyboard-flow"));
         assert!(auth_scenarios.contains(&"web-login-rate-limited-flow"));
-        assert!(auth_networks.iter().any(|(url, method, status)| *url == "/v1/auth/csrf" && *method == "GET" && *status == 200));
-        assert!(auth_networks.iter().any(|(url, method, status)| *url == "/v1/auth/session" && *method == "GET" && *status == 200));
+        assert!(auth_networks
+            .iter()
+            .any(|(url, method, status)| *url == "/v1/auth/csrf"
+                && *method == "GET"
+                && *status == 200));
+        assert!(auth_networks
+            .iter()
+            .any(|(url, method, status)| *url == "/v1/auth/session"
+                && *method == "GET"
+                && *status == 200));
         assert_eq!(endpoints.len(), 14);
         assert_eq!(patterns.len(), 14);
         assert!(patterns.contains(&"/api/v1/operator/*"));
@@ -208,11 +223,26 @@ mod tests {
         let catalog = source_catalog();
 
         assert_eq!(catalog.len(), 6);
-        assert!(catalog.iter().any(|(name, source)| *name == "web_use_api" && source.contains("\"dedupingIntervalMs\": 5000")));
-        assert!(catalog.iter().any(|(name, source)| *name == "web_csrf" && source.contains("csrf_token_sig")));
-        assert!(catalog.iter().any(|(name, source)| *name == "control_plane_middleware" && source.contains("sessionBinding")));
-        assert!(catalog.iter().any(|(name, source)| *name == "frontend_endpoint_baseline" && source.contains("/v1/campaigns")));
-        assert!(catalog.iter().any(|(name, source)| *name == "api_contract_manifest" && source.contains("frontendRequiredEndpoints")));
-        assert!(catalog.iter().any(|(name, source)| *name == "ui_behavior_manifest" && source.contains("web-login-rate-limited-flow")));
+        assert!(catalog.iter().any(|(name, source)| *name == "web_use_api"
+            && source.contains("\"dedupingIntervalMs\": 5000")));
+        assert!(catalog
+            .iter()
+            .any(|(name, source)| *name == "web_csrf" && source.contains("csrf_token_sig")));
+        assert!(catalog
+            .iter()
+            .any(|(name, source)| *name == "control_plane_middleware"
+                && source.contains("sessionBinding")));
+        assert!(catalog
+            .iter()
+            .any(|(name, source)| *name == "frontend_endpoint_baseline"
+                && source.contains("/v1/campaigns")));
+        assert!(catalog
+            .iter()
+            .any(|(name, source)| *name == "api_contract_manifest"
+                && source.contains("frontendRequiredEndpoints")));
+        assert!(catalog
+            .iter()
+            .any(|(name, source)| *name == "ui_behavior_manifest"
+                && source.contains("web-login-rate-limited-flow")));
     }
 }

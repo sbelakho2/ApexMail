@@ -61,7 +61,7 @@ fn stress_smtp_command_parsing_throughput() {
         iterations, elapsed, ops_per_sec
     );
 
-// Should parse at least 100K commands per second
+    // Should parse at least 100K commands per second
     assert!(
         ops_per_sec > 100_000.0,
         "SMTP parsing too slow: {:.0} ops/sec",
@@ -80,13 +80,9 @@ fn stress_smtp_state_machine_throughput() {
 
     for _ in 0..iterations {
         let config = SmtpProtectionConfig::default();
-        let mut prot = SmtpConnectionProtection::new(
-            "192.168.1.1".parse().unwrap(),
-            50,
-            config,
-        );
+        let mut prot = SmtpConnectionProtection::new("192.168.1.1".parse().unwrap(), 50, config);
 
-// Complete one full SMTP session
+        // Complete one full SMTP session
         let _ = prot.process_command("EHLO test.com");
         let _ = prot.process_command("MAIL FROM:<a@b.com>");
         let _ = prot.process_command("RCPT TO:<c@d.com>");
@@ -185,7 +181,7 @@ fn stress_adaptive_limiter_update_throughput() {
         iterations, elapsed, ops_per_sec
     );
 
-// Debug builds are ~10-20x slower than release; 1000 ops/sec is reasonable
+    // Debug builds are ~10-20x slower than release; 1000 ops/sec is reasonable
     assert!(
         ops_per_sec > 1_000.0,
         "Adaptive update too slow: {:.0}/sec",
@@ -207,13 +203,13 @@ fn stress_bot_detection_analysis_throughput() {
     for i in 0..iterations {
         let mut behavior = SessionBehavior::new(100);
 
-// Record 50 requests
+        // Record 50 requests
         for j in 0..50 {
             let ep = endpoints[(i + j) % endpoints.len()];
             behavior.record_request(ep, "GET", j % 10 == 0);
         }
 
-// Run analysis
+        // Run analysis
         let _assessment = behavior.analyze();
     }
 
@@ -401,7 +397,7 @@ fn stress_connection_tracker_contention() {
                 ]);
 
                 let _ = tracker.register_connection(ip);
-// Don't unregister — just measure registration throughput
+                // Don't unregister — just measure registration throughput
             }
         }));
     }
@@ -441,7 +437,7 @@ fn stress_adaptive_limiter_high_frequency() {
     let iterations = 5_000;
     let start = Instant::now();
 
-// Simulate rapid-fire observations (as if from multiple threads feeding into one limiter)
+    // Simulate rapid-fire observations (as if from multiple threads feeding into one limiter)
     for i in 0..iterations {
         let rps = if i % 1000 < 50 {
             5000.0 // Occasional spike
@@ -466,14 +462,14 @@ fn stress_adaptive_limiter_high_frequency() {
         iterations, elapsed, ops_per_sec
     );
 
-// Debug builds are slower; 1000 ops/sec is reasonable
+    // Debug builds are slower; 1000 ops/sec is reasonable
     assert!(
         ops_per_sec > 1_000.0,
         "Adaptive limiter too slow under high frequency: {:.0}/sec",
         ops_per_sec
     );
 
-// Verify it's still in a consistent state
+    // Verify it's still in a consistent state
     let threshold = limiter.current_threshold();
     assert!(threshold > 0, "Threshold should be positive after updates");
 }
@@ -493,7 +489,7 @@ fn stress_bot_detection_large_windows() {
     for i in 0..iterations {
         let mut behavior = SessionBehavior::new(window_size);
 
-// Fill the window
+        // Fill the window
         for j in 0..window_size {
             let ep = endpoints[(i + j) % endpoints.len()];
             behavior.record_request(ep, "GET", j % 15 == 0);

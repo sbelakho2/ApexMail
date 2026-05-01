@@ -12,7 +12,13 @@ use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/", get(list_secrets).post(create_secret).patch(update_secret).delete(delete_secret))
+    Router::new().route(
+        "/",
+        get(list_secrets)
+            .post(create_secret)
+            .patch(update_secret)
+            .delete(delete_secret),
+    )
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -69,7 +75,33 @@ impl From<SecretRow> for SecretResponse {
     }
 }
 
-async fn log_secret_audit(db: &sqlx::PgPool, action: &str, secret_id: &str, metadata: serde_json::Value) {
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretListQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+fn build_list_secrets_sql() -> &'static str {
+    "SELECT id, name, type, description, rotation_policy, status,
+            access_count, last_accessed, last_rotated, expires_at,
+            created_at, updated_at
+     FROM secrets ORDER BY created_at DESC
+     LIMIT $1 OFFSET $2"
+}
+
+async fn log_secret_audit(
+    db: &sqlx::PgPool,
+    action: &str,
+    secret_id: &str,
+    metadata: serde_json::Value,
+) {
     if let Err(e) = sqlx::query(
         "INSERT INTO audit_logs (timestamp, action, resource_type, resource_id, metadata)
          VALUES (NOW(), $1, 'secret', $2, $3::jsonb)",
@@ -87,17 +119,18 @@ async fn log_secret_audit(db: &sqlx::PgPool, action: &str, secret_id: &str, meta
 async fn list_secrets(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(params): Query<SecretListQuery>,
 ) -> Result<Json<Vec<SecretResponse>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    let rows = sqlx::query_as::<_, SecretRow>(
-        "SELECT id, name, type, description, rotation_policy, status,
-                access_count, last_accessed, last_rotated, expires_at,
-                created_at, updated_at
-         FROM secrets ORDER BY created_at DESC",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let limit = params.limit.clamp(1, 200);
+    let offset = params.offset.max(0);
+
+    let rows = sqlx::query_as::<_, SecretRow>(build_list_secrets_sql())
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
 
     Ok(Json(rows.into_iter().map(SecretResponse::from).collect()))
 }
@@ -126,17 +159,29 @@ async fn create_secret(
 ) -> Result<(StatusCode, Json<SecretResponse>), ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-// Validate name
+    // Validate name
     if body.name.is_empty() || body.name.len() > 100 {
-        return Err(ApiError::Validation(vec!["Name must be 1-100 characters".into()]));
+        return Err(ApiError::Validation(vec![
+            "Name must be 1-100 characters".into()
+        ]));
     }
-    if !body.name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+    if !body
+        .name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(ApiError::Validation(vec![
             "Name must contain only alphanumeric characters, underscores, and hyphens".into(),
         ]));
     }
 
-    let allowed_types = ["api_key", "oauth_secret", "encryption_key", "signing_key", "custom"];
+    let allowed_types = [
+        "api_key",
+        "oauth_secret",
+        "encryption_key",
+        "signing_key",
+        "custom",
+    ];
     if !allowed_types.contains(&body.secret_type.as_str()) {
         return Err(ApiError::Validation(vec!["Invalid secret type".into()]));
     }
@@ -290,4 +335,16 @@ async fn delete_secret(
         "success": true,
         "message": format!("Secret {} deleted", id)
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_list_secrets_sql_paginates_results() {
+        let sql = build_list_secrets_sql();
+
+        assert!(sql.contains("LIMIT $1 OFFSET $2"));
+    }
 }

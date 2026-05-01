@@ -3,9 +3,9 @@
 //! Handles SMTP AUTH mechanisms (PLAIN, LOGIN).
 
 use anyhow::{anyhow, Result};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use argon2::password_hash::{PasswordHasher, SaltString};
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use moka::sync::Cache;
 use rand::rngs::OsRng;
 use sqlx::PgPool;
@@ -36,7 +36,7 @@ pub struct AuthResult {
 /// Authenticate with PLAIN mechanism
 /// Format:\0username\0password (base64 encoded)
 pub async fn auth_plain(credentials: &str, pool: &PgPool, peer_ip: IpAddr) -> Result<AuthResult> {
-// #174:Check rate limit before processing
+    // #174:Check rate limit before processing
     if is_rate_limited(peer_ip) {
         warn!(peer = %peer_ip, "Auth rate limited");
         return Ok(AuthResult {
@@ -47,29 +47,32 @@ pub async fn auth_plain(credentials: &str, pool: &PgPool, peer_ip: IpAddr) -> Re
         });
     }
 
-    let decoded = BASE64.decode(credentials)
+    let decoded = BASE64
+        .decode(credentials)
         .map_err(|e| anyhow!("Invalid base64: {}", e))?;
-    
+
     let decoded_str = String::from_utf8_lossy(&decoded);
     let parts: Vec<&str> = decoded_str.split('\0').collect();
-    
-// PLAIN format:[authzid]\0authcid\0passwd
+
+    // PLAIN format:[authzid]\0authcid\0passwd
     let (username, password) = match parts.as_slice() {
         [_, user, pass] => (*user, *pass),
         [user, pass] => (*user, *pass),
-        _ => return Ok(AuthResult {
-            success: false,
-            account_id: None,
-            email: None,
-            error: Some("Invalid PLAIN credentials format".to_string()),
-        }),
+        _ => {
+            return Ok(AuthResult {
+                success: false,
+                account_id: None,
+                email: None,
+                error: Some("Invalid PLAIN credentials format".to_string()),
+            })
+        }
     };
-    
+
     let result = verify_credentials(username, password, pool).await?;
     if !result.success {
         record_auth_failure(peer_ip);
     } else {
-// Reset on success
+        // Reset on success
         AUTH_FAIL_CACHE.invalidate(&peer_ip);
     }
     Ok(result)
@@ -77,8 +80,13 @@ pub async fn auth_plain(credentials: &str, pool: &PgPool, peer_ip: IpAddr) -> Re
 
 /// Authenticate with LOGIN mechanism
 /// Two-step:username then password (both base64 encoded)
-pub async fn auth_login(username_b64: &str, password_b64: &str, pool: &PgPool, peer_ip: IpAddr) -> Result<AuthResult> {
-// #174:Check rate limit before processing
+pub async fn auth_login(
+    username_b64: &str,
+    password_b64: &str,
+    pool: &PgPool,
+    peer_ip: IpAddr,
+) -> Result<AuthResult> {
+    // #174:Check rate limit before processing
     if is_rate_limited(peer_ip) {
         warn!(peer = %peer_ip, "Auth rate limited");
         return Ok(AuthResult {
@@ -90,13 +98,19 @@ pub async fn auth_login(username_b64: &str, password_b64: &str, pool: &PgPool, p
     }
 
     let username = String::from_utf8(
-        BASE64.decode(username_b64).map_err(|e| anyhow!("Invalid base64 username: {}", e))?
-    ).map_err(|e| anyhow!("Invalid UTF-8 username: {}", e))?;
-    
+        BASE64
+            .decode(username_b64)
+            .map_err(|e| anyhow!("Invalid base64 username: {}", e))?,
+    )
+    .map_err(|e| anyhow!("Invalid UTF-8 username: {}", e))?;
+
     let password = String::from_utf8(
-        BASE64.decode(password_b64).map_err(|e| anyhow!("Invalid base64 password: {}", e))?
-    ).map_err(|e| anyhow!("Invalid UTF-8 password: {}", e))?;
-    
+        BASE64
+            .decode(password_b64)
+            .map_err(|e| anyhow!("Invalid base64 password: {}", e))?,
+    )
+    .map_err(|e| anyhow!("Invalid UTF-8 password: {}", e))?;
+
     let result = verify_credentials(&username, &password, pool).await?;
     if !result.success {
         record_auth_failure(peer_ip);
@@ -109,17 +123,19 @@ pub async fn auth_login(username_b64: &str, password_b64: &str, pool: &PgPool, p
 /// Verify credentials against database
 async fn verify_credentials(username: &str, password: &str, pool: &PgPool) -> Result<AuthResult> {
     debug!(username = %username, "Verifying credentials");
-    
-// Look up user in database
-    let row = sqlx::query(r#"
+
+    // Look up user in database
+    let row = sqlx::query(
+        r#"
         SELECT id, email, password_hash, is_active 
         FROM mail_accounts 
         WHERE email = $1
-    "#)
+    "#,
+    )
     .bind(username)
     .fetch_optional(pool)
     .await?;
-    
+
     let row = match row {
         Some(r) => r,
         None => {
@@ -132,7 +148,7 @@ async fn verify_credentials(username: &str, password: &str, pool: &PgPool) -> Re
             });
         }
     };
-    
+
     let is_active: bool = sqlx::Row::get(&row, "is_active");
     if !is_active {
         warn!(username = %username, "Account disabled");
@@ -143,16 +159,16 @@ async fn verify_credentials(username: &str, password: &str, pool: &PgPool) -> Re
             error: Some("Account disabled".to_string()),
         });
     }
-    
+
     let stored_hash: String = sqlx::Row::get(&row, "password_hash");
-    
-// Verify password hash using Argon2.
+
+    // Verify password hash using Argon2.
     let password_valid = verify_password_hash(password, &stored_hash);
-    
+
     if password_valid {
         let account_id: uuid::Uuid = sqlx::Row::get(&row, "id");
         let email: String = sqlx::Row::get(&row, "email");
-        
+
         debug!(username = %username, "Authentication successful");
         Ok(AuthResult {
             success: true,
@@ -184,7 +200,7 @@ fn verify_password_hash(password: &str, hash: &str) -> bool {
             .is_ok();
     }
 
-// #173:Actual bcrypt support for $2a$, $2b$, $2y$ prefixed hashes
+    // #173:Actual bcrypt support for $2a$, $2b$, $2y$ prefixed hashes
     if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$") {
         return bcrypt::verify(password, hash).unwrap_or(false);
     }

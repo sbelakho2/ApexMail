@@ -9,7 +9,7 @@ use crate::types::User;
 pub struct UsersRepo;
 
 impl UsersRepo {
-/// Create a new user.
+    /// Create a new user.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -33,27 +33,23 @@ impl UsersRepo {
         .await
     }
 
-/// Find a user by ID.
+    /// Find a user by ID.
     pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<User>, sqlx::Error> {
-        sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
     }
 
-/// Find a user by email (for login).
+    /// Find a user by email (for login).
     pub async fn find_by_email(pool: &PgPool, email: &str) -> Result<Option<User>, sqlx::Error> {
-        sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE email = $1"
-        )
-        .bind(email)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
+            .bind(email)
+            .fetch_optional(pool)
+            .await
     }
 
-/// Update user profile.
+    /// Update user profile.
     pub async fn update(
         pool: &PgPool,
         id: Uuid,
@@ -63,7 +59,7 @@ impl UsersRepo {
     ) -> Result<Option<User>, sqlx::Error> {
         sqlx::query_as::<_, User>(
             "UPDATE users SET name = $1, role = $2, status = $3, updated_at = NOW() \
-             WHERE id = $4 RETURNING *"
+             WHERE id = $4 RETURNING *",
         )
         .bind(name)
         .bind(role)
@@ -73,19 +69,19 @@ impl UsersRepo {
         .await
     }
 
-/// List users in a tenant with pagination.
-/// #220:Added limit/offset parameters to prevent unbounded queries
+    /// List users in a tenant with pagination.
+    /// #220:Added limit/offset parameters to prevent unbounded queries
     pub async fn list_by_tenant(
         pool: &PgPool,
         tenant_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<User>, sqlx::Error> {
-// Clamp to prevent abuse
+        // Clamp to prevent abuse
         let limit = limit.clamp(1, 1000);
         let offset = offset.max(0);
         sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE tenant_id = $1 ORDER BY created_at ASC LIMIT $2 OFFSET $3"
+            "SELECT * FROM users WHERE tenant_id = $1 ORDER BY created_at ASC LIMIT $2 OFFSET $3",
         )
         .bind(tenant_id)
         .bind(limit)

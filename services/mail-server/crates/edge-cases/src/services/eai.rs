@@ -59,9 +59,8 @@ pub struct EAIService {
     eai_cache: Cache<String, bool>,
 }
 
-static EAI_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
-    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-});
+static EAI_RESOLVER: LazyLock<TokioAsyncResolver> =
+    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
 
 impl EAIService {
     pub fn new(pool: PgPool, redis: deadpool_redis::Pool) -> Self {
@@ -81,7 +80,7 @@ impl EAIService {
         }
     }
 
-/// Parse and validate an email address.
+    /// Parse and validate an email address.
     pub async fn parse_email_address(
         &self,
         email: &str,
@@ -89,13 +88,17 @@ impl EAIService {
     ) -> anyhow::Result<ParsedEmail> {
         let email = email.trim();
 
-// Handle "Name <email>" format
+        // Handle "Name <email>" format
         let (name, addr) = if let Some(start) = email.find('<') {
             if let Some(end) = email.find('>') {
                 let name = email[..start].trim().trim_matches('"');
                 let addr = &email[start + 1..end];
                 (
-                    if name.is_empty() { display_name.map(|s| s.to_string()) } else { Some(name.to_string()) },
+                    if name.is_empty() {
+                        display_name.map(|s| s.to_string())
+                    } else {
+                        Some(name.to_string())
+                    },
                     addr.to_string(),
                 )
             } else {
@@ -105,17 +108,18 @@ impl EAIService {
             (display_name.map(|s| s.to_string()), email.to_string())
         };
 
-// Split at last @
+        // Split at last @
         let (local_part, domain) = addr
             .rsplit_once('@')
             .ok_or_else(|| anyhow::anyhow!("Missing @ in email address"))?;
 
-// NFC normalize
+        // NFC normalize
         let local_normalized = unicode_normalize_nfc(local_part);
         let domain_normalized = unicode_normalize_nfc(domain).to_lowercase();
-        let is_intl = contains_non_ascii(&local_normalized) || contains_non_ascii(&domain_normalized);
+        let is_intl =
+            contains_non_ascii(&local_normalized) || contains_non_ascii(&domain_normalized);
 
-// Punycode the domain
+        // Punycode the domain
         let punycode_domain = if contains_non_ascii(&domain_normalized) {
             match idna::domain_to_ascii(&domain_normalized) {
                 Ok(p) => Some(p),
@@ -127,9 +131,9 @@ impl EAIService {
             None
         };
 
-// Validate local part
+        // Validate local part
         self.validate_local_part(&local_normalized, is_intl)?;
-// Validate domain
+        // Validate domain
         self.validate_domain(
             &domain_normalized,
             punycode_domain.as_deref().unwrap_or(&domain_normalized),
@@ -157,7 +161,7 @@ impl EAIService {
         })
     }
 
-/// Full validation:parse + MX check + SMTPUTF8 support + typo check.
+    /// Full validation:parse + MX check + SMTPUTF8 support + typo check.
     pub async fn validate_email(&self, email: &str) -> anyhow::Result<EAIValidationResult> {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
@@ -175,17 +179,20 @@ impl EAIService {
             }
         };
 
-// Check MX records
+        // Check MX records
         if !self.check_domain_mx(&parsed.address.domain).await {
-            errors.push(format!("No MX records found for domain: {}", parsed.address.domain));
+            errors.push(format!(
+                "No MX records found for domain: {}",
+                parsed.address.domain
+            ));
         }
 
-// Check common typos
+        // Check common typos
         if let Some(suggestion) = check_common_typos(&parsed.address.domain) {
             warnings.push(format!("Did you mean {suggestion}?"));
         }
 
-// Check SMTPUTF8 support if internationalized
+        // Check SMTPUTF8 support if internationalized
         if parsed.requires_smtputf8 {
             let supported = self.check_eai_support(&parsed.address.domain).await;
             if !supported {
@@ -205,8 +212,11 @@ impl EAIService {
         })
     }
 
-/// Batch validation.
-    pub async fn validate_emails(&self, emails: &[String]) -> anyhow::Result<Vec<EAIValidationResult>> {
+    /// Batch validation.
+    pub async fn validate_emails(
+        &self,
+        emails: &[String],
+    ) -> anyhow::Result<Vec<EAIValidationResult>> {
         let mut results = Vec::with_capacity(emails.len());
         for email in emails {
             results.push(self.validate_email(email).await?);
@@ -214,7 +224,7 @@ impl EAIService {
         Ok(results)
     }
 
-/// Build MAIL FROM command with optional SMTPUTF8.
+    /// Build MAIL FROM command with optional SMTPUTF8.
     pub fn build_mail_from_command(from: &EmailAddress, requires_smtputf8: bool) -> String {
         if requires_smtputf8 {
             format!("MAIL FROM:<{}> SMTPUTF8", from.normalized)
@@ -228,7 +238,7 @@ impl EAIService {
         }
     }
 
-/// Build RCPT TO command.
+    /// Build RCPT TO command.
     pub fn build_rcpt_to_command(to: &EmailAddress, requires_smtputf8: bool) -> String {
         if requires_smtputf8 {
             format!("RCPT TO:<{}>", to.normalized)
@@ -242,7 +252,7 @@ impl EAIService {
         }
     }
 
-/// Update domain EAI capability in DB.
+    /// Update domain EAI capability in DB.
     pub async fn update_domain_capability(
         &self,
         domain: &str,
@@ -261,7 +271,7 @@ impl EAIService {
         Ok(())
     }
 
-// ── internal ───────────────────────────────────────────────────────────────
+    // ── internal ───────────────────────────────────────────────────────────────
 
     fn validate_local_part(&self, local: &str, is_intl: bool) -> anyhow::Result<()> {
         if local.is_empty() {
@@ -278,17 +288,38 @@ impl EAIService {
         }
 
         if is_intl {
-// UTF-8 is allowed, but no control characters
+            // UTF-8 is allowed, but no control characters
             for ch in local.chars() {
                 if ch.is_control() {
                     anyhow::bail!("Local part contains control characters");
                 }
             }
         } else {
-// ASCII validation
+            // ASCII validation
             for ch in local.chars() {
                 if !ch.is_ascii_alphanumeric()
-                    && !matches!(ch, '.' | '_' | '-' | '+' | '=' | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '/' | '?' | '^' | '`' | '{' | '|' | '}' | '~')
+                    && !matches!(
+                        ch,
+                        '.' | '_'
+                            | '-'
+                            | '+'
+                            | '='
+                            | '!'
+                            | '#'
+                            | '$'
+                            | '%'
+                            | '&'
+                            | '\''
+                            | '*'
+                            | '/'
+                            | '?'
+                            | '^'
+                            | '`'
+                            | '{'
+                            | '|'
+                            | '}'
+                            | '~'
+                    )
                 {
                     anyhow::bail!("Invalid character in local part: {ch}");
                 }
@@ -318,7 +349,7 @@ impl EAIService {
             }
         }
 
-// TLD must not be all numeric
+        // TLD must not be all numeric
         if let Some(tld) = labels.last() {
             if tld.chars().all(|c| c.is_ascii_digit()) {
                 anyhow::bail!("TLD must not be all numeric");
@@ -336,7 +367,7 @@ impl EAIService {
         let has_mx = match self.resolver.mx_lookup(domain).await {
             Ok(mx) => mx.iter().next().is_some(),
             Err(_) => {
-// Fallback to A record
+                // Fallback to A record
                 self.resolver.lookup_ip(domain).await.is_ok()
             }
         };
@@ -350,7 +381,7 @@ impl EAIService {
             return cached;
         }
 
-// Try Redis
+        // Try Redis
         if let Ok(mut conn) = self.redis.get().await {
             let key = format!("eai:support:{domain}");
             if let Ok(val) = redis::cmd("GET")
@@ -366,7 +397,7 @@ impl EAIService {
             }
         }
 
-// Try DB
+        // Try DB
         let result = sqlx::query_scalar::<_, bool>(
             "SELECT supports_smtputf8 FROM edge_domain_capabilities WHERE domain = $1 AND checked_at > NOW() - INTERVAL '7 days'"
         )

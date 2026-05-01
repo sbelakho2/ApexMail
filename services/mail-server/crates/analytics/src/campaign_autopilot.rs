@@ -17,18 +17,15 @@ impl CampaignAutopilot {
         Self { pool, redis }
     }
 
-/// Select the best template arm using Thompson sampling.
-    pub async fn select_arm(
-        &self,
-        campaign_id: &str,
-    ) -> anyhow::Result<TemplateSelection> {
+    /// Select the best template arm using Thompson sampling.
+    pub async fn select_arm(&self, campaign_id: &str) -> anyhow::Result<TemplateSelection> {
         let arms = self.load_arms(campaign_id).await?;
 
         if arms.is_empty() {
             return Err(anyhow::anyhow!("No arms found for campaign {campaign_id}"));
         }
 
-// Sample from each arm's Beta distribution
+        // Sample from each arm's Beta distribution
         let mut rng = rand::thread_rng();
         let mut best_idx = 0;
         let mut best_sample = f64::NEG_INFINITY;
@@ -41,10 +38,10 @@ impl CampaignAutopilot {
             }
         }
 
-// Monte Carlo:compute selection probabilities
+        // Monte Carlo:compute selection probabilities
         let selection_probs = monte_carlo_selection_probs(&arms).await;
 
-// Credible intervals
+        // Credible intervals
         let intervals: Vec<(f64, f64)> = arms
             .iter()
             .map(|a| credible_interval_95(a.state.alpha, a.state.beta))
@@ -64,7 +61,7 @@ impl CampaignAutopilot {
         })
     }
 
-/// Update arm statistics with new observation.
+    /// Update arm statistics with new observation.
     pub async fn update_arm(
         &self,
         campaign_id: &str,
@@ -86,7 +83,7 @@ impl CampaignAutopilot {
         .execute(&self.pool)
         .await?;
 
-// Invalidate cache
+        // Invalidate cache
         let cache_key = format!("autopilot:{campaign_id}");
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         redis::cmd("DEL")
@@ -98,11 +95,8 @@ impl CampaignAutopilot {
         Ok(())
     }
 
-/// Generate optimization report.
-    pub async fn report(
-        &self,
-        campaign_id: &str,
-    ) -> anyhow::Result<OptimizationReport> {
+    /// Generate optimization report.
+    pub async fn report(&self, campaign_id: &str) -> anyhow::Result<OptimizationReport> {
         let arms = self.load_arms(campaign_id).await?;
         let selection_probs = monte_carlo_selection_probs(&arms).await;
         let intervals: Vec<(f64, f64)> = arms
@@ -141,22 +135,24 @@ impl CampaignAutopilot {
 
         Ok(rows
             .into_iter()
-            .map(|(template_id, alpha, beta, trials, successes, _)| TemplateArm {
-                template_id,
-                state: BanditState {
-                    alpha,
-                    beta,
-                    trials,
-                    successes,
+            .map(
+                |(template_id, alpha, beta, trials, successes, _)| TemplateArm {
+                    template_id,
+                    state: BanditState {
+                        alpha,
+                        beta,
+                        trials,
+                        successes,
+                    },
                 },
-            })
+            )
             .collect())
     }
 }
 
 /// Sample from Beta(alpha, beta) distribution using Marsaglia-Tsang Gamma method.
 pub fn sample_beta(rng: &mut impl Rng, alpha: f64, beta: f64) -> f64 {
-// Normal approximation for large alpha, beta
+    // Normal approximation for large alpha, beta
     if alpha > 50.0 && beta > 50.0 {
         let mean = alpha / (alpha + beta);
         let var = (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
@@ -265,11 +261,7 @@ pub fn compute_expected_regret(arms: &[TemplateArm]) -> f64 {
 
     let best_mean = means.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-    means
-        .iter()
-        .map(|&m| best_mean - m)
-        .sum::<f64>()
-        / means.len() as f64
+    means.iter().map(|&m| best_mean - m).sum::<f64>() / means.len() as f64
 }
 
 /// Check if experiment has converged (one arm dominates >95%).
@@ -290,7 +282,7 @@ mod tests {
             sum += sample_beta(&mut rng, 1.0, 1.0);
         }
         let mean = sum / n as f64;
-// Beta(1,1) = Uniform(0,1), mean = 0.5
+        // Beta(1,1) = Uniform(0,1), mean = 0.5
         assert!((mean - 0.5).abs() < 0.05);
     }
 
@@ -303,7 +295,7 @@ mod tests {
             sum += sample_beta(&mut rng, 10.0, 2.0);
         }
         let mean = sum / n as f64;
-// Beta(10,2) mean = 10/12 ≈ 0.833
+        // Beta(10,2) mean = 10/12 ≈ 0.833
         assert!((mean - 0.833).abs() < 0.05);
     }
 
@@ -347,11 +339,21 @@ mod tests {
         let arms = vec![
             TemplateArm {
                 template_id: "a".into(),
-                state: BanditState { alpha: 10.0, beta: 10.0, trials: 20, successes: 10 },
+                state: BanditState {
+                    alpha: 10.0,
+                    beta: 10.0,
+                    trials: 20,
+                    successes: 10,
+                },
             },
             TemplateArm {
                 template_id: "b".into(),
-                state: BanditState { alpha: 10.0, beta: 10.0, trials: 20, successes: 10 },
+                state: BanditState {
+                    alpha: 10.0,
+                    beta: 10.0,
+                    trials: 20,
+                    successes: 10,
+                },
             },
         ];
         let regret = compute_expected_regret(&arms);
@@ -363,11 +365,21 @@ mod tests {
         let arms = vec![
             TemplateArm {
                 template_id: "a".into(),
-                state: BanditState { alpha: 30.0, beta: 10.0, trials: 40, successes: 30 },
+                state: BanditState {
+                    alpha: 30.0,
+                    beta: 10.0,
+                    trials: 40,
+                    successes: 30,
+                },
             },
             TemplateArm {
                 template_id: "b".into(),
-                state: BanditState { alpha: 10.0, beta: 30.0, trials: 40, successes: 10 },
+                state: BanditState {
+                    alpha: 10.0,
+                    beta: 30.0,
+                    trials: 40,
+                    successes: 10,
+                },
             },
         ];
         let regret = compute_expected_regret(&arms);
@@ -379,11 +391,21 @@ mod tests {
         let arms = vec![
             TemplateArm {
                 template_id: "strong".into(),
-                state: BanditState { alpha: 100.0, beta: 10.0, trials: 110, successes: 100 },
+                state: BanditState {
+                    alpha: 100.0,
+                    beta: 10.0,
+                    trials: 110,
+                    successes: 100,
+                },
             },
             TemplateArm {
                 template_id: "weak".into(),
-                state: BanditState { alpha: 10.0, beta: 100.0, trials: 110, successes: 10 },
+                state: BanditState {
+                    alpha: 10.0,
+                    beta: 100.0,
+                    trials: 110,
+                    successes: 10,
+                },
             },
         ];
         let probs = monte_carlo_selection_probs(&arms).await;
@@ -395,11 +417,21 @@ mod tests {
         let arms = vec![
             TemplateArm {
                 template_id: "a".into(),
-                state: BanditState { alpha: 100.0, beta: 5.0, trials: 105, successes: 100 },
+                state: BanditState {
+                    alpha: 100.0,
+                    beta: 5.0,
+                    trials: 105,
+                    successes: 100,
+                },
             },
             TemplateArm {
                 template_id: "b".into(),
-                state: BanditState { alpha: 5.0, beta: 100.0, trials: 105, successes: 5 },
+                state: BanditState {
+                    alpha: 5.0,
+                    beta: 100.0,
+                    trials: 105,
+                    successes: 5,
+                },
             },
         ];
         let probs = monte_carlo_selection_probs(&arms).await;
@@ -411,11 +443,21 @@ mod tests {
         let arms = vec![
             TemplateArm {
                 template_id: "a".into(),
-                state: BanditState { alpha: 5.0, beta: 5.0, trials: 10, successes: 5 },
+                state: BanditState {
+                    alpha: 5.0,
+                    beta: 5.0,
+                    trials: 10,
+                    successes: 5,
+                },
             },
             TemplateArm {
                 template_id: "b".into(),
-                state: BanditState { alpha: 5.0, beta: 5.0, trials: 10, successes: 5 },
+                state: BanditState {
+                    alpha: 5.0,
+                    beta: 5.0,
+                    trials: 10,
+                    successes: 5,
+                },
             },
         ];
         let probs = monte_carlo_selection_probs(&arms).await;

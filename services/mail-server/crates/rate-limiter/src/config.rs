@@ -7,11 +7,11 @@ use std::time::Duration;
 /// Configuration for a governor-based rate limiter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
-/// Maximum sustained requests per second.
+    /// Maximum sustained requests per second.
     pub requests_per_second: NonZeroU32,
-/// Burst capacity (tokens available immediately). Defaults to `requests_per_second`.
+    /// Burst capacity (tokens available immediately). Defaults to `requests_per_second`.
     pub burst_size: Option<NonZeroU32>,
-/// Optional jitter range applied to retry-after. Reduces thundering herd.
+    /// Optional jitter range applied to retry-after. Reduces thundering herd.
     pub jitter_ms: Option<u64>,
 }
 
@@ -50,11 +50,11 @@ impl RateLimitConfig {
 /// Configuration for a sliding window counter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlidingWindowConfig {
-/// Window duration in milliseconds.
+    /// Window duration in milliseconds.
     pub window_ms: u64,
-/// Maximum number of events allowed in the window.
+    /// Maximum number of events allowed in the window.
     pub max_events: u64,
-/// Key prefix for namespacing (optional).
+    /// Key prefix for namespacing (optional).
     pub key_prefix: Option<String>,
 }
 
@@ -79,11 +79,11 @@ impl SlidingWindowConfig {
 /// Configuration for keyed (multi-tenant) rate limiter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyedConfig {
-/// Config per key.
+    /// Config per key.
     pub per_key: RateLimitConfig,
-/// Maximum number of keys to track. Old keys evicted on overflow.
+    /// Maximum number of keys to track. Old keys evicted on overflow.
     pub max_keys: usize,
-/// Cleanup interval for expired entries.
+    /// Cleanup interval for expired entries.
     pub cleanup_interval_secs: u64,
 }
 

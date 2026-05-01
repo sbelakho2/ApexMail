@@ -25,7 +25,7 @@ use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct ClickQuery {
-/// Optional override URL (used when originalUrl was not baked into the token).
+    /// Optional override URL (used when originalUrl was not baked into the token).
     r: Option<String>,
 }
 
@@ -39,7 +39,7 @@ pub async fn handle_click(
     let fallback = state.config.tracking.fallback_url.clone();
     let redirect_status = state.config.tracking.redirect_status;
 
-// E-148:Length guard
+    // E-148:Length guard
     if tracking_id.len() < 10 || tracking_id.len() > 4096 {
         warn!(len = tracking_id.len(), "Click: invalid trackingId length");
         return csp_redirect(&fallback, redirect_status);
@@ -61,13 +61,13 @@ pub async fn handle_click(
 
     let redirect_url = determine_redirect_url(&data, q.r.as_deref(), &fallback);
 
-// Validate protocol and domain
+    // Validate protocol and domain
     let redirect_url = match validate_redirect_url(&redirect_url, data.as_ref(), &state).await {
         Ok(url) => url,
         Err(_) => fallback.clone(),
     };
 
-// Record click asynchronously (fire-and-forget)
+    // Record click asynchronously (fire-and-forget)
     if let Some(d) = &data {
         let processor = state.processor.clone();
         let click_data = ClickData {
@@ -80,7 +80,7 @@ pub async fn handle_click(
             ip_address: Some(ip.clone()),
         };
 
-// Store link URL in Redis for analytics (F-213, 90 day TTL)
+        // Store link URL in Redis for analytics (F-213, 90 day TTL)
         if let Some(link_id) = &d.link_id {
             let redis = state.redis.clone();
             let link_key = format!("links:{}:{}", d.tenant_id, d.message_id);
@@ -127,7 +127,7 @@ fn determine_redirect_url(
             return url.clone();
         }
         if let Some(r) = r_param {
-// F-211:decodeURIComponent equivalent — percent-decode only
+            // F-211:decodeURIComponent equivalent — percent-decode only
             return percent_decode(r).unwrap_or_else(|| fallback.to_owned());
         }
     }
@@ -135,7 +135,7 @@ fn determine_redirect_url(
 }
 
 fn percent_decode(s: &str) -> Option<String> {
-// Use a simple approach:percent-decode once
+    // Use a simple approach:percent-decode once
     let decoded = urlencoding::decode(s).ok()?;
     Some(decoded.into_owned())
 }
@@ -182,12 +182,12 @@ fn parse_allowed_redirect_url(url: &str) -> Result<url::Url, ()> {
 async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str) -> bool {
     let cache_key = format!("{tenant_id}:{domain}");
 
-// 1. moka
+    // 1. moka
     if let Some(r) = state.domain_cache.get(&cache_key).await {
         return r;
     }
 
-// Allow fallback domain without DB round-trip
+    // Allow fallback domain without DB round-trip
     if let Ok(fallback) = state.config.tracking.fallback_url.parse::<url::Url>() {
         if fallback.host_str() == Some(domain) {
             state.domain_cache.insert(cache_key.clone(), true).await;
@@ -195,7 +195,7 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
         }
     }
 
-// 2. Redis
+    // 2. Redis
     let redis_key = format!("redirect_domain:{cache_key}");
     if let Ok(mut conn) = state.redis.get().await {
         if let Ok(cached) = redis::cmd("GET")
@@ -209,7 +209,7 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
         }
     }
 
-// 3. Postgres:owned domains
+    // 3. Postgres:owned domains
     let result: bool = async {
         let row = sqlx::query_as::<_, (i64,)>(
             "SELECT 1 FROM domains WHERE tenant_id = $1 AND domain = $2 LIMIT 1",
@@ -225,7 +225,7 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
             return true;
         }
 
-// 4. Postgres:allowed_redirect_domains wildcard patterns
+        // 4. Postgres:allowed_redirect_domains wildcard patterns
         let row = sqlx::query_as::<_, (Vec<String>,)>(
             "SELECT allowed_redirect_domains FROM tenant_settings WHERE tenant_id = $1",
         )
@@ -246,7 +246,7 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
     }
     .await;
 
-// Cache result in both Redis and moka
+    // Cache result in both Redis and moka
     if let Ok(mut conn) = state.redis.get().await {
         let val = if result { "1" } else { "0" };
         let _ = redis::cmd("SETEX")

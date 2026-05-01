@@ -1,12 +1,7 @@
 //! Authentication routes: login, logout, refresh, register, reset password, and API key management.
 
 use super::helpers::{
-    clamp_limit,
-    default_limit,
-    extract_cookie,
-    hash_token,
-    html_escape,
-    token_blacklist_key,
+    clamp_limit, default_limit, extract_cookie, hash_token, html_escape, token_blacklist_key,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -21,11 +16,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{
-    invalidate_api_key_cache,
-    session_revocation_key,
-    validate_session_csrf,
-    AuthUser,
-    JwtClaims,
+    invalidate_api_key_cache, session_revocation_key, validate_session_csrf, AuthUser, JwtClaims,
 };
 use crate::state::AppState;
 
@@ -46,7 +37,8 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 }
 
 fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> bool {
-    let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$") {
+    let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$")
+    {
         bcrypt::verify(password, hash).map_err(|error| error.to_string())
     } else if hash.starts_with("$argon2") {
         apexmail_lib::verify_password(password, hash).map_err(|error| error.to_string())
@@ -262,8 +254,8 @@ async fn record_login_failure(
     }
 
     let duration = login_lockout_duration(lockouts);
-    let _: () = deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &lock_key, "1", duration)
-        .await?;
+    let _: () =
+        deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &lock_key, "1", duration).await?;
     let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &failure_key).await?;
 
     tracing::warn!(
@@ -311,8 +303,9 @@ async fn store_mfa_challenge(
 ) -> Result<String, ApiError> {
     let token = apexmail_lib::id::generate_id("mfa", 22);
     let key = mfa_challenge_key(&token);
-    let payload = serde_json::to_string(challenge)
-        .map_err(|error| ApiError::Internal(format!("failed to serialize MFA challenge: {error}")))?;
+    let payload = serde_json::to_string(challenge).map_err(|error| {
+        ApiError::Internal(format!("failed to serialize MFA challenge: {error}"))
+    })?;
 
     let mut conn = redis_pool.get().await?;
     let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
@@ -332,8 +325,10 @@ async fn load_mfa_challenge(
 ) -> Result<MfaChallengeState, ApiError> {
     let mut conn = redis_pool.get().await?;
     let key = mfa_challenge_key(token);
-    let payload: Option<String> = deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await?;
-    let payload = payload.ok_or_else(|| ApiError::Unauthorized("invalid or expired MFA challenge".into()))?;
+    let payload: Option<String> =
+        deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await?;
+    let payload =
+        payload.ok_or_else(|| ApiError::Unauthorized("invalid or expired MFA challenge".into()))?;
 
     serde_json::from_str(&payload)
         .map_err(|error| ApiError::Internal(format!("failed to decode MFA challenge: {error}")))
@@ -359,13 +354,9 @@ async fn revoke_user_sessions(
     let key = session_revocation_key(tenant_id, user_id);
     let revoked_after = Utc::now().timestamp();
 
-    let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
-        &mut *conn,
-        &key,
-        revoked_after,
-        ttl_secs,
-    )
-    .await?;
+    let _: () =
+        deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &key, revoked_after, ttl_secs)
+            .await?;
 
     Ok(())
 }
@@ -562,7 +553,10 @@ fn build_clear_session_cookie(secure: bool) -> String {
 }
 
 fn insert_private_no_store_headers(headers: &mut HeaderMap) {
-    headers.insert("Cache-Control", HeaderValue::from_static("no-store, private"));
+    headers.insert(
+        "Cache-Control",
+        HeaderValue::from_static("no-store, private"),
+    );
     headers.insert("Pragma", HeaderValue::from_static("no-cache"));
 }
 
@@ -598,8 +592,9 @@ fn issue_session_response(state: &AppState, user: &UserRow) -> Result<Response, 
     let token = encode(
         &Header::new(Algorithm::RS256),
         &claims,
-        &EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| ApiError::Internal(format!("invalid JWT private key configuration: {e}")))?,
+        &EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes()).map_err(|e| {
+            ApiError::Internal(format!("invalid JWT private key configuration: {e}"))
+        })?,
     )
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
@@ -616,10 +611,13 @@ fn issue_session_response(state: &AppState, user: &UserRow) -> Result<Response, 
     })?;
     headers.insert("Set-Cookie", value);
 
-    Ok((headers, Json(SessionAuthResponse {
-        expires_at: exp.to_rfc3339(),
-        user: build_user_info(user),
-    }))
+    Ok((
+        headers,
+        Json(SessionAuthResponse {
+            expires_at: exp.to_rfc3339(),
+            user: build_user_info(user),
+        }),
+    )
         .into_response())
 }
 
@@ -685,7 +683,10 @@ async fn login(
     }
 
     let login_identifier = normalized_login_identifier(&body.email);
-    if login_lock_ttl(&state.redis, &login_identifier).await?.is_some() {
+    if login_lock_ttl(&state.redis, &login_identifier)
+        .await?
+        .is_some()
+    {
         return Err(ApiError::RateLimited);
     }
 
@@ -721,7 +722,9 @@ async fn login(
                 .mfa_secret
                 .as_deref()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| ApiError::Forbidden("MFA is not configured for this admin account".into()))?;
+                .ok_or_else(|| {
+                    ApiError::Forbidden("MFA is not configured for this admin account".into())
+                })?;
 
             if let Some(mfa_code) = body.mfa_code.as_deref() {
                 if !apexmail_lib::mfa::verify_totp_code(secret, mfa_code) {
@@ -779,7 +782,9 @@ async fn complete_mfa_challenge(
     Json(body): Json<CompleteMfaChallengeRequest>,
 ) -> Result<Response, ApiError> {
     if body.challenge_token.trim().is_empty() {
-        return Err(ApiError::Validation(vec!["challenge_token is required".into()]));
+        return Err(ApiError::Validation(vec![
+            "challenge_token is required".into()
+        ]));
     }
     if body.mfa_code.trim().is_empty() {
         return Err(ApiError::Validation(vec!["mfa_code is required".into()]));
@@ -843,7 +848,9 @@ async fn complete_mfa_challenge(
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| ApiError::Unauthorized("MFA is no longer configured".into()))?;
             if !user.mfa_enabled || current_secret != challenge.secret {
-                return Err(ApiError::Unauthorized("MFA challenge is no longer valid".into()));
+                return Err(ApiError::Unauthorized(
+                    "MFA challenge is no longer valid".into(),
+                ));
             }
         }
     }
@@ -908,31 +915,45 @@ async fn register(
 ) -> Result<(StatusCode, Json<RegisterResponse>), ApiError> {
     // Validate input
     if body.company_name.is_empty() || body.company_name.len() > 100 {
-        return Err(ApiError::Validation(vec!["company_name must be 1-100 characters".into()]));
+        return Err(ApiError::Validation(vec![
+            "company_name must be 1-100 characters".into(),
+        ]));
     }
     if body.email.is_empty() || body.email.len() > 254 {
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
     if body.name.is_empty() || body.name.len() > 100 {
-        return Err(ApiError::Validation(vec!["name must be 1-100 characters".into()]));
+        return Err(ApiError::Validation(vec![
+            "name must be 1-100 characters".into()
+        ]));
     }
     validate_password_strength(&body.password)?;
 
     // Validate plan
-    let valid_plans = ["free", "starter", "pro", "growth", "scale", "enterprise", "payg"];
+    let valid_plans = [
+        "free",
+        "starter",
+        "pro",
+        "growth",
+        "scale",
+        "enterprise",
+        "payg",
+    ];
     if !valid_plans.contains(&body.plan.as_str()) {
-        return Err(ApiError::Validation(vec![format!("invalid plan: {}", body.plan)]));
+        return Err(ApiError::Validation(vec![format!(
+            "invalid plan: {}",
+            body.plan
+        )]));
     }
 
     let email_lower = body.email.to_lowercase();
 
     // Check if email already exists
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1"
-    )
-    .bind(&email_lower)
-    .fetch_optional(&state.db)
-    .await?;
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1")
+            .bind(&email_lower)
+            .fetch_optional(&state.db)
+            .await?;
 
     if existing.is_some() {
         return Ok((StatusCode::ACCEPTED, Json(register_response())));
@@ -983,7 +1004,7 @@ async fn register(
     match sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, 
                            email_verified, mfa_enabled, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&user_id)
     .bind(&tenant_id)
@@ -1033,16 +1054,19 @@ async fn register(
         "New tenant registered"
     );
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(register_response()),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(register_response())))
 }
 
 fn generate_slug(company_name: &str) -> String {
     let base: String = company_name
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let slug = base.trim_matches('-').to_string();
     // Add random suffix for uniqueness
@@ -1063,7 +1087,9 @@ pub(crate) async fn verify_email_token(
     token: &str,
 ) -> Result<VerifyEmailResponse, ApiError> {
     if token.is_empty() || token.len() > 128 {
-        return Err(ApiError::Validation(vec!["invalid verification token".into()]));
+        return Err(ApiError::Validation(vec![
+            "invalid verification token".into()
+        ]));
     }
 
     let token_hash = hash_token(token);
@@ -1073,7 +1099,7 @@ pub(crate) async fn verify_email_token(
         "SELECT id, tenant_id, metadata FROM users 
             WHERE metadata->>'verification_token_hash' = $1
          AND email_verified = false
-         LIMIT 1"
+         LIMIT 1",
     )
     .bind(&token_hash)
     .fetch_optional(&state.db)
@@ -1082,15 +1108,22 @@ pub(crate) async fn verify_email_token(
     let (user_id, tenant_id, metadata) = match user {
         Some(u) => u,
         None => {
-            return Err(ApiError::BadRequest("invalid or expired verification token".into()));
+            return Err(ApiError::BadRequest(
+                "invalid or expired verification token".into(),
+            ));
         }
     };
 
     // Check expiry
-    if let Some(expires_str) = metadata.get("verification_expires").and_then(|v| v.as_str()) {
+    if let Some(expires_str) = metadata
+        .get("verification_expires")
+        .and_then(|v| v.as_str())
+    {
         if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expires_str) {
             if Utc::now() > expires {
-                return Err(ApiError::BadRequest("verification token has expired".into()));
+                return Err(ApiError::BadRequest(
+                    "verification token has expired".into(),
+                ));
             }
         }
     }
@@ -1107,12 +1140,10 @@ pub(crate) async fn verify_email_token(
     .await?;
 
     // Activate tenant
-    sqlx::query(
-        "UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1"
-    )
-    .bind(&tenant_id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1")
+        .bind(&tenant_id)
+        .execute(&state.db)
+        .await?;
 
     tracing::info!(user_id = %user_id, tenant_id = %tenant_id, "Email verified");
 
@@ -1132,7 +1163,8 @@ async fn create_api_key(
     }
 
     let raw_key = apexmail_lib::id::generate_api_key(false);
-    let key_hash = apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
+    let key_hash =
+        apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
     // The persisted prefix must fit the api_keys.prefix VARCHAR(10) column.
     // If the key is unusually short, store at most 8 chars (or half the key)
     // to avoid exposing the full key.
@@ -1261,7 +1293,9 @@ async fn reset_password(
     Json(body): Json<ResetPasswordRequest>,
 ) -> Result<Json<ResetPasswordResponse>, ApiError> {
     if body.token.is_empty() || body.token.len() > 128 {
-        return Err(ApiError::Validation(vec!["invalid password reset token".into()]));
+        return Err(ApiError::Validation(vec![
+            "invalid password reset token".into()
+        ]));
     }
     if body.email.is_empty() || body.email.len() > 254 {
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
@@ -1289,17 +1323,24 @@ async fn reset_password(
     .await?;
 
     let Some((user_id, status, metadata)) = user else {
-        return Err(ApiError::BadRequest("invalid or expired reset token".into()));
+        return Err(ApiError::BadRequest(
+            "invalid or expired reset token".into(),
+        ));
     };
 
     if status != "active" {
         return Err(ApiError::Forbidden(format!("account is {status}")));
     }
 
-    if let Some(expires_str) = metadata.get("password_reset_expires").and_then(|value| value.as_str()) {
+    if let Some(expires_str) = metadata
+        .get("password_reset_expires")
+        .and_then(|value| value.as_str())
+    {
         if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expires_str) {
             if Utc::now() > expires {
-                return Err(ApiError::BadRequest("password reset token has expired".into()));
+                return Err(ApiError::BadRequest(
+                    "password reset token has expired".into(),
+                ));
             }
         }
     }
@@ -1341,10 +1382,8 @@ async fn logout(
         let key = token_blacklist_key(&token);
         if let Ok(mut conn) = state.redis.get().await {
             let ttl = state.config.jwt_expiry.as_secs();
-            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
-                &mut *conn, &key, "1", ttl,
-            )
-            .await;
+            let _: Result<(), _> =
+                deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &key, "1", ttl).await;
         }
     }
 
@@ -1381,7 +1420,9 @@ async fn refresh_token(
 
     // Decode existing token to get claims
     let key = jsonwebtoken::DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes())
-        .map_err(|e| ApiError::Internal(format!("invalid JWT public key configuration: {e}")))?;
+        .map_err(|e| {
+        ApiError::Internal(format!("invalid JWT public key configuration: {e}"))
+    })?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
     validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
 
@@ -1409,10 +1450,8 @@ async fn refresh_token(
         let bl_key = token_blacklist_key(&token);
         if let Ok(mut conn) = state.redis.get().await {
             let ttl = state.config.jwt_expiry.as_secs();
-            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
-                &mut *conn, &bl_key, "1", ttl,
-            )
-            .await;
+            let _: Result<(), _> =
+                deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &bl_key, "1", ttl).await;
         }
     }
 
@@ -1431,8 +1470,9 @@ async fn refresh_token(
     let token = encode(
         &Header::new(Algorithm::RS256),
         &claims,
-        &EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| ApiError::Internal(format!("invalid JWT private key configuration: {e}")))?,
+        &EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes()).map_err(|e| {
+            ApiError::Internal(format!("invalid JWT private key configuration: {e}"))
+        })?,
     )
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
@@ -1449,16 +1489,19 @@ async fn refresh_token(
     })?;
     headers.insert("Set-Cookie", value);
 
-    Ok((headers, Json(SessionAuthResponse {
-        expires_at: exp.to_rfc3339(),
-        user: UserInfo {
-            id: user.id,
-            email: user.email,
-            name: user.name,
-            tenant_id: user.tenant_id,
-            role: user.role,
-        },
-    })))
+    Ok((
+        headers,
+        Json(SessionAuthResponse {
+            expires_at: exp.to_rfc3339(),
+            user: UserInfo {
+                id: user.id,
+                email: user.email,
+                name: user.name,
+                tenant_id: user.tenant_id,
+                role: user.role,
+            },
+        }),
+    ))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -1518,7 +1561,8 @@ mod tests {
 
     #[test]
     fn test_create_api_key_request_rejects_unknown_fields() {
-        let json = r#"{"name":"prod","scopes":["messages:send"],"expires_in_days":30,"oops":"extra"}"#;
+        let json =
+            r#"{"name":"prod","scopes":["messages:send"],"expires_in_days":30,"oops":"extra"}"#;
 
         assert!(serde_json::from_str::<CreateApiKeyRequest>(json).is_err());
     }
@@ -1544,7 +1588,10 @@ mod tests {
         let now = Utc::now();
         let expires_at = resolve_api_key_expiry(None, now).expect("default expiry should resolve");
 
-        assert_eq!(expires_at, now + ChronoDuration::days(DEFAULT_API_KEY_EXPIRY_DAYS));
+        assert_eq!(
+            expires_at,
+            now + ChronoDuration::days(DEFAULT_API_KEY_EXPIRY_DAYS)
+        );
     }
 
     #[test]
@@ -1583,8 +1630,16 @@ mod tests {
         let password = "StrongPassword1!";
         let hash = apexmail_lib::hash_password(password).unwrap();
 
-        assert!(verify_password_or_log(password, &hash, "argon2-user@example.com"));
-        assert!(!verify_password_or_log("WrongPassword1!", &hash, "argon2-user@example.com"));
+        assert!(verify_password_or_log(
+            password,
+            &hash,
+            "argon2-user@example.com"
+        ));
+        assert!(!verify_password_or_log(
+            "WrongPassword1!",
+            &hash,
+            "argon2-user@example.com"
+        ));
     }
 
     #[test]
@@ -1592,8 +1647,16 @@ mod tests {
         let password = "StrongPassword1!";
         let hash = bcrypt::hash(password, 4).unwrap();
 
-        assert!(verify_password_or_log(password, &hash, "bcrypt-user@example.com"));
-        assert!(!verify_password_or_log("WrongPassword1!", &hash, "bcrypt-user@example.com"));
+        assert!(verify_password_or_log(
+            password,
+            &hash,
+            "bcrypt-user@example.com"
+        ));
+        assert!(!verify_password_or_log(
+            "WrongPassword1!",
+            &hash,
+            "bcrypt-user@example.com"
+        ));
     }
 
     #[test]
@@ -1718,13 +1781,16 @@ mod tests {
     #[test]
     fn test_revoke_user_sessions_uses_tenant_scoped_revocation_key() {
         let key = session_revocation_key("ten_test_001", "usr_test_001");
-        assert_eq!(key, "apexmail:session_revoked_after:ten_test_001:usr_test_001");
+        assert_eq!(
+            key,
+            "apexmail:session_revoked_after:ten_test_001:usr_test_001"
+        );
     }
 
     #[tokio::test]
     async fn test_record_login_failure_sets_lock_when_redis_is_available() {
-        let redis_url = std::env::var("TEST_REDIS_URL")
-            .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let redis_url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
         let pool = match RedisConfig::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         {
@@ -1751,7 +1817,11 @@ mod tests {
 
         if let Ok(mut conn) = pool.get().await {
             let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
-                .arg(&[failure_key.as_str(), lock_key.as_str(), counter_key.as_str()])
+                .arg(&[
+                    failure_key.as_str(),
+                    lock_key.as_str(),
+                    counter_key.as_str(),
+                ])
                 .query_async(&mut *conn)
                 .await;
         }
@@ -1762,11 +1832,21 @@ mod tests {
         assert!(login_lock_ttl(&pool, &identifier).await.unwrap().is_none());
 
         record_login_failure(&pool, &identifier).await.unwrap();
-        assert!(login_lock_ttl(&pool, &identifier).await.unwrap().unwrap_or_default() > 0);
+        assert!(
+            login_lock_ttl(&pool, &identifier)
+                .await
+                .unwrap()
+                .unwrap_or_default()
+                > 0
+        );
 
         if let Ok(mut conn) = pool.get().await {
             let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
-                .arg(&[failure_key.as_str(), lock_key.as_str(), counter_key.as_str()])
+                .arg(&[
+                    failure_key.as_str(),
+                    lock_key.as_str(),
+                    counter_key.as_str(),
+                ])
                 .query_async(&mut *conn)
                 .await;
         }
@@ -1802,15 +1882,16 @@ async fn change_password(
     }
 
     // Verify current password
-    let user = sqlx::query_as::<_, PasswordHashRow>(
-        "SELECT password_hash FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+    let user =
+        sqlx::query_as::<_, PasswordHashRow>("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
 
-    let password_hash = user.password_hash.as_deref()
+    let password_hash = user
+        .password_hash
+        .as_deref()
         .ok_or_else(|| ApiError::Unauthorized("No password set".into()))?;
     let valid = verify_password_or_log(&body.current_password, password_hash, user_id);
 
@@ -1822,13 +1903,11 @@ async fn change_password(
     let new_hash = apexmail_lib::hash_password(&body.new_password)
         .map_err(|error| ApiError::Internal(format!("Password hashing failed: {error}")))?;
 
-    sqlx::query(
-        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
-    )
-    .bind(new_hash)
-    .bind(user_id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2")
+        .bind(new_hash)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
 
     Ok(Json(serde_json::json!({ "changed": true })))
 }
@@ -1850,24 +1929,20 @@ async fn revoke_session(
 
     let affected = if let Some(session_id) = &body.session_id {
         // Revoke single session
-        sqlx::query(
-            "DELETE FROM sessions WHERE id = $1 AND user_id = $2",
-        )
-        .bind(session_id)
-        .bind(user_id)
-        .execute(&state.db)
-        .await?
-        .rows_affected()
+        sqlx::query("DELETE FROM sessions WHERE id = $1 AND user_id = $2")
+            .bind(session_id)
+            .bind(user_id)
+            .execute(&state.db)
+            .await?
+            .rows_affected()
     } else {
         // Revoke all sessions except current - if no specific session provided,
         // revoke all other sessions (we don't have session_id in auth context)
-        sqlx::query(
-            "DELETE FROM sessions WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .execute(&state.db)
-        .await?
-        .rows_affected()
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&state.db)
+            .await?
+            .rows_affected()
     };
 
     Ok(Json(serde_json::json!({ "revoked": affected })))

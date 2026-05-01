@@ -112,10 +112,21 @@ async fn list_inbox(
     let tenant_scoped = auth.tenant_id != "system";
     let sql = build_list_inbox_sql(&params, tenant_scoped);
 
-    let mut query = sqlx::query_as::<_, (
-        String, String, String, String, String,
-        Option<String>, bool, bool, Option<String>, chrono::DateTime<chrono::Utc>,
-    )>(&sql);
+    let mut query = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            bool,
+            bool,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(&sql);
 
     if tenant_scoped {
         query = query.bind(&auth.tenant_id);
@@ -132,20 +143,33 @@ async fn list_inbox(
 
     let messages: Vec<InboxMessage> = rows
         .into_iter()
-        .map(|(id, classification, subject, from_addr, to_addr, summary, is_read, is_archived, action_taken, created_at)| {
-            InboxMessage {
+        .map(
+            |(
                 id,
                 classification,
                 subject,
-                from_address: from_addr,
-                to_address: to_addr,
+                from_addr,
+                to_addr,
                 summary,
                 is_read,
                 is_archived,
                 action_taken,
-                created_at: created_at.to_rfc3339(),
-            }
-        })
+                created_at,
+            )| {
+                InboxMessage {
+                    id,
+                    classification,
+                    subject,
+                    from_address: from_addr,
+                    to_address: to_addr,
+                    summary,
+                    is_read,
+                    is_archived,
+                    action_taken,
+                    created_at: created_at.to_rfc3339(),
+                }
+            },
+        )
         .collect();
 
     Ok(Json(messages))
@@ -164,7 +188,10 @@ pub struct UpdateInboxMessage {
     pub action_taken: Option<String>,
 }
 
-fn build_update_inbox_sql(body: &UpdateInboxMessage, tenant_scoped: bool) -> Result<String, ApiError> {
+fn build_update_inbox_sql(
+    body: &UpdateInboxMessage,
+    tenant_scoped: bool,
+) -> Result<String, ApiError> {
     let mut sets: Vec<String> = Vec::new();
     let mut idx = if tenant_scoped { 3u32 } else { 2u32 };
 
@@ -191,7 +218,11 @@ fn build_update_inbox_sql(body: &UpdateInboxMessage, tenant_scoped: bool) -> Res
     Ok(format!(
         "UPDATE autopilot_inbox_messages SET {} WHERE id = $1{}",
         sets.join(", "),
-        if tenant_scoped { " AND tenant_id = $2" } else { "" }
+        if tenant_scoped {
+            " AND tenant_id = $2"
+        } else {
+            ""
+        }
     ))
 }
 

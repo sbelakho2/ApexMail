@@ -28,8 +28,8 @@ struct PatternEntry {
 }
 
 impl PatternMatcher {
-/// Build a matcher from labeled pattern strings.
-/// Returns `None` if the patterns are invalid (e.g., too many or conflicting).
+    /// Build a matcher from labeled pattern strings.
+    /// Returns `None` if the patterns are invalid (e.g., too many or conflicting).
     pub fn new(patterns: Vec<(String, String)>) -> Self {
         let entries: Vec<PatternEntry> = patterns
             .iter()
@@ -60,7 +60,7 @@ impl PatternMatcher {
         }
     }
 
-/// Find all matches in the input text.
+    /// Find all matches in the input text.
     pub fn find_all(&self, text: &str) -> Vec<MatchResult> {
         let Some(automaton) = self.automaton.as_ref() else {
             return Vec::new();
@@ -81,7 +81,7 @@ impl PatternMatcher {
             .collect()
     }
 
-/// Check if any pattern matches.
+    /// Check if any pattern matches.
     pub fn is_match(&self, text: &str) -> bool {
         self.automaton
             .as_ref()
@@ -89,7 +89,7 @@ impl PatternMatcher {
             .unwrap_or(false)
     }
 
-/// Count total matches.
+    /// Count total matches.
     pub fn count_matches(&self, text: &str) -> usize {
         self.automaton
             .as_ref()
@@ -97,7 +97,7 @@ impl PatternMatcher {
             .unwrap_or(0)
     }
 
-/// Find first match only.
+    /// Find first match only.
     pub fn find_first(&self, text: &str) -> Option<MatchResult> {
         self.automaton.as_ref()?.find(text).map(|m| {
             let entry = &self.patterns[m.pattern().as_usize()];
@@ -111,7 +111,7 @@ impl PatternMatcher {
         })
     }
 
-/// Number of patterns in the automaton.
+    /// Number of patterns in the automaton.
     pub fn pattern_count(&self) -> usize {
         self.patterns.len()
     }

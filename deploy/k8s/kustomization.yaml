@@ -24,6 +24,9 @@ resources:
   - api-server/hpa.yaml
   - api-server/pdb.yaml
   - api-server/network-policy.yaml
+  - policies/configmap-secret-guardrail.yaml
+  - observability/otel-collector.yaml
+  - observability/prometheus-rules.yaml
   - tracking-service/deployment.yaml
   - tracking-service/service.yaml
   - tracking-service/serviceaccount.yaml

@@ -5,9 +5,9 @@
 //! (keyed by tenant_id or "global"), forming an immutable linked list. A separate
 //! HMAC signature using a server-side signing key protects the hash from forgery.
 
-use chrono::{DateTime, Utc};
 #[cfg(test)]
 use chrono::Duration;
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -26,7 +26,7 @@ pub struct AuditLogger {
     #[allow(unused)]
     config: AuditConfig,
     signing_key: Vec<u8>,
-/// In-memory cache of last hash per chain key. Primary source:/// Redis `audit:lasthash:{key}`, falling back to DB.
+    /// In-memory cache of last hash per chain key. Primary source:/// Redis `audit:lasthash:{key}`, falling back to DB.
     last_hashes: RwLock<HashMap<String, String>>,
 }
 
@@ -41,7 +41,7 @@ impl AuditLogger {
         }
     }
 
-/// Initialize by loading last hashes from DB.
+    /// Initialize by loading last hashes from DB.
     pub async fn initialize(&self) -> Result<(), String> {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_timestamp ON audit_logs (tenant_id, timestamp DESC)",
@@ -71,9 +71,9 @@ impl AuditLogger {
         Ok(())
     }
 
-// ── Core logging ────────────────────────────────────────
+    // ── Core logging ────────────────────────────────────────
 
-/// Log a single audit event. Returns the persisted entry.
+    /// Log a single audit event. Returns the persisted entry.
     pub async fn log(
         &self,
         action: AuditAction,
@@ -86,10 +86,7 @@ impl AuditLogger {
     ) -> Result<AuditLogEntry, String> {
         let id = Uuid::new_v4().to_string();
         let timestamp = Utc::now();
-        let chain_key = ctx
-            .tenant_id
-            .clone()
-            .unwrap_or_else(|| "global".into());
+        let chain_key = ctx.tenant_id.clone().unwrap_or_else(|| "global".into());
 
         let previous_hash = {
             let map = self.last_hashes.read().await;
@@ -136,7 +133,7 @@ impl AuditLogger {
 
         self.persist_entry(&entry).await?;
 
-// Update last hash cache
+        // Update last hash cache
         {
             let mut map = self.last_hashes.write().await;
             map.insert(chain_key, hash);
@@ -145,65 +142,149 @@ impl AuditLogger {
         Ok(entry)
     }
 
-// ── Convenience wrappers ────────────────────────────────
+    // ── Convenience wrappers ────────────────────────────────
 
     pub async fn log_create(
-        &self, resource: AuditResource, resource_id: &str,
-        details: serde_json::Value, ctx: &LogContext,
+        &self,
+        resource: AuditResource,
+        resource_id: &str,
+        details: serde_json::Value,
+        ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
-        self.log(AuditAction::Create, resource, Some(resource_id), details, AuditOutcome::Success, None, ctx).await
+        self.log(
+            AuditAction::Create,
+            resource,
+            Some(resource_id),
+            details,
+            AuditOutcome::Success,
+            None,
+            ctx,
+        )
+        .await
     }
 
     pub async fn log_read(
-        &self, resource: AuditResource, resource_id: &str,
-        details: serde_json::Value, ctx: &LogContext,
+        &self,
+        resource: AuditResource,
+        resource_id: &str,
+        details: serde_json::Value,
+        ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
-        self.log(AuditAction::Read, resource, Some(resource_id), details, AuditOutcome::Success, None, ctx).await
+        self.log(
+            AuditAction::Read,
+            resource,
+            Some(resource_id),
+            details,
+            AuditOutcome::Success,
+            None,
+            ctx,
+        )
+        .await
     }
 
     pub async fn log_update(
-        &self, resource: AuditResource, resource_id: &str,
-        details: serde_json::Value, ctx: &LogContext,
+        &self,
+        resource: AuditResource,
+        resource_id: &str,
+        details: serde_json::Value,
+        ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
-        self.log(AuditAction::Update, resource, Some(resource_id), details, AuditOutcome::Success, None, ctx).await
+        self.log(
+            AuditAction::Update,
+            resource,
+            Some(resource_id),
+            details,
+            AuditOutcome::Success,
+            None,
+            ctx,
+        )
+        .await
     }
 
     pub async fn log_delete(
-        &self, resource: AuditResource, resource_id: &str,
-        details: serde_json::Value, ctx: &LogContext,
+        &self,
+        resource: AuditResource,
+        resource_id: &str,
+        details: serde_json::Value,
+        ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
-        self.log(AuditAction::Delete, resource, Some(resource_id), details, AuditOutcome::Success, None, ctx).await
+        self.log(
+            AuditAction::Delete,
+            resource,
+            Some(resource_id),
+            details,
+            AuditOutcome::Success,
+            None,
+            ctx,
+        )
+        .await
     }
 
     pub async fn log_login(
-        &self, user_id: &str, success: bool,
-        details: serde_json::Value, ctx: &LogContext,
+        &self,
+        user_id: &str,
+        success: bool,
+        details: serde_json::Value,
+        ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
-        let outcome = if success { AuditOutcome::Success } else { AuditOutcome::Failure };
+        let outcome = if success {
+            AuditOutcome::Success
+        } else {
+            AuditOutcome::Failure
+        };
         let error_msg = if success { None } else { Some("Login failed") };
-        self.log(AuditAction::Login, AuditResource::User, Some(user_id), details, outcome, error_msg, ctx).await
+        self.log(
+            AuditAction::Login,
+            AuditResource::User,
+            Some(user_id),
+            details,
+            outcome,
+            error_msg,
+            ctx,
+        )
+        .await
     }
 
     pub async fn log_send(
-        &self, message_id: &str,
-        details: serde_json::Value, ctx: &LogContext,
+        &self,
+        message_id: &str,
+        details: serde_json::Value,
+        ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
-        self.log(AuditAction::Send, AuditResource::Message, Some(message_id), details, AuditOutcome::Success, None, ctx).await
+        self.log(
+            AuditAction::Send,
+            AuditResource::Message,
+            Some(message_id),
+            details,
+            AuditOutcome::Success,
+            None,
+            ctx,
+        )
+        .await
     }
 
     pub async fn log_export(
-        &self, resource: AuditResource, resource_id: &str,
-        details: serde_json::Value, ctx: &LogContext,
+        &self,
+        resource: AuditResource,
+        resource_id: &str,
+        details: serde_json::Value,
+        ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
-        self.log(AuditAction::Export, resource, Some(resource_id), details, AuditOutcome::Success, None, ctx).await
+        self.log(
+            AuditAction::Export,
+            resource,
+            Some(resource_id),
+            details,
+            AuditOutcome::Success,
+            None,
+            ctx,
+        )
+        .await
     }
 
-// ── Query ───────────────────────────────────────────────
+    // ── Query ───────────────────────────────────────────────
 
-    pub async fn query(
-        &self,
-        q: &AuditLogQuery,
-    ) -> Result<(Vec<AuditLogEntry>, i64), String> {
+    pub async fn query(&self, q: &AuditLogQuery) -> Result<(Vec<AuditLogEntry>, i64), String> {
         let limit = q.limit.unwrap_or(50).min(1000);
         let offset = q.offset.unwrap_or(0);
 
@@ -250,10 +331,7 @@ impl AuditLogger {
         rows.into_iter().map(|r| r.into_entry()).collect()
     }
 
-    async fn count_entries_simple(
-        &self,
-        q: &AuditLogQuery,
-    ) -> Result<i64, String> {
+    async fn count_entries_simple(&self, q: &AuditLogQuery) -> Result<i64, String> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM audit_logs
              WHERE ($1::text IS NULL OR tenant_id = $1)
@@ -277,11 +355,8 @@ impl AuditLogger {
         Ok(count)
     }
 
-/// Get a single entry by ID.
-    pub async fn get_entry(
-        &self,
-        id: &str,
-    ) -> Result<Option<AuditLogEntry>, String> {
+    /// Get a single entry by ID.
+    pub async fn get_entry(&self, id: &str) -> Result<Option<AuditLogEntry>, String> {
         let row: Option<AuditRow> = sqlx::query_as(
             "SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
                     details, ip_address, user_agent, outcome, error_message,
@@ -299,13 +374,10 @@ impl AuditLogger {
         }
     }
 
-// ── Chain Verification ──────────────────────────────────
+    // ── Chain Verification ──────────────────────────────────
 
-/// Verify the integrity of the hash chain for a given scope.
-    pub fn verify_chain_entries(
-        &self,
-        entries: &[AuditLogEntry],
-    ) -> ChainValidationResult {
+    /// Verify the integrity of the hash chain for a given scope.
+    pub fn verify_chain_entries(&self, entries: &[AuditLogEntry]) -> ChainValidationResult {
         if entries.is_empty() {
             return ChainValidationResult {
                 valid: true,
@@ -316,7 +388,7 @@ impl AuditLogger {
         }
 
         for (i, entry) in entries.iter().enumerate() {
-// Recompute hash
+            // Recompute hash
             let expected_hash = self.compute_hash(
                 &entry.id,
                 &entry.tenant_id,
@@ -343,7 +415,7 @@ impl AuditLogger {
                 };
             }
 
-// Verify HMAC signature
+            // Verify HMAC signature
             let expected_sig = match self.compute_signature(&entry.hash) {
                 Ok(v) => v,
                 Err(e) => {
@@ -364,7 +436,7 @@ impl AuditLogger {
                 };
             }
 
-// Verify chain linkage
+            // Verify chain linkage
             if i > 0 {
                 let prev = &entries[i - 1];
                 if entry.previous_hash.as_deref() != Some(&prev.hash) {
@@ -372,10 +444,7 @@ impl AuditLogger {
                         valid: false,
                         entries_checked: i + 1,
                         first_invalid_entry: Some(entry.id.clone()),
-                        error: Some(format!(
-                            "Chain link broken at entry {}",
-                            entry.id
-                        )),
+                        error: Some(format!("Chain link broken at entry {}", entry.id)),
                     };
                 }
             }
@@ -389,7 +458,7 @@ impl AuditLogger {
         }
     }
 
-/// Verify chain from DB for optional tenant scope.
+    /// Verify chain from DB for optional tenant scope.
     pub async fn verify_chain(
         &self,
         tenant_id: Option<&str>,
@@ -421,9 +490,9 @@ impl AuditLogger {
         Ok(self.verify_chain_entries(&entries))
     }
 
-// ── Export ───────────────────────────────────────────────
+    // ── Export ───────────────────────────────────────────────
 
-/// Export audit logs in the specified format.
+    /// Export audit logs in the specified format.
     pub async fn export(
         &self,
         query: &AuditLogQuery,
@@ -433,15 +502,12 @@ impl AuditLogger {
 
         match format {
             "json" => {
-                let data = serde_json::to_string_pretty(&entries)
-                    .map_err(|e| format!("JSON: {e}"))?;
+                let data =
+                    serde_json::to_string_pretty(&entries).map_err(|e| format!("JSON: {e}"))?;
                 Ok(ExportResult {
                     data,
                     content_type: "application/json".into(),
-                    filename: format!(
-                        "audit-export-{}.json",
-                        Utc::now().format("%Y%m%d%H%M%S")
-                    ),
+                    filename: format!("audit-export-{}.json", Utc::now().format("%Y%m%d%H%M%S")),
                 })
             }
             "csv" => {
@@ -465,34 +531,25 @@ impl AuditLogger {
                 Ok(ExportResult {
                     data: csv,
                     content_type: "text/csv".into(),
-                    filename: format!(
-                        "audit-export-{}.csv",
-                        Utc::now().format("%Y%m%d%H%M%S")
-                    ),
+                    filename: format!("audit-export-{}.csv", Utc::now().format("%Y%m%d%H%M%S")),
                 })
             }
             "pdf" => {
-// Minimal PDF 1.4 generation (Courier font, text-only)
+                // Minimal PDF 1.4 generation (Courier font, text-only)
                 let data = generate_simple_pdf(&entries);
                 Ok(ExportResult {
                     data,
                     content_type: "application/pdf".into(),
-                    filename: format!(
-                        "audit-export-{}.pdf",
-                        Utc::now().format("%Y%m%d%H%M%S")
-                    ),
+                    filename: format!("audit-export-{}.pdf", Utc::now().format("%Y%m%d%H%M%S")),
                 })
             }
             _ => Err(format!("Unsupported export format: {format}")),
         }
     }
 
-// ── Stats ───────────────────────────────────────────────
+    // ── Stats ───────────────────────────────────────────────
 
-    pub async fn get_stats(
-        &self,
-        tenant_id: Option<&str>,
-    ) -> Result<serde_json::Value, String> {
+    pub async fn get_stats(&self, tenant_id: Option<&str>) -> Result<serde_json::Value, String> {
         let (total,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM audit_logs
              WHERE ($1::text IS NULL OR tenant_id = $1)",
@@ -537,14 +594,11 @@ impl AuditLogger {
         }))
     }
 
-// ── Archival ────────────────────────────────────────────
+    // ── Archival ────────────────────────────────────────────
 
-/// Archive audit logs older than the specified date.
-    pub async fn archive(
-        &self,
-        older_than: DateTime<Utc>,
-    ) -> Result<i64, String> {
-// Copy to archive
+    /// Archive audit logs older than the specified date.
+    pub async fn archive(&self, older_than: DateTime<Utc>) -> Result<i64, String> {
+        // Copy to archive
         let result = sqlx::query(
             "INSERT INTO audit_logs_archive
              SELECT * FROM audit_logs WHERE timestamp < $1
@@ -557,7 +611,7 @@ impl AuditLogger {
 
         let archived = result.rows_affected() as i64;
 
-// Delete from main table
+        // Delete from main table
         sqlx::query("DELETE FROM audit_logs WHERE timestamp < $1")
             .bind(older_than)
             .execute(&self.db)
@@ -568,7 +622,7 @@ impl AuditLogger {
         Ok(archived)
     }
 
-// ── Webhook Registration ────────────────────────────────
+    // ── Webhook Registration ────────────────────────────────
 
     pub async fn register_webhook(
         &self,
@@ -578,8 +632,7 @@ impl AuditLogger {
     ) -> Result<String, String> {
         let id = Uuid::new_v4().to_string();
         let events_json: Vec<String> = events.iter().map(|a| a.to_string()).collect();
-        let events_val = serde_json::to_value(&events_json)
-            .map_err(|e| format!("JSON: {e}"))?;
+        let events_val = serde_json::to_value(&events_json).map_err(|e| format!("JSON: {e}"))?;
 
         sqlx::query(
             "INSERT INTO audit_webhooks (id, tenant_id, url, events, created_at)
@@ -596,7 +649,7 @@ impl AuditLogger {
         Ok(id)
     }
 
-// ── Hash & Signature Computation ────────────────────────
+    // ── Hash & Signature Computation ────────────────────────
 
     fn compute_hash(
         &self,
@@ -615,7 +668,7 @@ impl AuditLogger {
         timestamp: &DateTime<Utc>,
         previous_hash: &Option<String>,
     ) -> String {
-// Deterministic JSON object with sorted keys (manual assembly)
+        // Deterministic JSON object with sorted keys (manual assembly)
         let obj = serde_json::json!({
             "action": action.to_string(),
             "details": details,
@@ -643,16 +696,13 @@ impl AuditLogger {
     }
 
     fn compute_signature(&self, hash: &str) -> Result<String, String> {
-        let mut mac =
-            HmacSha256::new_from_slice(&self.signing_key).map_err(|e| format!("Invalid HMAC key: {e}"))?;
+        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
+            .map_err(|e| format!("Invalid HMAC key: {e}"))?;
         mac.update(hash.as_bytes());
         Ok(hex::encode(mac.finalize().into_bytes()))
     }
 
-    async fn persist_entry(
-        &self,
-        entry: &AuditLogEntry,
-    ) -> Result<(), String> {
+    async fn persist_entry(&self, entry: &AuditLogEntry) -> Result<(), String> {
         sqlx::query(
             "INSERT INTO audit_logs
                (id, tenant_id, user_id, session_id, action, resource, resource_id,
@@ -695,10 +745,17 @@ pub struct ExportResult {
 
 fn csv_escape(value: &str) -> String {
     let mut escaped = value.replace('"', "\"\"");
-    if matches!(escaped.chars().next(), Some('=') | Some('+') | Some('-') | Some('@')) {
+    if matches!(
+        escaped.chars().next(),
+        Some('=') | Some('+') | Some('-') | Some('@')
+    ) {
         escaped.insert(0, '\'');
     }
-    if escaped.contains(',') || escaped.contains('"') || escaped.contains('\n') || escaped.contains('\r') {
+    if escaped.contains(',')
+        || escaped.contains('"')
+        || escaped.contains('\n')
+        || escaped.contains('\r')
+    {
         format!("\"{}\"", escaped)
     } else {
         escaped
@@ -708,7 +765,7 @@ fn csv_escape(value: &str) -> String {
 // ─── Minimal PDF generator ─────────────────────────────────────
 
 fn generate_simple_pdf(entries: &[AuditLogEntry]) -> String {
-// Generate a minimal text-based PDF 1.4
+    // Generate a minimal text-based PDF 1.4
     let mut lines = Vec::with_capacity(entries.len().saturating_add(4));
     lines.push("Audit Log Export".to_string());
     lines.push(format!("Generated: {}", Utc::now().to_rfc3339()));
@@ -727,7 +784,7 @@ fn generate_simple_pdf(entries: &[AuditLogEntry]) -> String {
         ));
     }
 
-// Minimal PDF structure
+    // Minimal PDF structure
     let content = lines.join("\n");
     let stream = format!("BT /F1 10 Tf 50 750 Td ({content}) Tj ET");
     let stream_len = stream.len();
@@ -769,20 +826,17 @@ struct AuditRow {
 
 impl AuditRow {
     fn into_entry(self) -> Result<AuditLogEntry, String> {
-        let action: AuditAction = serde_json::from_value(
-            serde_json::Value::String(self.action.clone()),
-        )
-        .map_err(|_| format!("Invalid action: {}", self.action))?;
+        let action: AuditAction =
+            serde_json::from_value(serde_json::Value::String(self.action.clone()))
+                .map_err(|_| format!("Invalid action: {}", self.action))?;
 
-        let resource: AuditResource = serde_json::from_value(
-            serde_json::Value::String(self.resource.clone()),
-        )
-        .map_err(|_| format!("Invalid resource: {}", self.resource))?;
+        let resource: AuditResource =
+            serde_json::from_value(serde_json::Value::String(self.resource.clone()))
+                .map_err(|_| format!("Invalid resource: {}", self.resource))?;
 
-        let outcome: AuditOutcome = serde_json::from_value(
-            serde_json::Value::String(self.outcome.clone()),
-        )
-        .map_err(|_| format!("Invalid outcome: {}", self.outcome))?;
+        let outcome: AuditOutcome =
+            serde_json::from_value(serde_json::Value::String(self.outcome.clone()))
+                .map_err(|_| format!("Invalid outcome: {}", self.outcome))?;
 
         Ok(AuditLogEntry {
             id: self.id,
@@ -852,16 +906,36 @@ mod tests {
         let details = serde_json::json!({"key": "value"});
 
         let h1 = logger.compute_hash(
-            "id1", &Some("t1".into()), &Some("u1".into()), &None,
-            &AuditAction::Create, &AuditResource::User, &Some("r1".into()),
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts, &None,
+            "id1",
+            &Some("t1".into()),
+            &Some("u1".into()),
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &Some("r1".into()),
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &None,
         );
         let h2 = logger.compute_hash(
-            "id1", &Some("t1".into()), &Some("u1".into()), &None,
-            &AuditAction::Create, &AuditResource::User, &Some("r1".into()),
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts, &None,
+            "id1",
+            &Some("t1".into()),
+            &Some("u1".into()),
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &Some("r1".into()),
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &None,
         );
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64); // SHA-256 hex
@@ -874,16 +948,36 @@ mod tests {
         let details = serde_json::json!({"key": "value"});
 
         let h1 = logger.compute_hash(
-            "id1", &Some("t1".into()), &None, &None,
-            &AuditAction::Create, &AuditResource::User, &None,
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts, &None,
+            "id1",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &None,
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &None,
         );
         let h2 = logger.compute_hash(
-            "id2", &Some("t1".into()), &None, &None,
-            &AuditAction::Create, &AuditResource::User, &None,
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts, &None,
+            "id2",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &None,
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &None,
         );
         assert_ne!(h1, h2);
     }
@@ -905,11 +999,14 @@ mod tests {
             .max_connections(1)
             .connect_lazy("postgres://fake:fake@localhost:1/fake")
             .unwrap();
-        let logger2 = AuditLogger::new(pool, AuditConfig {
-            retention_days: 365,
-            hash_chain_enabled: true,
-            signing_key: "different-key-that-is-at-least-32-characters!!".into(),
-        });
+        let logger2 = AuditLogger::new(
+            pool,
+            AuditConfig {
+                retention_days: 365,
+                hash_chain_enabled: true,
+                signing_key: "different-key-that-is-at-least-32-characters!!".into(),
+            },
+        );
 
         let s1 = logger1.compute_signature("samehash").unwrap();
         let s2 = logger2.compute_signature("samehash").unwrap();
@@ -931,10 +1028,20 @@ mod tests {
         let details = serde_json::json!({});
 
         let hash = logger.compute_hash(
-            "e1", &Some("t1".into()), &Some("u1".into()), &None,
-            &AuditAction::Create, &AuditResource::User, &None,
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts, &None,
+            "e1",
+            &Some("t1".into()),
+            &Some("u1".into()),
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &None,
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &None,
         );
         let sig = logger.compute_signature(&hash).unwrap();
 
@@ -969,42 +1076,78 @@ mod tests {
         let ts2 = ts1 + Duration::seconds(1);
         let details = serde_json::json!({});
 
-// Entry 1 (no previous)
+        // Entry 1 (no previous)
         let hash1 = logger.compute_hash(
-            "e1", &Some("t1".into()), &None, &None,
-            &AuditAction::Create, &AuditResource::User, &None,
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts1, &None,
+            "e1",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &None,
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts1,
+            &None,
         );
         let sig1 = logger.compute_signature(&hash1).unwrap();
         let entry1 = AuditLogEntry {
-            id: "e1".into(), tenant_id: Some("t1".into()),
-            user_id: None, session_id: None,
-            action: AuditAction::Create, resource: AuditResource::User,
-            resource_id: None, details: details.clone(),
-            ip_address: None, user_agent: None,
-            outcome: AuditOutcome::Success, error_message: None,
-            timestamp: ts1, hash: hash1.clone(),
-            previous_hash: None, signature: sig1,
+            id: "e1".into(),
+            tenant_id: Some("t1".into()),
+            user_id: None,
+            session_id: None,
+            action: AuditAction::Create,
+            resource: AuditResource::User,
+            resource_id: None,
+            details: details.clone(),
+            ip_address: None,
+            user_agent: None,
+            outcome: AuditOutcome::Success,
+            error_message: None,
+            timestamp: ts1,
+            hash: hash1.clone(),
+            previous_hash: None,
+            signature: sig1,
         };
 
-// Entry 2 (previous = hash1)
+        // Entry 2 (previous = hash1)
         let hash2 = logger.compute_hash(
-            "e2", &Some("t1".into()), &None, &None,
-            &AuditAction::Update, &AuditResource::User, &None,
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts2, &Some(hash1.clone()),
+            "e2",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Update,
+            &AuditResource::User,
+            &None,
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts2,
+            &Some(hash1.clone()),
         );
         let sig2 = logger.compute_signature(&hash2).unwrap();
         let entry2 = AuditLogEntry {
-            id: "e2".into(), tenant_id: Some("t1".into()),
-            user_id: None, session_id: None,
-            action: AuditAction::Update, resource: AuditResource::User,
-            resource_id: None, details,
-            ip_address: None, user_agent: None,
-            outcome: AuditOutcome::Success, error_message: None,
-            timestamp: ts2, hash: hash2,
-            previous_hash: Some(hash1), signature: sig2,
+            id: "e2".into(),
+            tenant_id: Some("t1".into()),
+            user_id: None,
+            session_id: None,
+            action: AuditAction::Update,
+            resource: AuditResource::User,
+            resource_id: None,
+            details,
+            ip_address: None,
+            user_agent: None,
+            outcome: AuditOutcome::Success,
+            error_message: None,
+            timestamp: ts2,
+            hash: hash2,
+            previous_hash: Some(hash1),
+            signature: sig2,
         };
 
         let result = logger.verify_chain_entries(&[entry1, entry2]);
@@ -1019,20 +1162,36 @@ mod tests {
         let details = serde_json::json!({});
 
         let real_hash = logger.compute_hash(
-            "e1", &Some("t1".into()), &None, &None,
-            &AuditAction::Create, &AuditResource::User, &None,
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts, &None,
+            "e1",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &None,
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &None,
         );
         let sig = logger.compute_signature(&real_hash).unwrap();
 
         let entry = AuditLogEntry {
-            id: "e1".into(), tenant_id: Some("t1".into()),
-            user_id: None, session_id: None,
-            action: AuditAction::Create, resource: AuditResource::User,
-            resource_id: None, details,
-            ip_address: None, user_agent: None,
-            outcome: AuditOutcome::Success, error_message: None,
+            id: "e1".into(),
+            tenant_id: Some("t1".into()),
+            user_id: None,
+            session_id: None,
+            action: AuditAction::Create,
+            resource: AuditResource::User,
+            resource_id: None,
+            details,
+            ip_address: None,
+            user_agent: None,
+            outcome: AuditOutcome::Success,
+            error_message: None,
             timestamp: ts,
             hash: "tampered_hash_value_not_real".into(), // tampered!
             previous_hash: None,
@@ -1052,41 +1211,77 @@ mod tests {
         let details = serde_json::json!({});
 
         let hash1 = logger.compute_hash(
-            "e1", &Some("t1".into()), &None, &None,
-            &AuditAction::Create, &AuditResource::User, &None,
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts1, &None,
+            "e1",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &None,
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts1,
+            &None,
         );
         let sig1 = logger.compute_signature(&hash1).unwrap();
         let entry1 = AuditLogEntry {
-            id: "e1".into(), tenant_id: Some("t1".into()),
-            user_id: None, session_id: None,
-            action: AuditAction::Create, resource: AuditResource::User,
-            resource_id: None, details: details.clone(),
-            ip_address: None, user_agent: None,
-            outcome: AuditOutcome::Success, error_message: None,
-            timestamp: ts1, hash: hash1,
-            previous_hash: None, signature: sig1,
+            id: "e1".into(),
+            tenant_id: Some("t1".into()),
+            user_id: None,
+            session_id: None,
+            action: AuditAction::Create,
+            resource: AuditResource::User,
+            resource_id: None,
+            details: details.clone(),
+            ip_address: None,
+            user_agent: None,
+            outcome: AuditOutcome::Success,
+            error_message: None,
+            timestamp: ts1,
+            hash: hash1,
+            previous_hash: None,
+            signature: sig1,
         };
 
-// Entry 2 with WRONG previous hash
+        // Entry 2 with WRONG previous hash
         let wrong_prev = Some("wrong_previous_hash".to_string());
         let hash2 = logger.compute_hash(
-            "e2", &Some("t1".into()), &None, &None,
-            &AuditAction::Update, &AuditResource::User, &None,
-            &details, &None, &None, &AuditOutcome::Success, &None,
-            &ts2, &wrong_prev,
+            "e2",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Update,
+            &AuditResource::User,
+            &None,
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts2,
+            &wrong_prev,
         );
         let sig2 = logger.compute_signature(&hash2).unwrap();
         let entry2 = AuditLogEntry {
-            id: "e2".into(), tenant_id: Some("t1".into()),
-            user_id: None, session_id: None,
-            action: AuditAction::Update, resource: AuditResource::User,
-            resource_id: None, details,
-            ip_address: None, user_agent: None,
-            outcome: AuditOutcome::Success, error_message: None,
-            timestamp: ts2, hash: hash2,
-            previous_hash: wrong_prev, signature: sig2,
+            id: "e2".into(),
+            tenant_id: Some("t1".into()),
+            user_id: None,
+            session_id: None,
+            action: AuditAction::Update,
+            resource: AuditResource::User,
+            resource_id: None,
+            details,
+            ip_address: None,
+            user_agent: None,
+            outcome: AuditOutcome::Success,
+            error_message: None,
+            timestamp: ts2,
+            hash: hash2,
+            previous_hash: wrong_prev,
+            signature: sig2,
         };
 
         let result = logger.verify_chain_entries(&[entry1, entry2]);
@@ -1098,18 +1293,25 @@ mod tests {
     fn test_export_csv_format() {
         let ts = Utc::now();
         let entry = AuditLogEntry {
-            id: "e1".into(), tenant_id: Some("t1".into()),
-            user_id: Some("u1".into()), session_id: None,
-            action: AuditAction::Create, resource: AuditResource::User,
+            id: "e1".into(),
+            tenant_id: Some("t1".into()),
+            user_id: Some("u1".into()),
+            session_id: None,
+            action: AuditAction::Create,
+            resource: AuditResource::User,
             resource_id: Some("r1".into()),
             details: serde_json::json!({}),
-            ip_address: None, user_agent: None,
-            outcome: AuditOutcome::Success, error_message: None,
-            timestamp: ts, hash: "abc".into(),
-            previous_hash: None, signature: "def".into(),
+            ip_address: None,
+            user_agent: None,
+            outcome: AuditOutcome::Success,
+            error_message: None,
+            timestamp: ts,
+            hash: "abc".into(),
+            previous_hash: None,
+            signature: "def".into(),
         };
 
-// Test CSV generation manually
+        // Test CSV generation manually
         let csv = format!(
             "{},{},{},{},{},{},{},{},{}",
             entry.id,
@@ -1127,18 +1329,24 @@ mod tests {
 
     #[test]
     fn test_pdf_generation() {
-        let entries = vec![
-            AuditLogEntry {
-                id: "e1".into(), tenant_id: None, user_id: None,
-                session_id: None, action: AuditAction::Login,
-                resource: AuditResource::User, resource_id: None,
-                details: serde_json::json!({}),
-                ip_address: None, user_agent: None,
-                outcome: AuditOutcome::Success, error_message: None,
-                timestamp: Utc::now(), hash: "h".into(),
-                previous_hash: None, signature: "s".into(),
-            },
-        ];
+        let entries = vec![AuditLogEntry {
+            id: "e1".into(),
+            tenant_id: None,
+            user_id: None,
+            session_id: None,
+            action: AuditAction::Login,
+            resource: AuditResource::User,
+            resource_id: None,
+            details: serde_json::json!({}),
+            ip_address: None,
+            user_agent: None,
+            outcome: AuditOutcome::Success,
+            error_message: None,
+            timestamp: Utc::now(),
+            hash: "h".into(),
+            previous_hash: None,
+            signature: "s".into(),
+        }];
         let pdf = generate_simple_pdf(&entries);
         assert!(pdf.starts_with("%PDF-1.4"));
         assert!(pdf.contains("%%EOF"));

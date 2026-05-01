@@ -26,12 +26,8 @@ impl InboxManager {
         }
     }
 
-/// Classify and store a message, returning the assigned category.
-    pub fn categorize_message(
-        &self,
-        from: String,
-        subject: String,
-    ) -> InboxMessage {
+    /// Classify and store a message, returning the assigned category.
+    pub fn categorize_message(&self, from: String, subject: String) -> InboxMessage {
         let category = Self::classify(&subject, &from);
         let msg = InboxMessage {
             id: Uuid::new_v4(),
@@ -45,7 +41,7 @@ impl InboxManager {
         msg
     }
 
-/// Heuristic classification.
+    /// Heuristic classification.
     fn classify(subject: &str, from: &str) -> MessageCategory {
         let s = subject.to_lowercase();
         let f = from.to_lowercase();
@@ -81,7 +77,7 @@ impl InboxManager {
         MessageCategory::Other
     }
 
-/// List messages belonging to a given category.
+    /// List messages belonging to a given category.
     pub fn list_by_category(&self, cat: MessageCategory) -> Vec<InboxMessage> {
         self.messages
             .read()
@@ -91,12 +87,12 @@ impl InboxManager {
             .collect()
     }
 
-/// List all messages regardless of category.
+    /// List all messages regardless of category.
     pub fn list_all(&self) -> Vec<InboxMessage> {
         self.messages.read().clone()
     }
 
-/// Mark a message as replied.
+    /// Mark a message as replied.
     pub fn mark_replied(&self, id: Uuid) -> bool {
         let mut store = self.messages.write();
         if let Some(msg) = store.iter_mut().find(|m| m.id == id) {
@@ -107,7 +103,7 @@ impl InboxManager {
         }
     }
 
-/// Return the reply rate (0.0–1.0) across *all* messages.
+    /// Return the reply rate (0.0–1.0) across *all* messages.
     pub fn get_reply_rate(&self) -> f64 {
         let store = self.messages.read();
         if store.is_empty() {

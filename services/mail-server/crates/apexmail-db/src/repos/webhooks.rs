@@ -9,7 +9,7 @@ use crate::types::Webhook;
 pub struct WebhooksRepo;
 
 impl WebhooksRepo {
-/// Create a new webhook.
+    /// Create a new webhook.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -31,23 +31,21 @@ impl WebhooksRepo {
         .await
     }
 
-/// Find a webhook by ID.
+    /// Find a webhook by ID.
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Webhook>, sqlx::Error> {
-        sqlx::query_as::<_, Webhook>(
-            "SELECT * FROM webhooks WHERE id = $1 AND tenant_id = $2"
-        )
-        .bind(id)
-        .bind(tenant_id)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, Webhook>("SELECT * FROM webhooks WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await
     }
 
-/// List webhooks for a tenant with pagination.
-/// #225:Added limit/offset parameters
+    /// List webhooks for a tenant with pagination.
+    /// #225:Added limit/offset parameters
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -66,7 +64,7 @@ impl WebhooksRepo {
         .await
     }
 
-/// Update a webhook.
+    /// Update a webhook.
     pub async fn update(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -77,7 +75,7 @@ impl WebhooksRepo {
     ) -> Result<Option<Webhook>, sqlx::Error> {
         sqlx::query_as::<_, Webhook>(
             "UPDATE webhooks SET url = $1, events = $2, status = $3, updated_at = NOW() \
-             WHERE id = $4 AND tenant_id = $5 RETURNING *"
+             WHERE id = $4 AND tenant_id = $5 RETURNING *",
         )
         .bind(url)
         .bind(events)
@@ -88,7 +86,7 @@ impl WebhooksRepo {
         .await
     }
 
-/// Delete a webhook.
+    /// Delete a webhook.
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM webhooks WHERE id = $1 AND tenant_id = $2")
             .bind(id)
@@ -98,7 +96,7 @@ impl WebhooksRepo {
         Ok(result.rows_affected() > 0)
     }
 
-/// List all webhooks subscribed to a specific event type.
+    /// List all webhooks subscribed to a specific event type.
     pub async fn list_by_event_type(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -106,7 +104,7 @@ impl WebhooksRepo {
     ) -> Result<Vec<Webhook>, sqlx::Error> {
         sqlx::query_as::<_, Webhook>(
             "SELECT * FROM webhooks WHERE tenant_id = $1 AND status = 'active' \
-             AND events @> $2::jsonb ORDER BY created_at ASC"
+             AND events @> $2::jsonb ORDER BY created_at ASC",
         )
         .bind(tenant_id)
         .bind(serde_json::json!([event_type]))

@@ -6,9 +6,9 @@ use std::time::Duration;
 /// The result of a rate limit check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Decision {
-/// Request is allowed; includes remaining quota.
+    /// Request is allowed; includes remaining quota.
     Allowed { remaining: u64 },
-/// Request is denied; includes how long to wait.
+    /// Request is denied; includes how long to wait.
     Denied { retry_after: Duration },
 }
 
@@ -52,13 +52,13 @@ pub enum RateLimitError {
 /// Snapshot of rate limiter state for diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitStatus {
-/// Number of requests remaining in the current window.
+    /// Number of requests remaining in the current window.
     pub remaining: u64,
-/// Maximum allowed requests.
+    /// Maximum allowed requests.
     pub limit: u64,
-/// When the window resets (epoch millis).
+    /// When the window resets (epoch millis).
     pub reset_at_ms: i64,
-/// Whether the limiter is currently blocking requests.
+    /// Whether the limiter is currently blocking requests.
     pub is_throttled: bool,
 }
 

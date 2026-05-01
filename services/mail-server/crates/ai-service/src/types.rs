@@ -155,7 +155,13 @@ pub struct EvalMetrics {
 // ── Helpers ──────────────────────────────────────────────────────
 
 impl Prediction {
-    pub fn new(model_id: &str, input: serde_json::Value, output: serde_json::Value, confidence: f64, latency_ms: u64) -> Self {
+    pub fn new(
+        model_id: &str,
+        input: serde_json::Value,
+        output: serde_json::Value,
+        confidence: f64,
+        latency_ms: u64,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             model_id: model_id.to_string(),
@@ -203,7 +209,12 @@ impl TrainingJob {
 }
 
 impl ContentSuggestion {
-    pub fn new(original: &str, suggested: &str, improvement_type: ImprovementType, confidence: f64) -> Self {
+    pub fn new(
+        original: &str,
+        suggested: &str,
+        improvement_type: ImprovementType,
+        confidence: f64,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             original: original.to_string(),
@@ -222,7 +233,13 @@ mod tests {
 
     #[test]
     fn test_prediction_new() {
-        let p = Prediction::new("m1", serde_json::json!({"x":1}), serde_json::json!(0.8), 0.95, 12);
+        let p = Prediction::new(
+            "m1",
+            serde_json::json!({"x":1}),
+            serde_json::json!(0.8),
+            0.95,
+            12,
+        );
         assert_eq!(p.model_id, "m1");
         assert!((p.confidence - 0.95).abs() < f64::EPSILON);
         assert_eq!(p.latency_ms, 12);

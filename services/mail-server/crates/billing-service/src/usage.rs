@@ -44,7 +44,7 @@ pub async fn record_usage(
     let now = Utc::now();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
 
-// 1. Check idempotency key in Redis.
+    // 1. Check idempotency key in Redis.
     let dedup_key = usage_dedup_key(id);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
     let was_set: bool = redis::cmd("SET")
@@ -61,8 +61,7 @@ pub async fn record_usage(
         return Ok(false); // duplicate
     }
 
-
-// 2. Persist to DB and append an immutable audit record in the same transaction.
+    // 2. Persist to DB and append an immutable audit record in the same transaction.
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
     let audit_result = async {
@@ -89,7 +88,12 @@ pub async fn record_usage(
             "billing.metering_event_recorded",
             "metering_event",
             Some(&id.to_string()),
-            serde_json::Value::Object(build_metering_audit_metadata(event_type_str, quantity, now, &meta)),
+            serde_json::Value::Object(build_metering_audit_metadata(
+                event_type_str,
+                quantity,
+                now,
+                &meta,
+            )),
             now,
         )
         .await
@@ -104,10 +108,16 @@ pub async fn record_usage(
         return Err(error);
     }
 
-// 3. Bump real-time Redis counter.
+    // 3. Bump real-time Redis counter.
     let period_key = usage_counter_key(tenant_id, event_type, now);
-    let _: i64 = conn.incr(&period_key, quantity).await.map_err(UsageError::RedisCmd)?;
-    let _: () = conn.expire(&period_key, 40 * 86_400).await.map_err(UsageError::RedisCmd)?; // 40 days TTL
+    let _: i64 = conn
+        .incr(&period_key, quantity)
+        .await
+        .map_err(UsageError::RedisCmd)?;
+    let _: () = conn
+        .expire(&period_key, 40 * 86_400)
+        .await
+        .map_err(UsageError::RedisCmd)?; // 40 days TTL
 
     Ok(true)
 }
@@ -150,7 +160,7 @@ pub async fn get_usage(
         }
     }
 
-// Look up plan limits.
+    // Look up plan limits.
     let limits: Option<TenantPlanLimitRow> = sqlx::query_as(
         r#"
         SELECT t.plan as plan_name,
@@ -196,11 +206,11 @@ pub async fn check_quota(
     redis: &RedisPool,
     tenant_id: &str,
 ) -> Result<QuotaStatus, UsageError> {
-// Fast-path:read the real-time Redis counter for the current month.
+    // Fast-path:read the real-time Redis counter for the current month.
     let now = Utc::now();
     let counter_key = usage_counter_key(tenant_id, MeterEventType::EmailsSent, now);
 
-// that metering is degraded rather than completely broken.
+    // that metering is degraded rather than completely broken.
     let current = match redis.get().await {
         Ok(mut conn) => {
             let val: Option<i64> = conn.get(&counter_key).await.map_err(UsageError::RedisCmd)?;
@@ -212,8 +222,7 @@ pub async fn check_quota(
                 .date_naive()
                 .with_day(1)
                 .unwrap_or(Utc::now().date_naive());
-            let period_start = period_start.and_hms_opt(0, 0, 0)
-                .unwrap_or_default();
+            let period_start = period_start.and_hms_opt(0, 0, 0).unwrap_or_default();
             let period_start = DateTime::<Utc>::from_naive_utc_and_offset(period_start, Utc);
 
             let row: Option<(Option<i64>,)> = sqlx::query_as(
@@ -252,7 +261,7 @@ pub async fn check_quota(
     let limit = resolve_plan_limits(limits).email_limit;
 
     if limit < 0 {
-// Unlimited plan.
+        // Unlimited plan.
         return Ok(QuotaStatus {
             allowed: true,
             current,
@@ -286,7 +295,7 @@ pub async fn reset_monthly_counters(
     let pattern = format!("meter:rt:{tenant_id}:*:{year}-{month:02}");
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
-// Use SCAN instead of KEYS for production safety — KEYS blocks Redis.
+    // Use SCAN instead of KEYS for production safety — KEYS blocks Redis.
     let mut cursor: u64 = 0;
     let mut all_keys: Vec<String> = Vec::new();
     loop {
@@ -477,7 +486,7 @@ pub async fn record_with_quota_check(
     let now = Utc::now();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
 
-// 1. Dedup check (same as record_usage).
+    // 1. Dedup check (same as record_usage).
     let dedup_key = usage_dedup_key(id);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
     let was_set: bool = redis::cmd("SET")
@@ -491,7 +500,7 @@ pub async fn record_with_quota_check(
         .map_err(UsageError::RedisCmd)?;
 
     if !was_set {
-// Already processed — read current counter for informational purposes.
+        // Already processed — read current counter for informational purposes.
         let counter_key = usage_counter_key(tenant_id, event_type, now);
         let current: i64 = conn.get(&counter_key).await.unwrap_or(0);
         return Ok(QuotaRecordResult {
@@ -501,7 +510,7 @@ pub async fn record_with_quota_check(
         });
     }
 
-// 2. Fetch plan limit from Postgres.
+    // 2. Fetch plan limit from Postgres.
     let limit_row: Option<TenantPlanLimitRow> = sqlx::query_as(
         r#"
         SELECT t.plan as plan_name,
@@ -519,7 +528,7 @@ pub async fn record_with_quota_check(
 
     let limit = resolve_plan_limits(limit_row).email_limit;
 
-// 3. Atomic check-and-increment via Lua.
+    // 3. Atomic check-and-increment via Lua.
     let counter_key = usage_counter_key(tenant_id, event_type, now);
     let ttl_seconds: i64 = 40 * 86_400; // 40 days
 
@@ -533,8 +542,8 @@ pub async fn record_with_quota_check(
         .map_err(UsageError::RedisCmd)?;
 
     if new_val < 0 {
-// Quota exceeded — roll back the dedup key so a retry after a plan
-// upgrade can succeed.
+        // Quota exceeded — roll back the dedup key so a retry after a plan
+        // upgrade can succeed.
         let _: () = conn.del(&dedup_key).await.unwrap_or(());
         return Ok(QuotaRecordResult {
             allowed: false,
@@ -543,7 +552,7 @@ pub async fn record_with_quota_check(
         });
     }
 
-// 4. Persist to DB and append an immutable audit record in the same transaction.
+    // 4. Persist to DB and append an immutable audit record in the same transaction.
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
     if let Err(error) = async {
@@ -570,7 +579,12 @@ pub async fn record_with_quota_check(
             "billing.metering_event_recorded",
             "metering_event",
             Some(&id.to_string()),
-            serde_json::Value::Object(build_metering_audit_metadata(event_type_str, quantity, now, &meta)),
+            serde_json::Value::Object(build_metering_audit_metadata(
+                event_type_str,
+                quantity,
+                now,
+                &meta,
+            )),
             now,
         )
         .await
@@ -578,16 +592,10 @@ pub async fn record_with_quota_check(
 
         tx.commit().await.map_err(UsageError::Db)
     }
-    .await {
-        if let Err(rollback_error) = rollback_quota_reservation(
-            redis,
-            tenant_id,
-            event_type,
-            quantity,
-            id,
-            now,
-        )
-        .await
+    .await
+    {
+        if let Err(rollback_error) =
+            rollback_quota_reservation(redis, tenant_id, event_type, quantity, id, now).await
         {
             tracing::error!(
                 error = %rollback_error,
@@ -706,11 +714,11 @@ pub struct QuotaStatus {
 /// Result of an atomic quota-check + record operation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct QuotaRecordResult {
-/// Whether the event was allowed (quota not exceeded).
+    /// Whether the event was allowed (quota not exceeded).
     pub allowed: bool,
-/// Current counter value after the operation.
+    /// Current counter value after the operation.
     pub current: i64,
-/// Whether this was a duplicate event (already idempotently processed).
+    /// Whether this was a duplicate event (already idempotently processed).
     pub duplicate: bool,
 }
 
@@ -898,7 +906,10 @@ mod tests {
     fn normalize_usage_metadata_wraps_scalar_payloads() {
         let normalized = normalize_usage_metadata(Some(serde_json::json!("email-123")));
 
-        assert_eq!(normalized.get("value"), Some(&serde_json::json!("email-123")));
+        assert_eq!(
+            normalized.get("value"),
+            Some(&serde_json::json!("email-123"))
+        );
     }
 
     #[test]
@@ -908,16 +919,18 @@ mod tests {
             .with_timezone(&Utc);
         let metadata = serde_json::json!({ "source": "api" });
 
-        let audit_metadata = build_metering_audit_metadata(
-            "emails_sent",
-            42,
-            recorded_at,
-            &metadata,
-        );
+        let audit_metadata =
+            build_metering_audit_metadata("emails_sent", 42, recorded_at, &metadata);
 
-        assert_eq!(audit_metadata.get("eventType"), Some(&serde_json::json!("emails_sent")));
+        assert_eq!(
+            audit_metadata.get("eventType"),
+            Some(&serde_json::json!("emails_sent"))
+        );
         assert_eq!(audit_metadata.get("quantity"), Some(&serde_json::json!(42)));
-        assert_eq!(audit_metadata.get("recordedAt"), Some(&serde_json::json!("2026-04-15T12:30:00+00:00")));
+        assert_eq!(
+            audit_metadata.get("recordedAt"),
+            Some(&serde_json::json!("2026-04-15T12:30:00+00:00"))
+        );
         assert_eq!(audit_metadata.get("metadata"), Some(&metadata));
     }
 
@@ -936,8 +949,14 @@ mod tests {
         let enriched = attach_subscription_context(serde_json::Map::new(), Some(&context));
 
         assert_eq!(enriched["subscriptionId"], serde_json::json!("sub_123"));
-        assert_eq!(enriched["subscriptionPeriodStart"], serde_json::json!("2026-04-01T00:00:00+00:00"));
-        assert_eq!(enriched["subscriptionPeriodEnd"], serde_json::json!("2026-05-01T00:00:00+00:00"));
+        assert_eq!(
+            enriched["subscriptionPeriodStart"],
+            serde_json::json!("2026-04-01T00:00:00+00:00")
+        );
+        assert_eq!(
+            enriched["subscriptionPeriodEnd"],
+            serde_json::json!("2026-05-01T00:00:00+00:00")
+        );
     }
 
     #[test]
@@ -956,6 +975,9 @@ mod tests {
 
         let enriched = attach_subscription_context(metadata, Some(&context));
 
-        assert_eq!(enriched["subscriptionId"], serde_json::json!("sub_existing"));
+        assert_eq!(
+            enriched["subscriptionId"],
+            serde_json::json!("sub_existing")
+        );
     }
 }

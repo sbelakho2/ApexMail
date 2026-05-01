@@ -42,7 +42,11 @@ impl std::fmt::Display for RenderErrorCode {
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
     #[error("Transpilation failed: {message}")]
-    Transpile { message: String, line: Option<u32>, column: Option<u32> },
+    Transpile {
+        message: String,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
 
     #[error("Execution failed: {message}")]
     Execution { message: String },
@@ -109,20 +113,22 @@ pub struct Template {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderOptions {
-/// Template variables / props
+    /// Template variables / props
     #[serde(default)]
     pub props: serde_json::Value,
-/// Whether to generate plaintext fallback
+    /// Whether to generate plaintext fallback
     #[serde(default = "default_true")]
     pub generate_plaintext: bool,
-/// Whether to minify HTML output
+    /// Whether to minify HTML output
     #[serde(default)]
     pub minify: bool,
-/// Subject line (may contain {{ variable }} placeholders)
+    /// Subject line (may contain {{ variable }} placeholders)
     pub subject: Option<String>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderResult {
@@ -237,24 +243,81 @@ mod tests {
 
     #[test]
     fn test_error_code_display() {
-        assert_eq!(RenderErrorCode::TranspileError.to_string(), "TRANSPILE_ERROR");
-        assert_eq!(RenderErrorCode::SandboxTimeout.to_string(), "SANDBOX_TIMEOUT");
-        assert_eq!(RenderErrorCode::ForbiddenModule.to_string(), "FORBIDDEN_MODULE");
+        assert_eq!(
+            RenderErrorCode::TranspileError.to_string(),
+            "TRANSPILE_ERROR"
+        );
+        assert_eq!(
+            RenderErrorCode::SandboxTimeout.to_string(),
+            "SANDBOX_TIMEOUT"
+        );
+        assert_eq!(
+            RenderErrorCode::ForbiddenModule.to_string(),
+            "FORBIDDEN_MODULE"
+        );
     }
 
     #[test]
     fn test_all_error_variants() {
         let cases: Vec<(TemplateError, RenderErrorCode)> = vec![
-            (TemplateError::Transpile { message: "x".into(), line: None, column: None }, RenderErrorCode::TranspileError),
-            (TemplateError::Execution { message: "x".into() }, RenderErrorCode::ExecutionError),
-            (TemplateError::Render { message: "x".into() }, RenderErrorCode::RenderError),
-            (TemplateError::NoDefaultExport, RenderErrorCode::NoDefaultExport),
-            (TemplateError::NotFound { id: "x".into() }, RenderErrorCode::TemplateNotFound),
-            (TemplateError::Timeout { ms: 5000 }, RenderErrorCode::SandboxTimeout),
-            (TemplateError::SourceTooLarge { size: 1000, max: 500 }, RenderErrorCode::SourceTooLarge),
-            (TemplateError::OutputTooLarge { size: 1000, max: 500 }, RenderErrorCode::OutputTooLarge),
-            (TemplateError::InvalidSyntax { message: "x".into() }, RenderErrorCode::InvalidSyntax),
-            (TemplateError::ForbiddenModule { module: "fs".into() }, RenderErrorCode::ForbiddenModule),
+            (
+                TemplateError::Transpile {
+                    message: "x".into(),
+                    line: None,
+                    column: None,
+                },
+                RenderErrorCode::TranspileError,
+            ),
+            (
+                TemplateError::Execution {
+                    message: "x".into(),
+                },
+                RenderErrorCode::ExecutionError,
+            ),
+            (
+                TemplateError::Render {
+                    message: "x".into(),
+                },
+                RenderErrorCode::RenderError,
+            ),
+            (
+                TemplateError::NoDefaultExport,
+                RenderErrorCode::NoDefaultExport,
+            ),
+            (
+                TemplateError::NotFound { id: "x".into() },
+                RenderErrorCode::TemplateNotFound,
+            ),
+            (
+                TemplateError::Timeout { ms: 5000 },
+                RenderErrorCode::SandboxTimeout,
+            ),
+            (
+                TemplateError::SourceTooLarge {
+                    size: 1000,
+                    max: 500,
+                },
+                RenderErrorCode::SourceTooLarge,
+            ),
+            (
+                TemplateError::OutputTooLarge {
+                    size: 1000,
+                    max: 500,
+                },
+                RenderErrorCode::OutputTooLarge,
+            ),
+            (
+                TemplateError::InvalidSyntax {
+                    message: "x".into(),
+                },
+                RenderErrorCode::InvalidSyntax,
+            ),
+            (
+                TemplateError::ForbiddenModule {
+                    module: "fs".into(),
+                },
+                RenderErrorCode::ForbiddenModule,
+            ),
         ];
         for (err, expected_code) in cases {
             assert_eq!(err.code(), expected_code);

@@ -20,11 +20,17 @@ mod apexmail_lib_tests {
     #[test]
     fn test_lib_id_generation() {
         let id = apexmail_lib::id::generate_id("msg", 16);
-        assert!(id.starts_with("msg_"), "generated id should start with 'msg_'");
+        assert!(
+            id.starts_with("msg_"),
+            "generated id should start with 'msg_'"
+        );
         assert_eq!(id.len(), 4 + 16, "id should be prefix + 16 chars");
 
         let api_key = apexmail_lib::generate_api_key(false);
-        assert!(api_key.starts_with("am_live_"), "live API key should start with 'am_live_'");
+        assert!(
+            api_key.starts_with("am_live_"),
+            "live API key should start with 'am_live_'"
+        );
     }
 
     #[test]
@@ -72,7 +78,7 @@ mod apexmail_db_tests {
         assert!(json.contains("acme"), "JSON should contain the slug");
         assert!(json.contains("free"), "JSON should contain the plan");
 
-// Round-trip
+        // Round-trip
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["name"], "Acme Corp");
     }
@@ -93,9 +99,12 @@ mod apexmail_db_tests {
 
     #[tokio::test]
     async fn test_db_pool_lazy_creation() {
-// create_lazy_pool should succeed without an actual database running
+        // create_lazy_pool should succeed without an actual database running
         let pool = apexmail_db::pool::create_lazy_pool("postgres://localhost/smoke_test");
-        assert!(pool.is_ok(), "create_lazy_pool should return Ok for any URL");
+        assert!(
+            pool.is_ok(),
+            "create_lazy_pool should return Ok for any URL"
+        );
     }
 }
 
@@ -107,7 +116,7 @@ mod apexmail_db_tests {
 mod api_server_tests {
     #[test]
     fn test_api_error_variants_exist() {
-// Verify error enum variants can be constructed
+        // Verify error enum variants can be constructed
         let bad_req = api_server::error::ApiError::BadRequest("test".into());
         assert_eq!(bad_req.to_string(), "test");
 
@@ -151,8 +160,15 @@ mod billing_tests {
     #[test]
     fn test_billing_plans() {
         let plans = billing_service::plans::default_plans();
-        assert!(!plans.is_empty(), "default_plans should return at least one plan");
-        assert!(plans.len() >= 5, "expected at least 5 default plans, got {}", plans.len());
+        assert!(
+            !plans.is_empty(),
+            "default_plans should return at least one plan"
+        );
+        assert!(
+            plans.len() >= 5,
+            "expected at least 5 default plans, got {}",
+            plans.len()
+        );
 
         let free = plans.iter().find(|p| p.name == "free");
         assert!(free.is_some(), "free plan should exist");
@@ -171,7 +187,7 @@ mod billing_tests {
         assert!(!payg.email_tiers.is_empty(), "PAYG should have email tiers");
         assert_eq!(payg.free_api_calls_per_month, 100_000);
 
-// Verify PAYG calculation
+        // Verify PAYG calculation
         let (email_cost, api_cost, total) = payg
             .calculate(5_000, 50_000)
             .expect("bounded smoke input should not overflow PAYG pricing");
@@ -182,17 +198,18 @@ mod billing_tests {
 
     #[test]
     fn test_billing_vat_calculation() {
-// Estonian customer:full 22% VAT
+        // Estonian customer:full 22% VAT
         let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "EE", None);
         assert_eq!(rate, 22);
         assert_eq!(amount, 2_200);
 
-// EU B2B with VAT number:reverse charge = 0%
-        let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "DE", Some("DE123456789"));
+        // EU B2B with VAT number:reverse charge = 0%
+        let (rate, amount) =
+            billing_service::invoices::calculate_vat(10_000, "DE", Some("DE123456789"));
         assert_eq!(rate, 0);
         assert_eq!(amount, 0);
 
-// Non-EU:0%
+        // Non-EU:0%
         let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "US", None);
         assert_eq!(rate, 0);
         assert_eq!(amount, 0);
@@ -211,7 +228,7 @@ mod devex_tests {
         let sdks = mgr.list_sdks();
         assert_eq!(sdks.len(), 5, "should have 5 SDK languages");
 
-// Verify all languages are distinct
+        // Verify all languages are distinct
         let mut languages: Vec<String> = sdks.iter().map(|s| format!("{:?}", s.language)).collect();
         languages.sort();
         languages.dedup();
@@ -222,7 +239,8 @@ mod devex_tests {
     fn test_devex_webhook_sign() {
         let tester = devex_service::webhook_tester::WebhookTester::new("whsec_test123".into())
             .expect("valid webhook secret");
-        let payload = devex_service::webhook_tester::WebhookTester::build_test_payload("email.delivered");
+        let payload =
+            devex_service::webhook_tester::WebhookTester::build_test_payload("email.delivered");
         let body = serde_json::to_vec(&payload).unwrap();
 
         let sig = tester.sign_payload(&body);
@@ -236,7 +254,7 @@ mod devex_tests {
         let versions = registry.list_versions();
         assert!(!versions.is_empty(), "should have at least one API version");
 
-// The latest version should be 2024-01
+        // The latest version should be 2024-01
         let latest = registry.get_version("2024-01");
         assert!(latest.is_ok());
         assert_eq!(latest.unwrap().version, "2024-01");
@@ -251,9 +269,9 @@ mod devex_tests {
 mod observability_tests {
     #[test]
     fn test_obs_metrics_collector() {
-        let collector = observability_service::metrics_collector::MetricsCollector::new(
-            vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
-        );
+        let collector = observability_service::metrics_collector::MetricsCollector::new(vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        ]);
         collector.record_counter("requests_total", 1.0, "Total requests");
         collector.record_counter("requests_total", 4.0, "Total requests");
         collector.record_gauge("cpu_usage", 0.75, "CPU usage");
@@ -282,7 +300,7 @@ mod observability_tests {
             cooldown_secs: 300,
         });
 
-// Evaluate with a metric that exceeds the threshold
+        // Evaluate with a metric that exceeds the threshold
         let summaries = vec![MetricSummary {
             name: "error_rate".into(),
             metric_type: MetricType::Gauge,
@@ -302,7 +320,10 @@ mod observability_tests {
         let result = monitor.check_compliance("api-availability", 100_000, 50);
         assert!(result.is_some());
         let result = result.unwrap();
-        assert!(result.compliant, "99.95% success should be compliant with 99.9% target");
+        assert!(
+            result.compliant,
+            "99.95% success should be compliant with 99.9% target"
+        );
         assert!(result.current_pct > 99.9);
         assert!(result.error_budget_remaining > 0.0);
     }
@@ -344,8 +365,16 @@ mod ops_tests {
             volume: 50_000,
         };
         let score = ops_service::trust::TrustScorer::compute_score(&metrics);
-        assert!(score.score >= 0.0 && score.score <= 100.0, "trust score should be 0-100, got {}", score.score);
-        assert!(score.score > 50.0, "good sender should score > 50, got {}", score.score);
+        assert!(
+            score.score >= 0.0 && score.score <= 100.0,
+            "trust score should be 0-100, got {}",
+            score.score
+        );
+        assert!(
+            score.score > 50.0,
+            "good sender should score > 50, got {}",
+            score.score
+        );
     }
 
     #[tokio::test]
@@ -355,11 +384,17 @@ mod ops_tests {
         assert_eq!(schedule.ip, "192.168.1.1");
         assert_eq!(schedule.target_volume, 100_000);
         assert_eq!(schedule.day, 0);
-        assert!(schedule.current_volume < schedule.target_volume, "day-0 volume should be less than target");
+        assert!(
+            schedule.current_volume < schedule.target_volume,
+            "day-0 volume should be less than target"
+        );
 
         let daily = mgr.get_daily_volume("192.168.1.1", 7);
         assert!(daily.is_some());
-        assert!(daily.unwrap() < 100_000, "mid-warmup volume should be less than target");
+        assert!(
+            daily.unwrap() < 100_000,
+            "mid-warmup volume should be less than target"
+        );
 
         let schedules = mgr.list_schedules();
         assert_eq!(schedules.len(), 1);
@@ -392,7 +427,8 @@ mod sales_tests {
 
     #[test]
     fn test_sales_enrichment() {
-        let domain = sales_autopilot::enrichment::EnrichmentService::extract_domain("user@example.com");
+        let domain =
+            sales_autopilot::enrichment::EnrichmentService::extract_domain("user@example.com");
         assert_eq!(domain, Some("example.com".into()));
 
         let no_domain = sales_autopilot::enrichment::EnrichmentService::extract_domain("invalid");
@@ -416,7 +452,10 @@ mod sales_tests {
         assert!(campaign.is_ok());
         let campaign = campaign.unwrap();
         assert_eq!(campaign.name, "Q1 Outreach");
-        assert_eq!(campaign.status, sales_autopilot::types::CampaignStatus::Draft);
+        assert_eq!(
+            campaign.status,
+            sales_autopilot::types::CampaignStatus::Draft
+        );
 
         let campaigns = mgr.list_campaigns("tenant-a");
         assert_eq!(campaigns.len(), 1);
@@ -433,7 +472,11 @@ mod ai_tests {
     fn test_ai_analytics_predict_open_rate() {
         let predictor = ai_service::analytics::AnalyticsPredictor::new();
         let rate = predictor.predict_open_rate("Check out our new feature", 10, 2);
-        assert!(rate >= 0.0 && rate <= 1.0, "open rate should be in [0, 1], got {}", rate);
+        assert!(
+            rate >= 0.0 && rate <= 1.0,
+            "open rate should be in [0, 1], got {}",
+            rate
+        );
         assert!(rate > 0.0, "open rate should be > 0");
     }
 
@@ -445,7 +488,7 @@ mod ai_tests {
         assert!(!arm1.is_empty());
         assert!(!arm2.is_empty());
 
-// Record some rewards
+        // Record some rewards
         bandit.record_reward(&arm1, 1.0).unwrap();
         bandit.record_reward(&arm1, 1.0).unwrap();
         bandit.record_reward(&arm2, 0.0).unwrap();
@@ -461,9 +504,13 @@ mod ai_tests {
     fn test_ai_content_scoring() {
         let optimizer = ai_service::content::ContentOptimizer::new();
         let score = optimizer.score_subject_line("Discover our amazing new product launch today");
-        assert!(score > 0 && score <= 100, "subject line score should be 1-100, got {}", score);
+        assert!(
+            score > 0 && score <= 100,
+            "subject line score should be 1-100, got {}",
+            score
+        );
 
-// Very short should score lower
+        // Very short should score lower
         let short_score = optimizer.score_subject_line("Hi");
         assert!(short_score < score, "short subject should score lower");
     }
@@ -526,9 +573,9 @@ mod compliance_tests {
 
     #[test]
     fn test_compliance_modules_compile() {
-// Verify we can reference modules from the compliance crate
+        // Verify we can reference modules from the compliance crate
         let _ = std::any::type_name::<compliance::types::RiskLevel>();
-// The crate compiles and exports these modules
+        // The crate compiles and exports these modules
         assert!(true, "compliance crate compiles successfully");
     }
 }
@@ -541,16 +588,16 @@ mod compliance_tests {
 mod enterprise_tests {
     #[test]
     fn test_enterprise_types() {
-// Verify SSO types exist and can be referenced
+        // Verify SSO types exist and can be referenced
         let _ = std::any::type_name::<enterprise::types::SSOConfiguration>();
         let _ = std::any::type_name::<enterprise::types::SSOSession>();
     }
 
     #[test]
     fn test_enterprise_modules_compile() {
-// Verify all enterprise modules compile
+        // Verify all enterprise modules compile
         let _ = std::any::type_name::<fn()>();
-// We can access the modules
+        // We can access the modules
         let modules = [
             "enterprise::sso",
             "enterprise::compliance",
@@ -558,7 +605,10 @@ mod enterprise_tests {
             "enterprise::sub_accounts",
             "enterprise::whitelabel",
         ];
-        assert!(modules.len() >= 5, "enterprise should have at least 5 modules");
+        assert!(
+            modules.len() >= 5,
+            "enterprise should have at least 5 modules"
+        );
     }
 }
 
@@ -608,9 +658,9 @@ mod isolation_tests {
 mod mta_tests {
     #[test]
     fn test_mta_config_type() {
-// Verify MtaConfig exists and can be referenced
+        // Verify MtaConfig exists and can be referenced
         let _ = std::any::type_name::<mta::MtaConfig>();
-// The crate compiles with all auth modules
+        // The crate compiles with all auth modules
         assert!(true, "MTA crate compiles successfully");
     }
 }
@@ -624,7 +674,7 @@ mod edge_cases_tests {
     #[test]
     fn test_edge_cases_config_type() {
         let _ = std::any::type_name::<edge_cases::config::EdgeCasesConfig>();
-// Verify the services module is accessible
+        // Verify the services module is accessible
         assert!(true, "edge-cases crate compiles successfully");
     }
 }
@@ -637,7 +687,7 @@ mod edge_cases_tests {
 mod worker_processors_tests {
     #[test]
     fn test_worker_processors_types() {
-// Verify key re-exported types exist
+        // Verify key re-exported types exist
         let _ = std::any::type_name::<worker_processors::ProcessorConfig>();
         let _ = std::any::type_name::<worker_processors::ProcessorError>();
         let _ = std::any::type_name::<worker_processors::ReplyClassification>();
@@ -672,7 +722,7 @@ mod ai_embeddings_tests {
         let _ = std::any::type_name::<ai_embeddings::types::SearchResult>();
         let _ = std::any::type_name::<ai_embeddings::types::EmbeddingError>();
 
-// Verify error variants
+        // Verify error variants
         let err = ai_embeddings::types::EmbeddingError::EmptyText;
         assert_eq!(format!("{}", err), "Empty text input");
     }
@@ -686,7 +736,7 @@ mod ai_embeddings_tests {
 mod pattern_matcher_tests {
     #[test]
     fn test_pattern_matcher_compile_and_match() {
-// Verify the PatternMatcher and Rule types exist
+        // Verify the PatternMatcher and Rule types exist
         let _ = std::any::type_name::<pattern_matcher::PatternMatcher>();
         let _ = std::any::type_name::<pattern_matcher::Rule>();
         let _ = std::any::type_name::<pattern_matcher::RuleCategory>();

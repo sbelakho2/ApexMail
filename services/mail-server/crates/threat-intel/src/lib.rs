@@ -17,35 +17,37 @@
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 
-pub mod config;
-pub mod ip_blocklist;
-pub mod domain_blocklist;
-pub mod reputation;
-pub mod engine;
 pub mod background_task;
+pub mod config;
+pub mod domain_blocklist;
+pub mod engine;
+pub mod ip_blocklist;
+pub mod reputation;
 pub mod stix_taxii;
 
 pub use engine::ThreatIntelEngine;
-pub use ip_blocklist::{IpBlocklist, Ipv6Blocklist, UnifiedIpBlocklist, IpBlockEntry, ThreatCategory};
+pub use ip_blocklist::{
+    IpBlockEntry, IpBlocklist, Ipv6Blocklist, ThreatCategory, UnifiedIpBlocklist,
+};
 
 use thiserror::Error;
 
 /// Threat intel errors
 #[derive(Debug, Error)]
 pub enum ThreatIntelError {
-/// Feed parsing error
+    /// Feed parsing error
     #[error("Feed parse error: {0}")]
     ParseError(String),
 
-/// Network error during feed fetch
+    /// Network error during feed fetch
     #[error("Fetch error: {0}")]
     FetchError(String),
 
-/// Invalid IP address
+    /// Invalid IP address
     #[error("Invalid IP: {0}")]
     InvalidIp(String),
 
-/// Invalid CIDR notation
+    /// Invalid CIDR notation
     #[error("Invalid CIDR: {0}")]
     InvalidCidr(String),
 }

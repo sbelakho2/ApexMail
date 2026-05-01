@@ -30,7 +30,7 @@ pub struct SesMonitor {
     client: SesClient,
     db: PgPool,
     region: String,
-/// Cached account info (updated every 5 minutes)
+    /// Cached account info (updated every 5 minutes)
     account_cache: Arc<RwLock<Option<SesAccountInfo>>>,
 }
 
@@ -44,23 +44,23 @@ pub struct SesAccountInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendQuotaInfo {
-/// Maximum emails per 24-hour period
+    /// Maximum emails per 24-hour period
     pub max_24_hour_send: f64,
-/// Emails sent in last 24 hours
+    /// Emails sent in last 24 hours
     pub sent_last_24_hours: f64,
-/// Maximum emails per second
+    /// Maximum emails per second
     pub max_send_rate: f64,
-/// Percentage of quota used
+    /// Percentage of quota used
     pub utilization_percent: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReputationInfo {
-/// Account sending enabled
+    /// Account sending enabled
     pub sending_enabled: bool,
-/// Enforcement status
+    /// Enforcement status
     pub enforcement_status: String,
-/// Production access granted
+    /// Production access granted
     pub production_access: bool,
 }
 
@@ -99,7 +99,7 @@ pub struct TenantDeliverabilityMetrics {
 }
 
 impl SesMonitor {
-/// Create a new SES monitor from AWS SDK config.
+    /// Create a new SES monitor from AWS SDK config.
     pub async fn new(db: PgPool, region: &str) -> Result<Self, String> {
         let aws_region = aws_sdk_sesv2::config::Region::new(region.to_string());
         let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -116,9 +116,9 @@ impl SesMonitor {
         })
     }
 
-/// Start background monitoring tasks.
+    /// Start background monitoring tasks.
     pub fn start(self: Arc<Self>) {
-// Quota sync every 5 minutes
+        // Quota sync every 5 minutes
         let monitor = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
@@ -130,7 +130,7 @@ impl SesMonitor {
             }
         });
 
-// Domain stats every hour
+        // Domain stats every hour
         let monitor = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -142,7 +142,7 @@ impl SesMonitor {
             }
         });
 
-// Tenant metrics every 15 minutes
+        // Tenant metrics every 15 minutes
         let monitor = self;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
@@ -155,7 +155,7 @@ impl SesMonitor {
         });
     }
 
-/// Fetch and cache current SES account quota and reputation.
+    /// Fetch and cache current SES account quota and reputation.
     pub async fn sync_quota(&self) -> Result<SesAccountInfo, String> {
         debug!("Syncing SES account quota");
 
@@ -168,7 +168,13 @@ impl SesMonitor {
 
         let quota = resp.send_quota();
         let (max_24h, sent_24h, max_rate) = quota
-            .map(|q| (q.max24_hour_send(), q.sent_last24_hours(), q.max_send_rate()))
+            .map(|q| {
+                (
+                    q.max24_hour_send(),
+                    q.sent_last24_hours(),
+                    q.max_send_rate(),
+                )
+            })
             .unwrap_or((0.0, 0.0, 0.0));
 
         let utilization = if max_24h > 0.0 {
@@ -200,13 +206,13 @@ impl SesMonitor {
             updated_at: Utc::now(),
         };
 
-// Update cache
+        // Update cache
         {
             let mut cache = self.account_cache.write().await;
             *cache = Some(info.clone());
         }
 
-// Store in database for historical tracking
+        // Store in database for historical tracking
         if let Err(e) = sqlx::query(
             "INSERT INTO ses_account_metrics 
              (id, region, max_24h_send, sent_24h, max_send_rate, utilization_pct, 
@@ -227,7 +233,7 @@ impl SesMonitor {
             warn!(region = %self.region, error = %e, "Failed to store SES account metrics");
         }
 
-// Alert if quota utilization is high
+        // Alert if quota utilization is high
         if utilization > 80.0 {
             warn!(
                 utilization = utilization,
@@ -235,10 +241,14 @@ impl SesMonitor {
                 sent_24h = sent_24h,
                 "SES quota utilization above 80%"
             );
-            self.trigger_alert("quota_utilization", &format!(
-                "SES quota at {:.1}% ({:.0}/{:.0} emails)",
-                utilization, sent_24h, max_24h
-            )).await;
+            self.trigger_alert(
+                "quota_utilization",
+                &format!(
+                    "SES quota at {:.1}% ({:.0}/{:.0} emails)",
+                    utilization, sent_24h, max_24h
+                ),
+            )
+            .await;
         }
 
         info!(
@@ -250,13 +260,13 @@ impl SesMonitor {
         Ok(info)
     }
 
-/// Fetch domain deliverability statistics from SES VDM.
+    /// Fetch domain deliverability statistics from SES VDM.
     pub async fn sync_domain_stats(&self) -> Result<Vec<DomainDeliverabilityStats>, String> {
         debug!("Syncing domain deliverability stats from SES VDM");
 
-// Get all verified domains from our database
+        // Get all verified domains from our database
         let domains: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM domains WHERE ses_verified = true AND status = 'verified'"
+            "SELECT name FROM domains WHERE ses_verified = true AND status = 'verified'",
         )
         .fetch_all(&self.db)
         .await
@@ -269,7 +279,7 @@ impl SesMonitor {
         for (domain,) in domains {
             match self.fetch_domain_stats(&domain, start_date, end_date).await {
                 Ok(domain_stats) => {
-// Store stats
+                    // Store stats
                     if let Err(e) = sqlx::query(
                         "INSERT INTO ses_domain_stats 
                          (id, domain, start_date, end_date, inbox_count, spam_count,
@@ -305,7 +315,7 @@ impl SesMonitor {
         Ok(stats)
     }
 
-/// Fetch stats for a single domain from SES.
+    /// Fetch stats for a single domain from SES.
     async fn fetch_domain_stats(
         &self,
         domain: &str,
@@ -313,10 +323,12 @@ impl SesMonitor {
         end_date: chrono::NaiveDate,
     ) -> Result<DomainDeliverabilityStats, String> {
         let start = aws_sdk_sesv2::primitives::DateTime::from_secs(
-            chrono::NaiveDateTime::from(start_date).and_utc().timestamp()
+            chrono::NaiveDateTime::from(start_date)
+                .and_utc()
+                .timestamp(),
         );
         let end = aws_sdk_sesv2::primitives::DateTime::from_secs(
-            chrono::NaiveDateTime::from(end_date).and_utc().timestamp()
+            chrono::NaiveDateTime::from(end_date).and_utc().timestamp(),
         );
 
         let resp = self
@@ -341,9 +353,7 @@ impl SesMonitor {
             })
             .unwrap_or_default();
 
-        let read_rate = overall
-            .as_ref()
-            .and_then(|o| o.read_rate_percent());
+        let read_rate = overall.as_ref().and_then(|o| o.read_rate_percent());
 
         Ok(DomainDeliverabilityStats {
             domain: domain.to_string(),
@@ -355,14 +365,14 @@ impl SesMonitor {
         })
     }
 
-/// Compute per-tenant deliverability metrics from local event data.
+    /// Compute per-tenant deliverability metrics from local event data.
     pub async fn compute_tenant_metrics(&self) -> Result<Vec<TenantDeliverabilityMetrics>, String> {
         debug!("Computing tenant deliverability metrics");
 
         let period_end = Utc::now();
         let period_start = period_end - Duration::hours(24);
 
-// Aggregate events per tenant
+        // Aggregate events per tenant
         let rows: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(
             "SELECT 
                 tenant_id::text,
@@ -413,7 +423,7 @@ impl SesMonitor {
                 delivery_rate,
             };
 
-// Store in database
+            // Store in database
             if let Err(e) = sqlx::query(
                 "INSERT INTO tenant_deliverability_metrics
                  (id, tenant_id, period_start, period_end, emails_sent, emails_delivered,
@@ -436,17 +446,22 @@ impl SesMonitor {
                 warn!(tenant_id = %tenant_id, error = %e, "Failed to store tenant metrics");
             }
 
-// Alert on high bounce/complaint rates
+            // Alert on high bounce/complaint rates
             if bounce_rate > 5.0 {
                 warn!(
                     tenant_id = %tenant_id,
                     bounce_rate = bounce_rate,
                     "Tenant bounce rate above 5%"
                 );
-                self.trigger_tenant_alert(&tenant_id, "bounce_rate", &format!(
-                    "Bounce rate at {:.2}% ({} bounces / {} sent)",
-                    bounce_rate, bounced, sent
-                )).await;
+                self.trigger_tenant_alert(
+                    &tenant_id,
+                    "bounce_rate",
+                    &format!(
+                        "Bounce rate at {:.2}% ({} bounces / {} sent)",
+                        bounce_rate, bounced, sent
+                    ),
+                )
+                .await;
             }
 
             if complaint_rate > 0.1 {
@@ -455,10 +470,15 @@ impl SesMonitor {
                     complaint_rate = complaint_rate,
                     "Tenant complaint rate above 0.1%"
                 );
-                self.trigger_tenant_alert(&tenant_id, "complaint_rate", &format!(
-                    "Complaint rate at {:.3}% ({} complaints / {} delivered)",
-                    complaint_rate, complained, delivered
-                )).await;
+                self.trigger_tenant_alert(
+                    &tenant_id,
+                    "complaint_rate",
+                    &format!(
+                        "Complaint rate at {:.3}% ({} complaints / {} delivered)",
+                        complaint_rate, complained, delivered
+                    ),
+                )
+                .await;
             }
 
             metrics.push(m);
@@ -468,11 +488,11 @@ impl SesMonitor {
         Ok(metrics)
     }
 
-/// Get cached account info or fetch fresh.
+    /// Get cached account info or fetch fresh.
     pub async fn get_account_info(&self) -> Result<SesAccountInfo, String> {
         let cache = self.account_cache.read().await;
         if let Some(ref info) = *cache {
-// Return cache if < 5 minutes old
+            // Return cache if < 5 minutes old
             if Utc::now() - info.updated_at < Duration::minutes(5) {
                 return Ok(info.clone());
             }
@@ -481,7 +501,7 @@ impl SesMonitor {
         self.sync_quota().await
     }
 
-/// Trigger a system-level alert.
+    /// Trigger a system-level alert.
     async fn trigger_alert(&self, alert_type: &str, message: &str) {
         if let Err(e) = sqlx::query(
             "INSERT INTO system_alerts (id, alert_type, message, severity, created_at)
@@ -496,9 +516,9 @@ impl SesMonitor {
         }
     }
 
-/// Trigger a tenant-specific alert.
+    /// Trigger a tenant-specific alert.
     async fn trigger_tenant_alert(&self, tenant_id: &str, alert_type: &str, message: &str) {
-// Insert alert record
+        // Insert alert record
         if let Err(e) = sqlx::query(
             "INSERT INTO tenant_alerts (id, tenant_id, alert_type, message, severity, created_at)
              VALUES (gen_random_uuid(), $1::uuid, $2, $3, 'warning', NOW())",
@@ -512,7 +532,7 @@ impl SesMonitor {
             warn!(tenant_id = %tenant_id, alert_type = %alert_type, error = %e, "Failed to store tenant alert");
         }
 
-// Notify via alert webhooks
+        // Notify via alert webhooks
         if let Err(e) = sqlx::query(
             "INSERT INTO alert_webhook_queue (id, tenant_id, alert_type, payload, created_at)
              VALUES (gen_random_uuid(), $1, $2, $3, NOW())",

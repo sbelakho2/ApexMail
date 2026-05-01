@@ -36,12 +36,9 @@ use crate::state::AppState;
 /// 1×1 transparent GIF (hard-coded bytes — no allocation per request).
 pub const TRANSPARENT_GIF: &[u8] = &[
     0x47, 0x49, 0x46, 0x38, 0x39, 0x61, // GIF89a
-    0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00,
-    0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x21,
-    0xf9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-    0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01,
-    0x00, 0x3b,
+    0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02,
+    0x02, 0x44, 0x01, 0x00, 0x3b,
 ];
 
 /// Build the complete axum `Router` with all routes and middleware.
@@ -53,26 +50,44 @@ pub fn build_router(state: AppState) -> Router {
     let prefs_path = cfg.tracking.preferences_path.clone();
 
     let app = Router::new()
-// Open pixel endpoints
-        .route(&format!("{pixel_path}/:tracking_id"), get(pixel::handle_pixel))
+        // Open pixel endpoints
+        .route(
+            &format!("{pixel_path}/:tracking_id"),
+            get(pixel::handle_pixel),
+        )
         .route("/o.gif", get(pixel::handle_pixel_gif))
-// Click redirect
-        .route(&format!("{click_path}/:tracking_id"), get(click::handle_click))
-// One-click unsubscribe (RFC 8058)
-        .route(&format!("{unsub_path}/:token"), post(unsubscribe::handle_unsub_post))
-        .route(&format!("{unsub_path}/:token"), get(unsubscribe::handle_unsub_get))
-// Preferences center
-        .route(&format!("{prefs_path}/:token"), get(unsubscribe::handle_prefs_get))
-        .route(&format!("{prefs_path}/:token"), post(unsubscribe::handle_prefs_post))
-// Real-time event streaming (SSE)
+        // Click redirect
+        .route(
+            &format!("{click_path}/:tracking_id"),
+            get(click::handle_click),
+        )
+        // One-click unsubscribe (RFC 8058)
+        .route(
+            &format!("{unsub_path}/:token"),
+            post(unsubscribe::handle_unsub_post),
+        )
+        .route(
+            &format!("{unsub_path}/:token"),
+            get(unsubscribe::handle_unsub_get),
+        )
+        // Preferences center
+        .route(
+            &format!("{prefs_path}/:token"),
+            get(unsubscribe::handle_prefs_get),
+        )
+        .route(
+            &format!("{prefs_path}/:token"),
+            post(unsubscribe::handle_prefs_post),
+        )
+        // Real-time event streaming (SSE)
         .route("/v1/stream", get(sse::handle_stream))
-// Health checks
+        // Health checks
         .route("/health", get(health::handle_health))
         .route("/ready", get(health::handle_ready))
-// Inject shared state
+        // Inject shared state
         .with_state(state.clone());
 
-// Apply middleware layers
+    // Apply middleware layers
     let app = app
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(TraceLayer::new_for_http())
@@ -80,12 +95,9 @@ pub fn build_router(state: AppState) -> Router {
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
         .layer(DefaultBodyLimit::max(64 * 1024)); // 64 KB — tracking payloads are tiny
 
-// Rate-limit middleware (Redis sliding window) — wraps entire router
+    // Rate-limit middleware (Redis sliding window) — wraps entire router
     if cfg.rate_limit.enabled {
-        app.layer(middleware::from_fn_with_state(
-            state,
-            rate_limit_middleware,
-        ))
+        app.layer(middleware::from_fn_with_state(state, rate_limit_middleware))
     } else {
         app
     }
@@ -101,17 +113,21 @@ pub fn build_router(state: AppState) -> Router {
 /// the first IP that is NOT a trusted proxy itself.
 /// 4. Fall back to `X-Real-IP`.
 /// 5. Fall back to the socket IP.
-pub fn extract_client_ip(headers: &HeaderMap, socket_ip: std::net::IpAddr, state: &AppState) -> String {
+pub fn extract_client_ip(
+    headers: &HeaderMap,
+    socket_ip: std::net::IpAddr,
+    state: &AppState,
+) -> String {
     let trusted = &state.config.tracking.trusted_proxies;
 
-// Normalise IPv4-mapped IPv6 (::ffff:a.b.c.d → a.b.c.d)
+    // Normalise IPv4-mapped IPv6 (::ffff:a.b.c.d → a.b.c.d)
     let socket_ip = normalise_ip(socket_ip);
 
     if !is_in_trusted(socket_ip, trusted) {
         return socket_ip.to_string();
     }
 
-// Connecting address is a trusted proxy — read forwarded header.
+    // Connecting address is a trusted proxy — read forwarded header.
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         for part in xff.split(',').map(str::trim) {
             if let Ok(ip) = part.parse::<std::net::IpAddr>() {
@@ -123,13 +139,13 @@ pub fn extract_client_ip(headers: &HeaderMap, socket_ip: std::net::IpAddr, state
         }
     }
 
-// #188:Validate X-Real-IP as a valid IP address before trusting it
+    // #188:Validate X-Real-IP as a valid IP address before trusting it
     if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         let trimmed = xri.trim();
         if trimmed.parse::<std::net::IpAddr>().is_ok() {
             return trimmed.to_owned();
         }
-// Invalid IP in header — fall through to socket IP
+        // Invalid IP in header — fall through to socket IP
     }
 
     socket_ip.to_string()
@@ -173,8 +189,8 @@ async fn rate_limit_middleware(
 
     let result: anyhow::Result<u64> = async {
         let mut conn = state.redis.get().await?;
-// #183:Atomic INCR + EXPIRE via Lua script to prevent orphaned keys
-// if a crash occurs between the two commands.
+        // #183:Atomic INCR + EXPIRE via Lua script to prevent orphaned keys
+        // if a crash occurs between the two commands.
         let script = r#"
             local count = redis.call('INCR', KEYS[1])
             if count == 1 then
@@ -190,14 +206,15 @@ async fn rate_limit_middleware(
             .query_async(&mut *conn)
             .await?;
         Ok(count)
-    }.await;
+    }
+    .await;
 
     match result {
         Ok(count) if count > cfg.max_per_minute as u64 => {
             warn!(ip = %ip, count = count, "Rate limit exceeded");
             let path = req.uri().path();
             let mut resp = if path.contains("/o/") || path.ends_with(".gif") {
-// Return a transparent GIF for pixel paths (-500-351)
+                // Return a transparent GIF for pixel paths (-500-351)
                 let len = TRANSPARENT_GIF.len().to_string();
                 Response::builder()
                     .status(StatusCode::TOO_MANY_REQUESTS)
@@ -214,10 +231,8 @@ async fn rate_limit_middleware(
                     .body(Body::from(r#"{"error":"Rate limit exceeded"}"#))
                     .unwrap_or_default()
             };
-            resp.headers_mut().insert(
-                "retry-after",
-                HeaderValue::from_static("60"),
-            );
+            resp.headers_mut()
+                .insert("retry-after", HeaderValue::from_static("60"));
             resp
         }
         Err(e) => {

@@ -7,8 +7,8 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 use crate::types::{
-    AttributeValue, NodeKind, TemplateError, TemplateNode, TranspiledTemplate,
-    ValidationError, ValidationResult, ALLOWED_MODULES,
+    AttributeValue, NodeKind, TemplateError, TemplateNode, TranspiledTemplate, ValidationError,
+    ValidationResult, ALLOWED_MODULES,
 };
 
 // ─── Regex patterns ────────────────────────────────────────────
@@ -61,7 +61,7 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
-// Size check
+    // Size check
     if source.len() > max_length {
         errors.push(ValidationError {
             message: format!(
@@ -79,7 +79,7 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         };
     }
 
-// Check for forbidden imports
+    // Check for forbidden imports
     for cap in IMPORT_RE.captures_iter(source) {
         let module = &cap[1];
         if !ALLOWED_MODULES.iter().any(|m| module.starts_with(m)) {
@@ -91,7 +91,7 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         }
     }
 
-// Check for dangerous patterns
+    // Check for dangerous patterns
     for pat in DANGEROUS_PATTERNS.iter() {
         if let Some(m) = pat.find(source) {
             warnings.push(format!(
@@ -102,8 +102,8 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         }
     }
 
-// #197:Only count template expression braces `{{ }}`, not CSS/JSON braces.
-// Template double-brace placeholders should be balanced.
+    // #197:Only count template expression braces `{{ }}`, not CSS/JSON braces.
+    // Template double-brace placeholders should be balanced.
     let double_open = source.matches("{{").count();
     let double_close = source.matches("}}").count();
     if double_open != double_close {
@@ -117,7 +117,7 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         });
     }
 
-// HTML tag balance check
+    // HTML tag balance check
     let open_tags: Vec<&str> = TAG_OPEN_RE
         .captures_iter(source)
         .filter_map(|c| c.get(1).map(|m| m.as_str()))
@@ -149,7 +149,7 @@ pub fn transpile(
         });
     }
 
-// Check for forbidden imports
+    // Check for forbidden imports
     for cap in IMPORT_RE.captures_iter(source) {
         let module = cap[1].to_string();
         if !ALLOWED_MODULES.iter().any(|m| module.starts_with(m)) {
@@ -157,7 +157,7 @@ pub fn transpile(
         }
     }
 
-// Check for dangerous patterns
+    // Check for dangerous patterns
     for pat in DANGEROUS_PATTERNS.iter() {
         if let Some(m) = pat.find(source) {
             return Err(TemplateError::InvalidSyntax {
@@ -166,13 +166,13 @@ pub fn transpile(
         }
     }
 
-// Strip imports (they've been validated)
+    // Strip imports (they've been validated)
     let stripped = IMPORT_RE.replace_all(source, "");
 
-// Parse into nodes
+    // Parse into nodes
     let nodes = parse_html_to_nodes(&stripped)?;
 
-// Collect unique imports
+    // Collect unique imports
     let imports_used: Vec<String> = IMPORT_RE
         .captures_iter(source)
         .map(|c| c[1].to_string())
@@ -218,7 +218,7 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
     let bytes = source.as_bytes();
 
     while pos < source.len() {
-// Try self-closing tag first
+        // Try self-closing tag first
         if let Some(cap) = SELF_CLOSE_RE.captures(&source[pos..]) {
             if let Some(full) = cap.get(0) {
                 if full.start() == 0 {
@@ -236,7 +236,7 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
             }
         }
 
-// Try opening tag
+        // Try opening tag
         if bytes[pos] == b'<' && pos + 1 < source.len() && bytes[pos + 1] != b'/' {
             if let Some(cap) = TAG_OPEN_RE.captures(&source[pos..]) {
                 if let Some(full) = cap.get(0) {
@@ -245,7 +245,7 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
                         let attrs_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
                         let attributes = parse_attributes(attrs_str);
 
-// Find matching close tag (simplified:doesn't handle nesting of same tag)
+                        // Find matching close tag (simplified:doesn't handle nesting of same tag)
                         let inner_start = pos + full.end();
                         let close_pattern = format!("</{}>", tag);
                         if let Some(close_pos) = source[inner_start..].find(&close_pattern) {
@@ -259,7 +259,7 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
                             pos = inner_start + close_pos + close_pattern.len();
                             continue;
                         } else {
-// Self-contained or unclosed — treat as leaf
+                            // Self-contained or unclosed — treat as leaf
                             nodes.push(TemplateNode {
                                 kind: NodeKind::Element { tag },
                                 attributes,
@@ -273,11 +273,14 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
             }
         }
 
-// Text node — consume until next '<'
-        let text_end = source[pos..].find('<').map(|i| pos + i).unwrap_or(source.len());
+        // Text node — consume until next '<'
+        let text_end = source[pos..]
+            .find('<')
+            .map(|i| pos + i)
+            .unwrap_or(source.len());
         let text = source[pos..text_end].trim();
         if !text.is_empty() {
-// Check for {{ expression }} placeholders
+            // Check for {{ expression }} placeholders
             if PLACEHOLDER_RE.is_match(text) {
                 nodes.push(TemplateNode {
                     kind: NodeKind::Expression(text.to_string()),
@@ -294,7 +297,7 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
         }
         pos = text_end;
 
-// Skip close tags at current position
+        // Skip close tags at current position
         if pos < source.len() {
             if let Some(cap) = TAG_CLOSE_RE.captures(&source[pos..]) {
                 if let Some(full) = cap.get(0) {
@@ -306,7 +309,7 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
             }
         }
 
-// Safety:advance at least 1 char
+        // Safety:advance at least 1 char
         if pos < source.len()
             && bytes[pos] == b'<'
             && TAG_OPEN_RE.captures(&source[pos..]).is_none()
@@ -458,7 +461,10 @@ mod tests {
         let source = r#"<img src="logo.png" />"#;
         let result = transpile(source, 4096).unwrap();
         assert_eq!(result.nodes.len(), 1);
-        assert!(matches!(&result.nodes[0].kind, NodeKind::Element { .. }), "Expected element node");
+        assert!(
+            matches!(&result.nodes[0].kind, NodeKind::Element { .. }),
+            "Expected element node"
+        );
         if let NodeKind::Element { tag } = &result.nodes[0].kind {
             assert_eq!(tag, "img");
         }

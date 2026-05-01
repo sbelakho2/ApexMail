@@ -8,7 +8,10 @@ pub fn is_localhost(host: &str) -> bool {
 pub fn is_private_or_reserved_host(host: &str) -> bool {
     let normalized = normalize_host(host);
 
-    if matches!(normalized.as_str(), "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") {
+    if matches!(
+        normalized.as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "0.0.0.0"
+    ) {
         return true;
     }
 
@@ -77,16 +80,24 @@ mod tests {
             "198.18.0.1",
             "203.0.113.5",
         ] {
-            assert!(is_private_or_reserved_ip(ip.parse().unwrap()), "{ip} should be blocked");
+            assert!(
+                is_private_or_reserved_ip(ip.parse().unwrap()),
+                "{ip} should be blocked"
+            );
         }
     }
 
     #[test]
     fn blocks_private_and_reserved_ipv6_ranges() {
         for ip in ["::1", "::", "fe80::1", "fd00::1"] {
-            assert!(is_private_or_reserved_ip(ip.parse().unwrap()), "{ip} should be blocked");
+            assert!(
+                is_private_or_reserved_ip(ip.parse().unwrap()),
+                "{ip} should be blocked"
+            );
         }
-        assert!(!is_private_or_reserved_ip("2001:4860:4860::8888".parse().unwrap()));
+        assert!(!is_private_or_reserved_ip(
+            "2001:4860:4860::8888".parse().unwrap()
+        ));
     }
 
     #[test]
@@ -99,7 +110,10 @@ mod tests {
             "printer.local",
             "office.corp",
         ] {
-            assert!(is_private_or_reserved_host(host), "{host} should be blocked");
+            assert!(
+                is_private_or_reserved_host(host),
+                "{host} should be blocked"
+            );
         }
 
         assert!(!is_private_or_reserved_host("api.apexmail.ee"));

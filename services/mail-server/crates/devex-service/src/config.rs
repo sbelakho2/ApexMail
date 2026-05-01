@@ -37,11 +37,7 @@ impl Default for DevExConfig {
             api_base_url: "https://api.apexmail.ee".into(),
             docs_base_url: "https://apexmail.ee/docs".into(),
             current_api_version: "2024-01".into(),
-            supported_api_versions: vec![
-                "2024-01".into(),
-                "2023-10".into(),
-                "2023-06".into(),
-            ],
+            supported_api_versions: vec!["2024-01".into(), "2023-10".into(), "2023-06".into()],
             deprecated_api_versions: vec!["2023-01".into(), "2022-10".into()],
             sandbox_enabled: true,
             max_webhook_endpoints_per_tenant: 10,
@@ -51,15 +47,20 @@ impl Default for DevExConfig {
 }
 
 impl DevExConfig {
-/// Load configuration from environment variables, falling back to defaults.
+    /// Load configuration from environment variables, falling back to defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
         let node_env = env::var("NODE_ENV").unwrap_or_else(|_| "development".into());
 
         let cors_origins: Vec<String> = env::var("CORS_ORIGINS")
-            .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
             .unwrap_or_else(|_| vec!["*".into()]);
 
-// Security:disallow wildcard CORS in production
+        // Security:disallow wildcard CORS in production
         if node_env != "development" && cors_origins.contains(&"*".to_string()) {
             return Err(ConfigError::SecurityViolation(
                 "Wildcard CORS origins are not allowed outside development".into(),
@@ -68,11 +69,7 @@ impl DevExConfig {
 
         let supported_api_versions: Vec<String> = env::var("SUPPORTED_API_VERSIONS")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_else(|_| vec![
-                "2024-01".into(),
-                "2023-10".into(),
-                "2023-06".into(),
-            ]);
+            .unwrap_or_else(|_| vec!["2024-01".into(), "2023-10".into(), "2023-06".into()]);
 
         let deprecated_api_versions: Vec<String> = env::var("DEPRECATED_API_VERSIONS")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
@@ -130,20 +127,24 @@ impl DevExConfig {
             return Err(ConfigError::MissingVar("REDIS_URL".into()));
         }
         if self.current_api_version.trim().is_empty() {
-            return Err(ConfigError::InvalidValue("CURRENT_API_VERSION must not be empty".into()));
+            return Err(ConfigError::InvalidValue(
+                "CURRENT_API_VERSION must not be empty".into(),
+            ));
         }
         if !self.is_version_supported(&self.current_api_version) {
-            return Err(ConfigError::InvalidValue("CURRENT_API_VERSION must be supported".into()));
+            return Err(ConfigError::InvalidValue(
+                "CURRENT_API_VERSION must be supported".into(),
+            ));
         }
         Ok(())
     }
 
-/// Check whether a given API version string is currently supported (not deprecated).
+    /// Check whether a given API version string is currently supported (not deprecated).
     pub fn is_version_supported(&self, version: &str) -> bool {
         self.supported_api_versions.iter().any(|v| v == version)
     }
 
-/// Check whether a given API version string is deprecated.
+    /// Check whether a given API version string is deprecated.
     pub fn is_version_deprecated(&self, version: &str) -> bool {
         self.deprecated_api_versions.iter().any(|v| v == version)
     }

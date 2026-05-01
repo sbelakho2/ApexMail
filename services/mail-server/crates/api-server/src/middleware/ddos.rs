@@ -76,7 +76,11 @@ fn build_request_context(req: &Request<Body>, state: &AppState) -> ddos_protecti
 
     let mut builder = RequestContextBuilder::new(ip, req.uri().path(), req.method().as_str());
 
-    if let Some(user_agent) = req.headers().get(USER_AGENT).and_then(|value| value.to_str().ok()) {
+    if let Some(user_agent) = req
+        .headers()
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+    {
         builder = builder.user_agent(user_agent);
     }
 

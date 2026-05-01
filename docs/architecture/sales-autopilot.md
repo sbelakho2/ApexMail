@@ -25,7 +25,7 @@ Two CRM implementations exist:
 - `CrmService` provides an in-memory lead store for tests and self-contained development flows.
 - `SqlxCrmService` provides a PostgreSQL-backed lead store with `sales_leads` table initialization and async CRUD operations.
 
-The shipped server binary currently wires the in-memory `CrmService`, so lead state is not persisted across process restarts unless the binary is extended to use `SqlxCrmService`.
+The shipped server binary now wires a `CrmBackend::Postgres` instance, so lead state is persisted in PostgreSQL across process restarts. The in-memory `CrmService` remains available for tests and self-contained local flows.
 
 Lead scoring is currently deterministic and local: `40%` email engagement, `30%` company-size tier, `30%` recency, rounded to a `0..=100` score.
 
@@ -36,7 +36,8 @@ Lead scoring is currently deterministic and local: `40%` email engagement, `30%`
 - Extracts the domain from the lead email address.
 - Uses deterministic mock data for known domains such as `acme.com`, `beta.io`, and `gamma.dev`.
 - Falls back to a derived company name with `Unknown` metadata for unrecognized domains.
-- Persists enrichment cache rows in `enriched_companies`.
+- Persists enrichment cache rows in `enriched_companies` and returns an error if persistence fails.
+- Requires tenant scope on the route surface and applies per-tenant request throttling before enrichment runs.
 
 The cache schema includes domain, company attributes, confidence score, and enrichment timestamps keyed by `(tenant_id, domain)`.
 
@@ -103,7 +104,7 @@ The router defined in `src/routes.rs` exposes:
 | `/calendar` | `GET` | List calendar events / availability |
 | `/inbox` | `GET` | List triaged inbox messages |
 
-The service applies a `256 KB` body limit and a `30-second` request timeout.
+The service applies a `256 KB` body limit and a `30-second` request timeout. `/health` now returns a degraded/503 response when PostgreSQL is unavailable instead of always returning healthy.
 
 ## Configuration
 
@@ -124,11 +125,10 @@ If config validation fails, the service falls back to `SalesConfig::default()` a
 Current persisted state:
 
 - `enriched_companies` cache table created by `routes::initialize_schema()`
-- Optional `sales_leads` table supported by `SqlxCrmService::initialize()`
+- `sales_leads` table initialized by the PostgreSQL CRM backend on startup
 
 Current in-memory-only state in the shipped binary:
 
-- leads
 - campaigns and recipients
 - calendar events
 - inbox messages
@@ -136,7 +136,7 @@ Current in-memory-only state in the shipped binary:
 ## Current Implementation Notes
 
 - The service is documented as storing ApexMail's own sales leads rather than tenant customer data.
-- Resource-level tenant scoping is not yet enforced on every campaign path, so the current deployment model should remain internal-only.
+- Resource-level tenant scoping is enforced on the company-enrichment and campaign-management routes that accept tenant scope, but the service should still be treated as internal-only.
 - Scoring weights are compile-time constants today.
 - Enrichment currently behaves like a deterministic mock for known domains and a fallback generator for unknown ones.
 - Campaign execution is orchestration state only; it is not yet tied to an event-driven outbound delivery pipeline.

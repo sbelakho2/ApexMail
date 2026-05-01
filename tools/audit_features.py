@@ -7,6 +7,8 @@ import json
 import re
 from pathlib import Path
 
+from audit_output import emit
+
 # Canonical feature limits from plans.ts and pricing.md
 FEATURE_LIMITS = {
     'Free': {
@@ -153,23 +155,23 @@ def audit_features():
         except json.JSONDecodeError:
             pass
     
-    print("=" * 70)
-    print("FEATURE LIMITS AUDIT")
-    print("=" * 70)
+    emit("=" * 70)
+    emit("FEATURE LIMITS AUDIT")
+    emit("=" * 70)
     
-    print(f"\nCritical Issues: {len(issues)}")
+    emit(f"\nCritical Issues: {len(issues)}")
     for issue in issues[:10]:
-        print(f"  {issue}")
+        emit(f"  {issue}")
     if len(issues) > 10:
-        print(f"  ... and {len(issues)-10} more")
+        emit(f"  ... and {len(issues)-10} more")
     
-    print(f"\nWarnings: {len(warnings)}")
+    emit(f"\nWarnings: {len(warnings)}")
     for w in warnings[:10]:
-        print(f"  {w}")
+        emit(f"  {w}")
     if len(warnings) > 10:
-        print(f"  ... and {len(warnings)-10} more")
+        emit(f"  ... and {len(warnings)-10} more")
     
-    print(f"\nStatus: {'✅ PASS' if len(issues) == 0 else '❌ FAIL'}")
+    emit(f"\nStatus: {'✅ PASS' if len(issues) == 0 else '❌ FAIL'}")
     
     return issues, warnings
 

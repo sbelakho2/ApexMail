@@ -29,8 +29,10 @@ const API_CONSOLE_BASELINE_TIMING_SOURCE: &str = r#"{
         "domComplete": 34
     }
 }"#;
-const TRANSITION_MANIFEST_SOURCE: &str = include_str!("../../../../../docs/development/ui-marketing-transition-manifest.json");
-const UI_BASELINE_MANIFEST_SOURCE: &str = include_str!("../../../../../docs/development/ui-baseline-manifest.json");
+const TRANSITION_MANIFEST_SOURCE: &str =
+    include_str!("../../../../../docs/development/ui-marketing-transition-manifest.json");
+const UI_BASELINE_MANIFEST_SOURCE: &str =
+    include_str!("../../../../../docs/development/ui-baseline-manifest.json");
 
 #[derive(Debug, Clone, Deserialize)]
 struct TransitionManifest {
@@ -159,7 +161,8 @@ pub const API_CONSOLE_ENDPOINTS: &[ApiConsoleEndpoint] = &[
 ];
 
 static TRANSITION_MANIFEST: Lazy<TransitionManifest> = Lazy::new(|| {
-    serde_json::from_str(TRANSITION_MANIFEST_SOURCE).expect("marketing transition manifest must parse")
+    serde_json::from_str(TRANSITION_MANIFEST_SOURCE)
+        .expect("marketing transition manifest must parse")
 });
 
 static UI_BASELINE: Lazy<BaselineManifest> = Lazy::new(|| {
@@ -193,7 +196,13 @@ pub fn marketing_route_paths(surface_id: &str) -> Vec<&'static str> {
         .surfaces
         .iter()
         .find(|surface| surface.id == surface_id)
-        .map(|surface| surface.routes.iter().map(|route| route.path.as_str()).collect())
+        .map(|surface| {
+            surface
+                .routes
+                .iter()
+                .map(|route| route.path.as_str())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -256,7 +265,10 @@ pub fn api_console_request_delay_range_ms() -> (usize, usize) {
 }
 
 pub fn api_console_endpoint_paths() -> Vec<&'static str> {
-    API_CONSOLE_ENDPOINTS.iter().map(|endpoint| endpoint.path).collect()
+    API_CONSOLE_ENDPOINTS
+        .iter()
+        .map(|endpoint| endpoint.path)
+        .collect()
 }
 
 pub fn api_console_primary_action_label() -> &'static str {
@@ -295,8 +307,14 @@ pub fn api_console_dom_complete_ms() -> usize {
 pub fn marketing_source_catalog() -> [(&'static str, &'static str); 5] {
     [
         ("api_console_baseline_dom", API_CONSOLE_BASELINE_DOM_SOURCE),
-        ("api_console_baseline_interaction", API_CONSOLE_BASELINE_INTERACTION_SOURCE),
-        ("api_console_baseline_timing", API_CONSOLE_BASELINE_TIMING_SOURCE),
+        (
+            "api_console_baseline_interaction",
+            API_CONSOLE_BASELINE_INTERACTION_SOURCE,
+        ),
+        (
+            "api_console_baseline_timing",
+            API_CONSOLE_BASELINE_TIMING_SOURCE,
+        ),
         ("transition_manifest", TRANSITION_MANIFEST_SOURCE),
         ("ui_baseline_manifest", UI_BASELINE_MANIFEST_SOURCE),
     ]
@@ -404,7 +422,8 @@ impl<'a> MarketingApiConsole<'a> {
                 response,
             )
         } else {
-            "<p class=\"text-sm text-gray-400 italic\">Click \"Send\" to execute the request.</p>".to_string()
+            "<p class=\"text-sm text-gray-400 italic\">Click \"Send\" to execute the request.</p>"
+                .to_string()
         };
         format!(
             "<div class=\"rounded-xl border border-gray-700 bg-gray-900 overflow-hidden shadow-2xl\"><div class=\"flex border-b border-gray-700\"><div class=\"w-56 border-r border-gray-700 bg-gray-800/50 hidden sm:block\"><div class=\"p-3 text-xs font-semibold text-gray-400 uppercase tracking-wider\">Endpoints</div>{}</div><div class=\"flex-1 flex flex-col min-h-[24rem]\"><div class=\"flex items-center gap-2 px-4 py-3 border-b border-gray-700 bg-gray-800/30\"><span class=\"font-mono text-sm font-bold {}\">{}</span><span class=\"font-mono text-sm text-gray-300\">{}</span><button class=\"ml-auto px-4 py-1.5 rounded-lg bg-primary-600 text-white text-sm font-semibold hover:bg-primary-500 transition-colors disabled:opacity-50\">{}</button></div>{}<div class=\"flex-1 px-4 py-3\"><div class=\"text-xs font-semibold text-gray-400 mb-2\">Response</div>{}</div></div></div></div>",
@@ -439,12 +458,15 @@ mod tests {
 
     #[test]
     fn marketing_islands_removed_after_js_elimination() {
-        assert!(MARKETING_ISLANDS.is_empty(), "islands replaced with CSS/HTML — array must be empty");
+        assert!(
+            MARKETING_ISLANDS.is_empty(),
+            "islands replaced with CSS/HTML — array must be empty"
+        );
     }
 
     #[test]
     fn marketing_source_catalog_is_baseline_only() {
-// Marketing now keeps only neutral manifests and behavioral baselines.
+        // Marketing now keeps only neutral manifests and behavioral baselines.
         assert_eq!(marketing_source_catalog().len(), 5);
     }
 
@@ -473,9 +495,18 @@ mod tests {
         assert!(api_console_endpoint_paths().contains(&"/v1/domains"));
         assert!(api_console_endpoint_paths().contains(&"/v1/contacts"));
         assert_eq!(api_console_primary_action_label(), "Send →");
-        assert_eq!(api_console_expected_response_text(), "Email queued for delivery");
-        assert_eq!(api_console_touch_flow_action_types(), vec!["tap", "waitForText"]);
-        assert_eq!(api_console_touch_send_selector(), Some("button:has-text(\"Send →\")"));
+        assert_eq!(
+            api_console_expected_response_text(),
+            "Email queued for delivery"
+        );
+        assert_eq!(
+            api_console_touch_flow_action_types(),
+            vec!["tap", "waitForText"]
+        );
+        assert_eq!(
+            api_console_touch_send_selector(),
+            Some("button:has-text(\"Send →\")")
+        );
         assert_eq!(api_console_touch_wait_text(), Some("queued"));
         assert_eq!(api_console_dom_complete_ms(), 34);
     }

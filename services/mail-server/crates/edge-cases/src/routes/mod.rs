@@ -38,19 +38,19 @@ pub struct AppState {
 pub fn router(state: Arc<AppState>) -> Router {
     let shared = state.clone();
     Router::new()
-// EAI
+        // EAI
         .route("/eai/validate", post(eai_validate))
         .route("/eai/parse", post(eai_parse))
         .route("/eai/normalize", post(eai_normalize))
-// Attachments
+        // Attachments
         .route("/attachments/validate", post(attachments_validate))
         .route("/attachments/size-check", post(attachments_size_check))
         .route("/attachments/stats", post(attachments_stats))
-// Calendar
+        // Calendar
         .route("/calendar/invite", post(calendar_create_invite))
         .route("/calendar/parse", post(calendar_parse))
         .route("/calendar/generate-ics", post(calendar_generate_ics))
-// Delivery
+        // Delivery
         .route("/delivery/parse-response", post(delivery_parse_response))
         .route("/delivery/retry-schedule", post(delivery_retry_schedule))
         .route("/delivery/detect-loop", post(delivery_detect_loop))
@@ -59,12 +59,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(delivery_detect_autoresponder),
         )
         .route("/delivery/mx/:domain", get(delivery_mx))
+        .route("/delivery/history/:message_id", get(delivery_history))
         .route(
-            "/delivery/history/:message_id",
-            get(delivery_history),
+            "/delivery/greylist-check/:domain",
+            get(delivery_greylist_check),
         )
-        .route("/delivery/greylist-check/:domain", get(delivery_greylist_check))
-// Health
+        // Health
         .route("/health", get(health))
         .route("/health/ready", get(health))
         .route("/health/live", get(health))
@@ -271,8 +271,7 @@ async fn eai_parse(
 async fn eai_normalize(
     Json(req): Json<EAINormalizeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let result =
-        crate::services::eai::normalize_content(&req.content, req.charset.as_deref());
+    let result = crate::services::eai::normalize_content(&req.content, req.charset.as_deref());
     serialize_or_500(&result)
 }
 
@@ -447,7 +446,9 @@ async fn delivery_retry_schedule(
         .calculate_retry_schedule(&req.response, req.current_attempt)
     {
         Some(schedule) => serialize_or_500(&schedule),
-        None => Ok(Json(serde_json::json!({"retry": false, "reason": "permanent failure or max retries reached"}))),
+        None => Ok(Json(
+            serde_json::json!({"retry": false, "reason": "permanent failure or max retries reached"}),
+        )),
     }
 }
 
@@ -463,9 +464,10 @@ async fn delivery_detect_autoresponder(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AutoResponderRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let result = state
-        .delivery
-        .detect_auto_responder(&req.headers, &req.subject, req.body.as_deref());
+    let result =
+        state
+            .delivery
+            .detect_auto_responder(&req.headers, &req.subject, req.body.as_deref());
     serialize_or_500(&result)
 }
 
@@ -498,7 +500,9 @@ async fn delivery_greylist_check(
         .is_known_greylister(&domain)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({ "domain": domain, "known_greylister": is_known })))
+    Ok(Json(
+        serde_json::json!({ "domain": domain, "known_greylister": is_known }),
+    ))
 }
 
 // ── Health ─────────────────────────────────────────────────────────────────────
@@ -510,10 +514,15 @@ async fn health() -> impl IntoResponse {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /// Serialize `val` to a `Json<Value>`, returning `500` if serialization fails.
-fn serialize_or_500<T: serde::Serialize>(val: &T) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    serde_json::to_value(val)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))
+fn serialize_or_500<T: serde::Serialize>(
+    val: &T,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    serde_json::to_value(val).map(Json).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialization error: {e}"),
+        )
+    })
 }
 
 // ── CalendarMethod parse from string ───────────────────────────────────────────

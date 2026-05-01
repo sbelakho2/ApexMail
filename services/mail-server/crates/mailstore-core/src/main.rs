@@ -2,29 +2,29 @@
 //!
 //! Provides message storage and retrieval functionality.
 
-use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
+use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use mail_proto::MailstoreServiceServer;
-use mailstore_core::{MessageStorage, MailstoreServiceImpl};
+use mailstore_core::{MailstoreServiceImpl, MessageStorage};
 
 #[derive(Parser)]
 #[command(name = "mailstore")]
 #[command(about = "Mailstore Service - Message storage and retrieval")]
 struct Cli {
-/// gRPC listen address
+    /// gRPC listen address
     #[arg(short, long, default_value = "0.0.0.0:50051")]
     listen: String,
-    
-/// Database URL
+
+    /// Database URL
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
-    
-/// Log level
+
+    /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
 }
@@ -32,34 +32,34 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    
-// Initialize logging
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
-    
+
+    // Initialize logging
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .json()
         .init();
-    
+
     info!("Starting Mailstore Service");
     info!("Listen address: {}", cli.listen);
-    
-// Connect to database
+
+    // Connect to database
     let pool = sqlx::PgPool::connect(&cli.database_url).await?;
     info!("Connected to database");
-    
-// Create storage
+
+    // Create storage
     let storage = Arc::new(MessageStorage::new(pool));
     storage.initialize().await?;
-    
-// Create gRPC service
+
+    // Create gRPC service
     let service = MailstoreServiceImpl::new(storage);
-    
-// Start gRPC server
+
+    // Start gRPC server
     let addr = cli.listen.parse()?;
     info!("Starting gRPC server on {}", addr);
-    
+
     Server::builder()
         .add_service(MailstoreServiceServer::new(service))
         .serve_with_shutdown(addr, async {
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
             info!("Shutdown signal received");
         })
         .await?;
-    
+
     info!("Mailstore Service stopped");
     Ok(())
 }

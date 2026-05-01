@@ -1,6 +1,6 @@
 //! Email template CRUD routes.
 
-use super::helpers::{html_escape, clamp_limit, default_limit};
+use super::helpers::{clamp_limit, default_limit, html_escape};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -16,7 +16,12 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create_template).get(list_templates))
-        .route("/:id", get(get_template).put(update_template).delete(delete_template))
+        .route(
+            "/:id",
+            get(get_template)
+                .put(update_template)
+                .delete(delete_template),
+        )
         .route("/:id/render", post(render_template))
         .route("/:id/duplicate", post(duplicate_template))
         .route("/:id/rollback", post(rollback_template))
@@ -234,8 +239,12 @@ async fn render_template(
 
     let tpl = fetch_template(&state, &auth.tenant_id, id).await?;
 
-// Simple Handlebars-style variable substitution:{{var_name}}
-    let vars = body.variables.as_object().unwrap_or(&serde_json::Map::new()).clone();
+    // Simple Handlebars-style variable substitution:{{var_name}}
+    let vars = body
+        .variables
+        .as_object()
+        .unwrap_or(&serde_json::Map::new())
+        .clone();
     let html = substitute(&tpl.html_body, &vars);
     let subject = substitute(&tpl.subject, &vars);
     let text = tpl.text_body.as_ref().map(|t| substitute(t, &vars));
@@ -249,8 +258,8 @@ async fn render_template(
 
 fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>) -> String {
     use std::borrow::Cow;
-    
-// Build a lookup map for O(1) variable access
+
+    // Build a lookup map for O(1) variable access
     let lookup: std::collections::HashMap<&str, Cow<str>> = vars
         .iter()
         .map(|(k, v)| {
@@ -261,15 +270,15 @@ fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>)
             (k.as_str(), escaped)
         })
         .collect();
-    
-// Single pass through template
+
+    // Single pass through template
     let mut result = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '{' && chars.peek() == Some(&'{') {
             chars.next(); // consume second '{'
-// Read variable name until '}}'
+                          // Read variable name until '}}'
             let mut var_name = String::new();
             while let Some(&ch) = chars.peek() {
                 if ch == '}' {
@@ -286,11 +295,11 @@ fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>)
                     break;
                 }
             }
-// Look up and substitute
+            // Look up and substitute
             if let Some(replacement) = lookup.get(var_name.as_str()) {
                 result.push_str(replacement);
             } else {
-// Keep original placeholder if variable not found
+                // Keep original placeholder if variable not found
                 result.push_str("{{");
                 result.push_str(&var_name);
                 result.push_str("}}");
@@ -299,7 +308,7 @@ fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>)
             result.push(c);
         }
     }
-    
+
     result
 }
 
@@ -334,7 +343,11 @@ impl From<TemplateRow> for TemplateResponse {
     }
 }
 
-async fn fetch_template(state: &AppState, tenant_id: &str, id: String) -> Result<TemplateRow, ApiError> {
+async fn fetch_template(
+    state: &AppState,
+    tenant_id: &str,
+    id: String,
+) -> Result<TemplateRow, ApiError> {
     sqlx::query_as::<_, TemplateRow>(
         "SELECT id, name, subject, html_body, text_body, version, status, created_at, updated_at
          FROM templates WHERE id = $1 AND tenant_id = $2",
@@ -355,7 +368,7 @@ async fn duplicate_template(
 ) -> Result<(StatusCode, Json<TemplateResponse>), ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
-// Fetch original
+    // Fetch original
     let original = fetch_template(&state, &auth.tenant_id, id.clone()).await?;
 
     let new_id = Uuid::new_v4();
@@ -393,7 +406,7 @@ async fn rollback_template(
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
-// Restore from template_versions table
+    // Restore from template_versions table
     let result = sqlx::query(
         "UPDATE templates SET
             html_body = tv.html_body,

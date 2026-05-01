@@ -22,7 +22,9 @@ pub struct SupportAnalyticsQuery {
     pub days: i64,
 }
 
-fn default_days() -> i64 { 30 }
+fn default_days() -> i64 {
+    30
+}
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -80,7 +82,7 @@ async fn get_support_analytics(
 
     let days = params.days.clamp(1, 365);
 
-// Check cache
+    // Check cache
     if let Ok(guard) = CACHE.lock() {
         if let Some((ts, cached_days, ref data)) = *guard {
             if ts.elapsed().as_secs() < 60 && cached_days == days {
@@ -91,10 +93,9 @@ async fn get_support_analytics(
 
     let interval = format!("{days} days");
 
-// Status counts
-    let status_row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
-        &format!(
-            "SELECT
+    // Status counts
+    let status_row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(&format!(
+        "SELECT
                 COUNT(*),
                 SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END),
@@ -103,14 +104,13 @@ async fn get_support_analytics(
                 SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN priority = 'urgent' THEN 1 ELSE 0 END)
              FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval"
-        ),
-    )
+    ))
     .fetch_optional(&state.db)
     .await
     .unwrap_or(None)
     .unwrap_or((0, 0, 0, 0, 0, 0, 0));
 
-// Average resolution time
+    // Average resolution time
     let avg_res: Option<(Option<f64>,)> = sqlx::query_as(
         "SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 3600)
          FROM support_tickets WHERE status IN ('resolved', 'closed')",
@@ -120,14 +120,12 @@ async fn get_support_analytics(
     .ok()
     .flatten();
 
-// Category breakdown
-    let cat_rows = sqlx::query_as::<_, (Option<String>, i64)>(
-        &format!(
-            "SELECT COALESCE(category, 'uncategorized'), COUNT(*)
+    // Category breakdown
+    let cat_rows = sqlx::query_as::<_, (Option<String>, i64)>(&format!(
+        "SELECT COALESCE(category, 'uncategorized'), COUNT(*)
              FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval
              GROUP BY category"
-        ),
-    )
+    ))
     .fetch_all(&state.db)
     .await?;
 
@@ -136,14 +134,12 @@ async fn get_support_analytics(
         cat_map.insert(k.clone().unwrap_or_default(), serde_json::json!(v));
     }
 
-// Priority breakdown
-    let pri_rows = sqlx::query_as::<_, (String, i64)>(
-        &format!(
-            "SELECT priority, COUNT(*)
+    // Priority breakdown
+    let pri_rows = sqlx::query_as::<_, (String, i64)>(&format!(
+        "SELECT priority, COUNT(*)
              FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval
              GROUP BY priority"
-        ),
-    )
+    ))
     .fetch_all(&state.db)
     .await?;
 
@@ -152,37 +148,44 @@ async fn get_support_analytics(
         pri_map.insert(k.clone(), serde_json::json!(v));
     }
 
-// Timeline
-    let timeline = sqlx::query_as::<_, (String, i64)>(
-        &format!(
-            "SELECT DATE(created_at)::text, COUNT(*)
+    // Timeline
+    let timeline = sqlx::query_as::<_, (String, i64)>(&format!(
+        "SELECT DATE(created_at)::text, COUNT(*)
              FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval
              GROUP BY DATE(created_at) ORDER BY DATE(created_at)"
-        ),
-    )
+    ))
     .fetch_all(&state.db)
     .await?;
 
-// Top tenants
-    let top = sqlx::query_as::<_, (Option<String>, i64)>(
-        &format!(
-            "SELECT COALESCE(tenant_name, 'Unknown'), COUNT(*)
+    // Top tenants
+    let top = sqlx::query_as::<_, (Option<String>, i64)>(&format!(
+        "SELECT COALESCE(tenant_name, 'Unknown'), COUNT(*)
              FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval
              GROUP BY tenant_name ORDER BY COUNT(*) DESC LIMIT 10"
-        ),
-    )
+    ))
     .fetch_all(&state.db)
     .await?;
 
-// Recent tickets
-    let recent = sqlx::query_as::<_, (String, String, Option<String>, String, String, Option<String>, chrono::DateTime<chrono::Utc>)>(
+    // Recent tickets
+    let recent = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
         "SELECT id::text, subject, tenant_name, status, priority, category, created_at
          FROM support_tickets ORDER BY created_at DESC LIMIT 10",
     )
     .fetch_all(&state.db)
     .await?;
 
-// Response time buckets
+    // Response time buckets
     let buckets = sqlx::query_as::<_, (Option<String>, i64)>(
         "SELECT
             CASE
@@ -216,16 +219,33 @@ async fn get_support_analytics(
         avg_resolution_hours: avg_res.and_then(|r| r.0).unwrap_or(0.0),
         tickets_by_category: serde_json::Value::Object(cat_map),
         tickets_by_priority: serde_json::Value::Object(pri_map),
-        tickets_over_time: timeline.into_iter().map(|(d, c)| TicketsOverTime { date: d, count: c }).collect(),
-        top_tenants: top.into_iter().map(|(n, c)| TopTenant { tenant_name: n.unwrap_or_default(), count: c }).collect(),
-        recent_tickets: recent.into_iter().map(|(id, subj, tn, st, pri, cat, ca)| RecentTicket {
-            id, subject: subj, tenant_name: tn, status: st, priority: pri, category: cat,
-            created_at: ca.to_rfc3339(),
-        }).collect(),
+        tickets_over_time: timeline
+            .into_iter()
+            .map(|(d, c)| TicketsOverTime { date: d, count: c })
+            .collect(),
+        top_tenants: top
+            .into_iter()
+            .map(|(n, c)| TopTenant {
+                tenant_name: n.unwrap_or_default(),
+                count: c,
+            })
+            .collect(),
+        recent_tickets: recent
+            .into_iter()
+            .map(|(id, subj, tn, st, pri, cat, ca)| RecentTicket {
+                id,
+                subject: subj,
+                tenant_name: tn,
+                status: st,
+                priority: pri,
+                category: cat,
+                created_at: ca.to_rfc3339(),
+            })
+            .collect(),
         response_time_buckets: serde_json::Value::Object(bucket_map),
     };
 
-// Update cache
+    // Update cache
     if let Ok(mut guard) = CACHE.lock() {
         *guard = Some((Instant::now(), days, result.clone()));
     }

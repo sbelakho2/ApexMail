@@ -9,7 +9,7 @@ use crate::types::ApiKey;
 pub struct ApiKeysRepo;
 
 impl ApiKeysRepo {
-/// Look up an API key by its hash (for authentication).
+    /// Look up an API key by its hash (for authentication).
     pub async fn find_by_hash(pool: &PgPool, hash: &str) -> Result<Option<ApiKey>, sqlx::Error> {
         sqlx::query_as::<_, ApiKey>(
             "SELECT id, tenant_id, name, key_hash, key_prefix, scopes, last_used_at, expires_at, created_at \
@@ -20,7 +20,7 @@ impl ApiKeysRepo {
         .await
     }
 
-/// Create a new API key.
+    /// Create a new API key.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -44,8 +44,8 @@ impl ApiKeysRepo {
         .await
     }
 
-/// List API keys for a tenant with pagination.
-/// #226:Added limit/offset parameters
+    /// List API keys for a tenant with pagination.
+    /// #226:Added limit/offset parameters
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -65,7 +65,7 @@ impl ApiKeysRepo {
         .await
     }
 
-/// Delete an API key (scoped to tenant).
+    /// Delete an API key (scoped to tenant).
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM api_keys WHERE id = $1 AND tenant_id = $2")
             .bind(id)
@@ -75,7 +75,7 @@ impl ApiKeysRepo {
         Ok(result.rows_affected() > 0)
     }
 
-/// Update the last-used timestamp for an API key.
+    /// Update the last-used timestamp for an API key.
     pub async fn update_last_used(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
             .bind(id)
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn test_api_keys_repo_is_stateless() {
         let _repo = ApiKeysRepo;
-// Repo has no fields — purely a method namespace.
+        // Repo has no fields — purely a method namespace.
     }
 
     #[test]

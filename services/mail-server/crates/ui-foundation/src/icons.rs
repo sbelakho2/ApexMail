@@ -10,9 +10,8 @@ struct IconBaseline {
     glyphs: HashMap<String, String>,
 }
 
-static GLYPHS: Lazy<Vec<String>> = Lazy::new(|| {
-    glyph_registry().keys().cloned().collect::<Vec<_>>()
-});
+static GLYPHS: Lazy<Vec<String>> =
+    Lazy::new(|| glyph_registry().keys().cloned().collect::<Vec<_>>());
 
 static GLYPH_REGISTRY: Lazy<HashMap<String, String>> = Lazy::new(build_glyph_registry);
 
@@ -65,7 +64,10 @@ fn build_glyph_registry() -> HashMap<String, String> {
 
 fn trim_float(value: f32) -> String {
     let rendered = format!("{value:.2}");
-    rendered.trim_end_matches('0').trim_end_matches('.').to_string()
+    rendered
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 pub fn glyph_names() -> &'static [String] {
@@ -96,7 +98,8 @@ mod tests {
     #[test]
     fn renders_svg_for_every_glyph() {
         for glyph in glyph_names() {
-            let svg = render_icon(glyph, IconRenderOptions::default()).expect("glyph should render");
+            let svg =
+                render_icon(glyph, IconRenderOptions::default()).expect("glyph should render");
             assert!(svg.starts_with("<svg "));
             assert!(svg.contains("viewBox=\"0 0 24 24\""));
             assert!(svg.contains("stroke-width=\"1.75\""));

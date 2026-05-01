@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -9,6 +10,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tower_http::timeout::TimeoutLayer;
@@ -18,7 +20,7 @@ use uuid::Uuid;
 use crate::{
     calendar::CalendarService,
     campaigns::CampaignManager,
-    crm::CrmService,
+    crm::CrmBackend,
     enrichment::EnrichmentService,
     inbox::InboxManager,
     types::{LeadStatus, SalesError},
@@ -31,13 +33,17 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
-    pub crm: CrmService,
+    pub crm: CrmBackend,
     pub enrichment: EnrichmentService,
+    pub enrichment_rate_limit: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
     pub campaigns: CampaignManager,
     pub calendar: CalendarService,
     pub inbox: InboxManager,
     pub service_token: String,
 }
+
+const ENRICH_RATE_LIMIT_MAX_REQUESTS: usize = 30;
+const ENRICH_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 pub async fn initialize_schema(db: &PgPool) -> Result<(), SalesError> {
     sqlx::query(
@@ -89,9 +95,9 @@ pub async fn initialize_schema(db: &PgPool) -> Result<(), SalesError> {
 pub fn router(state: AppState) -> Router {
     let shared = Arc::new(state);
     Router::new()
-// Health (unauthenticated for k8s probes)
+        // Health (unauthenticated for k8s probes)
         .route("/health", get(health))
-// Authenticated routes
+        // Authenticated routes
         .route("/leads", get(list_leads).post(create_lead))
         .route("/leads/{id}", get(get_lead))
         .route("/companies", get(list_companies))
@@ -105,15 +111,36 @@ pub fn router(state: AppState) -> Router {
         .with_state(shared.clone())
         .layer(DefaultBodyLimit::max(256 * 1024)) // 256 KB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
-        .layer(middleware::from_fn_with_state(shared, require_service_token))
+        .layer(middleware::from_fn_with_state(
+            shared,
+            require_service_token,
+        ))
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "healthy", "service": "sales-autopilot" }))
+async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let db_healthy = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+        .is_ok();
+
+    let status = if db_healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(serde_json::json!({
+            "status": if db_healthy { "healthy" } else { "degraded" },
+            "service": "sales-autopilot",
+            "database": if db_healthy { "up" } else { "down" },
+        })),
+    )
 }
 
 async fn require_service_token(
@@ -121,25 +148,72 @@ async fn require_service_token(
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-// Skip auth for health checks
+    // Skip auth for health checks
     if req.uri().path() == "/health" {
         return Ok(next.run(req).await);
     }
     if state.service_token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let provided = req.headers().get("x-api-key")
+    let provided = req
+        .headers()
+        .get("x-api-key")
         .and_then(|v| v.to_str().ok().map(String::from))
         .or_else(|| {
-            req.headers().get(AUTHORIZATION)
+            req.headers()
+                .get(AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided
+        .as_deref()
+        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
+    {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+fn normalize_pagination(
+    limit: Option<i64>,
+    offset: Option<i64>,
+    default_limit: i64,
+    max_limit: i64,
+) -> (i64, i64) {
+    (
+        limit.unwrap_or(default_limit).clamp(1, max_limit),
+        offset.unwrap_or(0).clamp(0, 100_000),
+    )
+}
+
+fn paginate_items<T>(items: Vec<T>, limit: i64, offset: i64) -> Vec<T> {
+    items
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect()
+}
+
+fn enforce_enrichment_rate_limit(
+    limiter: &Mutex<HashMap<String, Vec<Instant>>>,
+    tenant_id: &str,
+    now: Instant,
+) -> Result<(), SalesError> {
+    let mut guard = limiter.lock();
+    let entry = guard.entry(tenant_id.to_string()).or_default();
+    entry.retain(|timestamp| {
+        now.duration_since(*timestamp) < Duration::from_secs(ENRICH_RATE_LIMIT_WINDOW_SECS)
+    });
+
+    if entry.len() >= ENRICH_RATE_LIMIT_MAX_REQUESTS {
+        return Err(SalesError::RateLimited(
+            "enrichment rate limit exceeded".into(),
+        ));
+    }
+
+    entry.push(now);
+    Ok(())
 }
 
 // -- Leads ------------------------------------------------------------------
@@ -160,19 +234,30 @@ struct LeadQuery {
     status: Option<String>,
     source: Option<String>,
     q: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
 }
 
 async fn create_lead(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateLeadBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let lead = state.crm.create_lead(
-        body.email,
-        body.name,
-        body.company,
-        body.title,
-        if body.source.is_empty() { "api".into() } else { body.source },
-    );
+    let lead = state
+        .crm
+        .create_lead(
+            body.email,
+            body.name,
+            body.company,
+            body.title,
+            if body.source.is_empty() {
+                "api".into()
+            } else {
+                body.source
+            },
+        )
+        .await?;
     json_response(&lead)
 }
 
@@ -180,8 +265,10 @@ async fn list_leads(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LeadQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
+    let (limit, offset) = normalize_pagination(q.limit, q.offset, 100, 500);
+
     if let Some(ref search) = q.q {
-        let results = state.crm.search_leads(search);
+        let results = state.crm.search_leads(search, limit, offset).await?;
         return json_response(&results);
     }
     let status = q.status.and_then(|s| match s.as_str() {
@@ -192,7 +279,10 @@ async fn list_leads(
         "lost" => Some(LeadStatus::Lost),
         _ => None,
     });
-    let leads = state.crm.list_leads(status, q.source.as_deref());
+    let leads = state
+        .crm
+        .list_leads(status, q.source.as_deref(), limit, offset)
+        .await?;
     json_response(&leads)
 }
 
@@ -200,7 +290,7 @@ async fn get_lead(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let lead = state.crm.get_lead(id)?;
+    let lead = state.crm.get_lead(id).await?;
     json_response(&lead)
 }
 
@@ -214,6 +304,8 @@ struct CompanyQuery {
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+    #[serde(default)]
+    tenant_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow, serde::Serialize)]
@@ -237,10 +329,11 @@ struct EnrichedCompanyRow {
 
 async fn list_companies(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<CompanyQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let limit = q.limit.unwrap_or(100).clamp(1, 500);
-    let offset = q.offset.unwrap_or(0).clamp(0, 100_000);
+    let (limit, offset) = normalize_pagination(q.limit, q.offset, 100, 500);
+    let tenant_id = required_tenant_id(&headers, q.tenant_id.as_deref())?;
 
     let rows = if let Some(ref industry) = q.industry {
         let escaped = escape_like_pattern(industry);
@@ -249,10 +342,12 @@ async fn list_companies(
                     funding_stage, headquarters, founded_year, description, linkedin_url,
                     email_provider, confidence_score, last_enriched_at, created_at
              FROM enriched_companies
-             WHERE industry ILIKE $1 ESCAPE '\\'
+             WHERE tenant_id = $1
+               AND industry ILIKE $2 ESCAPE '\\'
              ORDER BY last_enriched_at DESC
-             LIMIT $2 OFFSET $3",
+             LIMIT $3 OFFSET $4",
         )
+        .bind(&tenant_id)
         .bind(format!("%{}%", escaped))
         .bind(limit)
         .bind(offset)
@@ -265,9 +360,11 @@ async fn list_companies(
                     funding_stage, headquarters, founded_year, description, linkedin_url,
                     email_provider, confidence_score, last_enriched_at, created_at
              FROM enriched_companies
+               WHERE tenant_id = $1
              ORDER BY last_enriched_at DESC
-             LIMIT $1 OFFSET $2",
+               LIMIT $2 OFFSET $3",
         )
+        .bind(&tenant_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&state.db)
@@ -290,19 +387,24 @@ struct EnrichBody {
 
 async fn enrich(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<EnrichBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = required_tenant_id(&headers, body.tenant_id.as_deref())?;
+    enforce_enrichment_rate_limit(&state.enrichment_rate_limit, &tenant_id, Instant::now())?;
+
     let company = if let Some(email) = body.email.as_deref() {
         state.enrichment.enrich_lead(email)?
     } else if let Some(domain) = body.domain.as_deref() {
         state.enrichment.enrich_company(domain)?
     } else {
-        return Err(SalesError::InvalidInput("email or domain is required".into()));
+        return Err(SalesError::InvalidInput(
+            "email or domain is required".into(),
+        ));
     };
-    let tenant_id = body.tenant_id.unwrap_or_else(|| "default".to_string());
 
-// Persist to enriched_companies table
-    if let Err(error) = sqlx::query(
+    // Persist to enriched_companies table
+    sqlx::query(
         "INSERT INTO enriched_companies (
             id, tenant_id, domain, company_name, industry, employee_count,
             annual_revenue, confidence_score, last_enriched_at, created_at, updated_at
@@ -327,16 +429,17 @@ async fn enrich(
     .bind(company.enriched_at)
     .execute(&state.db)
     .await
-    {
+    .map_err(|error| {
         warn!(email = ?body.email, domain = ?body.domain, tenant_id = %tenant_id, error = %error, "Failed to persist enriched company cache entry");
-    }
+        SalesError::Database(error.to_string())
+    })?;
 
     json_response(&company)
 }
 
 // -- Campaigns --------------------------------------------------------------
 
-fn campaign_tenant_id(
+fn required_tenant_id(
     headers: &HeaderMap,
     explicit_tenant_id: Option<&str>,
 ) -> Result<String, SalesError> {
@@ -350,12 +453,16 @@ fn campaign_tenant_id(
         .filter(|value| !value.is_empty());
 
     match (header_tenant_id, explicit_tenant_id) {
-        (Some(header_tenant_id), Some(explicit_tenant_id)) if header_tenant_id != explicit_tenant_id => {
-            Err(SalesError::InvalidInput("tenant_id mismatch between header and request payload".into()))
+        (Some(header_tenant_id), Some(explicit_tenant_id))
+            if header_tenant_id != explicit_tenant_id =>
+        {
+            Err(SalesError::InvalidInput(
+                "tenant_id mismatch between header and request payload".into(),
+            ))
         }
         (Some(header_tenant_id), _) => Ok(header_tenant_id.to_string()),
         (_, Some(explicit_tenant_id)) => Ok(explicit_tenant_id.to_string()),
-        _ => Err(SalesError::InvalidInput("tenant_id is required for campaign routes".into())),
+        _ => Err(SalesError::InvalidInput("tenant_id is required".into())),
     }
 }
 
@@ -373,16 +480,21 @@ async fn create_campaign(
     headers: HeaderMap,
     Json(body): Json<CreateCampaignBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let tenant_id = campaign_tenant_id(&headers, body.tenant_id.as_deref())?;
-    let c = state
-        .campaigns
-        .create_campaign(tenant_id, body.name, body.template_id, body.audience)?;
+    let tenant_id = required_tenant_id(&headers, body.tenant_id.as_deref())?;
+    let c =
+        state
+            .campaigns
+            .create_campaign(tenant_id, body.name, body.template_id, body.audience)?;
     json_response(&c)
 }
 
 #[derive(Deserialize)]
 struct CampaignQuery {
     tenant_id: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
 }
 
 async fn list_campaigns(
@@ -390,8 +502,9 @@ async fn list_campaigns(
     headers: HeaderMap,
     Query(q): Query<CampaignQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let tenant_id = campaign_tenant_id(&headers, q.tenant_id.as_deref())?;
-    let campaigns = state.campaigns.list_campaigns(&tenant_id);
+    let tenant_id = required_tenant_id(&headers, q.tenant_id.as_deref())?;
+    let (limit, offset) = normalize_pagination(q.limit, q.offset, 100, 500);
+    let campaigns = paginate_items(state.campaigns.list_campaigns(&tenant_id), limit, offset);
     json_response(&campaigns)
 }
 
@@ -407,11 +520,15 @@ async fn add_campaign_recipients(
     Json(body): Json<RecipientBody>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     if body.emails.is_empty() {
-        return Err(SalesError::InvalidInput("at least one recipient email is required".into()));
+        return Err(SalesError::InvalidInput(
+            "at least one recipient email is required".into(),
+        ));
     }
 
-    let tenant_id = campaign_tenant_id(&headers, None)?;
-    let added = state.campaigns.add_recipients(&tenant_id, id, body.emails)?;
+    let tenant_id = required_tenant_id(&headers, None)?;
+    let added = state
+        .campaigns
+        .add_recipients(&tenant_id, id, body.emails)?;
     json_response(&serde_json::json!({ "campaignId": id, "added": added }))
 }
 
@@ -420,7 +537,7 @@ async fn start_campaign(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let tenant_id = campaign_tenant_id(&headers, None)?;
+    let tenant_id = required_tenant_id(&headers, None)?;
     let campaign = state.campaigns.start_campaign(&tenant_id, id)?;
     json_response(&campaign)
 }
@@ -430,7 +547,7 @@ async fn pause_campaign(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let tenant_id = campaign_tenant_id(&headers, None)?;
+    let tenant_id = required_tenant_id(&headers, None)?;
     let campaign = state.campaigns.pause_campaign(&tenant_id, id)?;
     json_response(&campaign)
 }
@@ -441,6 +558,10 @@ async fn pause_campaign(
 struct CalendarQuery {
     from: Option<String>,
     to: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
 }
 
 async fn list_calendar(
@@ -448,15 +569,12 @@ async fn list_calendar(
     Query(q): Query<CalendarQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     use chrono::{DateTime, Utc};
-    let from: DateTime<Utc> = q
-        .from
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(Utc::now);
-    let to: DateTime<Utc> = q
-        .to
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| from + chrono::Duration::days(7));
-    let events = state.calendar.list_events(from, to);
+    let (limit, offset) = normalize_pagination(q.limit, q.offset, 100, 500);
+    let from: DateTime<Utc> = q.from.and_then(|s| s.parse().ok()).unwrap_or_else(Utc::now);
+    let to: DateTime<Utc> =
+        q.to.and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| from + chrono::Duration::days(7));
+    let events = paginate_items(state.calendar.list_events(from, to), limit, offset);
     json_response(&events)
 }
 
@@ -465,6 +583,10 @@ async fn list_calendar(
 #[derive(Deserialize)]
 struct InboxQuery {
     category: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
 }
 
 async fn list_inbox(
@@ -472,6 +594,7 @@ async fn list_inbox(
     Query(q): Query<InboxQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     use crate::types::MessageCategory;
+    let (limit, offset) = normalize_pagination(q.limit, q.offset, 100, 500);
     let cat = q.category.map(|c| match c.as_str() {
         "lead" => MessageCategory::Lead,
         "customer" => MessageCategory::Customer,
@@ -484,7 +607,7 @@ async fn list_inbox(
     } else {
         state.inbox.list_all()
     };
-    json_response(&msgs)
+    json_response(&paginate_items(msgs, limit, offset))
 }
 
 fn json_response<T: Serialize>(value: &T) -> Result<Json<serde_json::Value>, SalesError> {
@@ -520,12 +643,32 @@ mod tests {
             .unwrap();
         let state = AppState {
             db,
-            crm: CrmService::new(),
+            crm: CrmBackend::memory(),
             enrichment: EnrichmentService::new("http://mock"),
+            enrichment_rate_limit: Arc::new(Mutex::new(HashMap::new())),
             campaigns: CampaignManager::new(10),
             calendar: CalendarService::new(),
             inbox: InboxManager::new(),
             service_token: "test-key".into(),
+        };
+        router(state)
+    }
+
+    fn test_app_with_service_token(service_token: &str) -> Router {
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let state = AppState {
+            db,
+            crm: CrmBackend::memory(),
+            enrichment: EnrichmentService::new("http://mock"),
+            enrichment_rate_limit: Arc::new(Mutex::new(HashMap::new())),
+            campaigns: CampaignManager::new(10),
+            calendar: CalendarService::new(),
+            inbox: InboxManager::new(),
+            service_token: service_token.into(),
         };
         router(state)
     }
@@ -537,7 +680,7 @@ mod tests {
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -561,7 +704,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-// list
+        // list
         let resp2 = app
             .oneshot(
                 Request::get("/leads")
@@ -583,26 +726,28 @@ mod tests {
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let domain_body = serde_json::json!({ "domain": "acme.com" });
         let domain_resp = app
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&domain_body).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(domain_resp.status(), StatusCode::OK);
+        assert_eq!(domain_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
@@ -739,5 +884,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cross_tenant_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_list_leads_respects_pagination() {
+        let app = test_app();
+
+        for index in 0..3 {
+            let body = serde_json::json!({
+                "email": format!("lead{index}@acme.com"),
+                "name": format!("Lead {index}"),
+                "company": "Acme"
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/leads")
+                        .header("x-api-key", "test-key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = app
+            .oneshot(
+                Request::get("/leads?limit=1&offset=1")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let leads: Vec<serde_json::Value> = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(leads.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_protected_routes_reject_requests_when_service_token_missing() {
+        let app = test_app_with_service_token("");
+        let response = app
+            .oneshot(Request::get("/leads").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_enrich_requires_tenant_scope() {
+        let app = test_app();
+        let body = serde_json::json!({ "domain": "acme.com" });
+        let response = app
+            .oneshot(
+                Request::post("/enrich")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_enrichment_rate_limit_blocks_burst_requests() {
+        let limiter = Mutex::new(HashMap::new());
+        let now = Instant::now();
+
+        for _ in 0..ENRICH_RATE_LIMIT_MAX_REQUESTS {
+            assert!(enforce_enrichment_rate_limit(&limiter, "tenant-a", now).is_ok());
+        }
+
+        assert!(matches!(
+            enforce_enrichment_rate_limit(&limiter, "tenant-a", now),
+            Err(SalesError::RateLimited(_))
+        ));
     }
 }

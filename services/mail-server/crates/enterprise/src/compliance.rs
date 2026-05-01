@@ -157,18 +157,24 @@ impl ComplianceService {
         Self { db }
     }
 
-/// Enable compliance frameworks for an account
-/// When `hipaa_enabled` is true, both `encryption_at_rest` and `encryption_in_transit` /// are enabled. For more granular control, use separate configuration methods.
-    pub async fn enable(&self, tenant_id: String, frameworks: Vec<String>, hipaa_enabled: bool) -> Result<ApiResult<ComplianceConfig>, String> {
+    /// Enable compliance frameworks for an account
+    /// When `hipaa_enabled` is true, both `encryption_at_rest` and `encryption_in_transit` /// are enabled. For more granular control, use separate configuration methods.
+    pub async fn enable(
+        &self,
+        tenant_id: String,
+        frameworks: Vec<String>,
+        hipaa_enabled: bool,
+    ) -> Result<ApiResult<ComplianceConfig>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let now = Utc::now();
-        
-// #261:HIPAA requires both encryption types. Set them based on HIPAA flag,
-// but allow separate configuration for non-HIPAA compliance frameworks.
-        let encryption_at_rest = hipaa_enabled || frameworks.iter().any(|f| f == "soc2" || f == "iso27001");
+
+        // #261:HIPAA requires both encryption types. Set them based on HIPAA flag,
+        // but allow separate configuration for non-HIPAA compliance frameworks.
+        let encryption_at_rest =
+            hipaa_enabled || frameworks.iter().any(|f| f == "soc2" || f == "iso27001");
         let encryption_in_transit = true; // Always require encryption in transit
-        
+
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
             "INSERT INTO ent_compliance_configs (id, tenant_id, enabled_frameworks, status, zero_retention_mode, encryption_at_rest, encryption_in_transit, audit_log_retention_days, require_mfa, baa_signed, dpa_signed, created_at, updated_at)
              VALUES ($1,$2,$3,'active',false,$4,$5,$6,false,false,false,$7,$7)
@@ -186,11 +192,14 @@ impl ComplianceService {
         Ok(ApiResult::ok(row.into()))
     }
 
-/// Get compliance configuration for an account
-    pub async fn get_config(&self, tenant_id: String) -> Result<ApiResult<ComplianceConfig>, String> {
+    /// Get compliance configuration for an account
+    pub async fn get_config(
+        &self,
+        tenant_id: String,
+    ) -> Result<ApiResult<ComplianceConfig>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
-            "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1"
+            "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1",
         )
         .bind(tenant_uuid)
         .fetch_optional(&self.db)
@@ -203,8 +212,14 @@ impl ComplianceService {
         }
     }
 
-/// Sign a Business Associate Agreement (HIPAA)
-    pub async fn sign_baa(&self, tenant_id: String, signatory_name: &str, signatory_title: &str, signatory_email: &str) -> Result<ApiResult<ComplianceConfig>, String> {
+    /// Sign a Business Associate Agreement (HIPAA)
+    pub async fn sign_baa(
+        &self,
+        tenant_id: String,
+        signatory_name: &str,
+        signatory_title: &str,
+        signatory_email: &str,
+    ) -> Result<ApiResult<ComplianceConfig>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
             "UPDATE ent_compliance_configs SET baa_signed = true, baa_signed_at = NOW(),
@@ -225,12 +240,15 @@ impl ComplianceService {
         }
     }
 
-/// Enable zero-retention mode
-    pub async fn enable_zero_retention(&self, tenant_id: String) -> Result<ApiResult<ComplianceConfig>, String> {
+    /// Enable zero-retention mode
+    pub async fn enable_zero_retention(
+        &self,
+        tenant_id: String,
+    ) -> Result<ApiResult<ComplianceConfig>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
             "UPDATE ent_compliance_configs SET zero_retention_mode = true, updated_at = NOW()
-             WHERE tenant_id = $1 RETURNING *"
+             WHERE tenant_id = $1 RETURNING *",
         )
         .bind(tenant_uuid)
         .fetch_optional(&self.db)
@@ -246,13 +264,20 @@ impl ComplianceService {
         }
     }
 
-/// Log an audit event
+    /// Log an audit event
     pub async fn log_audit(
-        &self, tenant_id: String, user_id: Option<&str>, action: &str,
-        resource_type: &str, resource_id: Option<&str>,
-        old_value: Option<serde_json::Value>, new_value: Option<serde_json::Value>,
-        ip_address: Option<&str>, user_agent: Option<&str>,
-        session_id: Option<&str>, request_id: Option<&str>,
+        &self,
+        tenant_id: String,
+        user_id: Option<&str>,
+        action: &str,
+        resource_type: &str,
+        resource_id: Option<&str>,
+        old_value: Option<serde_json::Value>,
+        new_value: Option<serde_json::Value>,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+        session_id: Option<&str>,
+        request_id: Option<&str>,
     ) -> Result<(), String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
@@ -270,14 +295,19 @@ impl ComplianceService {
         Ok(())
     }
 
-/// Query audit logs with filtering
+    /// Query audit logs with filtering
     pub async fn get_audit_logs(
-        &self, tenant_id: String, action: Option<&str>, resource_type: Option<&str>,
-        limit: i64, offset: i64,
+        &self,
+        tenant_id: String,
+        action: Option<&str>,
+        resource_type: Option<&str>,
+        limit: i64,
+        offset: i64,
     ) -> Result<ApiResult<Vec<AuditLogEntry>>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
-// Build dynamic query
-        let mut query = String::from("SELECT * FROM ent_compliance_audit_logs WHERE tenant_id = $1");
+        // Build dynamic query
+        let mut query =
+            String::from("SELECT * FROM ent_compliance_audit_logs WHERE tenant_id = $1");
         let mut param_idx = 2;
 
         if action.is_some() {
@@ -293,18 +323,30 @@ impl ComplianceService {
         query.push_str(&format!(" OFFSET ${param_idx}"));
 
         let mut q = sqlx::query_as::<_, AuditLogEntryRow>(&query).bind(tenant_uuid);
-        if let Some(a) = action { q = q.bind(a); }
-        if let Some(rt) = resource_type { q = q.bind(rt); }
+        if let Some(a) = action {
+            q = q.bind(a);
+        }
+        if let Some(rt) = resource_type {
+            q = q.bind(rt);
+        }
         q = q.bind(limit).bind(offset);
 
-        let rows = q.fetch_all(&self.db).await.map_err(|e| format!("Get audit logs: {e}"))?;
+        let rows = q
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| format!("Get audit logs: {e}"))?;
         Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
-/// Create a data access request (GDPR SAR)
+    /// Create a data access request (GDPR SAR)
     pub async fn request_data_access(
-        &self, tenant_id: String, requester_id: &str, requester_email: &str,
-        request_type: &str, resource_type: Option<&str>, justification: Option<&str>,
+        &self,
+        tenant_id: String,
+        requester_id: &str,
+        requester_email: &str,
+        request_type: &str,
+        resource_type: Option<&str>,
+        justification: Option<&str>,
         identifiers: Option<serde_json::Value>,
     ) -> Result<ApiResult<DataAccessRequest>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
@@ -325,8 +367,13 @@ impl ComplianceService {
         Ok(ApiResult::ok(row.into()))
     }
 
-/// Approve a data access request
-    pub async fn approve_data_access(&self, id: Uuid, approved_by: &str, duration_minutes: i32) -> Result<ApiResult<DataAccessRequest>, String> {
+    /// Approve a data access request
+    pub async fn approve_data_access(
+        &self,
+        id: Uuid,
+        approved_by: &str,
+        duration_minutes: i32,
+    ) -> Result<ApiResult<DataAccessRequest>, String> {
         let access_token = crate::sso::generate_random_token(48);
         let expires_at = Utc::now() + chrono::Duration::minutes(duration_minutes as i64);
 
@@ -349,9 +396,12 @@ impl ComplianceService {
         }
     }
 
-/// Request data deletion (GDPR right to be forgotten)
+    /// Request data deletion (GDPR right to be forgotten)
     pub async fn request_data_deletion(
-        &self, tenant_id: String, requester_id: &str, requester_email: &str,
+        &self,
+        tenant_id: String,
+        requester_id: &str,
+        requester_email: &str,
         identifiers: Option<serde_json::Value>,
     ) -> Result<ApiResult<DataAccessRequest>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
@@ -370,11 +420,14 @@ impl ComplianceService {
         Ok(ApiResult::ok(row.into()))
     }
 
-/// Generate compliance report for an account
-    pub async fn generate_report(&self, tenant_id: String) -> Result<ApiResult<serde_json::Value>, String> {
+    /// Generate compliance report for an account
+    pub async fn generate_report(
+        &self,
+        tenant_id: String,
+    ) -> Result<ApiResult<serde_json::Value>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let config = sqlx::query_as::<_, ComplianceConfigRow>(
-            "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1"
+            "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1",
         )
         .bind(tenant_uuid)
         .fetch_optional(&self.db)
@@ -386,22 +439,20 @@ impl ComplianceService {
             None => return Ok(ApiResult::err("Compliance not configured", "NOT_FOUND")),
         };
 
-// Aggregate audit log counts
-        let audit_count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM ent_compliance_audit_logs WHERE tenant_id = $1"
-        )
-        .bind(tenant_uuid)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("Count audit logs: {e}"))?;
+        // Aggregate audit log counts
+        let audit_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM ent_compliance_audit_logs WHERE tenant_id = $1")
+                .bind(tenant_uuid)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| format!("Count audit logs: {e}"))?;
 
-        let access_requests: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM ent_data_access_requests WHERE tenant_id = $1"
-        )
-        .bind(tenant_uuid)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("Count access requests: {e}"))?;
+        let access_requests: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM ent_data_access_requests WHERE tenant_id = $1")
+                .bind(tenant_uuid)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| format!("Count access requests: {e}"))?;
 
         let report = serde_json::json!({
             "tenant_id": tenant_id,
@@ -422,11 +473,14 @@ impl ComplianceService {
         Ok(ApiResult::ok(report))
     }
 
-/// Get compliance status summary
-    pub async fn get_status(&self, tenant_id: String) -> Result<ApiResult<serde_json::Value>, String> {
+    /// Get compliance status summary
+    pub async fn get_status(
+        &self,
+        tenant_id: String,
+    ) -> Result<ApiResult<serde_json::Value>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let config = sqlx::query_as::<_, ComplianceConfigRow>(
-            "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1"
+            "SELECT * FROM ent_compliance_configs WHERE tenant_id = $1",
         )
         .bind(tenant_uuid)
         .fetch_optional(&self.db)

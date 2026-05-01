@@ -94,7 +94,11 @@ async fn handle_stripe_webhook(
     };
 
     match process_webhook(&state, &body, signature).await {
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "received": true }))).into_response(),
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "received": true })),
+        )
+            .into_response(),
         Err(error_message) => {
             record_deadletter(
                 &state,
@@ -345,14 +349,17 @@ fn verify_and_parse_event(
     }
 
     let timestamp_value = timestamp.to_string();
-    let verified = signatures.into_iter().filter_map(|candidate| hex::decode(candidate).ok()).any(|expected| {
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .expect("HMAC accepts arbitrary key lengths");
-        mac.update(timestamp_value.as_bytes());
-        mac.update(b".");
-        mac.update(payload);
-        mac.verify_slice(&expected).is_ok()
-    });
+    let verified = signatures
+        .into_iter()
+        .filter_map(|candidate| hex::decode(candidate).ok())
+        .any(|expected| {
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+                .expect("HMAC accepts arbitrary key lengths");
+            mac.update(timestamp_value.as_bytes());
+            mac.update(b".");
+            mac.update(payload);
+            mac.verify_slice(&expected).is_ok()
+        });
 
     if !verified {
         return Err("Invalid webhook signature".into());
@@ -417,8 +424,10 @@ async fn handle_stripe_event(state: &AppState, event: &StripeEventPayload) -> Re
             handle_invoice_paid(state, invoice).await
         }
         "invoice.payment_failed" => {
-            let invoice: InvoiceEvent = serde_json::from_value(event.data.object.clone())
-                .map_err(|error| format!("Failed to decode invoice payment_failed event: {error}"))?;
+            let invoice: InvoiceEvent =
+                serde_json::from_value(event.data.object.clone()).map_err(|error| {
+                    format!("Failed to decode invoice payment_failed event: {error}")
+                })?;
             handle_payment_failed(state, invoice).await
         }
         "customer.subscription.trial_will_end" => {
@@ -433,19 +442,20 @@ async fn handle_stripe_event(state: &AppState, event: &StripeEventPayload) -> Re
     }
 }
 
-async fn handle_checkout_completed(state: &AppState, session: CheckoutSession) -> Result<(), String> {
+async fn handle_checkout_completed(
+    state: &AppState,
+    session: CheckoutSession,
+) -> Result<(), String> {
     let Some(tenant_id) = tenant_id_from_metadata(session.metadata.as_ref()) else {
         warn!(session_id = %session.id, "stripe checkout session missing tenant_id metadata");
         return Ok(());
     };
 
-    sqlx::query(
-        "UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1",
-    )
-    .bind(tenant_id)
-    .execute(&state.db)
-    .await
-    .map_err(|error| format!("Failed to update tenant status after checkout: {error}"))?;
+    sqlx::query("UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1")
+        .bind(tenant_id)
+        .execute(&state.db)
+        .await
+        .map_err(|error| format!("Failed to update tenant status after checkout: {error}"))?;
 
     info!(tenant_id = %tenant_id, session_id = %session.id, "stripe checkout completed");
     Ok(())
@@ -653,7 +663,10 @@ async fn auto_provision_dedicated_ips(state: &AppState, tenant_id: &str) -> Resu
         let response = client
             .post(format!("{api_base_url}/v1/dedicated-ips"))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", state.config.service_auth_token))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", state.config.service_auth_token),
+            )
             .header("X-Internal-Service", "billing")
             .header("X-Tenant-Id", tenant_id)
             .json(&serde_json::json!({ "auto_provisioned": true }))
@@ -772,7 +785,9 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
             .bind(subscription_id)
             .fetch_optional(&state.db)
             .await
-            .map_err(|error| format!("Failed to resolve tenant from Stripe subscription: {error}"))?;
+            .map_err(|error| {
+                format!("Failed to resolve tenant from Stripe subscription: {error}")
+            })?;
         }
     }
 
@@ -798,8 +813,7 @@ async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Resul
             .subscription_details
             .as_ref()
             .and_then(|details| details.metadata.as_ref()),
-    )
-    else {
+    ) else {
         return Ok(());
     };
 
@@ -912,9 +926,7 @@ async fn record_failed_payment(
         new_status = "hard_suspended".into();
         if existing.as_ref().map(|row| row.status.as_str()) != Some("hard_suspended") {
             suspended_at = Some(now);
-            grace_period_ends_at = Some(
-                now + TimeDelta::days(i64::from(config.grace_period_days)),
-            );
+            grace_period_ends_at = Some(now + TimeDelta::days(i64::from(config.grace_period_days)));
         }
     } else if days_since_first_failure >= i64::from(config.soft_suspend_after_days) {
         new_status = "soft_suspended".into();
@@ -1273,8 +1285,14 @@ impl SubscriptionStatus {
         match current_status {
             "incomplete" => matches!(self, Self::Active | Self::IncompleteExpired),
             "incomplete_expired" => false,
-            "trialing" => matches!(self, Self::Active | Self::PastDue | Self::Canceled | Self::Unpaid | Self::Paused),
-            "active" => matches!(self, Self::PastDue | Self::Canceled | Self::Unpaid | Self::Paused),
+            "trialing" => matches!(
+                self,
+                Self::Active | Self::PastDue | Self::Canceled | Self::Unpaid | Self::Paused
+            ),
+            "active" => matches!(
+                self,
+                Self::PastDue | Self::Canceled | Self::Unpaid | Self::Paused
+            ),
             "past_due" => matches!(self, Self::Active | Self::Canceled | Self::Unpaid),
             "unpaid" => matches!(self, Self::Active | Self::Canceled),
             "canceled" => false,

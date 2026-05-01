@@ -60,15 +60,19 @@ pub struct EnqueueOptions {
     pub max_attempts: i32,
     #[serde(default)]
     pub priority: i32,
-/// When to make the job visible (None = now)
+    /// When to make the job visible (None = now)
     pub scheduled_at: Option<DateTime<Utc>>,
-/// Seconds before a processing job becomes visible again
+    /// Seconds before a processing job becomes visible again
     #[serde(default = "default_visibility_timeout")]
     pub visibility_timeout: i32,
 }
 
-fn default_max_attempts() -> i32 { 3 }
-fn default_visibility_timeout() -> i32 { 300 }
+fn default_max_attempts() -> i32 {
+    3
+}
+fn default_visibility_timeout() -> i32 {
+    300
+}
 
 // ─── Queue stats ───────────────────────────────────────────────
 
@@ -128,7 +132,8 @@ mod tests {
 
     #[test]
     fn test_enqueue_options_defaults() {
-        let json = r#"{"tenant_id":"00000000-0000-0000-0000-000000000000","queue":"email","payload":{}}"#;
+        let json =
+            r#"{"tenant_id":"00000000-0000-0000-0000-000000000000","queue":"email","payload":{}}"#;
         let opts: EnqueueOptions = serde_json::from_str(json).unwrap();
         assert_eq!(opts.max_attempts, 3);
         assert_eq!(opts.priority, 0);

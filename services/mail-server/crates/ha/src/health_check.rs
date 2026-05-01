@@ -55,29 +55,29 @@ impl HealthCheckService {
         }
     }
 
-/// Run all health checks and produce a cluster health report.
+    /// Run all health checks and produce a cluster health report.
     pub async fn check_all(&self) -> ClusterHealth {
         let mut components = Vec::with_capacity(5);
 
-// 1. Database primary
+        // 1. Database primary
         components.push(self.check_database().await);
 
-// 2. Redis
+        // 2. Redis
         components.push(self.check_redis().await);
 
-// 3. Replication lag
+        // 3. Replication lag
         components.push(self.check_replication_lag().await);
 
-// 4. Disk space (simulated check via DB)
+        // 4. Disk space (simulated check via DB)
         components.push(self.check_disk_space().await);
 
-// 5. Memory (in-process)
+        // 5. Memory (in-process)
         components.push(self.check_memory().await);
 
-// Compute overall status
+        // Compute overall status
         let overall = Self::compute_overall(&components);
 
-// Record in DB (best effort)
+        // Record in DB (best effort)
         if let Err(error) = self.record_health_check(&overall, &components).await {
             warn!(error = %error, "Failed to persist health check result");
         }
@@ -100,23 +100,32 @@ impl HealthCheckService {
                 .await
                 .map(|_| (HealthStatus::Healthy, None))
                 .map_err(|e| format!("DB ping failed: {e}"))
-        }).await
+        })
+        .await
     }
 
     async fn check_redis(&self) -> ComponentHealth {
         let client = self.redis_client.clone();
         check_component("redis", async move {
             let client = client.ok_or_else(|| "Redis client not configured".to_string())?;
-            let mut conn = client.get_multiplexed_async_connection().await
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
                 .map_err(|e| format!("Redis connect: {e}"))?;
-            let pong: String = redis::cmd("PING").query_async(&mut conn).await
+            let pong: String = redis::cmd("PING")
+                .query_async(&mut conn)
+                .await
                 .map_err(|e| format!("Redis PING: {e}"))?;
             if pong == "PONG" {
                 Ok((HealthStatus::Healthy, None))
             } else {
-                Ok((HealthStatus::Degraded, Some(format!("Unexpected PING response: {pong}"))))
+                Ok((
+                    HealthStatus::Degraded,
+                    Some(format!("Unexpected PING response: {pong}")),
+                ))
             }
-        }).await
+        })
+        .await
     }
 
     async fn check_replication_lag(&self) -> ComponentHealth {
@@ -153,21 +162,23 @@ impl HealthCheckService {
     async fn check_disk_space(&self) -> ComponentHealth {
         let pool = self.pool.clone();
         check_component("disk", async move {
-            let row: Option<(i64,)> = sqlx::query_as(
-                "SELECT pg_database_size(current_database())"
-            )
-            .fetch_optional(&pool)
-            .await
-            .map_err(|e| format!("Disk check: {e}"))?;
+            let row: Option<(i64,)> = sqlx::query_as("SELECT pg_database_size(current_database())")
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| format!("Disk check: {e}"))?;
 
             match row {
                 Some((size,)) => {
                     let gb = size as f64 / (1024.0 * 1024.0 * 1024.0);
                     Ok((HealthStatus::Healthy, Some(format!("DB size: {gb:.2} GB"))))
                 }
-                None => Ok((HealthStatus::Unknown, Some("Could not determine DB size".into()))),
+                None => Ok((
+                    HealthStatus::Unknown,
+                    Some("Could not determine DB size".into()),
+                )),
             }
-        }).await
+        })
+        .await
     }
 
     async fn check_memory(&self) -> ComponentHealth {
@@ -185,14 +196,22 @@ impl HealthCheckService {
                     Some(format!("RSS: {} KB / {} KB", rss_kb, total_kb)),
                 ))
             } else {
-                Ok((HealthStatus::Unknown, Some("Process not found for memory check".into())))
+                Ok((
+                    HealthStatus::Unknown,
+                    Some("Process not found for memory check".into()),
+                ))
             }
-        }).await
+        })
+        .await
     }
 
     fn compute_overall(components: &[ComponentHealth]) -> HealthStatus {
-        let any_unhealthy = components.iter().any(|c| c.status == HealthStatus::Unhealthy);
-        let any_degraded = components.iter().any(|c| c.status == HealthStatus::Degraded);
+        let any_unhealthy = components
+            .iter()
+            .any(|c| c.status == HealthStatus::Unhealthy);
+        let any_degraded = components
+            .iter()
+            .any(|c| c.status == HealthStatus::Degraded);
         if any_unhealthy {
             HealthStatus::Unhealthy
         } else if any_degraded {
@@ -212,7 +231,7 @@ impl HealthCheckService {
         sqlx::query(
             "INSERT INTO ha_health_checks (node_id, region, status, components, checked_at)
              VALUES ($1, $2, $3, $4, NOW())
-             ON CONFLICT DO NOTHING"
+             ON CONFLICT DO NOTHING",
         )
         .bind(&self.config.multi_region.node_id)
         .bind(&self.config.multi_region.region)
@@ -223,27 +242,35 @@ impl HealthCheckService {
         Ok(())
     }
 
-/// Get the latest health checks for all nodes.
+    /// Get the latest health checks for all nodes.
     pub async fn get_cluster_status(&self) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-        let rows: Vec<(String, String, String, serde_json::Value, chrono::DateTime<Utc>)> =
-            sqlx::query_as(
-                "SELECT node_id, region, status, components, checked_at
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            serde_json::Value,
+            chrono::DateTime<Utc>,
+        )> = sqlx::query_as(
+            "SELECT node_id, region, status, components, checked_at
                  FROM ha_health_checks
                  WHERE checked_at > NOW() - INTERVAL '5 minutes'
-                 ORDER BY checked_at DESC"
-            )
-            .fetch_all(&self.pool)
-            .await?;
+                 ORDER BY checked_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
-        Ok(rows.into_iter().map(|(node_id, region, status, components, checked_at)| {
-            serde_json::json!({
-                "node_id": node_id,
-                "region": region,
-                "status": status,
-                "components": components,
-                "checked_at": checked_at,
+        Ok(rows
+            .into_iter()
+            .map(|(node_id, region, status, components, checked_at)| {
+                serde_json::json!({
+                    "node_id": node_id,
+                    "region": region,
+                    "status": status,
+                    "components": components,
+                    "checked_at": checked_at,
+                })
             })
-        }).collect())
+            .collect())
     }
 }
 
@@ -255,51 +282,76 @@ mod tests {
     fn test_compute_overall_healthy() {
         let components = vec![
             ComponentHealth {
-                name: "db".into(), status: HealthStatus::Healthy,
-                latency_ms: Some(1.0), message: None,
-                last_check: Utc::now(), metadata: None,
+                name: "db".into(),
+                status: HealthStatus::Healthy,
+                latency_ms: Some(1.0),
+                message: None,
+                last_check: Utc::now(),
+                metadata: None,
             },
             ComponentHealth {
-                name: "redis".into(), status: HealthStatus::Healthy,
-                latency_ms: Some(2.0), message: None,
-                last_check: Utc::now(), metadata: None,
+                name: "redis".into(),
+                status: HealthStatus::Healthy,
+                latency_ms: Some(2.0),
+                message: None,
+                last_check: Utc::now(),
+                metadata: None,
             },
         ];
-        assert_eq!(HealthCheckService::compute_overall(&components), HealthStatus::Healthy);
+        assert_eq!(
+            HealthCheckService::compute_overall(&components),
+            HealthStatus::Healthy
+        );
     }
 
     #[test]
     fn test_compute_overall_degraded() {
         let components = vec![
             ComponentHealth {
-                name: "db".into(), status: HealthStatus::Healthy,
-                latency_ms: Some(1.0), message: None,
-                last_check: Utc::now(), metadata: None,
+                name: "db".into(),
+                status: HealthStatus::Healthy,
+                latency_ms: Some(1.0),
+                message: None,
+                last_check: Utc::now(),
+                metadata: None,
             },
             ComponentHealth {
-                name: "repl".into(), status: HealthStatus::Degraded,
-                latency_ms: Some(5.0), message: Some("high lag".into()),
-                last_check: Utc::now(), metadata: None,
+                name: "repl".into(),
+                status: HealthStatus::Degraded,
+                latency_ms: Some(5.0),
+                message: Some("high lag".into()),
+                last_check: Utc::now(),
+                metadata: None,
             },
         ];
-        assert_eq!(HealthCheckService::compute_overall(&components), HealthStatus::Degraded);
+        assert_eq!(
+            HealthCheckService::compute_overall(&components),
+            HealthStatus::Degraded
+        );
     }
 
     #[test]
     fn test_compute_overall_unhealthy() {
-        let components = vec![
-            ComponentHealth {
-                name: "db".into(), status: HealthStatus::Unhealthy,
-                latency_ms: Some(3000.0), message: Some("timeout".into()),
-                last_check: Utc::now(), metadata: None,
-            },
-        ];
-        assert_eq!(HealthCheckService::compute_overall(&components), HealthStatus::Unhealthy);
+        let components = vec![ComponentHealth {
+            name: "db".into(),
+            status: HealthStatus::Unhealthy,
+            latency_ms: Some(3000.0),
+            message: Some("timeout".into()),
+            last_check: Utc::now(),
+            metadata: None,
+        }];
+        assert_eq!(
+            HealthCheckService::compute_overall(&components),
+            HealthStatus::Unhealthy
+        );
     }
 
     #[test]
     fn test_compute_overall_empty() {
-        assert_eq!(HealthCheckService::compute_overall(&[]), HealthStatus::Healthy);
+        assert_eq!(
+            HealthCheckService::compute_overall(&[]),
+            HealthStatus::Healthy
+        );
     }
 
     #[test]

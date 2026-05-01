@@ -1,7 +1,7 @@
 //! In-memory vector store with LRU eviction and NDJSON persistence.
 
-use std::collections::{BinaryHeap, HashMap};
 use std::cmp::{max, Ordering};
+use std::collections::{BinaryHeap, HashMap};
 use std::io::{BufRead, Write};
 
 use chrono::Utc;
@@ -42,7 +42,7 @@ impl VectorStore {
         }
     }
 
-/// Add a vector to the store, evicting LRU entries if needed.
+    /// Add a vector to the store, evicting LRU entries if needed.
     pub fn add(
         &self,
         text: String,
@@ -62,7 +62,7 @@ impl VectorStore {
 
         let mut store = self.inner.write();
 
-// Evict if at threshold
+        // Evict if at threshold
         if store.vectors.len() >= self.eviction_threshold {
             self.evict_lru(&mut store);
         }
@@ -92,7 +92,7 @@ impl VectorStore {
         Ok(id)
     }
 
-/// Add multiple vectors in batch.
+    /// Add multiple vectors in batch.
     pub fn add_batch(
         &self,
         items: Vec<(String, Vec<f32>, serde_json::Value)>,
@@ -104,7 +104,7 @@ impl VectorStore {
         Ok(ids)
     }
 
-/// Get a vector by ID (updates last_accessed for LRU).
+    /// Get a vector by ID (updates last_accessed for LRU).
     pub fn get(&self, id: Uuid) -> Option<EmbeddingVector> {
         let mut store = self.inner.write();
         if let Some(v) = store.vectors.get_mut(&id) {
@@ -115,13 +115,13 @@ impl VectorStore {
         }
     }
 
-/// Remove a vector by ID.
+    /// Remove a vector by ID.
     pub fn remove(&self, id: Uuid) -> bool {
         let mut store = self.inner.write();
         store.vectors.remove(&id).is_some()
     }
 
-/// Search for the top-K most similar vectors using a min-heap.
+    /// Search for the top-K most similar vectors using a min-heap.
     pub fn search(&self, query_vector: &[f32], top_k: usize, tenant_id: &str) -> Vec<SearchResult> {
         if query_vector.len() != self.dimension || tenant_id.trim().is_empty() {
             return vec![];
@@ -157,8 +157,8 @@ impl VectorStore {
             }
         }
 
-// Convert heap to sorted results (highest score first)
-// into_sorted_vec returns ascending per Ord; our reversed Ord means highest-actual-score first
+        // Convert heap to sorted results (highest score first)
+        // into_sorted_vec returns ascending per Ord; our reversed Ord means highest-actual-score first
         let results: Vec<SearchResult> = heap
             .into_sorted_vec()
             .into_iter()
@@ -173,7 +173,7 @@ impl VectorStore {
         results
     }
 
-/// Get store statistics.
+    /// Get store statistics.
     pub fn stats(&self) -> StoreStats {
         let store = self.inner.read();
         let vectors = &store.vectors;
@@ -181,7 +181,7 @@ impl VectorStore {
         let oldest = vectors.values().map(|v| v.last_accessed).min();
         let newest = vectors.values().map(|v| v.last_accessed).max();
 
-// Estimate memory:per vector = dimension * 4 bytes (f32) + overhead
+        // Estimate memory:per vector = dimension * 4 bytes (f32) + overhead
         let vec_mem = vectors.len() * (self.dimension * 4 + 256);
 
         StoreStats {
@@ -193,7 +193,7 @@ impl VectorStore {
         }
     }
 
-/// Export store to NDJSON writer.
+    /// Export store to NDJSON writer.
     pub fn export_ndjson<W: Write>(&self, writer: &mut W) -> Result<usize, EmbeddingError> {
         let store = self.inner.read();
         let mut count = 0;
@@ -205,7 +205,7 @@ impl VectorStore {
         Ok(count)
     }
 
-/// Import vectors from NDJSON reader.
+    /// Import vectors from NDJSON reader.
     pub fn import_ndjson<R: BufRead>(&self, reader: R) -> Result<usize, EmbeddingError> {
         let mut parsed = Vec::new();
         for line in reader.lines() {
@@ -270,7 +270,7 @@ impl PartialOrd for MinScoreEntry {
 
 impl Ord for MinScoreEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-// Reverse ordering for min-heap behavior
+        // Reverse ordering for min-heap behavior
         other
             .score
             .partial_cmp(&self.score)
@@ -295,7 +295,11 @@ mod tests {
     fn test_add_and_get() {
         let store = make_store();
         let id = store
-            .add("hello".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .add(
+                "hello".into(),
+                vec![1.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
             .unwrap();
         let v = store.get(id).unwrap();
         assert_eq!(v.text, "hello");
@@ -324,7 +328,11 @@ mod tests {
     fn test_remove() {
         let store = make_store();
         let id = store
-            .add("rm".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .add(
+                "rm".into(),
+                vec![1.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
             .unwrap();
         assert!(store.remove(id));
         assert!(store.get(id).is_none());
@@ -339,16 +347,40 @@ mod tests {
     #[test]
     fn test_search_top_k() {
         let store = make_store();
-        store.add("a".into(), l2_normalize(vec![1.0, 0.0, 0.0]), tenant_metadata("tenant-a")).unwrap();
-        store.add("b".into(), l2_normalize(vec![0.9, 0.1, 0.0]), tenant_metadata("tenant-a")).unwrap();
-        store.add("c".into(), l2_normalize(vec![0.0, 1.0, 0.0]), tenant_metadata("tenant-a")).unwrap();
-        store.add("d".into(), l2_normalize(vec![0.0, 0.0, 1.0]), tenant_metadata("tenant-a")).unwrap();
+        store
+            .add(
+                "a".into(),
+                l2_normalize(vec![1.0, 0.0, 0.0]),
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
+        store
+            .add(
+                "b".into(),
+                l2_normalize(vec![0.9, 0.1, 0.0]),
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
+        store
+            .add(
+                "c".into(),
+                l2_normalize(vec![0.0, 1.0, 0.0]),
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
+        store
+            .add(
+                "d".into(),
+                l2_normalize(vec![0.0, 0.0, 1.0]),
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
 
         let query = l2_normalize(vec![1.0, 0.0, 0.0]);
         let results = store.search(&query, 2, "tenant-a");
 
         assert_eq!(results.len(), 2);
-// Most similar should be "a" (identical direction)
+        // Most similar should be "a" (identical direction)
         assert_eq!(results[0].text, "a");
         assert!(results[0].score > 0.9);
     }
@@ -356,8 +388,20 @@ mod tests {
     #[test]
     fn test_search_filters_by_tenant() {
         let store = make_store();
-        store.add("tenant-a-match".into(), l2_normalize(vec![1.0, 0.0, 0.0]), tenant_metadata("tenant-a")).unwrap();
-        store.add("tenant-b-match".into(), l2_normalize(vec![1.0, 0.0, 0.0]), tenant_metadata("tenant-b")).unwrap();
+        store
+            .add(
+                "tenant-a-match".into(),
+                l2_normalize(vec![1.0, 0.0, 0.0]),
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
+        store
+            .add(
+                "tenant-b-match".into(),
+                l2_normalize(vec![1.0, 0.0, 0.0]),
+                tenant_metadata("tenant-b"),
+            )
+            .unwrap();
 
         let query = l2_normalize(vec![1.0, 0.0, 0.0]);
         let results = store.search(&query, 5, "tenant-a");
@@ -377,7 +421,9 @@ mod tests {
     #[test]
     fn test_search_wrong_dimension() {
         let store = make_store();
-        store.add("a".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a")).unwrap();
+        store
+            .add("a".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
         let results = store.search(&[1.0, 0.0], 5, "tenant-a"); // wrong dimension
         assert!(results.is_empty());
     }
@@ -385,8 +431,12 @@ mod tests {
     #[test]
     fn test_stats() {
         let store = make_store();
-        store.add("a".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a")).unwrap();
-        store.add("b".into(), vec![0.0, 1.0, 0.0], tenant_metadata("tenant-a")).unwrap();
+        store
+            .add("a".into(), vec![1.0, 0.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        store
+            .add("b".into(), vec![0.0, 1.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
         let stats = store.stats();
         assert_eq!(stats.total_vectors, 2);
         assert_eq!(stats.dimension, 3);
@@ -396,15 +446,29 @@ mod tests {
     #[test]
     fn test_export_import_ndjson() {
         let store = make_store();
-        store.add("hello".into(), vec![1.0, 0.0, 0.0], serde_json::json!({"k":"v", "tenant_id":"tenant-a"})).unwrap();
-        store.add("world".into(), vec![0.0, 1.0, 0.0], tenant_metadata("tenant-a")).unwrap();
+        store
+            .add(
+                "hello".into(),
+                vec![1.0, 0.0, 0.0],
+                serde_json::json!({"k":"v", "tenant_id":"tenant-a"}),
+            )
+            .unwrap();
+        store
+            .add(
+                "world".into(),
+                vec![0.0, 1.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
 
         let mut buf = Vec::new();
         let exported = store.export_ndjson(&mut buf).unwrap();
         assert_eq!(exported, 2);
 
         let store2 = make_store();
-        let imported = store2.import_ndjson(std::io::BufReader::new(buf.as_slice())).unwrap();
+        let imported = store2
+            .import_ndjson(std::io::BufReader::new(buf.as_slice()))
+            .unwrap();
         assert_eq!(imported, 2);
         assert_eq!(store2.stats().total_vectors, 2);
     }
@@ -425,22 +489,34 @@ mod tests {
     #[test]
     fn test_store_full() {
         let store = VectorStore::new(2, 2, 3); // max 2 vectors, eviction at 3
-        store.add("a".into(), vec![1.0, 0.0], tenant_metadata("tenant-a")).unwrap();
-        store.add("b".into(), vec![0.0, 1.0], tenant_metadata("tenant-a")).unwrap();
-        let err = store.add("c".into(), vec![1.0, 1.0], tenant_metadata("tenant-a")).unwrap_err();
+        store
+            .add("a".into(), vec![1.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        store
+            .add("b".into(), vec![0.0, 1.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        let err = store
+            .add("c".into(), vec![1.0, 1.0], tenant_metadata("tenant-a"))
+            .unwrap_err();
         assert!(matches!(err, EmbeddingError::StoreFull { .. }));
     }
 
     #[test]
     fn test_lru_eviction() {
-// eviction_threshold = 3, max = 5 → when reaching 3 entries, evict 10% (at least 0, but we round)
+        // eviction_threshold = 3, max = 5 → when reaching 3 entries, evict 10% (at least 0, but we round)
         let store = VectorStore::new(2, 100, 3);
-        store.add("a".into(), vec![1.0, 0.0], tenant_metadata("tenant-a")).unwrap();
-        store.add("b".into(), vec![0.0, 1.0], tenant_metadata("tenant-a")).unwrap();
-        store.add("c".into(), vec![1.0, 1.0], tenant_metadata("tenant-a")).unwrap();
-// This should trigger eviction of LRU entries, then succeed
-// (eviction_threshold/10 = 0, so no entries get evicted, but it shouldn't error since we're at threshold not max)
-// Actually with max=100 and threshold=3, after eviction count stays under max
+        store
+            .add("a".into(), vec![1.0, 0.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        store
+            .add("b".into(), vec![0.0, 1.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        store
+            .add("c".into(), vec![1.0, 1.0], tenant_metadata("tenant-a"))
+            .unwrap();
+        // This should trigger eviction of LRU entries, then succeed
+        // (eviction_threshold/10 = 0, so no entries get evicted, but it shouldn't error since we're at threshold not max)
+        // Actually with max=100 and threshold=3, after eviction count stays under max
         let stats = store.stats();
         assert!(stats.total_vectors <= 100);
     }

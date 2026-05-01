@@ -15,6 +15,24 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list_warmup).post(warmup_action))
 }
 
+async fn update_pool_status(
+    db: &sqlx::PgPool,
+    pool_id: &str,
+    new_status: &str,
+) -> Result<(), ApiError> {
+    let result = sqlx::query("UPDATE ip_pools SET status = $1, updated_at = NOW() WHERE id = $2")
+        .bind(new_status)
+        .bind(pool_id)
+        .execute(db)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("ip pool not found".into()));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WarmupQuery {
     #[serde(default = "default_limit")]
@@ -67,7 +85,7 @@ async fn list_warmup(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-// Fetch pools
+    // Fetch pools
     let pool_rows: Vec<(String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT id, name, status, created_at FROM ip_pools ORDER BY created_at DESC LIMIT $1 OFFSET $2",
     )
@@ -82,7 +100,7 @@ async fn list_warmup(
         return Ok(Json(vec![]));
     }
 
-// Fetch addresses for all pools
+    // Fetch addresses for all pools
     let addr_rows: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT id, pool_id, ip_address, status FROM ip_pool_addresses WHERE pool_id = ANY($1)",
     )
@@ -90,7 +108,7 @@ async fn list_warmup(
     .fetch_all(db)
     .await?;
 
-// Fetch schedules for all pools
+    // Fetch schedules for all pools
     let schedule_rows: Vec<(String, String, i32, i64, Option<i64>, String)> = sqlx::query_as(
         "SELECT id, pool_id, day, target_volume, actual_volume, status FROM isp_warmup_schedules WHERE pool_id = ANY($1) ORDER BY day ASC",
     )
@@ -155,7 +173,9 @@ async fn warmup_action(
 
     let allowed = ["start", "pause", "reset"];
     if !allowed.contains(&body.action.as_str()) {
-        return Err(ApiError::Validation(vec!["Invalid action. Use start, pause, or reset.".into()]));
+        return Err(ApiError::Validation(vec![
+            "Invalid action. Use start, pause, or reset.".into(),
+        ]));
     }
 
     let new_status = match body.action.as_str() {
@@ -166,11 +186,7 @@ async fn warmup_action(
         _ => return Err(ApiError::Internal("unreachable warmup action".into())),
     };
 
-    sqlx::query("UPDATE ip_pools SET status = $1, updated_at = NOW() WHERE id = $2")
-        .bind(new_status)
-        .bind(&body.pool_id)
-        .execute(&state.db)
-        .await?;
+    update_pool_status(&state.db, &body.pool_id, new_status).await?;
 
     if body.action == "reset" {
         sqlx::query(
@@ -181,7 +197,7 @@ async fn warmup_action(
         .await?;
     }
 
-// Audit log
+    // Audit log
     let ip = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -211,4 +227,99 @@ async fn warmup_action(
         "status": new_status,
         "message": format!("Pool {} {}", body.pool_id, body.action)
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, path::PathBuf};
+
+    use sqlx::{migrate::Migrator, PgPool};
+    use uuid::Uuid;
+
+    fn tool_migrations_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../tools/migrations")
+    }
+
+    async fn apply_tool_migrations(pool: &PgPool) {
+        let source_dir = tool_migrations_dir();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "apexmail-api-warmup-up-migrations-{}",
+            Uuid::new_v4()
+        ));
+
+        fs::create_dir_all(&temp_dir).expect("failed to create temp sqlx migration directory");
+
+        let mut entries: Vec<PathBuf> = fs::read_dir(&source_dir)
+            .expect("failed to read tools/migrations")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| {
+                        !name.ends_with("_down.sql") && !name.contains("performance_indexes")
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        entries.sort();
+
+        for path in entries {
+            let file_name = path.file_name().expect("migration path missing filename");
+            let raw = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read migration {:?}: {error}", path));
+            let normalized = raw
+                .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
+                .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
+            fs::write(temp_dir.join(file_name), normalized).unwrap_or_else(|error| {
+                panic!("failed to write copied migration {:?}: {error}", path)
+            });
+        }
+
+        let migrator = Migrator::new(temp_dir.clone())
+            .await
+            .expect("failed to load copied up migrations");
+        migrator
+            .run(pool)
+            .await
+            .expect("failed to apply copied up migrations");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[sqlx::test]
+    async fn warmup_action_returns_not_found_for_missing_pool(pool: PgPool) {
+        apply_tool_migrations(&pool).await;
+
+        let error = update_pool_status(&pool, "pool_missing", "active")
+            .await
+            .expect_err("missing pools should be rejected");
+
+        assert!(matches!(error, ApiError::NotFound(_)));
+    }
+
+    #[sqlx::test]
+    async fn warmup_action_updates_existing_pool_status(pool: PgPool) {
+        apply_tool_migrations(&pool).await;
+
+        let pool_id = apexmail_lib::id::generate_id("ipp", 22);
+        sqlx::query("INSERT INTO ip_pools (id, name, status) VALUES ($1, $2, 'pending')")
+            .bind(&pool_id)
+            .bind("Primary Pool")
+            .execute(&pool)
+            .await
+            .expect("failed to insert test ip pool");
+
+        update_pool_status(&pool, &pool_id, "active")
+            .await
+            .expect("existing pools should update cleanly");
+
+        let row: (String,) = sqlx::query_as("SELECT status FROM ip_pools WHERE id = $1")
+            .bind(&pool_id)
+            .fetch_one(&pool)
+            .await
+            .expect("failed to fetch updated pool status");
+        assert_eq!(row.0, "active");
+    }
 }

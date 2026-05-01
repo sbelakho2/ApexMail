@@ -6,119 +6,128 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tonic::transport::Channel;
-use tracing::{info, error};
+use tracing::{error, info};
 
 use mail_proto::generated::outbound_service_client::OutboundServiceClient;
-use mail_proto::generated::{SendEmailRequest, QueueEmailRequest, GetQueueStatsRequest};
+use mail_proto::generated::{GetQueueStatsRequest, QueueEmailRequest, SendEmailRequest};
 
 #[derive(Parser)]
 #[command(name = "send-email")]
 #[command(about = "Send emails via ApexMail")]
 struct Cli {
-/// Outbound service gRPC address
-    #[arg(long, env = "OUTBOUND_GRPC_URL", default_value = "http://localhost:50052")]
+    /// Outbound service gRPC address
+    #[arg(
+        long,
+        env = "OUTBOUND_GRPC_URL",
+        default_value = "http://localhost:50052"
+    )]
     server: String,
-    
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-/// Send an email immediately
+    /// Send an email immediately
     Send {
-/// From address
+        /// From address
         #[arg(short, long)]
         from: String,
-        
-/// To address(es)
+
+        /// To address(es)
         #[arg(short, long)]
         to: Vec<String>,
-        
-/// Subject
+
+        /// Subject
         #[arg(short, long)]
         subject: String,
-        
-/// Text body
+
+        /// Text body
         #[arg(long)]
         text: Option<String>,
-        
-/// HTML body
+
+        /// HTML body
         #[arg(long)]
         html: Option<String>,
-        
-/// Read body from file
+
+        /// Read body from file
         #[arg(long)]
         body_file: Option<PathBuf>,
     },
-    
-/// Queue an email for later delivery
+
+    /// Queue an email for later delivery
     Queue {
-/// From address
+        /// From address
         #[arg(short, long)]
         from: String,
-        
-/// To address(es)
+
+        /// To address(es)
         #[arg(short, long)]
         to: Vec<String>,
-        
-/// Subject
+
+        /// Subject
         #[arg(short, long)]
         subject: String,
-        
-/// Text body
+
+        /// Text body
         #[arg(long)]
         text: Option<String>,
-        
-/// HTML body
+
+        /// HTML body
         #[arg(long)]
         html: Option<String>,
-        
-/// Campaign ID
+
+        /// Campaign ID
         #[arg(long)]
         campaign_id: Option<String>,
     },
-    
-/// Get queue statistics
+
+    /// Get queue statistics
     Stats,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
-    
+    tracing_subscriber::fmt().with_env_filter("info").init();
+
     let cli = Cli::parse();
-    
-// Connect to the outbound service
-    let channel = Channel::from_shared(cli.server.clone())?
-        .connect()
-        .await?;
-    
+
+    // Connect to the outbound service
+    let channel = Channel::from_shared(cli.server.clone())?.connect().await?;
+
     let mut client = OutboundServiceClient::new(channel);
-    
+
     match cli.command {
-        Commands::Send { from, to, subject, text, html, body_file } => {
+        Commands::Send {
+            from,
+            to,
+            subject,
+            text,
+            html,
+            body_file,
+        } => {
             let mut text_body = text.unwrap_or_default();
-            
+
             if let Some(path) = body_file {
                 text_body = tokio::fs::read_to_string(&path).await?;
             }
-            
-            let response = client.send_email_now(SendEmailRequest {
-                tenant_id: "default".to_string(),
-                from: from.clone(),
-                to: to.clone(),
-                subject: subject.clone(),
-                text_body,
-                html_body: html.unwrap_or_default(),
-                attachments: vec![],
-                headers: Default::default(),
-            }).await?;
-            
+
+            let response = client
+                .send_email_now(SendEmailRequest {
+                    tenant_id: "default".to_string(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    subject: subject.clone(),
+                    text_body,
+                    html_body: html.unwrap_or_default(),
+                    attachments: vec![],
+                    headers: Default::default(),
+                })
+                .await?;
+
             let result = response.into_inner();
-            
+
             if result.success {
                 info!(
                     message_id = %result.message_id,
@@ -134,28 +143,37 @@ async fn main() -> Result<()> {
                 eprintln!("✗ Failed: {}", result.error);
             }
         }
-        
-        Commands::Queue { from, to, subject, text, html, campaign_id } => {
-            let response = client.queue_email(QueueEmailRequest {
-                tenant_id: String::new(),
-                from: from.clone(),
-                to: to.clone(),
-                cc: vec![],
-                bcc: vec![],
-                reply_to: String::new(),
-                subject: subject.clone(),
-                text_body: text.unwrap_or_default(),
-                html_body: html.unwrap_or_default(),
-                attachments: vec![],
-                headers: Default::default(),
-                scheduled_at: 0,
-                campaign_id: campaign_id.unwrap_or_default(),
-                tags: vec![],
-                metadata: Default::default(),
-            }).await?;
-            
+
+        Commands::Queue {
+            from,
+            to,
+            subject,
+            text,
+            html,
+            campaign_id,
+        } => {
+            let response = client
+                .queue_email(QueueEmailRequest {
+                    tenant_id: String::new(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    cc: vec![],
+                    bcc: vec![],
+                    reply_to: String::new(),
+                    subject: subject.clone(),
+                    text_body: text.unwrap_or_default(),
+                    html_body: html.unwrap_or_default(),
+                    attachments: vec![],
+                    headers: Default::default(),
+                    scheduled_at: 0,
+                    campaign_id: campaign_id.unwrap_or_default(),
+                    tags: vec![],
+                    metadata: Default::default(),
+                })
+                .await?;
+
             let result = response.into_inner();
-            
+
             if !result.email_id.is_empty() {
                 info!(
                     email_id = %result.email_id,
@@ -169,13 +187,15 @@ async fn main() -> Result<()> {
                 eprintln!("✗ Failed: {}", result.status);
             }
         }
-        
+
         Commands::Stats => {
-            let response = client.get_queue_stats(GetQueueStatsRequest {
-                tenant_id: String::new(),
-            }).await?;
+            let response = client
+                .get_queue_stats(GetQueueStatsRequest {
+                    tenant_id: String::new(),
+                })
+                .await?;
             let stats = response.into_inner();
-            
+
             println!("Email Queue Statistics");
             println!("======================");
             println!("Pending:    {:>8}", stats.pending_count);
@@ -185,6 +205,6 @@ async fn main() -> Result<()> {
             println!("Bounced:    {:>8}", stats.bounced_today);
         }
     }
-    
+
     Ok(())
 }

@@ -197,84 +197,155 @@ impl Default for MtaConfig {
 macro_rules! impl_default {
     ($ty:ty, $body:expr) => {
         impl Default for $ty {
-            fn default() -> Self { $body }
+            fn default() -> Self {
+                $body
+            }
         }
     };
 }
 
-impl_default!(InboundConfig, Self {
-    enabled: true,
-    host: default_host(),
-    port: default_smtp_port(),
-    secure_port: default_smtps_port(),
-    hostname: default_hostname(),
-    max_message_size: default_max_message_size(),
-    max_recipients: default_max_recipients(),
-    auth_required: false,
-    tls: TlsConfig::default(),
-});
-impl_default!(BounceConfig, Self {
-    enabled: true,
-    host: default_host(),
-    port: default_bounce_port(),
-    hostname: default_hostname(),
-    verp_domain: default_verp_domain(),
-});
-impl_default!(FeedbackConfig, Self {
-    enabled: true,
-    host: default_host(),
-    port: default_fbl_port(),
-    hostname: default_hostname(),
-});
-impl_default!(DkimConfig, Self {
-    selector: default_selector(),
-    default_key_path: None,
-    key_directory: None,
-});
+impl_default!(
+    InboundConfig,
+    Self {
+        enabled: true,
+        host: default_host(),
+        port: default_smtp_port(),
+        secure_port: default_smtps_port(),
+        hostname: default_hostname(),
+        max_message_size: default_max_message_size(),
+        max_recipients: default_max_recipients(),
+        auth_required: false,
+        tls: TlsConfig::default(),
+    }
+);
+impl_default!(
+    BounceConfig,
+    Self {
+        enabled: true,
+        host: default_host(),
+        port: default_bounce_port(),
+        hostname: default_hostname(),
+        verp_domain: default_verp_domain(),
+    }
+);
+impl_default!(
+    FeedbackConfig,
+    Self {
+        enabled: true,
+        host: default_host(),
+        port: default_fbl_port(),
+        hostname: default_hostname(),
+    }
+);
+impl_default!(
+    DkimConfig,
+    Self {
+        selector: default_selector(),
+        default_key_path: None,
+        key_directory: None,
+    }
+);
 impl_default!(SpfConfig, Self { strict_mode: false });
-impl_default!(DmarcConfig, Self {
-    report_email: default_report_email(),
-    report_domain: default_hostname(),
-});
-impl_default!(RateLimitConfig, Self {
-    enabled: true,
-    max_connections_per_ip: default_max_conn_per_ip(),
-    max_messages_per_connection: default_max_msg_per_conn(),
-    max_recipients_per_message: default_max_recipients(),
-});
-impl_default!(EmailAuthConfig, Self {
-    require_spf: false,
-    require_dkim: false,
-    enforce_dmarc: false,
-    allow_soft_fail: true,
-    trusted_relays: Vec::new(),
-});
-impl_default!(MetricsConfig, Self { enabled: false, port: default_metrics_port() });
+impl_default!(
+    DmarcConfig,
+    Self {
+        report_email: default_report_email(),
+        report_domain: default_hostname(),
+    }
+);
+impl_default!(
+    RateLimitConfig,
+    Self {
+        enabled: true,
+        max_connections_per_ip: default_max_conn_per_ip(),
+        max_messages_per_connection: default_max_msg_per_conn(),
+        max_recipients_per_message: default_max_recipients(),
+    }
+);
+impl_default!(
+    EmailAuthConfig,
+    Self {
+        require_spf: false,
+        require_dkim: false,
+        enforce_dmarc: false,
+        allow_soft_fail: true,
+        trusted_relays: Vec::new(),
+    }
+);
+impl_default!(
+    MetricsConfig,
+    Self {
+        enabled: false,
+        port: default_metrics_port()
+    }
+);
 
-fn default_env() -> String { "development".into() }
-fn default_mta_id() -> String { uuid::Uuid::new_v4().to_string() }
-fn default_host() -> String { "0.0.0.0".into() }
-fn default_hostname() -> String { "mail.apexmail.ee".into() }
-fn default_smtp_port() -> u16 { 25 }
-fn default_smtps_port() -> u16 { 465 }
-fn default_bounce_port() -> u16 { 2525 }
-fn default_fbl_port() -> u16 { 2526 }
-fn default_max_message_size() -> usize { 25 * 1024 * 1024 }
-fn default_max_recipients() -> usize { 100 }
-fn default_max_connections() -> u32 { 20 }
-fn default_key_prefix() -> String { "mta:".into() }
-fn default_selector() -> String { "apexmail2026".into() }
-fn default_report_email() -> String { "dmarc-reports@apexmail.ee".into() }
-fn default_verp_domain() -> String { "bounces.apexmail.ee".into() }
-fn default_max_conn_per_ip() -> u32 { 10 }
-fn default_max_msg_per_conn() -> u32 { 100 }
-fn default_metrics_port() -> u16 { 9100 }
-fn default_health_port() -> u16 { 8081 }
-fn default_shutdown_timeout() -> u64 { 30 }
-fn default_true() -> bool { true }
+fn default_env() -> String {
+    "development".into()
+}
+fn default_mta_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+fn default_host() -> String {
+    "0.0.0.0".into()
+}
+fn default_hostname() -> String {
+    "mail.apexmail.ee".into()
+}
+fn default_smtp_port() -> u16 {
+    25
+}
+fn default_smtps_port() -> u16 {
+    465
+}
+fn default_bounce_port() -> u16 {
+    2525
+}
+fn default_fbl_port() -> u16 {
+    2526
+}
+fn default_max_message_size() -> usize {
+    25 * 1024 * 1024
+}
+fn default_max_recipients() -> usize {
+    100
+}
+fn default_max_connections() -> u32 {
+    20
+}
+fn default_key_prefix() -> String {
+    "mta:".into()
+}
+fn default_selector() -> String {
+    "apexmail2026".into()
+}
+fn default_report_email() -> String {
+    "dmarc-reports@apexmail.ee".into()
+}
+fn default_verp_domain() -> String {
+    "bounces.apexmail.ee".into()
+}
+fn default_max_conn_per_ip() -> u32 {
+    10
+}
+fn default_max_msg_per_conn() -> u32 {
+    100
+}
+fn default_metrics_port() -> u16 {
+    9100
+}
+fn default_health_port() -> u16 {
+    8081
+}
+fn default_shutdown_timeout() -> u64 {
+    30
+}
+fn default_true() -> bool {
+    true
+}
 
 impl MtaConfig {
-/// Load configuration from environment variables.
+    /// Load configuration from environment variables.
     pub fn from_env() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
         let cfg = Self {
@@ -290,7 +361,8 @@ impl MtaConfig {
             },
             redis: RedisConfig {
                 url: std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
-                key_prefix: std::env::var("REDIS_KEY_PREFIX").unwrap_or_else(|_| default_key_prefix()),
+                key_prefix: std::env::var("REDIS_KEY_PREFIX")
+                    .unwrap_or_else(|_| default_key_prefix()),
             },
             inbound: InboundConfig {
                 enabled: parse_bool_env("INBOUND_ENABLED", true),
@@ -329,7 +401,8 @@ impl MtaConfig {
                 strict_mode: parse_bool_env("SPF_STRICT_MODE", false),
             },
             dmarc: DmarcConfig {
-                report_email: std::env::var("DMARC_REPORT_EMAIL").unwrap_or_else(|_| default_report_email()),
+                report_email: std::env::var("DMARC_REPORT_EMAIL")
+                    .unwrap_or_else(|_| default_report_email()),
                 report_domain: std::env::var("DMARC_REPORT_DOMAIN").unwrap_or_default(),
             },
             rate_limit: RateLimitConfig::default(),
@@ -357,11 +430,11 @@ impl MtaConfig {
         Ok(cfg)
     }
 
-/// #155:Validate all config values to catch misconfiguration early.
+    /// #155:Validate all config values to catch misconfiguration early.
     pub fn validate(&self) -> anyhow::Result<()> {
         let mut errors: Vec<String> = Vec::new();
 
-// --- ports must be 1..=65535 (already u16, but 0 is invalid) ---
+        // --- ports must be 1..=65535 (already u16, but 0 is invalid) ---
         let port_checks: &[(&str, u16)] = &[
             ("inbound.port", self.inbound.port),
             ("inbound.secure_port", self.inbound.secure_port),
@@ -376,7 +449,7 @@ impl MtaConfig {
             }
         }
 
-// ports must not collide (among enabled listeners)
+        // ports must not collide (among enabled listeners)
         {
             let mut active_ports: Vec<(&str, u16)> = Vec::new();
             if self.inbound.enabled {
@@ -400,15 +473,13 @@ impl MtaConfig {
                     let (n1, p1) = active_ports[i];
                     let (n2, p2) = active_ports[j];
                     if p1 == p2 {
-                        errors.push(format!(
-                            "Port collision: {n1} and {n2} both use port {p1}"
-                        ));
+                        errors.push(format!("Port collision: {n1} and {n2} both use port {p1}"));
                     }
                 }
             }
         }
 
-// --- numeric bounds ---
+        // --- numeric bounds ---
         if self.database.max_connections == 0 {
             errors.push("database.max_connections must be > 0".into());
         }
@@ -439,7 +510,7 @@ impl MtaConfig {
             errors.push("graceful_shutdown_timeout must be > 0".into());
         }
 
-// --- TLS config coherence ---
+        // --- TLS config coherence ---
         if self.inbound.tls.enabled {
             if self.inbound.tls.cert_path.is_none() {
                 errors.push("TLS enabled but tls.cert_path is not set".into());
@@ -449,7 +520,7 @@ impl MtaConfig {
             }
         }
 
-// --- required non-empty strings ---
+        // --- required non-empty strings ---
         if self.database.connection_string.is_empty() {
             errors.push("database.connection_string must not be empty".into());
         }
@@ -479,9 +550,15 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 }
 
 fn parse_u16_env(name: &str, default: u16) -> u16 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn parse_usize_env(name: &str, default: usize) -> usize {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }

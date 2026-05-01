@@ -11,11 +11,11 @@
 
 use chrono::{Duration, Utc};
 use std::net::Ipv4Addr;
-use threat_intel::ip_blocklist::{IpBlockEntry, ThreatCategory};
+use threat_intel::background_task::{purge_once, FeedRefreshConfig};
 use threat_intel::domain_blocklist::DomainBlockEntry;
 use threat_intel::engine::ThreatAction;
+use threat_intel::ip_blocklist::{IpBlockEntry, ThreatCategory};
 use threat_intel::ThreatIntelEngine;
-use threat_intel::background_task::{purge_once, FeedRefreshConfig};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -50,12 +50,25 @@ fn domain_entry(domain: &str, expires_in_secs: i64) -> DomainBlockEntry {
 fn test_blocked_ip_flagged() {
     let engine = ThreatIntelEngine::new();
     let ip: Ipv4Addr = "198.51.100.1".parse().unwrap();
-    engine.ip_blocklist().add_ip(ip, spam_entry("198.51.100.1", 3600));
+    engine
+        .ip_blocklist()
+        .add_ip(ip, spam_entry("198.51.100.1", 3600));
 
     let verdict = engine.check_ip("198.51.100.1");
-    assert_eq!(verdict.action, ThreatAction::Block, "Blocked IP must yield Block action");
-    let score = verdict.ip_reputation.as_ref().map(|r| r.score).unwrap_or(0.0);
-    assert!(score > 0.0, "Blocked IP must have non-zero reputation score");
+    assert_eq!(
+        verdict.action,
+        ThreatAction::Block,
+        "Blocked IP must yield Block action"
+    );
+    let score = verdict
+        .ip_reputation
+        .as_ref()
+        .map(|r| r.score)
+        .unwrap_or(0.0);
+    assert!(
+        score > 0.0,
+        "Blocked IP must have non-zero reputation score"
+    );
 }
 
 /// Unblocked IP must return Allow.
@@ -63,7 +76,11 @@ fn test_blocked_ip_flagged() {
 fn test_clean_ip_not_flagged() {
     let engine = ThreatIntelEngine::new();
     let verdict = engine.check_ip("203.0.113.99");
-    assert_eq!(verdict.action, ThreatAction::Allow, "Unknown IP must return Allow");
+    assert_eq!(
+        verdict.action,
+        ThreatAction::Allow,
+        "Unknown IP must return Allow"
+    );
 }
 
 /// Malformed IP string must not panic.
@@ -71,7 +88,7 @@ fn test_clean_ip_not_flagged() {
 fn test_malformed_ip_no_panic() {
     let engine = ThreatIntelEngine::new();
     let verdict = engine.check_ip("not_an_ip");
-// Should return a safe Allow verdict without panicking
+    // Should return a safe Allow verdict without panicking
     assert_eq!(verdict.action, ThreatAction::Allow);
 }
 
@@ -81,16 +98,18 @@ fn test_malformed_ip_no_panic() {
 #[test]
 fn test_cidr_match_inside_range() {
     let engine = ThreatIntelEngine::new();
-    engine.ip_blocklist()
+    engine
+        .ip_blocklist()
         .add_cidr("198.51.100.0/24", spam_entry("198.51.100.0/24", 3600))
         .expect("add CIDR");
 
-// Any IP in .0/24 should match
+    // Any IP in .0/24 should match
     for last_octet in [1u8, 100, 254] {
         let ip = format!("198.51.100.{}", last_octet);
         let verdict = engine.check_ip(&ip);
         assert_eq!(
-            verdict.action, ThreatAction::Block,
+            verdict.action,
+            ThreatAction::Block,
             "IP {} inside blocked /24 CIDR must yield Block action",
             ip
         );
@@ -101,13 +120,18 @@ fn test_cidr_match_inside_range() {
 #[test]
 fn test_cidr_miss_outside_range() {
     let engine = ThreatIntelEngine::new();
-    engine.ip_blocklist()
+    engine
+        .ip_blocklist()
         .add_cidr("198.51.100.0/24", spam_entry("198.51.100.0/24", 3600))
         .expect("add CIDR");
 
-// 198.51.101.1 is outside /24 (different third octet)
+    // 198.51.101.1 is outside /24 (different third octet)
     let verdict = engine.check_ip("198.51.101.1");
-    assert_eq!(verdict.action, ThreatAction::Allow, "IP outside /24 CIDR must NOT be flagged");
+    assert_eq!(
+        verdict.action,
+        ThreatAction::Allow,
+        "IP outside /24 CIDR must NOT be flagged"
+    );
 }
 
 // ── TTL expiry (the empty-blocklist-after-24h regression) ────────────────────
@@ -120,11 +144,13 @@ fn test_expired_entry_purged_and_no_longer_blocked() {
     let engine = ThreatIntelEngine::new();
     let ip: Ipv4Addr = "198.51.100.50".parse().unwrap();
 
-// Add entry with TTL already expired (negative seconds)
-    engine.ip_blocklist().add_ip(ip, spam_entry("198.51.100.50", -1));
+    // Add entry with TTL already expired (negative seconds)
+    engine
+        .ip_blocklist()
+        .add_ip(ip, spam_entry("198.51.100.50", -1));
 
-// Before purge:entry may or may not be returned (implementation-dependent)
-// After purge:MUST be removed
+    // Before purge:entry may or may not be returned (implementation-dependent)
+    // After purge:MUST be removed
     let stats = purge_once(&engine);
     assert!(
         stats.expired_ips_removed > 0,
@@ -134,7 +160,8 @@ fn test_expired_entry_purged_and_no_longer_blocked() {
 
     let verdict = engine.check_ip("198.51.100.50");
     assert_eq!(
-        verdict.action, ThreatAction::Allow,
+        verdict.action,
+        ThreatAction::Allow,
         "After purge, expired IP must no longer be treated as a threat. \
          This regression demonstrates the empty-blocklist-after-24h bug: \
          without feed auto-refresh, all threat intel expires and attackers pass freely."
@@ -146,14 +173,23 @@ fn test_expired_entry_purged_and_no_longer_blocked() {
 fn test_valid_entry_survives_purge() {
     let engine = ThreatIntelEngine::new();
     let ip: Ipv4Addr = "198.51.100.77".parse().unwrap();
-    engine.ip_blocklist().add_ip(ip, spam_entry("198.51.100.77", 86400)); // expires in 24h
+    engine
+        .ip_blocklist()
+        .add_ip(ip, spam_entry("198.51.100.77", 86400)); // expires in 24h
 
     let stats = purge_once(&engine);
-// Nothing expired so removal count should be 0
-    assert_eq!(stats.expired_ips_removed, 0, "Fresh entry must not be purged");
+    // Nothing expired so removal count should be 0
+    assert_eq!(
+        stats.expired_ips_removed, 0,
+        "Fresh entry must not be purged"
+    );
 
     let verdict = engine.check_ip("198.51.100.77");
-    assert_eq!(verdict.action, ThreatAction::Block, "Fresh entry must still be blocked after purge");
+    assert_eq!(
+        verdict.action,
+        ThreatAction::Block,
+        "Fresh entry must still be blocked after purge"
+    );
 }
 
 // ── Domain blocklist ──────────────────────────────────────────────────────────
@@ -168,7 +204,11 @@ fn test_blocked_domain_flagged() {
     );
 
     let verdict = engine.check_domain("evil-phishing-site.com");
-    assert_eq!(verdict.action, ThreatAction::Block, "Blocked domain must yield Block action");
+    assert_eq!(
+        verdict.action,
+        ThreatAction::Block,
+        "Blocked domain must yield Block action"
+    );
 }
 
 /// Clean domain must return Allow.
@@ -176,7 +216,11 @@ fn test_blocked_domain_flagged() {
 fn test_clean_domain_not_flagged() {
     let engine = ThreatIntelEngine::new();
     let verdict = engine.check_domain("google.com");
-    assert_eq!(verdict.action, ThreatAction::Allow, "google.com must return Allow");
+    assert_eq!(
+        verdict.action,
+        ThreatAction::Allow,
+        "google.com must return Allow"
+    );
 }
 
 /// Subdomain of a blocked domain must ALSO be blocked.
@@ -185,15 +229,15 @@ fn test_clean_domain_not_flagged() {
 #[test]
 fn test_subdomain_not_matched_by_base_domain_block() {
     let engine = ThreatIntelEngine::new();
-    engine.domain_blocklist().add(
-        "phishing.com",
-        domain_entry("phishing.com", 3600),
-    );
+    engine
+        .domain_blocklist()
+        .add("phishing.com", domain_entry("phishing.com", 3600));
 
-// The lookup walks up:mail.phishing.com → phishing.com → match!
+    // The lookup walks up:mail.phishing.com → phishing.com → match!
     let verdict = engine.check_domain("mail.phishing.com");
     assert_eq!(
-        verdict.action, ThreatAction::Block,
+        verdict.action,
+        ThreatAction::Block,
         "Subdomain of a blocked domain must also be blocked (hierarchy walk). \
          The blocklist uses suffix/parent matching: mail.phishing.com matches phishing.com."
     );
@@ -213,22 +257,22 @@ async fn test_spawn_refresh_task_no_panic() {
         enabled: true,
     };
 
-// No-op loader — just verifies the task can be spawned
+    // No-op loader — just verifies the task can be spawned
     let handle = spawn_refresh_task(engine, config, |_engine| {
-// In real usage:fetch feed data and load into engine
+        // In real usage:fetch feed data and load into engine
     });
 
-// Abort immediately — we're just checking it spawns without panic
+    // Abort immediately — we're just checking it spawns without panic
     handle.abort();
-// Give Tokio a moment to process the abort
+    // Give Tokio a moment to process the abort
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 }
 
 /// A disabled refresh task must return immediately without running the loader.
 #[tokio::test]
 async fn test_disabled_refresh_task_does_not_run_loader() {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use threat_intel::background_task::run_refresh_loop;
 
     let engine = Arc::new(ThreatIntelEngine::new());
@@ -240,7 +284,7 @@ async fn test_disabled_refresh_task_does_not_run_loader() {
         enabled: false, // disabled!
     };
 
-// run_refresh_loop returns immediately when enabled=false
+    // run_refresh_loop returns immediately when enabled=false
     let task_engine = engine.clone();
     tokio::time::timeout(
         std::time::Duration::from_millis(100),
@@ -251,5 +295,8 @@ async fn test_disabled_refresh_task_does_not_run_loader() {
     .await
     .expect("disabled task must return immediately");
 
-    assert!(!called.load(Ordering::SeqCst), "Disabled refresh task must NOT invoke loader");
+    assert!(
+        !called.load(Ordering::SeqCst),
+        "Disabled refresh task must NOT invoke loader"
+    );
 }

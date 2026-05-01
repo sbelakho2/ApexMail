@@ -290,7 +290,7 @@ NEW_STRESS_CATEGORIES = {
          "checks": {"must_contain_any": ["PAYG", "tier", "$0.0005", "$0.0003", "Scale"]}},
         
         {"q": "Enterprise is $800. If I send 5M emails, what's the per-email cost?",
-         "checks": {"must_contain_any": ["$800", "0.00016", "custom", "contact@apexmail.ee"]}},
+         "checks": {"must_contain_any": ["$800", "0.00016", "custom", "support@apexmail.ee"]}},
     ],
 
     "growth_limits_clarity": [

@@ -5,10 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
   <meta name="theme-color" content="#2563EB" />
 
-  {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
-  {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.ttf", cachebust=true) %}
-  {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
-  {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
+  {% set asset_cdn_base_url = config.extra.asset_cdn_base_url | default(value="") %}
+  {% if asset_cdn_base_url %}
+    {% set inter_font_url = asset_cdn_base_url ~ "/fonts/InterVariable.woff2" %}
+    {% set mono_font_url = asset_cdn_base_url ~ "/fonts/JetBrainsMono-Variable.ttf" %}
+    {% set styles_css_url = asset_cdn_base_url ~ "/css/styles.css" %}
+    {% set no_js_css_url = asset_cdn_base_url ~ "/css/no-js.css" %}
+  {% else %}
+    {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
+    {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.ttf", cachebust=true) %}
+    {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
+    {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
+  {% endif %}
 
   <title>{% block title %}{{ config.title }}{% endblock title %}</title>
   <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}" />
@@ -109,8 +117,15 @@
 
   <script>
     (() => {
-      const consentCookie = "apexmail_cookie_consent";
-      const analyticsUrl = "https://plausible.apexmail.ee/api/event?name=pageview";
+      const consentCookie = {{ config.extra.cookie_consent_cookie_name | default(value="apexmail_cookie_consent") | json_encode | safe }};
+      const analyticsUrl = {{ config.extra.analytics_pixel_url | json_encode | safe }};
+      const configuredConsentChoices = {{ config.extra.cookie_consent_choices | default(value=[]) | json_encode | safe }};
+      const consentChoices = Array.isArray(configuredConsentChoices) && configuredConsentChoices.length > 0
+        ? configuredConsentChoices
+        : [
+            { value: "necessary", analytics: false },
+            { value: "all", analytics: true },
+          ];
 
       function readConsent() {
         const prefix = consentCookie + "=";
@@ -126,6 +141,9 @@
       }
 
       function injectAnalyticsPixel() {
+        if (!analyticsUrl) {
+          return;
+        }
         if (document.querySelector('[data-analytics-pixel="plausible"]')) {
           return;
         }
@@ -151,7 +169,8 @@
       function applyConsent(value) {
         writeConsent(value);
         hideBanner();
-        if (value === "all") {
+        const choice = consentChoices.find((entry) => entry && entry.value === value);
+        if (choice?.analytics === true) {
           injectAnalyticsPixel();
         }
       }
@@ -165,11 +184,13 @@
         mobileMenuToggle.setAttribute("aria-expanded", mobileMenuState.checked ? "true" : "false");
       }
 
-      document.getElementById("cookie-consent-necessary")?.addEventListener("click", () => {
-        applyConsent("necessary");
-      });
-      document.getElementById("cookie-consent-accept")?.addEventListener("click", () => {
-        applyConsent("all");
+      document.querySelectorAll("[data-cookie-consent-choice]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const value = button.dataset.cookieConsentValue;
+          if (value) {
+            applyConsent(value);
+          }
+        });
       });
 
       const mobileMenuState = document.getElementById("mobile-menu-state");
@@ -188,11 +209,12 @@
       }
 
       const existingConsent = readConsent();
-      if (existingConsent === "necessary") {
+      const storedChoice = consentChoices.find((entry) => entry && entry.value === existingConsent);
+      if (storedChoice) {
         hideBanner();
-      } else if (existingConsent === "all") {
-        hideBanner();
-        injectAnalyticsPixel();
+        if (storedChoice.analytics === true) {
+          injectAnalyticsPixel();
+        }
       }
     })();
   </script>

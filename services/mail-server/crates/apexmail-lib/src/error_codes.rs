@@ -4,30 +4,30 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
-// Auth
+    // Auth
     Unauthorized,
     Forbidden,
     TokenExpired,
     TokenBlacklisted,
     InvalidApiKey,
     InsufficientScopes,
-// Validation
+    // Validation
     ValidationError,
     InvalidInput,
     PayloadTooLarge,
     NullByteDetected,
-// Rate limiting
+    // Rate limiting
     RateLimitExceeded,
-// Resources
+    // Resources
     NotFound,
     Conflict,
     Gone,
-// Server
+    // Server
     InternalError,
     ServiceUnavailable,
     RequestTimeout,
     GatewayTimeout,
-// Business
+    // Business
     DomainNotVerified,
     SuppressionExists,
     WebhookDeliveryFailed,
@@ -73,13 +73,19 @@ impl fmt::Display for ErrorCode {
 impl ErrorCode {
     pub fn http_status(&self) -> u16 {
         match self {
-            Self::Unauthorized | Self::TokenExpired | Self::TokenBlacklisted | Self::InvalidApiKey => 401,
+            Self::Unauthorized
+            | Self::TokenExpired
+            | Self::TokenBlacklisted
+            | Self::InvalidApiKey => 401,
             Self::Forbidden | Self::InsufficientScopes => 403,
             Self::NotFound => 404,
             Self::Conflict | Self::IdempotencyConflict | Self::SuppressionExists => 409,
             Self::Gone | Self::MessageCancelled => 410,
             Self::PayloadTooLarge => 413,
-            Self::ValidationError | Self::InvalidInput | Self::NullByteDetected | Self::InvalidTemplate => 400,
+            Self::ValidationError
+            | Self::InvalidInput
+            | Self::NullByteDetected
+            | Self::InvalidTemplate => 400,
             Self::RateLimitExceeded | Self::QuotaExceeded => 429,
             Self::RequestTimeout => 408,
             Self::GatewayTimeout => 504,
@@ -126,7 +132,10 @@ mod tests {
     fn test_error_code_display() {
         assert_eq!(ErrorCode::Unauthorized.to_string(), "UNAUTHORIZED");
         assert_eq!(ErrorCode::NotFound.to_string(), "NOT_FOUND");
-        assert_eq!(ErrorCode::RateLimitExceeded.to_string(), "RATE_LIMIT_EXCEEDED");
+        assert_eq!(
+            ErrorCode::RateLimitExceeded.to_string(),
+            "RATE_LIMIT_EXCEEDED"
+        );
     }
 
     #[test]
@@ -150,8 +159,8 @@ mod tests {
 
     #[test]
     fn docs_error_reference_covers_canonical_error_codes() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../docs/api/errors.md");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../docs/api/errors.md");
         let doc = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
 

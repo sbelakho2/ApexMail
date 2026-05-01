@@ -109,7 +109,11 @@ async fn deep_check(State(state): State<AppState>) -> impl IntoResponse {
             response_time_ms: db_ms,
         },
         redis: ComponentCheck {
-            status: if redis_ok { "connected" } else { "disconnected" },
+            status: if redis_ok {
+                "connected"
+            } else {
+                "disconnected"
+            },
             response_time_ms: redis_ms,
         },
     };

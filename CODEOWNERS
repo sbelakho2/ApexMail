@@ -1,0 +1,29 @@
+# Global fallback owner
+* @sbelakho2
+
+# Runtime services
+/services/mail-server/ @sbelakho2
+
+# SDKs
+/packages/ @sbelakho2
+
+# Marketing and app assets
+/apps/ @sbelakho2
+
+# Deployment and ops assets
+/deploy/ @sbelakho2
+/docker-compose.yml @sbelakho2
+/docker-compose.override.yml @sbelakho2
+/docker-compose.prod.yml @sbelakho2
+
+# Documentation and governance
+/docs/ @sbelakho2
+/README.md @sbelakho2
+/CONTRIBUTING.md @sbelakho2
+/CHANGELOG.md @sbelakho2
+/.github/ @sbelakho2
+
+# Tooling, data, and experiments
+/tools/ @sbelakho2
+/data/ @sbelakho2
+/Lobster/ @sbelakho2

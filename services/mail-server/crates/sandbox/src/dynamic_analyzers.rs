@@ -20,25 +20,25 @@ use std::sync::OnceLock;
 /// A malware indicator rule used by [`YaraSignatureAnalyzer`].
 #[derive(Debug, Clone)]
 pub struct MalwareRule {
-/// Rule identifier (e.g., "RULE_EICAR_TEST")
+    /// Rule identifier (e.g., "RULE_EICAR_TEST")
     pub id: String,
-/// Human-readable description
+    /// Human-readable description
     pub description: String,
-/// Binary patterns — ALL must be present for a match (AND logic)
+    /// Binary patterns — ALL must be present for a match (AND logic)
     pub patterns: Vec<Vec<u8>>,
-/// Risk contribution when the rule fires
+    /// Risk contribution when the rule fires
     pub risk: f64,
-/// Decision to recommend
+    /// Decision to recommend
     pub decision: DynamicDecision,
 }
 
 /// Compiled rule set for efficient multi-pattern scanning.
 struct CompiledRuleSet {
-/// Aho-Corasick automaton over all patterns from all rules
+    /// Aho-Corasick automaton over all patterns from all rules
     automaton: AhoCorasick,
-/// Maps pattern index → (rule_index, pattern_index_within_rule)
+    /// Maps pattern index → (rule_index, pattern_index_within_rule)
     pattern_map: Vec<(usize, usize)>,
-/// Original rules
+    /// Original rules
     rules: Vec<MalwareRule>,
 }
 
@@ -64,24 +64,19 @@ pub struct YaraSignatureAnalyzer {
 /// Get the default built-in malware rules.
 fn builtin_malware_rules() -> Vec<MalwareRule> {
     vec![
-// ── Test / Canary ──
+        // ── Test / Canary ──
         MalwareRule {
             id: "RULE_EICAR_TEST".into(),
             description: "EICAR anti-malware test string detected".into(),
-            patterns: vec![
-                b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR".to_vec(),
-            ],
+            patterns: vec![b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR".to_vec()],
             risk: 10.0,
             decision: DynamicDecision::Reject,
         },
-// ── PE with suspicious API imports ──
+        // ── PE with suspicious API imports ──
         MalwareRule {
             id: "RULE_PE_SUSPICIOUS_IMPORTS".into(),
             description: "PE executable with process injection API imports".into(),
-            patterns: vec![
-                b"VirtualAlloc".to_vec(),
-                b"CreateRemoteThread".to_vec(),
-            ],
+            patterns: vec![b"VirtualAlloc".to_vec(), b"CreateRemoteThread".to_vec()],
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
@@ -95,24 +90,18 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
-// ── PowerShell cradles ──
+        // ── PowerShell cradles ──
         MalwareRule {
             id: "RULE_POWERSHELL_DOWNLOAD".into(),
             description: "PowerShell download cradle detected".into(),
-            patterns: vec![
-                b"powershell".to_vec(),
-                b"DownloadString".to_vec(),
-            ],
+            patterns: vec![b"powershell".to_vec(), b"DownloadString".to_vec()],
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
         MalwareRule {
             id: "RULE_POWERSHELL_ENCODED".into(),
             description: "PowerShell encoded command execution".into(),
-            patterns: vec![
-                b"powershell".to_vec(),
-                b"-EncodedCommand".to_vec(),
-            ],
+            patterns: vec![b"powershell".to_vec(), b"-EncodedCommand".to_vec()],
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
@@ -127,43 +116,33 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
-// ── Macro auto-execution ──
+        // ── Macro auto-execution ──
         MalwareRule {
             id: "RULE_VBA_AUTOOPEN".into(),
             description: "VBA macro with AutoOpen/AutoExec trigger".into(),
-            patterns: vec![
-                b"Attribute VB_".to_vec(),
-                b"Auto_Open".to_vec(),
-            ],
+            patterns: vec![b"Attribute VB_".to_vec(), b"Auto_Open".to_vec()],
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
         MalwareRule {
             id: "RULE_VBA_SHELL_EXEC".into(),
             description: "VBA macro with Shell execution".into(),
-            patterns: vec![
-                b"Attribute VB_".to_vec(),
-                b"Shell".to_vec(),
-            ],
+            patterns: vec![b"Attribute VB_".to_vec(), b"Shell".to_vec()],
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
         MalwareRule {
             id: "RULE_VBA_WSCRIPT".into(),
             description: "VBA macro using WScript.Shell".into(),
-            patterns: vec![
-                b"WScript.Shell".to_vec(),
-            ],
+            patterns: vec![b"WScript.Shell".to_vec()],
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
-// ── Ransomware indicators ──
+        // ── Ransomware indicators ──
         MalwareRule {
             id: "RULE_RANSOM_NOTE".into(),
             description: "Ransomware payment demand indicators".into(),
-            patterns: vec![
-                b"YOUR FILES HAVE BEEN ENCRYPTED".to_vec(),
-            ],
+            patterns: vec![b"YOUR FILES HAVE BEEN ENCRYPTED".to_vec()],
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
@@ -178,13 +157,11 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
-// ── Shellcode detection ──
+        // ── Shellcode detection ──
         MalwareRule {
             id: "RULE_SHELLCODE_NOP_SLED".into(),
             description: "NOP sled shellcode pattern".into(),
-            patterns: vec![
-                b"\x90\x90\x90\x90\x90\x90\x90\x90\x90\x90".to_vec(),
-            ],
+            patterns: vec![b"\x90\x90\x90\x90\x90\x90\x90\x90\x90\x90".to_vec()],
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
@@ -197,29 +174,22 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 6.0,
             decision: DynamicDecision::Flag,
         },
-// ── PDF malware ──
+        // ── PDF malware ──
         MalwareRule {
             id: "RULE_PDF_JS_LAUNCH".into(),
             description: "PDF with JavaScript and Launch action (dropper)".into(),
-            patterns: vec![
-                b"/JavaScript".to_vec(),
-                b"/Launch".to_vec(),
-            ],
+            patterns: vec![b"/JavaScript".to_vec(), b"/Launch".to_vec()],
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
         MalwareRule {
             id: "RULE_PDF_EMBEDDED_EXE".into(),
             description: "PDF with embedded executable content".into(),
-            patterns: vec![
-                b"%PDF".to_vec(),
-                b"/EmbeddedFile".to_vec(),
-                b"MZ".to_vec(),
-            ],
+            patterns: vec![b"%PDF".to_vec(), b"/EmbeddedFile".to_vec(), b"MZ".to_vec()],
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
-// ── C2 / Beacon ──
+        // ── C2 / Beacon ──
         MalwareRule {
             id: "RULE_COBALT_STRIKE_BEACON".into(),
             description: "Cobalt Strike beacon configuration indicators".into(),
@@ -229,75 +199,56 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             risk: 9.0,
             decision: DynamicDecision::Reject,
         },
-// ── WebShell ──
+        // ── WebShell ──
         MalwareRule {
             id: "RULE_PHP_WEBSHELL".into(),
             description: "PHP webshell indicators (eval + base64_decode)".into(),
-            patterns: vec![
-                b"eval(".to_vec(),
-                b"base64_decode".to_vec(),
-            ],
+            patterns: vec![b"eval(".to_vec(), b"base64_decode".to_vec()],
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
         MalwareRule {
             id: "RULE_JSP_WEBSHELL".into(),
             description: "JSP webshell indicators (Runtime.exec)".into(),
-            patterns: vec![
-                b"Runtime.getRuntime().exec".to_vec(),
-            ],
+            patterns: vec![b"Runtime.getRuntime().exec".to_vec()],
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
-// ── Crypto miner ──
+        // ── Crypto miner ──
         MalwareRule {
             id: "RULE_CRYPTO_MINER".into(),
             description: "Cryptocurrency miner indicators".into(),
-            patterns: vec![
-                b"stratum+tcp://".to_vec(),
-            ],
+            patterns: vec![b"stratum+tcp://".to_vec()],
             risk: 7.0,
             decision: DynamicDecision::Reject,
         },
         MalwareRule {
             id: "RULE_CRYPTO_MINER_XMR".into(),
             description: "XMRig miner configuration".into(),
-            patterns: vec![
-                b"xmrig".to_vec(),
-                b"pool".to_vec(),
-            ],
+            patterns: vec![b"xmrig".to_vec(), b"pool".to_vec()],
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
-// ── Exploit kit ──
+        // ── Exploit kit ──
         MalwareRule {
             id: "RULE_RTF_OLE_EXPLOIT".into(),
             description: "RTF document with embedded OLE exploit object".into(),
-            patterns: vec![
-                b"{\\rtf".to_vec(),
-                b"\\objdata".to_vec(),
-            ],
+            patterns: vec![b"{\\rtf".to_vec(), b"\\objdata".to_vec()],
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
-// ── Batch/CMD malware ──
+        // ── Batch/CMD malware ──
         MalwareRule {
             id: "RULE_CMD_CERTUTIL_DECODE".into(),
             description: "Certutil-based payload decode (LOLBin abuse)".into(),
-            patterns: vec![
-                b"certutil".to_vec(),
-                b"-decode".to_vec(),
-            ],
+            patterns: vec![b"certutil".to_vec(), b"-decode".to_vec()],
             risk: 8.0,
             decision: DynamicDecision::Reject,
         },
         MalwareRule {
             id: "RULE_CMD_BITSADMIN".into(),
             description: "BITSAdmin download (LOLBin abuse)".into(),
-            patterns: vec![
-                b"bitsadmin".to_vec(),
-                b"/transfer".to_vec(),
-            ],
+            patterns: vec![b"bitsadmin".to_vec(), b"/transfer".to_vec()],
             risk: 7.0,
             decision: DynamicDecision::Flag,
         },
@@ -305,12 +256,12 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
 }
 
 impl YaraSignatureAnalyzer {
-/// Create analyzer with built-in malware rules.
+    /// Create analyzer with built-in malware rules.
     pub fn new() -> Option<Self> {
         Self::with_rules(builtin_malware_rules())
     }
 
-/// Create analyzer with custom rules.
+    /// Create analyzer with custom rules.
     pub fn with_rules(rules: Vec<MalwareRule>) -> Option<Self> {
         if rules.is_empty() {
             let empty_patterns: Vec<&[u8]> = Vec::new();
@@ -347,7 +298,7 @@ impl YaraSignatureAnalyzer {
         })
     }
 
-/// Number of loaded rules.
+    /// Number of loaded rules.
     pub fn rule_count(&self) -> usize {
         self.compiled.rules.len()
     }
@@ -365,7 +316,7 @@ impl DynamicAnalyzer for YaraSignatureAnalyzer {
             return None;
         }
 
-// Track which patterns matched for each rule
+        // Track which patterns matched for each rule
         let _rule_count = self.compiled.rules.len();
         let mut rule_pattern_hits: Vec<Vec<bool>> = self
             .compiled
@@ -379,7 +330,7 @@ impl DynamicAnalyzer for YaraSignatureAnalyzer {
             rule_pattern_hits[rule_idx][pat_idx] = true;
         }
 
-// Find the highest-risk fully-matched rule
+        // Find the highest-risk fully-matched rule
         let mut best_finding: Option<DynamicAnalysisFinding> = None;
 
         for (idx, rule) in self.compiled.rules.iter().enumerate() {
@@ -420,14 +371,14 @@ impl DynamicAnalyzer for YaraSignatureAnalyzer {
 /// - **No connection pooling**:Opens a new socket per scan. For high throughput,
 /// implement a connection pool or use ClamAV's milter interface.
 pub struct ClamAvSocketAnalyzer {
-/// Path to the ClamAV Unix socket (e.g., `/var/run/clamav/clamd.ctl`)
+    /// Path to the ClamAV Unix socket (e.g., `/var/run/clamav/clamd.ctl`)
     socket_path: String,
-/// Maximum data size to send (default:25MB)
+    /// Maximum data size to send (default:25MB)
     max_scan_size: usize,
 }
 
 impl ClamAvSocketAnalyzer {
-/// Create a new ClamAV analyzer with the given socket path.
+    /// Create a new ClamAV analyzer with the given socket path.
     pub fn new(socket_path: String) -> Self {
         Self {
             socket_path,
@@ -435,7 +386,7 @@ impl ClamAvSocketAnalyzer {
         }
     }
 
-/// Create with a custom max scan size.
+    /// Create with a custom max scan size.
     pub fn with_max_size(socket_path: String, max_scan_size: usize) -> Self {
         Self {
             socket_path,
@@ -461,7 +412,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             });
         }
 
-// Attempt connection to ClamAV socket
+        // Attempt connection to ClamAV socket
         #[cfg(unix)]
         {
             let stream = match std::os::unix::net::UnixStream::connect(&self.socket_path) {
@@ -476,19 +427,19 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 }
             };
 
-// Set a reasonable timeout
+            // Set a reasonable timeout
             let timeout = std::time::Duration::from_secs(30);
             let _ = stream.set_read_timeout(Some(timeout));
             let _ = stream.set_write_timeout(Some(timeout));
 
             let mut stream = std::io::BufWriter::new(stream);
 
-// Send INSTREAM command
+            // Send INSTREAM command
             if stream.write_all(b"zINSTREAM\0").is_err() {
                 return None;
             }
 
-// Send data in 8KB chunks
+            // Send data in 8KB chunks
             let chunk_size = 8192;
             for chunk in data.chunks(chunk_size) {
                 let len = (chunk.len() as u32).to_be_bytes();
@@ -497,7 +448,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 }
             }
 
-// Send zero-length terminator
+            // Send zero-length terminator
             if stream.write_all(&[0, 0, 0, 0]).is_err() {
                 return None;
             }
@@ -506,7 +457,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 return None;
             }
 
-// Read response
+            // Read response
             let mut inner = stream.into_inner().ok()?;
             let mut response = String::new();
             if inner.read_to_string(&mut response).is_err() {
@@ -516,14 +467,17 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             let response = response.trim();
 
             if response.contains("FOUND") {
-// Extract virus name:"stream:Eicar-Signature FOUND"
+                // Extract virus name:"stream:Eicar-Signature FOUND"
                 let virus_name = response
                     .strip_prefix("stream: ")
                     .and_then(|s| s.strip_suffix(" FOUND"))
                     .unwrap_or("unknown");
 
                 return Some(DynamicAnalysisFinding {
-                    id: format!("CLAMAV_{}", virus_name.replace(['-', '.', ' '], "_").to_uppercase()),
+                    id: format!(
+                        "CLAMAV_{}",
+                        virus_name.replace(['-', '.', ' '], "_").to_uppercase()
+                    ),
                     description: format!(
                         "ClamAV detected: {} (file: {})",
                         virus_name,
@@ -538,7 +492,7 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                 return None; // Clean
             }
 
-// Unexpected response
+            // Unexpected response
             tracing::warn!(
                 response = %response,
                 "Unexpected ClamAV response"
@@ -586,7 +540,10 @@ mod tests {
         let mut pe = b"MZ\x90\x00".to_vec();
         pe.extend_from_slice(b"..lots of stuff..VirtualAlloc..more..CreateRemoteThread..");
         let finding = analyzer.analyze(&pe, Some("malware.dll"));
-        assert!(finding.is_some(), "PE with suspicious imports should be detected");
+        assert!(
+            finding.is_some(),
+            "PE with suspicious imports should be detected"
+        );
         let f = finding.expect("finding");
         assert_eq!(f.id, "RULE_PE_SUSPICIOUS_IMPORTS");
     }
@@ -629,7 +586,7 @@ mod tests {
         let vba = b"Attribute VB_Name = \"Module1\"\nSub Auto_Open()\n  Shell \"cmd.exe /c calc\"\nEnd Sub";
         let finding = analyzer.analyze(vba, Some("macro.vba"));
         assert!(finding.is_some());
-// Should match the highest-risk rule among matching rules
+        // Should match the highest-risk rule among matching rules
         let f = finding.expect("finding");
         assert!(f.risk >= 7.0);
     }
@@ -637,11 +594,14 @@ mod tests {
     #[test]
     fn test_yara_requires_all_patterns() {
         let analyzer = YaraSignatureAnalyzer::default();
-// Only one of two patterns for PE_SUSPICIOUS_IMPORTS
+        // Only one of two patterns for PE_SUSPICIOUS_IMPORTS
         let partial = b"VirtualAlloc is used in this documentation text";
         let finding = analyzer.analyze(partial, Some("readme.txt"));
-// Should NOT match because CreateRemoteThread is missing
-        assert!(finding.is_none(), "Partial pattern match should not trigger rule");
+        // Should NOT match because CreateRemoteThread is missing
+        assert!(
+            finding.is_none(),
+            "Partial pattern match should not trigger rule"
+        );
     }
 
     #[test]

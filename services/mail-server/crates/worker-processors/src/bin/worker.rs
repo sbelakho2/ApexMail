@@ -22,7 +22,7 @@ use worker_processors::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-// Initialize tracing
+    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -31,13 +31,13 @@ async fn main() -> Result<()> {
 
     info!("Starting ApexMail Worker (Rust)");
 
-// Load configuration from environment
+    // Load configuration from environment
     let database_url = env::var("DATABASE_URL")
         .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable must be set"))?;
     let redis_url = env::var("REDIS_URL")
         .map_err(|_| anyhow::anyhow!("REDIS_URL environment variable must be set"))?;
 
-// Create database pool
+    // Create database pool
     let db = PgPoolOptions::new()
         .max_connections(30)
         .acquire_timeout(Duration::from_secs(10))
@@ -48,13 +48,13 @@ async fn main() -> Result<()> {
 
     info!("Connected to PostgreSQL");
 
-// Create Redis pool
+    // Create Redis pool
     let redis_cfg = RedisConfig::from_url(&redis_url);
     let redis = redis_cfg.create_pool(Some(Runtime::Tokio1))?;
 
     info!("Connected to Redis");
 
-// Load concurrency from env
+    // Load concurrency from env
     let concurrency: usize = env::var("WORKER_CONCURRENCY")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
             .unwrap_or(5),
     );
 
-// Determine which processors to run
+    // Determine which processors to run
     let run_analytics = env::var("WORKER_RUN_ANALYTICS")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(true);
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
     let mut reply_processor: Option<Arc<ReplyHandler>> = None;
     let mut webhook_processor: Option<Arc<WebhookProcessor>> = None;
 
-// Start analytics processor
+    // Start analytics processor
     if run_analytics {
         let config = AnalyticsConfig {
             base: ProcessorConfig {
@@ -111,11 +111,12 @@ async fn main() -> Result<()> {
         info!("Analytics processor started");
     }
 
-// Start email processor
+    // Start email processor
     if run_email {
         let smtp_config = SmtpConfig {
-            host: env::var("SMTP_HOST")
-                .map_err(|_| anyhow::anyhow!("SMTP_HOST environment variable must be set for email processing"))?,
+            host: env::var("SMTP_HOST").map_err(|_| {
+                anyhow::anyhow!("SMTP_HOST environment variable must be set for email processing")
+            })?,
             port: env::var("SMTP_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -128,8 +129,8 @@ async fn main() -> Result<()> {
             ..Default::default()
         };
 
-// Choose transport backend via EMAIL_TRANSPORT_TYPE env var.
-// Values:"ses" (default), "smtp" / "self-hosted" / "direct".
+        // Choose transport backend via EMAIL_TRANSPORT_TYPE env var.
+        // Values:"ses" (default), "smtp" / "self-hosted" / "direct".
         let transport_type = env::var("EMAIL_TRANSPORT_TYPE")
             .map(|v| TransportType::from_env(&v))
             .unwrap_or_default();
@@ -166,7 +167,7 @@ async fn main() -> Result<()> {
         }
     }
 
-// Start reply handler
+    // Start reply handler
     if run_reply_handler {
         let config = ReplyHandlerConfig {
             base: ProcessorConfig {
@@ -189,7 +190,7 @@ async fn main() -> Result<()> {
         info!("Reply handler started");
     }
 
-// Start webhook processor
+    // Start webhook processor
     if run_webhook {
         let config = WebhookConfig {
             base: ProcessorConfig {
@@ -221,7 +222,7 @@ async fn main() -> Result<()> {
 
     info!("All processors running. Press Ctrl+C to stop.");
 
-// Start health check server for Kubernetes probes
+    // Start health check server for Kubernetes probes
     let health_port: u16 = env::var("HEALTH_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -237,9 +238,11 @@ async fn main() -> Result<()> {
         }
     });
 
-// Wait for shutdown signal (SIGINT or SIGTERM)
+    // Wait for shutdown signal (SIGINT or SIGTERM)
     {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -287,7 +290,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    if tokio::time::timeout(shutdown_timeout, join_all).await.is_err() {
+    if tokio::time::timeout(shutdown_timeout, join_all)
+        .await
+        .is_err()
+    {
         warn!("Shutdown timed out; some processor tasks may still be running");
     }
 

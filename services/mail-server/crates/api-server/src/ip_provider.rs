@@ -160,15 +160,15 @@ pub struct DedicatedIpProvider {
     client: Client,
     api_token: String,
     db: PgPool,
-/// Default Hetzner location for new IPs (e.g., "fsn1", "nbg1", "hel1").
+    /// Default Hetzner location for new IPs (e.g., "fsn1", "nbg1", "hel1").
     default_location: String,
-/// MTA server ID to assign floating IPs to. `None` = multi-server mode
-/// (IPs are created unassigned and picked up by the orchestrator).
+    /// MTA server ID to assign floating IPs to. `None` = multi-server mode
+    /// (IPs are created unassigned and picked up by the orchestrator).
     mta_server_id: Option<u64>,
 }
 
 impl DedicatedIpProvider {
-/// Create a new provider.
+    /// Create a new provider.
     pub fn new(
         api_token: String,
         db: PgPool,
@@ -180,10 +180,16 @@ impl DedicatedIpProvider {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client, api_token, db, default_location, mta_server_id }
+        Self {
+            client,
+            api_token,
+            db,
+            default_location,
+            mta_server_id,
+        }
     }
 
-/// Create from environment. Returns `None` if `HETZNER_API_TOKEN` is unset.
+    /// Create from environment. Returns `None` if `HETZNER_API_TOKEN` is unset.
     pub fn from_env(db: PgPool) -> Option<Self> {
         let api_token = std::env::var("HETZNER_API_TOKEN").ok()?;
         let default_location =
@@ -195,10 +201,10 @@ impl DedicatedIpProvider {
         Some(Self::new(api_token, db, default_location, mta_server_id))
     }
 
-// ── Plan gating ────────────────────────────────────────────
+    // ── Plan gating ────────────────────────────────────────────
 
-/// Check whether the tenant's plan allows dedicated IPs.
-/// Returns `(allowed, included_count)`.
+    /// Check whether the tenant's plan allows dedicated IPs.
+    /// Returns `(allowed, included_count)`.
     pub async fn check_plan_eligibility(
         &self,
         tenant_id: &str,
@@ -221,7 +227,7 @@ impl DedicatedIpProvider {
         }
     }
 
-/// Count active (non-retired, non-releasing) dedicated IPs for a tenant.
+    /// Count active (non-retired, non-releasing) dedicated IPs for a tenant.
     pub async fn count_active_ips(&self, tenant_id: &str) -> Result<i64, IpProviderError> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM dedicated_ips
@@ -233,29 +239,33 @@ impl DedicatedIpProvider {
         Ok(count)
     }
 
-// ── Allocation ─────────────────────────────────────────────
+    // ── Allocation ─────────────────────────────────────────────
 
-/// Allocate a new dedicated IP for a tenant via Hetzner Cloud.
-/// Steps:/// 1. Plan gating — verify the tenant is eligible
-/// 2. Create a Hetzner floating IP
-/// 3. Assign it to the MTA server
-/// 4. Set reverse DNS to `mail.<tenant_primary_domain>`
-/// 5. Insert `dedicated_ips` row (status = warming)
-/// 6. DB trigger updates `transport_routing_cache` → tenant is now
-/// routed through self-hosted SMTP automatically
+    /// Allocate a new dedicated IP for a tenant via Hetzner Cloud.
+    /// Steps:/// 1. Plan gating — verify the tenant is eligible
+    /// 2. Create a Hetzner floating IP
+    /// 3. Assign it to the MTA server
+    /// 4. Set reverse DNS to `mail.<tenant_primary_domain>`
+    /// 5. Insert `dedicated_ips` row (status = warming)
+    /// 6. DB trigger updates `transport_routing_cache` → tenant is now
+    /// routed through self-hosted SMTP automatically
     pub async fn allocate_ip(
         &self,
         tenant_id: &str,
         region: Option<&str>,
     ) -> Result<AllocatedIp, IpProviderError> {
-// 1. Plan gating
+        // 1. Plan gating
         let (allowed, included_count) = self.check_plan_eligibility(tenant_id).await?;
         if !allowed {
             return Err(IpProviderError::PlanNotEligible);
         }
 
         let active_count = self.count_active_ips(tenant_id).await?;
-        let hard_cap = if included_count >= 10 { 25 } else { included_count.max(5) };
+        let hard_cap = if included_count >= 10 {
+            25
+        } else {
+            included_count.max(5)
+        };
         if active_count >= hard_cap as i64 {
             return Err(IpProviderError::LimitReached {
                 tenant_id: tenant_id.to_string(),
@@ -265,7 +275,7 @@ impl DedicatedIpProvider {
 
         let location = region.unwrap_or(&self.default_location);
 
-// 2. Create floating IP in Hetzner
+        // 2. Create floating IP in Hetzner
         let mut labels = HashMap::new();
         labels.insert("tenant_id".to_string(), tenant_id.to_string());
         labels.insert("service".to_string(), "apexmail".to_string());
@@ -303,12 +313,15 @@ impl DedicatedIpProvider {
 
         info!(tenant_id = %tenant_id, ip = %ip_address, hetzner_id = hetzner_id, "Created Hetzner floating IP");
 
-// 3. Assign to MTA server
+        // 3. Assign to MTA server
         if let Some(server_id) = self.mta_server_id {
             let assign_req = AssignFloatingIpRequest { server: server_id };
             let assign_resp = self
                 .client
-                .post(format!("{}/floating_ips/{}/actions/assign", HETZNER_API_BASE, body.floating_ip.id))
+                .post(format!(
+                    "{}/floating_ips/{}/actions/assign",
+                    HETZNER_API_BASE, body.floating_ip.id
+                ))
                 .bearer_auth(&self.api_token)
                 .json(&assign_req)
                 .send()
@@ -323,17 +336,19 @@ impl DedicatedIpProvider {
             }
         }
 
-// 4. Set reverse DNS
-        let rdns_hostname = self.set_rdns_for_tenant(body.floating_ip.id, &ip_address, tenant_id).await;
+        // 4. Set reverse DNS
+        let rdns_hostname = self
+            .set_rdns_for_tenant(body.floating_ip.id, &ip_address, tenant_id)
+            .await;
 
-// 5. Billing status
+        // 5. Billing status
         let billing_status = if active_count < included_count as i64 {
             "included"
         } else {
             "pending_charge"
         };
 
-// 6. Insert DB record
+        // 6. Insert DB record
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO dedicated_ips
@@ -353,8 +368,8 @@ impl DedicatedIpProvider {
         .execute(&self.db)
         .await?;
 
-// ⚡ The `trg_update_transport_routing` trigger fires here, marking
-// the tenant for self-hosted routing.
+        // ⚡ The `trg_update_transport_routing` trigger fires here, marking
+        // the tenant for self-hosted routing.
 
         info!(
             id = %id, ip = %ip_address, tenant_id = %tenant_id,
@@ -373,12 +388,12 @@ impl DedicatedIpProvider {
         })
     }
 
-// ── Release ────────────────────────────────────────────────
+    // ── Release ────────────────────────────────────────────────
 
-/// Release a dedicated IP:delete the Hetzner floating IP and retire the
-/// DB record.
-/// If this was the tenant's last dedicated IP, the routing cache trigger
-/// flips them back to SES shared sending automatically.
+    /// Release a dedicated IP:delete the Hetzner floating IP and retire the
+    /// DB record.
+    /// If this was the tenant's last dedicated IP, the routing cache trigger
+    /// flips them back to SES shared sending automatically.
     pub async fn release_ip(
         &self,
         dedicated_ip_id: Uuid,
@@ -397,7 +412,7 @@ impl DedicatedIpProvider {
             ip: dedicated_ip_id.to_string(),
         })?;
 
-// Delete from Hetzner
+        // Delete from Hetzner
         if let Some(hid) = hetzner_id {
             let resp = self
                 .client
@@ -413,7 +428,7 @@ impl DedicatedIpProvider {
             }
         }
 
-// Retire DB record
+        // Retire DB record
         sqlx::query(
             "UPDATE dedicated_ips
              SET status = 'retired',
@@ -428,15 +443,15 @@ impl DedicatedIpProvider {
         .execute(&self.db)
         .await?;
 
-// ⚡ If this was the last IP, the trigger flips the tenant back to SES.
+        // ⚡ If this was the last IP, the trigger flips the tenant back to SES.
 
         info!(id = %dedicated_ip_id, ip = %ip_address, tenant_id = %tenant_id, "Dedicated IP released");
         Ok(())
     }
 
-// ── Warmup ─────────────────────────────────────────────────
+    // ── Warmup ─────────────────────────────────────────────────
 
-/// Start or resume warmup for a dedicated IP.
+    /// Start or resume warmup for a dedicated IP.
     pub async fn start_warmup(
         &self,
         dedicated_ip_id: Uuid,
@@ -455,9 +470,10 @@ impl DedicatedIpProvider {
         .fetch_optional(&self.db)
         .await?;
 
-        let (ip_address, progress, warmup_started_at) = row.ok_or_else(|| IpProviderError::IpNotFound {
-            ip: dedicated_ip_id.to_string(),
-        })?;
+        let (ip_address, progress, warmup_started_at) =
+            row.ok_or_else(|| IpProviderError::IpNotFound {
+                ip: dedicated_ip_id.to_string(),
+            })?;
 
         let warmup_day = self.get_warmup_day(dedicated_ip_id).await?;
         let daily_limit = warmup_schedule::limit_for_day(warmup_day as u32);
@@ -485,7 +501,7 @@ impl DedicatedIpProvider {
         Ok(day.map(|(d,)| d).unwrap_or(0))
     }
 
-/// Periodic job:update warmup progress, graduate IPs after the full warmup period.
+    /// Periodic job:update warmup progress, graduate IPs after the full warmup period.
     pub async fn tick_warmup(&self) -> Result<u32, IpProviderError> {
         let graduated = sqlx::query(
             "UPDATE dedicated_ips
@@ -519,7 +535,7 @@ impl DedicatedIpProvider {
         Ok((graduated + updated) as u32)
     }
 
-// ── Helpers ─────────────────────────────────────────────────
+    // ── Helpers ─────────────────────────────────────────────────
 
     async fn set_rdns_for_tenant(
         &self,
@@ -548,8 +564,12 @@ impl DedicatedIpProvider {
             dns_ptr: hostname.clone(),
         };
 
-        match self.client
-            .post(format!("{}/floating_ips/{}/actions/change_dns_ptr", HETZNER_API_BASE, floating_ip_id))
+        match self
+            .client
+            .post(format!(
+                "{}/floating_ips/{}/actions/change_dns_ptr",
+                HETZNER_API_BASE, floating_ip_id
+            ))
             .bearer_auth(&self.api_token)
             .json(&req)
             .send()
@@ -571,23 +591,30 @@ impl DedicatedIpProvider {
         }
     }
 
-/// List all active/warming dedicated IPs for a tenant.
+    /// List all active/warming dedicated IPs for a tenant.
     pub async fn list_tenant_ips(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<AllocatedIp>, IpProviderError> {
-        let rows: Vec<(Uuid, String, Option<i64>, String, Option<String>, i32, String)> =
-            sqlx::query_as(
-                "SELECT id, ip_address, hetzner_floating_ip_id, region, rdns_hostname,
+        let rows: Vec<(
+            Uuid,
+            String,
+            Option<i64>,
+            String,
+            Option<String>,
+            i32,
+            String,
+        )> = sqlx::query_as(
+            "SELECT id, ip_address, hetzner_floating_ip_id, region, rdns_hostname,
                         EXTRACT(DAY FROM NOW() - COALESCE(warmup_started_at, created_at))::int,
                         COALESCE(billing_status, 'included')
                  FROM dedicated_ips
                  WHERE tenant_id = $1 AND status NOT IN ('retired', 'releasing')
                  ORDER BY created_at",
-            )
-            .bind(tenant_id)
-            .fetch_all(&self.db)
-            .await?;
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.db)
+        .await?;
 
         Ok(rows
             .into_iter()
@@ -633,8 +660,11 @@ mod tests {
 
     #[test]
     fn test_warmup_day_1_same_as_day_0() {
-        assert_eq!(limit_for_day(0), limit_for_day(1),
-            "Days 0-1 should have the same limit");
+        assert_eq!(
+            limit_for_day(0),
+            limit_for_day(1),
+            "Days 0-1 should have the same limit"
+        );
     }
 
     #[test]
@@ -651,8 +681,10 @@ mod tests {
     #[test]
     fn test_warmup_day_44_is_not_unlimited() {
         // Day 44 must still be capped before the extended ramp tiers start.
-        assert!(limit_for_day(44) < u64::MAX,
-            "Day 44 must not be unlimited — IP is still warming");
+        assert!(
+            limit_for_day(44) < u64::MAX,
+            "Day 44 must not be unlimited — IP is still warming"
+        );
         assert_eq!(limit_for_day(44), 50_000);
     }
 
@@ -674,8 +706,10 @@ mod tests {
 
     #[test]
     fn test_warmup_full_period_is_60_days() {
-        assert_eq!(FULL_WARMUP_DAYS, 60,
-            "FULL_WARMUP_DAYS must match the warmup schedule graduation day");
+        assert_eq!(
+            FULL_WARMUP_DAYS, 60,
+            "FULL_WARMUP_DAYS must match the warmup schedule graduation day"
+        );
     }
 
     #[test]
@@ -690,9 +724,9 @@ mod tests {
     #[test]
     fn test_warmup_boundary_days() {
         // Test exact boundary values
-        assert_eq!(limit_for_day(2), 100);   // day 2-3
-        assert_eq!(limit_for_day(4), 250);   // day 4-5
-        assert_eq!(limit_for_day(6), 500);   // day 6-7
+        assert_eq!(limit_for_day(2), 100); // day 2-3
+        assert_eq!(limit_for_day(4), 250); // day 4-5
+        assert_eq!(limit_for_day(6), 500); // day 6-7
         assert_eq!(limit_for_day(8), 1_000); // day 8-10
         assert_eq!(limit_for_day(11), 2_500); // day 11-14
         assert_eq!(limit_for_day(15), 5_000); // day 15-20
@@ -708,7 +742,10 @@ mod tests {
     #[test]
     fn test_allocating_ip_add_on_price_consistency() {
         // The price constant in ip_provider must match dedicated_ips route
-        assert_eq!(super::ADD_ON_PRICE_CENTS, 3000,
-            "add-on price must be $30.00 = 3000 cents across all modules");
+        assert_eq!(
+            super::ADD_ON_PRICE_CENTS,
+            3000,
+            "add-on price must be $30.00 = 3000 cents across all modules"
+        );
     }
 }

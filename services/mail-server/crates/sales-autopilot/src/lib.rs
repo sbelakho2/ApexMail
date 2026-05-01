@@ -1,10 +1,10 @@
+pub mod calendar;
+pub mod campaigns;
 pub mod config;
-pub mod types;
 pub mod crm;
 pub mod crm_pg;
 pub mod enrichment;
-pub mod campaigns;
-pub mod calendar;
 pub mod inbox;
-pub mod scrapers;
 pub mod routes;
+pub mod scrapers;
+pub mod types;

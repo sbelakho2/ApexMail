@@ -372,9 +372,6 @@ def main():
         let just_released = not is_mouse_down and was_mouse_down
         
         hovered_index = -1
-        if just_released and pressed_btn != "":
-            handle_click(pressed_btn)
-            pressed_btn = ""
         
         var i = 0
         while i < num_buttons:
@@ -388,6 +385,11 @@ def main():
                 if is_mouse_down:
                     pressed_btn = btn.label
             i += 1
+
+        if just_released and pressed_btn != "":
+            if hovered_index >= 0 and button_layout[hovered_index].label == pressed_btn:
+                handle_click(pressed_btn)
+            pressed_btn = ""
         
         was_mouse_down = is_mouse_down
         

@@ -9,11 +9,11 @@ use aho_corasick::AhoCorasick;
 /// Content policy match
 #[derive(Debug, Clone)]
 pub struct PolicyMatch {
-/// Matched keyword/phrase
+    /// Matched keyword/phrase
     pub keyword: String,
-/// Risk score
+    /// Risk score
     pub risk: f64,
-/// Byte offset
+    /// Byte offset
     pub offset: usize,
 }
 
@@ -37,7 +37,7 @@ pub fn scan_content_policy(text: &str, keywords: &[String]) -> Vec<PolicyMatch> 
     for mat in ac.find_iter(text) {
         let idx = mat.pattern().as_usize();
         if idx < keywords.len() && seen.insert(idx) {
-// Assign risk based on keyword severity
+            // Assign risk based on keyword severity
             let keyword = &keywords[idx];
             let risk = classify_keyword_risk(keyword);
             matches.push(PolicyMatch {
@@ -56,9 +56,15 @@ fn classify_keyword_risk(keyword: &str) -> f64 {
     let lower = keyword.to_lowercase();
     if lower.contains("top secret") || lower.contains("classified") {
         8.0
-    } else if lower.contains("confidential") || lower.contains("restricted") || lower.contains("privileged") {
+    } else if lower.contains("confidential")
+        || lower.contains("restricted")
+        || lower.contains("privileged")
+    {
         6.0
-    } else if lower.contains("internal") || lower.contains("proprietary") || lower.contains("trade secret") {
+    } else if lower.contains("internal")
+        || lower.contains("proprietary")
+        || lower.contains("trade secret")
+    {
         4.0
     } else if lower.contains("do not distribute") || lower.contains("attorney") {
         5.0

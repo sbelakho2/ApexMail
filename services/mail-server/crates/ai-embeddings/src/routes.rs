@@ -32,7 +32,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/search", post(search_handler))
         .route("/stats", get(stats_handler))
         .route("/health", get(health_handler))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_service_token,
+        ))
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5 MB — embedding batches / vectors
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
@@ -59,7 +62,10 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided
+        .as_deref()
+        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
+    {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -91,7 +97,9 @@ struct SearchRequest {
     min_score: Option<f64>,
 }
 
-fn default_top_k() -> usize { 10 }
+fn default_top_k() -> usize {
+    10
+}
 
 // ─── Handlers ──────────────────────────────────────────────────
 
@@ -127,11 +135,9 @@ async fn add_vector_handler(
 
     match state
         .vector_store
-        .add(req.text, req.vector, serde_json::Value::Object(metadata)) {
-        Ok(id) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({"id": id})),
-        ),
+        .add(req.text, req.vector, serde_json::Value::Object(metadata))
+    {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({"id": id}))),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -143,7 +149,9 @@ async fn search_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let mut results = state.vector_store.search(&req.vector, req.top_k, &req.tenant_id);
+    let mut results = state
+        .vector_store
+        .search(&req.vector, req.top_k, &req.tenant_id);
     if let Some(min) = req.min_score {
         results.retain(|r| r.score >= min);
     }
@@ -181,7 +189,10 @@ mod tests {
     #[test]
     fn test_router_creation() {
         let config = EmbeddingsConfig {
-            server: ServerConfig { host: "0.0.0.0".into(), port: 9090 },
+            server: ServerConfig {
+                host: "0.0.0.0".into(),
+                port: 9090,
+            },
             inference: InferenceConfig {
                 url: "http://localhost:8080".into(),
                 model: "test".into(),
@@ -190,7 +201,10 @@ mod tests {
                 timeout_ms: 5000,
                 pooling: PoolingStrategy::Mean,
             },
-            store: StoreConfig { max_vectors: 1000, eviction_threshold: 900 },
+            store: StoreConfig {
+                max_vectors: 1000,
+                eviction_threshold: 900,
+            },
         };
         let state = Arc::new(AppState {
             embedding_service: EmbeddingService::new(config.inference.clone()).unwrap(),

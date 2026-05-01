@@ -1,5 +1,6 @@
 use chrono::Utc;
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -12,7 +13,7 @@ use crate::types::{Campaign, CampaignStatus, SalesError};
 #[derive(Debug, Clone)]
 pub struct CampaignManager {
     campaigns: Arc<RwLock<Vec<Campaign>>>,
-/// campaign_id → list of recipient emails
+    /// campaign_id → list of recipient emails
     recipients: Arc<RwLock<std::collections::HashMap<Uuid, Vec<String>>>>,
     max_campaigns: usize,
 }
@@ -26,7 +27,7 @@ impl CampaignManager {
         }
     }
 
-/// Create a campaign in Draft status.
+    /// Create a campaign in Draft status.
     pub fn create_campaign(
         &self,
         tenant_id: String,
@@ -61,7 +62,7 @@ impl CampaignManager {
         Ok(campaign)
     }
 
-/// List all campaigns.
+    /// List all campaigns.
     pub fn list_campaigns(&self, tenant_id: &str) -> Vec<Campaign> {
         self.campaigns
             .read()
@@ -71,7 +72,7 @@ impl CampaignManager {
             .collect()
     }
 
-/// Transition a draft/paused campaign to Active.
+    /// Transition a draft/paused campaign to Active.
     pub fn start_campaign(&self, tenant_id: &str, id: Uuid) -> Result<Campaign, SalesError> {
         let mut store = self.campaigns.write();
         let c = store
@@ -90,7 +91,7 @@ impl CampaignManager {
         }
     }
 
-/// Pause an active campaign.
+    /// Pause an active campaign.
     pub fn pause_campaign(&self, tenant_id: &str, id: Uuid) -> Result<Campaign, SalesError> {
         let mut store = self.campaigns.write();
         let c = store
@@ -104,18 +105,14 @@ impl CampaignManager {
         Ok(c.clone())
     }
 
-/// Return stats for a campaign (sent / opened / clicked / recipients).
+    /// Return stats for a campaign (sent / opened / clicked / recipients).
     pub fn get_stats(&self, id: Uuid) -> Result<serde_json::Value, SalesError> {
         let store = self.campaigns.read();
         let c = store
             .iter()
             .find(|c| c.id == id)
             .ok_or(SalesError::CampaignNotFound(id))?;
-        let recipient_count = self
-            .recipients
-            .read()
-            .get(&id)
-            .map_or(0, |r| r.len());
+        let recipient_count = self.recipients.read().get(&id).map_or(0, |r| r.len());
         Ok(serde_json::json!({
             "campaign_id": c.id,
             "status": c.status,
@@ -126,14 +123,14 @@ impl CampaignManager {
         }))
     }
 
-/// Add recipient emails to a campaign.
+    /// Add recipient emails to a campaign.
     pub fn add_recipients(
         &self,
         tenant_id: &str,
         id: Uuid,
         emails: Vec<String>,
     ) -> Result<usize, SalesError> {
-// verify campaign exists
+        // verify campaign exists
         if !self
             .campaigns
             .read()
@@ -144,9 +141,23 @@ impl CampaignManager {
         }
         let mut map = self.recipients.write();
         let list = map.entry(id).or_default();
-        let before = list.len();
-        list.extend(emails);
-        Ok(list.len() - before)
+        let mut existing = list
+            .iter()
+            .map(|email| email.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let mut added = 0usize;
+
+        for email in emails {
+            let normalized = email.trim().to_ascii_lowercase();
+            if normalized.is_empty() || !existing.insert(normalized.clone()) {
+                continue;
+            }
+
+            list.push(normalized);
+            added += 1;
+        }
+
+        Ok(added)
     }
 }
 
@@ -166,7 +177,12 @@ mod tests {
     fn test_create_and_list() {
         let mgr = make_mgr();
         let c = mgr
-            .create_campaign("tenant-a".into(), "Welcome".into(), "tmpl_1".into(), "all_leads".into())
+            .create_campaign(
+                "tenant-a".into(),
+                "Welcome".into(),
+                "tmpl_1".into(),
+                "all_leads".into(),
+            )
             .unwrap();
         assert_eq!(c.status, CampaignStatus::Draft);
         assert_eq!(mgr.list_campaigns("tenant-a").len(), 1);
@@ -177,7 +193,12 @@ mod tests {
     fn test_start_pause_lifecycle() {
         let mgr = make_mgr();
         let c = mgr
-            .create_campaign("tenant-a".into(), "Drip".into(), "tmpl_2".into(), "new_leads".into())
+            .create_campaign(
+                "tenant-a".into(),
+                "Drip".into(),
+                "tmpl_2".into(),
+                "new_leads".into(),
+            )
             .unwrap();
         let started = mgr.start_campaign("tenant-a", c.id).unwrap();
         assert_eq!(started.status, CampaignStatus::Active);
@@ -185,7 +206,7 @@ mod tests {
         let paused = mgr.pause_campaign("tenant-a", c.id).unwrap();
         assert_eq!(paused.status, CampaignStatus::Paused);
 
-// re-start after pause
+        // re-start after pause
         let restarted = mgr.start_campaign("tenant-a", c.id).unwrap();
         assert_eq!(restarted.status, CampaignStatus::Active);
     }
@@ -198,7 +219,7 @@ mod tests {
             .unwrap();
         mgr.start_campaign("tenant-a", c.id).unwrap();
 
-// second active campaign should be rejected
+        // second active campaign should be rejected
         let c2 = mgr.create_campaign("tenant-a".into(), "C2".into(), "t".into(), "a".into());
         assert!(c2.is_err());
     }
@@ -207,7 +228,12 @@ mod tests {
     fn test_recipients_and_stats() {
         let mgr = make_mgr();
         let c = mgr
-            .create_campaign("tenant-a".into(), "Outreach".into(), "tmpl".into(), "saas".into())
+            .create_campaign(
+                "tenant-a".into(),
+                "Outreach".into(),
+                "tmpl".into(),
+                "saas".into(),
+            )
             .unwrap();
         let added = mgr
             .add_recipients("tenant-a", c.id, vec!["a@x.com".into(), "b@x.com".into()])
@@ -223,7 +249,12 @@ mod tests {
     fn test_campaign_operations_are_tenant_scoped() {
         let mgr = make_mgr();
         let campaign = mgr
-            .create_campaign("tenant-a".into(), "Scoped".into(), "tmpl".into(), "all".into())
+            .create_campaign(
+                "tenant-a".into(),
+                "Scoped".into(),
+                "tmpl".into(),
+                "all".into(),
+            )
             .unwrap();
 
         assert!(matches!(
@@ -234,5 +265,33 @@ mod tests {
             mgr.add_recipients("tenant-b", campaign.id, vec!["user@example.com".into()]),
             Err(SalesError::CampaignNotFound(id)) if id == campaign.id
         ));
+    }
+
+    #[test]
+    fn test_add_recipients_deduplicates_addresses() {
+        let mgr = make_mgr();
+        let campaign = mgr
+            .create_campaign(
+                "tenant-a".into(),
+                "Scoped".into(),
+                "tmpl".into(),
+                "all".into(),
+            )
+            .unwrap();
+
+        let added = mgr
+            .add_recipients(
+                "tenant-a",
+                campaign.id,
+                vec![
+                    "alice@example.com".into(),
+                    " ALICE@example.com ".into(),
+                    "bob@example.com".into(),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(added, 2);
+        assert_eq!(mgr.get_stats(campaign.id).unwrap()["recipients"], 2);
     }
 }

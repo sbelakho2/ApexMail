@@ -5,15 +5,15 @@ use crate::signature::{SigSeverity, SignatureAction};
 /// Protocol anomaly result
 #[derive(Debug, Clone)]
 pub struct ProtocolAnomaly {
-/// Rule/anomaly ID
+    /// Rule/anomaly ID
     pub id: u32,
-/// Description
+    /// Description
     pub message: String,
-/// Severity
+    /// Severity
     pub severity: SigSeverity,
-/// Recommended action
+    /// Recommended action
     pub action: SignatureAction,
-/// Protocol
+    /// Protocol
     pub protocol: String,
 }
 
@@ -22,7 +22,7 @@ pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
     let mut anomalies = Vec::new();
     let text = String::from_utf8_lossy(payload);
 
-// Extremely long command lines (RFC 5321:max 512 chars)
+    // Extremely long command lines (RFC 5321:max 512 chars)
     for line in text.lines() {
         if line.len() > 512 {
             anomalies.push(ProtocolAnomaly {
@@ -36,7 +36,7 @@ pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         }
     }
 
-// Bare LF (without CR) — RFC violation, common in attack tools
+    // Bare LF (without CR) — RFC violation, common in attack tools
     let bytes = payload;
     for i in 0..bytes.len() {
         if bytes[i] == b'\n' && (i == 0 || bytes[i - 1] != b'\r') {
@@ -51,29 +51,39 @@ pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         }
     }
 
-// Pipelining abuse:multiple commands without waiting for response
-    let command_count = text.lines()
+    // Pipelining abuse:multiple commands without waiting for response
+    let command_count = text
+        .lines()
         .filter(|l| {
             let upper = l.to_uppercase();
-            upper.starts_with("EHLO") || upper.starts_with("HELO") ||
-            upper.starts_with("MAIL") || upper.starts_with("RCPT") ||
-            upper.starts_with("DATA") || upper.starts_with("QUIT") ||
-            upper.starts_with("RSET") || upper.starts_with("NOOP") ||
-            upper.starts_with("VRFY") || upper.starts_with("EXPN") ||
-            upper.starts_with("AUTH") || upper.starts_with("STARTTLS")
+            upper.starts_with("EHLO")
+                || upper.starts_with("HELO")
+                || upper.starts_with("MAIL")
+                || upper.starts_with("RCPT")
+                || upper.starts_with("DATA")
+                || upper.starts_with("QUIT")
+                || upper.starts_with("RSET")
+                || upper.starts_with("NOOP")
+                || upper.starts_with("VRFY")
+                || upper.starts_with("EXPN")
+                || upper.starts_with("AUTH")
+                || upper.starts_with("STARTTLS")
         })
         .count();
     if command_count > 5 {
         anomalies.push(ProtocolAnomaly {
             id: 3000003,
-            message: format!("Excessive SMTP pipelining ({} commands in single payload)", command_count),
+            message: format!(
+                "Excessive SMTP pipelining ({} commands in single payload)",
+                command_count
+            ),
             severity: SigSeverity::Medium,
             action: SignatureAction::Alert,
             protocol: "smtp".into(),
         });
     }
 
-// RCPT TO burst in a single payload can indicate directory harvesting.
+    // RCPT TO burst in a single payload can indicate directory harvesting.
     let rcpt_to_count = text
         .lines()
         .filter(|line| line.trim_start().to_uppercase().starts_with("RCPT TO:"))
@@ -91,7 +101,7 @@ pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         });
     }
 
-// Null bytes in SMTP stream
+    // Null bytes in SMTP stream
     if payload.contains(&0u8) {
         anomalies.push(ProtocolAnomaly {
             id: 3000004,
@@ -102,7 +112,7 @@ pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         });
     }
 
-// Bare CR (without LF) can indicate command smuggling attempts
+    // Bare CR (without LF) can indicate command smuggling attempts
     for i in 0..bytes.len() {
         if bytes[i] == b'\r' && (i + 1 >= bytes.len() || bytes[i + 1] != b'\n') {
             anomalies.push(ProtocolAnomaly {
@@ -116,7 +126,7 @@ pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         }
     }
 
-// DATA terminator smuggling pattern (\r.\r without expected \n framing)
+    // DATA terminator smuggling pattern (\r.\r without expected \n framing)
     if text.contains("\r.\r") {
         anomalies.push(ProtocolAnomaly {
             id: 3000006,
@@ -134,24 +144,29 @@ pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
 pub fn analyze_dns(payload: &[u8]) -> Vec<ProtocolAnomaly> {
     let mut anomalies = Vec::new();
 
-// DNS queries should be relatively small; oversized = amplification
+    // DNS queries should be relatively small; oversized = amplification
     if payload.len() > 512 {
         anomalies.push(ProtocolAnomaly {
             id: 3000010,
-            message: format!("Oversized DNS query ({} bytes, max typical: 512)", payload.len()),
+            message: format!(
+                "Oversized DNS query ({} bytes, max typical: 512)",
+                payload.len()
+            ),
             severity: SigSeverity::Medium,
             action: SignatureAction::Alert,
             protocol: "dns".into(),
         });
     }
 
-// Extremely long DNS labels
+    // Extremely long DNS labels
     if payload.len() >= 12 {
-// Skip DNS header (12 bytes) and check label lengths
+        // Skip DNS header (12 bytes) and check label lengths
         let mut i = 12;
         while i < payload.len() {
             let label_len = payload[i] as usize;
-            if label_len == 0 { break; }
+            if label_len == 0 {
+                break;
+            }
             if label_len > 63 {
                 anomalies.push(ProtocolAnomaly {
                     id: 3000011,
@@ -163,13 +178,15 @@ pub fn analyze_dns(payload: &[u8]) -> Vec<ProtocolAnomaly> {
                 break;
             }
             i += label_len + 1;
-// Safety:prevent OOB on next iteration
-            if i >= payload.len() { break; }
+            // Safety:prevent OOB on next iteration
+            if i >= payload.len() {
+                break;
+            }
         }
     }
 
-// Compression-pointer sanity checks to reduce parser/evasion abuse.
-// DNS name pointers have top two bits set (11xxxxxx xxxxxxxx).
+    // Compression-pointer sanity checks to reduce parser/evasion abuse.
+    // DNS name pointers have top two bits set (11xxxxxx xxxxxxxx).
     if payload.len() >= 14 {
         let mut i = 12usize;
         let mut pointer_hops = 0usize;
@@ -225,12 +242,12 @@ pub fn analyze_tls(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         return anomalies;
     }
 
-// TLS record:content_type (1 byte), version (2 bytes), length (2 bytes)
+    // TLS record:content_type (1 byte), version (2 bytes), length (2 bytes)
     let content_type = payload[0];
     let major_version = payload[1];
     let minor_version = payload[2];
 
-// Detect SSLv2 (0x00 0x02) or SSLv3 (0x03 0x00)
+    // Detect SSLv2 (0x00 0x02) or SSLv3 (0x03 0x00)
     if major_version == 0x03 && minor_version == 0x00 {
         anomalies.push(ProtocolAnomaly {
             id: 3000020,
@@ -241,8 +258,8 @@ pub fn analyze_tls(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         });
     }
 
-// Record type 22 = Handshake, 23 = Application Data
-// Reject unexpected content types
+    // Record type 22 = Handshake, 23 = Application Data
+    // Reject unexpected content types
     if content_type != 20 && content_type != 21 && content_type != 22 && content_type != 23 {
         anomalies.push(ProtocolAnomaly {
             id: 3000021,
@@ -253,7 +270,7 @@ pub fn analyze_tls(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         });
     }
 
-// Detect extremely large TLS records (>16KB + overhead)
+    // Detect extremely large TLS records (>16KB + overhead)
     let record_len = ((payload[3] as usize) << 8) | (payload[4] as usize);
     if record_len > 16_384 + 2048 {
         anomalies.push(ProtocolAnomaly {
@@ -265,7 +282,7 @@ pub fn analyze_tls(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         });
     }
 
-// Truncated record length mismatch can indicate evasive fragmentation.
+    // Truncated record length mismatch can indicate evasive fragmentation.
     if payload.len() < 5 + record_len {
         anomalies.push(ProtocolAnomaly {
             id: 3000023,
@@ -310,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_tls_sslv3() {
-// TLS record with SSLv3 version
+        // TLS record with SSLv3 version
         let payload = [22, 0x03, 0x00, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00];
         let anomalies = analyze_tls(&payload);
         assert!(anomalies.iter().any(|a| a.id == 3000020));
@@ -326,9 +343,9 @@ mod tests {
     #[test]
     fn test_dns_bad_pointer_offset() {
         let payload = vec![
-// Header (12 bytes)
+            // Header (12 bytes)
             0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-// Name pointer to offset 0x3FFF (out of bounds)
+            // Name pointer to offset 0x3FFF (out of bounds)
             0xFF, 0xFF,
         ];
         let anomalies = analyze_dns(&payload);
@@ -337,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_tls_truncated_record() {
-// Declares 16 bytes payload but provides only 2.
+        // Declares 16 bytes payload but provides only 2.
         let payload = [22, 0x03, 0x03, 0x00, 0x10, 0x01, 0x00];
         let anomalies = analyze_tls(&payload);
         assert!(anomalies.iter().any(|a| a.id == 3000023));

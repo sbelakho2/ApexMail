@@ -34,7 +34,7 @@ FIXES = [
     # Starter allows 3 team -> 5 team
     (r'Starter.*allows up to \*\*3 team members\*\*', 'Starter plan allows up to **5 team members**'),
     (r'Starter plan includes 3 team members', 'Starter plan includes 5 team members'),
-    (r'Starter.*3 team member', 'Starter plan has 5 team member'),
+    (r'Starter.*3 team member', 'Starter plan has 5 team members'),
     
     # Pro supports 5 team -> 10 team (standalone mentions)
     (r'Pro plan \(\$65/mo\) supports 5 team', 'Pro plan ($65/mo) supports 10 team'),

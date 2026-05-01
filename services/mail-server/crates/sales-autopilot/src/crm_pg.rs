@@ -5,7 +5,7 @@
 //! process restarts.
 
 use chrono::Utc;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::crm::CrmService as InMemoryCrmService;
@@ -14,6 +14,7 @@ use crate::types::{Lead, LeadStatus, SalesError};
 /// PostgreSQL-backed CRM service.
 /// Falls back to the in-memory `CrmService` scoring logic for the
 /// deterministic `score_lead` function (pure computation).
+#[derive(Debug, Clone)]
 pub struct SqlxCrmService {
     pool: PgPool,
 }
@@ -23,9 +24,10 @@ impl SqlxCrmService {
         Self { pool }
     }
 
-/// Ensure the leads table exists.
+    /// Ensure the leads table exists.
     pub async fn initialize(&self) -> Result<(), SalesError> {
-        sqlx::query(r#"
+        sqlx::query(
+            r#"
             CREATE TABLE IF NOT EXISTS sales_leads (
                 id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 email       TEXT NOT NULL,
@@ -37,29 +39,26 @@ impl SqlxCrmService {
                 status      TEXT NOT NULL DEFAULT 'new',
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
-        "#)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_sales_leads_status ON sales_leads(status)",
+        "#,
         )
         .execute(&self.pool)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_sales_leads_email ON sales_leads(email)",
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_status ON sales_leads(status)")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_email ON sales_leads(email)")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         Ok(())
     }
 
-/// Insert a new lead.
+    /// Insert a new lead.
     pub async fn create_lead(
         &self,
         email: String,
@@ -99,7 +98,7 @@ impl SqlxCrmService {
         })
     }
 
-/// Retrieve a lead by id.
+    /// Retrieve a lead by id.
     pub async fn get_lead(&self, id: Uuid) -> Result<Lead, SalesError> {
         let row = sqlx::query("SELECT * FROM sales_leads WHERE id = $1")
             .bind(id)
@@ -111,65 +110,49 @@ impl SqlxCrmService {
             .ok_or(SalesError::LeadNotFound(id))
     }
 
-/// List leads, optionally filtering by status and/or source.
+    /// List leads, optionally filtering by status and/or source.
     pub async fn list_leads(
         &self,
         status: Option<LeadStatus>,
         source: Option<&str>,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<Lead>, SalesError> {
-        let mut sql = String::from("SELECT * FROM sales_leads WHERE 1=1");
-        let status_str = status.map(|s| s.to_string());
+        let mut query = QueryBuilder::new("SELECT * FROM sales_leads WHERE 1=1");
 
-        if status_str.is_some() {
-            sql.push_str(" AND status = $1");
+        if let Some(status) = status {
+            query.push(" AND status = ").push_bind(status.to_string());
         }
-        if source.is_some() {
-            let param = if status_str.is_some() { "$2" } else { "$1" };
-            sql.push_str(&format!(" AND source = {}", param));
+        if let Some(source) = source {
+            query.push(" AND source = ").push_bind(source);
         }
-        sql.push_str(" ORDER BY created_at DESC");
 
-// Build query based on which filters are present
-        let rows = match (&status_str, source) {
-            (Some(s), Some(src)) => {
-                sqlx::query(&sql)
-                    .bind(s)
-                    .bind(src)
-                    .fetch_all(&self.pool)
-                    .await
-            }
-            (Some(s), None) => {
-                sqlx::query(&sql)
-                    .bind(s)
-                    .fetch_all(&self.pool)
-                    .await
-            }
-            (None, Some(src)) => {
-                sqlx::query(&sql)
-                    .bind(src)
-                    .fetch_all(&self.pool)
-                    .await
-            }
-            (None, None) => {
-                sqlx::query(&sql)
-                    .fetch_all(&self.pool)
-                    .await
-            }
-        }
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        query
+            .push(" ORDER BY created_at DESC LIMIT ")
+            .push_bind(limit)
+            .push(" OFFSET ")
+            .push_bind(offset);
+
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         Ok(rows.iter().map(row_to_lead).collect())
     }
 
-/// Transition a lead to a new status.
+    /// Transition a lead to a new status.
     pub async fn update_lead_status(
         &self,
         id: Uuid,
         new_status: LeadStatus,
     ) -> Result<Lead, SalesError> {
-        let result = sqlx::query(r#"
+        let result = sqlx::query(
+            r#"
             UPDATE sales_leads SET status = $2 WHERE id = $1 RETURNING *
-        "#)
+        "#,
+        )
         .bind(id)
         .bind(new_status.to_string())
         .fetch_optional(&self.pool)
@@ -181,18 +164,28 @@ impl SqlxCrmService {
             .ok_or(SalesError::LeadNotFound(id))
     }
 
-/// Full-text search over lead name, email, and company.
-    pub async fn search_leads(&self, query: &str) -> Result<Vec<Lead>, SalesError> {
+    /// Full-text search over lead name, email, and company.
+    pub async fn search_leads(
+        &self,
+        query: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Lead>, SalesError> {
         let pattern = format!("%{}%", query.to_lowercase());
 
-        let rows = sqlx::query(r#"
+        let rows = sqlx::query(
+            r#"
             SELECT * FROM sales_leads
             WHERE LOWER(name) LIKE $1
                OR LOWER(email) LIKE $1
                OR LOWER(company) LIKE $1
             ORDER BY created_at DESC
-        "#)
+            LIMIT $2 OFFSET $3
+        "#,
+        )
         .bind(&pattern)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -200,12 +193,12 @@ impl SqlxCrmService {
         Ok(rows.iter().map(row_to_lead).collect())
     }
 
-/// Re-export the pure scoring function.
+    /// Re-export the pure scoring function.
     pub fn score_lead(engagement: f64, company_size: f64, recency: f64) -> u8 {
         InMemoryCrmService::score_lead(engagement, company_size, recency)
     }
 
-/// Update a lead's score in the database.
+    /// Update a lead's score in the database.
     pub async fn set_lead_score(&self, id: Uuid, score: u8) -> Result<(), SalesError> {
         let result = sqlx::query("UPDATE sales_leads SET score = $2 WHERE id = $1")
             .bind(id)
@@ -220,7 +213,7 @@ impl SqlxCrmService {
         Ok(())
     }
 
-/// Delete a lead.
+    /// Delete a lead.
     pub async fn delete_lead(&self, id: Uuid) -> Result<(), SalesError> {
         let result = sqlx::query("DELETE FROM sales_leads WHERE id = $1")
             .bind(id)
@@ -270,9 +263,9 @@ fn row_to_lead(row: &sqlx::postgres::PgRow) -> Lead {
 mod tests {
     use super::*;
 
-// -----------------------------------------------------------------------
-// parse_lead_status — exhaustive coverage
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // parse_lead_status — exhaustive coverage
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_parse_lead_status_known_values() {
@@ -292,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_parse_lead_status_case_sensitive() {
-// Upper-case variants should default to New (not match)
+        // Upper-case variants should default to New (not match)
         assert_eq!(parse_lead_status("Contacted"), LeadStatus::New);
         assert_eq!(parse_lead_status("QUALIFIED"), LeadStatus::New);
         assert_eq!(parse_lead_status("Lost"), LeadStatus::New);
@@ -300,19 +293,22 @@ mod tests {
 
     #[test]
     fn test_parse_lead_status_with_whitespace() {
-// Leading/trailing whitespace should NOT match
+        // Leading/trailing whitespace should NOT match
         assert_eq!(parse_lead_status(" contacted "), LeadStatus::New);
         assert_eq!(parse_lead_status("qualified\n"), LeadStatus::New);
     }
 
     #[test]
     fn test_parse_lead_status_sql_injection_attempt() {
-        assert_eq!(parse_lead_status("'; DROP TABLE sales_leads; --"), LeadStatus::New);
+        assert_eq!(
+            parse_lead_status("'; DROP TABLE sales_leads; --"),
+            LeadStatus::New
+        );
     }
 
-// -----------------------------------------------------------------------
-// score_lead delegation — boundary values
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // score_lead delegation — boundary values
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_score_lead_delegation() {
@@ -323,44 +319,43 @@ mod tests {
 
     #[test]
     fn test_score_lead_clamping() {
-// Values above 1.0 should be clamped
+        // Values above 1.0 should be clamped
         assert_eq!(SqlxCrmService::score_lead(2.0, 2.0, 2.0), 100);
-// Negative values should be clamped to 0.0
+        // Negative values should be clamped to 0.0
         assert_eq!(SqlxCrmService::score_lead(-1.0, -1.0, -1.0), 0);
     }
 
     #[test]
     fn test_score_lead_individual_dimensions() {
-// Only engagement:1.0 * 40 = 40
+        // Only engagement:1.0 * 40 = 40
         assert_eq!(SqlxCrmService::score_lead(1.0, 0.0, 0.0), 40);
-// Only company_size:1.0 * 30 = 30
+        // Only company_size:1.0 * 30 = 30
         assert_eq!(SqlxCrmService::score_lead(0.0, 1.0, 0.0), 30);
-// Only recency:1.0 * 30 = 30
+        // Only recency:1.0 * 30 = 30
         assert_eq!(SqlxCrmService::score_lead(0.0, 0.0, 1.0), 30);
     }
 
     #[test]
     fn test_score_lead_rounding() {
-// 0.33 * 40 + 0.33 * 30 + 0.33 * 30 = 13.2 + 9.9 + 9.9 = 33.0
+        // 0.33 * 40 + 0.33 * 30 + 0.33 * 30 = 13.2 + 9.9 + 9.9 = 33.0
         assert_eq!(SqlxCrmService::score_lead(0.33, 0.33, 0.33), 33);
     }
 
     #[test]
     fn test_score_lead_nan_and_inf() {
-// NaN should be clamped to 0 by clamp (actually NaN.clamp returns NaN in Rust)
-// But the conversion to u8 should handle it gracefully
-// This test documents the behaviour
+        // NaN should be clamped to 0 by clamp (actually NaN.clamp returns NaN in Rust)
+        // But the conversion to u8 should handle it gracefully
+        // This test documents the behaviour
         let score = SqlxCrmService::score_lead(f64::NAN, 0.5, 0.5);
         assert!(score <= 100); // Whatever the result, it shouldn't panic
     }
 
-// -----------------------------------------------------------------------
-// SqlxCrmService::new
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // SqlxCrmService::new
+    // -----------------------------------------------------------------------
 
-// NOTE:We cannot test methods that require a database connection in
-// unit tests. The following tests validate pure logic only. Integration
-// tests with a real Postgres instance should be in the integration-tests
-// crate.
+    // NOTE:We cannot test methods that require a database connection in
+    // unit tests. The following tests validate pure logic only. Integration
+    // tests with a real Postgres instance should be in the integration-tests
+    // crate.
 }
-

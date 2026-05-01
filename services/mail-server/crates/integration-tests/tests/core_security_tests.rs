@@ -10,14 +10,14 @@
 
 mod ui_xss {
     use ui_foundation::shell::{
-        ControlPlaneShell, ImpersonationBanner, MarketingShell, OperationalBanner,
-        ShellHeader, WebDashboardShell,
+        ControlPlaneShell, ImpersonationBanner, MarketingShell, OperationalBanner, ShellHeader,
+        WebDashboardShell,
     };
 
-/// HTML-injection vectors that must never appear un-escaped in HTML output.
-/// Note:`javascript:` URIs without HTML metacharacters are only dangerous
-/// in href/src attribute contexts, not in text content where these values
-/// are rendered, so they are not included here.
+    /// HTML-injection vectors that must never appear un-escaped in HTML output.
+    /// Note:`javascript:` URIs without HTML metacharacters are only dangerous
+    /// in href/src attribute contexts, not in text content where these values
+    /// are rendered, so they are not included here.
     const XSS_PAYLOADS: &[&str] = &[
         "<script>alert('xss')</script>",
         "<img src=x onerror=\"alert(1)\">",
@@ -98,8 +98,11 @@ mod ui_xss {
             toast_surface: None,
         }
         .render_html();
-// child_html is trusted content and must be injected as-is
-        assert!(html.contains(child), "trusted child_html must not be double-escaped");
+        // child_html is trusted content and must be injected as-is
+        assert!(
+            html.contains(child),
+            "trusted child_html must not be double-escaped"
+        );
     }
 
     #[test]
@@ -135,7 +138,7 @@ mod rbac {
         }
     }
 
-// ── Positive path ──────────────────────────────────────────
+    // ── Positive path ──────────────────────────────────────────
 
     #[test]
     fn wildcard_grants_everything() {
@@ -155,7 +158,7 @@ mod rbac {
         assert!(require_scopes(&user, &[]).is_ok());
     }
 
-// ── Negative path ──────────────────────────────────────────
+    // ── Negative path ──────────────────────────────────────────
 
     #[test]
     fn missing_scope_denied() {
@@ -163,7 +166,10 @@ mod rbac {
         let result = require_scopes(&user, &["messages:send"]);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("messages:send"), "error must name the missing scope");
+        assert!(
+            msg.contains("messages:send"),
+            "error must name the missing scope"
+        );
     }
 
     #[test]
@@ -175,25 +181,25 @@ mod rbac {
     #[test]
     fn partial_match_insufficient() {
         let user = user_with_scopes(vec!["messages:read"]);
-// User has read but not send — requiring both must fail
+        // User has read but not send — requiring both must fail
         assert!(require_scopes(&user, &["messages:read", "messages:send"]).is_err());
     }
 
     #[test]
     fn substring_scope_no_match() {
-// "messages:read_all" must NOT match "messages:read"
+        // "messages:read_all" must NOT match "messages:read"
         let user = user_with_scopes(vec!["messages:read_all"]);
         assert!(require_scopes(&user, &["messages:read"]).is_err());
     }
 
     #[test]
     fn prefix_scope_no_match() {
-// "messages:" must NOT match "messages:read"
+        // "messages:" must NOT match "messages:read"
         let user = user_with_scopes(vec!["messages:"]);
         assert!(require_scopes(&user, &["messages:read"]).is_err());
     }
 
-// ── Role-based scope matrices ──────────────────────────────
+    // ── Role-based scope matrices ──────────────────────────────
 
     #[test]
     fn viewer_cannot_mutate() {
@@ -380,7 +386,10 @@ mod auth_security {
     fn same_password_produces_different_hashes_due_to_salt() {
         let h1 = crypto::hash_password("SamePassword!1").unwrap();
         let h2 = crypto::hash_password("SamePassword!1").unwrap();
-        assert_ne!(h1, h2, "same password must produce different hashes (random salt)");
+        assert_ne!(
+            h1, h2,
+            "same password must produce different hashes (random salt)"
+        );
     }
 
     #[test]
@@ -405,19 +414,16 @@ mod auth_security {
         let key = "am_live_test_key_123456789";
         let legacy = crypto::hash_api_key(key);
         let hmac = crypto::hash_api_key_with_secret(key, "any_secret");
-        assert_ne!(
-            legacy, hmac,
-            "legacy SHA-256 must differ from HMAC-SHA256"
-        );
+        assert_ne!(legacy, hmac, "legacy SHA-256 must differ from HMAC-SHA256");
     }
 
     #[test]
     fn bcrypt_hash_detected_before_argon2_verify() {
-// Simulate a bcrypt hash (from the old change_password path)
-// Argon2 verify_password must return Err, not a false positive
+        // Simulate a bcrypt hash (from the old change_password path)
+        // Argon2 verify_password must return Err, not a false positive
         let bcrypt_hash = "$2b$12$LJ3m4ys8Rp9gXPfBH9J9KuW5Eky0Zxy7v1X8X9X0X0X0X0X0X0X0";
         let result = crypto::verify_password("test", bcrypt_hash);
-// Must either error or return false — never panic or return true
+        // Must either error or return false — never panic or return true
         match result {
             Ok(verified) => assert!(!verified, "bcrypt hash must not verify as Argon2"),
             Err(_) => {} // Expected:format error
@@ -432,7 +438,7 @@ mod auth_security {
 mod ssrf_protection {
     use std::net::IpAddr;
 
-/// Parse and check if an IP is private (mirrors webhook_tester logic)
+    /// Parse and check if an IP is private (mirrors webhook_tester logic)
     fn is_private_ip(ip: IpAddr) -> bool {
         match ip {
             IpAddr::V4(v4) => {
@@ -442,9 +448,7 @@ mod ssrf_protection {
                     || v4.is_broadcast()
                     || v4.is_unspecified()
             }
-            IpAddr::V6(v6) => {
-                v6.is_loopback() || v6.is_unspecified()
-            }
+            IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
         }
     }
 

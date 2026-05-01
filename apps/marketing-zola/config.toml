@@ -42,8 +42,27 @@ site_name = "ApexMail"
 author = "Bel Consulting OÜ"
 og_image = "/images/og-image.svg"
 twitter_handle = "@apexmail"
-github_url = "https://github.com/Bel-Consulting-OU/ApexMail"
+github_url = "https://github.com/sbelakho2/ApexMail"
 docs_url = "https://apexmail.ee/docs"
 app_url = "https://app.apexmail.ee"
 api_url = "https://api.apexmail.ee"
-support_email = "hello@apexmail.ee"
+asset_cdn_base_url = "https://cdn.apexmail.ee"
+analytics_pixel_url = ""
+support_email = "support@apexmail.ee"
+cookie_consent_cookie_name = "apexmail_cookie_consent"
+cookie_consent_heading = "Cookie preferences"
+cookie_consent_copy = "We use essential cookies and privacy-friendly analytics to improve ApexMail."
+cookie_consent_policy_path = "/cookies"
+cookie_consent_policy_label = "Cookie Policy"
+
+[[extra.cookie_consent_choices]]
+value = "necessary"
+label = "Necessary Only"
+analytics = false
+primary = false
+
+[[extra.cookie_consent_choices]]
+value = "all"
+label = "Accept All"
+analytics = true
+primary = true

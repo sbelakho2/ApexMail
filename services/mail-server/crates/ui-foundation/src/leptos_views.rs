@@ -80,9 +80,7 @@ pub fn web_dashboard_layout(child_html: &str) -> String {
             mobile_menu_open: false,
         },
         impersonation_banner: None,
-        toast_surface: Some(ToastSurface {
-            toasts: Vec::new(),
-        }),
+        toast_surface: Some(ToastSurface { toasts: Vec::new() }),
     };
     shell.render_html()
 }
@@ -91,6 +89,13 @@ const CAMPAIGNS_RETURN_HREF: &str = "/campaigns?page=2&status=draft&query=spring
 
 fn pagination_storage_key(scope: &str) -> String {
     format!("{}:{scope}:page", ui_store_persistence_key())
+}
+
+fn render_page_breadcrumbs(current_page: &str) -> String {
+    format!(
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li><li class=\"text-surface-300\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">{}</li></ol></nav>",
+        current_page,
+    )
 }
 
 fn render_debounced_filter_bar(
@@ -127,7 +132,10 @@ fn render_table_loading_state(label: &str, source_label: &str, column_count: usi
                 class_name,
             }
             .render_html();
-            format!("<th class=\"h-11 px-4 align-middle bg-muted/20\">{}</th>", skeleton)
+            format!(
+                "<th class=\"h-11 px-4 align-middle bg-muted/20\">{}</th>",
+                skeleton
+            )
         })
         .collect::<Vec<_>>()
         .join("");
@@ -262,7 +270,7 @@ fn render_campaign_editor_page(
     .render_html();
 
     format!(
-        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-xl border border-success/25 bg-success/10 p-4 shadow-sm\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-semibold uppercase tracking-[0.24em] text-success\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-900\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Autosave keeps long campaign edits safe across accidental navigation and route changes.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div aria-live=\"polite\" data-autosave-status=\"saved\" class=\"flex items-center gap-2\">{autosave_badge}<span class=\"text-xs font-medium text-success\">Last saved 20 seconds ago</span></div><p class=\"text-xs text-muted-foreground\">Changes sync every 30 seconds and before navigation.</p></div></div></section><form class=\"space-y-6\" data-autosave-endpoint=\"/v1/campaigns/drafts\" data-autosave-interval-ms=\"30000\" data-dirty-guard=\"true\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Leaving the page before autosave completes will trigger a confirmation dialog instead of discarding your work.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}{schedule_button}</div></div></form><div hidden id=\"campaign-leave-guard\">{leave_dialog}</div></div>",
+        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-xl border border-success/25 bg-success/10 p-4 shadow-sm\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-semibold uppercase tracking-[0.24em] text-success\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-900\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Autosave keeps long campaign edits safe across accidental navigation and route changes.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div aria-live=\"polite\" data-autosave-status=\"saved\" class=\"flex items-center gap-2\">{autosave_badge}<span class=\"text-xs font-medium text-success\">Last saved just now</span></div><p class=\"text-xs text-muted-foreground\">Changes sync every 10 seconds and before navigation.</p></div></div></section><form class=\"space-y-6\" data-autosave-endpoint=\"/v1/campaigns/drafts\" data-autosave-interval-ms=\"10000\" data-dirty-guard=\"true\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Leaving the page before autosave completes will trigger a confirmation dialog instead of discarding your work.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}{schedule_button}</div></div></form><div hidden id=\"campaign-leave-guard\">{leave_dialog}</div></div>",
         breadcrumbs = breadcrumbs,
         title = title,
         autosave_badge = autosave_badge,
@@ -283,7 +291,12 @@ fn render_campaign_editor_page(
 
 /// Pixel-identical reproduction of the web new-campaign page contract.
 pub fn web_campaigns_new_page() -> String {
-    render_campaign_editor_page("Create Campaign", "New Campaign", "/campaigns?page=1", "Save Draft")
+    render_campaign_editor_page(
+        "Create Campaign",
+        "New Campaign",
+        "/campaigns?page=1",
+        "Save Draft",
+    )
 }
 
 /// Pixel-identical reproduction of the dedicated-IP settings page contract.
@@ -296,10 +309,22 @@ pub fn web_dedicated_ips_page() -> String {
     let table = Table {
         caption: Some("Dedicated IP addresses"),
         columns: vec![
-            TableColumn { label: "IP Address", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "Reputation", align: "left" },
-            TableColumn { label: "Allocated", align: "left" },
+            TableColumn {
+                label: "IP Address",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "Reputation",
+                align: "left",
+            },
+            TableColumn {
+                label: "Allocated",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -310,7 +335,13 @@ pub fn web_dedicated_ips_page() -> String {
 {empty}",
         header = header_html,
         table = table.render_html(),
-        empty = EmptyState { title: "No dedicated IPs", description: Some("Provision a dedicated IP to improve deliverability"), icon_markup: None, action_label: Some("Provision IP") }.render_html(),
+        empty = EmptyState {
+            title: "No dedicated IPs",
+            description: Some("Provision a dedicated IP to improve deliverability"),
+            icon_markup: None,
+            action_label: Some("Provision IP")
+        }
+        .render_html(),
     )
 }
 
@@ -359,11 +390,26 @@ pub fn control_plane_audit_page() -> String {
     let table = Table {
         caption: Some("Audit logs"),
         columns: vec![
-            TableColumn { label: "Timestamp", align: "left" },
-            TableColumn { label: "Action", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "Tenant", align: "left" },
-            TableColumn { label: "Details", align: "left" },
+            TableColumn {
+                label: "Timestamp",
+                align: "left",
+            },
+            TableColumn {
+                label: "Action",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "Tenant",
+                align: "left",
+            },
+            TableColumn {
+                label: "Details",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -380,7 +426,16 @@ pub fn control_plane_audit_page() -> String {
 </div>\
 {table}\
 </div>",
-        export_button = Button { variant: "outline", size: "default", label: "Export", disabled: false, loading: false, left_icon: Some("download"), right_icon: None }.render_html(),
+        export_button = Button {
+            variant: "outline",
+            size: "default",
+            label: "Export",
+            disabled: false,
+            loading: false,
+            left_icon: Some("download"),
+            right_icon: None
+        }
+        .render_html(),
         search = search_input.render_html(),
         table = table.render_html(),
     )
@@ -388,7 +443,7 @@ pub fn control_plane_audit_page() -> String {
 
 /// Rust SSR sales console shell for the control-plane migration.
 pub fn control_plane_sales_page() -> String {
-        r#"
+    r#"
 <main class="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.16),_transparent_35%),linear-gradient(180deg,#071018_0%,#0b1420_45%,#111827_100%)] px-6 py-10 text-white">
     <div class="mx-auto max-w-7xl space-y-8">
         <header class="grid gap-6 rounded-[2rem] border border-white/10 bg-black/20 p-6 shadow-2xl shadow-black/30 lg:grid-cols-[1.1fr_0.9fr]">
@@ -745,9 +800,7 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
 }
 
 fn web_auth_hidden_input(name: &str, value: &str) -> String {
-    format!(
-        "<input type=\"hidden\" name=\"{name}\" value=\"{value}\" />",
-    )
+    format!("<input type=\"hidden\" name=\"{name}\" value=\"{value}\" />",)
 }
 
 fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
@@ -998,9 +1051,24 @@ pub fn web_campaigns_page() -> String {
         size: "default",
         open: false,
         options: vec![
-            SelectOption { value: "draft", label: "Draft", disabled: false, selected: true },
-            SelectOption { value: "scheduled", label: "Scheduled", disabled: false, selected: false },
-            SelectOption { value: "sent", label: "Sent", disabled: false, selected: false },
+            SelectOption {
+                value: "draft",
+                label: "Draft",
+                disabled: false,
+                selected: true,
+            },
+            SelectOption {
+                value: "scheduled",
+                label: "Scheduled",
+                disabled: false,
+                selected: false,
+            },
+            SelectOption {
+                value: "sent",
+                label: "Sent",
+                disabled: false,
+                selected: false,
+            },
         ],
     }
     .render_html();
@@ -1011,24 +1079,66 @@ pub fn web_campaigns_page() -> String {
         size: "default",
         open: false,
         options: vec![
-            SelectOption { value: "updated", label: "Recently updated", disabled: false, selected: true },
-            SelectOption { value: "created", label: "Recently created", disabled: false, selected: false },
-            SelectOption { value: "open-rate", label: "Open rate", disabled: false, selected: false },
+            SelectOption {
+                value: "updated",
+                label: "Recently updated",
+                disabled: false,
+                selected: true,
+            },
+            SelectOption {
+                value: "created",
+                label: "Recently created",
+                disabled: false,
+                selected: false,
+            },
+            SelectOption {
+                value: "open-rate",
+                label: "Open rate",
+                disabled: false,
+                selected: false,
+            },
         ],
     }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
-        status_filter,
-        sort_filter,
+        status_filter, sort_filter,
     );
+    let select_all = Checkbox {
+        checked: true,
+        variant: "default",
+        size: "default",
+        indeterminate: false,
+        disabled: false,
+    }
+    .render_html();
+    let spring_checkbox = Checkbox {
+        checked: true,
+        variant: "default",
+        size: "default",
+        indeterminate: false,
+        disabled: false,
+    }
+    .render_html();
+    let launch_checkbox = Checkbox {
+        checked: true,
+        variant: "default",
+        size: "default",
+        indeterminate: false,
+        disabled: false,
+    }
+    .render_html();
     let spring_status = StatusIndicator { status: "draft" }.render_html();
-    let launch_status = StatusIndicator { status: "scheduled" }.render_html();
+    let launch_status = StatusIndicator {
+        status: "scheduled",
+    }
+    .render_html();
     let spring_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><button type=\"button\" data-alert-dialog-target=\"campaign-delete-confirmation\" class=\"inline-flex items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/10\">Delete</button></div>";
     let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Review</a><a href=\"/campaigns/c_launch/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a></div>";
     let table = Table {
         caption: Some("Campaigns"),
         columns: vec![
+            TableColumn { label: select_all.as_str(), align: "left" },
             TableColumn { label: "Name", align: "left" },
             TableColumn { label: "Status", align: "left" },
             TableColumn { label: "Audience", align: "left" },
@@ -1038,6 +1148,7 @@ pub fn web_campaigns_page() -> String {
         ],
         rows: vec![
             vec![
+                spring_checkbox.as_str(),
                 "<a href=\"/campaigns/c_spring?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"font-semibold text-foreground hover:text-primary\">Spring Winback</a>",
                 spring_status.as_str(),
                 "VIP Customers",
@@ -1046,6 +1157,7 @@ pub fn web_campaigns_page() -> String {
                 spring_actions,
             ],
             vec![
+                launch_checkbox.as_str(),
                 "<a href=\"/campaigns/c_launch?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"font-semibold text-foreground hover:text-primary\">Launch Sequence</a>",
                 launch_status.as_str(),
                 "Trial Accounts",
@@ -1055,23 +1167,40 @@ pub fn web_campaigns_page() -> String {
             ],
         ],
     };
+    let bulk_bar = format!(
+        "<section class=\"rounded-xl border border-border bg-card/80 p-4 shadow-sm\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\">{}<div aria-live=\"polite\"><p class=\"text-sm font-semibold text-foreground\">2 campaigns selected</p><p class=\"text-xs text-muted-foreground\">Bulk actions preserve the active search and page state while you triage drafts in batches.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{}{}</div></div></section>",
+        select_all,
+        Button { variant: "outline", size: "default", label: "Duplicate", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        format!(
+            "{}{}",
+            Button { variant: "outline", size: "default", label: "Archive", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+            Button { variant: "destructive", size: "default", label: "Delete", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        ),
+    );
     let pagination_key = pagination_storage_key("campaigns");
     let pagination = PaginationControls {
         page: 2,
         total_pages: 5,
     }
-    .render_html_with_links("/campaigns", Some("status=draft&query=spring"), Some(pagination_key.as_str()));
+    .render_html_with_links(
+        "/campaigns",
+        Some("status=draft&query=spring"),
+        Some(pagination_key.as_str()),
+    );
     let delete_dialog = AlertDialog {
         title: "Delete campaign?",
-        message: "This permanently removes the draft, schedule, and associated analytics snapshots.",
+        message:
+            "This permanently removes the draft, schedule, and associated analytics snapshots.",
         confirm_label: "Delete campaign",
         cancel_label: Some("Keep campaign"),
         variant: "destructive",
         dialog_type: "confirm",
     }
     .render_html();
+    let breadcrumbs = render_page_breadcrumbs("Campaigns");
     format!(
-        "<div class=\"space-y-6\"><div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Keep campaign lists responsive, searchable, and resumable without losing your current page.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">New Campaign</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"campaign-delete-confirmation\">{delete_dialog}</div></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Campaigns</h1><p class=\"text-sm text-muted-foreground\">Keep campaign lists responsive, searchable, and resumable without losing your current page.</p></div><a href=\"/campaigns/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">New Campaign</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 11-20 of 42 campaigns. Returning from detail pages restores page 2 and the active filters.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"campaign-delete-confirmation\">{delete_dialog}</div></div>",
+        breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "campaign-search",
             "Search campaigns",
@@ -1080,6 +1209,7 @@ pub fn web_campaigns_page() -> String {
             "/campaigns",
             filters.as_str(),
         ),
+        bulk_bar = bulk_bar,
         loading = render_table_loading_state("Loading campaign performance", "api", 6),
         table = table.render_html(),
         pagination = pagination,
@@ -1108,7 +1238,12 @@ pub fn web_campaign_detail_page() -> String {
 
 /// Campaign edit page.
 pub fn web_campaign_edit_page() -> String {
-    render_campaign_editor_page("Edit Campaign", "Edit Campaign", CAMPAIGNS_RETURN_HREF, "Save Changes")
+    render_campaign_editor_page(
+        "Edit Campaign",
+        "Edit Campaign",
+        CAMPAIGNS_RETURN_HREF,
+        "Save Changes",
+    )
 }
 
 /// Contacts list page.
@@ -1120,9 +1255,24 @@ pub fn web_contacts_page() -> String {
         size: "default",
         open: false,
         options: vec![
-            SelectOption { value: "subscribed", label: "Subscribed", disabled: false, selected: true },
-            SelectOption { value: "unsubscribed", label: "Unsubscribed", disabled: false, selected: false },
-            SelectOption { value: "bounced", label: "Bounced", disabled: false, selected: false },
+            SelectOption {
+                value: "subscribed",
+                label: "Subscribed",
+                disabled: false,
+                selected: true,
+            },
+            SelectOption {
+                value: "unsubscribed",
+                label: "Unsubscribed",
+                disabled: false,
+                selected: false,
+            },
+            SelectOption {
+                value: "bounced",
+                label: "Bounced",
+                disabled: false,
+                selected: false,
+            },
         ],
     }
     .render_html();
@@ -1133,16 +1283,30 @@ pub fn web_contacts_page() -> String {
         size: "default",
         open: false,
         options: vec![
-            SelectOption { value: "vip", label: "VIP Customers", disabled: false, selected: true },
-            SelectOption { value: "newsletter", label: "Newsletter Subscribers", disabled: false, selected: false },
-            SelectOption { value: "trial", label: "Trial Accounts", disabled: false, selected: false },
+            SelectOption {
+                value: "vip",
+                label: "VIP Customers",
+                disabled: false,
+                selected: true,
+            },
+            SelectOption {
+                value: "newsletter",
+                label: "Newsletter Subscribers",
+                disabled: false,
+                selected: false,
+            },
+            SelectOption {
+                value: "trial",
+                label: "Trial Accounts",
+                disabled: false,
+                selected: false,
+            },
         ],
     }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
-        status_filter,
-        segment_filter,
+        status_filter, segment_filter,
     );
     let select_all = Checkbox {
         checked: true,
@@ -1176,17 +1340,41 @@ pub fn web_contacts_page() -> String {
         disabled: false,
     }
     .render_html();
-    let subscriber_status = StatusIndicator { status: "subscribed" }.render_html();
-    let unsubscribed_status = StatusIndicator { status: "unsubscribed" }.render_html();
+    let subscriber_status = StatusIndicator {
+        status: "subscribed",
+    }
+    .render_html();
+    let unsubscribed_status = StatusIndicator {
+        status: "unsubscribed",
+    }
+    .render_html();
     let table = Table {
         caption: Some("Contacts"),
         columns: vec![
-            TableColumn { label: select_all.as_str(), align: "left" },
-            TableColumn { label: "Email", align: "left" },
-            TableColumn { label: "Name", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "Lists", align: "right" },
-            TableColumn { label: "Added", align: "left" },
+            TableColumn {
+                label: select_all.as_str(),
+                align: "left",
+            },
+            TableColumn {
+                label: "Email",
+                align: "left",
+            },
+            TableColumn {
+                label: "Name",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "Lists",
+                align: "right",
+            },
+            TableColumn {
+                label: "Added",
+                align: "left",
+            },
         ],
         rows: vec![
             vec![
@@ -1230,9 +1418,15 @@ pub fn web_contacts_page() -> String {
         page: 3,
         total_pages: 8,
     }
-    .render_html_with_links("/contacts", Some("status=subscribed&query=ali"), Some(pagination_key.as_str()));
+    .render_html_with_links(
+        "/contacts",
+        Some("status=subscribed&query=ali"),
+        Some(pagination_key.as_str()),
+    );
+    let breadcrumbs = render_page_breadcrumbs("Contacts");
     format!(
-        "<div class=\"space-y-6\"><div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Debounced filters, deterministic loading states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">Add Contact</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Contacts</h1><p class=\"text-sm text-muted-foreground\">Debounced filters, deterministic loading states, and batch actions keep list management fast at scale.</p></div><a href=\"/contacts/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">Add Contact</a></div>{filters}{bulk_bar}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 41-60 of 148 contacts. Page state persists while you review individual records and come back.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section></div>",
+        breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "contact-search",
             "Search contacts",
@@ -1280,8 +1474,18 @@ pub fn web_lists_page() -> String {
         size: "default",
         open: false,
         options: vec![
-            SelectOption { value: "active", label: "Active lists", disabled: false, selected: true },
-            SelectOption { value: "archived", label: "Archived lists", disabled: false, selected: false },
+            SelectOption {
+                value: "active",
+                label: "Active lists",
+                disabled: false,
+                selected: true,
+            },
+            SelectOption {
+                value: "archived",
+                label: "Archived lists",
+                disabled: false,
+                selected: false,
+            },
         ],
     }
     .render_html();
@@ -1292,25 +1496,46 @@ pub fn web_lists_page() -> String {
         size: "default",
         open: false,
         options: vec![
-            SelectOption { value: "largest", label: "Largest audience", disabled: false, selected: true },
-            SelectOption { value: "recent", label: "Recently updated", disabled: false, selected: false },
+            SelectOption {
+                value: "largest",
+                label: "Largest audience",
+                disabled: false,
+                selected: true,
+            },
+            SelectOption {
+                value: "recent",
+                label: "Recently updated",
+                disabled: false,
+                selected: false,
+            },
         ],
     }
     .render_html();
     let filters = format!(
         "<div class=\"grid w-full gap-3 sm:grid-cols-2 lg:w-auto\">{}{}</div>",
-        segment_filter,
-        sort_filter,
+        segment_filter, sort_filter,
     );
     let vip_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_vip\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><button type=\"button\" data-alert-dialog-target=\"list-delete-confirmation\" class=\"inline-flex items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-semibold text-destructive transition-colors hover:bg-destructive/10\">Delete</button></div>";
     let launch_actions = "<div class=\"flex flex-wrap justify-end gap-2\"><a href=\"/lists/l_launch\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Open</a><a href=\"/lists/l_launch/edit\" class=\"inline-flex items-center justify-center rounded-lg border border-input bg-background px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a></div>";
     let table = Table {
         caption: Some("Contact lists"),
         columns: vec![
-            TableColumn { label: "Name", align: "left" },
-            TableColumn { label: "Contacts", align: "right" },
-            TableColumn { label: "Updated", align: "left" },
-            TableColumn { label: "Actions", align: "right" },
+            TableColumn {
+                label: "Name",
+                align: "left",
+            },
+            TableColumn {
+                label: "Contacts",
+                align: "right",
+            },
+            TableColumn {
+                label: "Updated",
+                align: "left",
+            },
+            TableColumn {
+                label: "Actions",
+                align: "right",
+            },
         ],
         rows: vec![
             vec!["VIP Customers", "1,240", "8 minutes ago", vip_actions],
@@ -1322,7 +1547,11 @@ pub fn web_lists_page() -> String {
         page: 1,
         total_pages: 3,
     }
-    .render_html_with_links("/lists", Some("segment=active&query=vip"), Some(pagination_key.as_str()));
+    .render_html_with_links(
+        "/lists",
+        Some("segment=active&query=vip"),
+        Some(pagination_key.as_str()),
+    );
     let delete_dialog = AlertDialog {
         title: "Delete list?",
         message: "This removes the list definition immediately. Contacts remain intact, but campaign segment links will be removed.",
@@ -1332,8 +1561,10 @@ pub fn web_lists_page() -> String {
         dialog_type: "confirm",
     }
     .render_html();
+    let breadcrumbs = render_page_breadcrumbs("Lists");
     format!(
-        "<div class=\"space-y-6\"><div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions now surface confirmation and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">New List</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"list-delete-confirmation\">{delete_dialog}</div></div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-900\">Lists</h1><p class=\"text-sm text-muted-foreground\">List actions now surface confirmation and preserve the active list page when you navigate away and back.</p></div><a href=\"/lists/new\" class=\"inline-flex w-full items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 sm:w-auto\">New List</a></div>{filters}{loading}<section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">Showing 1-20 of 44 lists. Query parameters stay attached to pagination links for back/forward restoration.</p>{pagination}</div></section><section data-view-state=\"empty\" hidden>{empty}</section><div hidden id=\"list-delete-confirmation\">{delete_dialog}</div></div>",
+        breadcrumbs = breadcrumbs,
         filters = render_debounced_filter_bar(
             "list-search",
             "Search contact lists",
@@ -1359,9 +1590,36 @@ pub fn web_lists_new_page() -> String {
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
-        name_label = Label { text: "List Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "e.g. Newsletter Subscribers", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        save_button = Button { variant: "default", size: "default", label: "Create List", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        name_label = Label {
+            text: "List Name",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        name_input = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "e.g. Newsletter Subscribers",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        save_button = Button {
+            variant: "default",
+            size: "default",
+            label: "Create List",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None
+        }
+        .render_html(),
     )
 }
 
@@ -1370,9 +1628,18 @@ pub fn web_templates_page() -> String {
     let table = Table {
         caption: Some("Email templates"),
         columns: vec![
-            TableColumn { label: "Name", align: "left" },
-            TableColumn { label: "Subject", align: "left" },
-            TableColumn { label: "Updated", align: "left" },
+            TableColumn {
+                label: "Name",
+                align: "left",
+            },
+            TableColumn {
+                label: "Subject",
+                align: "left",
+            },
+            TableColumn {
+                label: "Updated",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1467,10 +1734,22 @@ pub fn web_events_page() -> String {
     let table = Table {
         caption: Some("Email events"),
         columns: vec![
-            TableColumn { label: "Timestamp", align: "left" },
-            TableColumn { label: "Event", align: "left" },
-            TableColumn { label: "Recipient", align: "left" },
-            TableColumn { label: "Subject", align: "left" },
+            TableColumn {
+                label: "Timestamp",
+                align: "left",
+            },
+            TableColumn {
+                label: "Event",
+                align: "left",
+            },
+            TableColumn {
+                label: "Recipient",
+                align: "left",
+            },
+            TableColumn {
+                label: "Subject",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1479,7 +1758,18 @@ pub fn web_events_page() -> String {
 <h1 class=\"text-2xl font-bold text-surface-900\">Events</h1>\
 {search}\
 {table}</div>",
-        search = Input { input_type: "text", variant: "default", size: "default", placeholder: "Filter events...", value: "", left_icon: Some("search"), right_icon: None, error: None, disabled: false }.render_html(),
+        search = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "Filter events...",
+            value: "",
+            left_icon: Some("search"),
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
         table = table.render_html(),
     )
 }
@@ -1489,11 +1779,26 @@ pub fn web_domains_page() -> String {
     let table = Table {
         caption: Some("Sending domains"),
         columns: vec![
-            TableColumn { label: "Domain", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "DKIM", align: "left" },
-            TableColumn { label: "SPF", align: "left" },
-            TableColumn { label: "Added", align: "left" },
+            TableColumn {
+                label: "Domain",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "DKIM",
+                align: "left",
+            },
+            TableColumn {
+                label: "SPF",
+                align: "left",
+            },
+            TableColumn {
+                label: "Added",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1516,9 +1821,36 @@ pub fn web_domains_new_page() -> String {
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        domain_label = Label { text: "Domain", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        domain_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "mail.example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        save_button = Button { variant: "default", size: "default", label: "Add Domain", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        domain_label = Label {
+            text: "Domain",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        domain_input = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "mail.example.com",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        save_button = Button {
+            variant: "default",
+            size: "default",
+            label: "Add Domain",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None
+        }
+        .render_html(),
     )
 }
 
@@ -1541,10 +1873,22 @@ pub fn web_settings_api_keys_page() -> String {
     let table = Table {
         caption: Some("API keys"),
         columns: vec![
-            TableColumn { label: "Name", align: "left" },
-            TableColumn { label: "Key Prefix", align: "left" },
-            TableColumn { label: "Created", align: "left" },
-            TableColumn { label: "Last Used", align: "left" },
+            TableColumn {
+                label: "Name",
+                align: "left",
+            },
+            TableColumn {
+                label: "Key Prefix",
+                align: "left",
+            },
+            TableColumn {
+                label: "Created",
+                align: "left",
+            },
+            TableColumn {
+                label: "Last Used",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1563,10 +1907,22 @@ pub fn web_settings_team_page() -> String {
     let table = Table {
         caption: Some("Team members"),
         columns: vec![
-            TableColumn { label: "Name", align: "left" },
-            TableColumn { label: "Email", align: "left" },
-            TableColumn { label: "Role", align: "left" },
-            TableColumn { label: "Joined", align: "left" },
+            TableColumn {
+                label: "Name",
+                align: "left",
+            },
+            TableColumn {
+                label: "Email",
+                align: "left",
+            },
+            TableColumn {
+                label: "Role",
+                align: "left",
+            },
+            TableColumn {
+                label: "Joined",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1603,10 +1959,22 @@ pub fn web_settings_webhooks_page() -> String {
     let table = Table {
         caption: Some("Webhooks"),
         columns: vec![
-            TableColumn { label: "URL", align: "left" },
-            TableColumn { label: "Events", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "Created", align: "left" },
+            TableColumn {
+                label: "URL",
+                align: "left",
+            },
+            TableColumn {
+                label: "Events",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "Created",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1637,16 +2005,106 @@ pub fn web_settings_profile_page() -> String {
 <div class=\"space-y-2\">{new_label}{new_input}</div>\
 <div class=\"flex gap-3\">{update_button}</div>\
 </form></div></div>",
-        name_label = Label { text: "Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        email_label = Label { text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "you@company.com", value: "", left_icon: None, right_icon: None, error: None, disabled: true }.render_html(),
-        save_button = Button { variant: "default", size: "default", label: "Save Changes", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
-        current_label = Label { text: "Current Password", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        current_input = Input { input_type: "password", variant: "default", size: "default", placeholder: "••••••••", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        new_label = Label { text: "New Password", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        new_input = Input { input_type: "password", variant: "default", size: "default", placeholder: "••••••••", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        update_button = Button { variant: "default", size: "default", label: "Update Password", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        name_label = Label {
+            text: "Name",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        name_input = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "Jane Doe",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        email_label = Label {
+            text: "Email",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        email_input = Input {
+            input_type: "email",
+            variant: "default",
+            size: "default",
+            placeholder: "you@company.com",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: true
+        }
+        .render_html(),
+        save_button = Button {
+            variant: "default",
+            size: "default",
+            label: "Save Changes",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None
+        }
+        .render_html(),
+        current_label = Label {
+            text: "Current Password",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        current_input = Input {
+            input_type: "password",
+            variant: "default",
+            size: "default",
+            placeholder: "••••••••",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        new_label = Label {
+            text: "New Password",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        new_input = Input {
+            input_type: "password",
+            variant: "default",
+            size: "default",
+            placeholder: "••••••••",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        update_button = Button {
+            variant: "default",
+            size: "default",
+            label: "Update Password",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None
+        }
+        .render_html(),
     )
 }
 
@@ -1672,10 +2130,22 @@ pub fn control_plane_tenants_page() -> String {
     let table = Table {
         caption: Some("Tenants"),
         columns: vec![
-            TableColumn { label: "Name", align: "left" },
-            TableColumn { label: "Plan", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "Created", align: "left" },
+            TableColumn {
+                label: "Name",
+                align: "left",
+            },
+            TableColumn {
+                label: "Plan",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "Created",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1698,11 +2168,56 @@ pub fn control_plane_tenants_new_page() -> String {
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        name_label = Label { text: "Tenant Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Acme Corp", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        domain_label = Label { text: "Primary Domain", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        domain_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "acme.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        save_button = Button { variant: "default", size: "default", label: "Create Tenant", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        name_label = Label {
+            text: "Tenant Name",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        name_input = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "Acme Corp",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        domain_label = Label {
+            text: "Primary Domain",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        domain_input = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "acme.com",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        save_button = Button {
+            variant: "default",
+            size: "default",
+            label: "Create Tenant",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None
+        }
+        .render_html(),
     )
 }
 
@@ -1711,10 +2226,22 @@ pub fn control_plane_operators_page() -> String {
     let table = Table {
         caption: Some("Operators"),
         columns: vec![
-            TableColumn { label: "Name", align: "left" },
-            TableColumn { label: "Email", align: "left" },
-            TableColumn { label: "Role", align: "left" },
-            TableColumn { label: "Last Active", align: "left" },
+            TableColumn {
+                label: "Name",
+                align: "left",
+            },
+            TableColumn {
+                label: "Email",
+                align: "left",
+            },
+            TableColumn {
+                label: "Role",
+                align: "left",
+            },
+            TableColumn {
+                label: "Last Active",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1737,11 +2264,56 @@ pub fn control_plane_operators_new_page() -> String {
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        name_label = Label { text: "Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        email_label = Label { text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "admin@apexmail.ee", value: "", left_icon: None, right_icon: None, error: None, disabled: false }.render_html(),
-        save_button = Button { variant: "default", size: "default", label: "Add Operator", disabled: false, loading: false, left_icon: None, right_icon: None }.render_html(),
+        name_label = Label {
+            text: "Name",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        name_input = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "Jane Doe",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        email_label = Label {
+            text: "Email",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        email_input = Input {
+            input_type: "email",
+            variant: "default",
+            size: "default",
+            placeholder: "admin@apexmail.ee",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false
+        }
+        .render_html(),
+        save_button = Button {
+            variant: "default",
+            size: "default",
+            label: "Add Operator",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None
+        }
+        .render_html(),
     )
 }
 
@@ -1781,11 +2353,26 @@ pub fn control_plane_jobs_page() -> String {
     let table = Table {
         caption: Some("Background jobs"),
         columns: vec![
-            TableColumn { label: "Job ID", align: "left" },
-            TableColumn { label: "Type", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "Started", align: "left" },
-            TableColumn { label: "Duration", align: "right" },
+            TableColumn {
+                label: "Job ID",
+                align: "left",
+            },
+            TableColumn {
+                label: "Type",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "Started",
+                align: "left",
+            },
+            TableColumn {
+                label: "Duration",
+                align: "right",
+            },
         ],
         rows: vec![],
     };
@@ -1812,15 +2399,33 @@ pub fn control_plane_nodes_page() -> String {
     let table = Table {
         caption: Some("Cluster nodes"),
         columns: vec![
-            TableColumn { label: "Node", align: "left" },
-            TableColumn { label: "Role", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "CPU", align: "right" },
-            TableColumn { label: "Memory", align: "right" },
+            TableColumn {
+                label: "Node",
+                align: "left",
+            },
+            TableColumn {
+                label: "Role",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "CPU",
+                align: "right",
+            },
+            TableColumn {
+                label: "Memory",
+                align: "right",
+            },
         ],
         rows: vec![],
     };
-    format!("<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Nodes</h1>{table}</div>", table = table.render_html())
+    format!(
+        "<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Nodes</h1>{table}</div>",
+        table = table.render_html()
+    )
 }
 
 /// Queues page.
@@ -1828,14 +2433,29 @@ pub fn control_plane_queues_page() -> String {
     let table = Table {
         caption: Some("Message queues"),
         columns: vec![
-            TableColumn { label: "Queue", align: "left" },
-            TableColumn { label: "Pending", align: "right" },
-            TableColumn { label: "Processing", align: "right" },
-            TableColumn { label: "Failed", align: "right" },
+            TableColumn {
+                label: "Queue",
+                align: "left",
+            },
+            TableColumn {
+                label: "Pending",
+                align: "right",
+            },
+            TableColumn {
+                label: "Processing",
+                align: "right",
+            },
+            TableColumn {
+                label: "Failed",
+                align: "right",
+            },
         ],
         rows: vec![],
     };
-    format!("<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Queues</h1>{table}</div>", table = table.render_html())
+    format!(
+        "<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Queues</h1>{table}</div>",
+        table = table.render_html()
+    )
 }
 
 /// CP domains page.
@@ -1843,14 +2463,29 @@ pub fn control_plane_domains_page() -> String {
     let table = Table {
         caption: Some("All domains"),
         columns: vec![
-            TableColumn { label: "Domain", align: "left" },
-            TableColumn { label: "Tenant", align: "left" },
-            TableColumn { label: "Status", align: "left" },
-            TableColumn { label: "Verified", align: "left" },
+            TableColumn {
+                label: "Domain",
+                align: "left",
+            },
+            TableColumn {
+                label: "Tenant",
+                align: "left",
+            },
+            TableColumn {
+                label: "Status",
+                align: "left",
+            },
+            TableColumn {
+                label: "Verified",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
-    format!("<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Domains</h1>{table}</div>", table = table.render_html())
+    format!(
+        "<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Domains</h1>{table}</div>",
+        table = table.render_html()
+    )
 }
 
 /// CP billing page.
@@ -1867,14 +2502,29 @@ pub fn control_plane_billing_plans_page() -> String {
     let table = Table {
         caption: Some("Plans"),
         columns: vec![
-            TableColumn { label: "Plan", align: "left" },
-            TableColumn { label: "Price", align: "right" },
-            TableColumn { label: "Quota", align: "right" },
-            TableColumn { label: "Subscribers", align: "right" },
+            TableColumn {
+                label: "Plan",
+                align: "left",
+            },
+            TableColumn {
+                label: "Price",
+                align: "right",
+            },
+            TableColumn {
+                label: "Quota",
+                align: "right",
+            },
+            TableColumn {
+                label: "Subscribers",
+                align: "right",
+            },
         ],
         rows: vec![],
     };
-    format!("<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Plans</h1>{table}</div>", table = table.render_html())
+    format!(
+        "<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Plans</h1>{table}</div>",
+        table = table.render_html()
+    )
 }
 
 /// CP compliance page.
@@ -1893,7 +2543,8 @@ pub fn control_plane_gdpr_page() -> String {
 <div class=\"rounded-xl border bg-card p-6\">\
 <h3 class=\"text-lg font-semibold mb-4\">Data Subject Requests</h3>\
 <p class=\"text-sm text-muted-foreground\">Process data access, export, and deletion requests.</p>\
-</div></div>".to_string()
+</div></div>"
+        .to_string()
 }
 
 /// CP alerts page.
@@ -1901,10 +2552,22 @@ pub fn control_plane_alerts_page() -> String {
     let table = Table {
         caption: Some("Active alerts"),
         columns: vec![
-            TableColumn { label: "Alert", align: "left" },
-            TableColumn { label: "Severity", align: "left" },
-            TableColumn { label: "Source", align: "left" },
-            TableColumn { label: "Triggered", align: "left" },
+            TableColumn {
+                label: "Alert",
+                align: "left",
+            },
+            TableColumn {
+                label: "Severity",
+                align: "left",
+            },
+            TableColumn {
+                label: "Source",
+                align: "left",
+            },
+            TableColumn {
+                label: "Triggered",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
@@ -1922,14 +2585,29 @@ pub fn control_plane_alert_rules_page() -> String {
     let table = Table {
         caption: Some("Alert rules"),
         columns: vec![
-            TableColumn { label: "Rule", align: "left" },
-            TableColumn { label: "Condition", align: "left" },
-            TableColumn { label: "Severity", align: "left" },
-            TableColumn { label: "Enabled", align: "left" },
+            TableColumn {
+                label: "Rule",
+                align: "left",
+            },
+            TableColumn {
+                label: "Condition",
+                align: "left",
+            },
+            TableColumn {
+                label: "Severity",
+                align: "left",
+            },
+            TableColumn {
+                label: "Enabled",
+                align: "left",
+            },
         ],
         rows: vec![],
     };
-    format!("<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Alert Rules</h1>{table}</div>", table = table.render_html())
+    format!(
+        "<div class=\"space-y-6\"><h1 class=\"text-2xl font-bold\">Alert Rules</h1>{table}</div>",
+        table = table.render_html()
+    )
 }
 
 /// CP settings page.
@@ -1986,7 +2664,8 @@ pub fn marketing_pricing_calculator_page() -> String {
 <p class=\"text-sm text-surface-500 mt-1\">10,000 emails/month</p></div>\
 <div class=\"border-t pt-6\"><p class=\"text-sm text-surface-500\">Estimated cost</p>\
 <p class=\"text-4xl font-bold text-surface-900\">$0/mo</p></div>\
-</div></div></section>".to_string()
+</div></div></section>"
+        .to_string()
 }
 
 pub fn marketing_features_page() -> String {
@@ -2040,7 +2719,8 @@ pub fn marketing_forensic_page() -> String {
 <div class=\"rounded-xl border p-6\">\
 <h3 class=\"text-lg font-semibold\">Email Trace</h3>\
 <p class=\"text-sm text-surface-500 mt-2\">Full SMTP transaction trace for every message.</p>\
-</div></div></section>".to_string()
+</div></div></section>"
+        .to_string()
 }
 
 pub fn marketing_status_page() -> String {
@@ -2049,7 +2729,8 @@ pub fn marketing_status_page() -> String {
 <div class=\"rounded-xl border p-6 mb-6\">\
 <div class=\"flex items-center gap-3\"><span class=\"h-3 w-3 rounded-full bg-emerald-500\"></span>\
 <span class=\"text-lg font-semibold text-surface-900\">All Systems Operational</span></div>\
-</div></div></section>".to_string()
+</div></div></section>"
+        .to_string()
 }
 
 pub fn marketing_compare_page(competitor: &str) -> String {
@@ -2181,18 +2862,21 @@ pub fn control_plane_login_page() -> String {
 mod tests {
     use super::*;
 
-// ─── Root layout parity ─────────────────────────────────
+    // ─── Root layout parity ─────────────────────────────────
 
     #[test]
     fn web_root_layout_matches_nextjs_structure() {
         let html = web_root_layout("<p>test</p>");
         assert!(html.starts_with("<!DOCTYPE html>"));
-        assert!(html.contains(&format!("<html lang=\"en\" class=\"{}\">", WEB_ROOT_HTML_CLASSES)));
+        assert!(html.contains(&format!(
+            "<html lang=\"en\" class=\"{}\">",
+            WEB_ROOT_HTML_CLASSES
+        )));
         assert!(html.contains("<title>ApexMail</title>"));
         assert!(html.contains("Modern email infrastructure for developers"));
         assert!(html.contains(&format!("<body class=\"{}\">", WEB_ROOT_BODY_CLASSES)));
         assert!(html.contains("<a href=\"#app-main\""));
-        assert!(html.contains("<main id=\"app-main\" class=\"min-h-screen bg-background\">") );
+        assert!(html.contains("<main id=\"app-main\" class=\"min-h-screen bg-background\">"));
         assert!(html.contains("<p>test</p>"));
         assert!(html.contains("</html>"));
     }
@@ -2205,7 +2889,7 @@ mod tests {
         assert!(html.contains("<p>test</p>"));
     }
 
-// ─── Web page parity ────────────────────────────────────
+    // ─── Web page parity ────────────────────────────────────
 
     #[test]
     fn web_home_page_matches_nextjs_output() {
@@ -2245,7 +2929,7 @@ mod tests {
         assert!(html.contains("Schedule"));
         assert!(html.contains("Audience"));
         assert!(html.contains("HTML Content"));
-        assert!(html.contains("data-autosave-interval-ms=\"30000\""));
+        assert!(html.contains("data-autosave-interval-ms=\"10000\""));
         assert!(html.contains("aria-live=\"polite\""));
     }
 
@@ -2258,7 +2942,7 @@ mod tests {
         assert!(html.contains("<table"));
     }
 
-// ─── Control-plane page parity ──────────────────────────
+    // ─── Control-plane page parity ──────────────────────────
 
     #[test]
     fn control_plane_home_page_matches_nextjs_output() {
@@ -2292,22 +2976,22 @@ mod tests {
         assert!(html.contains("/v1/admin/sales/*"));
     }
 
-// ─── Login page parity ──────────────────────────────────
+    // ─── Login page parity ──────────────────────────────────
 
     #[test]
     fn web_login_page_has_correct_selectors_and_structure() {
         let html = web_login_page();
-// Field IDs matching behavior baseline manifest
+        // Field IDs matching behavior baseline manifest
         assert!(html.contains("id=\"email\""));
         assert!(html.contains("id=\"password\""));
         assert!(html.contains("id=\"mfaCode\""));
-// Error data attribute for rate limiting
+        // Error data attribute for rate limiting
         assert!(html.contains("data-error-key=\"auth.error.rate_limited\""));
-// MFA section
+        // MFA section
         assert!(html.contains("Additional verification required. Enter your MFA code."));
-// CSRF endpoint
+        // CSRF endpoint
         assert!(html.contains("action=\"/v1/auth/login\""));
-// Form structure
+        // Form structure
         assert!(html.contains("Forgot password?"));
         assert!(html.contains("Welcome back"));
         assert!(html.contains("Console Access"));
@@ -2318,17 +3002,17 @@ mod tests {
     #[test]
     fn control_plane_login_has_correct_selectors() {
         let html = control_plane_login_page();
-// Selectors from behavior baseline manifest
+        // Selectors from behavior baseline manifest
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"login-password\""));
         assert!(html.contains("id=\"login-mfa\""));
-// MFA text
+        // MFA text
         assert!(html.contains("MFA Verification"));
-// Auth endpoint
+        // Auth endpoint
         assert!(html.contains("action=\"/api/auth/login\""));
     }
 
-// ─── Marketing page parity ──────────────────────────────
+    // ─── Marketing page parity ──────────────────────────────
 
     #[test]
     fn marketing_api_console_page_renders_sandbox() {
@@ -2347,9 +3031,9 @@ mod tests {
         assert!(html.contains("data-marketing-shell=\"footer\""));
     }
 
-// ─── Full-page render roundtrip tests ───────────────────
+    // ─── Full-page render roundtrip tests ───────────────────
 
-// ─── Web auth page tests ────────────────────────────────
+    // ─── Web auth page tests ────────────────────────────────
 
     #[test]
     fn web_signup_page_renders_form() {
@@ -2392,7 +3076,7 @@ mod tests {
         assert!(html.contains("Back to sign in"));
     }
 
-// ─── Web dashboard page tests ───────────────────────────
+    // ─── Web dashboard page tests ───────────────────────────
 
     #[test]
     fn web_dashboard_page_renders_cards_and_charts() {
@@ -2412,7 +3096,11 @@ mod tests {
         assert!(html.contains("Campaigns"));
         assert!(html.contains("New Campaign"));
         assert!(html.contains("No campaigns yet"));
+        assert!(html.contains("aria-label=\"Breadcrumb\""));
+        assert!(html.contains("aria-current=\"page\">Campaigns"));
         assert!(html.contains("<table"));
+        assert!(html.contains("data-bulk-scope=\"campaigns\""));
+        assert!(html.contains("2 campaigns selected"));
         assert!(html.contains("data-view-state=\"loading\""));
         assert!(html.contains("data-pagination-storage-key=\"apexmail-ui:campaigns:page\""));
         assert!(html.contains("Delete campaign?"));
@@ -2442,6 +3130,7 @@ mod tests {
         assert!(html.contains("Contacts"));
         assert!(html.contains("Add Contact"));
         assert!(html.contains("No contacts yet"));
+        assert!(html.contains("aria-current=\"page\">Contacts"));
         assert!(html.contains("<table"));
         assert!(html.contains("2 contacts selected"));
         assert!(html.contains("data-debounce-ms=\"300\""));
@@ -2461,6 +3150,7 @@ mod tests {
         assert!(html.contains("Lists"));
         assert!(html.contains("New List"));
         assert!(html.contains("No lists yet"));
+        assert!(html.contains("aria-current=\"page\">Lists"));
         assert!(html.contains("Delete list?"));
         assert!(html.contains("data-pagination-storage-key=\"apexmail-ui:lists:page\""));
     }
@@ -2554,7 +3244,7 @@ mod tests {
         assert!(html.contains("Update Password"));
     }
 
-// ─── Control-plane page tests ───────────────────────────
+    // ─── Control-plane page tests ───────────────────────────
 
     #[test]
     fn cp_dashboard_renders_cards() {
@@ -2643,7 +3333,7 @@ mod tests {
         assert!(html.contains("href=\"/settings/security\""));
     }
 
-// ─── Marketing page tests ───────────────────────────────
+    // ─── Marketing page tests ───────────────────────────────
 
     #[test]
     fn marketing_home_renders_hero() {
@@ -2703,7 +3393,7 @@ mod tests {
         assert!(html.contains("href=\"/compare/sendgrid\""));
     }
 
-// ─── Full-page render roundtrip tests ───────────────────
+    // ─── Full-page render roundtrip tests ───────────────────
 
     #[test]
     fn all_web_pages_produce_valid_html() {
@@ -2726,7 +3416,11 @@ mod tests {
             web_root_layout(&web_not_found_page()),
         ];
         for (i, html) in pages.iter().enumerate() {
-            assert!(html.starts_with("<!DOCTYPE html>"), "page {} missing doctype", i);
+            assert!(
+                html.starts_with("<!DOCTYPE html>"),
+                "page {} missing doctype",
+                i
+            );
             assert!(html.contains("</html>"), "page {} missing </html>", i);
             assert!(html.contains("<body"), "page {} missing <body", i);
             assert!(html.contains("</body>"), "page {} missing </body>", i);
@@ -2757,7 +3451,11 @@ mod tests {
             control_plane_root_layout(&control_plane_not_found_page()),
         ];
         for (i, html) in pages.iter().enumerate() {
-            assert!(html.starts_with("<!DOCTYPE html>"), "cp page {} missing doctype", i);
+            assert!(
+                html.starts_with("<!DOCTYPE html>"),
+                "cp page {} missing doctype",
+                i
+            );
             assert!(html.contains("</html>"), "cp page {} missing </html>", i);
         }
     }
@@ -2782,12 +3480,20 @@ mod tests {
             marketing_page(&marketing_zola_compare_index_page()),
         ];
         for (i, html) in pages.iter().enumerate() {
-            assert!(html.starts_with("<!DOCTYPE html>"), "marketing page {} missing doctype", i);
-            assert!(html.contains("</html>"), "marketing page {} missing </html>", i);
+            assert!(
+                html.starts_with("<!DOCTYPE html>"),
+                "marketing page {} missing doctype",
+                i
+            );
+            assert!(
+                html.contains("</html>"),
+                "marketing page {} missing </html>",
+                i
+            );
         }
     }
 
-// ─── Every page function is callable and non-empty ──────
+    // ─── Every page function is callable and non-empty ──────
 
     #[test]
     fn every_page_function_returns_non_empty_html() {
@@ -2806,7 +3512,10 @@ mod tests {
             ("web_templates_page", web_templates_page()),
             ("web_templates_new_page", web_templates_new_page()),
             ("web_reports_page", web_reports_page()),
-            ("web_reports_deliverability_page", web_reports_deliverability_page()),
+            (
+                "web_reports_deliverability_page",
+                web_reports_deliverability_page(),
+            ),
             ("web_analytics_page", web_analytics_page()),
             ("web_events_page", web_events_page()),
             ("web_domains_page", web_domains_page()),
@@ -2873,7 +3582,12 @@ mod tests {
 
         for (name, html) in &fns {
             assert!(!html.is_empty(), "{} returned empty HTML", name);
-            assert!(html.len() > 50, "{} returned suspiciously short HTML ({})", name, html.len());
+            assert!(
+                html.len() > 50,
+                "{} returned suspiciously short HTML ({})",
+                name,
+                html.len()
+            );
             assert!(
                 html.contains("<h1")
                     || html.contains("<main")

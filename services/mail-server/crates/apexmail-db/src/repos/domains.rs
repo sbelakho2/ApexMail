@@ -9,12 +9,8 @@ use crate::types::Domain;
 pub struct DomainsRepo;
 
 impl DomainsRepo {
-/// Create a new domain for a tenant.
-    pub async fn create(
-        pool: &PgPool,
-        tenant_id: Uuid,
-        name: &str,
-    ) -> Result<Domain, sqlx::Error> {
+    /// Create a new domain for a tenant.
+    pub async fn create(pool: &PgPool, tenant_id: Uuid, name: &str) -> Result<Domain, sqlx::Error> {
         sqlx::query_as::<_, Domain>(
             "INSERT INTO domains (id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
              return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, created_at, updated_at) \
@@ -28,33 +24,29 @@ impl DomainsRepo {
         .await
     }
 
-/// Find a domain by ID (scoped to tenant).
+    /// Find a domain by ID (scoped to tenant).
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Domain>, sqlx::Error> {
-        sqlx::query_as::<_, Domain>(
-            "SELECT * FROM domains WHERE id = $1 AND tenant_id = $2"
-        )
-        .bind(id)
-        .bind(tenant_id)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await
     }
 
-/// Find a domain by name across all tenants (for inbound routing).
+    /// Find a domain by name across all tenants (for inbound routing).
     pub async fn find_by_name(pool: &PgPool, name: &str) -> Result<Option<Domain>, sqlx::Error> {
-        sqlx::query_as::<_, Domain>(
-            "SELECT * FROM domains WHERE name = $1"
-        )
-        .bind(name)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE name = $1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await
     }
 
-/// List domains for a tenant with pagination.
-/// #227:Added limit/offset parameters
+    /// List domains for a tenant with pagination.
+    /// #227:Added limit/offset parameters
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -73,7 +65,7 @@ impl DomainsRepo {
         .await
     }
 
-/// Update domain verification status.
+    /// Update domain verification status.
     pub async fn update_verification(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -98,7 +90,7 @@ impl DomainsRepo {
         Ok(result.rows_affected() > 0)
     }
 
-/// Delete a domain.
+    /// Delete a domain.
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
             .bind(id)

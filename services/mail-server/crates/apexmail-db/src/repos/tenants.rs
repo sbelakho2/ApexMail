@@ -9,7 +9,7 @@ use crate::types::Tenant;
 pub struct TenantsRepo;
 
 impl TenantsRepo {
-/// Create a new tenant.
+    /// Create a new tenant.
     pub async fn create(
         pool: &PgPool,
         name: &str,
@@ -19,7 +19,7 @@ impl TenantsRepo {
         sqlx::query_as::<_, Tenant>(
             "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, 'active', NOW(), NOW()) \
-             RETURNING id, name, slug, plan, status, created_at, updated_at"
+             RETURNING id, name, slug, plan, status, created_at, updated_at",
         )
         .bind(Uuid::new_v4())
         .bind(name)
@@ -29,7 +29,7 @@ impl TenantsRepo {
         .await
     }
 
-/// Find a tenant by ID.
+    /// Find a tenant by ID.
     pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Tenant>, sqlx::Error> {
         sqlx::query_as::<_, Tenant>(
             "SELECT id, name, slug, plan, status, created_at, updated_at FROM tenants WHERE id = $1"
@@ -39,7 +39,7 @@ impl TenantsRepo {
         .await
     }
 
-/// Find a tenant by slug.
+    /// Find a tenant by slug.
     pub async fn find_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Tenant>, sqlx::Error> {
         sqlx::query_as::<_, Tenant>(
             "SELECT id, name, slug, plan, status, created_at, updated_at FROM tenants WHERE slug = $1"
@@ -49,7 +49,7 @@ impl TenantsRepo {
         .await
     }
 
-/// Update tenant details.
+    /// Update tenant details.
     pub async fn update(
         pool: &PgPool,
         id: Uuid,
@@ -60,7 +60,7 @@ impl TenantsRepo {
         sqlx::query_as::<_, Tenant>(
             "UPDATE tenants SET name = $1, plan = $2, status = $3, updated_at = NOW() \
              WHERE id = $4 \
-             RETURNING id, name, slug, plan, status, created_at, updated_at"
+             RETURNING id, name, slug, plan, status, created_at, updated_at",
         )
         .bind(name)
         .bind(plan)

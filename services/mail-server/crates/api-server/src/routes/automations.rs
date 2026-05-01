@@ -16,7 +16,12 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create_automation).get(list_automations))
-        .route("/:id", get(get_automation).put(update_automation).delete(delete_automation))
+        .route(
+            "/:id",
+            get(get_automation)
+                .put(update_automation)
+                .delete(delete_automation),
+        )
         .route("/:id/enable", post(enable_automation))
         .route("/:id/disable", post(disable_automation))
 }
@@ -158,7 +163,10 @@ async fn update_automation(
 
     let name = body.name.unwrap_or(existing.name);
     let trigger = body.trigger.unwrap_or(existing.trigger_config);
-    let actions = body.actions.map(|a| serde_json::json!(a)).unwrap_or(existing.actions);
+    let actions = body
+        .actions
+        .map(|a| serde_json::json!(a))
+        .unwrap_or(existing.actions);
     let conditions = body.conditions.or(existing.conditions);
 
     sqlx::query(
@@ -275,7 +283,11 @@ impl From<AutomationRow> for AutomationResponse {
     }
 }
 
-async fn fetch_automation(state: &AppState, tenant_id: &str, id: String) -> Result<AutomationRow, ApiError> {
+async fn fetch_automation(
+    state: &AppState,
+    tenant_id: &str,
+    id: String,
+) -> Result<AutomationRow, ApiError> {
     sqlx::query_as::<_, AutomationRow>(
         "SELECT id, name, trigger_config, actions, conditions, status, created_at, updated_at
          FROM automations WHERE id = $1 AND tenant_id = $2",

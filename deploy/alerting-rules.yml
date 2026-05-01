@@ -15,11 +15,47 @@ groups:
           description: "Tracking service {{ $labels.instance }} has been unreachable for more than 1 minute."
           runbook_url: "https://apexmail.ee/docs/alerts#tracking-service-down"
 
+      - alert: SyntheticTransactionFailure
+        expr: apexmail_synthetic_transaction_success == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Synthetic transaction failed for {{ $labels.target }}"
+          description: "Synthetic transaction target {{ $labels.target }} has failed for more than 2 minutes. Last error: {{ $labels.error }}."
+          runbook_url: "https://apexmail.ee/docs/alerts#synthetic-transaction-failure"
+
   - name: apexmail-performance
     rules:
+      - record: apexmail:api_availability:ratio_30d
+        expr: 1 - (sum(increase(apexmail_http_requests_total{job="apexmail-api",status=~"5.."}[30d])) / clamp_min(sum(increase(apexmail_http_requests_total{job="apexmail-api"}[30d])), 1))
+
+      - record: apexmail:api_latency_slo:ratio_30d
+        expr: sum(increase(apexmail_http_request_duration_seconds_bucket{job="apexmail-api",le="1"}[30d])) / clamp_min(sum(increase(apexmail_http_request_duration_seconds_count{job="apexmail-api"}[30d])), 1)
+
+      - alert: ApiAvailabilitySloBurn
+        expr: apexmail:api_availability:ratio_30d < 0.999
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API availability SLO burn"
+          description: "30-day API availability is {{ $value | humanizePercentage }}, below the 99.9% target."
+          runbook_url: "https://apexmail.ee/docs/alerts#api-availability-slo-burn"
+
+      - alert: ApiLatencySloBurn
+        expr: apexmail:api_latency_slo:ratio_30d < 0.95
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API latency SLO burn"
+          description: "Fewer than 95% of API requests are completing within 1s over the 30-day SLO window."
+          runbook_url: "https://apexmail.ee/docs/alerts#api-latency-slo-burn"
+
       # High API latency
       - alert: HighApiLatency
-        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="apexmail-api"}[5m])) > 1
+        expr: histogram_quantile(0.95, rate(apexmail_http_request_duration_seconds_bucket{job="apexmail-api"}[5m])) > 1
         for: 5m
         labels:
           severity: warning
@@ -30,7 +66,7 @@ groups:
 
       # High error rate
       - alert: HighApiErrorRate
-        expr: sum(rate(http_requests_total{job="apexmail-api",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="apexmail-api"}[5m])) > 0.05
+        expr: sum(rate(apexmail_http_requests_total{job="apexmail-api",status=~"5.."}[5m])) / clamp_min(sum(rate(apexmail_http_requests_total{job="apexmail-api"}[5m])), 1) > 0.05
         for: 5m
         labels:
           severity: warning
@@ -40,7 +76,7 @@ groups:
           runbook_url: "https://apexmail.ee/docs/alerts#high-api-error-rate"
 
       - alert: CriticalApiErrorRate
-        expr: sum(rate(http_requests_total{job="apexmail-api",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="apexmail-api"}[5m])) > 0.15
+        expr: sum(rate(apexmail_http_requests_total{job="apexmail-api",status=~"5.."}[5m])) / clamp_min(sum(rate(apexmail_http_requests_total{job="apexmail-api"}[5m])), 1) > 0.15
         for: 2m
         labels:
           severity: critical
@@ -53,63 +89,63 @@ groups:
     rules:
       # High CPU usage
       - alert: HighCpuUsage
-        expr: rate(apexmail_process_cpu_seconds_total[5m]) > 1.0
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m])) * 100) > 85
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "High CPU usage on {{ $labels.job }}"
-          description: "CPU usage is above 1 core for more than 10 minutes."
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "Node CPU utilization is above 85% for more than 10 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#high-cpu-usage"
 
       # High memory usage
       - alert: HighMemoryUsage
-        expr: apexmail_process_memory_bytes / 1073741824 > 1.5
+        expr: (node_memory_MemTotal_bytes{job="node"} - node_memory_MemAvailable_bytes{job="node"}) / node_memory_MemTotal_bytes{job="node"} > 0.85
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "High memory usage on {{ $labels.job }}"
-          description: "Memory usage is {{ $value }}GB, exceeding 1.5GB threshold."
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Node memory utilization is above 85%."
           runbook_url: "https://apexmail.ee/docs/alerts#high-memory-usage"
 
-      # Event loop lag
-      - alert: HighEventLoopLag
-        expr: apexmail_event_loop_lag_seconds > 0.1
+      # API concurrency saturation
+      - alert: HighApiInflightRequests
+        expr: sum(apexmail_http_requests_in_flight{job="apexmail-api"}) > 500
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "High event loop lag on {{ $labels.job }}"
-          description: "Event loop lag is {{ $value }}s, exceeding 100ms threshold."
-          runbook_url: "https://apexmail.ee/docs/alerts#high-event-loop-lag"
+          summary: "High API in-flight request count"
+          description: "More than 500 API requests have been in flight for 5 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#high-api-inflight-requests"
 
   - name: apexmail-email-delivery
     rules:
       # Email queue backing up
       - alert: EmailQueueBacklog
-        expr: apexmail_queue_depth{queue="email"} > 10000
+        expr: redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"} > 0.80
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Email queue backlog growing"
-          description: "Email queue has {{ $value }} pending jobs, exceeding 10k threshold for 10 minutes."
+          summary: "Redis queue memory pressure"
+          description: "Redis memory usage is above 80%, increasing risk for queue latency."
           runbook_url: "https://apexmail.ee/docs/alerts#email-queue-backlog"
 
       - alert: CriticalEmailQueueBacklog
-        expr: apexmail_queue_depth{queue="email"} > 50000
+        expr: redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"} > 0.95
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Critical email queue backlog"
-          description: "Email queue has {{ $value }} pending jobs, exceeding 50k threshold."
+          summary: "Critical Redis queue memory pressure"
+          description: "Redis memory usage is above 95%; queue writes may fail under the noeviction policy."
           runbook_url: "https://apexmail.ee/docs/alerts#critical-email-queue-backlog"
 
       # Webhook delivery failures
       - alert: HighWebhookFailureRate
-        expr: sum(rate(apexmail_webhook_deliveries_total{status="failed"}[10m])) / sum(rate(apexmail_webhook_deliveries_total[10m])) > 0.1
+        expr: sum(rate(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/webhooks.*|/webhooks/.*",status=~"5.."}[10m])) / clamp_min(sum(rate(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/webhooks.*|/webhooks/.*"}[10m])), 1) > 0.1
         for: 10m
         labels:
           severity: warning
@@ -133,7 +169,7 @@ groups:
     rules:
       # Stripe webhook processing failures
       - alert: StripeWebhookFailures
-        expr: increase(apexmail_stripe_webhook_errors_total[1h]) > 10
+        expr: increase(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/billing.*|/webhooks/stripe",status=~"5.."}[1h]) > 10
         for: 0m
         labels:
           severity: warning

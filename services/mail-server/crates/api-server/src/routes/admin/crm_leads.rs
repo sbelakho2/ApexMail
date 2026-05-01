@@ -22,7 +22,9 @@ pub struct CrmLeadsQuery {
     pub offset: i64,
 }
 
-fn default_limit() -> i64 { 50 }
+fn default_limit() -> i64 {
+    50
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,7 +49,7 @@ async fn list_crm_leads(
 ) -> Result<Json<Vec<CrmLead>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-// Check table exists
+    // Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class WHERE relname = 'sales_leads')",
     )
@@ -63,12 +65,22 @@ async fn list_crm_leads(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-    let rows = sqlx::query_as::<_, (
-        String, Option<String>, Option<String>, Option<String>, Option<String>,
-        Option<String>, Option<i32>, Option<String>,
-        Option<chrono::DateTime<chrono::Utc>>, chrono::DateTime<chrono::Utc>,
-        serde_json::Value,
-    )>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            chrono::DateTime<chrono::Utc>,
+            serde_json::Value,
+        ),
+    >(
         "SELECT id::text, company_name, domain, contact_email, contact_name,
                 stage, score, source, last_activity, created_at,
                 COALESCE(tags, '[]'::jsonb)
@@ -82,13 +94,21 @@ async fn list_crm_leads(
 
     let leads: Vec<CrmLead> = rows
         .into_iter()
-        .map(|(id, cn, dom, ce, cname, stage, score, src, la, ca, tags)| CrmLead {
-            id, company_name: cn, domain: dom, contact_email: ce, contact_name: cname,
-            stage, score, source: src,
-            last_activity: la.map(|t| t.to_rfc3339()),
-            created_at: ca.to_rfc3339(),
-            tags,
-        })
+        .map(
+            |(id, cn, dom, ce, cname, stage, score, src, la, ca, tags)| CrmLead {
+                id,
+                company_name: cn,
+                domain: dom,
+                contact_email: ce,
+                contact_name: cname,
+                stage,
+                score,
+                source: src,
+                last_activity: la.map(|t| t.to_rfc3339()),
+                created_at: ca.to_rfc3339(),
+                tags,
+            },
+        )
         .collect();
 
     Ok(Json(leads))

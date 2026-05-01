@@ -1,14 +1,11 @@
 //! Redis-backed cache utilities.
 
-use deadpool_redis::{Pool as RedisPool, redis::AsyncCommands};
-use serde::{Serialize, de::DeserializeOwned};
+use deadpool_redis::{redis::AsyncCommands, Pool as RedisPool};
+use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
 /// Get a cached JSON value from Redis.
-pub async fn cache_get<T: DeserializeOwned>(
-    redis: &RedisPool,
-    key: &str,
-) -> Option<T> {
+pub async fn cache_get<T: DeserializeOwned>(redis: &RedisPool, key: &str) -> Option<T> {
     let mut conn = redis.get().await.ok()?;
     let raw: Option<String> = conn.get(key).await.ok()?;
     raw.and_then(|s| serde_json::from_str(&s).ok())
@@ -28,10 +25,7 @@ pub async fn cache_set<T: Serialize>(
 }
 
 /// Delete a cache key.
-pub async fn cache_del(
-    redis: &RedisPool,
-    key: &str,
-) -> Result<(), anyhow::Error> {
+pub async fn cache_del(redis: &RedisPool, key: &str) -> Result<(), anyhow::Error> {
     let mut conn = redis.get().await?;
     let _: () = conn.del(key).await?;
     Ok(())
@@ -45,7 +39,7 @@ pub async fn cache_incr_with_ttl(
     ttl_secs: u64,
 ) -> Result<i64, anyhow::Error> {
     let mut conn = redis.get().await?;
-// Atomic Lua script:INCR and set EXPIRE only if first increment (count == 1)
+    // Atomic Lua script:INCR and set EXPIRE only if first increment (count == 1)
     let script = redis::Script::new(
         r#"
         local count = redis.call('INCR', KEYS[1])
@@ -55,7 +49,11 @@ pub async fn cache_incr_with_ttl(
         return count
         "#,
     );
-    let count: i64 = script.key(key).arg(ttl_secs).invoke_async(&mut *conn).await?;
+    let count: i64 = script
+        .key(key)
+        .arg(ttl_secs)
+        .invoke_async(&mut *conn)
+        .await?;
     Ok(count)
 }
 

@@ -16,7 +16,10 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create_contact).get(list_contacts))
-        .route("/:id", get(get_contact).put(update_contact).delete(delete_contact))
+        .route(
+            "/:id",
+            get(get_contact).put(update_contact).delete(delete_contact),
+        )
         .route("/bulk", post(bulk_import))
         .route("/counts", get(contact_counts))
         .route("/bulk/delete", post(bulk_delete))
@@ -235,9 +238,10 @@ async fn bulk_import(
 
     const MAX_BULK_CONTACTS: usize = 10_000;
     if body.contacts.len() > MAX_BULK_CONTACTS {
-        return Err(ApiError::Validation(vec![
-            format!("maximum {} contacts per import", MAX_BULK_CONTACTS)
-        ]));
+        return Err(ApiError::Validation(vec![format!(
+            "maximum {} contacts per import",
+            MAX_BULK_CONTACTS
+        )]));
     }
 
     let mut created = 0usize;
@@ -251,7 +255,7 @@ async fn bulk_import(
         }
 
         let tags = contact.tags.as_ref().map(|t| serde_json::json!(t));
-// xmax = 0 means a fresh insert; non-zero means update.
+        // xmax = 0 means a fresh insert; non-zero means update.
         let res: Result<Option<i64>, _> = sqlx::query_scalar(
             r#"INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at)
                VALUES ($1,$2,$3,$4,$5,$6,'active',NOW(),NOW())
@@ -280,7 +284,7 @@ async fn bulk_import(
                 }
             }
             Ok(None) => {
-// Shouldn't happen with RETURNING, but count as created
+                // Shouldn't happen with RETURNING, but count as created
                 created += 1;
             }
             Err(e) => {
@@ -326,7 +330,11 @@ impl From<ContactRow> for ContactResponse {
     }
 }
 
-async fn fetch_contact(state: &AppState, tenant_id: &str, id: String) -> Result<ContactRow, ApiError> {
+async fn fetch_contact(
+    state: &AppState,
+    tenant_id: &str,
+    id: String,
+) -> Result<ContactRow, ApiError> {
     sqlx::query_as::<_, ContactRow>(
         "SELECT id, email, name, tags, metadata, status, created_at, updated_at
          FROM contacts WHERE id = $1 AND tenant_id = $2",
@@ -361,7 +369,6 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["created"], 10);
     }
-
 }
 
 // ─── Additional Handlers (6B migration) ────────────────────────
@@ -492,7 +499,7 @@ async fn bulk_resolve_duplicates(
 ) -> Result<Json<BulkActionResult>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
-// Soft-delete duplicate contacts, keeping the oldest (lowest id) per email
+    // Soft-delete duplicate contacts, keeping the oldest (lowest id) per email
     let affected = sqlx::query(
         r#"WITH dupes AS (
             SELECT id, ROW_NUMBER() OVER (PARTITION BY LOWER(email) ORDER BY created_at ASC) AS rn
@@ -518,7 +525,7 @@ async fn import_contacts(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
-// Detect file format from Content-Type header or file magic bytes
+    // Detect file format from Content-Type header or file magic bytes
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -591,7 +598,10 @@ fn parse_csv_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiError
     for result in reader.records() {
         let record = result.map_err(|e| ApiError::BadRequest(format!("CSV parse error: {e}")))?;
         let email = record.get(0).unwrap_or("").to_string();
-        let name = record.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let name = record
+            .get(1)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         rows.push((email, name));
     }
     Ok(rows)
@@ -599,7 +609,7 @@ fn parse_csv_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiError
 
 /// Parse XLSX bytes into (email, name) rows using calamine.
 fn parse_xlsx_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiError> {
-    use calamine::{Reader, Xlsx, open_workbook_from_rs};
+    use calamine::{open_workbook_from_rs, Reader, Xlsx};
     use std::io::Cursor;
 
     let cursor = Cursor::new(data);
@@ -620,18 +630,14 @@ fn parse_xlsx_rows(data: &[u8]) -> Result<Vec<(String, Option<String>)>, ApiErro
     let mut is_header = true;
 
     for row in range.rows() {
-// Skip header row
+        // Skip header row
         if is_header {
             is_header = false;
             continue;
         }
 
-        let email = row.first()
-            .map(|c| c.to_string())
-            .unwrap_or_default();
-        let name = row.get(1)
-            .map(|c| c.to_string())
-            .filter(|s| !s.is_empty());
+        let email = row.first().map(|c| c.to_string()).unwrap_or_default();
+        let name = row.get(1).map(|c| c.to_string()).filter(|s| !s.is_empty());
 
         if !email.is_empty() {
             rows.push((email, name));

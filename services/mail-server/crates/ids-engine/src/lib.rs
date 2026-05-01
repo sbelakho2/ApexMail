@@ -21,20 +21,20 @@ pub mod protocol_analyzer;
 pub mod signature;
 
 pub use config::IdsConfig;
-pub use engine::{IdsEngine, IdsVerdict, Alert, AlertSeverity};
-pub use signature::{Signature, SignatureSet, SignatureAction};
-pub use connection_tracker::{ConnectionTracker, ConnectionAnomaly, TrackerStats};
+pub use connection_tracker::{ConnectionAnomaly, ConnectionTracker, TrackerStats};
+pub use engine::{Alert, AlertSeverity, IdsEngine, IdsVerdict};
+pub use signature::{Signature, SignatureAction, SignatureSet};
 
 /// IDS errors
 #[derive(Debug, thiserror::Error)]
 pub enum IdsError {
-/// Signature compilation error
+    /// Signature compilation error
     #[error("Signature error: {0}")]
     Signature(String),
-/// Configuration error
+    /// Configuration error
     #[error("Config error: {0}")]
     Config(String),
-/// Internal error
+    /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
 }

@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use moka::sync::Cache;
 use regex::Regex;
-use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::sync::OnceLock;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 
@@ -105,9 +105,8 @@ pub struct DeliveryService {
     auto_responder_subject_patterns: Vec<Regex>,
 }
 
-static DELIVERY_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
-    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-});
+static DELIVERY_RESOLVER: LazyLock<TokioAsyncResolver> =
+    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
 
 impl DeliveryService {
     pub fn new(
@@ -168,10 +167,11 @@ impl DeliveryService {
         }
     }
 
-/// Parse an SMTP response code + message.
+    /// Parse an SMTP response code + message.
     pub fn parse_smtp_response(&self, code: u16, message: &str) -> SMTPResponse {
         let is_rate_limit = (400..500).contains(&code) && self.is_rate_limit_message(message);
-        let is_greylist = !is_rate_limit && (400..500).contains(&code) && self.is_greylist_message(message);
+        let is_greylist =
+            !is_rate_limit && (400..500).contains(&code) && self.is_greylist_message(message);
 
         let response_type = match code {
             200..=299 => ResponseType::Success,
@@ -195,7 +195,7 @@ impl DeliveryService {
         }
     }
 
-/// Calculate retry schedule.
+    /// Calculate retry schedule.
     pub fn calculate_retry_schedule(
         &self,
         response: &SMTPResponse,
@@ -221,8 +221,10 @@ impl DeliveryService {
             }
             _ => {
                 let delay = (self.retry_config.initial_delay_secs as f64
-                    * self.retry_config.backoff_multiplier.powi(current_attempt as i32))
-                    as u64;
+                    * self
+                        .retry_config
+                        .backoff_multiplier
+                        .powi(current_attempt as i32)) as u64;
                 let delay = delay.min(self.retry_config.max_delay_secs);
                 (delay, "temporary_failure".to_string())
             }
@@ -237,7 +239,7 @@ impl DeliveryService {
         })
     }
 
-/// Detect email loop from Received headers.
+    /// Detect email loop from Received headers.
     pub fn detect_loop(&self, received_headers: &[String]) -> LoopDetection {
         let hop_count = received_headers.len();
 
@@ -250,7 +252,7 @@ impl DeliveryService {
             };
         }
 
-// Check for repeated hosts (>3 occurrences = loop)
+        // Check for repeated hosts (>3 occurrences = loop)
         let mut host_count: HashMap<String, usize> = HashMap::new();
         let mut hosts = Vec::new();
 
@@ -262,11 +264,7 @@ impl DeliveryService {
         }
 
         let is_loop = host_count.values().any(|&count| count > 3);
-        let loop_path = if is_loop {
-            Some(hosts)
-        } else {
-            None
-        };
+        let loop_path = if is_loop { Some(hosts) } else { None };
 
         LoopDetection {
             is_loop,
@@ -276,7 +274,7 @@ impl DeliveryService {
         }
     }
 
-/// Detect auto-responder from headers, subject, and body.
+    /// Detect auto-responder from headers, subject, and body.
     pub fn detect_auto_responder(
         &self,
         headers: &HashMap<String, String>,
@@ -287,8 +285,11 @@ impl DeliveryService {
         let mut indicators = Vec::new();
         let mut auto_type: Option<String> = None;
 
-// Auto-Submitted header (+40)
-        if let Some(val) = headers.get("auto-submitted").or(headers.get("Auto-Submitted")) {
+        // Auto-Submitted header (+40)
+        if let Some(val) = headers
+            .get("auto-submitted")
+            .or(headers.get("Auto-Submitted"))
+        {
             let lower = val.to_lowercase();
             if AUTO_SUBMITTED_VALUES.iter().any(|v| lower.contains(v)) {
                 score += 40;
@@ -297,7 +298,7 @@ impl DeliveryService {
             }
         }
 
-// Precedence header (+30)
+        // Precedence header (+30)
         if let Some(val) = headers.get("precedence").or(headers.get("Precedence")) {
             let lower = val.to_lowercase();
             if lower == "bulk" || lower == "junk" || lower == "auto_reply" {
@@ -306,7 +307,7 @@ impl DeliveryService {
             }
         }
 
-// X-Auto-Response-Suppress (+25)
+        // X-Auto-Response-Suppress (+25)
         if headers.contains_key("x-auto-response-suppress")
             || headers.contains_key("X-Auto-Response-Suppress")
         {
@@ -314,7 +315,7 @@ impl DeliveryService {
             indicators.push("X-Auto-Response-Suppress present".into());
         }
 
-// X-Autorespond / X-Autoreply (+35)
+        // X-Autorespond / X-Autoreply (+35)
         if headers.contains_key("x-autorespond")
             || headers.contains_key("X-Autorespond")
             || headers.contains_key("x-autoreply")
@@ -324,7 +325,7 @@ impl DeliveryService {
             indicators.push("X-Autorespond/X-Autoreply present".into());
         }
 
-// Empty or system Return-Path (+20)
+        // Empty or system Return-Path (+20)
         if let Some(rp) = headers.get("return-path").or(headers.get("Return-Path")) {
             let trimmed = rp.trim();
             if trimmed == "<>" || trimmed.is_empty() || trimmed.contains("mailer-daemon") {
@@ -333,7 +334,7 @@ impl DeliveryService {
             }
         }
 
-// Subject pattern match (+25)
+        // Subject pattern match (+25)
         let lower_subject = subject.to_lowercase();
         for pat in &self.auto_responder_subject_patterns {
             if pat.is_match(&lower_subject) {
@@ -346,7 +347,7 @@ impl DeliveryService {
             }
         }
 
-// Body keyword match (+15 each)
+        // Body keyword match (+15 each)
         if let Some(body_text) = body {
             let lower_body = body_text.to_lowercase();
             let keywords = [
@@ -374,7 +375,7 @@ impl DeliveryService {
         }
     }
 
-/// Resolve MX records for a domain.
+    /// Resolve MX records for a domain.
     pub async fn resolve_mx(&self, domain: &str) -> anyhow::Result<Vec<MXRecord>> {
         if let Some(cached) = self.mx_cache.get(domain) {
             return Ok(cached);
@@ -390,7 +391,7 @@ impl DeliveryService {
                 })
                 .collect(),
             Err(_) => {
-// Fallback to A record
+                // Fallback to A record
                 if self.resolver.lookup_ip(domain).await.is_ok() {
                     vec![MXRecord {
                         exchange: domain.to_string(),
@@ -408,7 +409,7 @@ impl DeliveryService {
         Ok(records)
     }
 
-/// Select next MX to try, skipping failed hosts.
+    /// Select next MX to try, skipping failed hosts.
     pub fn select_next_mx(
         records: &[MXRecord],
         failed_hosts: &HashSet<String>,
@@ -424,22 +425,20 @@ impl DeliveryService {
         }
 
         if let Some(prio) = preferred_priority {
-            let same_prio: Vec<&&MXRecord> = available
-                .iter()
-                .filter(|r| r.priority == prio)
-                .collect();
+            let same_prio: Vec<&&MXRecord> =
+                available.iter().filter(|r| r.priority == prio).collect();
             if !same_prio.is_empty() {
-// Random selection among same priority
+                // Random selection among same priority
                 let idx = rand_idx(same_prio.len());
                 return Some((*same_prio[idx]).clone());
             }
         }
 
-// Return lowest priority available
+        // Return lowest priority available
         Some(available[0].clone())
     }
 
-/// Record a delivery attempt.
+    /// Record a delivery attempt.
     pub async fn record_delivery_attempt(&self, attempt: &DeliveryAttempt) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO edge_delivery_attempts
@@ -461,7 +460,7 @@ impl DeliveryService {
         Ok(())
     }
 
-/// Get delivery history.
+    /// Get delivery history.
     pub async fn get_delivery_history(
         &self,
         message_id: &str,
@@ -475,23 +474,25 @@ impl DeliveryService {
 
         Ok(rows
             .into_iter()
-            .map(|(mid, att, mx, prio, code, msg, rt, ts, dur)| DeliveryAttempt {
-                message_id: mid,
-                attempt: att,
-                mx_host: mx,
-                mx_priority: prio as u16,
-                response_code: code as u16,
-                response_message: msg,
-                response_type: rt,
-                timestamp: ts,
-                duration_ms: dur,
-            })
+            .map(
+                |(mid, att, mx, prio, code, msg, rt, ts, dur)| DeliveryAttempt {
+                    message_id: mid,
+                    attempt: att,
+                    mx_host: mx,
+                    mx_priority: prio as u16,
+                    response_code: code as u16,
+                    response_message: msg,
+                    response_type: rt,
+                    timestamp: ts,
+                    duration_ms: dur,
+                },
+            )
             .collect())
     }
 
-/// Check if domain is a known greylister.
+    /// Check if domain is a known greylister.
     pub async fn is_known_greylister(&self, domain: &str) -> anyhow::Result<bool> {
-// Redis cache
+        // Redis cache
         if let Ok(mut conn) = self.redis.get().await {
             let key = format!("greylist:known:{domain}");
             if let Ok(Some(val)) = redis::cmd("GET")
@@ -512,7 +513,7 @@ impl DeliveryService {
 
         let is_known = count > 10;
 
-// Cache for 24h
+        // Cache for 24h
         if let Ok(mut conn) = self.redis.get().await {
             let key = format!("greylist:known:{domain}");
             redis::cmd("SET")
@@ -528,7 +529,7 @@ impl DeliveryService {
         Ok(is_known)
     }
 
-// ── internal ───────────────────────────────────────────────────────────────
+    // ── internal ───────────────────────────────────────────────────────────────
 
     fn is_greylist_message(&self, message: &str) -> bool {
         self.greylist_patterns.iter().any(|p| p.is_match(message))
@@ -555,14 +556,13 @@ impl DeliveryService {
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 fn extract_enhanced_status(message: &str) -> Option<String> {
-    let re = ENHANCED_STATUS_RE
-        .get_or_init(|| Regex::new(r"(\d\.\d+\.\d+)").expect("status regex"));
+    let re =
+        ENHANCED_STATUS_RE.get_or_init(|| Regex::new(r"(\d\.\d+\.\d+)").expect("status regex"));
     re.captures(message).map(|c| c[1].to_string())
 }
 
 fn extract_host_from_received(header: &str) -> Option<String> {
-    let re = RECEIVED_HOST_RE
-        .get_or_init(|| Regex::new(r"from\s+(\S+)").expect("received regex"));
+    let re = RECEIVED_HOST_RE.get_or_init(|| Regex::new(r"from\s+(\S+)").expect("received regex"));
     re.captures(header).map(|c| c[1].to_lowercase())
 }
 
@@ -608,7 +608,7 @@ pub fn is_valid_ip(ip: &str) -> bool {
 }
 
 fn rand_idx(max: usize) -> usize {
-// Cheap non-crypto random for MX rotation
+    // Cheap non-crypto random for MX rotation
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -671,7 +671,9 @@ mod tests {
     #[test]
     fn test_detect_loop_too_many_hops() {
         let svc = TestDelivery::new();
-        let headers: Vec<String> = (0..30).map(|i| format!("from host{i}.example.com")).collect();
+        let headers: Vec<String> = (0..30)
+            .map(|i| format!("from host{i}.example.com"))
+            .collect();
         let result = svc.detect_loop(&headers);
         assert!(result.is_loop);
     }
@@ -691,7 +693,7 @@ mod tests {
         headers.insert("Auto-Submitted".to_string(), "auto-replied".to_string());
         headers.insert("Precedence".to_string(), "bulk".to_string());
         let result = svc.detect_auto_responder(&headers, "Re: Meeting", None);
-// Auto-Submitted (+40) + Precedence (+30) = 70 >= threshold 50
+        // Auto-Submitted (+40) + Precedence (+30) = 70 >= threshold 50
         assert!(result.is_auto_responder);
         assert!(result.confidence >= 50);
     }
@@ -705,8 +707,8 @@ mod tests {
             "Out of Office: I am away",
             Some("I am out of office until Monday"),
         );
-// Subject pattern (+25) + body keyword (+15) = 40, below threshold 50
-// unless subject patterns are configured
+        // Subject pattern (+25) + body keyword (+15) = 40, below threshold 50
+        // unless subject patterns are configured
         assert!(result.confidence > 0);
     }
 
@@ -778,9 +780,21 @@ mod tests {
     #[test]
     fn test_select_next_mx() {
         let records = vec![
-            MXRecord { exchange: "mx1.example.com".into(), priority: 10, ttl: None },
-            MXRecord { exchange: "mx2.example.com".into(), priority: 10, ttl: None },
-            MXRecord { exchange: "mx3.example.com".into(), priority: 20, ttl: None },
+            MXRecord {
+                exchange: "mx1.example.com".into(),
+                priority: 10,
+                ttl: None,
+            },
+            MXRecord {
+                exchange: "mx2.example.com".into(),
+                priority: 10,
+                ttl: None,
+            },
+            MXRecord {
+                exchange: "mx3.example.com".into(),
+                priority: 20,
+                ttl: None,
+            },
         ];
         let mut failed = HashSet::new();
         let selected = DeliveryService::select_next_mx(&records, &failed, None).unwrap();
@@ -792,7 +806,7 @@ mod tests {
         assert_eq!(selected.exchange, "mx3.example.com");
     }
 
-/// Lightweight test helper – no DB/Redis pools needed for pure-logic tests.
+    /// Lightweight test helper – no DB/Redis pools needed for pure-logic tests.
     struct TestDelivery {
         retry_config: RetryConfig,
         loop_config: LoopDetectionConfig,
@@ -818,21 +832,21 @@ mod tests {
                     .iter()
                     .filter_map(|p| Regex::new(p).ok())
                     .collect(),
-                auto_responder_subject_patterns: [
-                    r"(?i)^out of office",
-                    r"(?i)^automatic reply",
-                ]
-                .iter()
-                .filter_map(|p| Regex::new(p).ok())
-                .collect(),
+                auto_responder_subject_patterns: [r"(?i)^out of office", r"(?i)^automatic reply"]
+                    .iter()
+                    .filter_map(|p| Regex::new(p).ok())
+                    .collect(),
             }
         }
 
         fn parse_smtp_response(&self, code: u16, message: &str) -> SMTPResponse {
-            let is_rate_limit =
-                code >= 400 && code < 500 && self.rate_limit_patterns.iter().any(|p| p.is_match(message));
+            let is_rate_limit = code >= 400
+                && code < 500
+                && self.rate_limit_patterns.iter().any(|p| p.is_match(message));
             let is_greylist = !is_rate_limit
-                && code >= 400 && code < 500 && self.greylist_patterns.iter().any(|p| p.is_match(message));
+                && code >= 400
+                && code < 500
+                && self.greylist_patterns.iter().any(|p| p.is_match(message));
 
             let response_type = match code {
                 200..=299 => ResponseType::Success,
@@ -879,8 +893,10 @@ mod tests {
                 }
                 _ => {
                     let delay = (self.retry_config.initial_delay_secs as f64
-                        * self.retry_config.backoff_multiplier.powi(current_attempt as i32))
-                        as u64;
+                        * self
+                            .retry_config
+                            .backoff_multiplier
+                            .powi(current_attempt as i32)) as u64;
                     let delay = delay.min(self.retry_config.max_delay_secs);
                     (delay, "temporary_failure".to_string())
                 }

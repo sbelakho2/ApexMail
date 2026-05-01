@@ -12,7 +12,7 @@ pub struct StoredMessage {
     pub id: Uuid,
     pub account_id: Uuid,
     pub mailbox_id: Uuid,
-/// Monotonic per-mailbox UID for IMAP-style access.
+    /// Monotonic per-mailbox UID for IMAP-style access.
     pub uid: i64,
     pub message_id: String,
     pub from_address: String,
@@ -50,14 +50,14 @@ impl EmailAddress {
             name: None,
         }
     }
-    
+
     pub fn with_name(address: &str, name: &str) -> Self {
         Self {
             address: address.to_string(),
             name: Some(name.to_string()),
         }
     }
-    
+
     pub fn display(&self) -> String {
         match &self.name {
             Some(name) => format!("{} <{}>", name, self.address),
@@ -107,7 +107,6 @@ pub enum MailboxType {
     #[default]
     Custom,
 }
-
 
 /// Email account
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -643,7 +643,7 @@ Poll `GET /v1/analytics/export/:export_id` until `status` becomes `completed` an
 
 ---
 
-## Caching Behaviour
+## Caching Behavior
 
 | Endpoint | Cache TTL | Notes |
 |----------|-----------|-------|

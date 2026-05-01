@@ -1,13 +1,16 @@
 //! Application builder — assembles all middleware and routes into an Axum `Router`.
 
-use base64::Engine;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::{header::{self, ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST}, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{
+    header::{self, ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST},
+    HeaderMap, HeaderValue, Method, StatusCode, Uri,
+};
 use axum::response::{Html, IntoResponse, Response};
-use rand::RngCore;
 use axum::routing::get;
 use axum::{BoxError, Json, Router};
+use base64::Engine;
+use rand::RngCore;
 use serde::Deserialize;
 use std::time::Duration;
 use tower::limit::GlobalConcurrencyLimitLayer;
@@ -53,7 +56,7 @@ async fn handle_backpressure_error(error: BoxError) -> Response {
 
 /// Build the complete Axum application with all middleware and routes.
 pub fn build_app(state: AppState) -> Router {
-// ── CORS ────────────────────────────────────────────────
+    // ── CORS ────────────────────────────────────────────────
     let allowed_headers = [
         ACCEPT,
         AUTHORIZATION,
@@ -100,12 +103,15 @@ pub fn build_app(state: AppState) -> Router {
         }
     };
 
-// ── Public routes (no auth) ─────────────────────────────
-// credential stuffing and registration spam.
+    // ── Public routes (no auth) ─────────────────────────────
+    // credential stuffing and registration spam.
     let rate_limited_public = Router::new()
         .nest("/v1/auth", routes::auth::router())
         .nest("/v1/auth/session", routes::session::router())
-        .nest("/v1/auth/forgot-password", routes::forgot_password::router())
+        .nest(
+            "/v1/auth/forgot-password",
+            routes::forgot_password::router(),
+        )
         .nest("/v1/auth/sso", routes::sso::router())
         .nest("/v1/auth/csrf", routes::csrf::router())
         .nest("/api/auth", routes::auth::control_plane_alias_router())
@@ -127,7 +133,7 @@ pub fn build_app(state: AppState) -> Router {
             ddos::ddos_protection_middleware,
         ));
 
-// ── Authenticated v1 routes ─────────────────────────────
+    // ── Authenticated v1 routes ─────────────────────────────
     let authenticated = Router::new()
         .nest("/v1/messages", routes::messages::router())
         .nest("/v1/domains", routes::domains::router())
@@ -149,17 +155,20 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
         .nest("/v1/account", routes::account::router())
         .nest("/v1/stream", routes::stream_tokens::router())
-// Migrated auth routes (require session/auth)
+        // Migrated auth routes (require session/auth)
         .nest("/v1/auth/impersonate", routes::impersonate::router())
         .nest("/v1/auth/telemetry", routes::telemetry::router())
-// Control-plane admin routes
+        // Control-plane admin routes
         .nest("/v1/admin/tenants", routes::admin::tenants::router())
         .nest("/v1/admin/features", routes::admin::features::router())
         .nest("/v1/admin/gdpr", routes::admin::gdpr::router())
         .nest("/v1/admin/secrets", routes::admin::secrets::router())
         .nest("/v1/admin/audit", routes::admin::audit::router())
         .nest("/v1/admin/dashboard", routes::admin::dashboard::router())
-        .nest("/v1/admin/compliance", routes::admin::compliance_overview::router())
+        .nest(
+            "/v1/admin/compliance",
+            routes::admin::compliance_overview::router(),
+        )
         .nest("/v1/admin/risk", routes::admin::risk::router())
         .nest("/v1/admin/revenue", routes::admin::revenue::router())
         .nest("/v1/admin/inbox", routes::admin::inbox::router())
@@ -170,13 +179,25 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/admin/proxy", routes::admin::proxy::router())
         .nest("/v1/admin/sales", routes::admin::sales::router())
         .nest("/v1/admin/analytics", routes::admin::analytics::router())
-        .nest("/v1/admin/analytics/export", routes::admin::analytics_export::router())
+        .nest(
+            "/v1/admin/analytics/export",
+            routes::admin::analytics_export::router(),
+        )
         .nest("/v1/admin/campaigns", routes::admin::campaigns::router())
         .nest("/v1/admin/crm/leads", routes::admin::crm_leads::router())
-        .nest("/v1/admin/leads/discovery", routes::admin::leads_discovery::router())
+        .nest(
+            "/v1/admin/leads/discovery",
+            routes::admin::leads_discovery::router(),
+        )
         .nest("/v1/admin/support", routes::admin::support::router())
-        .nest("/v1/admin/support/analytics", routes::admin::support_analytics::router())
-        .nest("/v1/admin/system/health", routes::admin::system_health::router())
+        .nest(
+            "/v1/admin/support/analytics",
+            routes::admin::support_analytics::router(),
+        )
+        .nest(
+            "/v1/admin/system/health",
+            routes::admin::system_health::router(),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ddos::ddos_protection_middleware,
@@ -194,7 +215,7 @@ pub fn build_app(state: AppState) -> Router {
             rate_limiter::rate_limit_middleware,
         ));
 
-// ── Assemble ────────────────────────────────────────────
+    // ── Assemble ────────────────────────────────────────────
     let overload_protection = ServiceBuilder::new()
         .layer(HandleErrorLayer::new(handle_backpressure_error))
         .layer(LoadShedLayer::new())
@@ -210,9 +231,9 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn(request_logger::request_logger))
         .layer(overload_protection)
-// Prometheus request metrics — placed after the router so MatchedPath is
-// available from extensions, but before compression/timeout so the
-// recorded duration is accurate end-to-end.
+        // Prometheus request metrics — placed after the router so MatchedPath is
+        // available from extensions, but before compression/timeout so the
+        // recorded duration is accurate end-to-end.
         .layer(axum::middleware::from_fn(metrics::metrics_middleware))
         .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
@@ -225,8 +246,7 @@ pub fn build_app(state: AppState) -> Router {
 // ─── Security headers ──────────────────────────────────────────
 
 static HDR_API_VERSION: HeaderValue = HeaderValue::from_static("v1");
-static HDR_HSTS: HeaderValue =
-    HeaderValue::from_static("max-age=31536000; includeSubDomains");
+static HDR_HSTS: HeaderValue = HeaderValue::from_static("max-age=31536000; includeSubDomains");
 static HDR_FRAME_OPTIONS: HeaderValue = HeaderValue::from_static("DENY");
 static HDR_CONTENT_TYPE_OPTIONS: HeaderValue = HeaderValue::from_static("nosniff");
 static HDR_XSS_PROTECTION: HeaderValue = HeaderValue::from_static("0");
@@ -318,7 +338,10 @@ fn browser_html_response(html: String) -> Response {
 
 async fn browser_globals_css() -> impl IntoResponse {
     (
-        [(CONTENT_TYPE, HeaderValue::from_static("text/css; charset=utf-8"))],
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/css; charset=utf-8"),
+        )],
         ui_foundation::GLOBALS_CSS,
     )
 }
@@ -382,7 +405,9 @@ fn auth_page_error_message(error: &crate::error::ApiError) -> String {
         crate::error::ApiError::RateLimited => {
             "Too many verification attempts. Please wait and try again.".into()
         }
-        crate::error::ApiError::Timeout => "The verification request timed out. Please try again.".into(),
+        crate::error::ApiError::Timeout => {
+            "The verification request timed out. Please try again.".into()
+        }
         crate::error::ApiError::Internal(_) => {
             "We could not verify your email right now. Please try again.".into()
         }
@@ -439,7 +464,12 @@ async fn browser_verify_email_page(
     }
 }
 
-fn render_ui_response(config: &Config, headers: &HeaderMap, uri: &Uri, method: &Method) -> Option<Response> {
+fn render_ui_response(
+    config: &Config,
+    headers: &HeaderMap,
+    uri: &Uri,
+    method: &Method,
+) -> Option<Response> {
     if !matches!(method, &Method::GET | &Method::HEAD) {
         return None;
     }
@@ -490,8 +520,8 @@ mod tests {
     use super::*;
     use axum::body::{to_bytes, Body};
     use axum::http::{HeaderMap, HeaderValue, Request};
-    use deadpool_redis::Config as RedisConfig;
     use ddos_protection::{DdosProtector, ProtectorConfig};
+    use deadpool_redis::Config as RedisConfig;
     use sqlx::postgres::PgPoolOptions;
     use std::sync::Arc;
     use std::sync::Once;
@@ -638,8 +668,8 @@ mod tests {
                 system_cost_capacity: 1020,
                 ..ProtectorConfig::default()
             })
-                .await
-                .expect("failed to create constrained ddos protector"),
+            .await
+            .expect("failed to create constrained ddos protector"),
         );
         let app = test_app_with_ddos(ddos_protector).await;
 
@@ -713,7 +743,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(overload_response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response_json(overload_response).await["error"]["code"], "SERVICE_OVERLOADED");
+        assert_eq!(
+            response_json(overload_response).await["error"]["code"],
+            "SERVICE_OVERLOADED"
+        );
 
         state.release.notify_waiters();
 
@@ -731,7 +764,10 @@ mod tests {
             .expect("expected ui response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers().get("content-type").unwrap(), "text/html; charset=utf-8");
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
     }
 
     #[tokio::test]
@@ -882,11 +918,21 @@ mod tests {
                 .oneshot(Request::get(path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::OK, "{path} should be reachable");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{path} should be reachable"
+            );
 
             let json = response_json(response).await;
-            assert_eq!(json["authenticated"], false, "{path} should default to logged-out state");
-            assert!(json["impersonation"].is_null(), "{path} should not report impersonation");
+            assert_eq!(
+                json["authenticated"], false,
+                "{path} should default to logged-out state"
+            );
+            assert!(
+                json["impersonation"].is_null(),
+                "{path} should not report impersonation"
+            );
         }
 
         for path in ["/v1/auth/csrf", "/api/csrf"] {
@@ -895,7 +941,11 @@ mod tests {
                 .oneshot(Request::get(path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::OK, "{path} should issue a CSRF token");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{path} should issue a CSRF token"
+            );
 
             let set_cookie = response
                 .headers()
@@ -905,7 +955,10 @@ mod tests {
                 .to_string();
             let json = response_json(response).await;
 
-            assert!(set_cookie.contains("csrf_token="), "{path} should set the CSRF cookie");
+            assert!(
+                set_cookie.contains("csrf_token="),
+                "{path} should set the CSRF cookie"
+            );
             assert!(json["token"].as_str().unwrap_or_default().contains('.'));
         }
     }
@@ -941,7 +994,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path} should fail fast on invalid input");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{path} should fail fast on invalid input"
+            );
             let json = response_json(response).await;
             assert_eq!(json["error"]["code"], "VALIDATION_ERROR");
         }
@@ -1049,7 +1106,11 @@ mod tests {
 
         let response = app
             .clone()
-            .oneshot(Request::get("/v1/auth/session").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/v1/auth/session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -1070,13 +1131,20 @@ mod tests {
                 .oneshot(Request::post(path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{path} should clear the session even without an active cookie");
+            assert_eq!(
+                response.status(),
+                StatusCode::NO_CONTENT,
+                "{path} should clear the session even without an active cookie"
+            );
             let set_cookie = response
                 .headers()
                 .get("set-cookie")
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
-            assert!(set_cookie.contains("am_session=;"), "{path} should clear the session cookie");
+            assert!(
+                set_cookie.contains("am_session=;"),
+                "{path} should clear the session cookie"
+            );
         }
 
         for path in ["/v1/auth/refresh", "/api/auth/refresh"] {
@@ -1085,7 +1153,11 @@ mod tests {
                 .oneshot(Request::get(path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path} should stay registered as POST-only");
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{path} should stay registered as POST-only"
+            );
         }
     }
 
@@ -1104,7 +1176,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path} should reject cookie logout without CSRF");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{path} should reject cookie logout without CSRF"
+            );
         }
 
         for path in ["/v1/auth/refresh", "/api/auth/refresh"] {
@@ -1118,7 +1194,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path} should reject cookie refresh without CSRF");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{path} should reject cookie refresh without CSRF"
+            );
         }
 
         let response = app
@@ -1127,11 +1207,17 @@ mod tests {
                 Request::post("/v1/auth/change-password")
                     .header("cookie", "am_session=session.jwt")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"current_password":"old","new_password":"NewPassword123!"}"#))
+                    .body(Body::from(
+                        r#"{"current_password":"old","new_password":"NewPassword123!"}"#,
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "/v1/auth/change-password should reject cookie-authenticated writes without CSRF");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "/v1/auth/change-password should reject cookie-authenticated writes without CSRF"
+        );
     }
 }

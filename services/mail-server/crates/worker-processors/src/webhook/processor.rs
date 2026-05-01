@@ -43,7 +43,7 @@ pub struct WebhookProcessor {
 }
 
 impl WebhookProcessor {
-/// Create a new webhook processor.
+    /// Create a new webhook processor.
     pub fn new(db: PgPool, redis: RedisPool, config: WebhookConfig) -> ProcessorResult<Self> {
         let client = Client::builder()
             .timeout(config.request_timeout)
@@ -68,7 +68,7 @@ impl WebhookProcessor {
         })
     }
 
-/// Start the processor.
+    /// Start the processor.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
         info!(
             concurrency = self.config.base.concurrency,
@@ -81,13 +81,13 @@ impl WebhookProcessor {
         Ok(())
     }
 
-/// Stop the processor gracefully.
+    /// Stop the processor gracefully.
     pub async fn stop(&self) -> ProcessorResult<()> {
         info!("Stopping webhook processor");
         self.is_running.store(false, Ordering::SeqCst);
         self.shutdown_notify.notify_waiters();
 
-// Wait for active jobs
+        // Wait for active jobs
         let max_wait = Duration::from_secs(30);
         let start = Instant::now();
 
@@ -95,19 +95,22 @@ impl WebhookProcessor {
             sleep(Duration::from_millis(100)).await;
         }
 
-// Flush any pending successes
+        // Flush any pending successes
         self.flush_pending_successes().await;
 
         info!("Webhook processor stopped");
         Ok(())
     }
 
-/// Main poll loop.
+    /// Main poll loop.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
-// Check capacity
-            let available =
-                self.config.base.concurrency.saturating_sub(self.active_jobs.load(Ordering::SeqCst));
+            // Check capacity
+            let available = self
+                .config
+                .base
+                .concurrency
+                .saturating_sub(self.active_jobs.load(Ordering::SeqCst));
             if available == 0 {
                 sleep(Duration::from_millis(100)).await;
                 continue;
@@ -128,7 +131,7 @@ impl WebhookProcessor {
                             }
                         })
                         .await;
-// Flush pending successes in batch
+                    // Flush pending successes in batch
                     self.flush_pending_successes().await;
                     sleep(Duration::from_millis(100)).await;
                 }
@@ -140,7 +143,7 @@ impl WebhookProcessor {
         }
     }
 
-/// Fetch webhook jobs from queue.
+    /// Fetch webhook jobs from queue.
     async fn fetch_jobs(&self, limit: usize) -> ProcessorResult<Vec<WebhookJob>> {
         let jobs = sqlx::query_as::<_, WebhookJob>(
             r#"
@@ -181,11 +184,14 @@ impl WebhookProcessor {
         Ok(jobs)
     }
 
-/// Process a single webhook job.
+    /// Process a single webhook job.
     async fn process_job(&self, job: WebhookJob) -> ProcessorResult<()> {
-// Enforce per-tenant concurrency limit
+        // Enforce per-tenant concurrency limit
         let tenant_count = {
-            let tenant_jobs = self.tenant_active_jobs.read().unwrap_or_else(|e| e.into_inner());
+            let tenant_jobs = self
+                .tenant_active_jobs
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             *tenant_jobs.get(&job.tenant_id).unwrap_or(&0)
         };
 
@@ -197,7 +203,7 @@ impl WebhookProcessor {
                 job_id = %job.id,
                 "Per-tenant concurrency limit reached, rescheduling"
             );
-// Reschedule for later
+            // Reschedule for later
             sqlx::query(
                 "UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + INTERVAL '5 seconds', locked_until = NULL, updated_at = NOW() WHERE id = $1"
             )
@@ -207,20 +213,26 @@ impl WebhookProcessor {
             return Ok(());
         }
 
-// Track active job
+        // Track active job
         self.active_jobs.fetch_add(1, Ordering::SeqCst);
         {
-            let mut tenant_jobs = self.tenant_active_jobs.write().unwrap_or_else(|e| e.into_inner());
+            let mut tenant_jobs = self
+                .tenant_active_jobs
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             *tenant_jobs.entry(job.tenant_id.clone()).or_insert(0) += 1;
         }
 
         let start = Instant::now();
         let result = self.process_job_inner(&job).await;
 
-// Decrement counters
+        // Decrement counters
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
         {
-            let mut tenant_jobs = self.tenant_active_jobs.write().unwrap_or_else(|e| e.into_inner());
+            let mut tenant_jobs = self
+                .tenant_active_jobs
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(count) = tenant_jobs.get_mut(&job.tenant_id) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -247,7 +259,7 @@ impl WebhookProcessor {
             "Processing webhook job"
         );
 
-// Check dedup key to prevent double delivery
+        // Check dedup key to prevent double delivery
         let dedup_key = format!("webhook:dedup:{}:{}", job.id, job.attempt);
         let mut conn = self.redis.get().await?;
         let previously_delivered: Option<String> = redis::cmd("GET")
@@ -268,17 +280,17 @@ impl WebhookProcessor {
             return Ok(());
         }
 
-// Get or create circuit breaker for this webhook
+        // Get or create circuit breaker for this webhook
         let circuit_breaker = self.get_circuit_breaker(&job.webhook_id);
 
-// Check if circuit is open
+        // Check if circuit is open
         if !circuit_breaker.as_ref().is_allowed() {
             warn!(
                 webhook_id = %job.webhook_id,
                 job_id = %job.id,
                 "Circuit breaker open for webhook"
             );
-// Reschedule without incrementing attempt
+            // Reschedule without incrementing attempt
             let retry_delay = job.next_retry_delay_ms().min(30000);
             sqlx::query(
                 "UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, last_error = 'Circuit breaker open — waiting for recovery', updated_at = NOW() WHERE id = $2"
@@ -290,7 +302,7 @@ impl WebhookProcessor {
             return Ok(());
         }
 
-// Validate URL for SSRF protection and pin DNS resolution used at send time
+        // Validate URL for SSRF protection and pin DNS resolution used at send time
         let resolved_target = match self.ssrf_validator.validate_and_resolve_url(&job.url).await {
             Ok(target) => target,
             Err(e) => {
@@ -318,7 +330,7 @@ impl WebhookProcessor {
             return Ok(());
         }
 
-// Truncate payload if too large
+        // Truncate payload if too large
         let payload = if serde_json::to_string(&job.payload)
             .map(|s| s.len())
             .unwrap_or(0)
@@ -334,19 +346,19 @@ impl WebhookProcessor {
             job.payload.clone()
         };
 
-// Serialize payload once for signature and body
+        // Serialize payload once for signature and body
         let serialized_payload = serde_json::to_string(&payload)
             .map_err(|e| ProcessorError::Job(format!("Failed to serialize payload: {}", e)))?;
 
-// on crash between SET and HTTP delivery.
+        // on crash between SET and HTTP delivery.
         let result = self
             .deliver_webhook(job, &serialized_payload, &resolved_target)
             .await;
 
-// Update circuit breaker
+        // Update circuit breaker
         if result.success {
             circuit_breaker.as_ref().record_success();
-// Set dedup key AFTER successful delivery (24h TTL)
+            // Set dedup key AFTER successful delivery (24h TTL)
             if let Err(error) = redis::cmd("SETEX")
                 .arg(&dedup_key)
                 .arg(86400)
@@ -365,17 +377,20 @@ impl WebhookProcessor {
         Ok(())
     }
 
-/// Get or create circuit breaker for a webhook.
+    /// Get or create circuit breaker for a webhook.
     fn get_circuit_breaker(&self, webhook_id: &str) -> Arc<CircuitBreaker> {
         const MAX_CIRCUIT_BREAKERS: usize = 10_000;
         let key = format!("webhook:{}", webhook_id);
-        let mut cbs = self.circuit_breakers.write().unwrap_or_else(|e| e.into_inner());
+        let mut cbs = self
+            .circuit_breakers
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
 
         if let Some(cb) = cbs.get(&key) {
             return Arc::clone(cb);
         }
 
-// Evict closed circuit breakers when map grows too large
+        // Evict closed circuit breakers when map grows too large
         if cbs.len() >= MAX_CIRCUIT_BREAKERS {
             let stale_keys: Vec<String> = cbs
                 .iter()
@@ -387,23 +402,24 @@ impl WebhookProcessor {
                 cbs.remove(k);
             }
             if stale_keys.is_empty() {
-                tracing::warn!(size = cbs.len(), "Circuit breaker map at capacity with no closed entries to evict");
+                tracing::warn!(
+                    size = cbs.len(),
+                    "Circuit breaker map at capacity with no closed entries to evict"
+                );
             }
         }
 
-        let cb = Arc::new(CircuitBreaker::new(
-            crate::common::CircuitBreakerConfig {
-                failure_threshold: 5,
-                open_duration: std::time::Duration::from_secs(30),
-                success_threshold: 2,
-                window_duration: std::time::Duration::from_secs(60),
-            },
-        ));
+        let cb = Arc::new(CircuitBreaker::new(crate::common::CircuitBreakerConfig {
+            failure_threshold: 5,
+            open_duration: std::time::Duration::from_secs(30),
+            success_threshold: 2,
+            window_duration: std::time::Duration::from_secs(60),
+        }));
         cbs.insert(key, Arc::clone(&cb));
         cb
     }
 
-/// Deliver webhook to endpoint.
+    /// Deliver webhook to endpoint.
     async fn deliver_webhook(
         &self,
         job: &WebhookJob,
@@ -413,10 +429,10 @@ impl WebhookProcessor {
         let timestamp = Utc::now().timestamp_millis();
         let delivery_id = format!("dlv_{}", uuid::Uuid::new_v4());
 
-// Sign payload
+        // Sign payload
         let signature = self.sign_payload(&job.secret, timestamp, serialized_payload);
 
-// Build headers
+        // Build headers
         let mut headers = job.get_headers();
         headers.insert("Content-Type".to_string(), "application/json".to_string());
         headers.insert("X-ApexMail-Webhook-Id".to_string(), job.webhook_id.clone());
@@ -428,7 +444,10 @@ impl WebhookProcessor {
         let start = Instant::now();
 
         let send_result = if resolved_target.host_is_ip {
-            let mut request = self.client.post(&job.url).body(serialized_payload.to_string());
+            let mut request = self
+                .client
+                .post(&job.url)
+                .body(serialized_payload.to_string());
             for (key, value) in &headers {
                 request = request.header(key.as_str(), value.as_str());
             }
@@ -468,7 +487,9 @@ impl WebhookProcessor {
                 }
             };
 
-            let mut request = pinned_client.post(&job.url).body(serialized_payload.to_string());
+            let mut request = pinned_client
+                .post(&job.url)
+                .body(serialized_payload.to_string());
             for (key, value) in &headers {
                 request = request.header(key.as_str(), value.as_str());
             }
@@ -480,31 +501,30 @@ impl WebhookProcessor {
                 let status = response.status().as_u16();
                 let response_time = start.elapsed().as_millis() as u64;
 
-// Parse Retry-After header for 429/503
+                // Parse Retry-After header for 429/503
                 let retry_after_ms = if status == 429 || status == 503 {
                     response
                         .headers()
                         .get("retry-after")
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| {
-// Try parsing as seconds
+                            // Try parsing as seconds
                             if let Ok(secs) = v.parse::<u64>() {
                                 Some(secs.min(3600) * 1000)
                             } else {
-// Try parsing as date
-                                chrono::DateTime::parse_from_rfc2822(v)
-                                    .ok()
-                                    .map(|dt| {
-                                        let delay = dt.timestamp_millis() - Utc::now().timestamp_millis();
-                                        (delay.max(0) as u64).min(3600_000)
-                                    })
+                                // Try parsing as date
+                                chrono::DateTime::parse_from_rfc2822(v).ok().map(|dt| {
+                                    let delay =
+                                        dt.timestamp_millis() - Utc::now().timestamp_millis();
+                                    (delay.max(0) as u64).min(3600_000)
+                                })
                             }
                         })
                 } else {
                     None
                 };
 
-// Read limited response body
+                // Read limited response body
                 let response_body = match response.bytes().await {
                     Ok(bytes) => {
                         let truncated = &bytes[..bytes.len().min(MAX_RESPONSE_BYTES)];
@@ -532,18 +552,12 @@ impl WebhookProcessor {
             }
             Err(e) => {
                 let response_time = start.elapsed().as_millis() as u64;
-                WebhookDeliveryResult::failure(
-                    None,
-                    response_time,
-                    e.to_string(),
-                    None,
-                    None,
-                )
+                WebhookDeliveryResult::failure(None, response_time, e.to_string(), None, None)
             }
         }
     }
 
-/// Sign payload with HMAC-SHA256.
+    /// Sign payload with HMAC-SHA256.
     fn sign_payload(&self, secret: &str, timestamp: i64, payload: &str) -> String {
         let message = format!("{}.{}", timestamp, payload);
         let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
@@ -558,8 +572,12 @@ impl WebhookProcessor {
         format!("{}{}", SIGNATURE_VERSION, hex::encode(result.into_bytes()))
     }
 
-/// Queue success for batch flush.
-    async fn handle_success(&self, job: &WebhookJob, result: WebhookDeliveryResult) -> ProcessorResult<()> {
+    /// Queue success for batch flush.
+    async fn handle_success(
+        &self,
+        job: &WebhookJob,
+        result: WebhookDeliveryResult,
+    ) -> ProcessorResult<()> {
         info!(
             job_id = %job.id,
             webhook_id = %job.webhook_id,
@@ -568,16 +586,23 @@ impl WebhookProcessor {
             "Webhook delivered successfully"
         );
 
-        self.pending_successes.lock().unwrap_or_else(|e| e.into_inner()).push(PendingSuccess {
-            job: job.clone(),
-            result,
-        });
+        self.pending_successes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(PendingSuccess {
+                job: job.clone(),
+                result,
+            });
 
         Ok(())
     }
 
-/// Handle failed delivery.
-    async fn handle_failure(&self, job: &WebhookJob, result: WebhookDeliveryResult) -> ProcessorResult<()> {
+    /// Handle failed delivery.
+    async fn handle_failure(
+        &self,
+        job: &WebhookJob,
+        result: WebhookDeliveryResult,
+    ) -> ProcessorResult<()> {
         let error_msg = result.error.as_deref().unwrap_or("Unknown error");
 
         warn!(
@@ -590,7 +615,7 @@ impl WebhookProcessor {
         );
 
         if job.attempt >= job.max_retries && result.is_retryable() {
-// Exhausted retries — move to dead letter
+            // Exhausted retries — move to dead letter
             sqlx::query(
                 r#"
                 INSERT INTO webhook_deliveries (id, webhook_id, tenant_id, event_type, payload, status_code, response_time_ms, response_body, attempt, error, delivered_at)
@@ -621,7 +646,7 @@ impl WebhookProcessor {
                 "Webhook exhausted retries, moved to dead letter"
             );
         } else if result.is_retryable() {
-// Schedule retry with backoff
+            // Schedule retry with backoff
             let retry_delay = result
                 .retry_after_ms
                 .map(|ms| ms as i64)
@@ -675,10 +700,13 @@ impl WebhookProcessor {
         Ok(())
     }
 
-/// Flush pending successes in a batch transaction.
+    /// Flush pending successes in a batch transaction.
     async fn flush_pending_successes(&self) {
         let successes: Vec<PendingSuccess> = {
-            let mut pending = self.pending_successes.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self
+                .pending_successes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *pending)
         };
 
@@ -690,8 +718,11 @@ impl WebhookProcessor {
             Ok(tx) => tx,
             Err(e) => {
                 error!(error = %e, "Failed to begin transaction for batch flush");
-// Put them back
-                self.pending_successes.lock().unwrap_or_else(|e| e.into_inner()).extend(successes);
+                // Put them back
+                self.pending_successes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(successes);
                 return;
             }
         };
@@ -700,7 +731,7 @@ impl WebhookProcessor {
             let job = &success.job;
             let result = &success.result;
 
-// Insert delivery record
+            // Insert delivery record
             if let Err(e) = sqlx::query(
                 r#"
                 INSERT INTO webhook_deliveries (id, webhook_id, tenant_id, event_type, payload, status_code, response_time_ms, response_body, attempt, delivered_at)
@@ -722,7 +753,7 @@ impl WebhookProcessor {
                 error!(error = %e, job_id = %job.id, "Failed to insert delivery record");
             }
 
-// Delete from queue
+            // Delete from queue
             if let Err(e) = sqlx::query("DELETE FROM webhook_queue WHERE id = $1")
                 .bind(&job.id)
                 .execute(&mut *tx)

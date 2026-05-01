@@ -9,35 +9,32 @@ use crate::session::UserLoginHistory;
 /// Behavioral analysis result
 #[derive(Debug, Clone)]
 pub struct BehaviorScore {
-/// Total risk from behavioral analysis (0.0 - 10.0)
+    /// Total risk from behavioral analysis (0.0 - 10.0)
     pub score: f64,
-/// Individual findings
+    /// Individual findings
     pub findings: Vec<BehaviorFinding>,
 }
 
 /// A behavioral finding
 #[derive(Debug, Clone)]
 pub struct BehaviorFinding {
-/// Finding ID
+    /// Finding ID
     pub id: &'static str,
-/// Description
+    /// Description
     pub description: String,
-/// Risk score
+    /// Risk score
     pub risk: f64,
 }
 
 /// Analyze login behavior against user history
-pub fn analyze_behavior(
-    login_hour: u32,
-    history: &UserLoginHistory,
-) -> BehaviorScore {
+pub fn analyze_behavior(login_hour: u32, history: &UserLoginHistory) -> BehaviorScore {
     let mut findings = Vec::new();
 
-// 1. Time-of-day anomaly
+    // 1. Time-of-day anomaly
     if let Some(typical_hour) = history.typical_login_hour() {
         let hour_diff = hour_distance(login_hour, typical_hour);
         if hour_diff >= 10 {
-// Far outside typical hours (e.g. usually logs in at 9am, now at 3am)
+            // Far outside typical hours (e.g. usually logs in at 9am, now at 3am)
             findings.push(BehaviorFinding {
                 id: "UNUSUAL_HOUR_HIGH",
                 description: format!(
@@ -58,7 +55,7 @@ pub fn analyze_behavior(
         }
     }
 
-// 2. Very few historical logins (new account or rarely used)
+    // 2. Very few historical logins (new account or rarely used)
     let successful_logins = history.events.iter().filter(|e| e.success).count();
     if successful_logins < 3 {
         findings.push(BehaviorFinding {
@@ -68,8 +65,10 @@ pub fn analyze_behavior(
         });
     }
 
-// 3. Burst login pattern (many logins in short period — could be automated)
-    let recent_logins = history.events.iter()
+    // 3. Burst login pattern (many logins in short period — could be automated)
+    let recent_logins = history
+        .events
+        .iter()
         .filter(|e| {
             let age = chrono::Utc::now().signed_duration_since(e.timestamp);
             age.num_minutes() < 5
@@ -144,7 +143,10 @@ mod tests {
         let history = make_history_at_hours(&[9, 10, 9, 8, 10]);
         let result = analyze_behavior(9, &history);
         assert!(
-            !result.findings.iter().any(|f| f.id.starts_with("UNUSUAL_HOUR")),
+            !result
+                .findings
+                .iter()
+                .any(|f| f.id.starts_with("UNUSUAL_HOUR")),
             "Login at typical hour should not be flagged"
         );
     }
@@ -152,10 +154,13 @@ mod tests {
     #[test]
     fn test_unusual_hour() {
         let history = make_history_at_hours(&[9, 10, 9, 8, 10, 9, 9]);
-// Login at 3am when typical is ~9am
+        // Login at 3am when typical is ~9am
         let result = analyze_behavior(3, &history);
         assert!(
-            result.findings.iter().any(|f| f.id.starts_with("UNUSUAL_HOUR")),
+            result
+                .findings
+                .iter()
+                .any(|f| f.id.starts_with("UNUSUAL_HOUR")),
             "Login at 3am (typical 9am) should be flagged"
         );
     }

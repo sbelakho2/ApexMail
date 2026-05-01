@@ -1,7 +1,8 @@
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 
-const UI_BASELINE_MANIFEST: &str = include_str!("../../../../../docs/development/ui-baseline-manifest.json");
+const UI_BASELINE_MANIFEST: &str =
+    include_str!("../../../../../docs/development/ui-baseline-manifest.json");
 
 #[derive(Debug, Clone, Deserialize)]
 struct RouteBaselineManifest {
@@ -43,7 +44,11 @@ static MANIFEST: Lazy<RouteBaselineManifest> = Lazy::new(|| {
 });
 
 pub fn surface_ids() -> Vec<&'static str> {
-    MANIFEST.surfaces.iter().map(|surface| surface.id.as_str()).collect()
+    MANIFEST
+        .surfaces
+        .iter()
+        .map(|surface| surface.id.as_str())
+        .collect()
 }
 
 pub fn surface_routes(surface_id: &str) -> Vec<SurfaceRoute<'static>> {
@@ -68,7 +73,10 @@ pub fn surface_routes(surface_id: &str) -> Vec<SurfaceRoute<'static>> {
 }
 
 pub fn surface_route_paths(surface_id: &str) -> Vec<&'static str> {
-    surface_routes(surface_id).into_iter().map(|route| route.path).collect()
+    surface_routes(surface_id)
+        .into_iter()
+        .map(|route| route.path)
+        .collect()
 }
 
 pub fn auth_required(surface_id: &str, route_path: &str) -> Option<bool> {
@@ -98,7 +106,11 @@ pub fn declared_route_count(surface_id: &str) -> Option<usize> {
 }
 
 pub fn total_route_count() -> usize {
-    MANIFEST.surfaces.iter().map(|surface| surface.routes.len()).sum()
+    MANIFEST
+        .surfaces
+        .iter()
+        .map(|surface| surface.routes.len())
+        .sum()
 }
 
 #[cfg(test)]
@@ -117,8 +129,13 @@ mod tests {
     #[test]
     fn exposes_web_routes_and_patterns() {
         let routes = surface_routes("web");
-        assert!(routes.iter().any(|route| route.path == "/dashboard" && route.auth_required));
-        assert_eq!(canonical_pattern("web", "/campaigns/c_1"), Some("/campaigns/[id]"));
+        assert!(routes
+            .iter()
+            .any(|route| route.path == "/dashboard" && route.auth_required));
+        assert_eq!(
+            canonical_pattern("web", "/campaigns/c_1"),
+            Some("/campaigns/[id]")
+        );
         assert_eq!(auth_required("web", "/login"), Some(false));
     }
 
@@ -130,15 +147,26 @@ mod tests {
 
         assert!(control_plane_routes
             .iter()
-            .any(|route| route.path == "/login" && !route.auth_required && route.category == "auth"));
+            .any(|route| route.path == "/login"
+                && !route.auth_required
+                && route.category == "auth"));
         assert!(control_plane_routes
             .iter()
-            .any(|route| route.path == "/analytics" && route.auth_required && route.category == "admin"));
+            .any(|route| route.path == "/analytics"
+                && route.auth_required
+                && route.category == "admin"));
         assert!(marketing_routes
             .iter()
-            .any(|route| route.path == "/pricing/calculator" && !route.auth_required && route.category == "marketing"));
-        assert!(marketing_zola_routes.iter().any(|route| route.path == "/compare"));
-        assert_eq!(surface_route_paths("marketing-zola").len(), declared_route_count("marketing-zola").unwrap());
+            .any(|route| route.path == "/pricing/calculator"
+                && !route.auth_required
+                && route.category == "marketing"));
+        assert!(marketing_zola_routes
+            .iter()
+            .any(|route| route.path == "/compare"));
+        assert_eq!(
+            surface_route_paths("marketing-zola").len(),
+            declared_route_count("marketing-zola").unwrap()
+        );
     }
 
     #[test]

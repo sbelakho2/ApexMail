@@ -61,6 +61,8 @@ billing-service = { path = "../billing-service" }
 ui-foundation = { path = "../ui-foundation" }
 mail-common = { path = "../mail-common" }
 ddos-protection = { path = "../ddos-protection" }
+apexmail-analytics = { path = "../analytics", package = "analytics" }
+observability-service = { path = "../observability-service" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

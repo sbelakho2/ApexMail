@@ -117,7 +117,7 @@ aws sesv2 create-configuration-set-event-destination \
 aws sns subscribe \
   --topic-arn arn:aws:sns:eu-west-1:ACCOUNT_ID:apexmail-ses-events \
   --protocol https \
-  --notification-endpoint https://api.yourdomain.com/v1/ses/notifications
+  --notification-endpoint https://api.apexmail.ee/v1/ses/notifications
 ```
 
 SES will send a `SubscriptionConfirmation` request to the endpoint. ApexMail automatically confirms it.

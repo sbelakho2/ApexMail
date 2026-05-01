@@ -33,10 +33,8 @@ fn tool_migrations_dir() -> PathBuf {
 
 async fn apply_tool_migrations(pool: &PgPool) {
     let source_dir = tool_migrations_dir();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "apexmail-sqlx-up-migrations-{}",
-        Uuid::new_v4()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("apexmail-sqlx-up-migrations-{}", Uuid::new_v4()));
 
     fs::create_dir_all(&temp_dir).expect("failed to create temp sqlx migration directory");
 
@@ -47,10 +45,7 @@ async fn apply_tool_migrations(pool: &PgPool) {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .map(|name| {
-                    !name.ends_with("_down.sql")
-                        && !name.contains("performance_indexes")
-                })
+                .map(|name| !name.ends_with("_down.sql") && !name.contains("performance_indexes"))
                 .unwrap_or(false)
         })
         .collect();
@@ -221,8 +216,8 @@ async fn count_rows_for_tenant(pool: &PgPool, table_name: &str, tenant_id: &str)
 }
 
 async fn tenant_scoped_tables(pool: &PgPool) -> Vec<String> {
-        sqlx::query_scalar::<_, String>(
-                "SELECT DISTINCT columns.table_name
+    sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT columns.table_name
                  FROM information_schema.columns AS columns
                  JOIN information_schema.tables AS tables
                      ON tables.table_schema = columns.table_schema
@@ -232,10 +227,10 @@ async fn tenant_scoped_tables(pool: &PgPool) -> Vec<String> {
                      AND columns.table_name <> 'tenants'
                      AND tables.table_type = 'BASE TABLE'
                  ORDER BY columns.table_name",
-        )
-        .fetch_all(pool)
-        .await
-        .expect("failed to enumerate tenant-scoped tables")
+    )
+    .fetch_all(pool)
+    .await
+    .expect("failed to enumerate tenant-scoped tables")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -246,8 +241,8 @@ async fn tenant_scoped_tables(pool: &PgPool) -> Vec<String> {
 async fn messages_table_has_to_emails_column(pool: PgPool) {
     apply_tool_migrations(&pool).await;
 
-// The messages.rs send_message handler INSERTs into (to_emails, cc_emails, bcc_emails).
-// If these columns don't exist, this will fail at runtime.
+    // The messages.rs send_message handler INSERTs into (to_emails, cc_emails, bcc_emails).
+    // If these columns don't exist, this will fail at runtime.
     let tenant_id = insert_test_tenant(&pool, "to_emails").await;
 
     let result = sqlx::query(
@@ -267,16 +262,20 @@ async fn messages_table_has_to_emails_column(pool: PgPool) {
     .execute(&pool)
     .await;
 
-    assert!(result.is_ok(), "INSERT with to_emails/cc_emails/bcc_emails failed: {:?}. \
-        The messages table is missing columns that messages.rs depends on.", result.err());
+    assert!(
+        result.is_ok(),
+        "INSERT with to_emails/cc_emails/bcc_emails failed: {:?}. \
+        The messages table is missing columns that messages.rs depends on.",
+        result.err()
+    );
 }
 
 #[sqlx::test]
 async fn messages_table_has_html_body_and_text_body_columns(pool: PgPool) {
     apply_tool_migrations(&pool).await;
 
-// messages.rs uses html_body/text_body but initial schema has html_body/text_body
-// and the send handler also writes html/text. Verify both exist.
+    // messages.rs uses html_body/text_body but initial schema has html_body/text_body
+    // and the send handler also writes html/text. Verify both exist.
     let tenant_id = insert_test_tenant(&pool, "htmltext").await;
 
     let result = sqlx::query(
@@ -293,7 +292,11 @@ async fn messages_table_has_html_body_and_text_body_columns(pool: PgPool) {
     .execute(&pool)
     .await;
 
-    assert!(result.is_ok(), "INSERT with html_body/text_body failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "INSERT with html_body/text_body failed: {:?}",
+        result.err()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -307,14 +310,18 @@ async fn sessions_table_exists_for_password_reset(pool: PgPool) {
     let tenant_id = insert_test_tenant(&pool, "sessions").await;
     let user_id = insert_test_user(&pool, &tenant_id, "sessions@test.com").await;
 
-// auth.rs:693 does DELETE FROM sessions WHERE user_id = $1
+    // auth.rs:693 does DELETE FROM sessions WHERE user_id = $1
     let result = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
         .bind(&user_id)
         .execute(&pool)
         .await;
 
-    assert!(result.is_ok(), "DELETE FROM sessions failed: {:?}. \
-        The sessions table does not exist — password reset/change will crash.", result.err());
+    assert!(
+        result.is_ok(),
+        "DELETE FROM sessions failed: {:?}. \
+        The sessions table does not exist — password reset/change will crash.",
+        result.err()
+    );
 }
 
 #[sqlx::test]
@@ -334,8 +341,12 @@ async fn sessions_table_accepts_insert(pool: PgPool) {
     .execute(&pool)
     .await;
 
-    assert!(result.is_ok(), "INSERT INTO sessions failed: {:?}. \
-        Sessions table may be missing required columns.", result.err());
+    assert!(
+        result.is_ok(),
+        "INSERT INTO sessions failed: {:?}. \
+        Sessions table may be missing required columns.",
+        result.err()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -349,7 +360,7 @@ async fn metering_events_table_exists(pool: PgPool) {
     let tenant_id = insert_test_tenant(&pool, "metering").await;
     let event_id = Uuid::new_v4();
 
-// usage.rs:50-65 INSERTs into metering_events
+    // usage.rs:50-65 INSERTs into metering_events
     let result = sqlx::query(
         "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
          VALUES ($1, $2, $3::text::meter_event_type, $4, $5, $6)
@@ -364,15 +375,19 @@ async fn metering_events_table_exists(pool: PgPool) {
     .execute(&pool)
     .await;
 
-    assert!(result.is_ok(), "INSERT INTO metering_events failed: {:?}. \
-        The metering_events table does not exist — billing is completely broken.", result.err());
+    assert!(
+        result.is_ok(),
+        "INSERT INTO metering_events failed: {:?}. \
+        The metering_events table does not exist — billing is completely broken.",
+        result.err()
+    );
 }
 
 #[sqlx::test]
 async fn metering_events_aggregation_works(pool: PgPool) {
     apply_tool_migrations(&pool).await;
 
-// usage.rs:88-103 aggregates from metering_events
+    // usage.rs:88-103 aggregates from metering_events
     let result = sqlx::query(
         "SELECT event_type, SUM(quantity)::bigint as total
          FROM metering_events
@@ -382,8 +397,12 @@ async fn metering_events_aggregation_works(pool: PgPool) {
     .fetch_all(&pool)
     .await;
 
-    assert!(result.is_ok(), "SELECT FROM metering_events failed: {:?}. \
-        The table or its columns are missing.", result.err());
+    assert!(
+        result.is_ok(),
+        "SELECT FROM metering_events failed: {:?}. \
+        The table or its columns are missing.",
+        result.err()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -394,7 +413,7 @@ async fn metering_events_aggregation_works(pool: PgPool) {
 async fn plans_table_has_email_limit_column(pool: PgPool) {
     apply_tool_migrations(&pool).await;
 
-// usage.rs:120-132 queries p.email_limit and p.api_call_limit
+    // usage.rs:120-132 queries p.email_limit and p.api_call_limit
     let result = sqlx::query(
         "SELECT COALESCE(p.email_limit, 0) as email_limit,
                 COALESCE(p.api_call_limit, 0) as api_call_limit
@@ -405,8 +424,12 @@ async fn plans_table_has_email_limit_column(pool: PgPool) {
     .fetch_optional(&pool)
     .await;
 
-    assert!(result.is_ok(), "SELECT email_limit/api_call_limit FROM plans failed: {:?}. \
-        The plans table is missing email_limit and/or api_call_limit columns.", result.err());
+    assert!(
+        result.is_ok(),
+        "SELECT email_limit/api_call_limit FROM plans failed: {:?}. \
+        The plans table is missing email_limit and/or api_call_limit columns.",
+        result.err()
+    );
 }
 
 #[sqlx::test]
@@ -431,10 +454,14 @@ async fn plans_table_accepts_limits(pool: PgPool) {
     .execute(&pool)
     .await;
 
-    assert!(result.is_ok(), "INSERT into plans with email_limit/api_call_limit failed: {:?}. \
-        These columns are missing from the plans table.", result.err());
+    assert!(
+        result.is_ok(),
+        "INSERT into plans with email_limit/api_call_limit failed: {:?}. \
+        These columns are missing from the plans table.",
+        result.err()
+    );
 
-// Cleanup
+    // Cleanup
     let _ = sqlx::query("DELETE FROM plans WHERE name = $1")
         .bind(&plan_name)
         .execute(&pool)
@@ -451,8 +478,8 @@ async fn domains_table_uses_correct_column_names(pool: PgPool) {
 
     let tenant_id = insert_test_tenant(&pool, "domcols").await;
 
-// messages.rs:485-495 queries:WHERE tenant_id = $1 AND name = $2 AND verified = true
-// After migration 003, the column is 'domain' not 'name', and 'is_verified' not 'verified'
+    // messages.rs:485-495 queries:WHERE tenant_id = $1 AND name = $2 AND verified = true
+    // After migration 003, the column is 'domain' not 'name', and 'is_verified' not 'verified'
     let result = sqlx::query(
         "SELECT 1 FROM domains WHERE tenant_id = $1 AND domain = $2 AND is_verified = true",
     )
@@ -461,8 +488,12 @@ async fn domains_table_uses_correct_column_names(pool: PgPool) {
     .fetch_optional(&pool)
     .await;
 
-    assert!(result.is_ok(), "SELECT from domains with 'domain' and 'is_verified' columns failed: {:?}. \
-        The column names may not match what the code expects.", result.err());
+    assert!(
+        result.is_ok(),
+        "SELECT from domains with 'domain' and 'is_verified' columns failed: {:?}. \
+        The column names may not match what the code expects.",
+        result.err()
+    );
 }
 
 #[sqlx::test]
@@ -483,8 +514,12 @@ async fn domains_table_allows_insert_with_domain_column(pool: PgPool) {
     .execute(&pool)
     .await;
 
-    assert!(result.is_ok(), "INSERT INTO domains with 'domain' column failed: {:?}. \
-        Column may still be named 'name' or migration not applied.", result.err());
+    assert!(
+        result.is_ok(),
+        "INSERT INTO domains with 'domain' column failed: {:?}. \
+        Column may still be named 'name' or migration not applied.",
+        result.err()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -495,15 +530,19 @@ async fn domains_table_allows_insert_with_domain_column(pool: PgPool) {
 async fn api_keys_table_uses_prefix_not_key_prefix(pool: PgPool) {
     apply_tool_migrations(&pool).await;
 
-// After migration 003, the column is 'prefix' not 'key_prefix'
+    // After migration 003, the column is 'prefix' not 'key_prefix'
     let result = sqlx::query(
         "SELECT id, name, prefix, scopes FROM api_keys WHERE tenant_id = 'nonexistent'",
     )
     .fetch_all(&pool)
     .await;
 
-    assert!(result.is_ok(), "SELECT prefix FROM api_keys failed: {:?}. \
-        The column may still be 'key_prefix' — migration 003 rename not applied.", result.err());
+    assert!(
+        result.is_ok(),
+        "SELECT prefix FROM api_keys failed: {:?}. \
+        The column may still be 'key_prefix' — migration 003 rename not applied.",
+        result.err()
+    );
 }
 
 #[sqlx::test]
@@ -524,8 +563,12 @@ async fn api_keys_insert_with_prefix_column(pool: PgPool) {
     .execute(&pool)
     .await;
 
-    assert!(result.is_ok(), "INSERT INTO api_keys with 'prefix' column failed: {:?}. \
-        Code uses 'key_prefix' but schema has 'prefix'.", result.err());
+    assert!(
+        result.is_ok(),
+        "INSERT INTO api_keys with 'prefix' column failed: {:?}. \
+        Code uses 'key_prefix' but schema has 'prefix'.",
+        result.err()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -542,8 +585,12 @@ async fn invoices_table_exists(pool: PgPool) {
     .fetch_all(&pool)
     .await;
 
-    assert!(result.is_ok(), "SELECT FROM invoices failed: {:?}. \
-        The invoices table does not exist — billing invoice endpoints are broken.", result.err());
+    assert!(
+        result.is_ok(),
+        "SELECT FROM invoices failed: {:?}. \
+        The invoices table does not exist — billing invoice endpoints are broken.",
+        result.err()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -554,16 +601,20 @@ async fn invoices_table_exists(pool: PgPool) {
 async fn subscriptions_tenant_id_is_varchar_compatible(pool: PgPool) {
     apply_tool_migrations(&pool).await;
 
-// subscriptions.tenant_id is UUID but tenants.id is VARCHAR(26)
-// This test verifies the JOIN works
+    // subscriptions.tenant_id is UUID but tenants.id is VARCHAR(26)
+    // This test verifies the JOIN works
     let result = sqlx::query(
         "SELECT s.id FROM subscriptions s JOIN tenants t ON s.tenant_id::text = t.id WHERE t.id = 'nonexistent'",
     )
     .fetch_all(&pool)
     .await;
 
-    assert!(result.is_ok(), "JOIN between subscriptions and tenants failed: {:?}. \
-        Type mismatch between subscriptions.tenant_id (UUID) and tenants.id (VARCHAR).", result.err());
+    assert!(
+        result.is_ok(),
+        "JOIN between subscriptions and tenants failed: {:?}. \
+        Type mismatch between subscriptions.tenant_id (UUID) and tenants.id (VARCHAR).",
+        result.err()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -577,9 +628,22 @@ async fn users_table_has_all_user_row_columns(pool: PgPool) {
     let tenant_id = insert_test_tenant(&pool, "usercols").await;
     let user_id = insert_test_user(&pool, &tenant_id, "usercols@test.com").await;
 
-// auth.rs change_password selects:id, tenant_id, email, name, password_hash, role, status
-// But UserRow also needs:mfa_enabled, mfa_secret
-    let result = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, String, String, bool, Option<String>)>(
+    // auth.rs change_password selects:id, tenant_id, email, name, password_hash, role, status
+    // But UserRow also needs:mfa_enabled, mfa_secret
+    let result = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            bool,
+            Option<String>,
+        ),
+    >(
         "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret
          FROM users WHERE id = $1",
     )
@@ -587,8 +651,12 @@ async fn users_table_has_all_user_row_columns(pool: PgPool) {
     .fetch_optional(&pool)
     .await;
 
-    assert!(result.is_ok(), "SELECT all UserRow columns from users failed: {:?}. \
-        The users table may be missing columns expected by the UserRow struct.", result.err());
+    assert!(
+        result.is_ok(),
+        "SELECT all UserRow columns from users failed: {:?}. \
+        The users table may be missing columns expected by the UserRow struct.",
+        result.err()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -631,23 +699,26 @@ async fn concurrent_registration_same_email_no_orphaned_tenant(pool: PgPool) {
     assert_eq!(response_a.status(), StatusCode::ACCEPTED);
     assert_eq!(response_b.status(), StatusCode::ACCEPTED);
 
-    let user_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)",
-    )
-    .bind(&email)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(user_count.0, 1, "registration race created duplicate users for {email}");
+    let user_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)")
+            .bind(&email)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        user_count.0, 1,
+        "registration race created duplicate users for {email}"
+    );
 
-    let tenant_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM tenants WHERE name = $1",
-    )
-    .bind(&company_name)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(tenant_count.0, 1, "registration race left duplicate or orphaned tenants for {company_name}");
+    let tenant_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tenants WHERE name = $1")
+        .bind(&company_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        tenant_count.0, 1,
+        "registration race left duplicate or orphaned tenants for {company_name}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -723,7 +794,10 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables(pool: P
     let deleted = delete_tenant_records(&pool, &tenant_id)
         .await
         .expect("failed to delete tenant through purge helper");
-    assert!(deleted, "tenant purge helper reported no deleted tenant row");
+    assert!(
+        deleted,
+        "tenant purge helper reported no deleted tenant row"
+    );
 
     let mut leftover_tables = Vec::new();
     for table_name in tenant_scoped_tables(&pool).await {

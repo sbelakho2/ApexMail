@@ -13,7 +13,7 @@ impl SecretString {
     pub fn new(s: String) -> Self {
         Self(s)
     }
-    
+
     pub fn expose_secret(&self) -> &str {
         &self.0
     }
@@ -140,7 +140,10 @@ impl DatabaseConfig {
     pub fn from_env() -> Self {
         Self {
             host: env::var("DB_HOST").unwrap_or_else(|_| "localhost".into()),
-            port: env::var("DB_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(5432),
+            port: env::var("DB_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5432),
             name: env::var("DB_NAME").unwrap_or_else(|_| "apexmail".into()),
             user: env::var("DB_USER").unwrap_or_else(|_| "apexmail".into()),
             password: env::var("DB_PASSWORD").unwrap_or_default(),
@@ -153,7 +156,7 @@ impl DatabaseConfig {
 
     pub fn url(&self) -> String {
         let ssl = if self.ssl { "?sslmode=require" } else { "" };
-// URL-encode user and password to handle special characters
+        // URL-encode user and password to handle special characters
         let encoded_user = urlencoding::encode(&self.user);
         let encoded_password = urlencoding::encode(&self.password);
         format!(
@@ -175,9 +178,15 @@ impl RedisConfig {
     pub fn from_env() -> Self {
         Self {
             host: env::var("REDIS_HOST").unwrap_or_else(|_| "localhost".into()),
-            port: env::var("REDIS_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(6379),
+            port: env::var("REDIS_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(6379),
             password: env::var("REDIS_PASSWORD").ok().filter(|s| !s.is_empty()),
-            db: env::var("REDIS_DB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            db: env::var("REDIS_DB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 
@@ -196,7 +205,7 @@ pub struct SamlConfig {
     pub acs_url: String,
     pub slo_url: String,
     pub certificate: String,
-/// Private key wrapped in SecretString for secure zeroize on drop
+    /// Private key wrapped in SecretString for secure zeroize on drop
     pub private_key: SecretString,
     pub allow_sha1: bool,
 }
@@ -278,12 +287,15 @@ pub struct Config {
 }
 
 impl Config {
-/// Load configuration from environment variables.
+    /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self, String> {
         let node_env = env::var("NODE_ENV").unwrap_or_default();
         let is_production = node_env == "production" || node_env == "prod";
 
-        let jwt_secret = match env::var("JWT_SECRET").ok().filter(|value| !value.trim().is_empty()) {
+        let jwt_secret = match env::var("JWT_SECRET")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
             Some(secret) => secret,
             None if is_production => {
                 return Err("JWT_SECRET environment variable must be set in production".into());
@@ -294,9 +306,12 @@ impl Config {
         if is_production && jwt_secret.len() < 32 {
             return Err("JWT_SECRET must be at least 32 characters in production".into());
         }
-        
+
         Ok(Self {
-            port: env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(3000),
+            port: env::var("PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3000),
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
             cors_origins: env::var("CORS_ORIGINS")
                 .unwrap_or_else(|_| "*".into())
@@ -308,66 +323,122 @@ impl Config {
             db: DatabaseConfig::from_env(),
             redis: RedisConfig::from_env(),
             sso: {
-                let base_url = env::var("BASE_URL").unwrap_or_else(|_| format!("http://{}:{}",                     env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
-                    env::var("PORT").ok().and_then(|v| v.parse::<u16>().ok()).unwrap_or(3000)
-                ));
+                let base_url = env::var("BASE_URL").unwrap_or_else(|_| {
+                    format!(
+                        "http://{}:{}",
+                        env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
+                        env::var("PORT")
+                            .ok()
+                            .and_then(|v| v.parse::<u16>().ok())
+                            .unwrap_or(3000)
+                    )
+                });
                 SSOConfig {
                     saml: SamlConfig {
-                        enabled: env::var("SAML_ENABLED").map(|v| v == "true").unwrap_or(false),
-                        entity_id: env::var("SAML_ENTITY_ID").unwrap_or_else(|_| "urn:apexmail:enterprise".into()),
-                        acs_url: env::var("SAML_ACS_URL").unwrap_or_else(|_| format!("{base_url}/api/sso/saml/callback")),
-                        slo_url: env::var("SAML_SLO_URL").unwrap_or_else(|_| format!("{base_url}/api/sso/saml/logout")),
+                        enabled: env::var("SAML_ENABLED")
+                            .map(|v| v == "true")
+                            .unwrap_or(false),
+                        entity_id: env::var("SAML_ENTITY_ID")
+                            .unwrap_or_else(|_| "urn:apexmail:enterprise".into()),
+                        acs_url: env::var("SAML_ACS_URL")
+                            .unwrap_or_else(|_| format!("{base_url}/api/sso/saml/callback")),
+                        slo_url: env::var("SAML_SLO_URL")
+                            .unwrap_or_else(|_| format!("{base_url}/api/sso/saml/logout")),
                         certificate: env::var("SAML_CERTIFICATE").unwrap_or_default(),
-                        private_key: SecretString::new(env::var("SAML_PRIVATE_KEY").unwrap_or_default()),
-                        allow_sha1: env::var("SAML_ALLOW_SHA1").map(|v| v == "true").unwrap_or(false),
+                        private_key: SecretString::new(
+                            env::var("SAML_PRIVATE_KEY").unwrap_or_default(),
+                        ),
+                        allow_sha1: env::var("SAML_ALLOW_SHA1")
+                            .map(|v| v == "true")
+                            .unwrap_or(false),
                     },
                     oidc: OidcConfig {
-                        enabled: env::var("OIDC_ENABLED").map(|v| v == "true").unwrap_or(false),
+                        enabled: env::var("OIDC_ENABLED")
+                            .map(|v| v == "true")
+                            .unwrap_or(false),
                         client_id: env::var("OIDC_CLIENT_ID").unwrap_or_default(),
                         client_secret: env::var("OIDC_CLIENT_SECRET").unwrap_or_default(),
                         issuer: env::var("OIDC_ISSUER").unwrap_or_default(),
-                        redirect_uri: env::var("OIDC_REDIRECT_URI").unwrap_or_else(|_| format!("{base_url}/api/sso/oidc/callback")),
-                        scopes: env::var("OIDC_SCOPES").unwrap_or_else(|_| "openid profile email".into()),
+                        redirect_uri: env::var("OIDC_REDIRECT_URI")
+                            .unwrap_or_else(|_| format!("{base_url}/api/sso/oidc/callback")),
+                        scopes: env::var("OIDC_SCOPES")
+                            .unwrap_or_else(|_| "openid profile email".into()),
                     },
                 }
             },
             whitelabel: WhiteLabelConfig {
-                enabled: env::var("WHITE_LABEL_ENABLED").map(|v| v == "true").unwrap_or(false),
-                custom_domain_prefix: env::var("CUSTOM_DOMAIN_PREFIX").unwrap_or_else(|_| "mail".into()),
+                enabled: env::var("WHITE_LABEL_ENABLED")
+                    .map(|v| v == "true")
+                    .unwrap_or(false),
+                custom_domain_prefix: env::var("CUSTOM_DOMAIN_PREFIX")
+                    .unwrap_or_else(|_| "mail".into()),
                 default_logo_url: env::var("DEFAULT_LOGO_URL").unwrap_or_default(),
-                default_primary_color: env::var("DEFAULT_PRIMARY_COLOR").unwrap_or_else(|_| "#2563eb".into()),
-                default_company_name: env::var("DEFAULT_COMPANY_NAME").unwrap_or_else(|_| "ApexMail".into()),
+                default_primary_color: env::var("DEFAULT_PRIMARY_COLOR")
+                    .unwrap_or_else(|_| "#2563eb".into()),
+                default_company_name: env::var("DEFAULT_COMPANY_NAME")
+                    .unwrap_or_else(|_| "ApexMail".into()),
             },
             sub_account: SubAccountConfig {
-                max_sub_accounts: env::var("MAX_SUB_ACCOUNTS").ok().and_then(|v| v.parse().ok()).unwrap_or(100),
-                inherit_parent_settings: env::var("INHERIT_PARENT_SETTINGS").map(|v| v == "true").unwrap_or(true),
+                max_sub_accounts: env::var("MAX_SUB_ACCOUNTS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(100),
+                inherit_parent_settings: env::var("INHERIT_PARENT_SETTINGS")
+                    .map(|v| v == "true")
+                    .unwrap_or(true),
                 volume_allocation_mode: env::var("VOLUME_ALLOCATION_MODE")
                     .unwrap_or_else(|_| "shared".into())
                     .parse()
                     .unwrap_or(VolumeAllocationMode::Shared),
             },
             compliance: ComplianceEnvConfig {
-                hipaa_enabled: env::var("HIPAA_ENABLED").map(|v| v == "true").unwrap_or(false),
-                zero_retention_enabled: env::var("ZERO_RETENTION_ENABLED").map(|v| v == "true").unwrap_or(false),
+                hipaa_enabled: env::var("HIPAA_ENABLED")
+                    .map(|v| v == "true")
+                    .unwrap_or(false),
+                zero_retention_enabled: env::var("ZERO_RETENTION_ENABLED")
+                    .map(|v| v == "true")
+                    .unwrap_or(false),
                 data_residency_regions: env::var("DATA_RESIDENCY_REGIONS")
                     .unwrap_or_else(|_| "us,eu".into())
                     .split(',')
                     .map(|s| s.trim().to_string())
                     .collect(),
-                audit_retention_days: env::var("AUDIT_RETENTION_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(2555),
+                audit_retention_days: env::var("AUDIT_RETENTION_DAYS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2555),
                 data_residency: env::var("DATA_RESIDENCY").unwrap_or_default(),
             },
             log_stream: LogStreamEnvConfig {
-                buffer_size: env::var("LOG_STREAM_BUFFER_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(1000),
-                flush_interval_ms: env::var("LOG_STREAM_FLUSH_INTERVAL").ok().and_then(|v| v.parse().ok()).unwrap_or(60000),
-                compression: env::var("LOG_STREAM_COMPRESSION").map(|v| v != "false").unwrap_or(true),
-                max_retries: env::var("LOG_STREAM_MAX_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
+                buffer_size: env::var("LOG_STREAM_BUFFER_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1000),
+                flush_interval_ms: env::var("LOG_STREAM_FLUSH_INTERVAL")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(60000),
+                compression: env::var("LOG_STREAM_COMPRESSION")
+                    .map(|v| v != "false")
+                    .unwrap_or(true),
+                max_retries: env::var("LOG_STREAM_MAX_RETRIES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3),
                 encryption_key: env::var("LOG_STREAM_ENCRYPTION_KEY").unwrap_or_default(),
             },
             template: TemplateConfig {
-                max_spam_score: env::var("TEMPLATE_MAX_SPAM_SCORE").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
-                require_review_for_new: env::var("TEMPLATE_REQUIRE_REVIEW_NEW").map(|v| v != "false").unwrap_or(true),
-                auto_approve_threshold: env::var("TEMPLATE_AUTO_APPROVE_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(10),
+                max_spam_score: env::var("TEMPLATE_MAX_SPAM_SCORE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(50),
+                require_review_for_new: env::var("TEMPLATE_REQUIRE_REVIEW_NEW")
+                    .map(|v| v != "false")
+                    .unwrap_or(true),
+                auto_approve_threshold: env::var("TEMPLATE_AUTO_APPROVE_THRESHOLD")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10),
             },
         })
     }
@@ -392,7 +463,7 @@ impl Config {
             return Err("CORS_ORIGINS must not be empty".into());
         }
 
-// Validate SSO secrets when their features are enabled
+        // Validate SSO secrets when their features are enabled
         if self.sso.saml.enabled && self.sso.saml.private_key.expose_secret().is_empty() {
             return Err("SAML_PRIVATE_KEY must be set when SAML_ENABLED=true".into());
         }
@@ -421,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-// Clear env to ensure defaults
+        // Clear env to ensure defaults
         for key in &["PORT", "HOST", "DB_HOST", "DB_PORT", "JWT_SECRET"] {
             env::remove_var(key);
         }
@@ -447,7 +518,10 @@ mod tests {
             idle_timeout_secs: 30,
             connect_timeout_secs: 10,
         };
-        assert_eq!(db.url(), "postgres://admin:secret@db.example.com:5433/enterprise");
+        assert_eq!(
+            db.url(),
+            "postgres://admin:secret@db.example.com:5433/enterprise"
+        );
     }
 
     #[test]
@@ -468,13 +542,23 @@ mod tests {
 
     #[test]
     fn test_redis_url_no_password() {
-        let r = RedisConfig { host: "localhost".into(), port: 6379, password: None, db: 0 };
+        let r = RedisConfig {
+            host: "localhost".into(),
+            port: 6379,
+            password: None,
+            db: 0,
+        };
         assert_eq!(r.url(), "redis://localhost:6379/0");
     }
 
     #[test]
     fn test_redis_url_with_password() {
-        let r = RedisConfig { host: "r.example.com".into(), port: 6380, password: Some("pass".into()), db: 2 };
+        let r = RedisConfig {
+            host: "r.example.com".into(),
+            port: 6380,
+            password: Some("pass".into()),
+            db: 2,
+        };
         assert_eq!(r.url(), "redis://:pass@r.example.com:6380/2");
     }
 
@@ -486,15 +570,27 @@ mod tests {
 
     #[test]
     fn test_sso_provider_parse() {
-        assert_eq!("saml".parse::<SSOProviderType>().unwrap(), SSOProviderType::Saml);
-        assert_eq!("azure_ad".parse::<SSOProviderType>().unwrap(), SSOProviderType::AzureAd);
+        assert_eq!(
+            "saml".parse::<SSOProviderType>().unwrap(),
+            SSOProviderType::Saml
+        );
+        assert_eq!(
+            "azure_ad".parse::<SSOProviderType>().unwrap(),
+            SSOProviderType::AzureAd
+        );
         assert!("unknown".parse::<SSOProviderType>().is_err());
     }
 
     #[test]
     fn test_volume_allocation_mode_parse() {
-        assert_eq!("fixed".parse::<VolumeAllocationMode>().unwrap(), VolumeAllocationMode::Fixed);
-        assert_eq!("burst".parse::<VolumeAllocationMode>().unwrap(), VolumeAllocationMode::Burst);
+        assert_eq!(
+            "fixed".parse::<VolumeAllocationMode>().unwrap(),
+            VolumeAllocationMode::Fixed
+        );
+        assert_eq!(
+            "burst".parse::<VolumeAllocationMode>().unwrap(),
+            VolumeAllocationMode::Burst
+        );
         assert!("invalid".parse::<VolumeAllocationMode>().is_err());
     }
 
@@ -528,7 +624,10 @@ mod tests {
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.sub_account.max_sub_accounts, 100);
         assert!(cfg.sub_account.inherit_parent_settings);
-        assert_eq!(cfg.sub_account.volume_allocation_mode, VolumeAllocationMode::Shared);
+        assert_eq!(
+            cfg.sub_account.volume_allocation_mode,
+            VolumeAllocationMode::Shared
+        );
     }
 
     #[test]

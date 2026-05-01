@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::types::{FailoverEvent, FailoverRow, FailoverState, FailoverType, FailoverConfigInfo};
+use crate::types::{FailoverConfigInfo, FailoverEvent, FailoverRow, FailoverState, FailoverType};
 
 /// Distributed lock key in Redis for failover coordination.
 const FAILOVER_LOCK_KEY: &str = "ha:failover:lock";
@@ -36,12 +36,12 @@ impl FailoverService {
         }
     }
 
-/// Get current failover state.
+    /// Get current failover state.
     pub async fn get_state(&self) -> FailoverState {
         self.state.read().await.clone()
     }
 
-/// Get the full failover configuration/status info.
+    /// Get the full failover configuration/status info.
     pub async fn get_config_info(&self) -> FailoverConfigInfo {
         let state = self.state.read().await;
         let primary = self.primary_node.read().await;
@@ -60,15 +60,20 @@ impl FailoverService {
         }
     }
 
-/// Report a health check failure from a component. Once threshold is exceeded,
-/// automatic failover is triggered.
+    /// Report a health check failure from a component. Once threshold is exceeded,
+    /// automatic failover is triggered.
     pub async fn report_failure(&self, component: &str) -> Result<(), String> {
         if !self.config.failover.enabled {
             return Ok(());
         }
         let mut cnt = self.failure_count.write().await;
         *cnt += 1;
-        warn!(component, count = *cnt, threshold = self.config.failover.threshold, "Failure reported");
+        warn!(
+            component,
+            count = *cnt,
+            threshold = self.config.failover.threshold,
+            "Failure reported"
+        );
         let mut trigger = false;
         if *cnt >= self.config.failover.threshold {
             let mut state = self.state.write().await;
@@ -80,39 +85,43 @@ impl FailoverService {
         drop(cnt);
         if trigger {
             info!("Failure threshold reached — initiating automatic failover");
-            self.initiate_failover(FailoverType::Automatic, Some(format!("Component {component} failures exceeded threshold"))).await?;
+            self.initiate_failover(
+                FailoverType::Automatic,
+                Some(format!("Component {component} failures exceeded threshold")),
+            )
+            .await?;
         }
         Ok(())
     }
 
-/// Reset the failure counter (e.g., after a successful health check).
+    /// Reset the failure counter (e.g., after a successful health check).
     pub async fn reset_failures(&self) {
         let mut cnt = self.failure_count.write().await;
         *cnt = 0;
     }
 
-/// Initiate a failover to the next replica.
+    /// Initiate a failover to the next replica.
     pub async fn initiate_failover(
         &self,
         failover_type: FailoverType,
         reason: Option<String>,
     ) -> Result<FailoverEvent, String> {
         let started_at = Utc::now();
-// Transition state:Normal/Detecting → Detecting → FailingOver
+        // Transition state:Normal/Detecting → Detecting → FailingOver
         {
             let mut s = self.state.write().await;
             match *s {
                 FailoverState::Normal => *s = FailoverState::Detecting,
-                FailoverState::Detecting => {},
+                FailoverState::Detecting => {}
                 FailoverState::FailedOver if failover_type == FailoverType::Manual => {
-// Allow manual re-failover
+                    // Allow manual re-failover
                     *s = FailoverState::Detecting;
                 }
                 _ => return Err(format!("Cannot initiate failover in state: {}", *s)),
             }
         }
 
-// Move to FailingOver
+        // Move to FailingOver
         {
             let mut s = self.state.write().await;
             *s = FailoverState::FailingOver;
@@ -120,11 +129,11 @@ impl FailoverService {
 
         info!(failover_type = %failover_type, "Failover initiated");
 
-// Determine target node
+        // Determine target node
         let current_primary = self.primary_node.read().await.clone();
         let target = self.select_failover_target(&current_primary).await?;
 
-// Acquire distributed lock
+        // Acquire distributed lock
         let lock_acquired = self.try_acquire_lock().await;
         if !lock_acquired {
             let mut s = self.state.write().await;
@@ -132,12 +141,12 @@ impl FailoverService {
             return Err("Failed to acquire failover lock — another failover in progress?".into());
         }
 
-// Run STONITH fencing on old primary
+        // Run STONITH fencing on old primary
         if let Err(e) = self.fence_node(&current_primary).await {
             warn!(error = %e, "STONITH fencing failed, proceeding anyway");
         }
 
-// Record the event
+        // Record the event
         let event_id = Uuid::new_v4();
         let completed_at = Utc::now();
         let duration_ms = (completed_at - started_at).num_milliseconds().max(0);
@@ -159,22 +168,22 @@ impl FailoverService {
             tracing::warn!(error = %e, event_id = %event_id, "Failed to record failover event — audit trail gap");
         }
 
-// Update primary
+        // Update primary
         {
             let mut p = self.primary_node.write().await;
             *p = target.clone();
         }
 
-// Transition to FailedOver
+        // Transition to FailedOver
         {
             let mut s = self.state.write().await;
             *s = FailoverState::FailedOver;
         }
 
-// Reset failure counter
+        // Reset failure counter
         self.reset_failures().await;
 
-// Publish state to Redis
+        // Publish state to Redis
         if let Err(e) = self.publish_state_change("failed_over").await {
             tracing::warn!(error = %e, "Failed to publish failover state change to Redis");
         }
@@ -183,7 +192,7 @@ impl FailoverService {
         Ok(event)
     }
 
-/// Initiate failback to the original primary.
+    /// Initiate failback to the original primary.
     pub async fn initiate_failback(&self) -> Result<FailoverEvent, String> {
         let started_at = Utc::now();
         if !self.config.failover.failback_enabled {
@@ -240,18 +249,23 @@ impl FailoverService {
         Ok(event)
     }
 
-/// Detect split-brain by checking Redis for conflicting primary claims.
+    /// Detect split-brain by checking Redis for conflicting primary claims.
     pub async fn detect_split_brain(&self) -> Result<bool, String> {
         let url = self.config.redis.url();
         let client = redis::Client::open(url.as_str()).map_err(|e| e.to_string())?;
-        let mut conn = client.get_multiplexed_async_connection().await
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
             .map_err(|e| e.to_string())?;
 
-// Look for multiple nodes claiming primary via SCAN
+        // Look for multiple nodes claiming primary via SCAN
         let keys = Self::scan_keys(&mut conn, "ha:primary:*").await?;
 
         if keys.len() > 1 {
-            warn!(primaries = keys.len(), "Split-brain detected: multiple primary claims");
+            warn!(
+                primaries = keys.len(),
+                "Split-brain detected: multiple primary claims"
+            );
             let mut s = self.state.write().await;
             *s = FailoverState::SplitBrain;
             return Ok(true);
@@ -259,29 +273,35 @@ impl FailoverService {
         Ok(false)
     }
 
-/// Resolve split-brain by fencing all but one node.
+    /// Resolve split-brain by fencing all but one node.
     pub async fn resolve_split_brain(&self, winner_node: &str) -> Result<(), String> {
         info!(winner = winner_node, "Resolving split-brain");
         let url = self.config.redis.url();
         let client = redis::Client::open(url.as_str()).map_err(|e| e.to_string())?;
-        let mut conn = client.get_multiplexed_async_connection().await
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
             .map_err(|e| e.to_string())?;
 
-// Remove all primary claims
+        // Remove all primary claims
         let keys = Self::scan_keys(&mut conn, "ha:primary:*").await?;
 
         for key in &keys {
-            let _: () = redis::cmd("DEL").arg(key)
-                .query_async(&mut conn).await
+            let _: () = redis::cmd("DEL")
+                .arg(key)
+                .query_async(&mut conn)
+                .await
                 .unwrap_or_default();
         }
 
-// Set the winner
+        // Set the winner
         let _: () = redis::cmd("SET")
             .arg(format!("ha:primary:{winner_node}"))
             .arg("1")
-            .arg("EX").arg(300u64)
-            .query_async(&mut conn).await
+            .arg("EX")
+            .arg(300u64)
+            .query_async(&mut conn)
+            .await
             .map_err(|e| e.to_string())?;
 
         {
@@ -322,12 +342,12 @@ impl FailoverService {
         Ok(keys)
     }
 
-/// Get failover event history from DB.
+    /// Get failover event history from DB.
     pub async fn get_history(&self, limit: i64) -> Result<Vec<FailoverEvent>, sqlx::Error> {
         let rows: Vec<FailoverRow> = sqlx::query_as::<_, FailoverRow>(
             "SELECT id, from_node, to_node, failover_type, state, reason,
                     started_at, completed_at, duration_ms, data_loss, metadata
-             FROM ha_failover_events ORDER BY started_at DESC LIMIT $1"
+             FROM ha_failover_events ORDER BY started_at DESC LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -336,20 +356,20 @@ impl FailoverService {
         Ok(rows.into_iter().map(|r| r.into_event()).collect())
     }
 
-// ── Internal helpers ───────────────────────────────────
+    // ── Internal helpers ───────────────────────────────────
 
     async fn select_failover_target(&self, current_primary: &str) -> Result<String, String> {
         let replicas = &self.config.database.replica_hosts;
         if replicas.is_empty() {
             return Err("No replica hosts configured for failover".into());
         }
-// Pick the first replica that isn't the current primary
+        // Pick the first replica that isn't the current primary
         for r in replicas {
             if r != current_primary {
                 return Ok(r.clone());
             }
         }
-// Otherwise just use the first one
+        // Otherwise just use the first one
         Ok(replicas[0].clone())
     }
 
@@ -358,8 +378,15 @@ impl FailoverService {
 
         const LOCK_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
         let url = self.config.redis.url();
-        let Ok(client) = redis::Client::open(url.as_str()) else { return false };
-        let Ok(Ok(mut conn)) = timeout(LOCK_ACQUIRE_TIMEOUT, client.get_multiplexed_async_connection()).await else {
+        let Ok(client) = redis::Client::open(url.as_str()) else {
+            return false;
+        };
+        let Ok(Ok(mut conn)) = timeout(
+            LOCK_ACQUIRE_TIMEOUT,
+            client.get_multiplexed_async_connection(),
+        )
+        .await
+        else {
             return false;
         };
 
@@ -383,18 +410,22 @@ impl FailoverService {
     }
 
     async fn fence_node(&self, node_id: &str) -> Result<(), String> {
-// STONITH fencing:mark node as fenced in Redis
+        // STONITH fencing:mark node as fenced in Redis
         info!(node = node_id, "STONITH fencing node");
         let url = self.config.redis.url();
         let client = redis::Client::open(url.as_str()).map_err(|e| e.to_string())?;
-        let mut conn = client.get_multiplexed_async_connection().await
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
             .map_err(|e| e.to_string())?;
 
         let _: () = redis::cmd("SET")
             .arg(format!("ha:fenced:{node_id}"))
             .arg("1")
-            .arg("EX").arg(3600u64)
-            .query_async(&mut conn).await
+            .arg("EX")
+            .arg(3600u64)
+            .query_async(&mut conn)
+            .await
             .map_err(|e| e.to_string())?;
 
         Ok(())
@@ -425,23 +456,30 @@ impl FailoverService {
     async fn publish_state_change(&self, new_state: &str) -> Result<(), String> {
         let url = self.config.redis.url();
         let client = redis::Client::open(url.as_str()).map_err(|e| e.to_string())?;
-        let mut conn = client.get_multiplexed_async_connection().await
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
             .map_err(|e| e.to_string())?;
 
         let _: () = redis::cmd("SET")
             .arg(STATE_KEY)
             .arg(new_state)
-            .query_async(&mut conn).await
+            .query_async(&mut conn)
+            .await
             .map_err(|e| e.to_string())?;
 
         let _: () = redis::cmd("PUBLISH")
             .arg("ha:failover:events")
-            .arg(serde_json::json!({
-                "state": new_state,
-                "node_id": self.config.multi_region.node_id,
-                "timestamp": Utc::now().to_rfc3339(),
-            }).to_string())
-            .query_async(&mut conn).await
+            .arg(
+                serde_json::json!({
+                    "state": new_state,
+                    "node_id": self.config.multi_region.node_id,
+                    "timestamp": Utc::now().to_rfc3339(),
+                })
+                .to_string(),
+            )
+            .query_async(&mut conn)
+            .await
             .map_err(|e| e.to_string())?;
 
         Ok(())
@@ -455,7 +493,12 @@ mod tests {
     fn test_runtime() -> &'static tokio::runtime::Runtime {
         use std::sync::OnceLock;
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-        RT.get_or_init(|| tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap())
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        })
     }
     fn test_pool() -> PgPool {
         let _guard = test_runtime().enter();

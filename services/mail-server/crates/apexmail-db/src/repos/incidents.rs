@@ -8,7 +8,7 @@ use crate::types::{StatusPageIncident, StatusPageIncidentUpdate};
 pub struct IncidentRepo;
 
 impl IncidentRepo {
-/// Create a new incident.
+    /// Create a new incident.
     pub async fn create(
         pool: &PgPool,
         id: &str,
@@ -31,8 +31,11 @@ impl IncidentRepo {
         .await
     }
 
-/// Get an incident by ID.
-    pub async fn get_by_id(pool: &PgPool, id: &str) -> Result<Option<StatusPageIncident>, sqlx::Error> {
+    /// Get an incident by ID.
+    pub async fn get_by_id(
+        pool: &PgPool,
+        id: &str,
+    ) -> Result<Option<StatusPageIncident>, sqlx::Error> {
         sqlx::query_as::<_, StatusPageIncident>(
             "SELECT id, title, status, impact, affected_components, created_at, updated_at, resolved_at \
              FROM status_page_incidents WHERE id = $1",
@@ -42,7 +45,7 @@ impl IncidentRepo {
         .await
     }
 
-/// List all active (non-resolved) incidents.
+    /// List all active (non-resolved) incidents.
     pub async fn list_active(
         pool: &PgPool,
         limit: i64,
@@ -58,8 +61,12 @@ impl IncidentRepo {
         .await
     }
 
-/// List all incidents with pagination.
-    pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<StatusPageIncident>, sqlx::Error> {
+    /// List all incidents with pagination.
+    pub async fn list(
+        pool: &PgPool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StatusPageIncident>, sqlx::Error> {
         sqlx::query_as::<_, StatusPageIncident>(
             "SELECT id, title, status, impact, affected_components, created_at, updated_at, resolved_at \
              FROM status_page_incidents ORDER BY created_at DESC LIMIT $1 OFFSET $2",
@@ -70,7 +77,7 @@ impl IncidentRepo {
         .await
     }
 
-/// Update incident status.
+    /// Update incident status.
     pub async fn update_status(
         pool: &PgPool,
         id: &str,
@@ -102,7 +109,7 @@ impl IncidentRepo {
         }
     }
 
-/// Add a timeline update to an incident.
+    /// Add a timeline update to an incident.
     pub async fn add_update(
         pool: &PgPool,
         id: &str,
@@ -125,7 +132,7 @@ impl IncidentRepo {
         .await
     }
 
-/// Get timeline updates for an incident.
+    /// Get timeline updates for an incident.
     pub async fn get_updates(
         pool: &PgPool,
         incident_id: &str,
@@ -139,7 +146,7 @@ impl IncidentRepo {
         .await
     }
 
-/// Delete an incident and its updates (CASCADE handles updates).
+    /// Delete an incident and its updates (CASCADE handles updates).
     pub async fn delete(pool: &PgPool, id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM status_page_incidents WHERE id = $1")
             .bind(id)

@@ -73,8 +73,8 @@ server {
     # Health check
     location /health {
         access_log off;
+        default_type text/plain;
         return 200 "OK";
-        add_header Content-Type text/plain;
     }
 
     # Gzip

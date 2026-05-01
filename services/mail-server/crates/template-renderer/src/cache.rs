@@ -97,8 +97,8 @@ mod tests {
         let cache = TemplateCache::new(100, 3600);
         assert_eq!(cache.entry_count(), 0);
         cache.insert("k1".to_string(), make_result("a"));
-// moka is eventually consistent, so entry_count may not update immediately
-// but the value should be retrievable
+        // moka is eventually consistent, so entry_count may not update immediately
+        // but the value should be retrievable
         assert!(cache.get("k1").is_some());
     }
 }

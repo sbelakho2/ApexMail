@@ -17,100 +17,100 @@ use parking_lot::RwLock;
 /// SMTP connection state machine states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmtpState {
-/// Just connected, waiting for greeting
+    /// Just connected, waiting for greeting
     Connected,
-/// Greeting sent, waiting for EHLO/HELO
+    /// Greeting sent, waiting for EHLO/HELO
     GreetingPending,
-/// EHLO/HELO received
+    /// EHLO/HELO received
     GreetingReceived,
-/// MAIL FROM received
+    /// MAIL FROM received
     MailFrom,
-/// RCPT TO received (with recipient count)
+    /// RCPT TO received (with recipient count)
     RcptTo {
-/// Number of accepted RCPT TO commands in current transaction.
+        /// Number of accepted RCPT TO commands in current transaction.
         count: u32,
     },
-/// DATA command received, waiting for body
+    /// DATA command received, waiting for body
     Data,
-/// Receiving message body data
+    /// Receiving message body data
     DataReceiving {
-/// Number of DATA bytes received so far for the current message.
+        /// Number of DATA bytes received so far for the current message.
         bytes: usize,
     },
-/// QUIT received
+    /// QUIT received
     Quit,
 }
 
 /// Actions the SMTP handler should take
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmtpAction {
-/// Continue processing normally
+    /// Continue processing normally
     Continue,
-/// Reject with given SMTP reply
+    /// Reject with given SMTP reply
     Reject(&'static str),
-/// Disconnect the client
+    /// Disconnect the client
     Disconnect,
-/// Tarpit:delay response by given duration
+    /// Tarpit:delay response by given duration
     Tarpit(Duration),
 }
 
 /// Parsed SMTP commands
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmtpCommand {
-/// EHLO with domain
+    /// EHLO with domain
     Ehlo(String),
-/// HELO with domain
+    /// HELO with domain
     Helo(String),
-/// MAIL FROM with address
+    /// MAIL FROM with address
     MailFrom(String),
-/// RCPT TO with address
+    /// RCPT TO with address
     RcptTo(String),
-/// DATA command
+    /// DATA command
     Data,
-/// RSET (reset transaction)
+    /// RSET (reset transaction)
     Rset,
-/// NOOP (no operation)
+    /// NOOP (no operation)
     Noop,
-/// QUIT
+    /// QUIT
     Quit,
-/// VRFY (verify)
+    /// VRFY (verify)
     Vrfy(String),
-/// HELP
+    /// HELP
     Help,
-/// STARTTLS
+    /// STARTTLS
     StartTls,
-/// AUTH
+    /// AUTH
     Auth(String),
-/// Unknown command
+    /// Unknown command
     Unknown(String),
 }
 
 /// SMTP protection configuration
 #[derive(Debug, Clone)]
 pub struct SmtpProtectionConfig {
-/// Max time in CONNECTED state before greeting
+    /// Max time in CONNECTED state before greeting
     pub connect_timeout: Duration,
-/// Max time waiting for any SMTP command
+    /// Max time waiting for any SMTP command
     pub command_timeout: Duration,
-/// Max time in DATA receiving state
+    /// Max time in DATA receiving state
     pub data_timeout: Duration,
-/// Max recipients per message
+    /// Max recipients per message
     pub max_rcpt: u32,
-/// Max message size in bytes
+    /// Max message size in bytes
     pub max_size: usize,
-/// Max commands per session
+    /// Max commands per session
     pub max_commands: u32,
-/// Max invalid/out-of-sequence commands before tarpit
+    /// Max invalid/out-of-sequence commands before tarpit
     pub max_invalid: u32,
-/// Base tarpit delay per invalid command
+    /// Base tarpit delay per invalid command
     pub tarpit_delay: Duration,
-/// Strict mode:reject on protocol violations
+    /// Strict mode:reject on protocol violations
     pub strict_mode: bool,
-/// Minimum data rate in bytes per second (slowloris protection)
+    /// Minimum data rate in bytes per second (slowloris protection)
     pub min_data_rate_bps: u64,
-/// Max concurrent connections per IP
+    /// Max concurrent connections per IP
     pub max_connections_per_ip: u32,
-/// Connection rate limit:max new connections per IP per minute
+    /// Connection rate limit:max new connections per IP per minute
     pub conn_rate_per_minute: u32,
 }
 
@@ -135,54 +135,54 @@ impl Default for SmtpProtectionConfig {
 
 /// Per-connection SMTP protection state
 pub struct SmtpConnectionProtection {
-/// Current protocol state
+    /// Current protocol state
     state: SmtpState,
-/// Client IP
+    /// Client IP
     peer_addr: IpAddr,
-/// Time the current state was entered
+    /// Time the current state was entered
     state_entered_at: Instant,
-/// Total commands received in this session
+    /// Total commands received in this session
     commands_received: u32,
-/// Invalid/out-of-sequence commands in this session
+    /// Invalid/out-of-sequence commands in this session
     invalid_commands: u32,
-/// Total bytes received (data phase)
+    /// Total bytes received (data phase)
     bytes_received: usize,
-/// Connection start time
+    /// Connection start time
     connected_at: Instant,
-/// Configuration
+    /// Configuration
     config: SmtpProtectionConfig,
-/// Reputation score (0-100, higher is more trusted)
+    /// Reputation score (0-100, higher is more trusted)
     reputation: u8,
 }
 
 /// SMTP protection errors
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmtpProtectionError {
-/// Too many commands in this session
+    /// Too many commands in this session
     TooManyCommands,
-/// State timeout exceeded
+    /// State timeout exceeded
     Timeout(SmtpState),
-/// Invalid command sequence
+    /// Invalid command sequence
     InvalidSequence {
-/// Current state
+        /// Current state
         state: SmtpState,
-/// The command that was sent
+        /// The command that was sent
         command: String,
     },
-/// Too many recipients
+    /// Too many recipients
     TooManyRecipients,
-/// Message too large
+    /// Message too large
     MessageTooLarge,
-/// Slowloris detected (data below minimum rate)
+    /// Slowloris detected (data below minimum rate)
     SlowlorisDetected {
-/// Observed rate in bytes per second
+        /// Observed rate in bytes per second
         observed_rate: u64,
-/// Required minimum rate
+        /// Required minimum rate
         required_rate: u64,
     },
-/// Connection rate limit exceeded
+    /// Connection rate limit exceeded
     ConnectionRateLimited,
-/// Too many concurrent connections
+    /// Too many concurrent connections
     TooManyConcurrent,
 }
 
@@ -196,8 +196,15 @@ impl std::fmt::Display for SmtpProtectionError {
             }
             Self::TooManyRecipients => write!(f, "Too many recipients"),
             Self::MessageTooLarge => write!(f, "Message too large"),
-            Self::SlowlorisDetected { observed_rate, required_rate } => {
-                write!(f, "Slowloris detected: {} bps < {} bps min", observed_rate, required_rate)
+            Self::SlowlorisDetected {
+                observed_rate,
+                required_rate,
+            } => {
+                write!(
+                    f,
+                    "Slowloris detected: {} bps < {} bps min",
+                    observed_rate, required_rate
+                )
             }
             Self::ConnectionRateLimited => write!(f, "Connection rate limited"),
             Self::TooManyConcurrent => write!(f, "Too many concurrent connections"),
@@ -208,7 +215,7 @@ impl std::fmt::Display for SmtpProtectionError {
 impl std::error::Error for SmtpProtectionError {}
 
 impl SmtpConnectionProtection {
-/// Create a new SMTP connection protection instance
+    /// Create a new SMTP connection protection instance
     pub fn new(peer_addr: IpAddr, reputation: u8, config: SmtpProtectionConfig) -> Self {
         let now = Instant::now();
         Self {
@@ -224,55 +231,55 @@ impl SmtpConnectionProtection {
         }
     }
 
-/// Get the current SMTP state
+    /// Get the current SMTP state
     pub fn state(&self) -> SmtpState {
         self.state
     }
 
-/// Get number of commands received
+    /// Get number of commands received
     pub fn commands_received(&self) -> u32 {
         self.commands_received
     }
 
-/// Get number of invalid commands
+    /// Get number of invalid commands
     pub fn invalid_commands(&self) -> u32 {
         self.invalid_commands
     }
 
-/// Get the client IP
+    /// Get the client IP
     pub fn peer_addr(&self) -> IpAddr {
         self.peer_addr
     }
 
-/// Get connection age
+    /// Get connection age
     pub fn connection_age(&self) -> Duration {
         self.connected_at.elapsed()
     }
 
-/// Check if this connection should be tarpitted
+    /// Check if this connection should be tarpitted
     pub fn should_tarpit(&self) -> Option<Duration> {
         if self.invalid_commands > self.config.max_invalid {
-// Progressive tarpit:delay increases with each invalid command
+            // Progressive tarpit:delay increases with each invalid command
             let multiplier = self.invalid_commands - self.config.max_invalid;
             Some(self.config.tarpit_delay * multiplier)
         } else if self.reputation < 20 {
-// Bad reputation = slower responses
+            // Bad reputation = slower responses
             Some(Duration::from_secs(2))
         } else {
             None
         }
     }
 
-/// Process an SMTP command and return the appropriate action
+    /// Process an SMTP command and return the appropriate action
     pub fn process_command(&mut self, raw_cmd: &str) -> Result<SmtpAction, SmtpProtectionError> {
         self.commands_received += 1;
 
-// Check command limits
+        // Check command limits
         if self.commands_received > self.config.max_commands {
             return Err(SmtpProtectionError::TooManyCommands);
         }
 
-// Check state timeout
+        // Check state timeout
         let elapsed = self.state_entered_at.elapsed();
         let timeout = match self.state {
             SmtpState::Connected | SmtpState::GreetingPending => self.config.connect_timeout,
@@ -284,40 +291,40 @@ impl SmtpConnectionProtection {
             return Err(SmtpProtectionError::Timeout(self.state));
         }
 
-// Parse SMTP command
+        // Parse SMTP command
         let cmd = parse_smtp_command(raw_cmd);
 
-// QUIT always bypasses tarpit — releasing connections saves server resources
+        // QUIT always bypasses tarpit — releasing connections saves server resources
         if matches!(cmd, SmtpCommand::Quit) {
             self.transition(SmtpState::Quit);
             return Ok(SmtpAction::Disconnect);
         }
 
-// Validate command sequence (protocol state machine)
-// NOTE:We process the state machine FIRST so that record_invalid is called
-// for bad commands even when tarpitting. This ensures the tarpit delay escalates.
+        // Validate command sequence (protocol state machine)
+        // NOTE:We process the state machine FIRST so that record_invalid is called
+        // for bad commands even when tarpitting. This ensures the tarpit delay escalates.
         let result = match (&self.state, &cmd) {
-// EHLO/HELO allowed from Connected or GreetingPending
+            // EHLO/HELO allowed from Connected or GreetingPending
             (SmtpState::Connected | SmtpState::GreetingPending, SmtpCommand::Ehlo(_))
             | (SmtpState::Connected | SmtpState::GreetingPending, SmtpCommand::Helo(_)) => {
                 self.transition(SmtpState::GreetingReceived);
                 Ok(SmtpAction::Continue)
             }
 
-// EHLO/HELO also allowed after greeting (re-greeting)
+            // EHLO/HELO also allowed after greeting (re-greeting)
             (SmtpState::GreetingReceived, SmtpCommand::Ehlo(_))
             | (SmtpState::GreetingReceived, SmtpCommand::Helo(_)) => {
                 self.transition(SmtpState::GreetingReceived);
                 Ok(SmtpAction::Continue)
             }
 
-// MAIL FROM from GreetingReceived or after RSET
+            // MAIL FROM from GreetingReceived or after RSET
             (SmtpState::GreetingReceived, SmtpCommand::MailFrom(_)) => {
                 self.transition(SmtpState::MailFrom);
                 Ok(SmtpAction::Continue)
             }
 
-// RCPT TO from MailFrom or more RcptTo
+            // RCPT TO from MailFrom or more RcptTo
             (SmtpState::MailFrom, SmtpCommand::RcptTo(_)) => {
                 self.transition(SmtpState::RcptTo { count: 1 });
                 Ok(SmtpAction::Continue)
@@ -331,13 +338,13 @@ impl SmtpConnectionProtection {
                 Ok(SmtpAction::Continue)
             }
 
-// DATA from RcptTo
+            // DATA from RcptTo
             (SmtpState::RcptTo { .. }, SmtpCommand::Data) => {
                 self.transition(SmtpState::DataReceiving { bytes: 0 });
                 Ok(SmtpAction::Continue)
             }
 
-// RSET from most states -> back to GreetingReceived
+            // RSET from most states -> back to GreetingReceived
             (
                 SmtpState::GreetingReceived
                 | SmtpState::MailFrom
@@ -350,13 +357,13 @@ impl SmtpConnectionProtection {
                 Ok(SmtpAction::Continue)
             }
 
-// QUIT from any state
+            // QUIT from any state
             (_, SmtpCommand::Quit) => {
                 self.transition(SmtpState::Quit);
                 Ok(SmtpAction::Disconnect)
             }
 
-// NOOP from any state (except Quit)
+            // NOOP from any state (except Quit)
             (SmtpState::Quit, SmtpCommand::Noop) => {
                 self.record_invalid();
                 if self.config.strict_mode {
@@ -370,25 +377,19 @@ impl SmtpConnectionProtection {
             }
             (_, SmtpCommand::Noop) => Ok(SmtpAction::Continue),
 
-// HELP from any state
+            // HELP from any state
             (_, SmtpCommand::Help) => Ok(SmtpAction::Continue),
 
-// STARTTLS only from GreetingReceived
-            (SmtpState::GreetingReceived, SmtpCommand::StartTls) => {
-                Ok(SmtpAction::Continue)
-            }
+            // STARTTLS only from GreetingReceived
+            (SmtpState::GreetingReceived, SmtpCommand::StartTls) => Ok(SmtpAction::Continue),
 
-// AUTH only from GreetingReceived
-            (SmtpState::GreetingReceived, SmtpCommand::Auth(_)) => {
-                Ok(SmtpAction::Continue)
-            }
+            // AUTH only from GreetingReceived
+            (SmtpState::GreetingReceived, SmtpCommand::Auth(_)) => Ok(SmtpAction::Continue),
 
-// VRFY from GreetingReceived
-            (SmtpState::GreetingReceived, SmtpCommand::Vrfy(_)) => {
-                Ok(SmtpAction::Continue)
-            }
+            // VRFY from GreetingReceived
+            (SmtpState::GreetingReceived, SmtpCommand::Vrfy(_)) => Ok(SmtpAction::Continue),
 
-// Unknown commands
+            // Unknown commands
             (_, SmtpCommand::Unknown(_)) => {
                 self.record_invalid();
                 if self.config.strict_mode {
@@ -401,7 +402,7 @@ impl SmtpConnectionProtection {
                 }
             }
 
-// Everything else = invalid sequence
+            // Everything else = invalid sequence
             _ => {
                 self.record_invalid();
                 if self.config.strict_mode {
@@ -415,9 +416,9 @@ impl SmtpConnectionProtection {
             }
         };
 
-// After processing the command through the state machine (which updates
-// invalid_commands count), check if we should tarpit. This ensures the
-// tarpit delay escalates as more invalid commands accumulate.
+        // After processing the command through the state machine (which updates
+        // invalid_commands count), check if we should tarpit. This ensures the
+        // tarpit delay escalates as more invalid commands accumulate.
         if let Some(delay) = self.should_tarpit() {
             return Ok(SmtpAction::Tarpit(delay));
         }
@@ -425,7 +426,7 @@ impl SmtpConnectionProtection {
         result
     }
 
-/// Record incoming data bytes (during DATA phase)
+    /// Record incoming data bytes (during DATA phase)
     pub fn record_data(&mut self, new_bytes: usize) -> Result<(), SmtpProtectionError> {
         if let SmtpState::DataReceiving { ref mut bytes } = self.state {
             *bytes += new_bytes;
@@ -438,26 +439,30 @@ impl SmtpConnectionProtection {
         Ok(())
     }
 
-/// Check data rate for slowloris detection. Returns error if rate is too low.
-/// `total_bytes` = bytes received since start of DATA phase
-/// `elapsed` = time since DATA phase started
+    /// Check data rate for slowloris detection. Returns error if rate is too low.
+    /// `total_bytes` = bytes received since start of DATA phase
+    /// `elapsed` = time since DATA phase started
     pub fn check_data_rate(
         &self,
         total_bytes: usize,
         elapsed: Duration,
     ) -> Result<(), SmtpProtectionError> {
-// Only check after a minimum period (1 second) to avoid false positives
+        // Only check after a minimum period (1 second) to avoid false positives
         if elapsed < Duration::from_secs(1) {
             return Ok(());
         }
 
-// Use floating-point division for precise rate calculation.
-// Integer division (as_secs) truncates sub-second time, inflating the
-// calculated rate and letting slowloris attacks at second boundaries pass.
+        // Use floating-point division for precise rate calculation.
+        // Integer division (as_secs) truncates sub-second time, inflating the
+        // calculated rate and letting slowloris attacks at second boundaries pass.
         let elapsed_secs = elapsed.as_secs_f64();
         let rate_bps = if elapsed_secs > 0.0 {
             let raw = total_bytes as f64 / elapsed_secs;
-            if raw.is_finite() { raw as u64 } else { 0 }
+            if raw.is_finite() {
+                raw as u64
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -470,13 +475,13 @@ impl SmtpConnectionProtection {
         Ok(())
     }
 
-/// Transition to a new state
+    /// Transition to a new state
     fn transition(&mut self, new_state: SmtpState) {
         self.state = new_state;
         self.state_entered_at = Instant::now();
     }
 
-/// Record an invalid command
+    /// Record an invalid command
     fn record_invalid(&mut self) {
         self.invalid_commands += 1;
     }
@@ -484,16 +489,16 @@ impl SmtpConnectionProtection {
 
 /// Per-IP connection tracker for rate limiting
 pub struct SmtpConnectionTracker {
-/// Per-IP active connection count
+    /// Per-IP active connection count
     active_connections: Arc<DashMap<IpAddr, AtomicU64>>,
-/// Per-IP connection timestamps for rate limiting
+    /// Per-IP connection timestamps for rate limiting
     connection_history: Arc<DashMap<IpAddr, RwLock<Vec<Instant>>>>,
-/// Configuration
+    /// Configuration
     config: SmtpProtectionConfig,
 }
 
 impl SmtpConnectionTracker {
-/// Create a new connection tracker
+    /// Create a new connection tracker
     pub fn new(config: SmtpProtectionConfig) -> Self {
         Self {
             active_connections: Arc::new(DashMap::new()),
@@ -502,12 +507,12 @@ impl SmtpConnectionTracker {
         }
     }
 
-/// Register a new connection. Returns error if limits are exceeded.
+    /// Register a new connection. Returns error if limits are exceeded.
     pub fn register_connection(&self, ip: IpAddr) -> Result<(), SmtpProtectionError> {
-// Check concurrent connection limit.
-// IMPORTANT:Scope the `count` RefMut so the DashMap shard lock is released
-// before we do anything else on active_connections. Failing to do so causes
-// a deadlock if the rate-limit branch also accesses active_connections.
+        // Check concurrent connection limit.
+        // IMPORTANT:Scope the `count` RefMut so the DashMap shard lock is released
+        // before we do anything else on active_connections. Failing to do so causes
+        // a deadlock if the rate-limit branch also accesses active_connections.
         {
             let count = self
                 .active_connections
@@ -521,7 +526,7 @@ impl SmtpConnectionTracker {
             }
         } // `count` (RefMut) dropped here — shard lock released
 
-// Check connection rate limit
+        // Check connection rate limit
         let now = Instant::now();
         let cutoff = now - Duration::from_secs(60); // 1-minute window
 
@@ -531,11 +536,11 @@ impl SmtpConnectionTracker {
             .or_insert_with(|| RwLock::new(Vec::new()));
 
         let mut times = history.write();
-// Remove old entries
+        // Remove old entries
         times.retain(|t| *t > cutoff);
 
         if times.len() >= self.config.conn_rate_per_minute as usize {
-// Undo the active count increment (safe:no conflicting lock held)
+            // Undo the active count increment (safe:no conflicting lock held)
             if let Some(c) = self.active_connections.get(&ip) {
                 c.fetch_sub(1, Ordering::SeqCst);
             }
@@ -546,14 +551,14 @@ impl SmtpConnectionTracker {
         Ok(())
     }
 
-/// Unregister a closed connection
+    /// Unregister a closed connection
     pub fn unregister_connection(&self, ip: &IpAddr) {
         if let Some(count) = self.active_connections.get(ip) {
-// Use a CAS loop to prevent underflow past zero
+            // Use a CAS loop to prevent underflow past zero
             loop {
                 let current = count.load(Ordering::SeqCst);
                 if current == 0 {
-// Already zero — don't decrement (would wrap to u64::MAX)
+                    // Already zero — don't decrement (would wrap to u64::MAX)
                     break;
                 }
                 match count.compare_exchange(
@@ -564,7 +569,7 @@ impl SmtpConnectionTracker {
                 ) {
                     Ok(prev) => {
                         if prev <= 1 {
-// Clean up zero entries
+                            // Clean up zero entries
                             drop(count);
                             self.active_connections.remove(ip);
                         }
@@ -576,7 +581,7 @@ impl SmtpConnectionTracker {
         }
     }
 
-/// Get active connection count for an IP
+    /// Get active connection count for an IP
     pub fn active_count(&self, ip: &IpAddr) -> u64 {
         self.active_connections
             .get(ip)
@@ -584,18 +589,18 @@ impl SmtpConnectionTracker {
             .unwrap_or(0)
     }
 
-/// Get total tracked IPs
+    /// Get total tracked IPs
     pub fn tracked_ips(&self) -> usize {
         self.active_connections.len()
     }
 
-/// Cleanup stale entries
+    /// Cleanup stale entries
     pub fn cleanup(&self) {
-// Remove zero-count entries
+        // Remove zero-count entries
         self.active_connections
             .retain(|_, v| v.load(Ordering::Relaxed) > 0);
 
-// Remove old history
+        // Remove old history
         let cutoff = Instant::now() - Duration::from_secs(120);
         self.connection_history.retain(|_, v| {
             let times = v.read();
@@ -653,23 +658,46 @@ mod tests {
 
     #[test]
     fn test_parse_smtp_commands() {
-        assert!(matches!(parse_smtp_command("EHLO example.com"), SmtpCommand::Ehlo(d) if d == "example.com"));
-        assert!(matches!(parse_smtp_command("HELO example.com"), SmtpCommand::Helo(d) if d == "example.com"));
-        assert!(matches!(parse_smtp_command("MAIL FROM:<user@example.com>"), SmtpCommand::MailFrom(a) if a == "<user@example.com>"));
-        assert!(matches!(parse_smtp_command("RCPT TO:<dest@example.com>"), SmtpCommand::RcptTo(a) if a == "<dest@example.com>"));
+        assert!(
+            matches!(parse_smtp_command("EHLO example.com"), SmtpCommand::Ehlo(d) if d == "example.com")
+        );
+        assert!(
+            matches!(parse_smtp_command("HELO example.com"), SmtpCommand::Helo(d) if d == "example.com")
+        );
+        assert!(
+            matches!(parse_smtp_command("MAIL FROM:<user@example.com>"), SmtpCommand::MailFrom(a) if a == "<user@example.com>")
+        );
+        assert!(
+            matches!(parse_smtp_command("RCPT TO:<dest@example.com>"), SmtpCommand::RcptTo(a) if a == "<dest@example.com>")
+        );
         assert!(matches!(parse_smtp_command("DATA"), SmtpCommand::Data));
         assert!(matches!(parse_smtp_command("RSET"), SmtpCommand::Rset));
         assert!(matches!(parse_smtp_command("NOOP"), SmtpCommand::Noop));
         assert!(matches!(parse_smtp_command("QUIT"), SmtpCommand::Quit));
-        assert!(matches!(parse_smtp_command("STARTTLS"), SmtpCommand::StartTls));
-        assert!(matches!(parse_smtp_command("AUTH PLAIN dGVzdA=="), SmtpCommand::Auth(_)));
-        assert!(matches!(parse_smtp_command("XYZZY"), SmtpCommand::Unknown(_)));
+        assert!(matches!(
+            parse_smtp_command("STARTTLS"),
+            SmtpCommand::StartTls
+        ));
+        assert!(matches!(
+            parse_smtp_command("AUTH PLAIN dGVzdA=="),
+            SmtpCommand::Auth(_)
+        ));
+        assert!(matches!(
+            parse_smtp_command("XYZZY"),
+            SmtpCommand::Unknown(_)
+        ));
     }
 
     #[test]
     fn test_case_insensitive_parsing() {
-        assert!(matches!(parse_smtp_command("ehlo test.com"), SmtpCommand::Ehlo(_)));
-        assert!(matches!(parse_smtp_command("Ehlo test.com"), SmtpCommand::Ehlo(_)));
+        assert!(matches!(
+            parse_smtp_command("ehlo test.com"),
+            SmtpCommand::Ehlo(_)
+        ));
+        assert!(matches!(
+            parse_smtp_command("Ehlo test.com"),
+            SmtpCommand::Ehlo(_)
+        ));
         assert!(matches!(parse_smtp_command("quit"), SmtpCommand::Quit));
         assert!(matches!(parse_smtp_command("data"), SmtpCommand::Data));
     }
@@ -684,11 +712,15 @@ mod tests {
         assert_eq!(action, SmtpAction::Continue);
         assert_eq!(prot.state(), SmtpState::GreetingReceived);
 
-        let action = prot.process_command("MAIL FROM:<sender@example.com>").unwrap();
+        let action = prot
+            .process_command("MAIL FROM:<sender@example.com>")
+            .unwrap();
         assert_eq!(action, SmtpAction::Continue);
         assert_eq!(prot.state(), SmtpState::MailFrom);
 
-        let action = prot.process_command("RCPT TO:<recipient@example.com>").unwrap();
+        let action = prot
+            .process_command("RCPT TO:<recipient@example.com>")
+            .unwrap();
         assert_eq!(action, SmtpAction::Continue);
         assert!(matches!(prot.state(), SmtpState::RcptTo { count: 1 }));
 
@@ -704,7 +736,7 @@ mod tests {
     #[test]
     fn test_invalid_sequence_strict() {
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, default_config());
-// Try MAIL FROM before EHLO - should be invalid in strict mode
+        // Try MAIL FROM before EHLO - should be invalid in strict mode
         let result = prot.process_command("MAIL FROM:<user@test.com>");
         assert!(result.is_err());
     }
@@ -730,7 +762,10 @@ mod tests {
         prot.process_command("RCPT TO:<b@t.com>").unwrap();
         prot.process_command("RCPT TO:<c@t.com>").unwrap();
         let result = prot.process_command("RCPT TO:<d@t.com>");
-        assert!(matches!(result, Err(SmtpProtectionError::TooManyRecipients)));
+        assert!(matches!(
+            result,
+            Err(SmtpProtectionError::TooManyRecipients)
+        ));
     }
 
     #[test]
@@ -740,7 +775,7 @@ mod tests {
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, config);
 
         for _i in 0..5 {
-// NOOP is always valid from Connected state (except Quit)
+            // NOOP is always valid from Connected state (except Quit)
             let _ = prot.process_command("NOOP");
         }
         let result = prot.process_command("NOOP");
@@ -768,7 +803,7 @@ mod tests {
         config.max_invalid = 2;
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, config);
 
-// Send invalid commands
+        // Send invalid commands
         prot.process_command("XYZZY").unwrap();
         prot.process_command("GARBAGE").unwrap();
         assert!(prot.should_tarpit().is_none()); // At max_invalid, not over
@@ -801,12 +836,10 @@ mod tests {
         let config = default_config();
         let prot = SmtpConnectionProtection::new(test_ip(), 50, config);
 
-// Good rate:1000 bytes in 1 second = 1000 bps > 100 bps minimum
-        assert!(prot
-            .check_data_rate(1000, Duration::from_secs(1))
-            .is_ok());
+        // Good rate:1000 bytes in 1 second = 1000 bps > 100 bps minimum
+        assert!(prot.check_data_rate(1000, Duration::from_secs(1)).is_ok());
 
-// Bad rate:10 bytes in 2 seconds = 5 bps < 100 bps minimum
+        // Bad rate:10 bytes in 2 seconds = 5 bps < 100 bps minimum
         let result = prot.check_data_rate(10, Duration::from_secs(2));
         assert!(matches!(
             result,
@@ -819,10 +852,8 @@ mod tests {
         let config = default_config();
         let prot = SmtpConnectionProtection::new(test_ip(), 50, config);
 
-// Under 1 second:grace period, no check
-        assert!(prot
-            .check_data_rate(0, Duration::from_millis(500))
-            .is_ok());
+        // Under 1 second:grace period, no check
+        assert!(prot.check_data_rate(0, Duration::from_millis(500)).is_ok());
     }
 
     #[test]
@@ -844,7 +875,10 @@ mod tests {
         tracker.register_connection(ip).unwrap();
         tracker.register_connection(ip).unwrap();
         let result = tracker.register_connection(ip);
-        assert!(matches!(result, Err(SmtpProtectionError::TooManyConcurrent)));
+        assert!(matches!(
+            result,
+            Err(SmtpProtectionError::TooManyConcurrent)
+        ));
     }
 
     #[test]
@@ -857,7 +891,7 @@ mod tests {
         tracker.register_connection(ip).unwrap();
         tracker.register_connection(ip).unwrap();
         tracker.unregister_connection(&ip);
-// Should be able to register again
+        // Should be able to register again
         tracker.register_connection(ip).unwrap();
     }
 

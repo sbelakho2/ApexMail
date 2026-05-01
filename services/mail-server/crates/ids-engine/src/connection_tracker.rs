@@ -12,53 +12,53 @@ use dashmap::DashMap;
 /// Connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnState {
-/// SYN sent (half-open)
+    /// SYN sent (half-open)
     SynSent,
-/// Connection established
+    /// Connection established
     Established,
-/// Connection closing
+    /// Connection closing
     Closing,
-/// Connection closed
+    /// Connection closed
     Closed,
 }
 
 /// A tracked connection
 #[derive(Debug, Clone)]
 pub struct TrackedConnection {
-/// Source IP
+    /// Source IP
     pub src_ip: IpAddr,
-/// Destination port
+    /// Destination port
     pub dst_port: u16,
-/// Connection state
+    /// Connection state
     pub state: ConnState,
-/// When this connection was first seen
+    /// When this connection was first seen
     pub first_seen: Instant,
-/// Last activity
+    /// Last activity
     pub last_seen: Instant,
-/// Bytes transferred (approximate)
+    /// Bytes transferred (approximate)
     pub bytes_transferred: u64,
-/// Number of packets
+    /// Number of packets
     pub packet_count: u32,
 }
 
 /// Port scan tracking per IP
 #[derive(Debug, Clone)]
 struct PortScanTracker {
-/// Unique ports contacted in the current window
+    /// Unique ports contacted in the current window
     ports: Vec<(u16, Instant)>,
-/// Whether this IP has been flagged for port scanning
+    /// Whether this IP has been flagged for port scanning
     flagged: bool,
 }
 
 /// Connection tracker
 pub struct ConnectionTracker {
-/// Active connections:(src_ip, dst_port) -> TrackedConnection
+    /// Active connections:(src_ip, dst_port) -> TrackedConnection
     connections: DashMap<(IpAddr, u16), TrackedConnection>,
-/// Half-open (SYN) connections per IP
+    /// Half-open (SYN) connections per IP
     half_open_counts: DashMap<IpAddr, u32>,
-/// Port scan tracking per source IP
+    /// Port scan tracking per source IP
     port_scan: DashMap<IpAddr, PortScanTracker>,
-/// Thresholds
+    /// Thresholds
     portscan_threshold: u32,
     portscan_window: std::time::Duration,
     syn_flood_threshold: u32,
@@ -68,23 +68,23 @@ pub struct ConnectionTracker {
 /// Anomaly detected by connection tracker
 #[derive(Debug, Clone)]
 pub enum ConnectionAnomaly {
-/// Port scan detected
+    /// Port scan detected
     PortScan {
-/// Source IP
+        /// Source IP
         ip: IpAddr,
-/// Number of unique ports contacted
+        /// Number of unique ports contacted
         unique_ports: u32,
     },
-/// SYN flood detected
+    /// SYN flood detected
     SynFlood {
-/// Source IP
+        /// Source IP
         ip: IpAddr,
-/// Number of half-open connections
+        /// Number of half-open connections
         half_open: u32,
     },
-/// Connection table exhaustion attempt
+    /// Connection table exhaustion attempt
     ConnectionFlood {
-/// Source IP
+        /// Source IP
         ip: IpAddr,
     },
 }
@@ -92,16 +92,16 @@ pub enum ConnectionAnomaly {
 /// Statistics about the connection tracker state
 #[derive(Debug, Clone)]
 pub struct TrackerStats {
-/// Number of active tracked connections
+    /// Number of active tracked connections
     pub active_connections: usize,
-/// Number of IPs being tracked for half-open connections
+    /// Number of IPs being tracked for half-open connections
     pub tracked_ips_half_open: usize,
-/// Number of IPs being tracked for port scanning
+    /// Number of IPs being tracked for port scanning
     pub tracked_ips_portscan: usize,
 }
 
 impl ConnectionTracker {
-/// Create a new connection tracker
+    /// Create a new connection tracker
     pub fn new(
         max_connections: usize,
         portscan_threshold: u32,
@@ -119,25 +119,28 @@ impl ConnectionTracker {
         }
     }
 
-/// Record a new connection attempt (SYN).
-/// Returns any detected anomalies.
+    /// Record a new connection attempt (SYN).
+    /// Returns any detected anomalies.
     pub fn record_syn(&self, src_ip: IpAddr, dst_port: u16) -> Vec<ConnectionAnomaly> {
         let mut anomalies = Vec::with_capacity(3);
         let now = Instant::now();
 
-// Update connection table
+        // Update connection table
         let key = (src_ip, dst_port);
-        self.connections.insert(key, TrackedConnection {
-            src_ip,
-            dst_port,
-            state: ConnState::SynSent,
-            first_seen: now,
-            last_seen: now,
-            bytes_transferred: 0,
-            packet_count: 1,
-        });
+        self.connections.insert(
+            key,
+            TrackedConnection {
+                src_ip,
+                dst_port,
+                state: ConnState::SynSent,
+                first_seen: now,
+                last_seen: now,
+                bytes_transferred: 0,
+                packet_count: 1,
+            },
+        );
 
-// Track half-open connections
+        // Track half-open connections
         let mut half_open = self.half_open_counts.entry(src_ip).or_insert(0);
         *half_open += 1;
         let half_open_val = *half_open;
@@ -150,14 +153,16 @@ impl ConnectionTracker {
             });
         }
 
-// Track port scan
+        // Track port scan
         let mut entry = self.port_scan.entry(src_ip).or_insert(PortScanTracker {
             ports: Vec::new(),
             flagged: false,
         });
-// Evict old entries outside the window
-        entry.ports.retain(|(_, t)| now.duration_since(*t) < self.portscan_window);
-// Add new port if not already tracked
+        // Evict old entries outside the window
+        entry
+            .ports
+            .retain(|(_, t)| now.duration_since(*t) < self.portscan_window);
+        // Add new port if not already tracked
         if !entry.ports.iter().any(|(p, _)| *p == dst_port) {
             entry.ports.push((dst_port, now));
         }
@@ -172,7 +177,7 @@ impl ConnectionTracker {
             });
         }
 
-// Check overall capacity
+        // Check overall capacity
         if self.connections.len() > self.max_connections {
             anomalies.push(ConnectionAnomaly::ConnectionFlood { ip: src_ip });
         }
@@ -180,20 +185,20 @@ impl ConnectionTracker {
         anomalies
     }
 
-/// Record connection established (SYN-ACK-ACK).
+    /// Record connection established (SYN-ACK-ACK).
     pub fn record_established(&self, src_ip: IpAddr, dst_port: u16) {
         let key = (src_ip, dst_port);
         if let Some(mut conn) = self.connections.get_mut(&key) {
             conn.state = ConnState::Established;
             conn.last_seen = Instant::now();
         }
-// Decrement half-open count
+        // Decrement half-open count
         if let Some(mut count) = self.half_open_counts.get_mut(&src_ip) {
             *count = count.saturating_sub(1);
         }
     }
 
-/// Record connection close
+    /// Record connection close
     pub fn record_close(&self, src_ip: IpAddr, dst_port: u16) {
         let key = (src_ip, dst_port);
         self.connections.remove(&key);
@@ -202,36 +207,38 @@ impl ConnectionTracker {
         }
     }
 
-/// Cleanup expired connections
+    /// Cleanup expired connections
     pub fn cleanup(&self, timeout: std::time::Duration) {
         let now = Instant::now();
-        self.connections.retain(|_, conn| {
-            now.duration_since(conn.last_seen) < timeout
-        });
+        self.connections
+            .retain(|_, conn| now.duration_since(conn.last_seen) < timeout);
     }
 
-/// Comprehensive cleanup including all trackers
-/// Should be called periodically (e.g., every 30-60 seconds)
-/// Returns number of entries removed
-    pub fn cleanup_all(&self, connection_timeout: std::time::Duration, tracker_timeout: std::time::Duration) -> usize {
+    /// Comprehensive cleanup including all trackers
+    /// Should be called periodically (e.g., every 30-60 seconds)
+    /// Returns number of entries removed
+    pub fn cleanup_all(
+        &self,
+        connection_timeout: std::time::Duration,
+        tracker_timeout: std::time::Duration,
+    ) -> usize {
         let now = Instant::now();
         let mut removed = 0;
-        
-// 1. Clean expired connections
+
+        // 1. Clean expired connections
         let before = self.connections.len();
-        self.connections.retain(|_, conn| {
-            now.duration_since(conn.last_seen) < connection_timeout
-        });
+        self.connections
+            .retain(|_, conn| now.duration_since(conn.last_seen) < connection_timeout);
         removed += before - self.connections.len();
-        
-// 2. Clean half_open_counts for IPs with no recent connections
-// IPs with 0 half-open connections can be removed
+
+        // 2. Clean half_open_counts for IPs with no recent connections
+        // IPs with 0 half-open connections can be removed
         self.half_open_counts.retain(|ip, count| {
             if *count == 0 {
                 removed += 1;
                 return false;
             }
-// Also remove if we have no active connections from this IP
+            // Also remove if we have no active connections from this IP
             let has_active = self.connections.iter().any(|entry| &entry.key().0 == ip);
             if !has_active {
                 removed += 1;
@@ -239,32 +246,32 @@ impl ConnectionTracker {
             }
             true
         });
-        
-// 3. Clean port scan tracker entries that are stale
+
+        // 3. Clean port scan tracker entries that are stale
         self.port_scan.retain(|_, tracker| {
-// Remove ports outside the tracking window
-            tracker.ports.retain(|(_, ts)| now.duration_since(*ts) < tracker_timeout);
-// If no recent ports and not flagged, remove the entry
+            // Remove ports outside the tracking window
+            tracker
+                .ports
+                .retain(|(_, ts)| now.duration_since(*ts) < tracker_timeout);
+            // If no recent ports and not flagged, remove the entry
             if tracker.ports.is_empty() && !tracker.flagged {
                 removed += 1;
                 return false;
             }
             true
         });
-        
+
         removed
     }
 
-/// Reset all tracking state.
-/// **Warning**:This clears all tracked connections, half-open counts, and
-/// port scan state. In production, this should ONLY be called through an
-/// audited admin path. Every reset call should be accompanied by a security
-/// event emission in the calling code.
-/// Returns the number of entries that were cleared.
+    /// Reset all tracking state.
+    /// **Warning**:This clears all tracked connections, half-open counts, and
+    /// port scan state. In production, this should ONLY be called through an
+    /// audited admin path. Every reset call should be accompanied by a security
+    /// event emission in the calling code.
+    /// Returns the number of entries that were cleared.
     pub fn reset(&self) -> usize {
-        let cleared = self.connections.len()
-            + self.half_open_counts.len()
-            + self.port_scan.len();
+        let cleared = self.connections.len() + self.half_open_counts.len() + self.port_scan.len();
         tracing::warn!(
             connections = self.connections.len(),
             half_open_ips = self.half_open_counts.len(),
@@ -277,7 +284,7 @@ impl ConnectionTracker {
         cleared
     }
 
-/// Get statistics about tracker memory usage
+    /// Get statistics about tracker memory usage
     pub fn stats(&self) -> TrackerStats {
         TrackerStats {
             active_connections: self.connections.len(),
@@ -286,12 +293,12 @@ impl ConnectionTracker {
         }
     }
 
-/// Get current number of tracked connections
+    /// Get current number of tracked connections
     pub fn active_connections(&self) -> usize {
         self.connections.len()
     }
 
-/// Get half-open count for a specific IP
+    /// Get half-open count for a specific IP
     pub fn half_open_for(&self, ip: &IpAddr) -> u32 {
         self.half_open_counts.get(ip).map(|v| *v).unwrap_or(0)
     }
@@ -310,7 +317,9 @@ mod tests {
         for port in 1..=6 {
             let anomalies = tracker.record_syn(ip, port);
             if port > 5 {
-                assert!(anomalies.iter().any(|a| matches!(a, ConnectionAnomaly::SynFlood { .. })));
+                assert!(anomalies
+                    .iter()
+                    .any(|a| matches!(a, ConnectionAnomaly::SynFlood { .. })));
             }
         }
     }
@@ -323,7 +332,9 @@ mod tests {
         for port in 1..=4 {
             let anomalies = tracker.record_syn(ip, port);
             if port > 3 {
-                assert!(anomalies.iter().any(|a| matches!(a, ConnectionAnomaly::PortScan { .. })));
+                assert!(anomalies
+                    .iter()
+                    .any(|a| matches!(a, ConnectionAnomaly::PortScan { .. })));
             }
         }
     }

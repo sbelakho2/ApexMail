@@ -220,7 +220,7 @@ After fencing, the system verifies isolation:
 
 ## Circuit Breakers with Redis Persistence
 
-Circuit breaker state is persisted in Redis to survive process restarts and ensure consistent behaviour across a distributed worker fleet.
+Circuit breaker state is persisted in Redis to survive process restarts and ensure consistent behavior across a distributed worker fleet.
 
 ### Redis Key Schema
 

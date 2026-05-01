@@ -140,10 +140,14 @@ impl PrivateDeployService {
         Self { db }
     }
 
-/// Create a new deployment
+    /// Create a new deployment
     pub async fn create(
-        &self, tenant_id: String, name: &str, deployment_type: &str,
-        region: Option<&str>, config: Option<serde_json::Value>,
+        &self,
+        tenant_id: String,
+        name: &str,
+        deployment_type: &str,
+        region: Option<&str>,
+        config: Option<serde_json::Value>,
     ) -> Result<ApiResult<PrivateDeployment>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
@@ -162,10 +166,10 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row.into()))
     }
 
-/// Get deployment by ID
+    /// Get deployment by ID
     pub async fn get(&self, id: Uuid) -> Result<ApiResult<PrivateDeployment>, String> {
         let row = sqlx::query_as::<_, PrivateDeploymentDbRow>(
-            "SELECT * FROM ent_private_deployments WHERE id = $1"
+            "SELECT * FROM ent_private_deployments WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -178,11 +182,14 @@ impl PrivateDeployService {
         }
     }
 
-/// List deployments for a tenant
-    pub async fn list(&self, tenant_id: String) -> Result<ApiResult<Vec<PrivateDeployment>>, String> {
+    /// List deployments for a tenant
+    pub async fn list(
+        &self,
+        tenant_id: String,
+    ) -> Result<ApiResult<Vec<PrivateDeployment>>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = sqlx::query_as::<_, PrivateDeploymentDbRow>(
-            "SELECT * FROM ent_private_deployments WHERE tenant_id = $1 ORDER BY created_at DESC"
+            "SELECT * FROM ent_private_deployments WHERE tenant_id = $1 ORDER BY created_at DESC",
         )
         .bind(tenant_uuid)
         .fetch_all(&self.db)
@@ -192,11 +199,11 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
-/// Start provisioning a deployment
+    /// Start provisioning a deployment
     pub async fn provision(&self, id: Uuid) -> Result<ApiResult<PrivateDeployment>, String> {
         let row = sqlx::query_as::<_, PrivateDeploymentDbRow>(
             "UPDATE ent_private_deployments SET status = 'provisioning', updated_at = NOW()
-             WHERE id = $1 AND status = 'pending' RETURNING *"
+             WHERE id = $1 AND status = 'pending' RETURNING *",
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -208,14 +215,17 @@ impl PrivateDeployService {
                 info!(id = %id, "Deployment provisioning started");
                 Ok(ApiResult::ok(r.into()))
             }
-            None => Ok(ApiResult::err("Deployment not found or not in pending state", "INVALID_STATE")),
+            None => Ok(ApiResult::err(
+                "Deployment not found or not in pending state",
+                "INVALID_STATE",
+            )),
         }
     }
 
-/// Check deployment health
+    /// Check deployment health
     pub async fn health_check(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let deploy = sqlx::query_as::<_, PrivateDeploymentDbRow>(
-            "SELECT * FROM ent_private_deployments WHERE id = $1"
+            "SELECT * FROM ent_private_deployments WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -237,7 +247,7 @@ impl PrivateDeployService {
             "unknown"
         };
 
-// Update health status in DB
+        // Update health status in DB
         if let Err(e) = sqlx::query(
             "UPDATE ent_private_deployments SET last_health_check_at = NOW(), health_status = $2 WHERE id = $1"
         )
@@ -255,9 +265,12 @@ impl PrivateDeployService {
         })))
     }
 
-/// Allocate a dedicated IP
+    /// Allocate a dedicated IP
     pub async fn allocate_dedicated_ip(
-        &self, tenant_id: String, deployment_id: Option<Uuid>, ip_address: &str,
+        &self,
+        tenant_id: String,
+        deployment_id: Option<Uuid>,
+        ip_address: &str,
     ) -> Result<ApiResult<DedicatedIP>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
@@ -275,7 +288,7 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row.into()))
     }
 
-/// Allocate a dedicated IP from the available pool
+    /// Allocate a dedicated IP from the available pool
     pub async fn allocate_ip_from_pool(
         &self,
         tenant_id: String,
@@ -284,23 +297,27 @@ impl PrivateDeployService {
         prefer_warmed: bool,
     ) -> Result<ApiResult<DedicatedIP>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
-// #269:Use hash-based lock ID to avoid UUID-to-i64 truncation collision
-// XOR the upper and lower 64 bits to create a more collision-resistant lock ID
+        // #269:Use hash-based lock ID to avoid UUID-to-i64 truncation collision
+        // XOR the upper and lower 64 bits to create a more collision-resistant lock ID
         let uuid_bytes = tenant_uuid.as_u128();
         let upper = (uuid_bytes >> 64) as i64;
         let lower = uuid_bytes as i64;
         let lock_id: i64 = upper ^ lower; // XOR gives better distribution than modulo
 
-        let mut tx = self.db.begin().await.map_err(|e| format!("Begin transaction: {e}"))?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("Begin transaction: {e}"))?;
 
-// Acquire advisory lock
+        // Acquire advisory lock
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("Advisory lock: {e}"))?;
 
-// Find an available IP from the pool, preferring warmed IPs if requested
+        // Find an available IP from the pool, preferring warmed IPs if requested
         let query = if prefer_warmed {
             "SELECT id, ip_address, region, datacenter, provider, reputation_score, ptr_record
              FROM ip_pool_available
@@ -319,36 +336,44 @@ impl PrivateDeployService {
              FOR UPDATE SKIP LOCKED"
         };
 
-        let pool_row: Option<(Uuid, String, String, Option<String>, String, f64, Option<String>)> =
-            sqlx::query_as(query)
+        let pool_row: Option<(
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            String,
+            f64,
+            Option<String>,
+        )> = sqlx::query_as(query)
             .bind(region)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| format!("Query available pool: {e}"))?;
 
-        let (pool_id, ip_address, ip_region, _datacenter, provider, reputation, ptr_record) = match pool_row {
-            Some(row) => row,
-            None => {
-                return Ok(ApiResult::err(
-                    "No available IPs in pool for requested region",
-                    "NO_AVAILABLE_IPS",
-                ));
-            }
-        };
+        let (pool_id, ip_address, ip_region, _datacenter, provider, reputation, ptr_record) =
+            match pool_row {
+                Some(row) => row,
+                None => {
+                    return Ok(ApiResult::err(
+                        "No available IPs in pool for requested region",
+                        "NO_AVAILABLE_IPS",
+                    ));
+                }
+            };
 
-// Mark the pool IP as allocated
+        // Mark the pool IP as allocated
         sqlx::query(
             "UPDATE ip_pool_available
              SET status = 'allocated', allocated_to = $1, allocated_at = NOW(), updated_at = NOW()
-             WHERE id = $2"
+             WHERE id = $2",
         )
-            .bind(tenant_uuid)
-            .bind(pool_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("Update pool IP: {e}"))?;
+        .bind(tenant_uuid)
+        .bind(pool_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Update pool IP: {e}"))?;
 
-// Create the dedicated IP record for the tenant
+        // Create the dedicated IP record for the tenant
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, DedicatedIPDbRow>(
             "INSERT INTO ent_dedicated_ips (
@@ -357,20 +382,22 @@ impl PrivateDeployService {
                 blocklisted, reputation_score, region, ptr_record, created_at
              )
              VALUES ($1, $2, $3, $4::inet, 'active', 0, 0, 0, false, $5, $6, $7, NOW())
-             RETURNING *"
+             RETURNING *",
         )
-            .bind(id)
-            .bind(tenant_uuid)
-            .bind(deployment_id)
-            .bind(ip_address.to_string())
-            .bind(reputation)
-            .bind(&ip_region)
-            .bind(&ptr_record)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| format!("Insert dedicated IP: {e}"))?;
+        .bind(id)
+        .bind(tenant_uuid)
+        .bind(deployment_id)
+        .bind(ip_address.to_string())
+        .bind(reputation)
+        .bind(&ip_region)
+        .bind(&ptr_record)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| format!("Insert dedicated IP: {e}"))?;
 
-        tx.commit().await.map_err(|e| format!("Commit transaction: {e}"))?;
+        tx.commit()
+            .await
+            .map_err(|e| format!("Commit transaction: {e}"))?;
 
         info!(
             tenant_id = %tenant_id,
@@ -384,20 +411,28 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row.into()))
     }
 
-/// Release a dedicated IP back to the pool
-    pub async fn release_ip_to_pool(&self, tenant_id: String, ip_id: Uuid) -> Result<ApiResult<()>, String> {
+    /// Release a dedicated IP back to the pool
+    pub async fn release_ip_to_pool(
+        &self,
+        tenant_id: String,
+        ip_id: Uuid,
+    ) -> Result<ApiResult<()>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
-        let mut tx = self.db.begin().await.map_err(|e| format!("Begin transaction: {e}"))?;
-
-// Get the IP address
-        let ip_row: Option<(String,)> = sqlx::query_as(
-            "SELECT ip_address::text FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2"
-        )
-            .bind(ip_id)
-            .bind(tenant_uuid)
-            .fetch_optional(&mut *tx)
+        let mut tx = self
+            .db
+            .begin()
             .await
-            .map_err(|e| format!("Get dedicated IP: {e}"))?;
+            .map_err(|e| format!("Begin transaction: {e}"))?;
+
+        // Get the IP address
+        let ip_row: Option<(String,)> = sqlx::query_as(
+            "SELECT ip_address::text FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(ip_id)
+        .bind(tenant_uuid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("Get dedicated IP: {e}"))?;
 
         let ip_address = match ip_row {
             Some(row) => row.0,
@@ -406,19 +441,19 @@ impl PrivateDeployService {
             }
         };
 
-// Release in pool
+        // Release in pool
         sqlx::query(
             "UPDATE ip_pool_available
              SET status = 'available', allocated_to = NULL, allocated_at = NULL, updated_at = NOW()
-             WHERE ip_address = $1::inet AND allocated_to = $2"
+             WHERE ip_address = $1::inet AND allocated_to = $2",
         )
-            .bind(&ip_address)
-            .bind(tenant_uuid)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("Update pool IP: {e}"))?;
+        .bind(&ip_address)
+        .bind(tenant_uuid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Update pool IP: {e}"))?;
 
-// Remove from dedicated IPs
+        // Remove from dedicated IPs
         sqlx::query("DELETE FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2")
             .bind(ip_id)
             .bind(tenant_uuid)
@@ -426,24 +461,29 @@ impl PrivateDeployService {
             .await
             .map_err(|e| format!("Delete dedicated IP: {e}"))?;
 
-        tx.commit().await.map_err(|e| format!("Commit transaction: {e}"))?;
+        tx.commit()
+            .await
+            .map_err(|e| format!("Commit transaction: {e}"))?;
 
         info!(tenant_id = %tenant_id, ip = %ip_address, "Dedicated IP released to pool");
         Ok(ApiResult::ok(()))
     }
 
-/// Get available IP count by region
-    pub async fn get_available_ip_count(&self, region: Option<&str>) -> Result<ApiResult<AvailableIpCount>, String> {
+    /// Get available IP count by region
+    pub async fn get_available_ip_count(
+        &self,
+        region: Option<&str>,
+    ) -> Result<ApiResult<AvailableIpCount>, String> {
         let counts: Vec<(String, i64)> = sqlx::query_as(
             "SELECT region, COUNT(*) as count
              FROM ip_pool_available
              WHERE status = 'available' AND ($1::text IS NULL OR region = $1)
-             GROUP BY region"
+             GROUP BY region",
         )
-            .bind(region)
-            .fetch_all(&self.db)
-            .await
-            .map_err(|e| format!("Query available count: {e}"))?;
+        .bind(region)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| format!("Query available count: {e}"))?;
 
         let total: i64 = counts.iter().map(|(_, c)| c).sum();
         let by_region: std::collections::HashMap<String, i64> = counts.into_iter().collect();
@@ -451,15 +491,14 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(AvailableIpCount { total, by_region }))
     }
 
-/// Get dedicated IP by ID
+    /// Get dedicated IP by ID
     pub async fn get_dedicated_ip(&self, id: Uuid) -> Result<ApiResult<DedicatedIP>, String> {
-        let row = sqlx::query_as::<_, DedicatedIPDbRow>(
-            "SELECT * FROM ent_dedicated_ips WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("Get dedicated IP: {e}"))?;
+        let row =
+            sqlx::query_as::<_, DedicatedIPDbRow>("SELECT * FROM ent_dedicated_ips WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| format!("Get dedicated IP: {e}"))?;
 
         match row {
             Some(r) => Ok(ApiResult::ok(r.into())),
@@ -467,7 +506,7 @@ impl PrivateDeployService {
         }
     }
 
-/// List dedicated IPs for a tenant
+    /// List dedicated IPs for a tenant
     pub async fn list_dedicated_ips(
         &self,
         tenant_id: String,
@@ -488,8 +527,11 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
-/// Get IP reputation
-    pub async fn get_ip_reputation(&self, ip_address: &str) -> Result<ApiResult<IPReputation>, String> {
+    /// Get IP reputation
+    pub async fn get_ip_reputation(
+        &self,
+        ip_address: &str,
+    ) -> Result<ApiResult<IPReputation>, String> {
         let row: Option<(Option<f64>, i64, i32, i32, bool)> = sqlx::query_as(
             "SELECT reputation_score, emails_sent_total, bounces_total, complaints_total, blocklisted
              FROM ent_dedicated_ips WHERE ip_address = $1::inet"
@@ -501,11 +543,23 @@ impl PrivateDeployService {
 
         match row {
             Some((score, sent, bounces, complaints, blocklisted)) => {
-                let bounce_rate = if sent > 0 { bounces as f64 / sent as f64 * 100.0 } else { 0.0 };
-                let complaint_rate = if sent > 0 { complaints as f64 / sent as f64 * 100.0 } else { 0.0 };
+                let bounce_rate = if sent > 0 {
+                    bounces as f64 / sent as f64 * 100.0
+                } else {
+                    0.0
+                };
+                let complaint_rate = if sent > 0 {
+                    complaints as f64 / sent as f64 * 100.0
+                } else {
+                    0.0
+                };
                 Ok(ApiResult::ok(IPReputation {
                     ip_address: ip_address.to_string(),
-                    reputation_score: score.unwrap_or(calculate_reputation(bounce_rate, complaint_rate, blocklisted)),
+                    reputation_score: score.unwrap_or(calculate_reputation(
+                        bounce_rate,
+                        complaint_rate,
+                        blocklisted,
+                    )),
                     bounce_rate,
                     complaint_rate,
                     blocklisted,
@@ -516,8 +570,12 @@ impl PrivateDeployService {
         }
     }
 
-/// Register a BYOIP range
-    pub async fn register_byoip(&self, tenant_id: String, cidr_block: &str) -> Result<ApiResult<BYOIPRange>, String> {
+    /// Register a BYOIP range
+    pub async fn register_byoip(
+        &self,
+        tenant_id: String,
+        cidr_block: &str,
+    ) -> Result<ApiResult<BYOIPRange>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         let verification_token = crate::sso::generate_random_token(32);
@@ -536,9 +594,13 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row.into()))
     }
 
-/// Verify BYOIP ownership
-/// #253:Requires proof-of-control token match before marking verified.
-    pub async fn verify_byoip(&self, id: Uuid, verification_token: &str) -> Result<ApiResult<BYOIPRange>, String> {
+    /// Verify BYOIP ownership
+    /// #253:Requires proof-of-control token match before marking verified.
+    pub async fn verify_byoip(
+        &self,
+        id: Uuid,
+        verification_token: &str,
+    ) -> Result<ApiResult<BYOIPRange>, String> {
         let row = sqlx::query_as::<_, BYOIPRangeDbRow>(
             "UPDATE ent_byoip_ranges SET status = 'verified', verified_at = NOW()
              WHERE id = $1 AND status = 'pending_verification' AND verification_token = $2 RETURNING *"
@@ -551,7 +613,10 @@ impl PrivateDeployService {
 
         match row {
             Some(r) => Ok(ApiResult::ok(r.into())),
-            None => Ok(ApiResult::err("BYOIP verification failed (invalid token or state)", "INVALID_STATE")),
+            None => Ok(ApiResult::err(
+                "BYOIP verification failed (invalid token or state)",
+                "INVALID_STATE",
+            )),
         }
     }
 }
@@ -594,11 +659,14 @@ pub fn generate_warming_plan() -> IPWarmingPlan {
     ];
 
     IPWarmingPlan {
-        days: days.into_iter().map(|(day, limit, desc)| WarmingDay {
-            day,
-            daily_limit: limit,
-            description: desc.to_string(),
-        }).collect(),
+        days: days
+            .into_iter()
+            .map(|(day, limit, desc)| WarmingDay {
+                day,
+                daily_limit: limit,
+                description: desc.to_string(),
+            })
+            .collect(),
         total_days: 30,
     }
 }
@@ -607,17 +675,17 @@ pub fn generate_warming_plan() -> IPWarmingPlan {
 pub fn calculate_reputation(bounce_rate: f64, complaint_rate: f64, blocklisted: bool) -> f64 {
     let mut score = 100.0;
 
-// Bounce penalty (weight:0.3)
+    // Bounce penalty (weight:0.3)
     if bounce_rate > 2.0 {
         score -= (bounce_rate - 2.0) * 10.0 * 0.3;
     }
 
-// Complaint penalty (weight:0.4)
+    // Complaint penalty (weight:0.4)
     if complaint_rate > 0.1 {
         score -= (complaint_rate - 0.1) * 100.0 * 0.4;
     }
 
-// Blocklist penalty (weight:0.3)
+    // Blocklist penalty (weight:0.3)
     if blocklisted {
         score -= 30.0;
     }
@@ -642,7 +710,8 @@ fn health_client() -> &'static reqwest::Client {
 }
 
 async fn check_health_endpoint(url: &str) -> Result<bool, String> {
-    let resp = health_client().get(url)
+    let resp = health_client()
+        .get(url)
         .send()
         .await
         .map_err(|e| format!("Health check failed: {e}"))?;
@@ -668,10 +737,14 @@ mod tests {
     fn test_warming_plan_monotonic_increase() {
         let plan = generate_warming_plan();
         for i in 1..plan.days.len() {
-            assert!(plan.days[i].daily_limit >= plan.days[i - 1].daily_limit,
+            assert!(
+                plan.days[i].daily_limit >= plan.days[i - 1].daily_limit,
                 "Day {} limit {} < day {} limit {}",
-                plan.days[i].day, plan.days[i].daily_limit,
-                plan.days[i-1].day, plan.days[i-1].daily_limit);
+                plan.days[i].day,
+                plan.days[i].daily_limit,
+                plan.days[i - 1].day,
+                plan.days[i - 1].daily_limit
+            );
         }
     }
 

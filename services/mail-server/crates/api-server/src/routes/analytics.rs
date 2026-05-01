@@ -1,7 +1,9 @@
 //! Analytics / reporting routes.
 
+use apexmail_analytics::subject_line_analyzer::SubjectLineAnalyzer;
+use apexmail_analytics::types::SubjectLineScore;
 use axum::extract::{Path, Query, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,7 @@ pub fn router() -> Router<AppState> {
         .route("/volume", get(volume))
         .route("/engagement", get(engagement))
         .route("/deliverability", get(deliverability))
+        .route("/subject-line", post(analyze_subject_line))
         .route("/export", get(export))
         .route("/export/pdf", get(export_pdf))
         .route("/export/:job_id", get(get_export_job))
@@ -32,6 +35,18 @@ pub struct AnalyticsQuery {
     pub to: Option<DateTime<Utc>>,
     #[serde(default = "default_interval")]
     pub interval: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubjectLineAnalyzeRequest {
+    pub subject: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubjectLineAnalyzeResponse {
+    pub score: SubjectLineScore,
 }
 
 fn default_interval() -> String {
@@ -103,6 +118,23 @@ fn build_deliverability_response(
         complaint_rate: safe_ratio(complained, delivered),
         inbox_rate: safe_ratio((delivered - complained).max(0), total_sent),
     }
+}
+
+fn analyze_subject_line_payload(subject: &str) -> Result<SubjectLineAnalyzeResponse, ApiError> {
+    let subject = subject.trim();
+    if subject.is_empty() {
+        return Err(ApiError::Validation(vec!["subject is required".into()]));
+    }
+    if subject.chars().count() > 200 {
+        return Err(ApiError::Validation(vec![
+            "subject must be 200 characters or fewer".into(),
+        ]));
+    }
+
+    let analyzer = SubjectLineAnalyzer::new();
+    Ok(SubjectLineAnalyzeResponse {
+        score: analyzer.analyze(subject),
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -178,7 +210,9 @@ async fn dashboard(
 ) -> Result<Json<DashboardResponse>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+    let from = params
+        .from
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
     let row = sqlx::query_as::<_, DashboardRow>(
@@ -230,15 +264,17 @@ async fn volume(
 ) -> Result<Json<Vec<VolumePoint>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+    let from = params
+        .from
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
     let rows = sqlx::query_as::<_, VolumeRow>(volume_query_for_interval(&params.interval))
-    .bind(&auth.tenant_id)
-    .bind(from)
-    .bind(to)
-    .fetch_all(&state.db)
-    .await?;
+        .bind(&auth.tenant_id)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&state.db)
+        .await?;
 
     Ok(Json(
         rows.into_iter()
@@ -259,7 +295,9 @@ async fn engagement(
 ) -> Result<Json<EngagementResponse>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+    let from = params
+        .from
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
     let totals = sqlx::query_as::<_, EngagementTotalsRow>(
@@ -323,7 +361,9 @@ async fn deliverability(
 ) -> Result<Json<DeliverabilityResponse>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+    let from = params
+        .from
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
     let row = sqlx::query_as::<_, DeliverabilityRow>(
@@ -359,6 +399,14 @@ async fn deliverability(
     )))
 }
 
+async fn analyze_subject_line(
+    auth: AuthUser,
+    Json(body): Json<SubjectLineAnalyzeRequest>,
+) -> Result<Json<SubjectLineAnalyzeResponse>, ApiError> {
+    require_scopes(&auth, &["analytics:read"])?;
+    Ok(Json(analyze_subject_line_payload(&body.subject)?))
+}
+
 async fn export(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -366,12 +414,14 @@ async fn export(
 ) -> Result<Json<ExportResponse>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+    let from = params
+        .from
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
     let format = params.format.clone();
     let job_id = uuid::Uuid::new_v4();
 
-// Create export job record
+    // Create export job record
     sqlx::query(
         "INSERT INTO export_jobs (id, tenant_id, job_type, status, format, date_range_start, date_range_end, created_by)
          VALUES ($1, $2, 'analytics', 'pending', $3, $4, $5, $6)"
@@ -388,15 +438,20 @@ async fn export(
     let db = state.db.clone();
     let tenant_id = auth.tenant_id.clone();
     tokio::spawn(async move {
-        let result = std::panic::AssertUnwindSafe(
-            process_analytics_export(db.clone(), job_id, tenant_id, from, to, format)
-        );
+        let result = std::panic::AssertUnwindSafe(process_analytics_export(
+            db.clone(),
+            job_id,
+            tenant_id,
+            from,
+            to,
+            format,
+        ));
         match futures::FutureExt::catch_unwind(result).await {
-            Ok(Ok(())) => {},
+            Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 let err_msg = e.to_string();
                 tracing::error!(job_id = %job_id, error = %err_msg, "Export job failed");
-// Mark job as failed
+                // Mark job as failed
                 if let Err(db_err) = sqlx::query(
                     "UPDATE export_jobs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2"
                 )
@@ -407,10 +462,10 @@ async fn export(
                 {
                     tracing::error!(job_id = %job_id, error = %db_err, "Failed to mark export job as failed — job will be stuck");
                 }
-            },
+            }
             Err(_panic) => {
                 tracing::error!(job_id = %job_id, "Export job panicked");
-// Mark job as failed due to panic
+                // Mark job as failed due to panic
                 if let Err(db_err) = sqlx::query(
                     "UPDATE export_jobs SET status = 'failed', error_message = 'internal error (panic)', completed_at = NOW() WHERE id = $1"
                 )
@@ -439,13 +494,13 @@ async fn process_analytics_export(
     to: DateTime<Utc>,
     format: String,
 ) -> anyhow::Result<()> {
-// Mark job as processing
+    // Mark job as processing
     sqlx::query("UPDATE export_jobs SET status = 'processing', started_at = NOW() WHERE id = $1")
         .bind(job_id)
         .execute(&db)
         .await?;
 
-// Query analytics data
+    // Query analytics data
     let rows: Vec<ExportRow> = sqlx::query_as(
         "SELECT
             m.message_id,
@@ -464,25 +519,26 @@ async fn process_analytics_export(
          ) e ON true
          WHERE m.tenant_id = $1 AND m.sent_at >= $2 AND m.sent_at < $3
          ORDER BY m.sent_at DESC
-         LIMIT 100000"
+         LIMIT 100000",
     )
-        .bind(&tenant_id)
-        .bind(from)
-        .bind(to)
-        .fetch_all(&db)
-        .await?;
+    .bind(&tenant_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(&db)
+    .await?;
 
     let total_rows = rows.len() as i64;
 
-// Generate export content based on format
+    // Generate export content based on format
     let (content, content_type, extension) = match format.as_str() {
         "json" => {
             let json = serde_json::to_string_pretty(&rows)?;
             (json.into_bytes(), "application/json", "json")
         }
         _ => {
-// CSV format (default)
-            let mut csv = String::from("message_id,subject,recipient,sent_at,last_event,event_time\n");
+            // CSV format (default)
+            let mut csv =
+                String::from("message_id,subject,recipient,sent_at,last_event,event_time\n");
             for row in &rows {
                 csv.push_str(&format!(
                     "{},{},{},{},{},{}\n",
@@ -500,12 +556,12 @@ async fn process_analytics_export(
 
     let file_size = content.len() as i64;
 
-// Upload to S3 (using object store pattern)
+    // Upload to S3 (using object store pattern)
     let object_key = format!("exports/{}/{}.{}", tenant_id, job_id, extension);
     let download_url = upload_export_to_storage(&object_key, &content, content_type).await?;
     let expires_at = Utc::now() + TimeDelta::try_hours(24).unwrap_or(TimeDelta::zero());
 
-// Update job as completed
+    // Update job as completed
     sqlx::query(
         "UPDATE export_jobs SET
             status = 'completed',
@@ -515,15 +571,15 @@ async fn process_analytics_export(
             download_url = $3,
             download_expires_at = $4,
             completed_at = NOW()
-         WHERE id = $5"
+         WHERE id = $5",
     )
-        .bind(total_rows)
-        .bind(file_size)
-        .bind(&download_url)
-        .bind(expires_at)
-        .bind(job_id)
-        .execute(&db)
-        .await?;
+    .bind(total_rows)
+    .bind(file_size)
+    .bind(&download_url)
+    .bind(expires_at)
+    .bind(job_id)
+    .execute(&db)
+    .await?;
 
     tracing::info!(job_id = %job_id, rows = total_rows, "Export completed");
     Ok(())
@@ -532,41 +588,49 @@ async fn process_analytics_export(
 /// Prefixes dangerous characters with a single quote.
 fn escape_csv(s: &str) -> String {
     let trimmed = s.trim_start();
-// CSV injection prevention:prefix = + - @ with single quote
+    // CSV injection prevention:prefix = + - @ with single quote
     let needs_prefix = matches!(
         trimmed.chars().next(),
         Some('=' | '+' | '-' | '@' | '\t' | '\r')
     );
-    
+
     let sanitized = if needs_prefix {
         format!("'{}", s)
     } else {
         s.to_string()
     };
-    
-    if sanitized.contains(',') || sanitized.contains('"') || sanitized.contains('\n') || sanitized.contains('\r') {
-        format!("\"{}\"" , sanitized.replace('"', "\"\""))
+
+    if sanitized.contains(',')
+        || sanitized.contains('"')
+        || sanitized.contains('\n')
+        || sanitized.contains('\r')
+    {
+        format!("\"{}\"", sanitized.replace('"', "\"\""))
     } else {
         sanitized
     }
 }
 
-async fn upload_export_to_storage(key: &str, content: &[u8], _content_type: &str) -> anyhow::Result<String> {
-// In production, this would upload to S3/GCS/MinIO
-// For now, generate a presigned-style URL
-// The actual implementation would use object_store crate
+async fn upload_export_to_storage(
+    key: &str,
+    content: &[u8],
+    _content_type: &str,
+) -> anyhow::Result<String> {
+    // In production, this would upload to S3/GCS/MinIO
+    // For now, generate a presigned-style URL
+    // The actual implementation would use object_store crate
 
     let export_dir = std::env::var("EXPORT_STORAGE_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
-// Use XDG data dir or fallback to a more secure location
+            // Use XDG data dir or fallback to a more secure location
             dirs::data_local_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/apexmail"))
                 .join("exports")
         });
     tokio::fs::create_dir_all(&export_dir).await?;
-    
-// Set restrictive permissions on the directory (owner only)
+
+    // Set restrictive permissions on the directory (owner only)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -577,8 +641,9 @@ async fn upload_export_to_storage(key: &str, content: &[u8], _content_type: &str
     let file_path = export_dir.join(key.replace('/', "_"));
     tokio::fs::write(&file_path, content).await?;
 
-// Return a URL - in production this would be a presigned S3 URL
-    let base_url = std::env::var("EXPORT_BASE_URL").unwrap_or_else(|_| "https://exports.apexmail.io".into());
+    // Return a URL - in production this would be a presigned S3 URL
+    let base_url =
+        std::env::var("EXPORT_BASE_URL").unwrap_or_else(|_| "https://exports.apexmail.io".into());
     Ok(format!("{}/{}", base_url, key))
 }
 
@@ -707,10 +772,12 @@ async fn export_pdf(
 
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+    let from = params
+        .from
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
-// Gather summary data for the PDF template
+    // Gather summary data for the PDF template
     let summary: Option<DashboardRow> = sqlx::query_as(
         "SELECT
             COUNT(*) as total_sent,
@@ -719,13 +786,13 @@ async fn export_pdf(
             COUNT(*) FILTER (WHERE status = 'opened') as total_opened,
             COUNT(*) FILTER (WHERE status = 'clicked') as total_clicked
          FROM messages
-         WHERE tenant_id = $1 AND sent_at >= $2 AND sent_at < $3"
+         WHERE tenant_id = $1 AND sent_at >= $2 AND sent_at < $3",
     )
-        .bind(&auth.tenant_id)
-        .bind(from)
-        .bind(to)
-        .fetch_optional(&state.db)
-        .await?;
+    .bind(&auth.tenant_id)
+    .bind(from)
+    .bind(to)
+    .fetch_optional(&state.db)
+    .await?;
 
     let s = summary.unwrap_or(DashboardRow {
         total_sent: 0,
@@ -776,8 +843,8 @@ async fn export_pdf(
         "data": pdf_data,
     });
 
-    let pdf_renderer_url = std::env::var("PDF_RENDERER_URL")
-        .unwrap_or_else(|_| "http://pdf-renderer:3004".into());
+    let pdf_renderer_url =
+        std::env::var("PDF_RENDERER_URL").unwrap_or_else(|_| "http://pdf-renderer:3004".into());
 
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -795,7 +862,9 @@ async fn export_pdf(
         return Err(ApiError::Internal(format!("PDF render failed: {body}")));
     }
 
-    let pdf_bytes = resp.bytes().await
+    let pdf_bytes = resp
+        .bytes()
+        .await
         .map_err(|e| ApiError::Internal(format!("Failed to read PDF: {e}")))?;
 
     let filename = format!(
@@ -807,7 +876,10 @@ async fn export_pdf(
     axum::response::Response::builder()
         .status(axum::http::StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/pdf")
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
         .header(header::CACHE_CONTROL, "no-store")
         .body(axum::body::Body::from(pdf_bytes.to_vec()))
         .map_err(|e| ApiError::Internal(format!("Failed to build PDF response: {e}")))
@@ -864,6 +936,20 @@ mod tests {
         assert_eq!(resp.bounce_rate, 0.1);
         assert_eq!(resp.complaint_rate, 5.0 / 90.0);
         assert_eq!(resp.inbox_rate, 0.85);
+    }
+
+    #[test]
+    fn test_subject_line_analysis_uses_advanced_analytics_crate() {
+        let resp = analyze_subject_line_payload("Your weekly delivery report is ready").unwrap();
+
+        assert!(resp.score.overall_score > 0.0);
+        assert_eq!(resp.score.word_count, 6);
+    }
+
+    #[test]
+    fn test_subject_line_analysis_rejects_empty_subject() {
+        let err = analyze_subject_line_payload("   ").unwrap_err();
+        assert!(matches!(err, ApiError::Validation(_)));
     }
 
     #[test]

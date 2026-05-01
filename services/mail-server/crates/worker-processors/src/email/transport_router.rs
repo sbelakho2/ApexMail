@@ -24,9 +24,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use sqlx::PgPool;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 // ─── Transport abstraction ─────────────────────────────────────
@@ -48,35 +48,33 @@ pub trait EmailTransport: Send + Sync {
 }
 
 /// Configuration passed to the transport layer per message.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TransportConfig {
-/// Which dedicated IP to bind (SMTP only, ignored by SES).
+    /// Which dedicated IP to bind (SMTP only, ignored by SES).
     pub bind_ip: Option<String>,
-/// DKIM selector override.
+    /// DKIM selector override.
     pub dkim_selector: Option<String>,
-/// Custom HELO name.
+    /// Custom HELO name.
     pub helo_name: Option<String>,
-/// Max SMTP DATA timeout override.
+    /// Max SMTP DATA timeout override.
     pub data_timeout: Option<Duration>,
 }
-
 
 /// Result of a send operation.
 #[derive(Debug, Clone)]
 pub struct SendResult {
-/// Opaque ID for the transport (SES MessageId or self-hosted queue ID).
+    /// Opaque ID for the transport (SES MessageId or self-hosted queue ID).
     pub message_id: String,
-/// Which transport was used.
+    /// Which transport was used.
     pub transport: TransportKind,
 }
 
 /// Which transport carried the message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
-/// AWS SES shared IP pool.
+    /// AWS SES shared IP pool.
     Ses,
-/// Self-hosted SMTP via Hetzner dedicated IPs.
+    /// Self-hosted SMTP via Hetzner dedicated IPs.
     Smtp,
 }
 
@@ -119,12 +117,12 @@ impl From<sqlx::Error> for TransportError {
 /// Cached routing decision for a tenant.
 #[derive(Debug, Clone)]
 struct RoutingEntry {
-/// `true` → at least one active/warming dedicated IP exists.
+    /// `true` → at least one active/warming dedicated IP exists.
     has_dedicated_ips: bool,
-/// The preferred dedicated IP to bind outgoing connections to.
-/// Selected by:active first, then lowest warmup_progress first.
+    /// The preferred dedicated IP to bind outgoing connections to.
+    /// Selected by:active first, then lowest warmup_progress first.
     preferred_ip: Option<String>,
-/// Number of active + warming IPs.
+    /// Number of active + warming IPs.
     dedicated_ip_count: i32,
 }
 
@@ -146,14 +144,10 @@ struct RoutingCache {
 }
 
 impl TransportRouter {
-/// Create a router with both transport paths.
-/// - `ses`:transport for the shared SES IP pool
-/// - `smtp`:transport for self-hosted MTA servers (Hetzner dedicated IPs)
-    pub fn new(
-        ses: Arc<dyn EmailTransport>,
-        smtp: Arc<dyn EmailTransport>,
-        db: PgPool,
-    ) -> Self {
+    /// Create a router with both transport paths.
+    /// - `ses`:transport for the shared SES IP pool
+    /// - `smtp`:transport for self-hosted MTA servers (Hetzner dedicated IPs)
+    pub fn new(ses: Arc<dyn EmailTransport>, smtp: Arc<dyn EmailTransport>, db: PgPool) -> Self {
         Self {
             ses,
             smtp,
@@ -165,15 +159,15 @@ impl TransportRouter {
         }
     }
 
-// ── Public API ─────────────────────────────────────────────
+    // ── Public API ─────────────────────────────────────────────
 
-/// Route and send a message.
-/// Decision tree:/// 1. Look up tenant in routing cache
-/// 2. If tenant has any active/warming dedicated IP → SMTP with bind IP
-/// 3. Otherwise → SES shared pool
-/// A tenant with dedicated IPs can still have *some* mail go through SES
-/// if the domain-level routing is configured that way (future extension),
-/// but the default is:dedicated IP exists ⇒ all mail → SMTP.
+    /// Route and send a message.
+    /// Decision tree:/// 1. Look up tenant in routing cache
+    /// 2. If tenant has any active/warming dedicated IP → SMTP with bind IP
+    /// 3. Otherwise → SES shared pool
+    /// A tenant with dedicated IPs can still have *some* mail go through SES
+    /// if the domain-level routing is configured that way (future extension),
+    /// but the default is:dedicated IP exists ⇒ all mail → SMTP.
     pub async fn send(
         &self,
         tenant_id: Uuid,
@@ -185,10 +179,12 @@ impl TransportRouter {
 
         let (transport, config) = self.resolve(tenant_id).await?;
 
-        transport.send_raw_email(from, to, raw_message, &config).await
+        transport
+            .send_raw_email(from, to, raw_message, &config)
+            .await
     }
 
-/// Determine which transport would be used for a tenant (without sending).
+    /// Determine which transport would be used for a tenant (without sending).
     pub async fn resolve_transport_kind(
         &self,
         tenant_id: Uuid,
@@ -202,26 +198,30 @@ impl TransportRouter {
         }
     }
 
-/// Force a cache refresh (e.g., after allocating a new IP).
+    /// Force a cache refresh (e.g., after allocating a new IP).
     pub async fn invalidate_cache(&self) {
         let mut cache = self.cache.write().await;
         cache.last_refresh = Instant::now() - Duration::from_secs(3600);
     }
 
-/// Force refresh routing for a specific tenant.
+    /// Force refresh routing for a specific tenant.
     pub async fn invalidate_tenant(&self, tenant_id: Uuid) {
         let entry = self.fetch_routing_entry(tenant_id).await;
         let mut cache = self.cache.write().await;
         match entry {
-            Ok(Some(e)) => { cache.entries.insert(tenant_id, e); }
-            Ok(None)    => { cache.entries.remove(&tenant_id); }
+            Ok(Some(e)) => {
+                cache.entries.insert(tenant_id, e);
+            }
+            Ok(None) => {
+                cache.entries.remove(&tenant_id);
+            }
             Err(e) => warn!(tenant_id = %tenant_id, error = %e, "Failed to refresh routing"),
         }
     }
 
-// ── Internals ──────────────────────────────────────────────
+    // ── Internals ──────────────────────────────────────────────
 
-/// Resolve transport + config for a tenant.
+    /// Resolve transport + config for a tenant.
     async fn resolve(
         &self,
         tenant_id: Uuid,
@@ -246,7 +246,7 @@ impl TransportRouter {
         }
     }
 
-/// Ensure the cache is fresh (refreshed within the last 30 seconds).
+    /// Ensure the cache is fresh (refreshed within the last 30 seconds).
     async fn ensure_cache_fresh(&self) -> Result<(), TransportError> {
         let needs_refresh = {
             let cache = self.cache.read().await;
@@ -259,7 +259,7 @@ impl TransportRouter {
         Ok(())
     }
 
-/// Full cache refresh from `transport_routing_cache`.
+    /// Full cache refresh from `transport_routing_cache`.
     async fn refresh_cache(&self) -> Result<(), TransportError> {
         let rows: Vec<(Uuid, bool, Option<String>, i32)> = sqlx::query_as(
             "SELECT tenant_id, has_dedicated_ips, preferred_dedicated_ip, dedicated_ip_count
@@ -270,11 +270,14 @@ impl TransportRouter {
 
         let mut entries = HashMap::with_capacity(rows.len());
         for (tid, has, ip, count) in rows {
-            entries.insert(tid, RoutingEntry {
-                has_dedicated_ips: has,
-                preferred_ip: ip,
-                dedicated_ip_count: count,
-            });
+            entries.insert(
+                tid,
+                RoutingEntry {
+                    has_dedicated_ips: has,
+                    preferred_ip: ip,
+                    dedicated_ip_count: count,
+                },
+            );
         }
 
         let mut cache = self.cache.write().await;
@@ -286,7 +289,7 @@ impl TransportRouter {
         Ok(())
     }
 
-/// Fetch a single tenant's routing entry directly from `dedicated_ips`.
+    /// Fetch a single tenant's routing entry directly from `dedicated_ips`.
     async fn fetch_routing_entry(
         &self,
         tenant_id: Uuid,
@@ -337,12 +340,15 @@ impl EmailTransport for RoutingTransport {
         raw_message: &[u8],
         config: &TransportConfig,
     ) -> Result<SendResult, TransportError> {
-// Extract tenant_id from the from address or look it up.
-// In practice, the tenant_id is threaded via the job context,
-// not extracted from the email headers. This wrapper is used
-// as a fallback when tenant context isn't available.
+        // Extract tenant_id from the from address or look it up.
+        // In practice, the tenant_id is threaded via the job context,
+        // not extracted from the email headers. This wrapper is used
+        // as a fallback when tenant context isn't available.
         warn!("RoutingTransport used without explicit tenant context — falling back to SES");
-        self.router.ses.send_raw_email(from, to, raw_message, config).await
+        self.router
+            .ses
+            .send_raw_email(from, to, raw_message, config)
+            .await
     }
 
     fn name(&self) -> &'static str {

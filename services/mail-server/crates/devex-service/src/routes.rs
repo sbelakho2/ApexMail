@@ -39,7 +39,7 @@ pub struct AppState {
 }
 
 impl AppState {
-/// Build `AppState` from a `DevExConfig`.
+    /// Build `AppState` from a `DevExConfig`.
     pub fn from_config(cfg: DevExConfig) -> Result<Self, crate::types::DevExError> {
         let openapi = OpenApiGenerator::new(&cfg.current_api_version, &cfg.api_base_url);
         let webhook_tester = WebhookTester::new(cfg.webhook_signing_secret.clone())?;
@@ -66,7 +66,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/openapi.json", get(handle_openapi))
         .route("/onboarding/checklist", get(handle_onboarding_checklist))
         .route("/health", get(handle_health))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_service_token,
+        ))
         .layer(DefaultBodyLimit::max(256 * 1024)) // 256 KB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
@@ -93,7 +96,10 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided
+        .as_deref()
+        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
+    {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -189,9 +195,7 @@ async fn handle_onboarding_checklist(
     headers: HeaderMap,
     Query(query): Query<OnboardingQuery>,
 ) -> impl IntoResponse {
-    let tenant_id = query
-        .tenant_id
-        .or_else(|| tenant_id_from_headers(&headers));
+    let tenant_id = query.tenant_id.or_else(|| tenant_id_from_headers(&headers));
 
     let Some(tenant_id) = tenant_id else {
         return (
@@ -260,7 +264,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "healthy");
         assert_eq!(json["service"], "devex");
@@ -284,7 +290,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["current"], "2024-01");
         assert!(json["versions"].as_array().unwrap().len() >= 5);
@@ -308,7 +316,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let sdks = json["sdks"].as_array().unwrap();
         assert_eq!(sdks.len(), 5);

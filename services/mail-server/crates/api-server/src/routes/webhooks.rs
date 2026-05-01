@@ -18,7 +18,10 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create_webhook).get(list_webhooks))
-        .route("/:id", get(get_webhook).put(update_webhook).delete(delete_webhook))
+        .route(
+            "/:id",
+            get(get_webhook).put(update_webhook).delete(delete_webhook),
+        )
         .route("/:id/test", post(test_webhook))
 }
 
@@ -47,7 +50,7 @@ pub struct WebhookResponse {
     pub id: String,
     pub url: String,
     pub events: serde_json::Value,
-// Secret is only returned at creation time.
+    // Secret is only returned at creation time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
     pub status: String,
@@ -80,24 +83,24 @@ pub struct ListWebhooksQuery {
 /// Requires HTTPS (or HTTP for localhost in development).
 fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     let url = Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
-    
+
     let scheme = url.scheme();
     let host = url.host_str().ok_or("URL must have a host")?;
-    
-// Require HTTPS for production URLs
+
+    // Require HTTPS for production URLs
     if scheme == "http" {
-// Allow HTTP only for localhost/development
+        // Allow HTTP only for localhost/development
         if host != "localhost" && host != "127.0.0.1" && host != "::1" {
             return Err("webhook URL must use HTTPS for non-local hosts".into());
         }
     } else if scheme != "https" {
         return Err(format!("invalid URL scheme: {}, must be https", scheme));
     }
-    
+
     if !is_localhost(host) && is_private_or_reserved_host(host) {
         return Err("webhook URL cannot point to private or reserved addresses".into());
     }
-    
+
     Ok(())
 }
 
@@ -111,28 +114,26 @@ async fn create_webhook(
     require_scopes(&auth, &["webhooks:write"])?;
 
     let mut errors = Vec::new();
-    
+
     if body.url.is_empty() {
         errors.push("url is required".into());
     } else if let Err(e) = validate_webhook_url(&body.url) {
         errors.push(e);
     }
-    
+
     if body.events.is_empty() {
         errors.push("events are required".into());
     }
-    
+
     if !errors.is_empty() {
         return Err(ApiError::Validation(errors));
     }
 
-// Enforce per-tenant webhook count limit (default:25)
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_one(&state.db)
-    .await?;
+    // Enforce per-tenant webhook count limit (default:25)
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1")
+        .bind(&auth.tenant_id)
+        .fetch_one(&state.db)
+        .await?;
 
     const MAX_WEBHOOKS_PER_TENANT: i64 = 25;
     if count.0 >= MAX_WEBHOOKS_PER_TENANT {
@@ -165,7 +166,7 @@ async fn create_webhook(
             id: id.to_string(),
             url: body.url,
             events: serde_json::json!(body.events),
-// Only return secret at creation time
+            // Only return secret at creation time
             secret: Some(secret),
             status: "active".into(),
             created_at: now.to_rfc3339(),
@@ -213,7 +214,7 @@ async fn update_webhook(
 ) -> Result<Json<WebhookResponse>, ApiError> {
     require_scopes(&auth, &["webhooks:write"])?;
 
-// Validate new URL if provided
+    // Validate new URL if provided
     if let Some(ref new_url) = body.url {
         if let Err(e) = validate_webhook_url(new_url) {
             return Err(ApiError::Validation(vec![e]));
@@ -222,13 +223,19 @@ async fn update_webhook(
 
     let existing = fetch_webhook(&state, &auth.tenant_id, id.clone()).await?;
     let url = body.url.unwrap_or(existing.url);
-    let events = body.events.map(|e| serde_json::json!(e)).unwrap_or(existing.events);
-    
+    let events = body
+        .events
+        .map(|e| serde_json::json!(e))
+        .unwrap_or(existing.events);
+
     let status = match body.status.as_deref() {
         Some(s) if s == "active" || s == "paused" || s == "disabled" => s.to_string(),
-        Some(s) => return Err(ApiError::Validation(vec![format!(
-            "invalid status '{}': must be 'active', 'paused', or 'disabled'", s
-        )])),
+        Some(s) => {
+            return Err(ApiError::Validation(vec![format!(
+                "invalid status '{}': must be 'active', 'paused', or 'disabled'",
+                s
+            )]))
+        }
         None => existing.status,
     };
 
@@ -282,31 +289,39 @@ async fn test_webhook(
     require_scopes(&auth, &["webhooks:write"])?;
 
     let wh = fetch_webhook(&state, &auth.tenant_id, id).await?;
-    
+
     if let Err(e) = validate_webhook_url(&wh.url) {
-        return Err(ApiError::BadRequest(format!("webhook URL validation failed: {e}")));
+        return Err(ApiError::BadRequest(format!(
+            "webhook URL validation failed: {e}"
+        )));
     }
-    
-// Additional DNS rebinding protection:resolve and check IP before request.
-    let url = Url::parse(&wh.url)
-        .map_err(|e| ApiError::BadRequest(format!("invalid URL: {e}")))?;
+
+    // Additional DNS rebinding protection:resolve and check IP before request.
+    let url = Url::parse(&wh.url).map_err(|e| ApiError::BadRequest(format!("invalid URL: {e}")))?;
     if let Some(host) = url.host_str() {
-// Skip DNS check for localhost in dev
+        // Skip DNS check for localhost in dev
         if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-// Try to resolve and verify the IP isn't private
-            if let Ok(addrs) = tokio::net::lookup_host(format!("{}:{}", host, url.port_or_known_default().unwrap_or(443))).await {
+            // Try to resolve and verify the IP isn't private
+            if let Ok(addrs) = tokio::net::lookup_host(format!(
+                "{}:{}",
+                host,
+                url.port_or_known_default().unwrap_or(443)
+            ))
+            .await
+            {
                 for addr in addrs {
                     let ip_str = addr.ip().to_string();
                     if is_private_or_reserved_host(&ip_str) {
                         return Err(ApiError::BadRequest(
-                            "webhook URL resolves to a private IP address (possible DNS rebinding)".into()
+                            "webhook URL resolves to a private IP address (possible DNS rebinding)"
+                                .into(),
                         ));
                     }
                 }
             }
         }
     }
-    
+
     let timeout = std::time::Duration::from_millis(state.config.webhook_timeout_ms);
 
     let client = state.http_client.clone();
@@ -375,7 +390,11 @@ impl From<WebhookRow> for WebhookResponse {
     }
 }
 
-async fn fetch_webhook(state: &AppState, tenant_id: &str, id: String) -> Result<WebhookRow, ApiError> {
+async fn fetch_webhook(
+    state: &AppState,
+    tenant_id: &str,
+    id: String,
+) -> Result<WebhookRow, ApiError> {
     sqlx::query_as::<_, WebhookRow>(
         "SELECT id, url, events, secret, status, created_at, updated_at
          FROM webhooks WHERE id = $1 AND tenant_id = $2",

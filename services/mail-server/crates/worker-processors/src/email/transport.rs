@@ -7,10 +7,8 @@
 //! the `TransportType` in `EmailConfig`.
 
 use async_trait::async_trait;
+use aws_sdk_sesv2::types::{Destination, EmailContent, RawMessage};
 use aws_sdk_sesv2::Client as SesClient;
-use aws_sdk_sesv2::types::{
-    Destination, EmailContent, RawMessage,
-};
 use mail_send::mail_auth::common::crypto::{RsaKey, Sha256};
 use mail_send::mail_auth::dkim::DkimSigner;
 use mail_send::mail_builder::headers::text::Text;
@@ -25,16 +23,16 @@ use crate::common::{EmailConfig, SesConfig, SmtpConfig, TransportType};
 /// Email transport trait for sending emails.
 #[async_trait]
 pub trait EmailTransport: Send + Sync {
-/// Verify transport connection.
+    /// Verify transport connection.
     async fn verify(&self) -> ProcessorResult<()>;
 
-/// Send an email.
+    /// Send an email.
     async fn send(&self, email: &PreparedEmail) -> ProcessorResult<SendResult>;
 
-/// Close the transport gracefully.
+    /// Close the transport gracefully.
     async fn close(&self) -> ProcessorResult<()>;
 
-/// Human-readable transport name for logging.
+    /// Human-readable transport name for logging.
     fn transport_name(&self) -> &str;
 }
 
@@ -48,7 +46,7 @@ pub struct SmtpTransport {
 }
 
 impl SmtpTransport {
-/// Create a new SMTP transport.
+    /// Create a new SMTP transport.
     pub fn new(config: SmtpConfig) -> Self {
         Self { config }
     }
@@ -121,7 +119,14 @@ impl SmtpTransport {
         Ok(DkimSigner::from_key(key)
             .domain(config.domain.clone())
             .selector(config.selector.clone())
-            .headers(["From", "To", "Subject", "Date", "Message-ID", "MIME-Version"]))
+            .headers([
+                "From",
+                "To",
+                "Subject",
+                "Date",
+                "Message-ID",
+                "MIME-Version",
+            ]))
     }
 }
 
@@ -239,12 +244,12 @@ pub struct SesTransport {
 }
 
 impl SesTransport {
-/// Create from an already-initialized SES client.
+    /// Create from an already-initialized SES client.
     pub fn new(client: SesClient, config: SesConfig) -> Self {
         Self { client, config }
     }
 
-/// Create from AWS SDK config (loads credentials from environment / IAM role).
+    /// Create from AWS SDK config (loads credentials from environment / IAM role).
     pub async fn from_env(ses_config: SesConfig) -> ProcessorResult<Self> {
         let region = aws_sdk_sesv2::config::Region::new(ses_config.region.clone());
         let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -258,9 +263,9 @@ impl SesTransport {
         })
     }
 
-/// Build a raw RFC 5322 MIME message from a `PreparedEmail`.
-/// We use `mail-builder` to construct the message identically to
-/// how `SmtpTransport` does it, then extract the raw bytes for SES.
+    /// Build a raw RFC 5322 MIME message from a `PreparedEmail`.
+    /// We use `mail-builder` to construct the message identically to
+    /// how `SmtpTransport` does it, then extract the raw bytes for SES.
     fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
         let mut builder = MessageBuilder::new()
             .from(email.from.as_str())
@@ -300,14 +305,12 @@ impl EmailTransport for SesTransport {
     async fn verify(&self) -> ProcessorResult<()> {
         debug!(region = %self.config.region, "Verifying SES connectivity");
 
-// Verify by calling GetAccount — lightweight API call that confirms credentials work
+        // Verify by calling GetAccount — lightweight API call that confirms credentials work
         self.client
             .get_account()
             .send()
             .await
-            .map_err(|e| {
-                ProcessorError::Transport(format!("SES verification failed: {e}"))
-            })?;
+            .map_err(|e| ProcessorError::Transport(format!("SES verification failed: {e}")))?;
 
         info!(region = %self.config.region, "SES transport verified");
         Ok(())
@@ -327,29 +330,23 @@ impl EmailTransport for SesTransport {
             .build()
             .map_err(|e| ProcessorError::Transport(format!("SES raw message build error: {e}")))?;
 
-        let content = EmailContent::builder()
-            .raw(raw_message)
-            .build();
+        let content = EmailContent::builder().raw(raw_message).build();
 
         let mut req = self
             .client
             .send_email()
             .from_email_address(&email.from)
-            .destination(
-                Destination::builder()
-                    .to_addresses(&email.to)
-                    .build(),
-            )
+            .destination(Destination::builder().to_addresses(&email.to).build())
             .content(content);
 
-// Attach configuration set if configured (enables event tracking).
+        // Attach configuration set if configured (enables event tracking).
         if let Some(config_set) = &self.config.configuration_set {
             req = req.configuration_set_name(config_set);
         }
 
         let resp = req.send().await.map_err(|e| {
             let msg = format!("{e}");
-// Classify SES errors for upstream retry logic
+            // Classify SES errors for upstream retry logic
             if msg.contains("Throttling") || msg.contains("TooManyRequestsException") {
                 warn!(error = %msg, "SES rate limit hit");
                 ProcessorError::RateLimited(format!("SES: {msg}"))
@@ -374,7 +371,7 @@ impl EmailTransport for SesTransport {
     }
 
     async fn close(&self) -> ProcessorResult<()> {
-// SES client is stateless HTTP — nothing to close.
+        // SES client is stateless HTTP — nothing to close.
         Ok(())
     }
 }
@@ -394,7 +391,9 @@ pub fn create_transport(config: &SmtpConfig) -> Box<dyn EmailTransport> {
 /// This is the preferred factory — it inspects `transport_type` and builds
 /// the appropriate backend. For SES, it initialises the AWS SDK config
 /// synchronously (credentials from env / IAM role).
-pub async fn create_transport_from_config(config: &EmailConfig) -> ProcessorResult<Box<dyn EmailTransport>> {
+pub async fn create_transport_from_config(
+    config: &EmailConfig,
+) -> ProcessorResult<Box<dyn EmailTransport>> {
     match config.transport_type {
         TransportType::Smtp => {
             info!("Initialising SMTP transport (self-hosted)");
@@ -483,7 +482,7 @@ mod tests {
             dkim: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
-// Should produce *something* even with no body
+        // Should produce *something* even with no body
         assert!(!raw.is_empty());
     }
 
@@ -528,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_smtp_builder_requires_password_with_username() {
-// Install the ring crypto provider for rustls (required by mail-send's SmtpClientBuilder)
+        // Install the ring crypto provider for rustls (required by mail-send's SmtpClientBuilder)
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = SmtpConfig {
             username: Some("user".into()),
@@ -544,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_smtp_builder_requires_username_with_password() {
-// Install the ring crypto provider for rustls (required by mail-send's SmtpClientBuilder)
+        // Install the ring crypto provider for rustls (required by mail-send's SmtpClientBuilder)
         let _ = rustls::crypto::ring::default_provider().install_default();
         use zeroize::Zeroizing;
         let config = SmtpConfig {

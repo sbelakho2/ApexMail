@@ -9,7 +9,7 @@ use crate::types::Campaign;
 pub struct CampaignsRepo;
 
 impl CampaignsRepo {
-/// Create a new campaign.
+    /// Create a new campaign.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -34,22 +34,20 @@ impl CampaignsRepo {
         .await
     }
 
-/// Find a campaign by ID.
+    /// Find a campaign by ID.
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Campaign>, sqlx::Error> {
-        sqlx::query_as::<_, Campaign>(
-            "SELECT * FROM campaigns WHERE id = $1 AND tenant_id = $2"
-        )
-        .bind(id)
-        .bind(tenant_id)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, Campaign>("SELECT * FROM campaigns WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await
     }
 
-/// List campaigns for a tenant.
+    /// List campaigns for a tenant.
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -68,7 +66,7 @@ impl CampaignsRepo {
         .await
     }
 
-/// Update campaign status (draft → sending → sent, etc.).
+    /// Update campaign status (draft → sending → sent, etc.).
     pub async fn update_status(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -76,7 +74,7 @@ impl CampaignsRepo {
         status: &str,
     ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
-            "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3"
+            "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
         )
         .bind(status)
         .bind(id)
@@ -86,10 +84,10 @@ impl CampaignsRepo {
         Ok(result.rows_affected() > 0)
     }
 
-/// Delete a campaign (only allowed in draft status).
+    /// Delete a campaign (only allowed in draft status).
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
-            "DELETE FROM campaigns WHERE id = $1 AND tenant_id = $2 AND status = 'draft'"
+            "DELETE FROM campaigns WHERE id = $1 AND tenant_id = $2 AND status = 'draft'",
         )
         .bind(id)
         .bind(tenant_id)

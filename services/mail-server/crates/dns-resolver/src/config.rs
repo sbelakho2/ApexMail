@@ -6,19 +6,19 @@ use std::time::Duration;
 /// DNS resolver configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsConfig {
-/// Cache TTL in seconds. Default:300 (5 minutes).
+    /// Cache TTL in seconds. Default:300 (5 minutes).
     pub cache_ttl_secs: u64,
-/// Maximum cache entries. Default:10,000.
+    /// Maximum cache entries. Default:10,000.
     pub max_cache_entries: u64,
-/// Negative cache TTL (for NXDOMAIN). Default:60.
+    /// Negative cache TTL (for NXDOMAIN). Default:60.
     pub negative_ttl_secs: u64,
-/// Query timeout in milliseconds. Default:5,000.
+    /// Query timeout in milliseconds. Default:5,000.
     pub query_timeout_ms: u64,
-/// Number of retry attempts. Default:2.
+    /// Number of retry attempts. Default:2.
     pub retries: u32,
-/// Whether to use TCP fallback. Default:true.
+    /// Whether to use TCP fallback. Default:true.
     pub tcp_fallback: bool,
-/// Custom nameservers. Empty = system defaults.
+    /// Custom nameservers. Empty = system defaults.
     pub nameservers: Vec<String>,
 }
 

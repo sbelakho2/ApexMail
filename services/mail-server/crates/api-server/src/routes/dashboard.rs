@@ -53,7 +53,7 @@ async fn dashboard_stats(
 ) -> Result<Json<DashboardStats>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-// Message stats (last 30 days)
+    // Message stats (last 30 days)
     let msg_stats = sqlx::query_as::<_, DashboardMessageStats>(
         r#"SELECT
             COUNT(*)::bigint AS total,
@@ -71,39 +71,51 @@ async fn dashboard_stats(
     .await?;
 
     let total = msg_stats.total as f64;
-    let delivery_rate = if msg_stats.total > 0 { msg_stats.delivered as f64 / total } else { 0.0 };
-    let bounce_rate = if msg_stats.total > 0 { msg_stats.bounced as f64 / total } else { 0.0 };
-    let open_rate = if msg_stats.total > 0 { msg_stats.opened as f64 / total } else { 0.0 };
-    let click_rate = if msg_stats.total > 0 { msg_stats.clicked as f64 / total } else { 0.0 };
+    let delivery_rate = if msg_stats.total > 0 {
+        msg_stats.delivered as f64 / total
+    } else {
+        0.0
+    };
+    let bounce_rate = if msg_stats.total > 0 {
+        msg_stats.bounced as f64 / total
+    } else {
+        0.0
+    };
+    let open_rate = if msg_stats.total > 0 {
+        msg_stats.opened as f64 / total
+    } else {
+        0.0
+    };
+    let click_rate = if msg_stats.total > 0 {
+        msg_stats.clicked as f64 / total
+    } else {
+        0.0
+    };
 
-// Resource counts
-    let contacts = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM contacts WHERE tenant_id = $1",
-    )
-    .bind(auth.tenant_id.to_string())
-    .fetch_one(&state.db)
-    .await?;
+    // Resource counts
+    let contacts =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM contacts WHERE tenant_id = $1")
+            .bind(auth.tenant_id.to_string())
+            .fetch_one(&state.db)
+            .await?;
 
-    let lists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM lists WHERE tenant_id = $1",
-    )
-    .bind(auth.tenant_id.to_string())
-    .fetch_one(&state.db)
-    .await?;
+    let lists =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM lists WHERE tenant_id = $1")
+            .bind(auth.tenant_id.to_string())
+            .fetch_one(&state.db)
+            .await?;
 
-    let campaigns = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM campaigns WHERE tenant_id = $1",
-    )
-    .bind(auth.tenant_id.to_string())
-    .fetch_one(&state.db)
-    .await?;
+    let campaigns =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM campaigns WHERE tenant_id = $1")
+            .bind(auth.tenant_id.to_string())
+            .fetch_one(&state.db)
+            .await?;
 
-    let templates = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM templates WHERE tenant_id = $1",
-    )
-    .bind(auth.tenant_id.to_string())
-    .fetch_one(&state.db)
-    .await?;
+    let templates =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM templates WHERE tenant_id = $1")
+            .bind(auth.tenant_id.to_string())
+            .fetch_one(&state.db)
+            .await?;
 
     let domains = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM domains WHERE tenant_id = $1 AND status = 'verified'",

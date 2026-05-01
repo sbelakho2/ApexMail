@@ -49,7 +49,7 @@ pub fn random_unicode(len: usize) -> String {
         .map(|_| loop {
             let cp = rng.gen_range(0x0020..0x10000u32);
             if let Some(c) = char::from_u32(cp) {
-// Skip surrogates
+                // Skip surrogates
                 if !c.is_control() || c == '\n' || c == '\t' {
                     return c;
                 }

@@ -14,14 +14,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 
+use crate::cache::TemplateCache;
 use crate::config::RendererConfig;
 use crate::plaintext::html_to_plaintext;
 use crate::sandbox::Sandbox;
 use crate::transpiler;
-use crate::types::{
-    RenderMetadata, RenderOptions, RenderResult, TemplateError, STARTER_TEMPLATE,
-};
-use crate::cache::TemplateCache;
+use crate::types::{RenderMetadata, RenderOptions, RenderResult, TemplateError, STARTER_TEMPLATE};
 
 // ─── App State ─────────────────────────────────────────────────
 
@@ -39,7 +37,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/validate", post(validate_handler))
         .route("/starter", get(starter_handler))
         .route("/health", get(health_handler))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_service_token,
+        ))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
@@ -66,7 +67,10 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided
+        .as_deref()
+        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
+    {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -87,7 +91,9 @@ struct RenderRequest {
     subject: Option<String>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Deserialize)]
 struct ValidateRequest {
@@ -163,13 +169,13 @@ async fn validate_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ValidateRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let result = transpiler::validate_source(
-        &req.source,
-        state.config.sandbox.max_source_length,
-    );
-    (StatusCode::OK, Json(serde_json::to_value(&result).unwrap_or_else(|e| {
-        serde_json::json!({"error": "serialization_failed", "message": e.to_string()})
-    })))
+    let result = transpiler::validate_source(&req.source, state.config.sandbox.max_source_length);
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&result).unwrap_or_else(
+            |e| serde_json::json!({"error": "serialization_failed", "message": e.to_string()}),
+        )),
+    )
 }
 
 async fn starter_handler() -> (StatusCode, Json<serde_json::Value>) {
@@ -218,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_router_creation() {
-// Just verifies router builds without panic
+        // Just verifies router builds without panic
         let config = test_config();
         let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
         let state = Arc::new(AppState {
@@ -246,13 +252,18 @@ mod tests {
 
     #[test]
     fn test_error_status_codes() {
-        let err = TemplateError::SourceTooLarge { size: 1000, max: 100 };
+        let err = TemplateError::SourceTooLarge {
+            size: 1000,
+            max: 100,
+        };
         assert_eq!(err.code().to_string(), "SOURCE_TOO_LARGE");
 
         let err = TemplateError::Timeout { ms: 5000 };
         assert_eq!(err.code().to_string(), "SANDBOX_TIMEOUT");
 
-        let err = TemplateError::ForbiddenModule { module: "fs".into() };
+        let err = TemplateError::ForbiddenModule {
+            module: "fs".into(),
+        };
         assert_eq!(err.code().to_string(), "FORBIDDEN_MODULE");
     }
 }

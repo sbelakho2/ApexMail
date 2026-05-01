@@ -2,14 +2,16 @@
 
 use chrono::Utc;
 use sqlx::PgPool;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::config::{Config, RoutingMode};
-use crate::types::{GeoRoutingRule, GeoRoutingRuleRow, RegionInfo, RegionRow,
-                   RegionRole, RegionStatus, FencingStatus, TrafficDistribution};
+use crate::types::{
+    FencingStatus, GeoRoutingRule, GeoRoutingRuleRow, RegionInfo, RegionRole, RegionRow,
+    RegionStatus, TrafficDistribution,
+};
 
 /// MultiRegionService manages cross-region routing, failover, and traffic distribution.
 pub struct MultiRegionService {
@@ -99,9 +101,9 @@ impl MultiRegionService {
         }
     }
 
-// ── Region CRUD ────────────────────────────────────────
+    // ── Region CRUD ────────────────────────────────────────
 
-/// Register or update a region.
+    /// Register or update a region.
     pub async fn register_region(
         &self,
         name: &str,
@@ -111,7 +113,11 @@ impl MultiRegionService {
     ) -> Result<RegionInfo, String> {
         let id = Uuid::new_v4();
         let is_primary = role == &RegionRole::Primary;
-        let status = if is_primary { RegionStatus::Active } else { RegionStatus::Standby };
+        let status = if is_primary {
+            RegionStatus::Active
+        } else {
+            RegionStatus::Standby
+        };
 
         sqlx::query(
             "INSERT INTO ha_regions (id, name, endpoint, status, role, is_primary, health_score, weight, availability_zone)
@@ -128,23 +134,29 @@ impl MultiRegionService {
         info!(name, role = %role, "Region registered");
 
         Ok(RegionInfo {
-            id, name: name.into(), endpoint: endpoint.into(),
-            status: status.to_string(), role: role.to_string(),
-            is_primary, health_score: 100.0, latency_ms: None,
-            replication_lag_ms: None, weight: 1,
+            id,
+            name: name.into(),
+            endpoint: endpoint.into(),
+            status: status.to_string(),
+            role: role.to_string(),
+            is_primary,
+            health_score: 100.0,
+            latency_ms: None,
+            replication_lag_ms: None,
+            weight: 1,
             last_health_check: None,
             availability_zone: availability_zone.map(String::from),
             metadata: None,
         })
     }
 
-/// Get all regions.
+    /// Get all regions.
     pub async fn list_regions(&self, limit: i64, offset: i64) -> Result<Vec<RegionInfo>, String> {
         let rows: Vec<RegionRow> = sqlx::query_as::<_, RegionRow>(
             "SELECT id, name, endpoint, status, role, is_primary, health_score,
                     latency_ms, replication_lag_ms, weight, last_health_check,
                     availability_zone, metadata
-             FROM ha_regions ORDER BY is_primary DESC, name LIMIT $1 OFFSET $2"
+             FROM ha_regions ORDER BY is_primary DESC, name LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(offset)
@@ -155,13 +167,13 @@ impl MultiRegionService {
         Ok(rows.into_iter().map(|r| r.into_info()).collect())
     }
 
-/// Get a single region by name.
+    /// Get a single region by name.
     pub async fn get_region(&self, name: &str) -> Result<Option<RegionInfo>, String> {
         let row: Option<RegionRow> = sqlx::query_as::<_, RegionRow>(
             "SELECT id, name, endpoint, status, role, is_primary, health_score,
                     latency_ms, replication_lag_ms, weight, last_health_check,
                     availability_zone, metadata
-             FROM ha_regions WHERE name = $1"
+             FROM ha_regions WHERE name = $1",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -171,7 +183,7 @@ impl MultiRegionService {
         Ok(row.map(|r| r.into_info()))
     }
 
-/// Update region health score and latency.
+    /// Update region health score and latency.
     pub async fn update_health(
         &self,
         region_name: &str,
@@ -190,10 +202,13 @@ impl MultiRegionService {
         sqlx::query(
             "UPDATE ha_regions SET health_score=$2, latency_ms=$3, replication_lag_ms=$4,
              status=CASE WHEN status = 'fenced' THEN status ELSE $5 END,
-             last_health_check=NOW() WHERE name=$1"
+             last_health_check=NOW() WHERE name=$1",
         )
-        .bind(region_name).bind(health_score).bind(latency_ms)
-        .bind(replication_lag_ms).bind(status.to_string())
+        .bind(region_name)
+        .bind(health_score)
+        .bind(latency_ms)
+        .bind(replication_lag_ms)
+        .bind(status.to_string())
         .execute(&self.pool)
         .await
         .map_err(|e| format!("Update health: {e}"))?;
@@ -201,7 +216,7 @@ impl MultiRegionService {
         Ok(())
     }
 
-/// Remove a region.
+    /// Remove a region.
     pub async fn remove_region(&self, name: &str) -> Result<bool, String> {
         let res = sqlx::query("DELETE FROM ha_regions WHERE name = $1")
             .bind(name)
@@ -211,15 +226,13 @@ impl MultiRegionService {
         Ok(res.rows_affected() > 0)
     }
 
-// ── Routing ────────────────────────────────────────────
+    // ── Routing ────────────────────────────────────────────
 
-/// Select the best region for a request based on the current routing mode.
-    pub async fn route_request(
-        &self,
-        source_region: Option<&str>,
-    ) -> Result<RegionInfo, String> {
+    /// Select the best region for a request based on the current routing mode.
+    pub async fn route_request(&self, source_region: Option<&str>) -> Result<RegionInfo, String> {
         let regions = self.list_regions(10_000, 0).await?;
-        let active: Vec<&RegionInfo> = regions.iter()
+        let active: Vec<&RegionInfo> = regions
+            .iter()
             .filter(|r| r.status == "active" && r.health_score > 0.0)
             .collect();
 
@@ -227,7 +240,7 @@ impl MultiRegionService {
             return Err("No active regions available".into());
         }
 
-// Check geo routing rules first
+        // Check geo routing rules first
         if let Some(src) = source_region {
             if let Ok(Some(rule)) = self.find_matching_rule(src).await {
                 if let Some(target) = active.iter().find(|r| r.name == rule.target_region) {
@@ -244,7 +257,7 @@ impl MultiRegionService {
         .clone())
     }
 
-// ── Geo Routing Rules ──────────────────────────────────
+    // ── Geo Routing Rules ──────────────────────────────────
 
     pub async fn add_geo_rule(
         &self,
@@ -264,16 +277,24 @@ impl MultiRegionService {
         .map_err(|e| format!("Add geo rule: {e}"))?;
 
         Ok(GeoRoutingRule {
-            id, name: name.into(), source_region: source_region.into(),
-            target_region: target_region.into(), priority, enabled: true,
+            id,
+            name: name.into(),
+            source_region: source_region.into(),
+            target_region: target_region.into(),
+            priority,
+            enabled: true,
             conditions: None,
         })
     }
 
-    pub async fn list_geo_rules(&self, limit: i64, offset: i64) -> Result<Vec<GeoRoutingRule>, String> {
+    pub async fn list_geo_rules(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<GeoRoutingRule>, String> {
         let rows: Vec<GeoRoutingRuleRow> = sqlx::query_as::<_, GeoRoutingRuleRow>(
             "SELECT id, name, source_region, target_region, priority, enabled, conditions
-             FROM ha_geo_routing_rules ORDER BY priority LIMIT $1 OFFSET $2"
+             FROM ha_geo_routing_rules ORDER BY priority LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(offset)
@@ -298,7 +319,7 @@ impl MultiRegionService {
             "SELECT id, name, source_region, target_region, priority, enabled, conditions
              FROM ha_geo_routing_rules
              WHERE source_region = $1 AND enabled = true
-             ORDER BY priority LIMIT 1"
+             ORDER BY priority LIMIT 1",
         )
         .bind(source)
         .fetch_optional(&self.pool)
@@ -308,39 +329,42 @@ impl MultiRegionService {
         Ok(row.map(|r| r.into_rule()))
     }
 
-// ── Region Fencing (STONITH) ───────────────────────────
+    // ── Region Fencing (STONITH) ───────────────────────────
 
-/// Fence a region to prevent it from serving traffic.
+    /// Fence a region to prevent it from serving traffic.
     pub async fn fence_region(&self, region_name: &str, reason: &str) -> Result<(), String> {
         info!(region = region_name, reason, "Fencing region");
 
-        sqlx::query(
-            "UPDATE ha_regions SET status = $2 WHERE name = $1"
-        )
-        .bind(region_name).bind(FencingStatus::Fenced.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| format!("Fence region: {e}"))?;
+        sqlx::query("UPDATE ha_regions SET status = $2 WHERE name = $1")
+            .bind(region_name)
+            .bind(FencingStatus::Fenced.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| format!("Fence region: {e}"))?;
 
-// Publish to Redis
+        // Publish to Redis
         let url = self.config.redis.url();
         if let Ok(client) = redis::Client::open(url.as_str()) {
             if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
                 let _: Result<(), _> = redis::cmd("PUBLISH")
                     .arg("ha:region:fenced")
-                    .arg(serde_json::json!({
-                        "region": region_name,
-                        "reason": reason,
-                        "timestamp": Utc::now().to_rfc3339(),
-                    }).to_string())
-                    .query_async(&mut conn).await;
+                    .arg(
+                        serde_json::json!({
+                            "region": region_name,
+                            "reason": reason,
+                            "timestamp": Utc::now().to_rfc3339(),
+                        })
+                        .to_string(),
+                    )
+                    .query_async(&mut conn)
+                    .await;
             }
         }
 
         Ok(())
     }
 
-/// Unfence a region.
+    /// Unfence a region.
     pub async fn unfence_region(&self, region_name: &str) -> Result<(), String> {
         sqlx::query("UPDATE ha_regions SET status = 'standby' WHERE name = $1")
             .bind(region_name)
@@ -352,28 +376,32 @@ impl MultiRegionService {
         Ok(())
     }
 
-// ── Traffic Distribution ───────────────────────────────
+    // ── Traffic Distribution ───────────────────────────────
 
-/// Get current traffic distribution across regions (from Redis metrics).
+    /// Get current traffic distribution across regions (from Redis metrics).
     pub async fn get_traffic_distribution(&self) -> Result<Vec<TrafficDistribution>, String> {
         let regions = self.list_regions(10_000, 0).await?;
         let total_weight: f64 = regions.iter().map(|r| r.weight.max(1) as f64).sum();
 
-        Ok(regions.iter().map(|r| {
-            TrafficDistribution {
-                region: r.name.clone(),
-                weight: r.weight.max(1) as f64 / total_weight,
-                requests_per_second: 0.0, // Would come from metrics
-                error_rate: 0.0,
-                avg_latency_ms: r.latency_ms.unwrap_or(0.0),
-            }
-        }).collect())
+        Ok(regions
+            .iter()
+            .map(|r| {
+                TrafficDistribution {
+                    region: r.name.clone(),
+                    weight: r.weight.max(1) as f64 / total_weight,
+                    requests_per_second: 0.0, // Would come from metrics
+                    error_rate: 0.0,
+                    avg_latency_ms: r.latency_ms.unwrap_or(0.0),
+                }
+            })
+            .collect())
     }
 
-/// Update region weight.
+    /// Update region weight.
     pub async fn set_weight(&self, region_name: &str, weight: i32) -> Result<(), String> {
         sqlx::query("UPDATE ha_regions SET weight = $2 WHERE name = $1")
-            .bind(region_name).bind(weight)
+            .bind(region_name)
+            .bind(weight)
             .execute(&self.pool)
             .await
             .map_err(|e| format!("Set weight: {e}"))?;
@@ -389,19 +417,38 @@ mod tests {
     fn test_routing_mode_active_passive_selects_primary() {
         let regions = vec![
             RegionInfo {
-                id: Uuid::new_v4(), name: "us-east-1".into(), endpoint: "https://east.example.com".into(),
-                status: "active".into(), role: "primary".into(), is_primary: true,
-                health_score: 100.0, latency_ms: Some(10.0), replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "us-east-1".into(),
+                endpoint: "https://east.example.com".into(),
+                status: "active".into(),
+                role: "primary".into(),
+                is_primary: true,
+                health_score: 100.0,
+                latency_ms: Some(10.0),
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
             RegionInfo {
-                id: Uuid::new_v4(), name: "us-west-2".into(), endpoint: "https://west.example.com".into(),
-                status: "active".into(), role: "secondary".into(), is_primary: false,
-                health_score: 95.0, latency_ms: Some(50.0), replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "us-west-2".into(),
+                endpoint: "https://west.example.com".into(),
+                status: "active".into(),
+                role: "secondary".into(),
+                is_primary: false,
+                health_score: 95.0,
+                latency_ms: Some(50.0),
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
         ];
-        let active: Vec<&RegionInfo> = regions.iter()
+        let active: Vec<&RegionInfo> = regions
+            .iter()
             .filter(|r| r.status == "active" && r.health_score > 0.0)
             .collect();
         let selected = active
@@ -416,22 +463,44 @@ mod tests {
     fn test_routing_latency_based() {
         let regions = vec![
             RegionInfo {
-                id: Uuid::new_v4(), name: "us-east-1".into(), endpoint: "".into(),
-                status: "active".into(), role: "primary".into(), is_primary: true,
-                health_score: 100.0, latency_ms: Some(100.0), replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "us-east-1".into(),
+                endpoint: "".into(),
+                status: "active".into(),
+                role: "primary".into(),
+                is_primary: true,
+                health_score: 100.0,
+                latency_ms: Some(100.0),
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
             RegionInfo {
-                id: Uuid::new_v4(), name: "eu-west-1".into(), endpoint: "".into(),
-                status: "active".into(), role: "secondary".into(), is_primary: false,
-                health_score: 95.0, latency_ms: Some(20.0), replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "eu-west-1".into(),
+                endpoint: "".into(),
+                status: "active".into(),
+                role: "secondary".into(),
+                is_primary: false,
+                health_score: 95.0,
+                latency_ms: Some(20.0),
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
         ];
-        let best = regions.iter()
-            .min_by(|a, b| a.latency_ms.unwrap_or(f64::MAX)
-                .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
-                .unwrap_or(std::cmp::Ordering::Equal))
+        let best = regions
+            .iter()
+            .min_by(|a, b| {
+                a.latency_ms
+                    .unwrap_or(f64::MAX)
+                    .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|r| r.name.as_str());
         assert_eq!(best, Some("eu-west-1"));
     }
@@ -440,20 +509,43 @@ mod tests {
     fn test_routing_active_active_selects_healthiest() {
         let regions = vec![
             RegionInfo {
-                id: Uuid::new_v4(), name: "a".into(), endpoint: "".into(),
-                status: "active".into(), role: "primary".into(), is_primary: true,
-                health_score: 80.0, latency_ms: None, replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "a".into(),
+                endpoint: "".into(),
+                status: "active".into(),
+                role: "primary".into(),
+                is_primary: true,
+                health_score: 80.0,
+                latency_ms: None,
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
             RegionInfo {
-                id: Uuid::new_v4(), name: "b".into(), endpoint: "".into(),
-                status: "active".into(), role: "secondary".into(), is_primary: false,
-                health_score: 95.0, latency_ms: None, replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "b".into(),
+                endpoint: "".into(),
+                status: "active".into(),
+                role: "secondary".into(),
+                is_primary: false,
+                health_score: 95.0,
+                latency_ms: None,
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
         ];
-        let best = regions.iter()
-            .max_by(|a, b| a.health_score.partial_cmp(&b.health_score).unwrap_or(std::cmp::Ordering::Equal))
+        let best = regions
+            .iter()
+            .max_by(|a, b| {
+                a.health_score
+                    .partial_cmp(&b.health_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|r| r.name.as_str());
         assert_eq!(best, Some("b"));
     }
@@ -461,15 +553,33 @@ mod tests {
     #[test]
     fn test_health_score_to_status() {
         assert_eq!(
-            if 90.0 >= 80.0 { "active" } else if 90.0 >= 50.0 { "standby" } else { "inactive" },
+            if 90.0 >= 80.0 {
+                "active"
+            } else if 90.0 >= 50.0 {
+                "standby"
+            } else {
+                "inactive"
+            },
             "active"
         );
         assert_eq!(
-            if 60.0 >= 80.0 { "active" } else if 60.0 >= 50.0 { "standby" } else { "inactive" },
+            if 60.0 >= 80.0 {
+                "active"
+            } else if 60.0 >= 50.0 {
+                "standby"
+            } else {
+                "inactive"
+            },
             "standby"
         );
         assert_eq!(
-            if 30.0 >= 80.0 { "active" } else if 30.0 >= 50.0 { "standby" } else { "inactive" },
+            if 30.0 >= 80.0 {
+                "active"
+            } else if 30.0 >= 50.0 {
+                "standby"
+            } else {
+                "inactive"
+            },
             "inactive"
         );
     }
@@ -478,28 +588,48 @@ mod tests {
     fn test_traffic_distribution_weights() {
         let regions = vec![
             RegionInfo {
-                id: Uuid::new_v4(), name: "r1".into(), endpoint: "".into(),
-                status: "active".into(), role: "primary".into(), is_primary: true,
-                health_score: 100.0, latency_ms: Some(10.0), replication_lag_ms: None,
-                weight: 3, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "r1".into(),
+                endpoint: "".into(),
+                status: "active".into(),
+                role: "primary".into(),
+                is_primary: true,
+                health_score: 100.0,
+                latency_ms: Some(10.0),
+                replication_lag_ms: None,
+                weight: 3,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
             RegionInfo {
-                id: Uuid::new_v4(), name: "r2".into(), endpoint: "".into(),
-                status: "active".into(), role: "secondary".into(), is_primary: false,
-                health_score: 100.0, latency_ms: Some(20.0), replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "r2".into(),
+                endpoint: "".into(),
+                status: "active".into(),
+                role: "secondary".into(),
+                is_primary: false,
+                health_score: 100.0,
+                latency_ms: Some(20.0),
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
         ];
         let total_weight: f64 = regions.iter().map(|r| r.weight.max(1) as f64).sum();
         assert_eq!(total_weight, 4.0);
-        let dist: Vec<TrafficDistribution> = regions.iter().map(|r| {
-            TrafficDistribution {
+        let dist: Vec<TrafficDistribution> = regions
+            .iter()
+            .map(|r| TrafficDistribution {
                 region: r.name.clone(),
                 weight: r.weight.max(1) as f64 / total_weight,
-                requests_per_second: 0.0, error_rate: 0.0,
+                requests_per_second: 0.0,
+                error_rate: 0.0,
                 avg_latency_ms: r.latency_ms.unwrap_or(0.0),
-            }
-        }).collect();
+            })
+            .collect();
         assert!((dist[0].weight - 0.75).abs() < 0.001);
         assert!((dist[1].weight - 0.25).abs() < 0.001);
     }
@@ -507,10 +637,18 @@ mod tests {
     #[test]
     fn test_region_info_serialization() {
         let r = RegionInfo {
-            id: Uuid::new_v4(), name: "us-east-1".into(), endpoint: "https://east.example.com".into(),
-            status: "active".into(), role: "primary".into(), is_primary: true,
-            health_score: 99.5, latency_ms: Some(15.2), replication_lag_ms: None,
-            weight: 2, last_health_check: None, availability_zone: Some("us-east-1a".into()),
+            id: Uuid::new_v4(),
+            name: "us-east-1".into(),
+            endpoint: "https://east.example.com".into(),
+            status: "active".into(),
+            role: "primary".into(),
+            is_primary: true,
+            health_score: 99.5,
+            latency_ms: Some(15.2),
+            replication_lag_ms: None,
+            weight: 2,
+            last_health_check: None,
+            availability_zone: Some("us-east-1a".into()),
             metadata: None,
         };
         let json = serde_json::to_value(&r).unwrap();
@@ -521,9 +659,13 @@ mod tests {
     #[test]
     fn test_geo_routing_rule_serialization() {
         let rule = GeoRoutingRule {
-            id: Uuid::new_v4(), name: "eu-to-eu".into(),
-            source_region: "eu-west-1".into(), target_region: "eu-central-1".into(),
-            priority: 1, enabled: true, conditions: None,
+            id: Uuid::new_v4(),
+            name: "eu-to-eu".into(),
+            source_region: "eu-west-1".into(),
+            target_region: "eu-central-1".into(),
+            priority: 1,
+            enabled: true,
+            conditions: None,
         };
         let json = serde_json::to_value(&rule).unwrap();
         assert_eq!(json["priority"], 1);
@@ -541,7 +683,7 @@ mod tests {
         let total: i32 = weights.iter().sum();
         assert_eq!(total, 5);
 
-// pick=0 → cumulative crosses at idx 0 (3 >= 1)
+        // pick=0 → cumulative crosses at idx 0 (3 >= 1)
         let pick = 0;
         let mut cumulative = 0;
         let mut chosen = 0;
@@ -554,7 +696,7 @@ mod tests {
         }
         assert_eq!(chosen, 0);
 
-// pick=4 → cumulative crosses at idx 2 (5 >= 5)
+        // pick=4 → cumulative crosses at idx 2 (5 >= 5)
         let pick = 4;
         let mut cumulative = 0;
         let mut chosen = 0;
@@ -572,16 +714,34 @@ mod tests {
     fn test_select_active_region_round_robin_advances() {
         let regions = vec![
             RegionInfo {
-                id: Uuid::new_v4(), name: "r1".into(), endpoint: "".into(),
-                status: "active".into(), role: "primary".into(), is_primary: true,
-                health_score: 100.0, latency_ms: Some(10.0), replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "r1".into(),
+                endpoint: "".into(),
+                status: "active".into(),
+                role: "primary".into(),
+                is_primary: true,
+                health_score: 100.0,
+                latency_ms: Some(10.0),
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
             RegionInfo {
-                id: Uuid::new_v4(), name: "r2".into(), endpoint: "".into(),
-                status: "active".into(), role: "secondary".into(), is_primary: false,
-                health_score: 95.0, latency_ms: Some(15.0), replication_lag_ms: None,
-                weight: 1, last_health_check: None, availability_zone: None, metadata: None,
+                id: Uuid::new_v4(),
+                name: "r2".into(),
+                endpoint: "".into(),
+                status: "active".into(),
+                role: "secondary".into(),
+                is_primary: false,
+                health_score: 95.0,
+                latency_ms: Some(15.0),
+                replication_lag_ms: None,
+                weight: 1,
+                last_health_check: None,
+                availability_zone: None,
+                metadata: None,
             },
         ];
         let active: Vec<&RegionInfo> = regions.iter().collect();
@@ -597,10 +757,19 @@ mod tests {
     #[test]
     fn test_select_active_region_weighted_single_region() {
         let regions = vec![RegionInfo {
-            id: Uuid::new_v4(), name: "solo".into(), endpoint: "".into(),
-            status: "active".into(), role: "primary".into(), is_primary: true,
-            health_score: 100.0, latency_ms: Some(5.0), replication_lag_ms: None,
-            weight: 0, last_health_check: None, availability_zone: None, metadata: None,
+            id: Uuid::new_v4(),
+            name: "solo".into(),
+            endpoint: "".into(),
+            status: "active".into(),
+            role: "primary".into(),
+            is_primary: true,
+            health_score: 100.0,
+            latency_ms: Some(5.0),
+            replication_lag_ms: None,
+            weight: 0,
+            last_health_check: None,
+            availability_zone: None,
+            metadata: None,
         }];
         let active: Vec<&RegionInfo> = regions.iter().collect();
         let rr_counter = AtomicU64::new(0);

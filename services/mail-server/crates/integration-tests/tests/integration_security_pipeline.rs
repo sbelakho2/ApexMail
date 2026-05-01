@@ -11,8 +11,8 @@
 //! - Multi-layer detection catches threats
 //! - Clean traffic passes through efficiently
 
-use std::net::{IpAddr, Ipv4Addr};
 use chrono::Utc;
+use std::net::{IpAddr, Ipv4Addr};
 
 // ===========================================================================
 // Email Delivery Pipeline Tests
@@ -24,7 +24,10 @@ mod email_pipeline {
     use sandbox::engine::SandboxEngine;
     use spam_filter::engine::SpamEngine;
     use threat_intel::ThreatIntelEngine;
-    use waf_engine::{config::WafConfig, engine::{HttpRequest, WafEngine}};
+    use waf_engine::{
+        config::WafConfig,
+        engine::{HttpRequest, WafEngine},
+    };
 
     #[test]
     fn test_clean_email_passes_all_stages() {
@@ -34,8 +37,9 @@ mod email_pipeline {
         let dlp = DlpEngine::new();
         let sandbox_eng = SandboxEngine::new();
 
-// Step 1:WAF check
-        let api_body = r#"{"from":"sender@legitimate.com","subject":"Meeting","body":"Let's meet tomorrow."}"#;
+        // Step 1:WAF check
+        let api_body =
+            r#"{"from":"sender@legitimate.com","subject":"Meeting","body":"Let's meet tomorrow."}"#;
         let waf_req = HttpRequest {
             client_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
             method: "POST",
@@ -45,27 +49,46 @@ mod email_pipeline {
             body: Some(api_body),
         };
         let waf_result = waf.inspect(&waf_req);
-// Clean traffic should have low/zero score
-        assert!(waf_result.total_score < 10, "WAF score too high for clean email: {}", waf_result.total_score);
+        // Clean traffic should have low/zero score
+        assert!(
+            waf_result.total_score < 10,
+            "WAF score too high for clean email: {}",
+            waf_result.total_score
+        );
 
-// Step 2:Threat-intel check
+        // Step 2:Threat-intel check
         let _ti_ip = threat_intel.check_ip("8.8.8.8");
         let _ti_domain = threat_intel.check_domain("legitimate.com");
-// Clean IPs/domains should not be blocked (check risk_score if available)
+        // Clean IPs/domains should not be blocked (check risk_score if available)
 
-// Step 3:Spam filter
+        // Step 3:Spam filter
         let headers = vec![
             ("From".into(), "sender@legitimate.com".into()),
             ("Subject".into(), "Meeting tomorrow".into()),
         ];
-        let spam_verdict = spam.analyze("Let's meet tomorrow at 10am. Best regards, John.", &headers, None);
-        assert!(spam_verdict.score < 5.0, "Spam score too high for clean email: {}", spam_verdict.score);
+        let spam_verdict = spam.analyze(
+            "Let's meet tomorrow at 10am. Best regards, John.",
+            &headers,
+            None,
+        );
+        assert!(
+            spam_verdict.score < 5.0,
+            "Spam score too high for clean email: {}",
+            spam_verdict.score
+        );
 
-// Step 4:DLP scan
-        let dlp_verdict = dlp.scan("Let's meet tomorrow at 10am. Best regards, John.", Some("legitimate.com"));
-        assert!(dlp_verdict.risk_score < 5.0, "DLP score too high for clean email: {}", dlp_verdict.risk_score);
+        // Step 4:DLP scan
+        let dlp_verdict = dlp.scan(
+            "Let's meet tomorrow at 10am. Best regards, John.",
+            Some("legitimate.com"),
+        );
+        assert!(
+            dlp_verdict.risk_score < 5.0,
+            "DLP score too high for clean email: {}",
+            dlp_verdict.risk_score
+        );
 
-// Step 5:Sandbox (no attachment)
+        // Step 5:Sandbox (no attachment)
         let sandbox_result = sandbox_eng.analyze(b"Plain text attachment", Some("notes.txt"));
         assert!(sandbox_result.is_ok(), "Sandbox should accept plain text");
     }
@@ -84,7 +107,11 @@ mod email_pipeline {
             body: Some(api_body),
         };
         let result = waf.inspect(&req);
-        assert!(result.total_score > 0, "WAF should detect SQLi: score = {}", result.total_score);
+        assert!(
+            result.total_score > 0,
+            "WAF should detect SQLi: score = {}",
+            result.total_score
+        );
     }
 
     #[test]
@@ -94,10 +121,17 @@ mod email_pipeline {
         let body = "Congratulations! You've won $1,000,000! Click here to claim your prize NOW! This offer expires in 24 hours! Don't delay - act immediately!";
         let headers = vec![
             ("From".into(), "spam@spammer.com".into()),
-            ("Subject".into(), "URGENT: Act now! Limited time offer!".into()),
+            (
+                "Subject".into(),
+                "URGENT: Act now! Limited time offer!".into(),
+            ),
         ];
         let verdict = spam.analyze(body, &headers, None);
-        assert!(verdict.score > 3.0, "Spam filter should flag obvious spam: score = {}", verdict.score);
+        assert!(
+            verdict.score > 3.0,
+            "Spam filter should flag obvious spam: score = {}",
+            verdict.score
+        );
     }
 
     #[test]
@@ -106,9 +140,12 @@ mod email_pipeline {
 
         let body = "Customer SSN: 123-45-6789, Credit card: 4111-1111-1111-1111";
         let verdict = dlp.scan(body, Some("external.com"));
-        assert!(verdict.risk_score > 0.0 || !verdict.pii_findings.is_empty(),
+        assert!(
+            verdict.risk_score > 0.0 || !verdict.pii_findings.is_empty(),
             "DLP should detect PII: risk = {}, findings = {}",
-            verdict.risk_score, verdict.pii_findings.len());
+            verdict.risk_score,
+            verdict.pii_findings.len()
+        );
     }
 
     #[test]
@@ -119,7 +156,11 @@ mod email_pipeline {
         let result = sandbox_eng.analyze(exe_data, Some("important.exe"));
         assert!(result.is_ok(), "Sandbox should produce a verdict");
         let verdict = result.expect("verdict");
-        assert!(verdict.risk_score > 0.0, "Sandbox should flag executable: risk = {}", verdict.risk_score);
+        assert!(
+            verdict.risk_score > 0.0,
+            "Sandbox should flag executable: risk = {}",
+            verdict.risk_score
+        );
     }
 
     #[test]
@@ -136,7 +177,11 @@ mod email_pipeline {
             body: Some(body),
         };
         let result = waf.inspect(&req);
-        assert!(result.total_score > 0, "WAF should detect XSS: score = {}", result.total_score);
+        assert!(
+            result.total_score > 0,
+            "WAF should detect XSS: score = {}",
+            result.total_score
+        );
     }
 }
 
@@ -170,56 +215,71 @@ mod login_pipeline {
         let event = make_login("user1", "8.8.8.8", 40.7128, -74.0060, true);
         let verdict = ato.evaluate(&event);
 
-// Normal login should have low risk
-        assert!(verdict.risk_score < 5.0, "Normal login should have low risk: {}", verdict.risk_score);
+        // Normal login should have low risk
+        assert!(
+            verdict.risk_score < 5.0,
+            "Normal login should have low risk: {}",
+            verdict.risk_score
+        );
     }
 
     #[test]
     fn test_failed_login_escalation() {
         let ato = AtoEngine::with_config(AtoConfig::default());
 
-// Multiple failed logins
+        // Multiple failed logins
         for _ in 0..6 {
             let event = make_login("user_lockout", "10.0.0.1", 40.7128, -74.0060, false);
             ato.evaluate(&event);
         }
 
-// Next successful login should have elevated risk
+        // Next successful login should have elevated risk
         let event = make_login("user_lockout", "10.0.0.1", 40.7128, -74.0060, true);
         let verdict = ato.evaluate(&event);
 
-        assert!(verdict.risk_score > 2.0, "Risk should escalate after failed attempts: {}", verdict.risk_score);
+        assert!(
+            verdict.risk_score > 2.0,
+            "Risk should escalate after failed attempts: {}",
+            verdict.risk_score
+        );
     }
 
     #[test]
     fn test_impossible_travel_detection() {
         let ato = AtoEngine::with_config(AtoConfig::default());
 
-// Login from NYC
+        // Login from NYC
         let nyc_event = make_login("user_travel", "1.2.3.4", 40.7128, -74.0060, true);
         ato.evaluate(&nyc_event);
 
-// Immediate login from Tokyo
+        // Immediate login from Tokyo
         let tokyo_event = make_login("user_travel", "5.6.7.8", 35.6762, 139.6503, true);
         let verdict = ato.evaluate(&tokyo_event);
 
         assert!(verdict.impossible_travel, "Should detect impossible travel");
-        assert!(verdict.risk_score > 4.0, "Risk should be high for impossible travel: {}", verdict.risk_score);
+        assert!(
+            verdict.risk_score > 4.0,
+            "Risk should be high for impossible travel: {}",
+            verdict.risk_score
+        );
     }
 
     #[test]
     fn test_new_device_detection() {
         let ato = AtoEngine::with_config(AtoConfig::default());
 
-// First login - new device
+        // First login - new device
         let event = make_login("user_device", "10.0.0.1", 40.7128, -74.0060, true);
         let verdict = ato.evaluate(&event);
         assert!(verdict.new_device, "First login should be new device");
 
-// Second login - same device
+        // Second login - same device
         let event2 = make_login("user_device", "10.0.0.1", 40.7128, -74.0060, true);
         let verdict2 = ato.evaluate(&event2);
-        assert!(!verdict2.new_device, "Second login should not be new device");
+        assert!(
+            !verdict2.new_device,
+            "Second login should not be new device"
+        );
     }
 }
 
@@ -231,7 +291,10 @@ mod network_pipeline {
     use super::*;
     use ids_engine::{config::IdsConfig, engine::IdsEngine};
     use threat_intel::ThreatIntelEngine;
-    use waf_engine::{config::WafConfig, engine::{HttpRequest, WafEngine}};
+    use waf_engine::{
+        config::WafConfig,
+        engine::{HttpRequest, WafEngine},
+    };
 
     #[test]
     fn test_clean_http_traffic() {
@@ -240,13 +303,12 @@ mod network_pipeline {
         let _threat_intel = ThreatIntelEngine::new();
 
         let payload = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
-        let (verdict, alerts) = ids.inspect(
-            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-            80,
-            "tcp",
-            payload,
+        let (verdict, alerts) =
+            ids.inspect(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80, "tcp", payload);
+        assert!(
+            matches!(verdict, ids_engine::IdsVerdict::Pass),
+            "IDS should pass clean traffic"
         );
-        assert!(matches!(verdict, ids_engine::IdsVerdict::Pass), "IDS should pass clean traffic");
         assert!(alerts.is_empty(), "No alerts for clean traffic");
 
         let req = HttpRequest {
@@ -258,7 +320,11 @@ mod network_pipeline {
             body: None,
         };
         let waf_result = waf.inspect(&req);
-        assert!(waf_result.total_score < 5, "WAF should not flag clean traffic: {}", waf_result.total_score);
+        assert!(
+            waf_result.total_score < 5,
+            "WAF should not flag clean traffic: {}",
+            waf_result.total_score
+        );
     }
 
     #[test]
@@ -266,13 +332,10 @@ mod network_pipeline {
         let ids = IdsEngine::new(IdsConfig::default()).expect("IDS init");
         let waf = WafEngine::new(WafConfig::default());
 
-        let payload = b"GET /search?q=' UNION SELECT * FROM users -- HTTP/1.1\r\nHost:example.com\r\n\r\n";
-        let (_verdict, alerts) = ids.inspect(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            80,
-            "tcp",
-            payload,
-        );
+        let payload =
+            b"GET /search?q=' UNION SELECT * FROM users -- HTTP/1.1\r\nHost:example.com\r\n\r\n";
+        let (_verdict, alerts) =
+            ids.inspect(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 80, "tcp", payload);
 
         let req = HttpRequest {
             client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -301,7 +364,11 @@ mod network_pipeline {
             body: None,
         };
         let result = waf.inspect(&req);
-        assert!(result.total_score > 0, "WAF should detect path traversal: {}", result.total_score);
+        assert!(
+            result.total_score > 0,
+            "WAF should detect path traversal: {}",
+            result.total_score
+        );
     }
 
     #[test]
@@ -317,7 +384,11 @@ mod network_pipeline {
             body: Some("<script>alert(1)</script>"),
         };
         let result = waf.inspect(&req);
-        assert!(result.total_score > 0, "WAF should detect XSS: {}", result.total_score);
+        assert!(
+            result.total_score > 0,
+            "WAF should detect XSS: {}",
+            result.total_score
+        );
     }
 }
 

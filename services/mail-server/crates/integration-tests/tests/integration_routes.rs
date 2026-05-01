@@ -77,12 +77,11 @@ mod devex {
             )
             .await
             .unwrap();
-// The handler tries to actually POST to the URL, and will fail in tests
-// (no network). We just verify the route exists and returns a response.
-// Either 200 (if network is available) or 500 (network error) is fine.
+        // The handler tries to actually POST to the URL, and will fail in tests
+        // (no network). We just verify the route exists and returns a response.
+        // Either 200 (if network is available) or 500 (network error) is fine.
         assert!(
-            resp.status() == StatusCode::OK
-                || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
+            resp.status() == StatusCode::OK || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 
@@ -316,13 +315,13 @@ mod ops {
 
 mod sales {
     use super::*;
-    use sqlx::postgres::PgPoolOptions;
     use sales_autopilot::calendar::CalendarService;
     use sales_autopilot::campaigns::CampaignManager;
     use sales_autopilot::crm::CrmService;
     use sales_autopilot::enrichment::EnrichmentService;
     use sales_autopilot::inbox::InboxManager;
     use sales_autopilot::routes::{router, AppState};
+    use sqlx::postgres::PgPoolOptions;
 
     fn app() -> axum::Router {
         let db = PgPoolOptions::new()
@@ -550,9 +549,17 @@ mod billing {
     fn all_plans_have_positive_limits() {
         let plans = default_plans();
         for p in &plans {
-// -1 means unlimited, otherwise must be positive
-            assert!(p.email_limit > 0 || p.email_limit == -1, "{} email_limit", p.name);
-            assert!(p.api_call_limit > 0 || p.api_call_limit == -1, "{} api_call_limit", p.name);
+            // -1 means unlimited, otherwise must be positive
+            assert!(
+                p.email_limit > 0 || p.email_limit == -1,
+                "{} email_limit",
+                p.name
+            );
+            assert!(
+                p.api_call_limit > 0 || p.api_call_limit == -1,
+                "{} api_call_limit",
+                p.name
+            );
         }
     }
 }

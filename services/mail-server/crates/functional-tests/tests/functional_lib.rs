@@ -75,15 +75,17 @@ fn api_key_prefixes() {
 
 #[test]
 fn validate_email_edge_cases() {
-// Valid
+    // Valid
     assert!(apexmail_lib::validation::is_valid_email("user@example.com"));
     assert!(apexmail_lib::validation::is_valid_email("a@b.cc"));
-    assert!(apexmail_lib::validation::is_valid_email("test+tag@sub.domain.co.uk"));
-// Invalid
+    assert!(apexmail_lib::validation::is_valid_email(
+        "test+tag@sub.domain.co.uk"
+    ));
+    // Invalid
     assert!(!apexmail_lib::validation::is_valid_email(""));
     assert!(!apexmail_lib::validation::is_valid_email("noatsign"));
     assert!(!apexmail_lib::validation::is_valid_email("@no-local.com"));
-// Very long (> 320 chars)
+    // Very long (> 320 chars)
     let long_local = "a".repeat(310);
     let long_email = format!("{}@example.com", long_local);
     assert!(!apexmail_lib::validation::is_valid_email(&long_email));
@@ -101,10 +103,22 @@ fn null_byte_detection_and_sanitization() {
 
 #[test]
 fn parse_valid_durations() {
-    assert_eq!(apexmail_lib::time::parse_duration("24h").unwrap(), Duration::from_secs(86400));
-    assert_eq!(apexmail_lib::time::parse_duration("30m").unwrap(), Duration::from_secs(1800));
-    assert_eq!(apexmail_lib::time::parse_duration("7d").unwrap(), Duration::from_secs(604800));
-    assert_eq!(apexmail_lib::time::parse_duration("60s").unwrap(), Duration::from_secs(60));
+    assert_eq!(
+        apexmail_lib::time::parse_duration("24h").unwrap(),
+        Duration::from_secs(86400)
+    );
+    assert_eq!(
+        apexmail_lib::time::parse_duration("30m").unwrap(),
+        Duration::from_secs(1800)
+    );
+    assert_eq!(
+        apexmail_lib::time::parse_duration("7d").unwrap(),
+        Duration::from_secs(604800)
+    );
+    assert_eq!(
+        apexmail_lib::time::parse_duration("60s").unwrap(),
+        Duration::from_secs(60)
+    );
 }
 
 #[test]
@@ -158,7 +172,16 @@ fn error_code_http_status_mapping_all_variants() {
 
 #[test]
 fn error_code_display_roundtrip() {
-    assert_eq!(apexmail_lib::ErrorCode::Unauthorized.to_string(), "UNAUTHORIZED");
-    assert_eq!(apexmail_lib::ErrorCode::RateLimitExceeded.to_string(), "RATE_LIMIT_EXCEEDED");
-    assert_eq!(apexmail_lib::ErrorCode::IdempotencyConflict.to_string(), "IDEMPOTENCY_CONFLICT");
+    assert_eq!(
+        apexmail_lib::ErrorCode::Unauthorized.to_string(),
+        "UNAUTHORIZED"
+    );
+    assert_eq!(
+        apexmail_lib::ErrorCode::RateLimitExceeded.to_string(),
+        "RATE_LIMIT_EXCEEDED"
+    );
+    assert_eq!(
+        apexmail_lib::ErrorCode::IdempotencyConflict.to_string(),
+        "IDEMPOTENCY_CONFLICT"
+    );
 }

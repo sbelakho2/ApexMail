@@ -139,17 +139,17 @@ pub struct DnsblReport {
 }
 
 impl DnsblReport {
-/// Whether the IP is listed on any DNSBL.
+    /// Whether the IP is listed on any DNSBL.
     pub fn is_listed(&self) -> bool {
         self.results.iter().any(|r| r.listed)
     }
 
-/// Count of DNSBLs where the IP is listed.
+    /// Count of DNSBLs where the IP is listed.
     pub fn listing_count(&self) -> usize {
         self.results.iter().filter(|r| r.listed).count()
     }
 
-/// Get the highest severity among all listings.
+    /// Get the highest severity among all listings.
     pub fn max_severity(&self) -> Option<Severity> {
         self.results
             .iter()
@@ -158,7 +158,7 @@ impl DnsblReport {
             .max()
     }
 
-/// Get all zones where the IP is listed.
+    /// Get all zones where the IP is listed.
     pub fn listed_zones(&self) -> Vec<&DnsblCheckResult> {
         self.results.iter().filter(|r| r.listed).collect()
     }
@@ -172,30 +172,26 @@ pub struct DnsblChecker {
 }
 
 impl DnsblChecker {
-/// Create a new DNSBL checker.
+    /// Create a new DNSBL checker.
     pub fn new() -> Self {
         let resolver =
             TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
         Self { resolver }
     }
 
-/// Reverse an IPv4 address for DNSBL query.
-/// Example:192.168.1.2 → "2.1.168.192"
+    /// Reverse an IPv4 address for DNSBL query.
+    /// Example:192.168.1.2 → "2.1.168.192"
     pub fn reverse_ip(ip: Ipv4Addr) -> String {
         let octets = ip.octets();
         format!("{}.{}.{}.{}", octets[3], octets[2], octets[1], octets[0])
     }
 
-/// Check a single IP against a single DNSBL zone.
-    pub async fn check_single(
-        &self,
-        ip: IpAddr,
-        zone: &DnsblZone,
-    ) -> DnsblCheckResult {
+    /// Check a single IP against a single DNSBL zone.
+    pub async fn check_single(&self, ip: IpAddr, zone: &DnsblZone) -> DnsblCheckResult {
         let ip_v4 = match ip {
             IpAddr::V4(v4) => v4,
             IpAddr::V6(_) => {
-// Most DNSBLs only support IPv4
+                // Most DNSBLs only support IPv4
                 return DnsblCheckResult {
                     ip,
                     zone: zone.zone.to_string(),
@@ -212,7 +208,7 @@ impl DnsblChecker {
 
         match self.resolver.lookup_ip(&query).await {
             Ok(lookup) => {
-// Any A record response means the IP is listed.
+                // Any A record response means the IP is listed.
                 let return_addr = lookup.iter().next().and_then(|a| match a {
                     IpAddr::V4(v4) => Some(v4),
                     _ => None,
@@ -238,7 +234,7 @@ impl DnsblChecker {
                 }
             }
             Err(_) => {
-// NXDOMAIN or timeout → not listed (this is the normal case)
+                // NXDOMAIN or timeout → not listed (this is the normal case)
                 DnsblCheckResult {
                     ip,
                     zone: zone.zone.to_string(),
@@ -252,11 +248,11 @@ impl DnsblChecker {
         }
     }
 
-/// Check an IP against all configured DNSBL zones.
+    /// Check an IP against all configured DNSBL zones.
     pub async fn check_all(&self, ip: IpAddr) -> DnsblReport {
         let mut results = Vec::with_capacity(DNSBL_ZONES.len());
 
-// Run all checks concurrently
+        // Run all checks concurrently
         let futures: Vec<_> = DNSBL_ZONES
             .iter()
             .map(|zone| self.check_single(ip, zone))
@@ -285,7 +281,7 @@ impl DnsblChecker {
         report
     }
 
-/// Check multiple IPs against all DNSBLs.
+    /// Check multiple IPs against all DNSBLs.
     pub async fn check_many(&self, ips: &[IpAddr]) -> Vec<DnsblReport> {
         let futures: Vec<_> = ips.iter().map(|ip| self.check_all(*ip)).collect();
         futures::future::join_all(futures).await
@@ -338,17 +334,15 @@ mod tests {
         let report = DnsblReport {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             checked_at: Utc::now(),
-            results: vec![
-                DnsblCheckResult {
-                    ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                    zone: "zen.spamhaus.org".into(),
-                    zone_name: "Spamhaus ZEN".into(),
-                    listed: false,
-                    return_code: None,
-                    severity: Severity::Critical,
-                    checked_at: Utc::now(),
-                },
-            ],
+            results: vec![DnsblCheckResult {
+                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                zone: "zen.spamhaus.org".into(),
+                zone_name: "Spamhaus ZEN".into(),
+                listed: false,
+                return_code: None,
+                severity: Severity::Critical,
+                checked_at: Utc::now(),
+            }],
         };
         assert!(!report.is_listed());
         assert_eq!(report.listing_count(), 0);

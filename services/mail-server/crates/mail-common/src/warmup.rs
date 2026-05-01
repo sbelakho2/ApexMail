@@ -62,8 +62,10 @@ mod tests {
 
         for day in 0..=FULL_WARMUP_DAYS {
             let current = limit_for_day(day);
-            assert!(current >= previous,
-                "warmup schedule regressed at day {day}: {current} < {previous}");
+            assert!(
+                current >= previous,
+                "warmup schedule regressed at day {day}: {current} < {previous}"
+            );
             previous = current;
         }
     }

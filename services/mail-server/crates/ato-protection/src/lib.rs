@@ -29,12 +29,12 @@
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 
+pub mod behavior;
 pub mod config;
+pub mod engine;
 pub mod geo;
 pub mod lockout_backend;
 pub mod session;
-pub mod behavior;
-pub mod engine;
 pub mod tls_fingerprint;
 
 use thiserror::Error;
@@ -42,15 +42,15 @@ use thiserror::Error;
 /// ATO protection errors
 #[derive(Debug, Error)]
 pub enum AtoError {
-/// Session not found
+    /// Session not found
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 
-/// User has no login history
+    /// User has no login history
     #[error("No history for user: {0}")]
     NoHistory(String),
 
-/// Internal error
+    /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
 }

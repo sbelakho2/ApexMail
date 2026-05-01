@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}Page Not Found | {{ config.extra.site_name }}{% endblock title %}
+{% block description %}The page you requested could not be found. Explore ApexMail pricing, docs, or the developer console from here.{% endblock description %}
+{% block canonical %}{{ config.base_url }}/404{% endblock canonical %}
+
+{% block head %}
+  <meta name="robots" content="noindex, nofollow" />
+{% endblock head %}
+
+{% block content %}
+<section class="relative overflow-hidden bg-surface-950 text-white">
+  <div class="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(37,99,235,0.25),transparent_55%)]"></div>
+  <div class="relative mx-auto flex min-h-[70vh] max-w-5xl flex-col justify-center px-4 py-20 sm:px-6 lg:px-8">
+    <div class="max-w-2xl">
+      <p class="mb-4 text-sm font-semibold uppercase tracking-[0.3em] text-primary-300">404</p>
+      <h1 class="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+        This page is gone, but the platform is still here.
+      </h1>
+      <p class="mt-6 max-w-xl text-lg text-surface-300">
+        The URL may be outdated or mistyped. Use one of the primary entry points below to get back to pricing, docs, or the application.
+      </p>
+      <div class="mt-10 flex flex-col gap-3 sm:flex-row">
+        <a href="/pricing" class="inline-flex items-center justify-center rounded-md bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-primary-400">
+          View Pricing
+        </a>
+        <a href="/docs" class="inline-flex items-center justify-center rounded-md border border-surface-700 px-5 py-3 text-sm font-medium text-surface-100 transition-colors hover:border-surface-500 hover:bg-surface-900">
+          Read Docs
+        </a>
+        <a href="{{ config.extra.app_url }}/login" class="inline-flex items-center justify-center rounded-md border border-surface-700 px-5 py-3 text-sm font-medium text-surface-100 transition-colors hover:border-surface-500 hover:bg-surface-900">
+          Open Console
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock content %}

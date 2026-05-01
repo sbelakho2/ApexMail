@@ -62,16 +62,16 @@ pub struct AlertConfig {
 /// Root configuration for the observability service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservabilityConfig {
-/// HTTP listen port.
+    /// HTTP listen port.
     pub port: u16,
-/// Runtime environment (`development`, `staging`, `production`).
+    /// Runtime environment (`development`, `staging`, `production`).
     pub environment: String,
-/// Application version tag.
+    /// Application version tag.
     pub version: String,
-/// Shared bearer token required for protected internal routes.
+    /// Shared bearer token required for protected internal routes.
     pub internal_service_token: String,
 
-// Database
+    // Database
     pub db_host: String,
     pub db_port: u16,
     pub database: String,
@@ -79,18 +79,18 @@ pub struct ObservabilityConfig {
     pub db_password: String,
     pub db_pool_max: u32,
 
-// Redis
+    // Redis
     pub redis_host: String,
     pub redis_port: u16,
     pub redis_password: Option<String>,
 
-// Sub-configs
+    // Sub-configs
     pub tracing: TracingConfig,
     pub metrics: MetricsConfig,
     pub logging: LoggingConfig,
     pub alerting: AlertConfig,
 
-/// Log retention in days.
+    /// Log retention in days.
     pub log_retention_days: u32,
 }
 
@@ -170,7 +170,7 @@ impl Default for ObservabilityConfig {
 }
 
 impl ObservabilityConfig {
-/// Build a config from environment variables (falls back to defaults).
+    /// Build a config from environment variables (falls back to defaults).
     pub fn from_env() -> Result<Self, String> {
         fn env_or(key: &str, default: &str) -> String {
             std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -208,9 +208,7 @@ impl ObservabilityConfig {
                 service_name: env_or("SERVICE_NAME", &default.tracing.service_name),
                 service_version: env_or("SERVICE_VERSION", &default.tracing.service_version),
                 environment: env_or("NODE_ENV", &default.tracing.environment),
-                sample_rate: env_or("TRACE_SAMPLE_RATE", "1.0")
-                    .parse()
-                    .unwrap_or(1.0),
+                sample_rate: env_or("TRACE_SAMPLE_RATE", "1.0").parse().unwrap_or(1.0),
                 jaeger_endpoint: env_or("JAEGER_ENDPOINT", &default.tracing.jaeger_endpoint),
                 zipkin_endpoint: env_or("ZIPKIN_ENDPOINT", &default.tracing.zipkin_endpoint),
                 otlp_endpoint: env_or("OTLP_ENDPOINT", &default.tracing.otlp_endpoint),
@@ -218,9 +216,12 @@ impl ObservabilityConfig {
 
             metrics: MetricsConfig {
                 enabled: env_or("METRICS_ENABLED", "true") != "false",
-                prometheus_port: env_or("PROMETHEUS_PORT", &default.metrics.prometheus_port.to_string())
-                    .parse()
-                    .unwrap_or(default.metrics.prometheus_port),
+                prometheus_port: env_or(
+                    "PROMETHEUS_PORT",
+                    &default.metrics.prometheus_port.to_string(),
+                )
+                .parse()
+                .unwrap_or(default.metrics.prometheus_port),
                 default_labels: default.metrics.default_labels.clone(),
                 histogram_buckets: default.metrics.histogram_buckets.clone(),
                 aggregation_interval_ms: env_or(
@@ -237,9 +238,12 @@ impl ObservabilityConfig {
                 include_timestamp: true,
                 include_trace_id: true,
                 sensitive_fields: default.logging.sensitive_fields.clone(),
-                max_message_length: env_or("LOG_MAX_LENGTH", &default.logging.max_message_length.to_string())
-                    .parse()
-                    .unwrap_or(default.logging.max_message_length),
+                max_message_length: env_or(
+                    "LOG_MAX_LENGTH",
+                    &default.logging.max_message_length.to_string(),
+                )
+                .parse()
+                .unwrap_or(default.logging.max_message_length),
             },
 
             alerting: AlertConfig {
@@ -257,14 +261,10 @@ impl ObservabilityConfig {
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string())
                     .collect(),
-                cooldown_minutes: env_or("ALERT_COOLDOWN", "15")
-                    .parse()
-                    .unwrap_or(15),
+                cooldown_minutes: env_or("ALERT_COOLDOWN", "15").parse().unwrap_or(15),
             },
 
-            log_retention_days: env_or("LOG_RETENTION_DAYS", "30")
-                .parse()
-                .unwrap_or(30),
+            log_retention_days: env_or("LOG_RETENTION_DAYS", "30").parse().unwrap_or(30),
         };
         config.validate()?;
         Ok(config)
@@ -334,13 +334,15 @@ mod tests {
         let cfg = ObservabilityConfig::default();
         let json = serde_json::to_string(&cfg);
         assert!(json.is_ok());
-        let deserialized: Option<ObservabilityConfig> =
-            json.ok().and_then(|value| serde_json::from_str(&value).ok());
-        assert_eq!(deserialized.as_ref().map(|value| value.port), Some(cfg.port));
+        let deserialized: Option<ObservabilityConfig> = json
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok());
         assert_eq!(
-            deserialized
-                .as_ref()
-                .map(|value| value.tracing.sample_rate),
+            deserialized.as_ref().map(|value| value.port),
+            Some(cfg.port)
+        );
+        assert_eq!(
+            deserialized.as_ref().map(|value| value.tracing.sample_rate),
             Some(cfg.tracing.sample_rate)
         );
         assert_eq!(

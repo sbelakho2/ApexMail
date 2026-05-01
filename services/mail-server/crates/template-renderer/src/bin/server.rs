@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use clap::Parser;
+use std::sync::Arc;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use template_renderer::config::*;
-use template_renderer::sandbox::Sandbox;
 use template_renderer::cache::TemplateCache;
+use template_renderer::config::*;
 use template_renderer::routes::{self, AppState};
+use template_renderer::sandbox::Sandbox;
 
 #[derive(Parser)]
 #[command(name = "template-renderer", about = "Email template rendering service")]
@@ -73,7 +73,9 @@ async fn main() -> anyhow::Result<()> {
         service_token: {
             let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
             if token.is_empty() {
-                tracing::warn!("INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled");
+                tracing::warn!(
+                    "INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled"
+                );
             }
             token
         },
@@ -86,7 +88,9 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     let shutdown = async {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

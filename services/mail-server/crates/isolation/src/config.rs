@@ -166,23 +166,34 @@ fn generated_runtime_secret(label: &str) -> String {
 impl Config {
     pub fn from_env() -> Self {
         let environment = env_or("NODE_ENV", "development");
-        let is_production = environment.eq_ignore_ascii_case("production") || environment.eq_ignore_ascii_case("prod");
+        let is_production = environment.eq_ignore_ascii_case("production")
+            || environment.eq_ignore_ascii_case("prod");
         let encryption_key_env = std::env::var("TENANT_ENCRYPTION_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
         let internal_api_key_env = std::env::var("ISOLATION_INTERNAL_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let encryption_key = encryption_key_env
-            .unwrap_or_else(|| generated_runtime_secret("tenant-encryption-key"));
+        let encryption_key =
+            encryption_key_env.unwrap_or_else(|| generated_runtime_secret("tenant-encryption-key"));
         let internal_api_key = internal_api_key_env
             .unwrap_or_else(|| generated_runtime_secret("isolation-internal-api-key"));
-        if is_production && std::env::var("TENANT_ENCRYPTION_KEY").ok().filter(|value| !value.trim().is_empty()).is_none() {
+        if is_production
+            && std::env::var("TENANT_ENCRYPTION_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .is_none()
+        {
             eprintln!(
                 "SECURITY: TENANT_ENCRYPTION_KEY missing in production; generated an ephemeral runtime key"
             );
         }
-        if is_production && std::env::var("ISOLATION_INTERNAL_API_KEY").ok().filter(|value| !value.trim().is_empty()).is_none() {
+        if is_production
+            && std::env::var("ISOLATION_INTERNAL_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .is_none()
+        {
             eprintln!(
                 "SECURITY: ISOLATION_INTERNAL_API_KEY missing in production; generated an ephemeral runtime key"
             );

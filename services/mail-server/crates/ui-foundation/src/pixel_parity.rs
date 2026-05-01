@@ -120,20 +120,17 @@ pub fn compare_classes(expected_html: &str, actual_html: &str) -> Vec<String> {
                 let missing: Vec<&String> = e.iter().filter(|c| !a.contains(c)).collect();
                 let extra: Vec<&String> = a.iter().filter(|c| !e.contains(c)).collect();
                 if !missing.is_empty() {
-                    diffs.push(format!(
-                        "Element {}: missing classes {:?}",
-                        i, missing
-                    ));
+                    diffs.push(format!("Element {}: missing classes {:?}", i, missing));
                 }
                 if !extra.is_empty() {
-                    diffs.push(format!(
-                        "Element {}: extra classes {:?}",
-                        i, extra
-                    ));
+                    diffs.push(format!("Element {}: extra classes {:?}", i, extra));
                 }
             }
             (Some(e), None) => {
-                diffs.push(format!("Element {}: expected classes {:?}, got nothing", i, e));
+                diffs.push(format!(
+                    "Element {}: expected classes {:?}, got nothing",
+                    i, e
+                ));
             }
             (None, Some(a)) => {
                 diffs.push(format!("Element {}: unexpected classes {:?}", i, a));
@@ -150,13 +147,13 @@ pub fn extract_data_attrs(html: &str) -> Vec<(String, String)> {
     let mut attrs = Vec::new();
     let mut search = html;
     while let Some(pos) = search.find("data-") {
-// Find the attribute name
+        // Find the attribute name
         let name_end = search[pos..]
             .find(['=', ' ', '>', '/'])
             .unwrap_or(search[pos..].len());
         let name = &search[pos..pos + name_end];
 
-// Find the value
+        // Find the value
         if search[pos + name_end..].starts_with("=\"") {
             let val_start = pos + name_end + 2;
             if let Some(val_end) = search[val_start..].find('"') {
@@ -238,7 +235,7 @@ pub fn check_parity(expected: &str, actual: &str) -> ParityResult {
 
     let mut attribute_diffs = Vec::new();
 
-// Check data attributes
+    // Check data attributes
     for (name, val) in &expected_data {
         if !actual_data.iter().any(|(n, v)| n == name && v == val) {
             attribute_diffs.push(format!("missing {}=\"{}\"", name, val));
@@ -250,7 +247,7 @@ pub fn check_parity(expected: &str, actual: &str) -> ParityResult {
         }
     }
 
-// Check aria attributes
+    // Check aria attributes
     for (name, val) in &expected_aria {
         if !actual_aria.iter().any(|(n, v)| n == name && v == val) {
             attribute_diffs.push(format!("missing {}=\"{}\"", name, val));
@@ -266,13 +263,16 @@ pub fn check_parity(expected: &str, actual: &str) -> ParityResult {
             (Some(e), Some(a)) if e != a => {
                 text_diffs.push(format!("Text node {}: expected {:?}, got {:?}", i, e, a));
             }
-            (Some(e), None) => text_diffs.push(format!("Text node {}: expected {:?}, missing", i, e)),
+            (Some(e), None) => {
+                text_diffs.push(format!("Text node {}: expected {:?}, missing", i, e))
+            }
             (None, Some(a)) => text_diffs.push(format!("Text node {}: unexpected {:?}", i, a)),
             _ => {}
         }
     }
 
-    let is_identical = class_diffs.is_empty() && attribute_diffs.is_empty() && text_diffs.is_empty();
+    let is_identical =
+        class_diffs.is_empty() && attribute_diffs.is_empty() && text_diffs.is_empty();
 
     ParityResult {
         is_identical,
@@ -318,9 +318,9 @@ mod tests {
         );
     }
 
-// ─── Self-consistency tests ─────────────────────────────
-// These verify that the SAME rendering engine produces
-// identical output when called twice (determinism baseline).
+    // ─── Self-consistency tests ─────────────────────────────
+    // These verify that the SAME rendering engine produces
+    // identical output when called twice (determinism baseline).
 
     #[test]
     fn deterministic_rendering_web_home() {
@@ -350,11 +350,19 @@ mod tests {
         assert_pixel_parity("campaigns_new determinism", &a, &b);
     }
 
-// ─── Primitive parity tests ─────────────────────────────
+    // ─── Primitive parity tests ─────────────────────────────
 
     #[test]
     fn button_html_class_parity() {
-        let btn = Button { variant: "default", size: "default", label: "Click me", disabled: false, loading: false, left_icon: None, right_icon: None };
+        let btn = Button {
+            variant: "default",
+            size: "default",
+            label: "Click me",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None,
+        };
         let html = btn.render_html();
         let html2 = btn.render_html();
         assert_pixel_parity("button_default", &html, &html2);
@@ -364,7 +372,17 @@ mod tests {
 
     #[test]
     fn input_html_class_parity() {
-        let inp = Input { input_type: "text", variant: "default", size: "default", placeholder: "Enter text", value: "", left_icon: None, right_icon: None, error: None, disabled: false };
+        let inp = Input {
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "Enter text",
+            value: "",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false,
+        };
         let html = inp.render_html();
         let classes = extract_classes(&html);
         assert!(!classes.is_empty());
@@ -374,21 +392,32 @@ mod tests {
 
     #[test]
     fn dialog_renders_accessible() {
-        let dlg = Dialog { title: "Confirm", description: Some("Are you sure?"), body: "<p>Test</p>", size: "default", variant: "default", hide_close_button: false };
+        let dlg = Dialog {
+            title: "Confirm",
+            description: Some("Are you sure?"),
+            body: "<p>Test</p>",
+            size: "default",
+            variant: "default",
+            hide_close_button: false,
+        };
         let html = dlg.render_html();
         let aria = extract_aria_attrs(&html);
-        assert!(aria.iter().any(|(n, _)| n == "aria-modal"), "Dialog must have aria-modal");
+        assert!(
+            aria.iter().any(|(n, _)| n == "aria-modal"),
+            "Dialog must have aria-modal"
+        );
     }
 
-// ─── Page-level parity markers ──────────────────────────
+    // ─── Page-level parity markers ──────────────────────────
 
     #[test]
     fn web_login_page_selectors_match_behavior_baseline() {
         let html = leptos_views::web_login_page();
         let data = extract_data_attrs(&html);
-// Check the error-key data attribute
+        // Check the error-key data attribute
         assert!(
-            data.iter().any(|(n, v)| n == "data-error-key" && v == "auth.error.rate_limited"),
+            data.iter()
+                .any(|(n, v)| n == "data-error-key" && v == "auth.error.rate_limited"),
             "Login page must contain data-error-key for rate limiting"
         );
     }
@@ -398,7 +427,8 @@ mod tests {
         let html = leptos_views::web_dashboard_layout("<div>test</div>");
         let data = extract_data_attrs(&html);
         assert!(
-            data.iter().any(|(n, v)| n == "data-sidebar-storage-key" && v == "apexmail-ui"),
+            data.iter()
+                .any(|(n, v)| n == "data-sidebar-storage-key" && v == "apexmail-ui"),
             "Dashboard shell must have data-sidebar-storage-key"
         );
         assert!(
@@ -412,7 +442,8 @@ mod tests {
         let html = leptos_views::web_dashboard_layout("<div>test</div>");
         let aria = extract_aria_attrs(&html);
         assert!(
-            aria.iter().any(|(n, v)| n == "aria-label" && v == "Primary sidebar navigation"),
+            aria.iter()
+                .any(|(n, v)| n == "aria-label" && v == "Primary sidebar navigation"),
             "Dashboard sidebar must have correct aria-label"
         );
     }
@@ -425,7 +456,7 @@ mod tests {
         assert!(html.contains("id=\"login-mfa\""));
     }
 
-// ─── Marketing parity tests ─────────────────────────────
+    // ─── Marketing parity tests ─────────────────────────────
 
     #[test]
     fn marketing_api_console_has_expected_markers() {
@@ -434,7 +465,7 @@ mod tests {
         assert!(text.iter().any(|t| t.contains("API Sandbox Console")));
     }
 
-// ─── Class extraction unit tests ────────────────────────
+    // ─── Class extraction unit tests ────────────────────────
 
     #[test]
     fn extract_classes_parses_correctly() {
@@ -463,10 +494,15 @@ mod tests {
 
     #[test]
     fn extract_data_attrs_parses_correctly() {
-        let html = r#"<div data-sidebar-storage-key="apexmail-ui" data-toast-store="global"></div>"#;
+        let html =
+            r#"<div data-sidebar-storage-key="apexmail-ui" data-toast-store="global"></div>"#;
         let attrs = extract_data_attrs(html);
-        assert!(attrs.iter().any(|(n, v)| n == "data-sidebar-storage-key" && v == "apexmail-ui"));
-        assert!(attrs.iter().any(|(n, v)| n == "data-toast-store" && v == "global"));
+        assert!(attrs
+            .iter()
+            .any(|(n, v)| n == "data-sidebar-storage-key" && v == "apexmail-ui"));
+        assert!(attrs
+            .iter()
+            .any(|(n, v)| n == "data-toast-store" && v == "global"));
     }
 
     #[test]
@@ -502,17 +538,24 @@ mod tests {
         assert!(!result.attribute_diffs.is_empty());
     }
 
-// ─── Comprehensive page parity tests ────────────────────
+    // ─── Comprehensive page parity tests ────────────────────
 
     #[test]
     fn web_login_full_parity_check() {
         let html = leptos_views::web_login_page();
         let result = check_parity(&html, &html);
-        assert!(result.is_identical, "Web login page must be self-consistent: {}", result.report());
+        assert!(
+            result.is_identical,
+            "Web login page must be self-consistent: {}",
+            result.report()
+        );
 
         let tampered = html.replacen("data-error-key=\"auth.error.rate_limited\"", "", 1);
         let diff = check_parity(&html, &tampered);
-        assert!(!diff.is_identical, "Web login parity should fail when security data attr is removed");
+        assert!(
+            !diff.is_identical,
+            "Web login parity should fail when security data attr is removed"
+        );
         assert!(
             !diff.attribute_diffs.is_empty(),
             "Web login data-attr mutation should produce attribute diffs"
@@ -523,7 +566,11 @@ mod tests {
     fn web_dashboard_full_parity_check() {
         let html = leptos_views::web_dashboard_layout("<div>content</div>");
         let result = check_parity(&html, &html);
-        assert!(result.is_identical, "Dashboard layout must be self-consistent: {}", result.report());
+        assert!(
+            result.is_identical,
+            "Dashboard layout must be self-consistent: {}",
+            result.report()
+        );
 
         let tampered = html.replacen(
             "aria-label=\"Primary sidebar navigation\"",
@@ -531,7 +578,10 @@ mod tests {
             1,
         );
         let diff = check_parity(&html, &tampered);
-        assert!(!diff.is_identical, "Dashboard parity should fail when aria-label changes");
+        assert!(
+            !diff.is_identical,
+            "Dashboard parity should fail when aria-label changes"
+        );
         assert!(
             !diff.attribute_diffs.is_empty(),
             "Dashboard aria mutation should produce attribute diffs"
@@ -542,11 +592,18 @@ mod tests {
     fn control_plane_audit_full_parity_check() {
         let html = leptos_views::control_plane_audit_page();
         let result = check_parity(&html, &html);
-        assert!(result.is_identical, "Audit page must be self-consistent: {}", result.report());
+        assert!(
+            result.is_identical,
+            "Audit page must be self-consistent: {}",
+            result.report()
+        );
 
         let tampered = html.replacen("Audit Logs", "Audit Trail", 1);
         let diff = check_parity(&html, &tampered);
-        assert!(!diff.is_identical, "Audit parity should fail when title text changes");
+        assert!(
+            !diff.is_identical,
+            "Audit parity should fail when title text changes"
+        );
         assert!(
             !diff.text_diffs.is_empty(),
             "Audit title mutation should produce text diffs"
@@ -558,7 +615,10 @@ mod tests {
         let html = leptos_views::web_login_page();
         let tampered = html.replacen("rounded-xl", "rounded-2xl", 1);
         let result = check_parity(&html, &tampered);
-        assert!(!result.is_identical, "Class mutation on web login should be detected");
+        assert!(
+            !result.is_identical,
+            "Class mutation on web login should be detected"
+        );
         assert!(
             !result.class_diffs.is_empty(),
             "Class mutation on web login should produce class diffs"
@@ -572,7 +632,7 @@ mod tests {
         assert_mutation_is_detected("marketing pricing text", &html, &tampered);
     }
 
-// ─── Full surface pixel parity sweeps ───────────────────
+    // ─── Full surface pixel parity sweeps ───────────────────
 
     #[test]
     fn all_web_pages_deterministic_parity() {
@@ -598,7 +658,12 @@ mod tests {
         ];
         for (name, html) in &pages {
             let result = check_parity(html, html);
-            assert!(result.is_identical, "web/{} parity failed: {}", name, result.report());
+            assert!(
+                result.is_identical,
+                "web/{} parity failed: {}",
+                name,
+                result.report()
+            );
         }
     }
 
@@ -613,7 +678,10 @@ mod tests {
             ("analytics", leptos_views::control_plane_analytics_page()),
             ("discovery", leptos_views::control_plane_discovery_page()),
             ("jobs", leptos_views::control_plane_jobs_page()),
-            ("infrastructure", leptos_views::control_plane_infrastructure_page()),
+            (
+                "infrastructure",
+                leptos_views::control_plane_infrastructure_page(),
+            ),
             ("nodes", leptos_views::control_plane_nodes_page()),
             ("queues", leptos_views::control_plane_queues_page()),
             ("domains", leptos_views::control_plane_domains_page()),
@@ -625,7 +693,12 @@ mod tests {
         ];
         for (name, html) in &pages {
             let result = check_parity(html, html);
-            assert!(result.is_identical, "cp/{} parity failed: {}", name, result.report());
+            assert!(
+                result.is_identical,
+                "cp/{} parity failed: {}",
+                name,
+                result.report()
+            );
         }
     }
 
@@ -636,32 +709,61 @@ mod tests {
             ("pricing", leptos_views::marketing_pricing_page()),
             ("features", leptos_views::marketing_features_page()),
             ("compliance", leptos_views::marketing_compliance_page()),
-            ("private_cloud", leptos_views::marketing_private_cloud_page()),
+            (
+                "private_cloud",
+                leptos_views::marketing_private_cloud_page(),
+            ),
             ("case_studies", leptos_views::marketing_case_studies_page()),
             ("status", leptos_views::marketing_status_page()),
-            ("compare_postmark", leptos_views::marketing_compare_page("postmark")),
-            ("compare_sendgrid", leptos_views::marketing_compare_page("sendgrid")),
-            ("legal_terms", leptos_views::marketing_legal_page("Terms", "terms")),
+            (
+                "compare_postmark",
+                leptos_views::marketing_compare_page("postmark"),
+            ),
+            (
+                "compare_sendgrid",
+                leptos_views::marketing_compare_page("sendgrid"),
+            ),
+            (
+                "legal_terms",
+                leptos_views::marketing_legal_page("Terms", "terms"),
+            ),
             ("api_console", leptos_views::marketing_api_console_page()),
-            ("zola_compare", leptos_views::marketing_zola_compare_index_page()),
+            (
+                "zola_compare",
+                leptos_views::marketing_zola_compare_index_page(),
+            ),
         ];
         for (name, html) in &pages {
             let result = check_parity(html, html);
-            assert!(result.is_identical, "mkt/{} parity failed: {}", name, result.report());
+            assert!(
+                result.is_identical,
+                "mkt/{} parity failed: {}",
+                name,
+                result.report()
+            );
         }
     }
 
-// ─── CSS class contract verification ────────────────────
+    // ─── CSS class contract verification ────────────────────
 
     #[test]
     fn web_login_preserves_tailwind_classes() {
         let html = leptos_views::web_login_page();
         let classes = extract_classes(&html);
-        let flat: Vec<&str> = classes.iter().flat_map(|c| c.iter().map(|s| s.as_str())).collect();
+        let flat: Vec<&str> = classes
+            .iter()
+            .flat_map(|c| c.iter().map(|s| s.as_str()))
+            .collect();
 
         let required = [
-            "min-h-screen", "rounded-xl", "border", "bg-white",
-            "shadow-lg", "text-2xl", "font-bold", "bg-primary",
+            "min-h-screen",
+            "rounded-xl",
+            "border",
+            "bg-white",
+            "shadow-lg",
+            "text-2xl",
+            "font-bold",
+            "bg-primary",
         ];
         for cls in &required {
             assert!(flat.contains(cls), "web login missing class '{}'", cls);
@@ -672,18 +774,26 @@ mod tests {
     fn cp_login_preserves_tailwind_classes() {
         let html = leptos_views::control_plane_login_page();
         let classes = extract_classes(&html);
-        let flat: Vec<&str> = classes.iter().flat_map(|c| c.iter().map(|s| s.as_str())).collect();
+        let flat: Vec<&str> = classes
+            .iter()
+            .flat_map(|c| c.iter().map(|s| s.as_str()))
+            .collect();
 
         let required = [
-            "min-h-screen", "rounded-xl", "border", "shadow-lg",
-            "text-2xl", "font-bold", "bg-primary",
+            "min-h-screen",
+            "rounded-xl",
+            "border",
+            "shadow-lg",
+            "text-2xl",
+            "font-bold",
+            "bg-primary",
         ];
         for cls in &required {
             assert!(flat.contains(cls), "cp login missing class '{}'", cls);
         }
     }
 
-// ─── Data attribute preservation across all pages ───────
+    // ─── Data attribute preservation across all pages ───────
 
     #[test]
     fn marketing_pages_preserve_data_attrs() {
@@ -701,7 +811,8 @@ mod tests {
         let aria = extract_aria_attrs(&html);
 
         assert!(
-            aria.iter().any(|(n, v)| n == "aria-label" && v == "Primary sidebar navigation"),
+            aria.iter()
+                .any(|(n, v)| n == "aria-label" && v == "Primary sidebar navigation"),
             "missing sidebar aria-label"
         );
         assert!(

@@ -1,5 +1,7 @@
 //! Entry point for the ops-service binary.
 
+use anyhow::Context;
+use dashmap::DashMap;
 use ops_service::config::OpsConfig;
 use ops_service::health::HealthChecker;
 use ops_service::incidents::IncidentManager;
@@ -7,19 +9,17 @@ use ops_service::routes::{router, AppState};
 use ops_service::slo::SloTracker;
 use ops_service::warmup::IpWarmupManager;
 use std::sync::Arc;
-use dashmap::DashMap;
-use anyhow::Context;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-// Initialise tracing
+    // Initialise tracing
     tracing_subscriber::fmt::init();
 
     let config = OpsConfig::from_env();
     info!(?config, "ops-service starting");
 
-// Connect to database
+    // Connect to database
     let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         trust_cache: Arc::new(DashMap::new()),
     };
 
-// Load existing state from database
+    // Load existing state from database
     if let Err(e) = state.incidents.load_from_db().await {
         tracing::warn!(?e, "Failed to load incidents from database");
     }
@@ -57,7 +57,9 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to bind TCP listener")?;
 
     let shutdown = async {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

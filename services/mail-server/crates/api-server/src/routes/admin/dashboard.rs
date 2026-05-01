@@ -1,7 +1,7 @@
 //! Dashboard stats endpoint.
 //!
 
-use super::super::helpers::table_exists;
+use super::super::helpers::{column_exists, table_exists};
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -18,7 +18,13 @@ pub fn router() -> Router<AppState> {
 }
 
 static CACHE: Mutex<Option<(Instant, DashboardStats)>> = Mutex::new(None);
-const CACHE_TTL_SECS: u64 = 30;
+const CACHE_TTL_SECS: u64 = 5;
+
+pub(crate) fn invalidate_dashboard_cache() {
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = None;
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,8 +82,46 @@ pub struct DashboardStats {
     pub pipeline: PipelineStats,
 }
 
-fn parse_count(val: Option<String>) -> i64 {
-    val.and_then(|s| s.parse().ok()).unwrap_or(0)
+async fn fetch_count_or_zero(db: &sqlx::PgPool, sql: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(sql)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
+}
+
+fn build_subscription_mrr_sql(has_billing_interval: bool) -> String {
+    let billing_interval_expr = if has_billing_interval {
+        "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
+    } else {
+        "'monthly'"
+    };
+
+    format!(
+        "SELECT COALESCE(SUM(
+                CASE
+                    WHEN {billing_interval_expr} IN ('year', 'yearly') THEN COALESCE(p.price_yearly, 0) / 12
+                    ELSE COALESCE(p.price_monthly, 0)
+                END
+            ), 0)::bigint
+         FROM subscriptions s
+         LEFT JOIN plans p ON p.name = s.plan_name
+         WHERE s.status IN ('active', 'trialing', 'past_due')"
+    )
+}
+
+async fn fetch_dashboard_mrr(db: &sqlx::PgPool) -> f64 {
+    if !(table_exists(db, "subscriptions").await && table_exists(db, "plans").await) {
+        return 0.0;
+    }
+
+    let has_billing_interval = column_exists(db, "subscriptions", "billing_interval").await;
+    let sql = build_subscription_mrr_sql(has_billing_interval);
+
+    sqlx::query_scalar::<_, i64>(&sql)
+        .fetch_one(db)
+        .await
+        .map(|cents| cents as f64 / 100.0)
+        .unwrap_or(0.0)
 }
 
 async fn get_dashboard_stats(
@@ -86,7 +130,7 @@ async fn get_dashboard_stats(
 ) -> Result<Json<DashboardStats>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-// Check cache
+    // Check cache
     {
         if let Ok(guard) = CACHE.lock() {
             if let Some((ts, ref cached)) = *guard {
@@ -103,87 +147,100 @@ async fn get_dashboard_stats(
     let has_drip_campaigns = table_exists(db, "drip_campaigns").await;
     let has_gdpr_requests = table_exists(db, "gdpr_requests").await;
     let has_system_alerts = table_exists(db, "system_alerts").await;
-    let has_stripe_subs = table_exists(db, "stripe_subscriptions").await;
 
-// Aggregate counts
+    // Aggregate counts
     let active_leads = if has_sales_leads {
-        parse_count(
-            sqlx::query_scalar("SELECT COUNT(*)::text FROM sales_leads WHERE status NOT IN ('converted', 'lost', 'unqualified')")
-                .fetch_one(db).await.ok(),
+        fetch_count_or_zero(
+            db,
+            "SELECT COUNT(*)::bigint FROM sales_leads WHERE status NOT IN ('converted', 'lost', 'unqualified')",
         )
-    } else { 0 };
+        .await
+    } else {
+        0
+    };
 
     let leads_this_week = if has_sales_leads {
-        parse_count(
-            sqlx::query_scalar("SELECT COUNT(*)::text FROM sales_leads WHERE created_at >= NOW() - INTERVAL '7 days'")
-                .fetch_one(db).await.ok(),
+        fetch_count_or_zero(
+            db,
+            "SELECT COUNT(*)::bigint FROM sales_leads WHERE created_at >= NOW() - INTERVAL '7 days'",
         )
-    } else { 0 };
+        .await
+    } else {
+        0
+    };
 
     let campaigns_running = if has_drip_campaigns {
-        parse_count(
-            sqlx::query_scalar("SELECT COUNT(*)::text FROM drip_campaigns WHERE status = 'active'")
-                .fetch_one(db).await.ok(),
+        fetch_count_or_zero(
+            db,
+            "SELECT COUNT(*)::bigint FROM drip_campaigns WHERE status = 'active'",
         )
-    } else { 0 };
+        .await
+    } else {
+        0
+    };
 
     let demos_scheduled = if has_sales_leads {
-        parse_count(
-            sqlx::query_scalar("SELECT COUNT(*)::text FROM sales_leads WHERE status IN ('demo_scheduled', 'demo_booked', 'demo')")
-                .fetch_one(db).await.ok(),
+        fetch_count_or_zero(
+            db,
+            "SELECT COUNT(*)::bigint FROM sales_leads WHERE status IN ('demo_scheduled', 'demo_booked', 'demo')",
         )
-    } else { 0 };
+        .await
+    } else {
+        0
+    };
 
     let conversion_rate: f64 = if has_sales_leads {
-        sqlx::query_scalar::<_, String>(
-            "SELECT CASE
-                WHEN COUNT(*) FILTER (WHERE status IN ('contacted', 'qualified', 'converted')) = 0 THEN '0'
-                ELSE (COUNT(*) FILTER (WHERE status = 'converted')::float /
-                      COUNT(*) FILTER (WHERE status IN ('contacted', 'qualified', 'converted')))::text
-             END FROM sales_leads",
+        sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(
+                COUNT(*) FILTER (WHERE status = 'converted')::double precision /
+                NULLIF(COUNT(*) FILTER (WHERE status IN ('contacted', 'qualified', 'converted')), 0)::double precision,
+                0.0
+             )
+             FROM sales_leads",
         )
         .fetch_one(db)
         .await
-        .ok()
-        .and_then(|s| s.parse().ok())
         .unwrap_or(0.0)
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
-    let audit_events_today = parse_count(
-        sqlx::query_scalar("SELECT COUNT(*)::text FROM audit_logs WHERE timestamp >= CURRENT_DATE")
-            .fetch_one(db).await.ok(),
-    );
+    let audit_events_today = fetch_count_or_zero(
+        db,
+        "SELECT COUNT(*)::bigint FROM audit_logs WHERE timestamp >= CURRENT_DATE",
+    )
+    .await;
 
-    let active_tenants = parse_count(
-        sqlx::query_scalar("SELECT COUNT(*)::text FROM tenants WHERE status = 'active'")
-            .fetch_one(db).await.ok(),
-    );
+    let active_tenants = fetch_count_or_zero(
+        db,
+        "SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'",
+    )
+    .await;
 
-    let total_emails = parse_count(
-        sqlx::query_scalar("SELECT COUNT(*)::text FROM messages WHERE status IN ('sent', 'delivered')")
-            .fetch_one(db).await.ok(),
-    );
+    let total_emails = fetch_count_or_zero(
+        db,
+        "SELECT COUNT(*)::bigint FROM messages WHERE status IN ('sent', 'delivered')",
+    )
+    .await;
 
-    let mrr: f64 = if has_stripe_subs {
-        sqlx::query_scalar::<_, String>(
-            "SELECT COALESCE(SUM(CASE WHEN billing_interval = 'year' THEN amount / 12.0 WHEN billing_interval = 'month' THEN amount ELSE 0 END) / 100.0, 0)::text
-             FROM stripe_subscriptions WHERE status IN ('active', 'trialing', 'past_due') AND canceled_at IS NULL",
-        )
-        .fetch_one(db).await.ok().and_then(|s| s.parse().ok()).unwrap_or(0.0)
-    } else { 0.0 };
+    let mrr = fetch_dashboard_mrr(db).await;
 
-// Risk / health
+    // Risk / health
     let (mut risk_alerts, mut critical_tenants) = (0i64, 0i64);
     let mut critical_alert_count = 0i64;
     let mut high_alert_count = 0i64;
 
     if has_system_alerts {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT severity, COUNT(*)::text FROM system_alerts WHERE acknowledged = false AND severity IN ('high', 'critical') GROUP BY severity",
-        ).fetch_all(db).await?;
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT severity, COUNT(*)::bigint
+             FROM system_alerts
+             WHERE acknowledged = false AND severity IN ('high', 'critical')
+             GROUP BY severity",
+        )
+        .fetch_all(db)
+        .await?;
 
-        for (severity, count_str) in &rows {
-            let count: i64 = count_str.parse().unwrap_or(0);
+        for (severity, count) in &rows {
             risk_alerts += count;
             if severity == "critical" {
                 critical_alert_count += count;
@@ -203,22 +260,31 @@ async fn get_dashboard_stats(
     };
 
     let gdpr_pending = if has_gdpr_requests {
-        parse_count(
-            sqlx::query_scalar("SELECT COUNT(*)::text FROM gdpr_requests WHERE status = 'pending'")
-                .fetch_one(db).await.ok(),
+        fetch_count_or_zero(
+            db,
+            "SELECT COUNT(*)::bigint FROM gdpr_requests WHERE status = 'pending'",
         )
-    } else { 0 };
+        .await
+    } else {
+        0
+    };
 
-// Pipeline
-    let mut pipeline = PipelineStats { prospect: 0, outreach: 0, engaged: 0, demo: 0, closed: 0 };
+    // Pipeline
+    let mut pipeline = PipelineStats {
+        prospect: 0,
+        outreach: 0,
+        engaged: 0,
+        demo: 0,
+        closed: 0,
+    };
 
     if has_sales_leads {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT status, COUNT(*)::text FROM sales_leads GROUP BY status",
-        ).fetch_all(db).await?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT status, COUNT(*)::bigint FROM sales_leads GROUP BY status")
+                .fetch_all(db)
+                .await?;
 
-        for (status, count_str) in &rows {
-            let count: i64 = count_str.parse().unwrap_or(0);
+        for (status, count) in &rows {
             match status.as_str() {
                 "new" | "prospect" | "identified" => pipeline.prospect += count,
                 "contacted" | "outreach" | "attempted" => pipeline.outreach += count,
@@ -230,13 +296,15 @@ async fn get_dashboard_stats(
         }
     }
 
-// Recent activity (simple — latest leads)
+    // Recent activity (simple — latest leads)
     let mut recent_activity: Vec<ActivityEntry> = Vec::new();
 
     if has_sales_leads {
         let leads: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT id, company_name, created_at FROM sales_leads ORDER BY created_at DESC LIMIT 5",
-        ).fetch_all(db).await?;
+        )
+        .fetch_all(db)
+        .await?;
 
         for (id, name, ts) in leads {
             recent_activity.push(ActivityEntry {
@@ -275,10 +343,74 @@ async fn get_dashboard_stats(
         pipeline,
     };
 
-// Update cache
+    // Update cache
     if let Ok(mut guard) = CACHE.lock() {
         *guard = Some((Instant::now(), stats.clone()));
     }
 
     Ok(Json(stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_stats() -> DashboardStats {
+        DashboardStats {
+            sales: SalesStats {
+                active_leads: 1,
+                leads_this_week: 1,
+                campaigns_running: 1,
+                demos_scheduled: 1,
+                conversion_rate: 0.5,
+            },
+            compliance: ComplianceStats {
+                risk_alerts: 1,
+                critical_tenants: 1,
+                gdpr_pending: 1,
+                audit_events_today: 1,
+            },
+            platform: PlatformStats {
+                active_tenants: 1,
+                total_emails: 1,
+                mrr: 1.0,
+                health_status: "healthy".into(),
+            },
+            recent_activity: Vec::new(),
+            pipeline: PipelineStats {
+                prospect: 1,
+                outreach: 1,
+                engaged: 1,
+                demo: 1,
+                closed: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn invalidate_dashboard_cache_clears_cached_value() {
+        if let Ok(mut guard) = CACHE.lock() {
+            *guard = Some((Instant::now(), sample_stats()));
+        }
+
+        invalidate_dashboard_cache();
+
+        let guard = CACHE.lock().expect("cache lock should succeed");
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    fn dashboard_cache_ttl_stays_short() {
+        assert_eq!(CACHE_TTL_SECS, 5);
+    }
+
+    #[test]
+    fn dashboard_subscription_mrr_sql_uses_plan_prices() {
+        let sql = build_subscription_mrr_sql(true);
+
+        assert!(sql.contains("FROM subscriptions s"));
+        assert!(sql.contains("LEFT JOIN plans p"));
+        assert!(sql.contains("price_yearly"));
+        assert!(sql.contains("billing_interval"));
+    }
 }

@@ -31,9 +31,9 @@ impl GdprAutomation {
         Self { db, redis, config }
     }
 
-// ── Request Lifecycle ────────────────────────────────────
+    // ── Request Lifecycle ────────────────────────────────────
 
-/// Submit a new data-subject request. Returns request + verification token.
+    /// Submit a new data-subject request. Returns request + verification token.
     pub async fn submit_request(
         &self,
         tenant_id: &str,
@@ -83,12 +83,8 @@ impl GdprAutomation {
         Ok((request, token))
     }
 
-/// Verify a data-subject request using the token.
-    pub async fn verify_request(
-        &self,
-        request_id: &str,
-        token: &str,
-    ) -> Result<bool, String> {
+    /// Verify a data-subject request using the token.
+    pub async fn verify_request(&self, request_id: &str, token: &str) -> Result<bool, String> {
         let token_hash = sha256_hex(token);
 
         let mut tx = self
@@ -132,19 +128,19 @@ impl GdprAutomation {
 
         tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
 
-// Enqueue for processing
+        // Enqueue for processing
         self.enqueue_request(request_id).await?;
 
         info!(request_id, "GDPR request verified");
         Ok(true)
     }
 
-/// Process a single request (called from queue worker).
+    /// Process a single request (called from queue worker).
     pub async fn process_request(
         &self,
         request_id: &str,
     ) -> Result<DataSubjectRequestResult, String> {
-// Mark as processing
+        // Mark as processing
         sqlx::query(
             "UPDATE data_subject_requests SET status = 'processing', processed_at = NOW()
              WHERE id = $1",
@@ -154,28 +150,20 @@ impl GdprAutomation {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        let request = self.fetch_request(request_id).await?
+        let request = self
+            .fetch_request(request_id)
+            .await?
             .ok_or("Request not found")?;
 
         let result = match request.request_type {
-            DataSubjectRequestType::Access => {
-                self.process_access_request(&request).await
-            }
-            DataSubjectRequestType::Erasure => {
-                self.process_erasure_request(&request).await
-            }
-            DataSubjectRequestType::Portability => {
-                self.process_portability_request(&request).await
-            }
+            DataSubjectRequestType::Access => self.process_access_request(&request).await,
+            DataSubjectRequestType::Erasure => self.process_erasure_request(&request).await,
+            DataSubjectRequestType::Portability => self.process_portability_request(&request).await,
             DataSubjectRequestType::Rectification => {
                 self.process_rectification_request(&request).await
             }
-            DataSubjectRequestType::Restriction => {
-                self.process_restriction_request(&request).await
-            }
-            DataSubjectRequestType::Objection => {
-                self.process_objection_request(&request).await
-            }
+            DataSubjectRequestType::Restriction => self.process_restriction_request(&request).await,
+            DataSubjectRequestType::Objection => self.process_objection_request(&request).await,
         };
 
         match &result {
@@ -197,20 +185,18 @@ impl GdprAutomation {
             }
             Err(e) => {
                 warn!(request_id, error = %e, "GDPR request processing failed");
-                sqlx::query(
-                    "UPDATE data_subject_requests SET status = 'rejected' WHERE id = $1",
-                )
-                .bind(request_id)
-                .execute(&self.db)
-                .await
-                .map_err(|e| format!("DB error updating GDPR status to rejected: {e}"))?;
+                sqlx::query("UPDATE data_subject_requests SET status = 'rejected' WHERE id = $1")
+                    .bind(request_id)
+                    .execute(&self.db)
+                    .await
+                    .map_err(|e| format!("DB error updating GDPR status to rejected: {e}"))?;
             }
         }
 
         result
     }
 
-// ── Access Request (Article 15) ────────────────────────
+    // ── Access Request (Article 15) ────────────────────────
 
     async fn process_access_request(
         &self,
@@ -220,7 +206,7 @@ impl GdprAutomation {
         let email = &request.email;
         let tid = &request.tenant_id;
 
-// Collect subscriber profile
+        // Collect subscriber profile
         let profile: Option<(serde_json::Value,)> = sqlx::query_as(
             "SELECT row_to_json(s) FROM subscribers s
              WHERE email = $1 AND tenant_id = $2",
@@ -235,7 +221,7 @@ impl GdprAutomation {
             data.insert("profile".into(), sanitize_pii(p));
         }
 
-// Collect sending history
+        // Collect sending history
         let history: Vec<(serde_json::Value,)> = sqlx::query_as(
             "SELECT row_to_json(m) FROM message_events m
              WHERE recipient_email = $1 AND tenant_id = $2
@@ -250,7 +236,7 @@ impl GdprAutomation {
         let events: Vec<serde_json::Value> = history.into_iter().map(|(v,)| v).collect();
         data.insert("message_history".into(), serde_json::Value::Array(events));
 
-// Collect consent records
+        // Collect consent records
         let consents: Vec<(serde_json::Value,)> = sqlx::query_as(
             "SELECT row_to_json(c) FROM consent_records c
              WHERE email = $1 AND tenant_id = $2",
@@ -264,7 +250,7 @@ impl GdprAutomation {
         let consent_vals: Vec<serde_json::Value> = consents.into_iter().map(|(v,)| v).collect();
         data.insert("consents".into(), serde_json::Value::Array(consent_vals));
 
-// Store export
+        // Store export
         let export_json = serde_json::to_string_pretty(&serde_json::Value::Object(data.clone()))
             .map_err(|e| format!("JSON: {e}"))?;
 
@@ -299,7 +285,7 @@ impl GdprAutomation {
         })
     }
 
-// ── Erasure Request (Article 17) ───────────────────────
+    // ── Erasure Request (Article 17) ───────────────────────
 
     async fn process_erasure_request(
         &self,
@@ -309,57 +295,79 @@ impl GdprAutomation {
         let email = &request.email;
         let mut total_deleted: i64 = 0;
 
-// #284:Run erasure operations in a single transaction to avoid partial deletion.
+        // #284:Run erasure operations in a single transaction to avoid partial deletion.
         let mut tx = self.db.begin().await.map_err(|e| format!("DB: {e}"))?;
 
-// 1. Delete subscriber profile
+        // 1. Delete subscriber profile
         let r = sqlx::query("DELETE FROM subscribers WHERE email = $1 AND tenant_id = $2")
-            .bind(email).bind(tid)
-            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
+            .bind(email)
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-// 2. Delete message events
-        let r = sqlx::query("DELETE FROM message_events WHERE recipient_email = $1 AND tenant_id = $2")
-            .bind(email).bind(tid)
-            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
+        // 2. Delete message events
+        let r =
+            sqlx::query("DELETE FROM message_events WHERE recipient_email = $1 AND tenant_id = $2")
+                .bind(email)
+                .bind(tid)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-// 3. Delete engagement events
+        // 3. Delete engagement events
         let r = sqlx::query("DELETE FROM engagement_events WHERE email = $1 AND tenant_id = $2")
-            .bind(email).bind(tid)
-            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
+            .bind(email)
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-// 4. Delete consent records
+        // 4. Delete consent records
         let r = sqlx::query("DELETE FROM consent_records WHERE email = $1 AND tenant_id = $2")
-            .bind(email).bind(tid)
-            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
+            .bind(email)
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-// 5. Delete from suppression list
+        // 5. Delete from suppression list
         let r = sqlx::query("DELETE FROM suppression_list WHERE email = $1 AND tenant_id = $2")
-            .bind(email).bind(tid)
-            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
+            .bind(email)
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-// 6. Delete tracking data
+        // 6. Delete tracking data
         let r = sqlx::query("DELETE FROM tracking_events WHERE email = $1 AND tenant_id = $2")
-            .bind(email).bind(tid)
-            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
+            .bind(email)
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
-// 7. Delete analytics data
+        // 7. Delete analytics data
         let r = sqlx::query("DELETE FROM subscriber_analytics WHERE email = $1 AND tenant_id = $2")
-            .bind(email).bind(tid)
-            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
+            .bind(email)
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
         tx.commit().await.map_err(|e| format!("DB: {e}"))?;
 
-// Clear Redis keys
+        // Clear Redis keys
         self.clear_redis_keys(tid, email).await?;
 
-// Create deletion confirmation
+        // Create deletion confirmation
         let confirmation = serde_json::json!({
             "certificate_id": Uuid::new_v4().to_string(),
             "request_id": request.id,
@@ -382,23 +390,23 @@ impl GdprAutomation {
         })
     }
 
-// ── Portability Request (Article 20) ───────────────────
+    // ── Portability Request (Article 20) ───────────────────
 
     async fn process_portability_request(
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-// Portability = access export in machine-readable format
+        // Portability = access export in machine-readable format
         self.process_access_request(request).await
     }
 
-// ── Rectification (Article 16) ─────────────────────────
+    // ── Rectification (Article 16) ─────────────────────────
 
     async fn process_rectification_request(
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-// Rectification requires manual admin review
+        // Rectification requires manual admin review
         info!(request_id = %request.id, "Rectification request queued for manual review");
         Ok(DataSubjectRequestResult {
             data: None,
@@ -411,13 +419,13 @@ impl GdprAutomation {
         })
     }
 
-// ── Restriction of Processing (Article 18) ────────────
+    // ── Restriction of Processing (Article 18) ────────────
 
     async fn process_restriction_request(
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-// Add to suppression list to prevent future processing
+        // Add to suppression list to prevent future processing
         sqlx::query(
             "INSERT INTO suppression_list (id, tenant_id, email, reason, created_at)
              VALUES ($1, $2, $3, 'gdpr_restriction', NOW())
@@ -442,18 +450,14 @@ impl GdprAutomation {
         })
     }
 
-// ── Objection (Article 21) ────────────────────────────
+    // ── Objection (Article 21) ────────────────────────────
 
     async fn process_objection_request(
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
-// Similar to restriction — suppress + withdraw consents
-        let mut tx = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| format!("DB: {e}"))?;
+        // Similar to restriction — suppress + withdraw consents
+        let mut tx = self.db.begin().await.map_err(|e| format!("DB: {e}"))?;
 
         let r = sqlx::query(
             "UPDATE consent_records SET granted = false, revoked_at = NOW()
@@ -491,10 +495,10 @@ impl GdprAutomation {
         })
     }
 
-// ── Consent Management ────────────────────────────────
+    // ── Consent Management ────────────────────────────────
 
-/// Record or update a consent. If consent_type is marketing and granted=false,
-/// cascade to analytics and profiling.
+    /// Record or update a consent. If consent_type is marketing and granted=false,
+    /// cascade to analytics and profiling.
     pub fn record_consent<'a>(
         &'a self,
         tenant_id: &'a str,
@@ -504,20 +508,22 @@ impl GdprAutomation {
         granted: bool,
         source: ConsentSource,
         ip_address: Option<&'a str>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ConsentRecord, String>> + Send + 'a>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ConsentRecord, String>> + Send + 'a>,
+    > {
         Box::pin(async move {
-        let id = Uuid::new_v4().to_string();
-        let now = Utc::now();
-        let granted_at = if granted { Some(now) } else { None };
-        let revoked_at = if granted { None } else { Some(now) };
-        let expires_at = if granted {
-            Some(now + Duration::days(self.config.data_retention_days))
-        } else {
-            None
-        };
+            let id = Uuid::new_v4().to_string();
+            let now = Utc::now();
+            let granted_at = if granted { Some(now) } else { None };
+            let revoked_at = if granted { None } else { Some(now) };
+            let expires_at = if granted {
+                Some(now + Duration::days(self.config.data_retention_days))
+            } else {
+                None
+            };
 
-        sqlx::query(
-            "INSERT INTO consent_records
+            sqlx::query(
+                "INSERT INTO consent_records
                (id, tenant_id, subscriber_id, email, consent_type, granted,
                 granted_at, revoked_at, source, ip_address, expires_at, metadata)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'{}'::jsonb)
@@ -529,75 +535,77 @@ impl GdprAutomation {
                                  ELSE consent_records.granted_at END,
                revoked_at = CASE WHEN NOT EXCLUDED.granted THEN NOW() ELSE NULL END,
                expires_at = EXCLUDED.expires_at",
-        )
-        .bind(&id)
-        .bind(tenant_id)
-        .bind(subscriber_id)
-        .bind(email)
-        .bind(consent_type.to_string())
-        .bind(granted)
-        .bind(granted_at)
-        .bind(revoked_at)
-        .bind(source.to_string())
-        .bind(ip_address)
-        .bind(expires_at)
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("DB: {e}"))?;
+            )
+            .bind(&id)
+            .bind(tenant_id)
+            .bind(subscriber_id)
+            .bind(email)
+            .bind(consent_type.to_string())
+            .bind(granted)
+            .bind(granted_at)
+            .bind(revoked_at)
+            .bind(source.to_string())
+            .bind(ip_address)
+            .bind(expires_at)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
 
-// Marketing cascade:withdrawing marketing also withdraws analytics + profiling
-        if !granted && consent_type == ConsentType::Marketing {
-            for cascade_type in &[ConsentType::Analytics, ConsentType::Profiling] {
-                if let Err(e) = self
-                    .record_consent(
-                        tenant_id,
-                        subscriber_id,
-                        email,
-                        *cascade_type,
-                        false,
-                        ConsentSource::System,
-                        ip_address,
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        error = %e,
-                        tenant_id = %tenant_id,
-                        email = %mail_common::pii::redact_email(email),
-                        cascade_type = %cascade_type,
-                        "GDPR VIOLATION: Failed to cascade consent withdrawal — manual intervention required"
-                    );
-                    return Err(format!("Failed to cascade {cascade_type} consent withdrawal: {e}"));
+            // Marketing cascade:withdrawing marketing also withdraws analytics + profiling
+            if !granted && consent_type == ConsentType::Marketing {
+                for cascade_type in &[ConsentType::Analytics, ConsentType::Profiling] {
+                    if let Err(e) = self
+                        .record_consent(
+                            tenant_id,
+                            subscriber_id,
+                            email,
+                            *cascade_type,
+                            false,
+                            ConsentSource::System,
+                            ip_address,
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            error = %e,
+                            tenant_id = %tenant_id,
+                            email = %mail_common::pii::redact_email(email),
+                            cascade_type = %cascade_type,
+                            "GDPR VIOLATION: Failed to cascade consent withdrawal — manual intervention required"
+                        );
+                        return Err(format!(
+                            "Failed to cascade {cascade_type} consent withdrawal: {e}"
+                        ));
+                    }
                 }
             }
-        }
 
-        let record = ConsentRecord {
-            id,
-            tenant_id: tenant_id.into(),
-            subscriber_id: subscriber_id.into(),
-            email: email.into(),
-            consent_type,
-            granted,
-            granted_at,
-            revoked_at,
-            source,
-            ip_address: ip_address.map(String::from),
-            user_agent: None,
-            proof_document: None,
-            expires_at,
-            metadata: serde_json::json!({}),
-        };
+            let record = ConsentRecord {
+                id,
+                tenant_id: tenant_id.into(),
+                subscriber_id: subscriber_id.into(),
+                email: email.into(),
+                consent_type,
+                granted,
+                granted_at,
+                revoked_at,
+                source,
+                ip_address: ip_address.map(String::from),
+                user_agent: None,
+                proof_document: None,
+                expires_at,
+                metadata: serde_json::json!({}),
+            };
 
-        info!(
-            %tenant_id, %subscriber_id, %consent_type,
-            %granted, "Consent recorded"
-        );
-        Ok(record)
+            info!(
+                %tenant_id, %subscriber_id, %consent_type,
+                %granted, "Consent recorded"
+            );
+            Ok(record)
         }) // Box::pin
     }
 
-/// Initiate double opt-in:store pending consent + return token.
+    /// Initiate double opt-in:store pending consent + return token.
     pub async fn initiate_double_opt_in(
         &self,
         tenant_id: &str,
@@ -632,7 +640,7 @@ impl GdprAutomation {
         Ok(token)
     }
 
-/// Confirm double opt-in with token.
+    /// Confirm double opt-in with token.
     pub async fn confirm_double_opt_in(
         &self,
         tenant_id: &str,
@@ -659,7 +667,7 @@ impl GdprAutomation {
         };
 
         if expires_at < Utc::now() {
-// Token expired — clean up
+            // Token expired — clean up
             sqlx::query(
                 "DELETE FROM double_opt_in_tokens
                  WHERE tenant_id = $1 AND subscriber_id = $2 AND consent_type = $3",
@@ -677,7 +685,7 @@ impl GdprAutomation {
             return Ok(false);
         }
 
-// Token valid — record consent, delete token
+        // Token valid — record consent, delete token
         self.record_consent(
             tenant_id,
             subscriber_id,
@@ -704,7 +712,7 @@ impl GdprAutomation {
         Ok(true)
     }
 
-/// Get all consent records for a subscriber.
+    /// Get all consent records for a subscriber.
     pub async fn get_consent_records(
         &self,
         tenant_id: &str,
@@ -727,12 +735,11 @@ impl GdprAutomation {
         rows.into_iter().map(|r| r.into_record()).collect()
     }
 
-// ── Queue Processing ──────────────────────────────────
+    // ── Queue Processing ──────────────────────────────────
 
-/// Enqueue a request for background processing via Redis.
+    /// Enqueue a request for background processing via Redis.
     async fn enqueue_request(&self, request_id: &str) -> Result<(), String> {
-        let mut conn = self.redis.get().await
-            .map_err(|e| format!("Redis: {e}"))?;
+        let mut conn = self.redis.get().await.map_err(|e| format!("Redis: {e}"))?;
         redis::cmd("RPUSH")
             .arg("gdpr:request_queue")
             .arg(request_id)
@@ -742,13 +749,12 @@ impl GdprAutomation {
         Ok(())
     }
 
-/// Process next batch of requests from the queue.
+    /// Process next batch of requests from the queue.
     pub async fn process_queue_batch(
         &self,
         max_items: usize,
     ) -> Result<Vec<DataSubjectRequestResult>, String> {
-        let mut conn = self.redis.get().await
-            .map_err(|e| format!("Redis: {e}"))?;
+        let mut conn = self.redis.get().await.map_err(|e| format!("Redis: {e}"))?;
 
         let limit = max_items.min(10); // max 10 per tick
         let mut results = Vec::with_capacity(limit);
@@ -761,14 +767,12 @@ impl GdprAutomation {
                 .map_err(|e| format!("Redis LPOP: {e}"))?;
 
             match item {
-                Some(request_id) => {
-                    match self.process_request(&request_id).await {
-                        Ok(r) => results.push(r),
-                        Err(e) => {
-                            warn!(request_id = %request_id, error = %e, "Failed to process GDPR request");
-                        }
+                Some(request_id) => match self.process_request(&request_id).await {
+                    Ok(r) => results.push(r),
+                    Err(e) => {
+                        warn!(request_id = %request_id, error = %e, "Failed to process GDPR request");
                     }
-                }
+                },
                 None => break,
             }
         }
@@ -776,9 +780,9 @@ impl GdprAutomation {
         Ok(results)
     }
 
-// ── Expiry ────────────────────────────────────────────
+    // ── Expiry ────────────────────────────────────────────
 
-/// Expire requests that passed their deadline.
+    /// Expire requests that passed their deadline.
     pub async fn expire_overdue_requests(&self) -> Result<u64, String> {
         let result = sqlx::query(
             "UPDATE data_subject_requests
@@ -797,39 +801,34 @@ impl GdprAutomation {
         Ok(count)
     }
 
-/// Expire stale double-opt-in tokens.
+    /// Expire stale double-opt-in tokens.
     pub async fn expire_stale_opt_in_tokens(&self) -> Result<u64, String> {
-        let result = sqlx::query(
-            "DELETE FROM double_opt_in_tokens WHERE expires_at < NOW()",
-        )
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("DB: {e}"))?;
+        let result = sqlx::query("DELETE FROM double_opt_in_tokens WHERE expires_at < NOW()")
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("DB: {e}"))?;
 
         Ok(result.rows_affected())
     }
 
-/// Data retention:delete old consent records and exports.
+    /// Data retention:delete old consent records and exports.
     pub async fn enforce_retention(&self) -> Result<(u64, u64), String> {
         let cutoff = Utc::now() - Duration::days(self.config.data_retention_days);
 
-        let consents = sqlx::query(
-            "DELETE FROM consent_records WHERE granted_at < $1 AND granted = false",
-        )
-        .bind(cutoff)
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("DB: {e}"))?
-        .rows_affected();
+        let consents =
+            sqlx::query("DELETE FROM consent_records WHERE granted_at < $1 AND granted = false")
+                .bind(cutoff)
+                .execute(&self.db)
+                .await
+                .map_err(|e| format!("DB: {e}"))?
+                .rows_affected();
 
-        let exports = sqlx::query(
-            "DELETE FROM gdpr_exports WHERE created_at < $1",
-        )
-        .bind(cutoff)
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("DB: {e}"))?
-        .rows_affected();
+        let exports = sqlx::query("DELETE FROM gdpr_exports WHERE created_at < $1")
+            .bind(cutoff)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("DB: {e}"))?
+            .rows_affected();
 
         if consents > 0 || exports > 0 {
             info!(consents, exports, "Retention enforcement completed");
@@ -837,12 +836,9 @@ impl GdprAutomation {
         Ok((consents, exports))
     }
 
-// ── Stats ─────────────────────────────────────────────
+    // ── Stats ─────────────────────────────────────────────
 
-    pub async fn get_request_stats(
-        &self,
-        tenant_id: &str,
-    ) -> Result<serde_json::Value, String> {
+    pub async fn get_request_stats(&self, tenant_id: &str) -> Result<serde_json::Value, String> {
         let row: Option<(i64, i64, i64, i64, i64)> = sqlx::query_as(
             "SELECT
                COUNT(*) FILTER (WHERE status = 'pending_verification'),
@@ -869,12 +865,9 @@ impl GdprAutomation {
         }))
     }
 
-// ── Internal Helpers ──────────────────────────────────
+    // ── Internal Helpers ──────────────────────────────────
 
-    async fn fetch_request(
-        &self,
-        request_id: &str,
-    ) -> Result<Option<DataSubjectRequest>, String> {
+    async fn fetch_request(&self, request_id: &str) -> Result<Option<DataSubjectRequest>, String> {
         let row: Option<RequestRow> = sqlx::query_as(
             "SELECT id, tenant_id, request_type, email, verification_token_hash,
                     verified, verified_at, status, requested_at, processed_at,
@@ -893,7 +886,11 @@ impl GdprAutomation {
     }
 
     async fn clear_redis_keys(&self, tenant_id: &str, email: &str) -> Result<(), String> {
-        let mut conn = self.redis.get().await.map_err(|e| format!("Redis pool: {e}"))?;
+        let mut conn = self
+            .redis
+            .get()
+            .await
+            .map_err(|e| format!("Redis pool: {e}"))?;
         let keys = [
             format!("subscriber:{}:{}", tenant_id, email),
             format!("engagement:{}:{}", tenant_id, email),
@@ -933,7 +930,12 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
 /// Remove sensitive internal fields from JSON data.
 fn sanitize_pii(mut value: serde_json::Value) -> serde_json::Value {
     if let Some(obj) = value.as_object_mut() {
-        for key in &["password_hash", "internal_notes", "api_key_hash", "verification_token_hash"] {
+        for key in &[
+            "password_hash",
+            "internal_notes",
+            "api_key_hash",
+            "verification_token_hash",
+        ] {
             obj.remove(*key);
         }
     }
@@ -1211,50 +1213,100 @@ mod tests {
     #[test]
     fn test_all_request_types_parse() {
         let now = Utc::now();
-        let types = ["access", "erasure", "portability", "rectification", "restriction", "objection"];
+        let types = [
+            "access",
+            "erasure",
+            "portability",
+            "rectification",
+            "restriction",
+            "objection",
+        ];
         for t in types {
             let row = RequestRow {
-                id: "r".into(), tenant_id: "t".into(),
-                request_type: t.into(), email: "e@e.com".into(),
-                verification_token_hash: "h".into(), verified: false,
-                verified_at: None, status: "completed".into(),
-                requested_at: now, processed_at: None,
-                completed_at: None, expires_at: now, result: None,
+                id: "r".into(),
+                tenant_id: "t".into(),
+                request_type: t.into(),
+                email: "e@e.com".into(),
+                verification_token_hash: "h".into(),
+                verified: false,
+                verified_at: None,
+                status: "completed".into(),
+                requested_at: now,
+                processed_at: None,
+                completed_at: None,
+                expires_at: now,
+                result: None,
             };
-            assert!(row.into_request().is_ok(), "Failed to parse request type: {}", t);
+            assert!(
+                row.into_request().is_ok(),
+                "Failed to parse request type: {}",
+                t
+            );
         }
     }
 
     #[test]
     fn test_all_consent_types_parse() {
         let _now = Utc::now();
-        let types = ["marketing", "transactional", "analytics", "profiling", "third_party", "data_processing"];
+        let types = [
+            "marketing",
+            "transactional",
+            "analytics",
+            "profiling",
+            "third_party",
+            "data_processing",
+        ];
         for t in types {
             let row = ConsentRecordRow {
-                id: "c".into(), tenant_id: "t".into(),
-                subscriber_id: "s".into(), email: "e@e.com".into(),
-                consent_type: t.into(), granted: true,
-                granted_at: None, revoked_at: None,
-                source: "api".into(), ip_address: None,
-                user_agent: None, proof_document: None,
-                expires_at: None, metadata: serde_json::json!({}),
+                id: "c".into(),
+                tenant_id: "t".into(),
+                subscriber_id: "s".into(),
+                email: "e@e.com".into(),
+                consent_type: t.into(),
+                granted: true,
+                granted_at: None,
+                revoked_at: None,
+                source: "api".into(),
+                ip_address: None,
+                user_agent: None,
+                proof_document: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
             };
-            assert!(row.into_record().is_ok(), "Failed to parse consent type: {}", t);
+            assert!(
+                row.into_record().is_ok(),
+                "Failed to parse consent type: {}",
+                t
+            );
         }
     }
 
     #[test]
     fn test_all_statuses_parse() {
         let now = Utc::now();
-        let statuses = ["pending_verification", "verified", "processing", "completed", "rejected", "expired"];
+        let statuses = [
+            "pending_verification",
+            "verified",
+            "processing",
+            "completed",
+            "rejected",
+            "expired",
+        ];
         for s in statuses {
             let row = RequestRow {
-                id: "r".into(), tenant_id: "t".into(),
-                request_type: "access".into(), email: "e@e.com".into(),
-                verification_token_hash: "h".into(), verified: false,
-                verified_at: None, status: s.into(),
-                requested_at: now, processed_at: None,
-                completed_at: None, expires_at: now, result: None,
+                id: "r".into(),
+                tenant_id: "t".into(),
+                request_type: "access".into(),
+                email: "e@e.com".into(),
+                verification_token_hash: "h".into(),
+                verified: false,
+                verified_at: None,
+                status: s.into(),
+                requested_at: now,
+                processed_at: None,
+                completed_at: None,
+                expires_at: now,
+                result: None,
             };
             assert!(row.into_request().is_ok(), "Failed to parse status: {}", s);
         }

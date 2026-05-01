@@ -17,7 +17,7 @@ impl PostgresQueueProvider {
         Self { db }
     }
 
-/// Enqueue a new job.
+    /// Enqueue a new job.
     pub async fn enqueue(&self, opts: EnqueueOptions) -> Result<Job, QueueError> {
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -27,10 +27,14 @@ impl PostgresQueueProvider {
             return Err(QueueError::InvalidPayload("queue name is required".into()));
         }
         if opts.max_attempts <= 0 {
-            return Err(QueueError::InvalidPayload("max_attempts must be positive".into()));
+            return Err(QueueError::InvalidPayload(
+                "max_attempts must be positive".into(),
+            ));
         }
         if opts.visibility_timeout <= 0 {
-            return Err(QueueError::InvalidPayload("visibility_timeout must be positive seconds".into()));
+            return Err(QueueError::InvalidPayload(
+                "visibility_timeout must be positive seconds".into(),
+            ));
         }
 
         let row: JobRow = sqlx::query_as::<_, JobRow>(
@@ -60,8 +64,8 @@ impl PostgresQueueProvider {
         Ok(row.into_job())
     }
 
-/// Dequeue the next available job using SKIP LOCKED.
-/// Returns None if no jobs are available.
+    /// Dequeue the next available job using SKIP LOCKED.
+    /// Returns None if no jobs are available.
     pub async fn dequeue(&self, queue: &str, batch_size: i32) -> Result<Vec<Job>, QueueError> {
         let now = Utc::now();
 
@@ -100,7 +104,7 @@ impl PostgresQueueProvider {
         Ok(jobs)
     }
 
-/// Mark a job as completed.
+    /// Mark a job as completed.
     pub async fn complete(&self, job_id: Uuid) -> Result<(), QueueError> {
         let now = Utc::now();
         let result = sqlx::query(
@@ -121,11 +125,11 @@ impl PostgresQueueProvider {
         Ok(())
     }
 
-/// Mark a job as failed with exponential backoff for retry.
+    /// Mark a job as failed with exponential backoff for retry.
     pub async fn fail(&self, job_id: Uuid, error: &str) -> Result<(), QueueError> {
         let now = Utc::now();
 
-// Fetch current state
+        // Fetch current state
         let job: JobRow = sqlx::query_as::<_, JobRow>(
             r#"
             SELECT id, tenant_id, queue, payload, status,
@@ -141,10 +145,10 @@ impl PostgresQueueProvider {
         .ok_or(QueueError::NotFound { id: job_id })?;
 
         if job.attempts >= job.max_attempts {
-// Move to dead letter queue
+            // Move to dead letter queue
             self.dead_letter(job_id, error).await?;
         } else {
-// #228:Exponential backoff with cap at 1 hour to prevent excessive delays
+            // #228:Exponential backoff with cap at 1 hour to prevent excessive delays
             let backoff_secs = ((2_i64.pow(job.attempts as u32)) * 30).min(3600);
             let retry_at = now + chrono::Duration::seconds(backoff_secs);
 
@@ -176,7 +180,7 @@ impl PostgresQueueProvider {
         Ok(())
     }
 
-/// Move a job to dead letter queue.
+    /// Move a job to dead letter queue.
     pub async fn dead_letter(&self, job_id: Uuid, error: &str) -> Result<(), QueueError> {
         let now = Utc::now();
         sqlx::query(
@@ -199,7 +203,7 @@ impl PostgresQueueProvider {
         Ok(())
     }
 
-/// Recover stale processing jobs (visibility timeout expired).
+    /// Recover stale processing jobs (visibility timeout expired).
     pub async fn recover_stale(&self) -> Result<i64, QueueError> {
         let now = Utc::now();
         let result = sqlx::query(
@@ -221,7 +225,7 @@ impl PostgresQueueProvider {
         Ok(count)
     }
 
-/// Get queue statistics.
+    /// Get queue statistics.
     pub async fn stats(&self, queue: &str) -> Result<QueueStats, QueueError> {
         let row: StatsRow = sqlx::query_as::<_, StatsRow>(
             r#"
@@ -248,9 +252,10 @@ impl PostgresQueueProvider {
         })
     }
 
-/// Purge completed/dead_letter jobs older than the given age.
+    /// Purge completed/dead_letter jobs older than the given age.
     pub async fn purge(&self, queue: &str, older_than_hours: i32) -> Result<i64, QueueError> {
-        let cutoff = Utc::now() - TimeDelta::try_hours(older_than_hours as i64).unwrap_or(TimeDelta::zero());
+        let cutoff =
+            Utc::now() - TimeDelta::try_hours(older_than_hours as i64).unwrap_or(TimeDelta::zero());
         let result = sqlx::query(
             r#"
             DELETE FROM queue_jobs
@@ -347,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff_calculation() {
-// Verify backoff formula:2^attempts * 30 seconds
+        // Verify backoff formula:2^attempts * 30 seconds
         let attempt_1 = 2_i64.pow(1) * 30; // 60s
         let attempt_2 = 2_i64.pow(2) * 30; // 120s
         let attempt_3 = 2_i64.pow(3) * 30; // 240s

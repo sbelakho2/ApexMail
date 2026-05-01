@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
+use crate::presentation::leads::source_icon;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -52,7 +53,7 @@ async fn get_discovery(
 ) -> Result<Json<DiscoveryResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-// Check table exists
+    // Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class WHERE relname = 'sales_leads')",
     )
@@ -62,26 +63,18 @@ async fn get_discovery(
     .flatten();
 
     if !exists.map(|r| r.0).unwrap_or(false) {
-        return Ok(Json(DiscoveryResponse { sources: vec![], leads: vec![] }));
+        return Ok(Json(DiscoveryResponse {
+            sources: vec![],
+            leads: vec![],
+        }));
     }
 
-// Sources breakdown from sales_leads.source
+    // Sources breakdown from sales_leads.source
     let source_rows = sqlx::query_as::<_, (Option<String>, i64)>(
         "SELECT source, COUNT(*) as cnt FROM sales_leads GROUP BY source ORDER BY cnt DESC",
     )
     .fetch_all(&state.db)
     .await?;
-
-    let icon_for = |name: &str| -> &str {
-        match name.to_lowercase().as_str() {
-            "linkedin" => "🔗",
-            "website" => "🌐",
-            "referral" => "👥",
-            "conference" => "🎤",
-            "cold_outreach" | "cold outreach" => "📧",
-            _ => "📋",
-        }
-    };
 
     let sources: Vec<DiscoverySource> = source_rows
         .into_iter()
@@ -89,7 +82,7 @@ async fn get_discovery(
             let name = src.clone().unwrap_or_else(|| "Unknown".into());
             DiscoverySource {
                 id: name.to_lowercase().replace(' ', "_"),
-                icon: icon_for(&name).into(),
+                icon: source_icon(&name).into(),
                 enabled: true,
                 last_run: None,
                 leads_found: cnt,
@@ -99,11 +92,19 @@ async fn get_discovery(
         })
         .collect();
 
-// Recent leads
-    let lead_rows = sqlx::query_as::<_, (
-        String, Option<String>, Option<String>, Option<String>,
-        Option<String>, Option<String>, chrono::DateTime<chrono::Utc>,
-    )>(
+    // Recent leads
+    let lead_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
         "SELECT id::text, company_name, domain, source, stage, description, created_at
          FROM sales_leads ORDER BY created_at DESC LIMIT 100",
     )
@@ -113,8 +114,12 @@ async fn get_discovery(
     let leads: Vec<DiscoveredLead> = lead_rows
         .into_iter()
         .map(|(id, cn, dom, src, stage, desc, ca)| DiscoveredLead {
-            id, company_name: cn, domain: dom, source: src,
-            category: stage, description: desc,
+            id,
+            company_name: cn,
+            domain: dom,
+            source: src,
+            category: stage,
+            description: desc,
             found_at: ca.to_rfc3339(),
             imported: true,
         })

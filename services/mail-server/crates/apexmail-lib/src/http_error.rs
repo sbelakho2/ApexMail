@@ -26,11 +26,7 @@ impl ErrorEnvelope {
         }
     }
 
-    pub fn with_details(
-        code: ErrorCode,
-        message: impl Into<String>,
-        details: Vec<String>,
-    ) -> Self {
+    pub fn with_details(code: ErrorCode, message: impl Into<String>, details: Vec<String>) -> Self {
         Self {
             error: ErrorDetail {
                 code: code.to_string(),

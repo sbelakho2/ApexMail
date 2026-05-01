@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::types::{BillingInterval, Subscription, SubscriptionStatus};
 use crate::types::UsageSummary;
+use crate::types::{BillingInterval, Subscription, SubscriptionStatus};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -102,7 +102,7 @@ pub async fn update_plan(
     tenant_id: &str,
     new_plan: &str,
 ) -> Result<(), SubscriptionError> {
-// Verify the plan exists and capture its quota limits.
+    // Verify the plan exists and capture its quota limits.
     let new_plan_limits: Option<PlanLimitRow> = sqlx::query_as(
         "SELECT name, email_limit, api_call_limit FROM plans WHERE name = $1 AND is_active = true",
     )
@@ -153,10 +153,10 @@ pub async fn update_plan(
 
     let now = Utc::now();
 
-// Wrap both writes in a transaction for atomicity.
+    // Wrap both writes in a transaction for atomicity.
     let mut tx = pool.begin().await.map_err(SubscriptionError::Db)?;
 
-// Update only the current visible subscription record.
+    // Update only the current visible subscription record.
     let updated_subscription_id: Option<Uuid> = sqlx::query_scalar(
         r#"
         WITH target AS (
@@ -183,7 +183,7 @@ pub async fn update_plan(
 
     let updated_subscription_id = updated_subscription_id.ok_or(SubscriptionError::NotFound)?;
 
-// Update tenant plan column.
+    // Update tenant plan column.
     sqlx::query("UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3")
         .bind(new_plan)
         .bind(now)
@@ -200,10 +200,7 @@ pub async fn update_plan(
 }
 
 /// Cancel the subscription (at period end).
-pub async fn cancel_subscription(
-    pool: &PgPool,
-    tenant_id: &str,
-) -> Result<(), SubscriptionError> {
+pub async fn cancel_subscription(pool: &PgPool, tenant_id: &str) -> Result<(), SubscriptionError> {
     let now = Utc::now();
 
     let affected = sqlx::query(
@@ -375,11 +372,23 @@ mod tests {
     #[test]
     fn parse_status_variants() {
         assert_eq!(parse_status("active").unwrap(), SubscriptionStatus::Active);
-        assert_eq!(parse_status("past_due").unwrap(), SubscriptionStatus::PastDue);
-        assert_eq!(parse_status("canceled").unwrap(), SubscriptionStatus::Canceled);
-        assert_eq!(parse_status("trialing").unwrap(), SubscriptionStatus::Trialing);
+        assert_eq!(
+            parse_status("past_due").unwrap(),
+            SubscriptionStatus::PastDue
+        );
+        assert_eq!(
+            parse_status("canceled").unwrap(),
+            SubscriptionStatus::Canceled
+        );
+        assert_eq!(
+            parse_status("trialing").unwrap(),
+            SubscriptionStatus::Trialing
+        );
         assert_eq!(parse_status("paused").unwrap(), SubscriptionStatus::Paused);
-        assert_eq!(parse_status("incomplete").unwrap(), SubscriptionStatus::Incomplete);
+        assert_eq!(
+            parse_status("incomplete").unwrap(),
+            SubscriptionStatus::Incomplete
+        );
     }
 
     #[test]
@@ -497,8 +506,12 @@ mod tests {
         let errors = usage_limit_errors(&usage, &limits);
 
         assert_eq!(errors.len(), 2);
-        assert!(errors.iter().any(|error| error.contains("emails sent this period")));
-        assert!(errors.iter().any(|error| error.contains("API calls this period")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("emails sent this period")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("API calls this period")));
     }
 
     #[test]

@@ -8,7 +8,10 @@ use tracing::info;
 pub type DatabasePool = PgPool;
 
 /// Create a connection pool from a database URL.
-pub async fn create_pool(database_url: &str, max_connections: u32) -> Result<DatabasePool, sqlx::Error> {
+pub async fn create_pool(
+    database_url: &str,
+    max_connections: u32,
+) -> Result<DatabasePool, sqlx::Error> {
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .min_connections(2)
@@ -31,7 +34,7 @@ pub async fn create_pool_from_config(
     password: &str,
     max_connections: u32,
 ) -> Result<DatabasePool, sqlx::Error> {
-// #210:URL-encode user and password to handle special characters safely
+    // #210:URL-encode user and password to handle special characters safely
     let encoded_user = urlencoding::encode(user);
     let encoded_password = urlencoding::encode(password);
     let url = format!(

@@ -7,9 +7,8 @@ use crate::types::*;
 
 /// Global prior probabilities for hours (24) – peak at 10 AM.
 const HOUR_PRIORS: [f64; 24] = [
-    0.011, 0.0055, 0.0033, 0.0033, 0.0055, 0.011, 0.022, 0.0439, 0.0768, 0.0988,
-    0.1207, 0.1098, 0.0878, 0.0768, 0.0659, 0.0549, 0.0439, 0.0384, 0.0329, 0.0274,
-    0.022, 0.0165, 0.0132, 0.0088,
+    0.011, 0.0055, 0.0033, 0.0033, 0.0055, 0.011, 0.022, 0.0439, 0.0768, 0.0988, 0.1207, 0.1098,
+    0.0878, 0.0768, 0.0659, 0.0549, 0.0439, 0.0384, 0.0329, 0.0274, 0.022, 0.0165, 0.0132, 0.0088,
 ];
 
 /// Global prior probabilities for days (Mon=0..Sun=6) – peak on Tuesday.
@@ -29,15 +28,12 @@ impl SendTimeOptimizer {
         Self { pool, redis }
     }
 
-/// Get optimal send window for a recipient, with caching.
-    pub async fn get_optimal_window(
-        &self,
-        email: &str,
-    ) -> anyhow::Result<BulkOptimizationResult> {
+    /// Get optimal send window for a recipient, with caching.
+    pub async fn get_optimal_window(&self, email: &str) -> anyhow::Result<BulkOptimizationResult> {
         let email_hash = hash_email(email);
         let cache_key = format!("sto:{email_hash}");
 
-// Check Redis cache
+        // Check Redis cache
         if let Ok(cached) = self.get_cached(&cache_key).await {
             return Ok(cached);
         }
@@ -52,13 +48,13 @@ impl SendTimeOptimizer {
             profile_age_days: profile.profile_age_days,
         };
 
-// Cache for 24h
+        // Cache for 24h
         self.set_cached(&cache_key, &result, 86400).await.ok();
 
         Ok(result)
     }
 
-/// Build recipient profile from engagement data.
+    /// Build recipient profile from engagement data.
     async fn build_recipient_profile(&self, email: &str) -> anyhow::Result<RecipientProfile> {
         let rows = sqlx::query_as::<_, (i32, i32, i64)>(
             "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, \
@@ -75,9 +71,7 @@ impl SendTimeOptimizer {
         let mut hour_dist = HourDistribution {
             hours: vec![0.0; 24],
         };
-        let mut day_dist = DayDistribution {
-            days: vec![0.0; 7],
-        };
+        let mut day_dist = DayDistribution { days: vec![0.0; 7] };
         let mut total: i64 = 0;
 
         for (hour, dow, cnt) in &rows {
@@ -88,7 +82,7 @@ impl SendTimeOptimizer {
             total += cnt;
         }
 
-// Normalize to probabilities
+        // Normalize to probabilities
         if total > 0 {
             for h in &mut hour_dist.hours {
                 *h /= total as f64;
@@ -98,15 +92,15 @@ impl SendTimeOptimizer {
             }
         }
 
-// Get profile age
-        let first_event: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
-            "SELECT MIN(timestamp) FROM events WHERE recipient = $1",
-        )
-        .bind(email)
-        .fetch_optional(&self.pool)
-        .await?;
+        // Get profile age
+        let first_event: Option<(chrono::DateTime<Utc>,)> =
+            sqlx::query_as("SELECT MIN(timestamp) FROM events WHERE recipient = $1")
+                .bind(email)
+                .fetch_optional(&self.pool)
+                .await?;
 
-        let age_days = first_event.map(|(t,)| (Utc::now() - t).num_days() as u32)
+        let age_days = first_event
+            .map(|(t,)| (Utc::now() - t).num_days() as u32)
             .unwrap_or(0);
 
         Ok(RecipientProfile {
@@ -119,10 +113,7 @@ impl SendTimeOptimizer {
 
     async fn get_cached(&self, key: &str) -> anyhow::Result<BulkOptimizationResult> {
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        let val: String = redis::cmd("GET")
-            .arg(key)
-            .query_async(&mut *conn)
-            .await?;
+        let val: String = redis::cmd("GET").arg(key).query_async(&mut *conn).await?;
         Ok(serde_json::from_str(&val)?)
     }
 
@@ -163,7 +154,7 @@ pub fn dynamic_alpha(total: f64) -> f64 {
 pub fn compute_optimal_windows(profile: &RecipientProfile) -> Vec<OptimalSendWindow> {
     let alpha = dynamic_alpha(profile.total_events as f64);
 
-// Cold start:return default Tuesday 10 AM
+    // Cold start:return default Tuesday 10 AM
     if profile.total_events < 5 {
         return vec![OptimalSendWindow {
             hour: COLD_START_HOUR,
@@ -173,7 +164,7 @@ pub fn compute_optimal_windows(profile: &RecipientProfile) -> Vec<OptimalSendWin
         }];
     }
 
-// Compute smoothed scores for each (hour, day) pair
+    // Compute smoothed scores for each (hour, day) pair
     let mut windows: Vec<OptimalSendWindow> = Vec::with_capacity(24 * 7);
 
     for hour in 0..24_usize {
@@ -193,8 +184,7 @@ pub fn compute_optimal_windows(profile: &RecipientProfile) -> Vec<OptimalSendWin
             );
 
             let score = hour_posterior * day_posterior;
-            let confidence = profile.total_events as f64
-                / (profile.total_events as f64 + 100.0);
+            let confidence = profile.total_events as f64 / (profile.total_events as f64 + 100.0);
 
             windows.push(OptimalSendWindow {
                 hour: hour as u32,
@@ -205,8 +195,12 @@ pub fn compute_optimal_windows(profile: &RecipientProfile) -> Vec<OptimalSendWin
         }
     }
 
-// Sort by score descending, take top 3
-    windows.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by score descending, take top 3
+    windows.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     windows.truncate(3);
     windows
 }
@@ -225,7 +219,7 @@ mod tests {
     #[test]
     fn test_bayesian_smooth_with_data() {
         let result = bayesian_smooth(0.1, 100.0, 0.05, 5.0);
-// (0.1 + 5 * 0.05) / (100 + 5) = (0.1 + 0.25) / 105 ≈ 0.00333
+        // (0.1 + 5 * 0.05) / (100 + 5) = (0.1 + 0.25) / 105 ≈ 0.00333
         assert!((result - 0.00333).abs() < 0.001);
     }
 
@@ -238,14 +232,14 @@ mod tests {
     #[test]
     fn test_dynamic_alpha_small_total() {
         let alpha = dynamic_alpha(0.0);
-// max(1, 10 - log10(1) * 3) = max(1, 10 - 0) = 10
+        // max(1, 10 - log10(1) * 3) = max(1, 10 - 0) = 10
         assert!((alpha - 10.0).abs() < 0.01);
     }
 
     #[test]
     fn test_dynamic_alpha_large_total() {
         let alpha = dynamic_alpha(10000.0);
-// max(1, 10 - log10(10001) * 3) = max(1, 10 - 12) = 1
+        // max(1, 10 - log10(10001) * 3) = max(1, 10 - 12) = 1
         assert!((alpha - 1.0).abs() < 0.01);
     }
 
@@ -253,9 +247,9 @@ mod tests {
     fn test_hash_email() {
         let hash = hash_email("user@example.com");
         assert_eq!(hash.len(), 64);
-// Deterministic
+        // Deterministic
         assert_eq!(hash, hash_email("user@example.com"));
-// Different for different emails
+        // Different for different emails
         assert_ne!(hash, hash_email("other@example.com"));
     }
 
@@ -265,9 +259,7 @@ mod tests {
             hour_distribution: HourDistribution {
                 hours: vec![0.0; 24],
             },
-            day_distribution: DayDistribution {
-                days: vec![0.0; 7],
-            },
+            day_distribution: DayDistribution { days: vec![0.0; 7] },
             total_events: 0,
             profile_age_days: 0,
         };
@@ -295,7 +287,7 @@ mod tests {
 
         let windows = compute_optimal_windows(&profile);
         assert!(windows.len() <= 3);
-// Should return top windows by score
+        // Should return top windows by score
         assert!(windows[0].score >= windows[windows.len() - 1].score);
     }
 

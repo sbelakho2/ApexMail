@@ -16,7 +16,7 @@ pub struct EventTypeCount {
 pub struct EventsRepo;
 
 impl EventsRepo {
-/// Create a new event.
+    /// Create a new event.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -40,7 +40,7 @@ impl EventsRepo {
         .await
     }
 
-/// List events for a specific message.
+    /// List events for a specific message.
     pub async fn list_by_message(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -48,7 +48,7 @@ impl EventsRepo {
     ) -> Result<Vec<Event>, sqlx::Error> {
         sqlx::query_as::<_, Event>(
             "SELECT id, tenant_id, message_id, event_type, recipient, metadata, timestamp \
-             FROM events WHERE tenant_id = $1 AND message_id = $2 ORDER BY timestamp ASC"
+             FROM events WHERE tenant_id = $1 AND message_id = $2 ORDER BY timestamp ASC",
         )
         .bind(tenant_id)
         .bind(message_id)
@@ -56,7 +56,7 @@ impl EventsRepo {
         .await
     }
 
-/// List events for a tenant with pagination.
+    /// List events for a tenant with pagination.
     pub async fn list_by_tenant(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -67,7 +67,7 @@ impl EventsRepo {
         let offset = offset.clamp(0, 100_000);
         sqlx::query_as::<_, Event>(
             "SELECT id, tenant_id, message_id, event_type, recipient, metadata, timestamp \
-             FROM events WHERE tenant_id = $1 ORDER BY timestamp DESC LIMIT $2 OFFSET $3"
+             FROM events WHERE tenant_id = $1 ORDER BY timestamp DESC LIMIT $2 OFFSET $3",
         )
         .bind(tenant_id)
         .bind(limit)
@@ -76,8 +76,8 @@ impl EventsRepo {
         .await
     }
 
-/// Count events by type for a tenant within a time window.
-/// #222:Added time bound to prevent expensive full table scans
+    /// Count events by type for a tenant within a time window.
+    /// #222:Added time bound to prevent expensive full table scans
     pub async fn count_by_type(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -87,7 +87,7 @@ impl EventsRepo {
         sqlx::query_as::<_, EventTypeCount>(
             "SELECT event_type, COUNT(*) as count \
              FROM events WHERE tenant_id = $1 AND timestamp > NOW() - make_interval(hours => $2) \
-             GROUP BY event_type ORDER BY count DESC"
+             GROUP BY event_type ORDER BY count DESC",
         )
         .bind(tenant_id)
         .bind(since_hours)
@@ -95,7 +95,7 @@ impl EventsRepo {
         .await
     }
 
-/// Event type stats with time window.
+    /// Event type stats with time window.
     pub async fn stats_by_type(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -104,7 +104,7 @@ impl EventsRepo {
         sqlx::query_as::<_, EventTypeCount>(
             "SELECT event_type, COUNT(*) as count \
              FROM events WHERE tenant_id = $1 AND timestamp > NOW() - make_interval(hours => $2) \
-             GROUP BY event_type ORDER BY count DESC"
+             GROUP BY event_type ORDER BY count DESC",
         )
         .bind(tenant_id)
         .bind(since_hours)

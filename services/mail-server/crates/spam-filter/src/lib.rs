@@ -28,13 +28,13 @@ pub use engine::{SpamEngine, SpamVerdict};
 /// Spam filter errors
 #[derive(Debug, thiserror::Error)]
 pub enum SpamError {
-/// Configuration error
+    /// Configuration error
     #[error("Spam filter config error: {0}")]
     Config(String),
-/// Model error
+    /// Model error
     #[error("Model error: {0}")]
     Model(String),
-/// Internal error
+    /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
 }

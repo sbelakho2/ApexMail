@@ -67,7 +67,7 @@ impl BounceServer {
         }
     }
 
-/// Start listening.
+    /// Start listening.
     pub async fn start(self: Arc<Self>) -> anyhow::Result<()> {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let listener = TcpListener::bind(&addr).await?;
@@ -124,16 +124,17 @@ impl BounceServer {
                 let _ = write_line(&mut stream, &format!("250 {} Hello\r\n", self.hostname)).await;
             } else if cmd.starts_with("MAIL FROM") {
                 let addr = extract_addr(&line);
-// RFC 5321:bounces (DSNs) must have null sender
+                // RFC 5321:bounces (DSNs) must have null sender
                 if !addr.is_empty() && addr != "<>" {
-                    let _ = write_line(&mut stream, "550 Bounce MAIL FROM must be null (<>)\r\n").await;
+                    let _ =
+                        write_line(&mut stream, "550 Bounce MAIL FROM must be null (<>)\r\n").await;
                 } else {
-// #145:mail_from validated but not stored (always <> for bounces)
+                    // #145:mail_from validated but not stored (always <> for bounces)
                     let _ = write_line(&mut stream, "250 OK\r\n").await;
                 }
             } else if cmd.starts_with("RCPT TO") {
                 let addr = extract_addr(&line);
-// Accept VERP addresses and standard bounce addresses
+                // Accept VERP addresses and standard bounce addresses
                 let accepted = addr.contains("bounces+")
                     || addr.starts_with("bounce@")
                     || addr.starts_with("bounces@")
@@ -156,7 +157,9 @@ impl BounceServer {
                     match stream.read_line(&mut line).await {
                         Ok(0) => break,
                         Ok(_) => {
-                            if line.trim() == "." { break; }
+                            if line.trim() == "." {
+                                break;
+                            }
                             if line.starts_with("..") {
                                 message.extend_from_slice(line[1..].as_bytes());
                             } else {
@@ -178,7 +181,7 @@ impl BounceServer {
                 }
                 rcpt_to.clear();
             } else if cmd.starts_with("RSET") {
-// #145:only clear rcpt_to (mail_from no longer tracked)
+                // #145:only clear rcpt_to (mail_from no longer tracked)
                 rcpt_to.clear();
                 let _ = write_line(&mut stream, "250 OK\r\n").await;
             } else if cmd.starts_with("QUIT") {
@@ -187,10 +190,18 @@ impl BounceServer {
             } else if cmd.starts_with("NOOP") {
                 let _ = write_line(&mut stream, "250 OK\r\n").await;
             } else if cmd.starts_with("VRFY") || cmd.starts_with("EXPN") {
-// We intentionally do not reveal recipient validity to avoid directory harvests.
-                let _ = write_line(&mut stream, "252 Cannot VRFY user, but will accept message and attempt delivery\r\n").await;
+                // We intentionally do not reveal recipient validity to avoid directory harvests.
+                let _ = write_line(
+                    &mut stream,
+                    "252 Cannot VRFY user, but will accept message and attempt delivery\r\n",
+                )
+                .await;
             } else if cmd.starts_with("HELP") {
-                let _ = write_line(&mut stream, "214 Supported: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT\r\n").await;
+                let _ = write_line(
+                    &mut stream,
+                    "214 Supported: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT\r\n",
+                )
+                .await;
             } else if cmd.starts_with("STARTTLS") {
                 let _ = write_line(&mut stream, "454 TLS not available on this endpoint\r\n").await;
             } else {
@@ -199,17 +210,13 @@ impl BounceServer {
         }
     }
 
-// ── bounce processing ──────────────────────────────────────────────────────
+    // ── bounce processing ──────────────────────────────────────────────────────
 
-    async fn process_bounce(
-        &self,
-        rcpt_to: &[String],
-        raw: &[u8],
-    ) -> anyhow::Result<String> {
+    async fn process_bounce(&self, rcpt_to: &[String], raw: &[u8]) -> anyhow::Result<String> {
         let bounce_id = Uuid::new_v4().to_string();
         let message = String::from_utf8_lossy(raw);
 
-// 1. Try to match via VERP address
+        // 1. Try to match via VERP address
         let mut original_message_id = None;
         let mut original_recipient = None;
         for addr in rcpt_to {
@@ -220,17 +227,17 @@ impl BounceServer {
             }
         }
 
-// 2. If no VERP match, try to parse DSN
+        // 2. If no VERP match, try to parse DSN
         if original_message_id.is_none() {
             if let Some(mid) = extract_original_message_id(&message) {
                 original_message_id = Some(mid);
             }
         }
 
-// 3. Classify bounce
+        // 3. Classify bounce
         let bounce_info = classify_bounce(&message);
 
-// 4. Record bounce event
+        // 4. Record bounce event
         sqlx::query(
             r#"INSERT INTO bounce_events (
                 id, original_message_id, original_recipient,
@@ -248,7 +255,7 @@ impl BounceServer {
         .execute(&self.pool)
         .await?;
 
-// 5. Hard bounces → suppression list
+        // 5. Hard bounces → suppression list
         if bounce_info.bounce_type == BounceType::Hard {
             if let Some(ref recip) = original_recipient {
                 sqlx::query(
@@ -261,7 +268,7 @@ impl BounceServer {
             }
         }
 
-// 6. Queue webhook
+        // 6. Queue webhook
         let payload = serde_json::json!({
             "event": "bounce",
             "bounce_id": bounce_id,
@@ -291,7 +298,7 @@ impl BounceServer {
         Ok(bounce_id)
     }
 
-/// Clean up old unmatched bounces.
+    /// Clean up old unmatched bounces.
     pub async fn cleanup_unmatched_bounces(
         &self,
         retention_days: i32,
@@ -325,43 +332,55 @@ pub fn classify_bounce(message: &str) -> BounceInfo {
     let diagnostic = extract_diagnostic_code(message);
 
     let (bounce_type, subtype) = match status_code.as_str() {
-        s if s.starts_with("5.1.") => (BounceType::Hard, match s {
-            "5.1.0" => "address-rejected",
-            "5.1.1" => "no-mailbox",
-            "5.1.2" => "no-such-domain",
-            "5.1.3" => "bad-syntax",
-            "5.1.4" => "ambiguous-address",
-            "5.1.6" => "moved",
-            _ => "address-error",
-        }),
-        s if s.starts_with("5.2.") => (BounceType::Hard, match s {
-            "5.2.1" => "disabled",
-            "5.2.2" => "mailbox-full",
-            "5.2.3" => "message-too-large",
-            _ => "mailbox-error",
-        }),
+        s if s.starts_with("5.1.") => (
+            BounceType::Hard,
+            match s {
+                "5.1.0" => "address-rejected",
+                "5.1.1" => "no-mailbox",
+                "5.1.2" => "no-such-domain",
+                "5.1.3" => "bad-syntax",
+                "5.1.4" => "ambiguous-address",
+                "5.1.6" => "moved",
+                _ => "address-error",
+            },
+        ),
+        s if s.starts_with("5.2.") => (
+            BounceType::Hard,
+            match s {
+                "5.2.1" => "disabled",
+                "5.2.2" => "mailbox-full",
+                "5.2.3" => "message-too-large",
+                _ => "mailbox-error",
+            },
+        ),
         s if s.starts_with("5.3.") => (BounceType::Hard, "system-error"),
         s if s.starts_with("5.4.") => (BounceType::Hard, "network-error"),
         s if s.starts_with("5.5.") => (BounceType::Hard, "protocol-error"),
         s if s.starts_with("5.6.") => (BounceType::Hard, "content-error"),
-        s if s.starts_with("5.7.") => (BounceType::Hard, match s {
-            "5.7.1" => "policy",
-            "5.7.13" => "account-disabled",
-            "5.7.23" => "spf-failed",
-            "5.7.25" => "ip-blacklisted",
-            "5.7.26" => "dmarc-failed",
-            _ => "security-error",
-        }),
-        s if s.starts_with("4.2.") => (BounceType::Soft, match s {
-            "4.2.1" => "disabled-temp",
-            "4.2.2" => "mailbox-full",
-            _ => "mailbox-temp",
-        }),
+        s if s.starts_with("5.7.") => (
+            BounceType::Hard,
+            match s {
+                "5.7.1" => "policy",
+                "5.7.13" => "account-disabled",
+                "5.7.23" => "spf-failed",
+                "5.7.25" => "ip-blacklisted",
+                "5.7.26" => "dmarc-failed",
+                _ => "security-error",
+            },
+        ),
+        s if s.starts_with("4.2.") => (
+            BounceType::Soft,
+            match s {
+                "4.2.1" => "disabled-temp",
+                "4.2.2" => "mailbox-full",
+                _ => "mailbox-temp",
+            },
+        ),
         s if s.starts_with("4.4.") => (BounceType::Soft, "network-error"),
         s if s.starts_with("4.7.") => (BounceType::Soft, "security-temp"),
         s if s.starts_with("4.") => (BounceType::Transient, "transient"),
         _ => {
-// Heuristic:look for keywords
+            // Heuristic:look for keywords
             let lower = message.to_lowercase();
             if lower.contains("does not exist")
                 || lower.contains("no such user")
@@ -400,7 +419,7 @@ pub fn classify_bounce(message: &str) -> BounceInfo {
 // ── parsing helpers ────────────────────────────────────────────────────────────
 
 fn parse_verp_address(addr: &str, verp_domain: &str) -> Option<(String, String)> {
-// VERP format:bounces+{message_id}={recipient_domain}={recipient_local}@{verp_domain}
+    // VERP format:bounces+{message_id}={recipient_domain}={recipient_local}@{verp_domain}
     let addr = addr.trim_matches(|c| c == '<' || c == '>');
     if !addr.ends_with(&format!("@{verp_domain}")) {
         return None;
@@ -408,7 +427,7 @@ fn parse_verp_address(addr: &str, verp_domain: &str) -> Option<(String, String)>
     let local = addr.split('@').next()?;
     let rest = local.strip_prefix("bounces+")?;
 
-// Split:message_id=domain=local
+    // Split:message_id=domain=local
     let parts: Vec<&str> = rest.splitn(3, '=').collect();
     if parts.len() >= 3 {
         let message_id = parts[0].to_string();
@@ -420,9 +439,9 @@ fn parse_verp_address(addr: &str, verp_domain: &str) -> Option<(String, String)>
 }
 
 fn extract_status_code(message: &str) -> String {
-// #142:Use pre-compiled regex (LazyLock)
-// #143:Only search in DSN header lines (Status:, Diagnostic-Code:) to avoid
-// matching codes from the attached original message
+    // #142:Use pre-compiled regex (LazyLock)
+    // #143:Only search in DSN header lines (Status:, Diagnostic-Code:) to avoid
+    // matching codes from the attached original message
     for line in message.lines() {
         let trimmed = line.trim().to_lowercase();
         if trimmed.starts_with("status:") || trimmed.starts_with("diagnostic-code:") {
@@ -433,7 +452,7 @@ fn extract_status_code(message: &str) -> String {
             }
         }
     }
-// Fallback:check lines starting with 3-digit SMTP reply codes
+    // Fallback:check lines starting with 3-digit SMTP reply codes
     if let Some(re) = &*BOUNCE_STATUS_RE {
         for line in message.lines() {
             let trimmed = line.trim();
@@ -460,16 +479,24 @@ fn extract_diagnostic_code(message: &str) -> Option<String> {
 fn extract_original_message_id(message: &str) -> Option<String> {
     for line in message.lines() {
         let trimmed = line.trim().to_lowercase();
-        if trimmed.starts_with("original-message-id:") || trimmed.starts_with("x-original-message-id:") {
-            let value = line.split(':').skip(1).collect::<Vec<_>>().join(":").trim().to_string();
+        if trimmed.starts_with("original-message-id:")
+            || trimmed.starts_with("x-original-message-id:")
+        {
+            let value = line
+                .split(':')
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(":")
+                .trim()
+                .to_string();
             let cleaned = value.trim_matches(|c| c == '<' || c == '>').to_string();
             if !cleaned.is_empty() {
                 return Some(cleaned);
             }
         }
     }
-// #144:Removed generic Message-ID fallback that could match the bounce's own ID.
-// Only Original-Message-ID / X-Original-Message-ID are reliable for matching.
+    // #144:Removed generic Message-ID fallback that could match the bounce's own ID.
+    // Only Original-Message-ID / X-Original-Message-ID are reliable for matching.
     None
 }
 
@@ -482,7 +509,10 @@ fn extract_addr(line: &str) -> String {
     line.split_whitespace().last().unwrap_or("").to_string()
 }
 
-async fn write_line<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(stream: &mut BufStream<S>, data: &str) -> std::io::Result<()> {
+async fn write_line<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: &mut BufStream<S>,
+    data: &str,
+) -> std::io::Result<()> {
     stream.write_all(data.as_bytes()).await?;
     stream.flush().await
 }

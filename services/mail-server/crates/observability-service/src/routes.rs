@@ -3,9 +3,9 @@
 //! Exposes metrics summaries, traces, logs, alerts, SLOs, and a health
 //! endpoint via a shared [`AppState`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::HashMap;
 
 use axum::{
     extract::{DefaultBodyLimit, Query, State},
@@ -16,8 +16,8 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use tower_http::timeout::TimeoutLayer;
 use serde::{Deserialize, Serialize};
+use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
 use crate::alerting::AlertManager;
@@ -76,7 +76,10 @@ pub fn router(state: AppState) -> Router {
         .route("/logs", get(logs_query))
         .route("/alerts", get(alerts_list).post(alerts_ingest))
         .route("/slos", get(slos_list))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_service_token,
+        ))
         .with_state(state)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
@@ -97,14 +100,20 @@ async fn require_service_token(
     if state.service_token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let provided = req.headers().get("x-api-key")
+    let provided = req
+        .headers()
+        .get("x-api-key")
         .and_then(|v| v.to_str().ok().map(String::from))
         .or_else(|| {
-            req.headers().get(AUTHORIZATION)
+            req.headers()
+                .get(AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided
+        .as_deref()
+        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
+    {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -192,7 +201,11 @@ async fn logs_query(
 ) -> Json<Vec<crate::types::LogEntry>> {
     let level_filter = params.level.as_deref().and_then(parse_log_level);
     let limit = clamp_limit(params.limit.unwrap_or(200), 1000);
-    Json(state.logs.query(level_filter, params.service.as_deref(), limit))
+    Json(
+        state
+            .logs
+            .query(level_filter, params.service.as_deref(), limit),
+    )
 }
 
 async fn alerts_list(State(state): State<AppState>) -> Json<Vec<Alert>> {
@@ -212,11 +225,9 @@ async fn alerts_ingest(
     StatusCode::ACCEPTED
 }
 
-async fn slos_list(
-    State(state): State<AppState>,
-) -> Json<Vec<crate::slo::SloComplianceResult>> {
-// Return targets as-is (compliance requires request counts, so here we
-// just list defined SLOs as zero-traffic compliance snapshots).
+async fn slos_list(State(state): State<AppState>) -> Json<Vec<crate::slo::SloComplianceResult>> {
+    // Return targets as-is (compliance requires request counts, so here we
+    // just list defined SLOs as zero-traffic compliance snapshots).
     let targets = state.slos.list_slos();
     let results: Vec<_> = targets
         .iter()
@@ -408,7 +419,9 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_summary_endpoint() {
         let state = test_state();
-        state.metrics.record_counter("req_total", 5.0, "total requests");
+        state
+            .metrics
+            .record_counter("req_total", 5.0, "total requests");
 
         let app = router(state);
         let req = Request::builder()

@@ -88,47 +88,56 @@ async fn send_time_optimization(
     let tz = params.timezone.clone().unwrap_or_else(|| "UTC".into());
     let recipient = params.recipient.as_deref();
 
-// Query historical engagement data - when did recipients open emails most
+    // Query historical engagement data - when did recipients open emails most
     let hour_data: Vec<(i32, i64)> = if let Some(email) = recipient {
-// For specific recipient, analyze their personal open patterns
+        // For specific recipient, analyze their personal open patterns
         sqlx::query_as(
             "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, COUNT(*) as opens
              FROM events
              WHERE tenant_id = $1 AND event_type = 'open' AND recipient = $2
              GROUP BY hour
-             ORDER BY opens DESC"
+             ORDER BY opens DESC",
         )
-            .bind(&auth.tenant_id)
-            .bind(email)
-            .fetch_all(&state.db)
-            .await?
+        .bind(&auth.tenant_id)
+        .bind(email)
+        .fetch_all(&state.db)
+        .await?
     } else {
-// For tenant-wide, analyze all open patterns
+        // For tenant-wide, analyze all open patterns
         sqlx::query_as(
             "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, COUNT(*) as opens
              FROM events
              WHERE tenant_id = $1 AND event_type = 'open' AND timestamp > NOW() - INTERVAL '90 days'
              GROUP BY hour
-             ORDER BY opens DESC"
+             ORDER BY opens DESC",
         )
-            .bind(&auth.tenant_id)
-            .fetch_all(&state.db)
-            .await?
+        .bind(&auth.tenant_id)
+        .fetch_all(&state.db)
+        .await?
     };
 
-    let cache_key = format!("send_time:{}:{}:{}", auth.tenant_id, recipient.unwrap_or("all"), &tz);
+    let cache_key = format!(
+        "send_time:{}:{}:{}",
+        auth.tenant_id,
+        recipient.unwrap_or("all"),
+        &tz
+    );
     let cached: Option<(i32, f64)> = sqlx::query_as(
         "SELECT recommended_hour, confidence FROM ai_send_time_cache
-         WHERE cache_key = $1 AND expires_at > NOW()"
+         WHERE cache_key = $1 AND expires_at > NOW()",
     )
-        .bind(&cache_key)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+    .bind(&cache_key)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
     let (recommended_hour, confidence, reasoning) = if let Some((hour, conf)) = cached {
-        (hour.clamp(0, 23) as u8, conf, "Based on cached engagement analysis.".into())
+        (
+            hour.clamp(0, 23) as u8,
+            conf,
+            "Based on cached engagement analysis.".into(),
+        )
     } else if !hour_data.is_empty() {
         let best_hour = hour_data[0].0.clamp(0, 23) as u8;
         let total_opens: i64 = hour_data.iter().map(|(_, c)| c).sum();
@@ -142,7 +151,7 @@ async fn send_time_optimization(
         };
         let confidence = confidence.min(0.95);
 
-// Cache the result
+        // Cache the result
         if let Err(e) = sqlx::query(
             "INSERT INTO ai_send_time_cache (cache_key, tenant_id, recipient_email, recommended_hour, confidence, expires_at)
              VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '24 hours')
@@ -165,8 +174,12 @@ async fn send_time_optimization(
         );
         (best_hour, confidence, reasoning)
     } else {
-// Fallback to industry defaults when no data
-        (14, 0.5, "No historical data available. Using industry best practice (mid-afternoon).".into())
+        // Fallback to industry defaults when no data
+        (
+            14,
+            0.5,
+            "No historical data available. Using industry best practice (mid-afternoon).".into(),
+        )
     };
 
     Ok(Json(SendTimeResponse {
@@ -190,7 +203,7 @@ async fn subject_analysis(
     let has_personalization = subject.contains("{{") || subject.contains("{%");
     let has_emoji = subject.chars().any(|c| {
         let cp = c as u32;
-// Common emoji ranges:emoticons, dingbats, symbols, flags, etc.
+        // Common emoji ranges:emoticons, dingbats, symbols, flags, etc.
         matches!(cp,
             0x1F600..=0x1F64F | // Emoticons
             0x1F300..=0x1F5FF | // Misc Symbols and Pictographs
@@ -232,7 +245,8 @@ async fn subject_analysis(
         suggestions.push("Consider shortening the subject line to under 10 words.".into());
     }
     if !has_personalization {
-        suggestions.push("Adding personalization (e.g. recipient name) can improve open rates.".into());
+        suggestions
+            .push("Adding personalization (e.g. recipient name) can improve open rates.".into());
     }
 
     Ok(Json(SubjectAnalysisResponse {
@@ -252,7 +266,7 @@ async fn churn_prediction(
 ) -> Result<Json<ChurnPredictionResponse>, ApiError> {
     require_scopes(&auth, &["ai:read"])?;
 
-// Simple heuristic:contacts with no events in the last 90 days
+    // Simple heuristic:contacts with no events in the last 90 days
     let at_risk = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(DISTINCT c.id) FROM contacts c
          LEFT JOIN events e ON e.recipient = c.email AND e.tenant_id = c.tenant_id
@@ -276,10 +290,7 @@ async fn churn_prediction(
     Ok(Json(ChurnPredictionResponse {
         at_risk_contacts: at_risk,
         churn_probability: at_risk as f64 / total as f64,
-        top_risk_factors: vec![
-            "No opens in 90 days".into(),
-            "Engagement declining".into(),
-        ],
+        top_risk_factors: vec!["No opens in 90 days".into(), "Engagement declining".into()],
         recommendations: vec![
             "Send a re-engagement campaign".into(),
             "Offer an incentive to inactive subscribers".into(),
@@ -298,58 +309,65 @@ async fn bot_detection(
     let mut confidence = 0.0_f64;
     let mut is_bot = false;
 
-// Check by IP address patterns
+    // Check by IP address patterns
     if let Some(ip) = &params.ip_address {
-// Check if IP is from known data center ranges
+        // Check if IP is from known data center ranges
         if ip.starts_with("10.") || ip.starts_with("192.168.") || ip.starts_with("172.16.") {
             signals.push("private IP range".into());
             confidence += 0.2;
         }
 
-// Query event patterns for this IP to detect bot-like behavior
+        // Query event patterns for this IP to detect bot-like behavior
         let ip_stats: Option<(i64, i64, Option<f64>)> = sqlx::query_as(
             "SELECT
                 COUNT(*) as event_count,
                 COUNT(DISTINCT recipient) as unique_recipients,
                 EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))) as time_span_seconds
              FROM events
-             WHERE tenant_id = $1 AND ip_address = $2 AND timestamp > NOW() - INTERVAL '1 hour'"
+             WHERE tenant_id = $1 AND ip_address = $2 AND timestamp > NOW() - INTERVAL '1 hour'",
         )
-            .bind(&auth.tenant_id)
-            .bind(ip)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+        .bind(&auth.tenant_id)
+        .bind(ip)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
 
         if let Some((event_count, unique_recipients, time_span)) = ip_stats {
-// High velocity from single IP
+            // High velocity from single IP
             if event_count > 100 && time_span.unwrap_or(3600.0) < 60.0 {
                 signals.push(format!("{} events in <60 seconds", event_count));
                 confidence += 0.4;
             }
-// Same IP hitting many recipients
+            // Same IP hitting many recipients
             if unique_recipients > 50 && event_count > 100 {
-                signals.push(format!("{} unique recipients from single IP", unique_recipients));
+                signals.push(format!(
+                    "{} unique recipients from single IP",
+                    unique_recipients
+                ));
                 confidence += 0.3;
             }
         }
     }
 
-// Check by event ID to get user-agent and timing patterns
+    // Check by event ID to get user-agent and timing patterns
     if let Some(event_id) = params.event_id {
-        let event_data: Option<(Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT user_agent, ip_address, timestamp FROM events WHERE id = $1 AND tenant_id = $2"
+        let event_data: Option<(
+            Option<String>,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT user_agent, ip_address, timestamp FROM events WHERE id = $1 AND tenant_id = $2",
         )
-            .bind(event_id)
-            .bind(&auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+        .bind(event_id)
+        .bind(&auth.tenant_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
 
         if let Some((user_agent, _ip, timestamp)) = event_data {
-// Check user agent against known bot patterns
+            // Check user agent against known bot patterns
             if let Some(ua) = user_agent {
                 let ua_lower = ua.to_lowercase();
                 let bot_patterns = [
@@ -378,14 +396,14 @@ async fn bot_detection(
                     }
                 }
 
-// Check for suspicious UA characteristics
+                // Check for suspicious UA characteristics
                 if ua.is_empty() || ua.len() < 10 {
                     signals.push("missing or minimal user agent".into());
                     confidence += 0.3;
                 }
             }
 
-// Check for impossibly fast opens after send (< 1 second usually indicates prefetching)
+            // Check for impossibly fast opens after send (< 1 second usually indicates prefetching)
             let send_time: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
                 "SELECT sent_at FROM messages WHERE id = (SELECT message_id FROM events WHERE id = $1)"
             )

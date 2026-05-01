@@ -5,7 +5,6 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use deadpool_redis::redis::AsyncCommands;
 use billing_service::{
     config::{BillingConfig, PaygPricing},
     plans,
@@ -13,6 +12,7 @@ use billing_service::{
     usage,
 };
 use chrono::{Datelike, Months, NaiveTime, Utc};
+use deadpool_redis::redis::AsyncCommands;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,6 +27,7 @@ const MILLISECONDS_PER_DAY: i64 = 86_400_000;
 const LEGACY_DOWNGRADE_PLAN: &str = "free";
 const DEFAULT_BILLING_CURRENCY: &str = "USD";
 const DEFAULT_NET_DAYS: i64 = 30;
+const USAGE_QUERY_CACHE_TTL_SECONDS: u64 = 30;
 const BILLING_COMPANY_NAME: &str = "Bel Consulting OÜ";
 const BILLING_COMPANY_TRADING_AS: &str = "ApexMail";
 const BILLING_COMPANY_STREET: &str = "Sakala 7-2";
@@ -69,13 +70,22 @@ pub fn router() -> Router<AppState> {
         .route("/admin/tenants", get(admin_list_tenants))
         .route("/admin/tenants/:tenantId", get(admin_get_tenant_details))
         .route("/admin/tenants/:tenantId/credits", post(admin_apply_credit))
-        .route("/admin/tenants/:tenantId/plan-override", post(admin_apply_plan_override))
+        .route(
+            "/admin/tenants/:tenantId/plan-override",
+            post(admin_apply_plan_override),
+        )
         .route(
             "/admin/tenants/:tenantId/subscription-status",
             post(admin_force_subscription_status),
         )
-        .route("/admin/tenants/:tenantId/dunning/reset", post(admin_reset_dunning))
-        .route("/admin/tenants/:tenantId/invoices", post(admin_create_invoice))
+        .route(
+            "/admin/tenants/:tenantId/dunning/reset",
+            post(admin_reset_dunning),
+        )
+        .route(
+            "/admin/tenants/:tenantId/invoices",
+            post(admin_create_invoice),
+        )
         .route("/admin/reports/revenue", get(admin_get_revenue_report))
         .route("/admin/reports/mrr", get(admin_get_mrr_report))
         .route("/admin/reports/churn", get(admin_get_churn_report))
@@ -256,11 +266,7 @@ fn comparison_differences(
 ) -> Vec<serde_json::Value> {
     let features1 = feature_map(plan1);
     let features2 = feature_map(plan2);
-    let mut keys: Vec<String> = features1
-        .keys()
-        .chain(features2.keys())
-        .cloned()
-        .collect();
+    let mut keys: Vec<String> = features1.keys().chain(features2.keys()).cloned().collect();
     keys.sort();
     keys.dedup();
 
@@ -311,6 +317,62 @@ fn usage_payload(summary: billing_service::types::UsageSummary) -> serde_json::V
             "percentUsed": percent_used,
         },
     })
+}
+
+fn usage_cache_key(
+    tenant_id: &str,
+    period_start: chrono::DateTime<Utc>,
+    period_end: chrono::DateTime<Utc>,
+    namespace: &str,
+) -> String {
+    format!(
+        "billing:usage-query:{namespace}:{tenant_id}:{}:{}",
+        period_start.timestamp(),
+        period_end.timestamp()
+    )
+}
+
+fn map_usage_error(error: usage::UsageError) -> ApiError {
+    match error {
+        usage::UsageError::Db(db_error) => ApiError::from(db_error),
+        usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
+        usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
+        usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
+    }
+}
+
+async fn cached_usage_payload_for_period(
+    state: &AppState,
+    tenant_id: &str,
+    period_start: chrono::DateTime<Utc>,
+    period_end: chrono::DateTime<Utc>,
+    namespace: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let cache_key = usage_cache_key(tenant_id, period_start, period_end, namespace);
+
+    if let Ok(mut conn) = state.redis.get().await {
+        let cached: Result<Option<String>, _> = conn.get(&cache_key).await;
+        if let Ok(Some(cached)) = cached {
+            if let Ok(payload) = serde_json::from_str(&cached) {
+                return Ok(payload);
+            }
+        }
+    }
+
+    let summary = usage::get_usage(&state.db, tenant_id, period_start, period_end)
+        .await
+        .map_err(map_usage_error)?;
+    let payload = usage_payload(summary);
+
+    if let Ok(serialized) = serde_json::to_string(&payload) {
+        if let Ok(mut conn) = state.redis.get().await {
+            let _: Result<(), _> = conn
+                .set_ex(&cache_key, serialized, USAGE_QUERY_CACHE_TTL_SECONDS)
+                .await;
+        }
+    }
+
+    Ok(payload)
 }
 
 #[derive(Debug, Deserialize)]
@@ -820,7 +882,89 @@ fn stripe_api_version() -> String {
         .unwrap_or_else(|| DEFAULT_STRIPE_API_VERSION.into())
 }
 
-fn is_allowed_billing_redirect_url(url_string: &str, environment: crate::config::Environment) -> bool {
+#[derive(Clone)]
+struct StripeClient {
+    http: reqwest::Client,
+    base_url: String,
+    api_version: String,
+    secret_key: String,
+}
+
+impl StripeClient {
+    fn from_env(http: &reqwest::Client) -> Result<Self, String> {
+        let secret_key = std::env::var("STRIPE_SECRET_KEY")
+            .map_err(|_| "Stripe secret key is not configured".to_string())?;
+
+        Ok(Self {
+            http: http.clone(),
+            base_url: stripe_api_base_url(),
+            api_version: stripe_api_version(),
+            secret_key,
+        })
+    }
+
+    fn new(
+        http: reqwest::Client,
+        base_url: String,
+        api_version: String,
+        secret_key: String,
+    ) -> Self {
+        Self {
+            http,
+            base_url,
+            api_version,
+            secret_key,
+        }
+    }
+
+    async fn form_post<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+        idempotency_key: Option<&str>,
+    ) -> Result<T, String> {
+        let response = self
+            .form_request(path, form, idempotency_key)
+            .send()
+            .await
+            .map_err(|error| format!("Stripe request failed: {error}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Stripe returned {status}: {body}"));
+        }
+
+        response
+            .json::<T>()
+            .await
+            .map_err(|error| format!("Stripe response decode failed: {error}"))
+    }
+
+    fn form_request(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+        idempotency_key: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let mut request = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .bearer_auth(&self.secret_key)
+            .header("Stripe-Version", &self.api_version)
+            .form(form);
+
+        if let Some(idempotency_key) = idempotency_key {
+            request = request.header("Idempotency-Key", idempotency_key);
+        }
+
+        request
+    }
+}
+
+fn is_allowed_billing_redirect_url(
+    url_string: &str,
+    environment: crate::config::Environment,
+) -> bool {
     let Ok(url) = url::Url::parse(url_string) else {
         return false;
     };
@@ -860,60 +1004,6 @@ fn billing_operation_failed_response() -> Response {
 fn tenant_billing_email(settings_raw: &str) -> Option<String> {
     let settings: TenantStripeSettings = serde_json::from_str(settings_raw).unwrap_or_default();
     settings.billing_email.or(settings.default_from_email)
-}
-
-async fn stripe_form_post<T: DeserializeOwned>(
-    client: &reqwest::Client,
-    path: &str,
-    form: &[(&str, String)],
-    idempotency_key: Option<&str>,
-) -> Result<T, String> {
-    let secret_key = std::env::var("STRIPE_SECRET_KEY")
-        .map_err(|_| "Stripe secret key is not configured".to_string())?;
-    let request = build_stripe_form_request(
-        client,
-        path,
-        &secret_key,
-        &stripe_api_version(),
-        form,
-        idempotency_key,
-    );
-
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("Stripe request failed: {error}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Stripe returned {status}: {body}"));
-    }
-
-    response
-        .json::<T>()
-        .await
-        .map_err(|error| format!("Stripe response decode failed: {error}"))
-}
-
-fn build_stripe_form_request(
-    client: &reqwest::Client,
-    path: &str,
-    secret_key: &str,
-    api_version: &str,
-    form: &[(&str, String)],
-    idempotency_key: Option<&str>,
-) -> reqwest::RequestBuilder {
-    let mut request = client
-        .post(format!("{}{}", stripe_api_base_url(), path))
-        .bearer_auth(secret_key)
-        .header("Stripe-Version", api_version)
-        .form(form);
-
-    if let Some(idempotency_key) = idempotency_key {
-        request = request.header("Idempotency-Key", idempotency_key);
-    }
-
-    request
 }
 
 async fn get_or_create_stripe_customer_id(
@@ -961,17 +1051,18 @@ async fn get_or_create_stripe_customer_id(
         return Err("No billing email configured".into());
     };
 
-    let customer = stripe_form_post::<StripeCustomerResponse>(
-        &state.http_client,
-        "/v1/customers",
-        &[
-            ("email", email.clone()),
-            ("name", tenant_name.clone()),
-            ("metadata[tenant_id]", tenant_id.to_string()),
-        ],
-        Some(&format!("customer_create_{tenant_id}")),
-    )
-    .await?;
+    let stripe = StripeClient::from_env(&state.http_client)?;
+    let customer = stripe
+        .form_post::<StripeCustomerResponse>(
+            "/v1/customers",
+            &[
+                ("email", email.clone()),
+                ("name", tenant_name.clone()),
+                ("metadata[tenant_id]", tenant_id.to_string()),
+            ],
+            Some(&format!("customer_create_{tenant_id}")),
+        )
+        .await?;
 
     sqlx::query(
         r#"
@@ -1066,7 +1157,9 @@ fn json_rows_to_csv(data: &serde_json::Value) -> String {
         let object = row.as_object().cloned().unwrap_or_default();
         let values = headers
             .iter()
-            .map(|header| sanitize_csv_value(object.get(header).unwrap_or(&serde_json::Value::Null)))
+            .map(|header| {
+                sanitize_csv_value(object.get(header).unwrap_or(&serde_json::Value::Null))
+            })
             .collect::<Vec<_>>();
         csv_rows.push(values.join(","));
     }
@@ -1156,18 +1249,15 @@ fn admin_invoice_export_query(use_legacy_schema: bool) -> &'static str {
 }
 
 fn has_admin_access(auth: &AuthUser) -> bool {
-    auth.scopes.iter().any(|scope| {
-        scope == "*" || scope == "billing:admin"
-    })
+    auth.scopes
+        .iter()
+        .any(|scope| scope == "*" || scope == "billing:admin")
 }
 
 fn has_tenant_access(auth: &AuthUser, tenant_id: &str) -> bool {
     let tenant_scope = format!("tenant:{tenant_id}");
     auth.scopes.iter().any(|scope| {
-        scope == "*"
-            || scope == "billing:admin"
-            || scope == "tenant:*"
-            || scope == &tenant_scope
+        scope == "*" || scope == "billing:admin" || scope == "tenant:*" || scope == &tenant_scope
     })
 }
 
@@ -1218,7 +1308,11 @@ async fn resolve_tenant_billing_currency(state: &AppState, tenant_id: &str) -> S
 
     let normalized = currency.unwrap_or_else(|| DEFAULT_BILLING_CURRENCY.to_string());
     let normalized = normalized.trim().to_uppercase();
-    if normalized.len() == 3 && normalized.chars().all(|character| character.is_ascii_uppercase()) {
+    if normalized.len() == 3
+        && normalized
+            .chars()
+            .all(|character| character.is_ascii_uppercase())
+    {
         normalized
     } else {
         DEFAULT_BILLING_CURRENCY.to_string()
@@ -1227,7 +1321,12 @@ async fn resolve_tenant_billing_currency(state: &AppState, tenant_id: &str) -> S
 
 fn generate_admin_invoice_number(tenant_id: &str) -> String {
     let year = Utc::now().year();
-    let tenant_prefix = tenant_id.replace('-', "").chars().take(4).collect::<String>().to_uppercase();
+    let tenant_prefix = tenant_id
+        .replace('-', "")
+        .chars()
+        .take(4)
+        .collect::<String>()
+        .to_uppercase();
     let random_part = Uuid::new_v4()
         .simple()
         .to_string()
@@ -1290,16 +1389,19 @@ async fn get_dunning_state(
     state: &AppState,
     tenant_id: &str,
 ) -> Result<Option<LegacyDunningStateDto>, ApiError> {
-    let row = sqlx::query_as::<_, (
-        String,
-        String,
-        i64,
-        Option<chrono::DateTime<Utc>>,
-        Option<chrono::DateTime<Utc>>,
-        Option<chrono::DateTime<Utc>>,
-        Option<chrono::DateTime<Utc>>,
-        Option<chrono::DateTime<Utc>>,
-    )>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            i64,
+            Option<chrono::DateTime<Utc>>,
+            Option<chrono::DateTime<Utc>>,
+            Option<chrono::DateTime<Utc>>,
+            Option<chrono::DateTime<Utc>>,
+            Option<chrono::DateTime<Utc>>,
+        ),
+    >(
         r#"
         SELECT tenant_id, status, failed_payment_count, first_failed_at, last_failed_at,
                next_retry_at, suspended_at, grace_period_ends_at
@@ -1419,7 +1521,11 @@ fn invoice_payment_terms_days(invoice: &LegacyInvoiceDto) -> i64 {
 }
 
 fn invoice_vat_label(invoice: &LegacyInvoiceDto) -> String {
-    let mut vat_rates: Vec<i32> = invoice.line_items.iter().map(|item| item.vat_rate).collect();
+    let mut vat_rates: Vec<i32> = invoice
+        .line_items
+        .iter()
+        .map(|item| item.vat_rate)
+        .collect();
     vat_rates.sort_unstable();
     vat_rates.dedup();
 
@@ -1629,19 +1735,34 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
     let reference_number = invoice
         .purchase_order_number
         .as_ref()
-        .map(|value| format!("      <ReferenceNumber>{}</ReferenceNumber>\n", escape_xml(value)))
+        .map(|value| {
+            format!(
+                "      <ReferenceNumber>{}</ReferenceNumber>\n",
+                escape_xml(value)
+            )
+        })
         .unwrap_or_default();
     let buyer_vat_number = invoice
         .billing_address
         .vat_number
         .as_ref()
-        .map(|value| format!("        <VATRegNumber>{}</VATRegNumber>\n", escape_xml(value)))
+        .map(|value| {
+            format!(
+                "        <VATRegNumber>{}</VATRegNumber>\n",
+                escape_xml(value)
+            )
+        })
         .unwrap_or_default();
     let buyer_address_line_2 = invoice
         .billing_address
         .address_line2
         .as_ref()
-        .map(|value| format!("            <PostalAddress2>{}</PostalAddress2>\n", escape_xml(value)))
+        .map(|value| {
+            format!(
+                "            <PostalAddress2>{}</PostalAddress2>\n",
+                escape_xml(value)
+            )
+        })
         .unwrap_or_default();
 
     let mut item_entries = String::new();
@@ -1695,7 +1816,9 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
 fn safe_invoice_filename(invoice_number: &str) -> String {
     let sanitized: String = invoice_number
         .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
         .collect();
 
     if sanitized.is_empty() {
@@ -2188,7 +2311,9 @@ fn cents_to_usd_string(cents: i64) -> String {
 
 fn validate_non_negative(value: i64, field_name: &str) -> Result<u64, ApiError> {
     if value < 0 {
-        return Err(ApiError::Validation(vec![format!("{field_name} must be non-negative")]));
+        return Err(ApiError::Validation(vec![format!(
+            "{field_name} must be non-negative"
+        )]));
     }
 
     Ok(value as u64)
@@ -2255,7 +2380,9 @@ async fn get_current_plan(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let plan = plans::get_plan_for_tenant(&state.db, &auth.tenant_id).await?;
     match plan {
-        Some(plan) => Ok(Json(serde_json::to_value(LegacyPlanLimitsDto::from(&plan))?)),
+        Some(plan) => Ok(Json(serde_json::to_value(LegacyPlanLimitsDto::from(
+            &plan,
+        ))?)),
         None => Ok(Json(serde_json::Value::Null)),
     }
 }
@@ -2282,7 +2409,9 @@ async fn get_plan_features(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let plan = plans::get_plan_for_tenant(&state.db, &auth.tenant_id).await?;
     match plan {
-        Some(plan) => Ok(Json(serde_json::to_value(LegacyPlanFeaturesPayload::from(plan.features))?)),
+        Some(plan) => Ok(Json(serde_json::to_value(
+            LegacyPlanFeaturesPayload::from(plan.features),
+        )?)),
         None => Ok(Json(serde_json::json!({}))),
     }
 }
@@ -2353,16 +2482,16 @@ async fn get_usage(
     let period_start = month_start_date.and_time(NaiveTime::MIN).and_utc();
     let period_end = period_start + Months::new(1);
 
-    let summary = usage::get_usage(&state.db, &auth.tenant_id, period_start, period_end)
-        .await
-        .map_err(|error| match error {
-            usage::UsageError::Db(db_error) => ApiError::from(db_error),
-            usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
-            usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
-            usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
-        })?;
+    let payload = cached_usage_payload_for_period(
+        &state,
+        &auth.tenant_id,
+        period_start,
+        period_end,
+        "summary",
+    )
+    .await?;
 
-    Ok(Json(usage_payload(summary)))
+    Ok(Json(payload))
 }
 
 async fn get_realtime_usage_counter(
@@ -2418,23 +2547,30 @@ async fn get_payg_usage(
     let period_start = month_start_date.and_time(NaiveTime::MIN).and_utc();
     let period_end = period_start + Months::new(1);
 
-    let summary = usage::get_usage(&state.db, &auth.tenant_id, period_start, period_end)
-        .await
-        .map_err(|error| match error {
-            usage::UsageError::Db(db_error) => ApiError::from(db_error),
-            usage::UsageError::Audit(audit_error) => ApiError::Internal(audit_error),
-            usage::UsageError::Redis(pool_error) => ApiError::from(pool_error),
-            usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
-        })?;
-
-    let emails_sent = summary.emails_sent.max(0) as u64;
-    let api_calls = summary.api_calls.max(0) as u64;
+    let usage_payload =
+        cached_usage_payload_for_period(&state, &auth.tenant_id, period_start, period_end, "payg")
+            .await?;
+    let billing_cycle_usage = usage_payload
+        .get("billingCycleUsage")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let emails_sent = billing_cycle_usage
+        .get("emailsSent")
+        .and_then(|value| value.as_i64())
+        .unwrap_or_default()
+        .max(0) as u64;
+    let api_calls = billing_cycle_usage
+        .get("apiCalls")
+        .and_then(|value| value.as_i64())
+        .unwrap_or_default()
+        .max(0) as u64;
     let pricing = PaygPricing::default();
 
     Ok(Json(serde_json::json!({
         "period": {
-            "start": summary.period_start.to_rfc3339(),
-            "end": summary.period_end.to_rfc3339(),
+            "start": period_start.to_rfc3339(),
+            "end": period_end.to_rfc3339(),
         },
         "usage": {
             "emailsSent": emails_sent,
@@ -2450,7 +2586,9 @@ async fn estimate_overage_cost(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let emails_sent = validate_non_negative(body.emails_sent, "emailsSent")? as i64;
     if body.email_limit < 0 {
-        return Err(ApiError::Validation(vec!["emailLimit must be non-negative".into()]));
+        return Err(ApiError::Validation(vec![
+            "emailLimit must be non-negative".into(),
+        ]));
     }
 
     let overage_cost_cents = plans::calculate_overage_cost(emails_sent, body.email_limit);
@@ -2562,25 +2700,36 @@ async fn create_checkout_session(
         }
     };
 
-    let session = match stripe_form_post::<StripeCheckoutSessionResponse>(
-        &state.http_client,
-        "/v1/checkout/sessions",
-        &[
-            ("customer", customer_id),
-            ("payment_method_types[0]", "card".into()),
-            ("line_items[0][price]", body.price_id),
-            ("line_items[0][quantity]", "1".into()),
-            ("mode", "subscription".into()),
-            ("success_url", body.success_url),
-            ("cancel_url", body.cancel_url),
-            ("subscription_data[metadata][tenant_id]", auth.tenant_id.clone()),
-            ("allow_promotion_codes", "true".into()),
-            ("billing_address_collection", "required".into()),
-            ("tax_id_collection[enabled]", "true".into()),
-        ],
-        None,
-    )
-    .await
+    let stripe = match StripeClient::from_env(&state.http_client) {
+        Ok(stripe) => stripe,
+        Err(error) => {
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Stripe client for checkout");
+            return Ok(billing_operation_failed_response());
+        }
+    };
+
+    let session = match stripe
+        .form_post::<StripeCheckoutSessionResponse>(
+            "/v1/checkout/sessions",
+            &[
+                ("customer", customer_id),
+                ("payment_method_types[0]", "card".into()),
+                ("line_items[0][price]", body.price_id),
+                ("line_items[0][quantity]", "1".into()),
+                ("mode", "subscription".into()),
+                ("success_url", body.success_url),
+                ("cancel_url", body.cancel_url),
+                (
+                    "subscription_data[metadata][tenant_id]",
+                    auth.tenant_id.clone(),
+                ),
+                ("allow_promotion_codes", "true".into()),
+                ("billing_address_collection", "required".into()),
+                ("tax_id_collection[enabled]", "true".into()),
+            ],
+            None,
+        )
+        .await
     {
         Ok(session) => session,
         Err(error) => {
@@ -2628,16 +2777,24 @@ async fn create_portal_session(
         }
     };
 
-    let session = match stripe_form_post::<StripePortalSessionResponse>(
-        &state.http_client,
-        "/v1/billing_portal/sessions",
-        &[
-            ("customer", stripe_customer_id),
-            ("return_url", body.return_url),
-        ],
-        None,
-    )
-    .await
+    let stripe = match StripeClient::from_env(&state.http_client) {
+        Ok(stripe) => stripe,
+        Err(error) => {
+            tracing::error!(tenant_id = %auth.tenant_id, error = %error, "Failed to initialize Stripe client for portal session");
+            return Ok(billing_operation_failed_response());
+        }
+    };
+
+    let session = match stripe
+        .form_post::<StripePortalSessionResponse>(
+            "/v1/billing_portal/sessions",
+            &[
+                ("customer", stripe_customer_id),
+                ("return_url", body.return_url),
+            ],
+            None,
+        )
+        .await
     {
         Ok(session) => session,
         Err(error) => {
@@ -2686,9 +2843,18 @@ async fn get_proration_preview(
         }
     };
 
-    match preview_plan_proration(&BillingConfig::default(), &current_plan, &new_plan, &subscription) {
+    match preview_plan_proration(
+        &BillingConfig::default(),
+        &current_plan,
+        &new_plan,
+        &subscription,
+    ) {
         Ok(proration) => Ok(Json(serde_json::to_value(proration)?).into_response()),
-        Err(error) => Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": error }))).into_response()),
+        Err(error) => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error })),
+        )
+            .into_response()),
     }
 }
 
@@ -2727,13 +2893,12 @@ async fn switch_plan(
             .await?;
         }
 
-        let tenant_update = sqlx::query(
-            "UPDATE tenants SET plan = 'payg', updated_at = $1 WHERE id = $2",
-        )
-        .bind(now)
-        .bind(&auth.tenant_id)
-        .execute(&mut *tx)
-        .await?;
+        let tenant_update =
+            sqlx::query("UPDATE tenants SET plan = 'payg', updated_at = $1 WHERE id = $2")
+                .bind(now)
+                .bind(&auth.tenant_id)
+                .execute(&mut *tx)
+                .await?;
 
         if tenant_update.rows_affected() != 1 {
             return Ok((
@@ -3051,15 +3216,15 @@ async fn list_invoices(
     let limit = clamp_limit(query.limit.unwrap_or(50), 200);
     let offset = clamp_offset(query.offset.unwrap_or(0), 100_000);
 
-    let total_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM invoices WHERE tenant_id = $1",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_one(&state.db)
-    .await?;
+    let total_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM invoices WHERE tenant_id = $1")
+            .bind(&auth.tenant_id)
+            .fetch_one(&state.db)
+            .await?;
 
-    let rows = query_invoice_list_rows_with_legacy_fallback(&state.db, &auth.tenant_id, limit, offset)
-        .await?;
+    let rows =
+        query_invoice_list_rows_with_legacy_fallback(&state.db, &auth.tenant_id, limit, offset)
+            .await?;
 
     let invoices: Vec<LegacyInvoiceDto> = rows.into_iter().map(map_invoice_row).collect();
 
@@ -3141,10 +3306,7 @@ async fn load_legacy_invoice_detail(
     Ok(rows.into_iter().next().map(map_invoice_row))
 }
 
-async fn check_quota(
-    State(state): State<AppState>,
-    auth: AuthUser,
-) -> Result<Response, ApiError> {
+async fn check_quota(State(state): State<AppState>, auth: AuthUser) -> Result<Response, ApiError> {
     let status = usage::check_quota(&state.db, &state.redis, &auth.tenant_id)
         .await
         .map_err(|error| match error {
@@ -3296,23 +3458,18 @@ async fn admin_get_tenant_details(
         .map(|plan| LegacyPlanLimitsDto::from(&plan));
     let dunning = get_dunning_state(&state, &tenant_id).await?;
     let wallet = get_or_create_wallet_balance(&state, &tenant_id).await?;
-    let total_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM invoices WHERE tenant_id = $1",
-    )
-    .bind(&tenant_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
-    let recent_invoices: Vec<LegacyInvoiceDto> = query_invoice_list_rows_with_legacy_fallback(
-        &state.db,
-        &tenant_id,
-        10,
-        0,
-    )
-    .await?
-    .into_iter()
-    .map(map_invoice_row)
-    .collect();
+    let total_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM invoices WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+    let recent_invoices: Vec<LegacyInvoiceDto> =
+        query_invoice_list_rows_with_legacy_fallback(&state.db, &tenant_id, 10, 0)
+            .await?
+            .into_iter()
+            .map(map_invoice_row)
+            .collect();
 
     Ok(Json(serde_json::json!({
         "tenantId": tenant_id,
@@ -3418,7 +3575,13 @@ async fn admin_apply_credit(
 
     invalidate_cache_key(&state, &format!("wallet:balance:{tenant_id}")).await;
 
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(LegacyWalletTransactionDto::from(transaction))?)).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(LegacyWalletTransactionDto::from(
+            transaction,
+        ))?),
+    )
+        .into_response())
 }
 
 async fn admin_apply_plan_override(
@@ -3473,7 +3636,10 @@ async fn admin_apply_plan_override(
     .execute(&state.db)
     .await?;
 
-    Ok(Json(serde_json::json!({ "success": true, "message": "Plan override applied" })).into_response())
+    Ok(
+        Json(serde_json::json!({ "success": true, "message": "Plan override applied" }))
+            .into_response(),
+    )
 }
 
 async fn admin_force_subscription_status(
@@ -3540,7 +3706,10 @@ async fn admin_force_subscription_status(
 
     tx.commit().await?;
 
-    Ok(Json(serde_json::json!({ "success": true, "message": "Subscription status updated" })).into_response())
+    Ok(
+        Json(serde_json::json!({ "success": true, "message": "Subscription status updated" }))
+            .into_response(),
+    )
 }
 
 async fn admin_reset_dunning(
@@ -3627,7 +3796,10 @@ async fn admin_reset_dunning(
     tx.commit().await?;
     invalidate_cache_key(&state, &format!("dunning:status:{tenant_id}")).await;
 
-    Ok(Json(serde_json::json!({ "success": true, "message": "Dunning state reset" })).into_response())
+    Ok(
+        Json(serde_json::json!({ "success": true, "message": "Dunning state reset" }))
+            .into_response(),
+    )
 }
 
 async fn admin_create_invoice(
@@ -3715,7 +3887,8 @@ async fn admin_create_invoice(
     )
     .bind(&tenant_id)
     .fetch_optional(&mut *tx)
-    .await? {
+    .await?
+    {
         Some(address) => address,
         None => {
             return Ok((
@@ -3751,7 +3924,10 @@ async fn admin_create_invoice(
             )
         })
         .collect();
-    let subtotal: i64 = base_line_items.iter().map(|(_, _, _, amount)| *amount).sum();
+    let subtotal: i64 = base_line_items
+        .iter()
+        .map(|(_, _, _, amount)| *amount)
+        .sum();
     let (vat_rate, vat_total) = billing_service::invoices::calculate_vat(
         subtotal,
         &billing_address.country,
@@ -3864,11 +4040,23 @@ async fn admin_get_revenue_report(
         return Ok(response);
     }
 
-    let (Some(start_date), Some(end_date)) = (query.start_date.as_deref(), query.end_date.as_deref()) else {
-        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "startDate and endDate required" }))).into_response());
+    let (Some(start_date), Some(end_date)) =
+        (query.start_date.as_deref(), query.end_date.as_deref())
+    else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "startDate and endDate required" })),
+        )
+            .into_response());
     };
-    let (Some(start_date), Some(end_date)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
-        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid startDate or endDate" }))).into_response());
+    let (Some(start_date), Some(end_date)) =
+        (parse_query_date(start_date), parse_query_date(end_date))
+    else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Invalid startDate or endDate" })),
+        )
+            .into_response());
     };
 
     let report: serde_json::Value = match sqlx::query_scalar(admin_revenue_report_query(false))
@@ -4019,11 +4207,23 @@ async fn admin_get_cost_report(
         return Ok(response);
     }
 
-    let (Some(start_date), Some(end_date)) = (query.start_date.as_deref(), query.end_date.as_deref()) else {
-        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "startDate and endDate required" }))).into_response());
+    let (Some(start_date), Some(end_date)) =
+        (query.start_date.as_deref(), query.end_date.as_deref())
+    else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "startDate and endDate required" })),
+        )
+            .into_response());
     };
-    let (Some(start_date), Some(end_date)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
-        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid startDate or endDate" }))).into_response());
+    let (Some(start_date), Some(end_date)) =
+        (parse_query_date(start_date), parse_query_date(end_date))
+    else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Invalid startDate or endDate" })),
+        )
+            .into_response());
     };
 
     let report: serde_json::Value = sqlx::query_scalar(
@@ -4068,11 +4268,21 @@ async fn admin_export_billing_data(
         query.start_date.as_deref(),
         query.end_date.as_deref(),
     ) else {
-        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "type, startDate, and endDate required" }))).into_response());
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "type, startDate, and endDate required" })),
+        )
+            .into_response());
     };
 
-    let (Some(start_date_parsed), Some(end_date_parsed)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
-        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid startDate or endDate" }))).into_response());
+    let (Some(start_date_parsed), Some(end_date_parsed)) =
+        (parse_query_date(start_date), parse_query_date(end_date))
+    else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Invalid startDate or endDate" })),
+        )
+            .into_response());
     };
 
     let export_query = match export_type {
@@ -4114,7 +4324,11 @@ async fn admin_export_billing_data(
     };
 
     let Some(export_query) = export_query else {
-        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Invalid export type" }))).into_response());
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Invalid export type" })),
+        )
+            .into_response());
     };
 
     let data: serde_json::Value = match sqlx::query_scalar(export_query)
@@ -4149,118 +4363,119 @@ async fn admin_export_billing_data(
     Ok(csv_text_response(csv, Some(filename)))
 }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::time::Duration;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
 
-        use axum::body::Body;
-        use axum::http::{Method, Request};
-        use deadpool_redis::Config as RedisConfig;
-        use sqlx::postgres::PgPoolOptions;
-        use tower::ServiceExt;
+    use axum::body::Body;
+    use axum::http::{Method, Request};
+    use deadpool_redis::Config as RedisConfig;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
 
-        use crate::app::build_app;
-        use crate::config::{Config, Environment};
-        use crate::ses_provider::SesIpProvider;
-        use crate::state::AppStateInner;
+    use crate::app::build_app;
+    use crate::config::{Config, Environment};
+    use crate::ses_provider::SesIpProvider;
+    use crate::state::AppStateInner;
 
-        fn initialize_billing_test_env() {
-            static INIT: std::sync::Once = std::sync::Once::new();
-            INIT.call_once(|| {
-                std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
-                std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-                std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-                std::env::set_var("BILLING_COMPANY_IBAN", "EE381010220123456789");
-                std::env::set_var("BILLING_COMPANY_PHONE", "+3721234567");
-            });
+    fn initialize_billing_test_env() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+            std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+            std::env::set_var("BILLING_COMPANY_IBAN", "EE381010220123456789");
+            std::env::set_var("BILLING_COMPANY_PHONE", "+3721234567");
+        });
+    }
+
+    fn test_config() -> Config {
+        Config {
+            port: 3000,
+            host: "0.0.0.0".into(),
+            base_url: "http://localhost:3000".into(),
+            environment: Environment::Development,
+            db_host: "localhost".into(),
+            db_port: 5432,
+            db_name: "apexmail".into(),
+            db_user: "apexmail".into(),
+            db_password: "password".into(),
+            db_max_connections: 20,
+            redis_host: "localhost".into(),
+            redis_port: 6379,
+            redis_password: None,
+            redis_db: 0,
+            redis_pool_max_size: 40,
+            jwt_private_key_pem: "BEGIN TEST".into(),
+            jwt_public_key_pem: "BEGIN TEST".into(),
+            jwt_expiry: Duration::from_secs(86_400),
+            api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
+            rate_limit_window_ms: 60_000,
+            rate_limit_max_requests: 1_000,
+            max_inflight_requests: 80,
+            cors_origins: vec!["*".into()],
+            trusted_proxies: vec![],
+            ui_web_hosts: vec!["app.apexmail.ee".into(), "127.0.0.1".into()],
+            ui_control_plane_hosts: vec!["admin.apexmail.ee".into(), "localhost".into()],
+            ui_marketing_hosts: vec!["apexmail.ee".into()],
+            ui_marketing_surface: "marketing-zola".into(),
+            ui_default_surface: Some("web".into()),
+            webhook_signing_secret: "test-webhook-signing-secret-1234567890".into(),
+            webhook_timeout_ms: 5_000,
+            webhook_max_retries: 3,
+            idempotency_ttl_seconds: 86_400,
+            aws_region: "us-east-1".into(),
+            ses_ip_pool_prefix: "apexmail".into(),
+            ses_default_warmup_days: 14,
+            ses_configuration_set: None,
+            google_client_id: None,
+            google_client_secret: None,
+            github_client_id: None,
+            github_client_secret: None,
+            oauth_redirect_base_url: "http://localhost:3000".into(),
+            session_secret: "test-session-secret-1234567890ab".into(),
+            impersonation_secret: "test-impersonation-secret-12345".into(),
+            csrf_secret: "test-csrf-secret-1234567890abcd".into(),
+            control_plane_api_key: None,
+            sales_autopilot_base_url: "http://localhost:3010".into(),
+            internal_service_token: None,
+            tracking_secret_key: "test-tracking-secret-123456789012".into(),
+            billing_company_iban: "EE381010220123456789".into(),
+            billing_company_phone: "+3721234567".into(),
+            metrics_port: 9090,
         }
+    }
 
-        fn test_config() -> Config {
-            Config {
-                port: 3000,
-                host: "0.0.0.0".into(),
-                base_url: "http://localhost:3000".into(),
-                environment: Environment::Development,
-                db_host: "localhost".into(),
-                db_port: 5432,
-                db_name: "apexmail".into(),
-                db_user: "apexmail".into(),
-                db_password: "password".into(),
-                db_max_connections: 20,
-                redis_host: "localhost".into(),
-                redis_port: 6379,
-                redis_password: None,
-                redis_db: 0,
-                redis_pool_max_size: 40,
-                jwt_private_key_pem: "BEGIN TEST".into(),
-                jwt_public_key_pem: "BEGIN TEST".into(),
-                jwt_expiry: Duration::from_secs(86_400),
-                api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
-                rate_limit_window_ms: 60_000,
-                rate_limit_max_requests: 1_000,
-                max_inflight_requests: 80,
-                cors_origins: vec!["*".into()],
-                trusted_proxies: vec![],
-                ui_web_hosts: vec!["app.apexmail.ee".into(), "127.0.0.1".into()],
-                ui_control_plane_hosts: vec!["admin.apexmail.ee".into(), "localhost".into()],
-                ui_marketing_hosts: vec!["apexmail.ee".into()],
-                ui_marketing_surface: "marketing-zola".into(),
-                ui_default_surface: Some("web".into()),
-                webhook_signing_secret: "test-webhook-signing-secret-1234567890".into(),
-                webhook_timeout_ms: 5_000,
-                webhook_max_retries: 3,
-                idempotency_ttl_seconds: 86_400,
-                aws_region: "us-east-1".into(),
-                ses_ip_pool_prefix: "apexmail".into(),
-                ses_default_warmup_days: 14,
-                ses_configuration_set: None,
-                google_client_id: None,
-                google_client_secret: None,
-                github_client_id: None,
-                github_client_secret: None,
-                oauth_redirect_base_url: "http://localhost:3000".into(),
-                session_secret: "test-session-secret-1234567890ab".into(),
-                impersonation_secret: "test-impersonation-secret-12345".into(),
-                csrf_secret: "test-csrf-secret-1234567890abcd".into(),
-                control_plane_api_key: None,
-                sales_autopilot_base_url: "http://localhost:3010".into(),
-                internal_service_token: None,
-                tracking_secret_key: "test-tracking-secret-123456789012".into(),
-                billing_company_iban: "EE381010220123456789".into(),
-                billing_company_phone: "+3721234567".into(),
-                metrics_port: 9090,
-            }
-        }
+    async fn test_router() -> Router {
+        initialize_billing_test_env();
 
-        async fn test_router() -> Router {
-            initialize_billing_test_env();
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://apexmail:apexmail@127.0.0.1:5433/apexmail".into());
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(&database_url)
+            .expect("failed to create lazy test database pool");
 
-            let database_url = std::env::var("TEST_DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://apexmail:apexmail@127.0.0.1:5433/apexmail".into());
-            let db = PgPoolOptions::new()
-                .max_connections(1)
-                .connect_lazy(&database_url)
-                .expect("failed to create lazy test database pool");
+        let redis_url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let redis = RedisConfig::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("failed to create lazy test redis pool");
 
-            let redis_url =
-                std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-            let redis = RedisConfig::from_url(&redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("failed to create lazy test redis pool");
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+            .load()
+            .await;
+        let ses_provider = SesIpProvider::new(
+            aws_sdk_sesv2::Client::new(&aws_config),
+            db.clone(),
+            "apexmail".into(),
+            "us-east-1".into(),
+        );
 
-            let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
-                .load()
-                .await;
-            let ses_provider = SesIpProvider::new(
-                aws_sdk_sesv2::Client::new(&aws_config),
-                db.clone(),
-                "apexmail".into(),
-                "us-east-1".into(),
-            );
-
-            build_app(AppStateInner::new(
+        build_app(
+            AppStateInner::new(
                 db,
                 redis,
                 test_config(),
@@ -4269,51 +4484,79 @@ async fn admin_export_billing_data(
                 None,
             )
             .await
-            .expect("failed to build app state"))
-        }
+            .expect("failed to build app state"),
+        )
+    }
 
-        fn auth_user(scopes: &[&str], tenant_id: &str) -> AuthUser {
-            AuthUser {
-                tenant_id: tenant_id.to_string(),
-                user_id: Some("user_123".into()),
-                api_key_id: None,
-                scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
-            }
+    fn auth_user(scopes: &[&str], tenant_id: &str) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant_id.to_string(),
+            user_id: Some("user_123".into()),
+            api_key_id: None,
+            scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
         }
+    }
 
-        #[test]
-        fn billing_routes_admin_access_rejects_tenant_only_scope() {
-            assert!(has_admin_access(&auth_user(&["*"], "tenant_1")));
-            assert!(has_admin_access(&auth_user(&["billing:admin"], "tenant_1")));
-            assert!(!has_admin_access(&auth_user(&["tenant:*"], "tenant_1")));
-            assert!(!has_admin_access(&auth_user(&["tenant:tenant_1"], "tenant_1")));
-        }
+    #[test]
+    fn billing_routes_admin_access_rejects_tenant_only_scope() {
+        assert!(has_admin_access(&auth_user(&["*"], "tenant_1")));
+        assert!(has_admin_access(&auth_user(&["billing:admin"], "tenant_1")));
+        assert!(!has_admin_access(&auth_user(&["tenant:*"], "tenant_1")));
+        assert!(!has_admin_access(&auth_user(
+            &["tenant:tenant_1"],
+            "tenant_1"
+        )));
+    }
 
-        #[test]
-        fn billing_routes_tenant_access_accepts_exact_and_wildcard_scope() {
-            assert!(has_tenant_access(&auth_user(&["*"], "tenant_1"), "tenant_2"));
-            assert!(has_tenant_access(&auth_user(&["tenant:*"], "tenant_1"), "tenant_2"));
-            assert!(has_tenant_access(
-                &auth_user(&["tenant:tenant_2"], "tenant_1"),
-                "tenant_2"
-            ));
-            assert!(!has_tenant_access(
-                &auth_user(&["tenant:tenant_3"], "tenant_1"),
-                "tenant_2"
-            ));
-        }
+    #[test]
+    fn billing_routes_tenant_access_accepts_exact_and_wildcard_scope() {
+        assert!(has_tenant_access(
+            &auth_user(&["*"], "tenant_1"),
+            "tenant_2"
+        ));
+        assert!(has_tenant_access(
+            &auth_user(&["tenant:*"], "tenant_1"),
+            "tenant_2"
+        ));
+        assert!(has_tenant_access(
+            &auth_user(&["tenant:tenant_2"], "tenant_1"),
+            "tenant_2"
+        ));
+        assert!(!has_tenant_access(
+            &auth_user(&["tenant:tenant_3"], "tenant_1"),
+            "tenant_2"
+        ));
+    }
 
-        #[test]
-        fn billing_routes_realtime_counter_key_uses_month_bucket() {
-            let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 3, 9, 12, 30, 0)
-                .single()
-                .expect("valid timestamp");
-            assert_eq!(
-                usage_realtime_counter_key("tenant_123", "emails_sent", now),
-                "meter:rt:tenant_123:emails_sent:2026-03"
-            );
-        }
+    #[test]
+    fn billing_routes_realtime_counter_key_uses_month_bucket() {
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 3, 9, 12, 30, 0)
+            .single()
+            .expect("valid timestamp");
+        assert_eq!(
+            usage_realtime_counter_key("tenant_123", "emails_sent", now),
+            "meter:rt:tenant_123:emails_sent:2026-03"
+        );
+    }
 
+    #[test]
+    fn billing_routes_usage_cache_key_includes_namespace_and_period() {
+        let start = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 3, 1, 0, 0, 0)
+            .single()
+            .expect("valid start");
+        let end = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid end");
+
+        assert_eq!(
+            usage_cache_key("tenant_123", start, end, "summary"),
+            format!(
+                "billing:usage-query:summary:tenant_123:{}:{}",
+                start.timestamp(),
+                end.timestamp()
+            )
+        );
+    }
 
     fn sample_invoice() -> LegacyInvoiceDto {
         let issued_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 3, 9, 12, 30, 0)
@@ -4403,7 +4646,8 @@ async fn admin_export_billing_data(
         assert!(admin_revenue_report_query(true).contains("SUM(amount_cents) as total_revenue"));
         assert!(admin_revenue_report_query(true).contains("0::bigint as total_tax"));
 
-        assert!(admin_invoice_export_query(false).contains("i.subtotal, i.vat_total, i.total, i.currency"));
+        assert!(admin_invoice_export_query(false)
+            .contains("i.subtotal, i.vat_total, i.total, i.currency"));
         assert!(admin_invoice_export_query(true).contains("i.amount_cents as subtotal"));
         assert!(admin_invoice_export_query(true).contains("i.due_date as due_at"));
     }
@@ -4434,18 +4678,25 @@ async fn admin_export_billing_data(
 
     #[test]
     fn billing_routes_stripe_request_builder_pins_api_version_and_idempotency() {
-        let request = build_stripe_form_request(
-            &reqwest::Client::new(),
-            "/v1/customers",
-            "sk_test_123",
-            DEFAULT_STRIPE_API_VERSION,
-            &[("email", "billing@example.com".to_string())],
-            Some("customer_create_tenant_123"),
-        )
-        .build()
-        .expect("request should build");
+        let stripe = StripeClient::new(
+            reqwest::Client::new(),
+            "https://api.stripe.com".into(),
+            DEFAULT_STRIPE_API_VERSION.into(),
+            "sk_test_123".into(),
+        );
+        let request = stripe
+            .form_request(
+                "/v1/customers",
+                &[("email", "billing@example.com".to_string())],
+                Some("customer_create_tenant_123"),
+            )
+            .build()
+            .expect("request should build");
 
-        assert_eq!(request.url().as_str(), "https://api.stripe.com/v1/customers");
+        assert_eq!(
+            request.url().as_str(),
+            "https://api.stripe.com/v1/customers"
+        );
         assert_eq!(
             request
                 .headers()
@@ -4467,32 +4718,32 @@ async fn admin_export_billing_data(
         assert!(request.headers().get("authorization").is_some());
     }
 
-        #[tokio::test]
-        async fn billing_routes_require_authentication_for_new_public_endpoints() {
-            let app = test_router().await;
+    #[tokio::test]
+    async fn billing_routes_require_authentication_for_new_public_endpoints() {
+        let app = test_router().await;
 
-            for (method, uri) in [
-                (Method::GET, "/v1/billing/usage/realtime/emails_sent"),
-                (Method::POST, "/v1/billing/alerts"),
-                (Method::POST, "/v1/billing/checkout"),
-                (Method::POST, "/v1/billing/portal"),
-                (Method::GET, "/v1/billing/proration/pro"),
-                (Method::GET, "/v1/billing/invoices/inv_test_123/pdf"),
-                (Method::GET, "/v1/billing/invoices/inv_test_123/xml"),
-            ] {
-                let response = app
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .method(method)
-                            .uri(uri)
-                            .body(Body::empty())
-                            .expect("request"),
-                    )
-                    .await
-                    .expect("response");
+        for (method, uri) in [
+            (Method::GET, "/v1/billing/usage/realtime/emails_sent"),
+            (Method::POST, "/v1/billing/alerts"),
+            (Method::POST, "/v1/billing/checkout"),
+            (Method::POST, "/v1/billing/portal"),
+            (Method::GET, "/v1/billing/proration/pro"),
+            (Method::GET, "/v1/billing/invoices/inv_test_123/pdf"),
+            (Method::GET, "/v1/billing/invoices/inv_test_123/xml"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
 
-                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
-            }
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
         }
     }
+}

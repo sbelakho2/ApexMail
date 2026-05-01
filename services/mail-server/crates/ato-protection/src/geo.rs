@@ -8,9 +8,9 @@ const EARTH_RADIUS_KM: f64 = 6371.0;
 /// A geographic coordinate
 #[derive(Debug, Clone, Copy)]
 pub struct GeoPoint {
-/// Latitude in degrees
+    /// Latitude in degrees
     pub lat: f64,
-/// Longitude in degrees
+    /// Longitude in degrees
     pub lon: f64,
 }
 
@@ -37,7 +37,7 @@ pub fn check_impossible_travel(
     max_speed_kmh: f64,
 ) -> (bool, f64, f64) {
     if elapsed_secs <= 0.0 {
-// Same timestamp or backwards — suspicious if different location
+        // Same timestamp or backwards — suspicious if different location
         let dist = haversine_distance(from, to);
         return (dist > 1.0, f64::INFINITY, dist);
     }
@@ -61,59 +61,107 @@ mod tests {
 
     #[test]
     fn test_haversine_same_point() {
-        let p = GeoPoint { lat: 40.7128, lon: -74.006 };
+        let p = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        };
         let dist = haversine_distance(&p, &p);
         assert!(dist.abs() < 0.001);
     }
 
     #[test]
     fn test_haversine_nyc_to_london() {
-        let nyc = GeoPoint { lat: 40.7128, lon: -74.006 };
-        let london = GeoPoint { lat: 51.5074, lon: -0.1278 };
+        let nyc = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        };
+        let london = GeoPoint {
+            lat: 51.5074,
+            lon: -0.1278,
+        };
         let dist = haversine_distance(&nyc, &london);
-// NYC to London ≈ 5,570 km
-        assert!((dist - 5570.0).abs() < 50.0, "NYC-London distance: {} km", dist);
+        // NYC to London ≈ 5,570 km
+        assert!(
+            (dist - 5570.0).abs() < 50.0,
+            "NYC-London distance: {} km",
+            dist
+        );
     }
 
     #[test]
     fn test_haversine_antipodal() {
         let a = GeoPoint { lat: 0.0, lon: 0.0 };
-        let b = GeoPoint { lat: 0.0, lon: 180.0 };
+        let b = GeoPoint {
+            lat: 0.0,
+            lon: 180.0,
+        };
         let dist = haversine_distance(&a, &b);
-// Half circumference ≈ 20,015 km
-        assert!((dist - 20015.0).abs() < 100.0, "Antipodal distance: {} km", dist);
+        // Half circumference ≈ 20,015 km
+        assert!(
+            (dist - 20015.0).abs() < 100.0,
+            "Antipodal distance: {} km",
+            dist
+        );
     }
 
     #[test]
     fn test_impossible_travel_detected() {
-        let nyc = GeoPoint { lat: 40.7128, lon: -74.006 };
-        let tokyo = GeoPoint { lat: 35.6762, lon: 139.6503 };
-// 1 hour between NYC and Tokyo (≈10,800 km) — impossible
+        let nyc = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        };
+        let tokyo = GeoPoint {
+            lat: 35.6762,
+            lon: 139.6503,
+        };
+        // 1 hour between NYC and Tokyo (≈10,800 km) — impossible
         let (impossible, speed, dist) = check_impossible_travel(&nyc, &tokyo, 3600.0, 900.0);
-        assert!(impossible, "Should be impossible: speed={:.0} km/h, dist={:.0} km", speed, dist);
+        assert!(
+            impossible,
+            "Should be impossible: speed={:.0} km/h, dist={:.0} km",
+            speed, dist
+        );
     }
 
     #[test]
     fn test_plausible_travel() {
-        let nyc = GeoPoint { lat: 40.7128, lon: -74.006 };
-        let london = GeoPoint { lat: 51.5074, lon: -0.1278 };
-// 8 hours between NYC and London (≈5,570 km at ≈696 km/h) — plausible by plane
+        let nyc = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        };
+        let london = GeoPoint {
+            lat: 51.5074,
+            lon: -0.1278,
+        };
+        // 8 hours between NYC and London (≈5,570 km at ≈696 km/h) — plausible by plane
         let (impossible, speed, _) = check_impossible_travel(&nyc, &london, 8.0 * 3600.0, 900.0);
         assert!(!impossible, "Should be plausible: speed={:.0} km/h", speed);
     }
 
     #[test]
     fn test_zero_elapsed_different_location() {
-        let a = GeoPoint { lat: 40.7128, lon: -74.006 };
-        let b = GeoPoint { lat: 35.6762, lon: 139.6503 };
+        let a = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        };
+        let b = GeoPoint {
+            lat: 35.6762,
+            lon: 139.6503,
+        };
         let (impossible, _, _) = check_impossible_travel(&a, &b, 0.0, 900.0);
         assert!(impossible, "Same timestamp, different city = impossible");
     }
 
     #[test]
     fn test_zero_elapsed_same_location() {
-        let a = GeoPoint { lat: 40.7128, lon: -74.006 };
-        let b = GeoPoint { lat: 40.7129, lon: -74.006 };
+        let a = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        };
+        let b = GeoPoint {
+            lat: 40.7129,
+            lon: -74.006,
+        };
         let (impossible, _, _) = check_impossible_travel(&a, &b, 0.0, 900.0);
         assert!(!impossible, "Same timestamp, same location = ok");
     }

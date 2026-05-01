@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     extract::State,
-    response::{IntoResponse, Json, Response},
     http::StatusCode,
+    response::{IntoResponse, Json, Response},
 };
 use serde_json::json;
 use tracing::error;

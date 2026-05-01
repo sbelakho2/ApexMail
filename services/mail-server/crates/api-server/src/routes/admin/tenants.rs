@@ -14,8 +14,10 @@ use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(list_tenants).patch(update_tenant).delete(delete_tenant))
+    Router::new().route(
+        "/",
+        get(list_tenants).patch(update_tenant).delete(delete_tenant),
+    )
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -28,7 +30,9 @@ pub struct ListTenantsQuery {
     pub offset: i64,
 }
 
-fn default_limit() -> i64 { 50 }
+fn default_limit() -> i64 {
+    50
+}
 
 const TENANT_SCOPED_TABLES_QUERY: &str = "
     SELECT DISTINCT columns.table_name
@@ -158,12 +162,16 @@ async fn update_tenant(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     let id = body.id;
 
-// Handle suspend/unsuspend action
+    // Handle suspend/unsuspend action
     if let Some(action) = &body.action {
         let new_status = match action.as_str() {
             "suspend" => "suspended",
             "unsuspend" => "active",
-            _ => return Err(ApiError::Validation(vec![format!("unknown action: {action}")])),
+            _ => {
+                return Err(ApiError::Validation(vec![format!(
+                    "unknown action: {action}"
+                )]))
+            }
         };
 
         sqlx::query("UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2")
@@ -172,12 +180,12 @@ async fn update_tenant(
             .execute(&state.db)
             .await?;
 
-// Audit log
+        // Audit log
         log_tenant_audit(&state, action, Some(&id)).await;
         return Ok(StatusCode::OK);
     }
 
-// Direct field updates
+    // Direct field updates
     if let Some(name) = &body.name {
         sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
             .bind(name)

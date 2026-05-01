@@ -14,60 +14,60 @@ use std::sync::Arc;
 /// Final verdict for an attachment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxVerdict {
-/// Unique analysis ID
+    /// Unique analysis ID
     pub analysis_id: String,
-/// SHA-256 of the file
+    /// SHA-256 of the file
     pub sha256: String,
-/// File size
+    /// File size
     pub size: u64,
-/// Detected file type
+    /// Detected file type
     pub file_type: String,
-/// Original filename (if known)
+    /// Original filename (if known)
     pub filename: Option<String>,
-/// Decision:allow, quarantine, reject
+    /// Decision:allow, quarantine, reject
     pub decision: String,
-/// Risk score
+    /// Risk score
     pub risk_score: f64,
-/// Detailed reasons
+    /// Detailed reasons
     pub reasons: Vec<String>,
-/// Individual findings
+    /// Individual findings
     pub findings: Vec<VerdictFinding>,
-/// Analysis timestamp (ISO 8601)
+    /// Analysis timestamp (ISO 8601)
     pub timestamp: String,
 }
 
 /// A finding included in the verdict
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerdictFinding {
-/// Finding ID
+    /// Finding ID
     pub id: String,
-/// Description
+    /// Description
     pub description: String,
-/// Risk contribution
+    /// Risk contribution
     pub risk: f64,
 }
 
 /// Dynamic-analysis engine result.
 #[derive(Debug, Clone)]
 pub struct DynamicAnalysisFinding {
-/// Dynamic finding identifier.
+    /// Dynamic finding identifier.
     pub id: String,
-/// Human-readable behavior description.
+    /// Human-readable behavior description.
     pub description: String,
-/// Risk contribution from dynamic analysis.
+    /// Risk contribution from dynamic analysis.
     pub risk: f64,
-/// Decision requested by the dynamic analyzer.
+    /// Decision requested by the dynamic analyzer.
     pub decision: DynamicDecision,
 }
 
 /// Decision returned by dynamic analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DynamicDecision {
-/// Dynamic analysis observed no blocking behavior.
+    /// Dynamic analysis observed no blocking behavior.
     Allow,
-/// Dynamic analysis recommends escalating to quarantine.
+    /// Dynamic analysis recommends escalating to quarantine.
     Flag,
-/// Dynamic analysis recommends outright rejection.
+    /// Dynamic analysis recommends outright rejection.
     Reject,
 }
 
@@ -88,7 +88,7 @@ pub enum DynamicDecision {
 /// content (e.g., phishing screenshots) is not inspected. An OCR-equipped
 /// dynamic analyzer can fill this gap.
 pub trait DynamicAnalyzer: Send + Sync {
-/// Run dynamic analysis on the attachment and optionally return a finding.
+    /// Run dynamic analysis on the attachment and optionally return a finding.
     fn analyze(&self, data: &[u8], filename: Option<&str>) -> Option<DynamicAnalysisFinding>;
 }
 
@@ -102,7 +102,7 @@ pub struct SandboxEngine {
 }
 
 impl SandboxEngine {
-/// Create engine with default config
+    /// Create engine with default config
     pub fn new() -> Self {
         Self {
             config: SandboxConfig::default(),
@@ -110,7 +110,7 @@ impl SandboxEngine {
         }
     }
 
-/// Create engine with custom config
+    /// Create engine with custom config
     pub fn with_config(config: SandboxConfig) -> Self {
         Self {
             config,
@@ -118,22 +118,29 @@ impl SandboxEngine {
         }
     }
 
-/// Create engine with optional dynamic analyzer.
-    pub fn with_dynamic_analyzer(config: SandboxConfig, analyzer: Arc<dyn DynamicAnalyzer>) -> Self {
+    /// Create engine with optional dynamic analyzer.
+    pub fn with_dynamic_analyzer(
+        config: SandboxConfig,
+        analyzer: Arc<dyn DynamicAnalyzer>,
+    ) -> Self {
         Self {
             config,
             dynamic_analyzer: Some(analyzer),
         }
     }
 
-/// Analyze a single attachment
-/// # Arguments
-/// * `data` - Raw file bytes
-/// * `filename` - Optional original filename
-/// # Returns
-/// A `SandboxVerdict` with the analysis results
-    pub fn analyze(&self, data: &[u8], filename: Option<&str>) -> Result<SandboxVerdict, SandboxError> {
-// Pre-check:file size
+    /// Analyze a single attachment
+    /// # Arguments
+    /// * `data` - Raw file bytes
+    /// * `filename` - Optional original filename
+    /// # Returns
+    /// A `SandboxVerdict` with the analysis results
+    pub fn analyze(
+        &self,
+        data: &[u8],
+        filename: Option<&str>,
+    ) -> Result<SandboxVerdict, SandboxError> {
+        // Pre-check:file size
         if data.len() as u64 > self.config.max_file_size {
             return Err(SandboxError::FileTooLarge {
                 size: data.len() as u64,
@@ -141,13 +148,13 @@ impl SandboxEngine {
             });
         }
 
-// Step 1:File inspection (static analysis)
+        // Step 1:File inspection (static analysis)
         let inspection: FileInspection = file_inspector::inspect_file(data, filename);
 
-// Step 2:Policy evaluation
+        // Step 2:Policy evaluation
         let policy_result: PolicyResult = policy::evaluate_policy(&inspection, &self.config);
 
-// Step 3:Build verdict
+        // Step 3:Build verdict
         let mut verdict = SandboxVerdict {
             analysis_id: uuid::Uuid::new_v4().to_string(),
             sha256: inspection.sha256.clone(),
@@ -196,7 +203,7 @@ impl SandboxEngine {
         Ok(verdict)
     }
 
-/// Analyze multiple attachments in batch
+    /// Analyze multiple attachments in batch
     pub fn analyze_batch(
         &self,
         attachments: &[(&[u8], Option<&str>)],
@@ -207,53 +214,63 @@ impl SandboxEngine {
             .collect()
     }
 
-/// Check if a verdict resulted in rejection
+    /// Check if a verdict resulted in rejection
     pub fn is_rejected(verdict: &SandboxVerdict) -> bool {
         verdict.decision == PolicyDecision::Reject.to_string()
     }
 
-/// Check if any verdict in a batch resulted in rejection
+    /// Check if any verdict in a batch resulted in rejection
     pub fn any_rejected(verdicts: &[Result<SandboxVerdict, SandboxError>]) -> bool {
-        verdicts.iter().any(|v| {
-            matches!(v, Ok(v) if Self::is_rejected(v))
-                || v.is_err()
-        })
+        verdicts
+            .iter()
+            .any(|v| matches!(v, Ok(v) if Self::is_rejected(v)) || v.is_err())
     }
 }
 
 #[cfg(feature = "events")]
 impl SandboxEngine {
-/// Analyze an attachment and also produce a normalized security event.
-/// Requires the `events` feature flag (which enables the `mail-common` dep).
+    /// Analyze an attachment and also produce a normalized security event.
+    /// Requires the `events` feature flag (which enables the `mail-common` dep).
     pub fn analyze_with_event(
         &self,
         data: &[u8],
         filename: Option<&str>,
         correlation: Option<mail_common::security::CorrelationContext>,
-    ) -> (Result<SandboxVerdict, crate::SandboxError>, mail_common::security::SecurityEvent) {
+    ) -> (
+        Result<SandboxVerdict, crate::SandboxError>,
+        mail_common::security::SecurityEvent,
+    ) {
         let result = self.analyze(data, filename);
-        let correlation = correlation.unwrap_or_else(
-            mail_common::security::CorrelationContext::generated,
-        );
+        let correlation =
+            correlation.unwrap_or_else(mail_common::security::CorrelationContext::generated);
 
         let (action, severity, risk_score, description) = match &result {
             Ok(v) if v.decision == "REJECT" => (
                 mail_common::security::SecurityAction::Reject,
                 mail_common::security::SecuritySeverity::Critical,
                 v.risk_score.min(10.0),
-                format!("Sandbox REJECT file={} risk={:.1}", v.file_type, v.risk_score),
+                format!(
+                    "Sandbox REJECT file={} risk={:.1}",
+                    v.file_type, v.risk_score
+                ),
             ),
             Ok(v) if v.decision == "QUARANTINE" => (
                 mail_common::security::SecurityAction::Quarantine,
                 mail_common::security::SecuritySeverity::High,
                 v.risk_score.min(10.0),
-                format!("Sandbox QUARANTINE file={} risk={:.1}", v.file_type, v.risk_score),
+                format!(
+                    "Sandbox QUARANTINE file={} risk={:.1}",
+                    v.file_type, v.risk_score
+                ),
             ),
             Ok(v) => (
                 mail_common::security::SecurityAction::Allow,
                 mail_common::security::SecuritySeverity::Info,
                 v.risk_score.min(10.0),
-                format!("Sandbox ALLOW file={} risk={:.1}", v.file_type, v.risk_score),
+                format!(
+                    "Sandbox ALLOW file={} risk={:.1}",
+                    v.file_type, v.risk_score
+                ),
             ),
             Err(e) => (
                 mail_common::security::SecurityAction::Block,
@@ -273,7 +290,9 @@ impl SandboxEngine {
         );
 
         if let Some(alert) = mail_common::security::ingest_security_event(event.clone()) {
-            event.metadata.insert("composite_alert".to_string(), "true".to_string());
+            event
+                .metadata
+                .insert("composite_alert".to_string(), "true".to_string());
             event.metadata.insert(
                 "composite_score".to_string(),
                 format!("{:.2}", alert.composite_score),
@@ -352,10 +371,8 @@ mod tests {
         let engine = SandboxEngine::new();
         let clean = b"Just some text" as &[u8];
         let exe = [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
-        let attachments: Vec<(&[u8], Option<&str>)> = vec![
-            (clean, Some("readme.txt")),
-            (&exe, Some("update.exe")),
-        ];
+        let attachments: Vec<(&[u8], Option<&str>)> =
+            vec![(clean, Some("readme.txt")), (&exe, Some("update.exe"))];
         let results = engine.analyze_batch(&attachments);
         assert_eq!(results.len(), 2);
         assert!(SandboxEngine::any_rejected(&results));

@@ -29,6 +29,8 @@ require_once __DIR__ . '/Resources/Webhooks.php';
 require_once __DIR__ . '/Resources/Templates.php';
 require_once __DIR__ . '/Resources/Suppressions.php';
 require_once __DIR__ . '/Resources/Events.php';
+require_once __DIR__ . '/Resources/Analytics.php';
+require_once __DIR__ . '/Resources/ApiKeys.php';
 
 class Client
 {
@@ -50,6 +52,8 @@ class Client
     public Resources\Templates   $templates;
     public Resources\Suppressions $suppressions;
     public Resources\Events      $events;
+    public Resources\Analytics   $analytics;
+    public Resources\ApiKeys     $apiKeys;
 
     /**
      * @param string $apiKey  API key (starts with am_live_ or am_test_)
@@ -76,6 +80,8 @@ class Client
         $this->templates    = new Resources\Templates($this);
         $this->suppressions = new Resources\Suppressions($this);
         $this->events       = new Resources\Events($this);
+        $this->analytics    = new Resources\Analytics($this);
+        $this->apiKeys      = new Resources\ApiKeys($this);
     }
 
     /**

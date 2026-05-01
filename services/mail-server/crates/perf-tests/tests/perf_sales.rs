@@ -74,9 +74,15 @@ fn test_message_categorization_throughput() {
 
     let messages: Vec<(&str, &str)> = vec![
         ("noreply@spam.com", "Buy viagra now lottery winner"),
-        ("support@acme.com", "Re: Support ticket #1234 — issue resolved"),
+        (
+            "support@acme.com",
+            "Re: Support ticket #1234 — issue resolved",
+        ),
         ("jane@prospect.io", "Interested in a demo of your platform"),
-        ("billing@vendor.com", "Invoice #INV-2025 — payment confirmation"),
+        (
+            "billing@vendor.com",
+            "Invoice #INV-2025 — payment confirmation",
+        ),
         ("ceo@bigcorp.com", "Partnership opportunity discussion"),
         ("alerts@monitoring.io", "Server health check passed"),
     ];

@@ -9,7 +9,7 @@ use crate::types::Contact;
 pub struct ContactsRepo;
 
 impl ContactsRepo {
-/// Create a new contact.
+    /// Create a new contact.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -33,37 +33,33 @@ impl ContactsRepo {
         .await
     }
 
-/// Find a contact by ID.
+    /// Find a contact by ID.
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Contact>, sqlx::Error> {
-        sqlx::query_as::<_, Contact>(
-            "SELECT * FROM contacts WHERE id = $1 AND tenant_id = $2"
-        )
-        .bind(id)
-        .bind(tenant_id)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, Contact>("SELECT * FROM contacts WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await
     }
 
-/// Find a contact by email.
+    /// Find a contact by email.
     pub async fn find_by_email(
         pool: &PgPool,
         tenant_id: Uuid,
         email: &str,
     ) -> Result<Option<Contact>, sqlx::Error> {
-        sqlx::query_as::<_, Contact>(
-            "SELECT * FROM contacts WHERE tenant_id = $1 AND email = $2"
-        )
-        .bind(tenant_id)
-        .bind(email)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, Contact>("SELECT * FROM contacts WHERE tenant_id = $1 AND email = $2")
+            .bind(tenant_id)
+            .bind(email)
+            .fetch_optional(pool)
+            .await
     }
 
-/// List contacts for a tenant.
+    /// List contacts for a tenant.
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -82,7 +78,7 @@ impl ContactsRepo {
         .await
     }
 
-/// Update a contact.
+    /// Update a contact.
     pub async fn update(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -106,7 +102,7 @@ impl ContactsRepo {
         .await
     }
 
-/// Delete a contact.
+    /// Delete a contact.
     pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM contacts WHERE id = $1 AND tenant_id = $2")
             .bind(id)
@@ -116,13 +112,13 @@ impl ContactsRepo {
         Ok(result.rows_affected() > 0)
     }
 
-/// Bulk-create contacts (skip conflicts on email within tenant).
+    /// Bulk-create contacts (skip conflicts on email within tenant).
     pub async fn bulk_create(
         pool: &PgPool,
         tenant_id: Uuid,
         entries: &[(&str, Option<&str>)], // (email, name)
     ) -> Result<Vec<Contact>, sqlx::Error> {
-// #214:Return early on empty input to avoid invalid SQL
+        // #214:Return early on empty input to avoid invalid SQL
         if entries.is_empty() {
             return Ok(Vec::new());
         }
@@ -138,13 +134,14 @@ impl ContactsRepo {
             }
             query.push_str(&format!(
                 "(${}, ${}, ${}, ${}, 'active', NOW(), NOW())",
-                param_idx, param_idx + 1, param_idx + 2, param_idx + 3,
+                param_idx,
+                param_idx + 1,
+                param_idx + 2,
+                param_idx + 3,
             ));
             param_idx += 4;
         }
-        query.push_str(
-            " ON CONFLICT (tenant_id, email) DO NOTHING RETURNING *"
-        );
+        query.push_str(" ON CONFLICT (tenant_id, email) DO NOTHING RETURNING *");
 
         let mut q = sqlx::query_as::<_, Contact>(&query);
         for (email, name) in entries {

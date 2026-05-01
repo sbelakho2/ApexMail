@@ -28,13 +28,13 @@ impl SloTracker {
         }
     }
 
-/// Register (or overwrite) an SLO definition.
+    /// Register (or overwrite) an SLO definition.
     pub fn define(&self, slo: SloDefinition) {
         self.definitions.insert(slo.name.clone(), slo);
     }
 
-/// Evaluate an SLO given total requests and error count.
-/// Returns `None` if the SLO name is not registered.
+    /// Evaluate an SLO given total requests and error count.
+    /// Returns `None` if the SLO name is not registered.
     pub fn evaluate(&self, name: &str, total: u64, errors: u64) -> Option<SloEvaluation> {
         self.definitions.get(name).map(|slo| {
             let actual = if total == 0 {
@@ -51,9 +51,9 @@ impl SloTracker {
         })
     }
 
-/// Compute the remaining error budget as a percentage of total budget.
-/// Error budget = 100 - target. Remaining = budget - consumed.
-/// Returns `None` if the SLO is not registered.
+    /// Compute the remaining error budget as a percentage of total budget.
+    /// Error budget = 100 - target. Remaining = budget - consumed.
+    /// Returns `None` if the SLO is not registered.
     pub fn get_error_budget(&self, name: &str, total: u64, errors: u64) -> Option<f64> {
         self.definitions.get(name).map(|slo| {
             let budget = 100.0 - slo.target; // e.g. 0.1 for 99.9 SLO
@@ -66,7 +66,7 @@ impl SloTracker {
         })
     }
 
-/// List all registered SLO definitions.
+    /// List all registered SLO definitions.
     pub fn list_all(&self) -> Vec<SloDefinition> {
         self.definitions.iter().map(|e| e.value().clone()).collect()
     }
@@ -105,7 +105,7 @@ mod tests {
         let tracker = SloTracker::new();
         tracker.define(api_slo());
 
-// 100_000 total, 50 errors → 99.95% → within 99.9 target
+        // 100_000 total, 50 errors → 99.95% → within 99.9 target
         let eval = tracker.evaluate("api-availability", 100_000, 50).unwrap();
         assert!(eval.within_budget);
         assert!(eval.actual > 99.9);
@@ -116,7 +116,7 @@ mod tests {
         let tracker = SloTracker::new();
         tracker.define(api_slo());
 
-// 1000 total, 5 errors → 99.5% → below 99.9 target
+        // 1000 total, 5 errors → 99.5% → below 99.9 target
         let eval = tracker.evaluate("api-availability", 1000, 5).unwrap();
         assert!(!eval.within_budget);
         assert!(eval.actual < 99.9);

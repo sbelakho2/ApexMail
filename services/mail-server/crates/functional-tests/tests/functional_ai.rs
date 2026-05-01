@@ -15,7 +15,10 @@ fn open_rate_always_between_0_and_1() {
             let rate = p.predict_open_rate("Check out our deal", hour, day);
             assert!(
                 (0.0..=1.0).contains(&rate),
-                "open_rate out of bounds: {} (h={}, d={})", rate, hour, day
+                "open_rate out of bounds: {} (h={}, d={})",
+                rate,
+                hour,
+                day
             );
         }
     }
@@ -28,7 +31,9 @@ fn click_rate_always_between_0_and_1() {
         let rate = p.predict_click_rate("Buy now free shipping", pos);
         assert!(
             (0.0..=1.0).contains(&rate),
-            "click_rate out of bounds: {} at pos {}", rate, pos
+            "click_rate out of bounds: {} at pos {}",
+            rate,
+            pos
         );
     }
 }
@@ -36,11 +41,15 @@ fn click_rate_always_between_0_and_1() {
 #[test]
 fn unsubscribe_risk_bounds() {
     let p = AnalyticsPredictor::new();
-// extremes
+    // extremes
     let high = p.predict_unsubscribe_risk(10.0, 0.0);
-    let low  = p.predict_unsubscribe_risk(0.5, 1.0);
-    assert!((0.0..=1.0).contains(&high), "high risk {} out of bounds", high);
-    assert!((0.0..=1.0).contains(&low),  "low risk {} out of bounds", low);
+    let low = p.predict_unsubscribe_risk(0.5, 1.0);
+    assert!(
+        (0.0..=1.0).contains(&high),
+        "high risk {} out of bounds",
+        high
+    );
+    assert!((0.0..=1.0).contains(&low), "low risk {} out of bounds", low);
     assert!(high > low, "high-freq/low-engagement should be riskier");
 }
 
@@ -57,14 +66,24 @@ fn open_rate_business_hours_boost() {
 #[test]
 fn subject_line_scoring_length_heuristics() {
     let c = ContentOptimizer::new();
-// Optimal length (30-60 chars)
+    // Optimal length (30-60 chars)
     let optimal = c.score_subject_line("Discover amazing deals waiting for you today");
-// Very short
+    // Very short
     let short = c.score_subject_line("Hi");
-// Very long
+    // Very long
     let long = c.score_subject_line(&"a]".repeat(60));
-    assert!(optimal > short, "optimal ({}) should beat short ({})", optimal, short);
-    assert!(optimal > long, "optimal ({}) should beat long ({})", optimal, long);
+    assert!(
+        optimal > short,
+        "optimal ({}) should beat short ({})",
+        optimal,
+        short
+    );
+    assert!(
+        optimal > long,
+        "optimal ({}) should beat long ({})",
+        optimal,
+        long
+    );
 }
 
 // ── Bandits ────────────────────────────────────────────────────
@@ -75,7 +94,7 @@ fn bandit_epsilon_0_always_exploits() {
     let id_a = b.add_arm("variant-a");
     let id_b = b.add_arm("variant-b");
 
-// Give arm A a much higher reward rate
+    // Give arm A a much higher reward rate
     for _ in 0..50 {
         b.record_reward(&id_a, 1.0).unwrap();
     }
@@ -83,7 +102,7 @@ fn bandit_epsilon_0_always_exploits() {
         b.record_reward(&id_b, 0.0).unwrap();
     }
 
-// epsilon=0 should always pick the best arm
+    // epsilon=0 should always pick the best arm
     for _ in 0..20 {
         let choice = b.select_arm().unwrap();
         assert_eq!(choice, id_a, "epsilon=0 should always exploit best arm");
@@ -95,7 +114,7 @@ fn bandit_epsilon_1_explores_both_arms() {
     let b = BanditOptimizer::new(1.0);
     let id_a = b.add_arm("variant-a");
     let id_b = b.add_arm("variant-b");
-// Record some rewards so arms are initialized
+    // Record some rewards so arms are initialized
     b.record_reward(&id_a, 1.0).unwrap();
     b.record_reward(&id_b, 0.0).unwrap();
 
@@ -103,8 +122,12 @@ fn bandit_epsilon_1_explores_both_arms() {
     let mut saw_b = false;
     for _ in 0..100 {
         let choice = b.select_arm().unwrap();
-        if choice == id_a { saw_a = true; }
-        if choice == id_b { saw_b = true; }
+        if choice == id_a {
+            saw_a = true;
+        }
+        if choice == id_b {
+            saw_b = true;
+        }
     }
     assert!(saw_a && saw_b, "epsilon=1 should eventually pick both arms");
 }
@@ -144,15 +167,14 @@ fn segment_users_returns_k_clusters() {
 #[test]
 fn send_time_optimizer_returns_valid_hour_and_day() {
     let sto = SendTimeOptimizer::new();
-    let data = vec![
-        (9u8, 1u8, 0.5),
-        (10, 2, 0.9),
-        (10, 2, 0.8),
-        (15, 4, 0.3),
-    ];
+    let data = vec![(9u8, 1u8, 0.5), (10, 2, 0.9), (10, 2, 0.8), (15, 4, 0.3)];
     let best = sto.find_optimal_time(&data).unwrap();
     assert!(best.hour <= 23, "hour {} out of range", best.hour);
-    assert!(best.day_of_week <= 6, "day {} out of range", best.day_of_week);
+    assert!(
+        best.day_of_week <= 6,
+        "day {} out of range",
+        best.day_of_week
+    );
 }
 
 // ── A/B test winner ────────────────────────────────────────────

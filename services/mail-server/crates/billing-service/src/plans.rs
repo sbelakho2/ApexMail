@@ -261,7 +261,7 @@ pub fn builtin_plan_seed(plan_name: Option<&str>) -> PlanSeed {
         .iter()
         .find(|plan| plan.name == preferred)
         .cloned()
-    .unwrap_or_else(free_plan_seed)
+        .unwrap_or_else(free_plan_seed)
 }
 
 pub fn builtin_quota_limits(plan_name: Option<&str>) -> (i64, i64) {
@@ -296,8 +296,8 @@ pub async fn upsert_plan_input(
     pool: &PgPool,
     input: &PlanUpsertInput,
 ) -> Result<Plan, sqlx::Error> {
-    let features_json = serde_json::to_value(&input.features)
-        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    let features_json =
+        serde_json::to_value(&input.features).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
     let now = Utc::now();
 
     let row: PlanRow = sqlx::query_as(
@@ -424,7 +424,8 @@ pub async fn get_quota_for_tenant(
     let Some(row) = row else { return Ok(None) };
 
     let fallback_plan = builtin_plan_seed(Some(&row.plan_name));
-    let plan_found = row.email_limit.is_some() || row.api_call_limit.is_some() || row.features.is_some();
+    let plan_found =
+        row.email_limit.is_some() || row.api_call_limit.is_some() || row.features.is_some();
     let effective_plan_name = if plan_found {
         row.plan_name.clone()
     } else {
@@ -465,7 +466,7 @@ pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
         return 0;
     }
     let overage = emails_sent - email_limit;
-// 0.04 cents per email → ceil(overage * 4 / 100)
+    // 0.04 cents per email → ceil(overage * 4 / 100)
     (overage.saturating_mul(4) + 99) / 100
 }
 
@@ -554,7 +555,10 @@ mod tests {
 
     #[test]
     fn builtin_quota_limits_fall_back_to_free() {
-        assert_eq!(builtin_quota_limits(Some("does-not-exist")), (3_000, 50_000));
+        assert_eq!(
+            builtin_quota_limits(Some("does-not-exist")),
+            (3_000, 50_000)
+        );
     }
 
     #[test]
@@ -569,7 +573,7 @@ mod tests {
 
     #[test]
     fn overage_above_limit() {
-// 1 000 overage emails * 0.04 cents = 40 cents
+        // 1 000 overage emails * 0.04 cents = 40 cents
         assert_eq!(calculate_overage_cost(4_000, 3_000), 40);
     }
 
@@ -580,7 +584,10 @@ mod tests {
             .iter()
             .find(|p| p.name == "enterprise")
             .map(|p| p.features.clone());
-        assert!(ent_features.as_ref().map(|f| f.sso_enabled).unwrap_or(false));
+        assert!(ent_features
+            .as_ref()
+            .map(|f| f.sso_enabled)
+            .unwrap_or(false));
         assert!(ent_features
             .as_ref()
             .map(|f| f.hipaa_compliance)

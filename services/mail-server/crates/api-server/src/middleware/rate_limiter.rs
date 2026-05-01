@@ -25,21 +25,23 @@ pub async fn rate_limit_middleware(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
     next: Next,
-) -> Response
-{
-// Extract tenant_id from AuthUser (set by require_auth middleware).
+) -> Response {
+    // Extract tenant_id from AuthUser (set by require_auth middleware).
     let tenant_id = req
         .extensions()
         .get::<AuthUser>()
         .map(|u| u.tenant_id.clone());
 
-    let tenant_key = tenant_id
-        .clone()
-        .unwrap_or_else(|| "anonymous".to_string());
+    let tenant_key = tenant_id.clone().unwrap_or_else(|| "anonymous".to_string());
 
     let window_ms = state.config.rate_limit_window_ms;
-    let max_requests = resolve_rate_limit_max_requests(&state, tenant_id.as_deref(), window_ms).await;
-    let redis_key = format!("apexmail:ratelimit:{}:{}", tenant_key, current_window(window_ms));
+    let max_requests =
+        resolve_rate_limit_max_requests(&state, tenant_id.as_deref(), window_ms).await;
+    let redis_key = format!(
+        "apexmail:ratelimit:{}:{}",
+        tenant_key,
+        current_window(window_ms)
+    );
 
     match check_rate_limit(&state, &redis_key, max_requests, window_ms).await {
         Ok(info) => {
@@ -78,7 +80,7 @@ pub async fn rate_limit_middleware(
                 )
                     .into_response()
             } else {
-// Fail open in development
+                // Fail open in development
                 tracing::warn!("rate limiter Redis unavailable — failing open (dev mode)");
                 next.run(req).await
             }
@@ -108,7 +110,9 @@ async fn resolve_rate_limit_max_requests(
     tenant_id: Option<&str>,
     window_ms: u64,
 ) -> u64 {
-    let Some(tenant_id) = tenant_id.filter(|tenant_id| *tenant_id != "anonymous" && *tenant_id != "system") else {
+    let Some(tenant_id) =
+        tenant_id.filter(|tenant_id| *tenant_id != "anonymous" && *tenant_id != "system")
+    else {
         return state.config.rate_limit_max_requests;
     };
 
@@ -139,17 +143,13 @@ async fn check_rate_limit(
     max: u64,
     window_ms: u64,
 ) -> Result<RateLimitInfo, RateLimitOutcome> {
-    let mut conn = state
-        .redis
-        .get()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "redis pool error in rate limiter");
-            RateLimitOutcome::RedisDown
-        })?;
+    let mut conn = state.redis.get().await.map_err(|e| {
+        tracing::error!(error = %e, "redis pool error in rate limiter");
+        RateLimitOutcome::RedisDown
+    })?;
 
-// This prevents the race where a crash between INCR and EXPIRE leaves
-// a key without TTL (permanent rate limit).
+    // This prevents the race where a crash between INCR and EXPIRE leaves
+    // a key without TTL (permanent rate limit).
     let ttl_secs = (window_ms / 1000).max(1) as i64;
     let script = redis::Script::new(
         r#"
@@ -199,11 +199,8 @@ pub async fn public_rate_limit_middleware(
         .map(|ci| ci.0.ip());
 
     let bucket = if let Some(socket_ip) = socket_ip {
-        let client_ip = extract_public_client_ip(
-            req.headers(),
-            socket_ip,
-            &state.config.trusted_proxies,
-        );
+        let client_ip =
+            extract_public_client_ip(req.headers(), socket_ip, &state.config.trusted_proxies);
         format!("ip:{client_ip}:{path}")
     } else {
         tracing::warn!("public rate limiter missing ConnectInfo; falling back to path bucket");
@@ -364,8 +361,7 @@ pub async fn sliding_window_count(
     let curr_count = curr_count.unwrap_or(0);
     let prev_count = prev_count.unwrap_or(0);
 
-    let estimated =
-        (prev_count as f64 * (1.0 - position_in_window)) + curr_count as f64;
+    let estimated = (prev_count as f64 * (1.0 - position_in_window)) + curr_count as f64;
 
     Ok(estimated <= max as f64)
 }
@@ -392,11 +388,7 @@ mod tests {
             HeaderValue::from_static("198.51.100.55, 203.0.113.10"),
         );
 
-        let ip = extract_public_client_ip(
-            &headers,
-            "203.0.113.77".parse().unwrap(),
-            &[],
-        );
+        let ip = extract_public_client_ip(&headers, "203.0.113.77".parse().unwrap(), &[]);
 
         assert_eq!(ip, "203.0.113.77");
     }
@@ -410,11 +402,7 @@ mod tests {
         );
 
         let trusted = vec!["10.0.0.0/8".to_string()];
-        let ip = extract_public_client_ip(
-            &headers,
-            "10.1.2.3".parse().unwrap(),
-            &trusted,
-        );
+        let ip = extract_public_client_ip(&headers, "10.1.2.3".parse().unwrap(), &trusted);
 
         assert_eq!(ip, "198.51.100.55");
     }
@@ -437,10 +425,22 @@ mod tests {
 
     #[test]
     fn test_requests_per_window_for_rate_limit_tiers() {
-        assert_eq!(requests_per_window_for_tier(RateLimitTier::Free, 60_000), 600);
-        assert_eq!(requests_per_window_for_tier(RateLimitTier::Standard, 60_000), 6_000);
-        assert_eq!(requests_per_window_for_tier(RateLimitTier::High, 60_000), 30_000);
-        assert_eq!(requests_per_window_for_tier(RateLimitTier::Unlimited, 60_000), 300_000);
+        assert_eq!(
+            requests_per_window_for_tier(RateLimitTier::Free, 60_000),
+            600
+        );
+        assert_eq!(
+            requests_per_window_for_tier(RateLimitTier::Standard, 60_000),
+            6_000
+        );
+        assert_eq!(
+            requests_per_window_for_tier(RateLimitTier::High, 60_000),
+            30_000
+        );
+        assert_eq!(
+            requests_per_window_for_tier(RateLimitTier::Unlimited, 60_000),
+            300_000
+        );
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_sliding_window_math() {
-// Pure math check:50% through window, prev=100, curr=50 → estimated 100
+        // Pure math check:50% through window, prev=100, curr=50 → estimated 100
         let prev_count = 100_f64;
         let curr_count = 50_f64;
         let position = 0.5_f64;

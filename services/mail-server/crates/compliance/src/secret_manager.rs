@@ -27,7 +27,7 @@ use crate::types::*;
 pub struct SecretManager {
     db: PgPool,
     config: SecretsConfig,
-/// 32-byte derived encryption key
+    /// 32-byte derived encryption key
     cipher_key: [u8; 32],
 }
 
@@ -41,13 +41,10 @@ impl SecretManager {
         })
     }
 
-// ── CRUD ────────────────────────────────────────────────
+    // ── CRUD ────────────────────────────────────────────────
 
-/// Create a new secret. If `value` is None, auto-generates based on type.
-    pub async fn create_secret(
-        &self,
-        input: &SecretCreateInput,
-    ) -> Result<Secret, String> {
+    /// Create a new secret. If `value` is None, auto-generates based on type.
+    pub async fn create_secret(&self, input: &SecretCreateInput) -> Result<Secret, String> {
         let value = match &input.value {
             Some(v) => v.clone(),
             None => generate_secret_value(input.secret_type),
@@ -57,9 +54,10 @@ impl SecretManager {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        let next_rotation = input.rotation_schedule.as_ref().map(|rs| {
-            now + Duration::days(rs.interval_days)
-        });
+        let next_rotation = input
+            .rotation_schedule
+            .as_ref()
+            .map(|rs| now + Duration::days(rs.interval_days));
 
         let rotation_json = input
             .rotation_schedule
@@ -89,11 +87,17 @@ impl SecretManager {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-// Grant creator admin access
-        self.grant_access_internal(&id, &input.created_by, AccessLevel::Admin, &input.created_by, None)
-            .await?;
+        // Grant creator admin access
+        self.grant_access_internal(
+            &id,
+            &input.created_by,
+            AccessLevel::Admin,
+            &input.created_by,
+            None,
+        )
+        .await?;
 
-// Save initial version
+        // Save initial version
         self.save_version(&id, 1, &encrypted).await?;
 
         let secret = Secret {
@@ -116,20 +120,23 @@ impl SecretManager {
         Ok(secret)
     }
 
-/// Get a secret (decrypted) if the user has read access.
+    /// Get a secret (decrypted) if the user has read access.
     pub async fn get_secret(
         &self,
         secret_id: &str,
         user_id: &str,
     ) -> Result<Option<(Secret, String)>, String> {
-        if !self.check_access(secret_id, user_id, AccessLevel::Read).await? {
+        if !self
+            .check_access(secret_id, user_id, AccessLevel::Read)
+            .await?
+        {
             return Err("Access denied to secret".into());
         }
 
         let row = self.fetch_secret_row(secret_id).await?;
         match row {
             Some(s) => {
-// Check expiry
+                // Check expiry
                 if let Some(exp) = s.expires_at {
                     if exp < Utc::now() {
                         return Err("Secret has expired".into());
@@ -143,21 +150,20 @@ impl SecretManager {
         }
     }
 
-/// Get a secret by tenant + name.
+    /// Get a secret by tenant + name.
     pub async fn get_secret_by_name(
         &self,
         tenant_id: &str,
         name: &str,
         user_id: &str,
     ) -> Result<Option<(Secret, String)>, String> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM secrets WHERE tenant_id = $1 AND name = $2",
-        )
-        .bind(tenant_id)
-        .bind(name)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM secrets WHERE tenant_id = $1 AND name = $2")
+                .bind(tenant_id)
+                .bind(name)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| format!("DB error: {e}"))?;
 
         match row {
             Some((id,)) => self.get_secret(&id, user_id).await,
@@ -165,14 +171,17 @@ impl SecretManager {
         }
     }
 
-/// Update secret metadata (not the value — use rotate for that).
+    /// Update secret metadata (not the value — use rotate for that).
     pub async fn update_secret(
         &self,
         secret_id: &str,
         user_id: &str,
         update: &SecretUpdateInput,
     ) -> Result<Secret, String> {
-        if !self.check_access(secret_id, user_id, AccessLevel::Write).await? {
+        if !self
+            .check_access(secret_id, user_id, AccessLevel::Write)
+            .await?
+        {
             return Err("Access denied to modify secret".into());
         }
 
@@ -216,14 +225,17 @@ impl SecretManager {
             .ok_or_else(|| "Secret not found".into())
     }
 
-/// Rotate a secret (generate or set new value).
+    /// Rotate a secret (generate or set new value).
     pub async fn rotate_secret(
         &self,
         secret_id: &str,
         user_id: &str,
         new_value: Option<&str>,
     ) -> Result<(Secret, String), String> {
-        if !self.check_access(secret_id, user_id, AccessLevel::Write).await? {
+        if !self
+            .check_access(secret_id, user_id, AccessLevel::Write)
+            .await?
+        {
             return Err("Access denied to modify secret".into());
         }
 
@@ -241,9 +253,10 @@ impl SecretManager {
         let new_version = existing.version + 1;
         let now = Utc::now();
 
-        let next_rotation = existing.rotation_schedule.as_ref().map(|rs| {
-            now + Duration::days(rs.interval_days)
-        });
+        let next_rotation = existing
+            .rotation_schedule
+            .as_ref()
+            .map(|rs| now + Duration::days(rs.interval_days));
 
         sqlx::query(
             "UPDATE secrets SET encrypted_value = $1, version = $2,
@@ -259,7 +272,8 @@ impl SecretManager {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        self.save_version(secret_id, new_version, &encrypted).await?;
+        self.save_version(secret_id, new_version, &encrypted)
+            .await?;
         self.prune_versions(secret_id).await?;
         self.log_access(secret_id, user_id, "rotate").await?;
 
@@ -272,26 +286,23 @@ impl SecretManager {
         Ok((updated, value))
     }
 
-/// Delete a secret (archive first).
-    pub async fn delete_secret(
-        &self,
-        secret_id: &str,
-        user_id: &str,
-    ) -> Result<(), String> {
-        if !self.check_access(secret_id, user_id, AccessLevel::Admin).await? {
+    /// Delete a secret (archive first).
+    pub async fn delete_secret(&self, secret_id: &str, user_id: &str) -> Result<(), String> {
+        if !self
+            .check_access(secret_id, user_id, AccessLevel::Admin)
+            .await?
+        {
             return Err("Access denied to delete secret".into());
         }
 
-// Archive
-        sqlx::query(
-            "INSERT INTO secrets_archive SELECT * FROM secrets WHERE id = $1",
-        )
-        .bind(secret_id)
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+        // Archive
+        sqlx::query("INSERT INTO secrets_archive SELECT * FROM secrets WHERE id = $1")
+            .bind(secret_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
 
-// Delete versions, access, then secret
+        // Delete versions, access, then secret
         sqlx::query("DELETE FROM secret_versions WHERE secret_id = $1")
             .bind(secret_id)
             .execute(&self.db)
@@ -315,7 +326,7 @@ impl SecretManager {
         Ok(())
     }
 
-/// List secrets for a tenant (no decrypted values).
+    /// List secrets for a tenant (no decrypted values).
     pub async fn list_secrets(
         &self,
         tenant_id: &str,
@@ -357,7 +368,7 @@ impl SecretManager {
         rows.into_iter().map(|r| r.into_secret()).collect()
     }
 
-// ── Access Control ──────────────────────────────────────
+    // ── Access Control ──────────────────────────────────────
 
     pub async fn grant_access(
         &self,
@@ -367,7 +378,10 @@ impl SecretManager {
         granted_by: &str,
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<SecretAccess, String> {
-        if !self.check_access(secret_id, granted_by, AccessLevel::Admin).await? {
+        if !self
+            .check_access(secret_id, granted_by, AccessLevel::Admin)
+            .await?
+        {
             return Err("Access denied to grant secret access".into());
         }
         self.grant_access_internal(secret_id, user_id, access_type, granted_by, expires_at)
@@ -380,7 +394,10 @@ impl SecretManager {
         user_id: &str,
         revoked_by: &str,
     ) -> Result<(), String> {
-        if !self.check_access(secret_id, revoked_by, AccessLevel::Admin).await? {
+        if !self
+            .check_access(secret_id, revoked_by, AccessLevel::Admin)
+            .await?
+        {
             return Err("Access denied to revoke secret access".into());
         }
 
@@ -428,14 +445,17 @@ impl SecretManager {
         }
     }
 
-// ── Version History ─────────────────────────────────────
+    // ── Version History ─────────────────────────────────────
 
     pub async fn get_version_history(
         &self,
         secret_id: &str,
         user_id: &str,
     ) -> Result<Vec<(i32, chrono::DateTime<Utc>)>, String> {
-        if !self.check_access(secret_id, user_id, AccessLevel::Read).await? {
+        if !self
+            .check_access(secret_id, user_id, AccessLevel::Read)
+            .await?
+        {
             return Err("Access denied to secret history".into());
         }
 
@@ -457,7 +477,10 @@ impl SecretManager {
         version: i32,
         user_id: &str,
     ) -> Result<Secret, String> {
-        if !self.check_access(secret_id, user_id, AccessLevel::Admin).await? {
+        if !self
+            .check_access(secret_id, user_id, AccessLevel::Admin)
+            .await?
+        {
             return Err("Access denied to rollback secret".into());
         }
 
@@ -491,9 +514,9 @@ impl SecretManager {
             .ok_or_else(|| "Secret not found after rollback".into())
     }
 
-// ── Auto-Rotation ───────────────────────────────────────
+    // ── Auto-Rotation ───────────────────────────────────────
 
-/// Get secrets due for rotation.
+    /// Get secrets due for rotation.
     pub async fn get_secrets_for_rotation(&self) -> Result<Vec<Secret>, String> {
         let rows: Vec<SecretRow> = sqlx::query_as(
             "SELECT id, tenant_id, name, type, encrypted_value, version,
@@ -510,10 +533,8 @@ impl SecretManager {
         rows.into_iter().map(|r| r.into_secret()).collect()
     }
 
-/// Process all auto-rotations.
-    pub async fn process_auto_rotations(
-        &self,
-    ) -> Result<AutoRotationResult, String> {
+    /// Process all auto-rotations.
+    pub async fn process_auto_rotations(&self) -> Result<AutoRotationResult, String> {
         let due = self.get_secrets_for_rotation().await?;
         let mut rotated = Vec::new();
         let mut errors = Vec::new();
@@ -535,7 +556,7 @@ impl SecretManager {
         Ok(AutoRotationResult { rotated, errors })
     }
 
-// ── Internal Helpers ────────────────────────────────────
+    // ── Internal Helpers ────────────────────────────────────
 
     async fn grant_access_internal(
         &self,
@@ -582,10 +603,7 @@ impl SecretManager {
         })
     }
 
-    async fn fetch_secret_row(
-        &self,
-        secret_id: &str,
-    ) -> Result<Option<Secret>, String> {
+    async fn fetch_secret_row(&self, secret_id: &str) -> Result<Option<Secret>, String> {
         let row: Option<SecretRow> = sqlx::query_as(
             "SELECT id, tenant_id, name, type, encrypted_value, version,
                     rotation_schedule, last_rotated_at, next_rotation_at,
@@ -642,12 +660,7 @@ impl SecretManager {
         Ok(())
     }
 
-    async fn log_access(
-        &self,
-        secret_id: &str,
-        user_id: &str,
-        action: &str,
-    ) -> Result<(), String> {
+    async fn log_access(&self, secret_id: &str, user_id: &str, action: &str) -> Result<(), String> {
         sqlx::query(
             "INSERT INTO secret_access_log (secret_id, user_id, action, accessed_at)
              VALUES ($1, $2, $3, NOW())",
@@ -662,8 +675,8 @@ impl SecretManager {
     }
 
     fn encrypt(&self, plaintext: &str) -> Result<String, String> {
-        let cipher = Aes256Gcm::new_from_slice(&self.cipher_key)
-            .map_err(|e| format!("Cipher init: {e}"))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&self.cipher_key).map_err(|e| format!("Cipher init: {e}"))?;
 
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
@@ -673,7 +686,7 @@ impl SecretManager {
             .encrypt(nonce, plaintext.as_bytes())
             .map_err(|e| format!("Encryption failed: {e}"))?;
 
-// Pack:nonce (12) || ciphertext+tag
+        // Pack:nonce (12) || ciphertext+tag
         let mut packed = Vec::with_capacity(12 + ciphertext.len());
         packed.extend_from_slice(&nonce_bytes);
         packed.extend_from_slice(&ciphertext);
@@ -693,8 +706,8 @@ impl SecretManager {
         let nonce = Nonce::from_slice(&packed[..12]);
         let ciphertext = &packed[12..];
 
-        let cipher = Aes256Gcm::new_from_slice(&self.cipher_key)
-            .map_err(|e| format!("Cipher init: {e}"))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&self.cipher_key).map_err(|e| format!("Cipher init: {e}"))?;
 
         let plaintext = cipher
             .decrypt(nonce, ciphertext)
@@ -716,16 +729,16 @@ fn derive_key(master_key: &str) -> Result<[u8; 32], String> {
         return Err("SECRETS_KDF_SALT must be at least 16 characters".to_string());
     }
 
-// HKDF-Extract(salt, ikm)
+    // HKDF-Extract(salt, ikm)
     let mut extract = <HmacSha256 as Mac>::new_from_slice(salt.as_bytes())
         .map_err(|e| format!("KDF salt init: {e}"))?;
     extract.update(master_key.as_bytes());
     let prk = extract.finalize().into_bytes();
 
-// HKDF-Expand(prk, info, 32)
+    // HKDF-Expand(prk, info, 32)
     let info = b"apexmail-secret-manager-encryption-key-v1";
-    let mut expand = <HmacSha256 as Mac>::new_from_slice(&prk)
-        .map_err(|e| format!("KDF PRK init: {e}"))?;
+    let mut expand =
+        <HmacSha256 as Mac>::new_from_slice(&prk).map_err(|e| format!("KDF PRK init: {e}"))?;
     expand.update(info);
     expand.update(&[1]);
     let okm = expand.finalize().into_bytes();
@@ -888,9 +901,9 @@ mod tests {
         let plaintext = "same-value";
         let e1 = mgr.encrypt(plaintext).unwrap();
         let e2 = mgr.encrypt(plaintext).unwrap();
-// Different nonces → different ciphertext
+        // Different nonces → different ciphertext
         assert_ne!(e1, e2);
-// Both decrypt to same value
+        // Both decrypt to same value
         assert_eq!(mgr.decrypt(&e1).unwrap(), plaintext);
         assert_eq!(mgr.decrypt(&e2).unwrap(), plaintext);
     }
@@ -902,7 +915,7 @@ mod tests {
         };
         let encrypted = mgr.encrypt("secret").unwrap();
         let mut bytes = B64.decode(&encrypted).unwrap();
-// Tamper with ciphertext
+        // Tamper with ciphertext
         if let Some(b) = bytes.last_mut() {
             *b ^= 0xFF;
         }
@@ -920,11 +933,14 @@ mod tests {
             .max_connections(1)
             .connect_lazy("postgres://fake:fake@localhost:1/fake")
             .unwrap();
-        let mgr2 = SecretManager::new(pool, SecretsConfig {
-            encryption_key: "different-master-key-for-testing!!".into(),
-            rotation_days: 90,
-            max_versions_to_keep: 10,
-        });
+        let mgr2 = SecretManager::new(
+            pool,
+            SecretsConfig {
+                encryption_key: "different-master-key-for-testing!!".into(),
+                rotation_days: 90,
+                max_versions_to_keep: 10,
+            },
+        );
         assert!(mgr2.is_ok(), "test secret manager should initialize");
         let Some(mgr2) = mgr2.ok() else {
             return;
@@ -959,7 +975,7 @@ mod tests {
     #[test]
     fn test_generate_encryption_key() {
         let val = generate_secret_value(SecretType::EncryptionKey);
-// Base64 encoded
+        // Base64 encoded
         assert!(B64.decode(&val).is_ok());
     }
 

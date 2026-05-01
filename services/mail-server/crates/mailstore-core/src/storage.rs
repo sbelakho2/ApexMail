@@ -3,8 +3,8 @@
 //! Handles persistence of email messages.
 
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -21,25 +21,32 @@ pub struct MessageStorage {
 }
 
 impl MessageStorage {
-/// Create a new message storage instance
+    /// Create a new message storage instance
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
-    
-/// Initialize database tables
+
+    /// Initialize database tables
     pub async fn initialize(&self) -> Result<()> {
         MIGRATOR.run(&self.pool).await?;
         info!("Mailstore tables initialized");
         Ok(())
     }
-    
-// ========== Account Operations ==========
-    
-/// Create a new account
-    pub async fn create_account(&self, email: &str, password_hash: &str, display_name: Option<&str>) -> Result<Account> {
-        let domain = email.split('@').nth(1)
+
+    // ========== Account Operations ==========
+
+    /// Create a new account
+    pub async fn create_account(
+        &self,
+        email: &str,
+        password_hash: &str,
+        display_name: Option<&str>,
+    ) -> Result<Account> {
+        let domain = email
+            .split('@')
+            .nth(1)
             .ok_or_else(|| anyhow!("Invalid email address"))?;
-        
+
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO mail_accounts (email, domain, password_hash, display_name)
@@ -54,7 +61,7 @@ impl MessageStorage {
         .bind(display_name)
         .fetch_one(&self.pool)
         .await?;
-        
+
         let account = Account {
             id: row.get("id"),
             email: row.get("email"),
@@ -67,15 +74,15 @@ impl MessageStorage {
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         };
-        
-// Create default mailboxes
+
+        // Create default mailboxes
         self.create_default_mailboxes(&account.id).await?;
-        
+
         info!(account_id = %account.id, email = %mail_common::pii::redact_email(email), "Account created");
         Ok(account)
     }
-    
-/// Get account by email
+
+    /// Get account by email
     pub async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_accounts WHERE email = $1 AND is_active = true",
@@ -84,7 +91,7 @@ impl MessageStorage {
         .bind(email)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row.map(|r| Account {
             id: r.get("id"),
             email: r.get("email"),
@@ -98,8 +105,8 @@ impl MessageStorage {
             updated_at: r.get("updated_at"),
         }))
     }
-    
-/// Get account by ID
+
+    /// Get account by ID
     pub async fn get_account(&self, account_id: &Uuid) -> Result<Option<Account>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_accounts WHERE id = $1",
@@ -108,7 +115,7 @@ impl MessageStorage {
         .bind(account_id)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row.map(|r| Account {
             id: r.get("id"),
             email: r.get("email"),
@@ -122,10 +129,10 @@ impl MessageStorage {
             updated_at: r.get("updated_at"),
         }))
     }
-    
-// ========== Mailbox Operations ==========
-    
-/// Create default mailboxes for an account
+
+    // ========== Mailbox Operations ==========
+
+    /// Create default mailboxes for an account
     async fn create_default_mailboxes(&self, account_id: &Uuid) -> Result<()> {
         let defaults = [
             ("Inbox", "inbox"),
@@ -135,24 +142,26 @@ impl MessageStorage {
             ("Spam", "spam"),
             ("Archive", "archive"),
         ];
-        
+
         for (name, mailbox_type) in defaults {
-            sqlx::query(r#"
+            sqlx::query(
+                r#"
                 INSERT INTO mail_mailboxes (account_id, name, mailbox_type)
                 VALUES ($1, $2, $3)
                 ON CONFLICT DO NOTHING
-            "#)
+            "#,
+            )
             .bind(account_id)
             .bind(name)
             .bind(mailbox_type)
             .execute(&self.pool)
             .await?;
         }
-        
+
         Ok(())
     }
-    
-/// List mailboxes for an account
+
+    /// List mailboxes for an account
     pub async fn list_mailboxes(&self, account_id: &Uuid) -> Result<Vec<Mailbox>> {
         let rows = sqlx::query(&format!(
             "SELECT {} FROM mail_mailboxes WHERE account_id = $1 ORDER BY name",
@@ -161,33 +170,40 @@ impl MessageStorage {
         .bind(account_id)
         .fetch_all(&self.pool)
         .await?;
-        
-        let mailboxes = rows.iter().map(|r| Mailbox {
-            id: r.get("id"),
-            account_id: r.get("account_id"),
-            name: r.get("name"),
-            parent_id: r.get("parent_id"),
-            mailbox_type: match r.get::<String, _>("mailbox_type").as_str() {
-                "inbox" => MailboxType::Inbox,
-                "sent" => MailboxType::Sent,
-                "drafts" => MailboxType::Drafts,
-                "trash" => MailboxType::Trash,
-                "spam" => MailboxType::Spam,
-                "archive" => MailboxType::Archive,
-                _ => MailboxType::Custom,
-            },
-            total_messages: r.get("total_messages"),
-            unread_messages: r.get("unread_messages"),
-            uidnext: r.get("uidnext"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-        }).collect();
-        
+
+        let mailboxes = rows
+            .iter()
+            .map(|r| Mailbox {
+                id: r.get("id"),
+                account_id: r.get("account_id"),
+                name: r.get("name"),
+                parent_id: r.get("parent_id"),
+                mailbox_type: match r.get::<String, _>("mailbox_type").as_str() {
+                    "inbox" => MailboxType::Inbox,
+                    "sent" => MailboxType::Sent,
+                    "drafts" => MailboxType::Drafts,
+                    "trash" => MailboxType::Trash,
+                    "spam" => MailboxType::Spam,
+                    "archive" => MailboxType::Archive,
+                    _ => MailboxType::Custom,
+                },
+                total_messages: r.get("total_messages"),
+                unread_messages: r.get("unread_messages"),
+                uidnext: r.get("uidnext"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect();
+
         Ok(mailboxes)
     }
 
-/// Get a mailbox by name (case-insensitive)
-    pub async fn get_mailbox_by_name(&self, account_id: &Uuid, name: &str) -> Result<Option<Mailbox>> {
+    /// Get a mailbox by name (case-insensitive)
+    pub async fn get_mailbox_by_name(
+        &self,
+        account_id: &Uuid,
+        name: &str,
+    ) -> Result<Option<Mailbox>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_mailboxes WHERE account_id = $1 AND lower(name) = lower($2)",
             MAILBOX_COLUMNS
@@ -219,7 +235,7 @@ impl MessageStorage {
         }))
     }
 
-/// Create a new mailbox for an account
+    /// Create a new mailbox for an account
     pub async fn create_mailbox(
         &self,
         account_id: &Uuid,
@@ -281,7 +297,7 @@ impl MessageStorage {
         })
     }
 
-/// Delete a mailbox (custom mailboxes only)
+    /// Delete a mailbox (custom mailboxes only)
     pub async fn delete_mailbox(&self, account_id: &Uuid, name: &str) -> Result<bool> {
         let mailbox = match self.get_mailbox_by_name(account_id, name).await? {
             Some(m) => m,
@@ -300,9 +316,13 @@ impl MessageStorage {
 
         Ok(rows > 0)
     }
-    
-/// Get mailbox by type
-    pub async fn get_mailbox_by_type(&self, account_id: &Uuid, mailbox_type: MailboxType) -> Result<Option<Mailbox>> {
+
+    /// Get mailbox by type
+    pub async fn get_mailbox_by_type(
+        &self,
+        account_id: &Uuid,
+        mailbox_type: MailboxType,
+    ) -> Result<Option<Mailbox>> {
         let type_str = match mailbox_type {
             MailboxType::Inbox => "inbox",
             MailboxType::Sent => "sent",
@@ -312,7 +332,7 @@ impl MessageStorage {
             MailboxType::Archive => "archive",
             MailboxType::Custom => return Ok(None),
         };
-        
+
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_mailboxes WHERE account_id = $1 AND mailbox_type = $2",
             MAILBOX_COLUMNS
@@ -321,7 +341,7 @@ impl MessageStorage {
         .bind(type_str)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row.map(|r| Mailbox {
             id: r.get("id"),
             account_id: r.get("account_id"),
@@ -335,16 +355,18 @@ impl MessageStorage {
             updated_at: r.get("updated_at"),
         }))
     }
-    
-// ========== Message Operations ==========
-    
-/// Store a new message
+
+    // ========== Message Operations ==========
+
+    /// Store a new message
     pub async fn store_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
         let mut tx = self.pool.begin().await?;
 
-        let mailbox_ok: Option<i64> = sqlx::query_scalar(r#"
+        let mailbox_ok: Option<i64> = sqlx::query_scalar(
+            r#"
             SELECT 1 FROM mail_mailboxes WHERE id = $1 AND account_id = $2
-        "#)
+        "#,
+        )
         .bind(message.mailbox_id)
         .bind(message.account_id)
         .fetch_optional(&mut *tx)
@@ -354,7 +376,8 @@ impl MessageStorage {
             return Err(anyhow!("Mailbox does not belong to account"));
         }
 
-        let uid: i64 = sqlx::query_scalar(r#"
+        let uid: i64 = sqlx::query_scalar(
+            r#"
             WITH next_uid AS (
                 SELECT COALESCE(uidnext, 1) AS uid
                 FROM mail_mailboxes
@@ -366,7 +389,8 @@ impl MessageStorage {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING (SELECT uid FROM next_uid) AS uid
-        "#)
+        "#,
+        )
         .bind(message.mailbox_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -406,16 +430,18 @@ impl MessageStorage {
         .fetch_one(&mut *tx)
         .await?;
 
-        self.update_mailbox_counts_tx(&mut tx, &message.mailbox_id).await?;
-        self.update_account_usage_tx(&mut tx, &message.account_id, message.raw_size).await?;
+        self.update_mailbox_counts_tx(&mut tx, &message.mailbox_id)
+            .await?;
+        self.update_account_usage_tx(&mut tx, &message.account_id, message.raw_size)
+            .await?;
 
         tx.commit().await?;
-        
+
         debug!(message_id = %id, "Message stored");
         Ok((id, uid))
     }
-    
-/// Get a message by ID
+
+    /// Get a message by ID
     pub async fn get_message(&self, message_id: &Uuid) -> Result<Option<StoredMessage>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_messages WHERE id = $1",
@@ -424,14 +450,14 @@ impl MessageStorage {
         .bind(message_id)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         match row {
             Some(r) => Ok(Some(self.row_to_message(&r)?)),
             None => Ok(None),
         }
     }
 
-/// Get a message by mailbox UID
+    /// Get a message by mailbox UID
     pub async fn get_message_by_uid(
         &self,
         account_id: &Uuid,
@@ -453,41 +479,41 @@ impl MessageStorage {
             None => Ok(None),
         }
     }
-    
-/// List messages
+
+    /// List messages
     pub async fn list_messages(&self, query: &MessageQuery) -> Result<Vec<StoredMessage>> {
         let mut sql = format!(
             "SELECT {} FROM mail_messages WHERE account_id = $1",
             MESSAGE_COLUMNS
         );
-        
+
         let mut param_idx = 2;
-        
+
         if query.mailbox_id.is_some() {
             sql.push_str(&format!(" AND mailbox_id = ${}", param_idx));
             param_idx += 1;
         }
-        
+
         if query.is_read.is_some() {
             sql.push_str(&format!(" AND is_read = ${}", param_idx));
             param_idx += 1;
         }
-        
+
         if query.is_starred.is_some() {
             sql.push_str(&format!(" AND is_starred = ${}", param_idx));
             param_idx += 1;
         }
-        
+
         if query.is_deleted.is_some() {
             sql.push_str(&format!(" AND is_deleted = ${}", param_idx));
             param_idx += 1;
         }
-        
+
         sql.push_str(" ORDER BY uid DESC NULLS LAST, date DESC");
         sql.push_str(&format!(" LIMIT ${} OFFSET ${}", param_idx, param_idx + 1));
-        
+
         let mut q = sqlx::query(&sql).bind(query.account_id);
-        
+
         if let Some(ref mailbox_id) = query.mailbox_id {
             q = q.bind(mailbox_id);
         }
@@ -500,17 +526,15 @@ impl MessageStorage {
         if let Some(is_deleted) = query.is_deleted {
             q = q.bind(is_deleted);
         }
-        
+
         q = q.bind(query.limit).bind(query.offset);
-        
+
         let rows = q.fetch_all(&self.pool).await?;
-        
-        rows.iter()
-            .map(|r| self.row_to_message(r))
-            .collect()
+
+        rows.iter().map(|r| self.row_to_message(r)).collect()
     }
 
-/// Search messages using full-text query.
+    /// Search messages using full-text query.
     pub async fn search_messages(
         &self,
         account_id: &Uuid,
@@ -524,12 +548,14 @@ impl MessageStorage {
             return Ok((Vec::new(), 0));
         }
 
-        let total: i64 = sqlx::query_scalar(r#"
+        let total: i64 = sqlx::query_scalar(
+            r#"
             SELECT COUNT(*) FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2
               AND to_tsvector('english', subject || ' ' || COALESCE(text_body, ''))
                   @@ plainto_tsquery('english', $3)
-        "#)
+        "#,
+        )
         .bind(account_id)
         .bind(mailbox_id)
         .bind(q)
@@ -555,11 +581,14 @@ impl MessageStorage {
         .fetch_all(&self.pool)
         .await?;
 
-        let messages = rows.iter().map(|r| self.row_to_message(r)).collect::<Result<Vec<_>>>()?;
+        let messages = rows
+            .iter()
+            .map(|r| self.row_to_message(r))
+            .collect::<Result<Vec<_>>>()?;
         Ok((messages, total))
     }
 
-/// Fetch message flags for a set of UIDs.
+    /// Fetch message flags for a set of UIDs.
     pub async fn get_message_flags_by_uids(
         &self,
         account_id: &Uuid,
@@ -570,11 +599,13 @@ impl MessageStorage {
             return Ok(HashMap::new());
         }
 
-        let rows = sqlx::query(r#"
+        let rows = sqlx::query(
+            r#"
             SELECT uid, is_read, is_starred, is_deleted, is_spam
             FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2 AND uid = ANY($3)
-        "#)
+        "#,
+        )
         .bind(account_id)
         .bind(mailbox_id)
         .bind(uids)
@@ -598,7 +629,7 @@ impl MessageStorage {
         Ok(map)
     }
 
-/// Update message flags by UID.
+    /// Update message flags by UID.
     pub async fn update_message_flags_by_uid(
         &self,
         account_id: &Uuid,
@@ -606,11 +637,13 @@ impl MessageStorage {
         uid: i64,
         flags: &MessageFlags,
     ) -> Result<u64> {
-        let result = sqlx::query(r#"
+        let result = sqlx::query(
+            r#"
             UPDATE mail_messages
             SET is_read = $4, is_starred = $5, is_deleted = $6, is_spam = $7, updated_at = NOW()
             WHERE account_id = $1 AND mailbox_id = $2 AND uid = $3
-        "#)
+        "#,
+        )
         .bind(account_id)
         .bind(mailbox_id)
         .bind(uid)
@@ -624,7 +657,7 @@ impl MessageStorage {
         Ok(result.rows_affected())
     }
 
-/// Fetch full messages by UID.
+    /// Fetch full messages by UID.
     pub async fn get_messages_by_uids(
         &self,
         account_id: &Uuid,
@@ -647,14 +680,20 @@ impl MessageStorage {
 
         rows.iter().map(|r| self.row_to_message(r)).collect()
     }
-    
-/// Update message flags
-    pub async fn update_message_flags(&self, message_id: &Uuid, flags: &MessageFlags) -> Result<()> {
-        sqlx::query(r#"
+
+    /// Update message flags
+    pub async fn update_message_flags(
+        &self,
+        message_id: &Uuid,
+        flags: &MessageFlags,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
             UPDATE mail_messages
             SET is_read = $2, is_starred = $3, is_deleted = $4, is_spam = $5, updated_at = NOW()
             WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(message_id)
         .bind(flags.is_read)
         .bind(flags.is_starred)
@@ -662,24 +701,27 @@ impl MessageStorage {
         .bind(flags.is_spam)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(())
     }
-    
-/// Move message to another mailbox
+
+    /// Move message to another mailbox
     pub async fn move_message(&self, message_id: &Uuid, target_mailbox_id: &Uuid) -> Result<i64> {
         let mut tx = self.pool.begin().await?;
 
-        let message = sqlx::query(r#"
+        let message = sqlx::query(
+            r#"
             SELECT mailbox_id FROM mail_messages WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(message_id)
         .fetch_one(&mut *tx)
         .await?;
-        
+
         let old_mailbox_id: Uuid = message.get("mailbox_id");
 
-        let new_uid: i64 = sqlx::query_scalar(r#"
+        let new_uid: i64 = sqlx::query_scalar(
+            r#"
             WITH next_uid AS (
                 SELECT COALESCE(uidnext, 1) AS uid
                 FROM mail_mailboxes
@@ -691,59 +733,67 @@ impl MessageStorage {
                 updated_at = NOW()
             WHERE id = $1
             RETURNING (SELECT uid FROM next_uid) AS uid
-        "#)
+        "#,
+        )
         .bind(target_mailbox_id)
         .fetch_one(&mut *tx)
         .await?;
-        
-        sqlx::query(r#"
+
+        sqlx::query(
+            r#"
             UPDATE mail_messages
             SET mailbox_id = $2, uid = $3, updated_at = NOW()
             WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(message_id)
         .bind(target_mailbox_id)
         .bind(new_uid)
         .execute(&mut *tx)
         .await?;
 
-        self.update_mailbox_counts_tx(&mut tx, &old_mailbox_id).await?;
-        self.update_mailbox_counts_tx(&mut tx, target_mailbox_id).await?;
+        self.update_mailbox_counts_tx(&mut tx, &old_mailbox_id)
+            .await?;
+        self.update_mailbox_counts_tx(&mut tx, target_mailbox_id)
+            .await?;
 
         tx.commit().await?;
-        
+
         Ok(new_uid)
     }
-    
-/// Delete a message permanently
+
+    /// Delete a message permanently
     pub async fn delete_message(&self, message_id: &Uuid) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        let message = sqlx::query(r#"
+        let message = sqlx::query(
+            r#"
             SELECT account_id, mailbox_id, raw_size FROM mail_messages WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(message_id)
         .fetch_one(&mut *tx)
         .await?;
-        
+
         let account_id: Uuid = message.get("account_id");
         let mailbox_id: Uuid = message.get("mailbox_id");
         let raw_size: i64 = message.get("raw_size");
-        
+
         sqlx::query(r#"DELETE FROM mail_messages WHERE id = $1"#)
             .bind(message_id)
             .execute(&mut *tx)
             .await?;
 
         self.update_mailbox_counts_tx(&mut tx, &mailbox_id).await?;
-        self.update_account_usage_tx(&mut tx, &account_id, -raw_size).await?;
+        self.update_account_usage_tx(&mut tx, &account_id, -raw_size)
+            .await?;
 
         tx.commit().await?;
-        
+
         Ok(())
     }
 
-/// Expunge deleted messages in a mailbox, returning the deleted UIDs.
+    /// Expunge deleted messages in a mailbox, returning the deleted UIDs.
     pub async fn expunge_deleted_messages(
         &self,
         account_id: &Uuid,
@@ -751,11 +801,13 @@ impl MessageStorage {
     ) -> Result<Vec<i64>> {
         let mut tx = self.pool.begin().await?;
 
-        let rows = sqlx::query(r#"
+        let rows = sqlx::query(
+            r#"
             DELETE FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2 AND is_deleted = true
             RETURNING uid, raw_size
-        "#)
+        "#,
+        )
         .bind(account_id)
         .bind(mailbox_id)
         .fetch_all(&mut *tx)
@@ -780,16 +832,18 @@ impl MessageStorage {
         Ok(uids)
     }
 
-/// Refresh mailbox counts for a mailbox.
+    /// Refresh mailbox counts for a mailbox.
     pub async fn refresh_mailbox_counts(&self, mailbox_id: &Uuid) -> Result<()> {
         self.update_mailbox_counts(mailbox_id).await
     }
 
-/// Return quota information for an account.
+    /// Return quota information for an account.
     pub async fn get_account_quota(&self, account_id: &Uuid) -> Result<(i64, i64, i64)> {
-        let row = sqlx::query(r#"
+        let row = sqlx::query(
+            r#"
             SELECT used_bytes, quota_bytes FROM mail_accounts WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(account_id)
         .fetch_one(&self.pool)
         .await?;
@@ -797,18 +851,20 @@ impl MessageStorage {
         let used_bytes: i64 = row.get("used_bytes");
         let quota_bytes: i64 = row.get("quota_bytes");
 
-        let used_messages: i64 = sqlx::query_scalar(r#"
+        let used_messages: i64 = sqlx::query_scalar(
+            r#"
             SELECT COUNT(*) FROM mail_messages WHERE account_id = $1 AND is_deleted = false
-        "#)
+        "#,
+        )
         .bind(account_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok((used_bytes, quota_bytes, used_messages))
     }
-    
-// ========== Helper Methods ==========
-    
+
+    // ========== Helper Methods ==========
+
     fn row_to_message(&self, row: &sqlx::postgres::PgRow) -> Result<StoredMessage> {
         Ok(StoredMessage {
             id: row.get("id"),
@@ -837,7 +893,7 @@ impl MessageStorage {
             updated_at: row.get("updated_at"),
         })
     }
-    
+
     async fn update_mailbox_counts(&self, mailbox_id: &Uuid) -> Result<()> {
         sqlx::query(r#"
             UPDATE mail_mailboxes
@@ -850,7 +906,7 @@ impl MessageStorage {
         .bind(mailbox_id)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(())
     }
 
@@ -873,19 +929,21 @@ impl MessageStorage {
 
         Ok(())
     }
-    
+
     #[allow(dead_code)]
     async fn update_account_usage(&self, account_id: &Uuid, delta: i64) -> Result<()> {
-        sqlx::query(r#"
+        sqlx::query(
+            r#"
             UPDATE mail_accounts
             SET used_bytes = used_bytes + $2, updated_at = NOW()
             WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(account_id)
         .bind(delta)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(())
     }
 
@@ -895,11 +953,13 @@ impl MessageStorage {
         account_id: &Uuid,
         delta: i64,
     ) -> Result<()> {
-        sqlx::query(r#"
+        sqlx::query(
+            r#"
             UPDATE mail_accounts
             SET used_bytes = used_bytes + $2, updated_at = NOW()
             WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(account_id)
         .bind(delta)
         .execute(&mut **tx)

@@ -2,9 +2,9 @@
 //!
 //! Verifies BIMI DNS records, validates SVG logos, and checks VMC certificates.
 
+use std::io::Cursor;
 use std::sync::LazyLock;
 use std::time::Duration;
-use std::io::Cursor;
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -15,17 +15,16 @@ use trust_dns_resolver::TokioAsyncResolver;
 use x509_parser::prelude::*;
 
 // #131:Shared DNS resolver – avoids creating a new resolver per verify_bimi call
-static BIMI_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
-    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-});
+static BIMI_RESOLVER: LazyLock<TokioAsyncResolver> =
+    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
 
 // Shared HTTP client for BIMI logo fetching.
 static BIMI_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     Client::builder()
-    .connect_timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()
-    .ok()
+        .ok()
 });
 
 // #128:Maximum logo download size (256 KB) to prevent OOM from malicious URLs
@@ -87,9 +86,9 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
         recommendations: Vec::new(),
     };
 
-// 1. Check DMARC enforcement (required for BIMI)
+    // 1. Check DMARC enforcement (required for BIMI)
     let dmarc_name = format!("_dmarc.{domain}");
-// #131:Use shared resolver instead of creating new one per call
+    // #131:Use shared resolver instead of creating new one per call
     let resolver = &*BIMI_RESOLVER;
 
     match resolver.txt_lookup(&dmarc_name).await {
@@ -100,7 +99,9 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
             });
             result.dmarc_valid = has_enforcement;
             if !has_enforcement {
-                result.errors.push("DMARC policy must be 'reject' or 'quarantine' for BIMI".into());
+                result
+                    .errors
+                    .push("DMARC policy must be 'reject' or 'quarantine' for BIMI".into());
             }
         }
         Err(e) => {
@@ -108,7 +109,7 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
         }
     }
 
-// 2. Look up BIMI record
+    // 2. Look up BIMI record
     let bimi_name = format!("{selector}._bimi.{domain}");
     match resolver.txt_lookup(&bimi_name).await {
         Ok(records) => {
@@ -118,7 +119,7 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
                     let parsed = parse_bimi_record(&txt, selector);
                     result.supported = true;
 
-// 3. Validate logo if present
+                    // 3. Validate logo if present
                     if let Some(ref url) = parsed.logo_url {
                         result.logo_valid = validate_bimi_logo_url(url).await;
                         if !result.logo_valid {
@@ -126,11 +127,13 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
                         }
                     }
 
-// 4. Check VMC certificate
+                    // 4. Check VMC certificate
                     if let Some(ref cert_url) = parsed.certificate_url {
                         result.certificate_valid = validate_vmc_certificate(cert_url).await;
                     } else {
-                        result.warnings.push("No VMC certificate URL provided".into());
+                        result
+                            .warnings
+                            .push("No VMC certificate URL provided".into());
                     }
 
                     result.record = Some(parsed);
@@ -146,14 +149,16 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
         }
         Err(e) => {
             result.errors.push(format!("BIMI DNS lookup failed: {e}"));
-            result.recommendations.push(format!(
-                "Add a BIMI DNS record at {bimi_name}"
-            ));
+            result
+                .recommendations
+                .push(format!("Add a BIMI DNS record at {bimi_name}"));
         }
     }
 
     if !result.dmarc_valid {
-        result.recommendations.push("Set DMARC policy to 'reject' or 'quarantine'".into());
+        result
+            .recommendations
+            .push("Set DMARC policy to 'reject' or 'quarantine'".into());
     }
 
     result
@@ -170,17 +175,17 @@ pub fn generate_bimi_record(logo_url: &str, certificate_url: Option<&str>) -> St
 
 /// Validate a BIMI logo URL (basic checks).
 pub async fn validate_bimi_logo_url(url: &str) -> bool {
-// Must be HTTPS
+    // Must be HTTPS
     if !url.starts_with("https://") {
         return false;
     }
 
-// Must end in .svg
+    // Must end in .svg
     if !url.to_lowercase().ends_with(".svg") {
         return false;
     }
 
-// Try to fetch and validate SVG
+    // Try to fetch and validate SVG
     let Some(client) = BIMI_CLIENT.as_ref() else {
         return false;
     };
@@ -201,14 +206,14 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
                 return false;
             }
 
-// #128:Check Content-Length before downloading
+            // #128:Check Content-Length before downloading
             if let Some(len) = resp.content_length() {
                 if len > MAX_LOGO_SIZE as u64 {
                     return false;
                 }
             }
 
-// #128:Download with size limit to prevent OOM
+            // #128:Download with size limit to prevent OOM
             match resp.bytes().await {
                 Ok(bytes) => {
                     if bytes.len() > MAX_LOGO_SIZE {
@@ -243,7 +248,12 @@ pub fn validate_svg_content(svg: &str) -> bool {
 
                 if matches!(
                     name.as_str(),
-                    "script" | "foreignobject" | "animate" | "set" | "animatetransform" | "animatemotion"
+                    "script"
+                        | "foreignobject"
+                        | "animate"
+                        | "set"
+                        | "animatetransform"
+                        | "animatemotion"
                 ) {
                     return false;
                 }
@@ -271,9 +281,12 @@ pub fn validate_svg_content(svg: &str) -> bool {
                     }
 
                     if (key == "href" || key == "xlink:href")
-                        && (value.contains("http://") || value.contains("https://") || value.starts_with("//")) {
-                            return false;
-                        }
+                        && (value.contains("http://")
+                            || value.contains("https://")
+                            || value.starts_with("//"))
+                    {
+                        return false;
+                    }
                 }
             }
             Ok(Event::DocType(_)) | Ok(Event::CData(_)) => {
@@ -320,7 +333,9 @@ pub fn get_bimi_setup_instructions(
     ];
 
     if let Some(cert) = certificate_url {
-        steps.push(format!("3. Obtain a VMC (Verified Mark Certificate) and host at {cert}"));
+        steps.push(format!(
+            "3. Obtain a VMC (Verified Mark Certificate) and host at {cert}"
+        ));
     } else {
         steps.push("3. (Optional) Obtain a VMC for enhanced verification".into());
     }
@@ -482,10 +497,7 @@ mod tests {
         let txt = "v=BIMI1; l=https://example.com/logo.svg; a=https://example.com/cert.pem";
         let record = parse_bimi_record(txt, "default");
         assert_eq!(record.version, "BIMI1");
-        assert_eq!(
-            record.logo_url.unwrap(),
-            "https://example.com/logo.svg"
-        );
+        assert_eq!(record.logo_url.unwrap(), "https://example.com/logo.svg");
         assert_eq!(
             record.certificate_url.unwrap(),
             "https://example.com/cert.pem"
@@ -512,7 +524,8 @@ mod tests {
 
     #[test]
     fn test_setup_instructions() {
-        let steps = get_bimi_setup_instructions("example.com", "https://example.com/logo.svg", None);
+        let steps =
+            get_bimi_setup_instructions("example.com", "https://example.com/logo.svg", None);
         assert!(steps.len() >= 5);
         assert!(steps[0].contains("DMARC"));
         assert!(steps[3].contains("default._bimi.example.com"));

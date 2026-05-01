@@ -25,16 +25,15 @@ use uuid::Uuid;
 use crate::config::FeedbackConfig;
 
 // #148:Shared DNS resolver – avoids creating a new one per rDNS verification call
-static FBL_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
-    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-});
+static FBL_RESOLVER: LazyLock<TokioAsyncResolver> =
+    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
 
 // #147:Shared HTTP client with timeout – avoids Client::new fallback without timeout
 static FBL_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-    .ok()
+        .ok()
 });
 
 // ── types ──────────────────────────────────────────────────────────────────────
@@ -83,7 +82,7 @@ pub struct FeedbackLoopServer {
     redis: deadpool_redis::Pool,
     hostname: String,
     trusted_domains: HashSet<String>,
-/// #149:Bounded rDNS cache with 10-minute TTL (replaces unbounded DashMap).
+    /// #149:Bounded rDNS cache with 10-minute TTL (replaces unbounded DashMap).
     rdns_cache: Cache<IpAddr, bool>,
     shutdown: Arc<Notify>,
 }
@@ -96,10 +95,8 @@ impl FeedbackLoopServer {
         hostname: String,
         extra_trusted: &[String],
     ) -> Self {
-        let mut trusted: HashSet<String> = TRUSTED_FBL_SENDERS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let mut trusted: HashSet<String> =
+            TRUSTED_FBL_SENDERS.iter().map(|s| s.to_string()).collect();
         for d in extra_trusted {
             trusted.insert(d.clone());
         }
@@ -109,7 +106,7 @@ impl FeedbackLoopServer {
             redis,
             hostname,
             trusted_domains: trusted,
-// #149:Bounded cache with TTL prevents unbounded memory growth
+            // #149:Bounded cache with TTL prevents unbounded memory growth
             rdns_cache: Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(600))
@@ -118,7 +115,7 @@ impl FeedbackLoopServer {
         }
     }
 
-/// Start listening.
+    /// Start listening.
     pub async fn start(self: Arc<Self>) -> anyhow::Result<()> {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let listener = TcpListener::bind(&addr).await?;
@@ -148,7 +145,7 @@ impl FeedbackLoopServer {
     async fn handle_session(self: Arc<Self>, socket: TcpStream, peer: SocketAddr) {
         let ip = peer.ip();
 
-// Verify source via rDNS
+        // Verify source via rDNS
         if !self.verify_fbl_source(ip).await {
             let mut s = BufStream::new(socket);
             let _ = write_line(&mut s, "554 Unverified FBL source\r\n").await;
@@ -185,10 +182,13 @@ impl FeedbackLoopServer {
                 let _ = write_line(&mut stream, "250 OK\r\n").await;
             } else if cmd.starts_with("RCPT TO") {
                 let addr = extract_addr(&line);
-// Accept abuse@, complaints@, fbl@, feedback@, postmaster@
+                // Accept abuse@, complaints@, fbl@, feedback@, postmaster@
                 let local = addr.split('@').next().unwrap_or("").to_lowercase();
-                let accepted =
-                    local == "abuse" || local == "complaints" || local == "fbl" || local == "feedback" || local == "postmaster";
+                let accepted = local == "abuse"
+                    || local == "complaints"
+                    || local == "fbl"
+                    || local == "feedback"
+                    || local == "postmaster";
                 if accepted {
                     rcpt_to.push(addr);
                     let _ = write_line(&mut stream, "250 OK\r\n").await;
@@ -236,10 +236,18 @@ impl FeedbackLoopServer {
             } else if cmd.starts_with("RSET") || cmd.starts_with("NOOP") {
                 let _ = write_line(&mut stream, "250 OK\r\n").await;
             } else if cmd.starts_with("VRFY") || cmd.starts_with("EXPN") {
-// Avoid leaking recipient validity.
-                let _ = write_line(&mut stream, "252 Cannot VRFY user, but will accept message and attempt delivery\r\n").await;
+                // Avoid leaking recipient validity.
+                let _ = write_line(
+                    &mut stream,
+                    "252 Cannot VRFY user, but will accept message and attempt delivery\r\n",
+                )
+                .await;
             } else if cmd.starts_with("HELP") {
-                let _ = write_line(&mut stream, "214 Supported: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT\r\n").await;
+                let _ = write_line(
+                    &mut stream,
+                    "214 Supported: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT\r\n",
+                )
+                .await;
             } else if cmd.starts_with("STARTTLS") {
                 let _ = write_line(&mut stream, "454 TLS not available on this endpoint\r\n").await;
             } else {
@@ -248,32 +256,36 @@ impl FeedbackLoopServer {
         }
     }
 
-// ── rDNS verification ──────────────────────────────────────────────────────
+    // ── rDNS verification ──────────────────────────────────────────────────────
 
     async fn verify_fbl_source(&self, ip: IpAddr) -> bool {
-// Check cache
+        // Check cache
         if let Some(cached) = self.rdns_cache.get(&ip) {
             return cached;
         }
 
-// #148:Use shared resolver instead of creating a new one per call
+        // #148:Use shared resolver instead of creating a new one per call
         let resolver = &*FBL_RESOLVER;
 
-// Reverse DNS lookup
+        // Reverse DNS lookup
         let result = match resolver.reverse_lookup(ip).await {
             Ok(lookup) => {
                 let mut matched_hostname: Option<String> = None;
                 for name in lookup.iter() {
                     let hostname_str = name.to_string();
                     let hostname = hostname_str.trim_end_matches('.').to_lowercase();
-                    if self.trusted_domains.iter().any(|domain| hostname.ends_with(domain.as_str())) {
+                    if self
+                        .trusted_domains
+                        .iter()
+                        .any(|domain| hostname.ends_with(domain.as_str()))
+                    {
                         matched_hostname = Some(hostname);
                         break;
                     }
                 }
 
-// #146:Forward-Confirmed reverse DNS (FCrDNS) – verify the PTR
-// hostname resolves back to the original IP to prevent PTR spoofing
+                // #146:Forward-Confirmed reverse DNS (FCrDNS) – verify the PTR
+                // hostname resolves back to the original IP to prevent PTR spoofing
                 if let Some(ref hostname) = matched_hostname {
                     match resolver.lookup_ip(hostname.as_str()).await {
                         Ok(forward) => {
@@ -303,23 +315,19 @@ impl FeedbackLoopServer {
         result
     }
 
-// ── complaint processing ───────────────────────────────────────────────────
+    // ── complaint processing ───────────────────────────────────────────────────
 
-    async fn process_complaint(
-        &self,
-        source_ip: IpAddr,
-        raw: &[u8],
-    ) -> anyhow::Result<String> {
+    async fn process_complaint(&self, source_ip: IpAddr, raw: &[u8]) -> anyhow::Result<String> {
         let complaint_id = Uuid::new_v4().to_string();
         let message = String::from_utf8_lossy(raw);
 
-// Parse ARF report
+        // Parse ARF report
         let complaint = parse_arf_report(&message);
 
-// Match to original message
+        // Match to original message
         let original_id = complaint.original_message_id.clone();
 
-// Record complaint event
+        // Record complaint event
         sqlx::query(
             r#"INSERT INTO complaint_events (
                 id, original_message_id, original_recipient,
@@ -338,7 +346,7 @@ impl FeedbackLoopServer {
         .execute(&self.pool)
         .await?;
 
-// Add recipient to suppression list (complaints → always suppress)
+        // Add recipient to suppression list (complaints → always suppress)
         if let Some(ref recipient) = complaint.original_recipient {
             sqlx::query(
                 "INSERT INTO suppression_list (email, reason, source, created_at) VALUES ($1, 'complaint', 'fbl', NOW()) ON CONFLICT DO NOTHING"
@@ -348,10 +356,10 @@ impl FeedbackLoopServer {
             .await?;
         }
 
-// Update sender reputation
+        // Update sender reputation
         self.update_sender_reputation(&complaint).await?;
 
-// Queue webhook
+        // Queue webhook
         let payload = serde_json::json!({
             "event": "complaint",
             "complaint_id": complaint_id,
@@ -380,19 +388,13 @@ impl FeedbackLoopServer {
         Ok(complaint_id)
     }
 
-    async fn update_sender_reputation(
-        &self,
-        complaint: &ComplaintInfo,
-    ) -> anyhow::Result<()> {
-// Extract domain from original message or reported domain
-        let domain = complaint
-            .reported_domain
-            .as_deref()
-            .unwrap_or("unknown");
+    async fn update_sender_reputation(&self, complaint: &ComplaintInfo) -> anyhow::Result<()> {
+        // Extract domain from original message or reported domain
+        let domain = complaint.reported_domain.as_deref().unwrap_or("unknown");
 
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-// Increment complaint count in Redis with 7-day TTL
+        // Increment complaint count in Redis with 7-day TTL
         if let Ok(mut conn) = self.redis.get().await {
             let key = format!("mta:reputation:{}:{}", domain, today);
             redis::cmd("HINCRBY")
@@ -409,7 +411,7 @@ impl FeedbackLoopServer {
                 .await
                 .ok();
 
-// Check complaint rate (if we have sent count)
+            // Check complaint rate (if we have sent count)
             let sent: i64 = redis::cmd("HGET")
                 .arg(&key)
                 .arg("sent")
@@ -426,7 +428,7 @@ impl FeedbackLoopServer {
             if sent > 100 {
                 let rate = complaints as f64 / sent as f64;
                 if rate > 0.001 {
-// 0.1% threshold
+                    // 0.1% threshold
                     warn!(
                         domain = domain,
                         rate = rate,
@@ -434,13 +436,14 @@ impl FeedbackLoopServer {
                         complaints = complaints,
                         "High complaint rate detected"
                     );
-// Trigger alert webhook
-                    self.trigger_alert_webhook(domain, rate, sent, complaints).await;
+                    // Trigger alert webhook
+                    self.trigger_alert_webhook(domain, rate, sent, complaints)
+                        .await;
                 }
             }
         }
 
-// Record in DB for long-term tracking
+        // Record in DB for long-term tracking
         sqlx::query(
             r#"INSERT INTO sender_reputation (domain, date, complaints, updated_at)
                VALUES ($1, CURRENT_DATE, 1, NOW())
@@ -454,16 +457,16 @@ impl FeedbackLoopServer {
         Ok(())
     }
 
-/// Trigger alert webhooks for high complaint rate
+    /// Trigger alert webhooks for high complaint rate
     async fn trigger_alert_webhook(&self, domain: &str, rate: f64, sent: i64, complaints: i64) {
-// Query all active webhooks for this type of alert
+        // Query all active webhooks for this type of alert
         let webhooks: Vec<(Uuid, String, String)> = match sqlx::query_as(
             "SELECT id, url, secret FROM alert_webhooks
-             WHERE enabled = true AND alert_types @> $1::jsonb"
+             WHERE enabled = true AND alert_types @> $1::jsonb",
         )
-            .bind(serde_json::json!(["complaint_rate"]))
-            .fetch_all(&self.pool)
-            .await
+        .bind(serde_json::json!(["complaint_rate"]))
+        .fetch_all(&self.pool)
+        .await
         {
             Ok(rows) => rows,
             Err(e) => {
@@ -487,14 +490,14 @@ impl FeedbackLoopServer {
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 
-// #147:Use shared client with guaranteed timeout
+        // #147:Use shared client with guaranteed timeout
         let Some(client) = FBL_CLIENT.as_ref() else {
             error!("FBL HTTP client unavailable; skipping complaint rate webhooks");
             return;
         };
 
         for (webhook_id, url, secret) in webhooks {
-// Compute HMAC signature
+            // Compute HMAC signature
             type HmacSha256 = Hmac<Sha256>;
             let payload_str = serde_json::to_string(&payload).unwrap_or_default();
             let signature = if !secret.is_empty() {
@@ -522,7 +525,7 @@ impl FeedbackLoopServer {
                 .send()
                 .await;
 
-// Record delivery attempt
+            // Record delivery attempt
             let (success, status_code, error_msg) = match response {
                 Ok(resp) => {
                     let status = resp.status().as_u16() as i32;
@@ -602,11 +605,11 @@ pub fn parse_arf_report(message: &str) -> ComplaintInfo {
         } else if lower.starts_with("authentication-results:") {
             info.authentication_results = Some(extract_value(trimmed));
         } else if (lower.starts_with("original-message-id:") || lower.starts_with("message-id:"))
-            && info.original_message_id.is_none() {
-                let mid = extract_value(trimmed);
-                info.original_message_id =
-                    Some(mid.trim_matches(|c| c == '<' || c == '>').to_string());
-            }
+            && info.original_message_id.is_none()
+        {
+            let mid = extract_value(trimmed);
+            info.original_message_id = Some(mid.trim_matches(|c| c == '<' || c == '>').to_string());
+        }
     }
 
     info

@@ -9,10 +9,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use parking_lot::Mutex;
-use std::time::{Duration, Instant};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tower_http::timeout::TimeoutLayer;
 
 use crate::{
@@ -24,6 +24,7 @@ use crate::{
     inference::InferenceEngine,
     sto::SendTimeOptimizer,
     training::{TrainingConfig, TrainingManager},
+    types::AiError,
 };
 
 // ── Shared application state ─────────────────────────────────────
@@ -82,13 +83,16 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: AiConfig) -> Self {
+    pub fn new(config: AiConfig) -> Result<Self, AiError> {
         let inference_rate_limiter = RequestRateLimiter::new(
             config.inference_rate_limit,
             Duration::from_secs(config.inference_rate_limit_window_secs),
         );
-        Self {
-            bandits: BanditOptimizer::new(config.bandit_epsilon),
+        let bandits =
+            BanditOptimizer::with_state_path(config.bandit_epsilon, &config.bandit_state_path)?;
+
+        Ok(Self {
+            bandits,
             config,
             analytics: AnalyticsPredictor::new(),
             assistant: AiAssistant::new(),
@@ -98,7 +102,7 @@ impl AppState {
             training: TrainingManager::new(),
             service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
             inference_rate_limiter,
-        }
+        })
     }
 }
 
@@ -289,7 +293,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/bandits", get(bandits_handler))
         .route("/bandits/reward", post(bandit_reward_handler))
         .route("/content/score", post(content_score_handler))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_service_token))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_service_token,
+        ))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
@@ -316,7 +323,10 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided
+        .as_deref()
+        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
+    {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -325,7 +335,21 @@ async fn require_service_token(
 
 /// Build `AppState` with default config (convenience for tests / quick starts).
 pub fn default_app_state() -> Arc<AppState> {
-    Arc::new(AppState::new(AiConfig::default()))
+    #[cfg(test)]
+    let mut config = AiConfig::default();
+    #[cfg(not(test))]
+    let config = AiConfig::default();
+    #[cfg(test)]
+    {
+        config.bandit_state_path = std::env::temp_dir()
+            .join(format!(
+                "apexmail-ai-bandits-test-{}.json",
+                uuid::Uuid::new_v4()
+            ))
+            .display()
+            .to_string();
+    }
+    Arc::new(AppState::new(config).expect("default ai app state"))
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -343,7 +367,7 @@ mod tests {
         Arc::get_mut(&mut state)
             .expect("exclusive test state")
             .service_token = "test-key".into();
-// Register a model so prediction works
+        // Register a model so prediction works
         state.inference.register_model(Model {
             id: "m1".into(),
             name: "test".into(),

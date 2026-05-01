@@ -17,37 +17,37 @@ use crate::types::*;
 /// Collected raw metrics used to compute risk factors.
 #[derive(Debug, Default)]
 struct TenantMetrics {
-/// Days since tenant was created.
+    /// Days since tenant was created.
     account_age_days: i64,
-/// Number of verified (DKIM/SPF-confirmed) domains.
+    /// Number of verified (DKIM/SPF-confirmed) domains.
     verified_domains: i64,
-/// Number of failed payments in the last 90 days.
+    /// Number of failed payments in the last 90 days.
     payment_failures: i64,
-/// Total messages sent (lifetime).
+    /// Total messages sent (lifetime).
     total_messages: i64,
-/// Messages sent in last 24 hours.
+    /// Messages sent in last 24 hours.
     messages_24h: i64,
-/// Messages sent in last 7 days.
+    /// Messages sent in last 7 days.
     messages_7d: i64,
-/// Average daily sending rate over 7 days.
+    /// Average daily sending rate over 7 days.
     avg_daily_7d: f64,
-/// Hard bounce rate (%).
+    /// Hard bounce rate (%).
     bounce_rate: f64,
-/// Spam complaint rate (%).
+    /// Spam complaint rate (%).
     spam_rate: f64,
-/// Unsubscribe rate (%).
+    /// Unsubscribe rate (%).
     unsub_rate: f64,
-/// Open rate from campaign stats (%).
+    /// Open rate from campaign stats (%).
     open_rate: f64,
-/// Click rate from campaign stats (%).
+    /// Click rate from campaign stats (%).
     click_rate: f64,
-/// Abuse report count (all time).
+    /// Abuse report count (all time).
     abuse_reports: i64,
-/// Content violations (all time).
+    /// Content violations (all time).
     content_violations: i64,
-/// Phishing detections (all time).
+    /// Phishing detections (all time).
     phishing_detections: i64,
-/// Whether the tenant appears on any active blocklist.
+    /// Whether the tenant appears on any active blocklist.
     blocklisted: bool,
 }
 
@@ -61,13 +61,10 @@ impl RiskScoringEngine {
         Self { db, config }
     }
 
-// ── Public API ───────────────────────────────────────────
+    // ── Public API ───────────────────────────────────────────
 
-/// Full assessment:collect metrics, compute factors & flags, persist.
-    pub async fn assess_tenant(
-        &self,
-        tenant_id: &str,
-    ) -> Result<TenantRiskProfile, String> {
+    /// Full assessment:collect metrics, compute factors & flags, persist.
+    pub async fn assess_tenant(&self, tenant_id: &str) -> Result<TenantRiskProfile, String> {
         let metrics = self.collect_metrics(tenant_id).await?;
         let factors = self.compute_factors(&metrics);
         let score = weighted_average(&factors);
@@ -95,11 +92,8 @@ impl RiskScoringEngine {
         Ok(profile)
     }
 
-/// Retrieve a previously-persisted profile.
-    pub async fn get_profile(
-        &self,
-        tenant_id: &str,
-    ) -> Result<Option<TenantRiskProfile>, String> {
+    /// Retrieve a previously-persisted profile.
+    pub async fn get_profile(&self, tenant_id: &str) -> Result<Option<TenantRiskProfile>, String> {
         let row = sqlx::query_as::<_, ProfileRow>(
             "SELECT tenant_id, risk_score, risk_level, factors, limits, flags,
                     last_assessed_at, next_assessment_at, created_at, updated_at
@@ -116,22 +110,18 @@ impl RiskScoringEngine {
         }
     }
 
-/// Force reassessment regardless of next_assessment_at.
-    pub async fn force_reassessment(
-        &self,
-        tenant_id: &str,
-    ) -> Result<TenantRiskProfile, String> {
+    /// Force reassessment regardless of next_assessment_at.
+    pub async fn force_reassessment(&self, tenant_id: &str) -> Result<TenantRiskProfile, String> {
         self.assess_tenant(tenant_id).await
     }
 
-/// Manually update sending limits for a tenant (admin override).
+    /// Manually update sending limits for a tenant (admin override).
     pub async fn update_limits(
         &self,
         tenant_id: &str,
         limits: &TenantLimits,
     ) -> Result<(), String> {
-        let limits_json =
-            serde_json::to_value(limits).map_err(|e| format!("JSON error: {e}"))?;
+        let limits_json = serde_json::to_value(limits).map_err(|e| format!("JSON error: {e}"))?;
 
         sqlx::query(
             "UPDATE risk_profiles SET limits = $1, updated_at = NOW()
@@ -146,7 +136,7 @@ impl RiskScoringEngine {
         Ok(())
     }
 
-/// Resolve a risk flag with a resolution note.
+    /// Resolve a risk flag with a resolution note.
     pub async fn resolve_flag(
         &self,
         tenant_id: &str,
@@ -164,7 +154,7 @@ impl RiskScoringEngine {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-// Also update the profile's flags JSONB (mark resolved_at).
+        // Also update the profile's flags JSONB (mark resolved_at).
         if let Some(mut profile) = self.get_profile(tenant_id).await? {
             for flag in &mut profile.flags {
                 if &flag.flag_type == flag_type && flag.resolved_at.is_none() {
@@ -177,10 +167,8 @@ impl RiskScoringEngine {
         Ok(())
     }
 
-/// All tenants at critical risk level.
-    pub async fn get_critical_risk_tenants(
-        &self,
-    ) -> Result<Vec<TenantRiskProfile>, String> {
+    /// All tenants at critical risk level.
+    pub async fn get_critical_risk_tenants(&self) -> Result<Vec<TenantRiskProfile>, String> {
         let rows = sqlx::query_as::<_, ProfileRow>(
             "SELECT tenant_id, risk_score, risk_level, factors, limits, flags,
                     last_assessed_at, next_assessment_at, created_at, updated_at
@@ -194,28 +182,23 @@ impl RiskScoringEngine {
         rows.into_iter().map(|r| r.into_profile()).collect()
     }
 
-/// Aggregate risk stats.
-    pub async fn get_risk_stats(
-        &self,
-    ) -> Result<serde_json::Value, String> {
-        let total: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM risk_profiles")
-                .fetch_one(&self.db)
+    /// Aggregate risk stats.
+    pub async fn get_risk_stats(&self) -> Result<serde_json::Value, String> {
+        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM risk_profiles")
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+
+        let by_level: Vec<(String, i64)> =
+            sqlx::query_as("SELECT risk_level, COUNT(*) FROM risk_profiles GROUP BY risk_level")
+                .fetch_all(&self.db)
                 .await
                 .map_err(|e| format!("DB error: {e}"))?;
 
-        let by_level: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT risk_level, COUNT(*) FROM risk_profiles GROUP BY risk_level",
-        )
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-
-        let avg_score: (Option<f64>,) =
-            sqlx::query_as("SELECT AVG(risk_score) FROM risk_profiles")
-                .fetch_one(&self.db)
-                .await
-                .map_err(|e| format!("DB error: {e}"))?;
+        let avg_score: (Option<f64>,) = sqlx::query_as("SELECT AVG(risk_score) FROM risk_profiles")
+            .fetch_one(&self.db)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
 
         let flagged: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM risk_profiles WHERE jsonb_array_length(flags) > 0",
@@ -234,12 +217,9 @@ impl RiskScoringEngine {
         }))
     }
 
-// ── Internal ─────────────────────────────────────────────
+    // ── Internal ─────────────────────────────────────────────
 
-    async fn collect_metrics(
-        &self,
-        tenant_id: &str,
-    ) -> Result<TenantMetrics, String> {
+    async fn collect_metrics(&self, tenant_id: &str) -> Result<TenantMetrics, String> {
         let mut m = TenantMetrics::default();
 
         let age_fut = sqlx::query_as::<_, (Option<i64>,)>(
@@ -284,11 +264,10 @@ impl RiskScoringEngine {
         .bind(tenant_id)
         .fetch_one(&self.db);
 
-        let unsub_fut = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM unsubscribes WHERE tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_one(&self.db);
+        let unsub_fut =
+            sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM unsubscribes WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&self.db);
 
         let engagement_fut = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
             "SELECT AVG(open_rate), AVG(click_rate)
@@ -297,11 +276,10 @@ impl RiskScoringEngine {
         .bind(tenant_id)
         .fetch_optional(&self.db);
 
-        let abuse_fut = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM abuse_reports WHERE tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_one(&self.db);
+        let abuse_fut =
+            sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM abuse_reports WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&self.db);
 
         let violations_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM content_violations WHERE tenant_id = $1",
@@ -359,7 +337,11 @@ impl RiskScoringEngine {
         m.total_messages = msg_row.0;
         m.messages_24h = msg_row.1;
         m.messages_7d = msg_row.2;
-        m.avg_daily_7d = if m.messages_7d > 0 { m.messages_7d as f64 / 7.0 } else { 0.0 };
+        m.avg_daily_7d = if m.messages_7d > 0 {
+            m.messages_7d as f64 / 7.0
+        } else {
+            0.0
+        };
 
         if m.total_messages > 0 {
             m.bounce_rate = (bounce_row.0 as f64 / m.total_messages as f64) * 100.0;
@@ -411,10 +393,7 @@ impl RiskScoringEngine {
                 RiskFactorType::SendingPattern,
                 sending_pattern_score(m.messages_24h, m.avg_daily_7d),
                 w.sending_pattern,
-                format!(
-                    "24h: {}, avg 7d: {:.0}",
-                    m.messages_24h, m.avg_daily_7d
-                ),
+                format!("24h: {}, avg 7d: {:.0}", m.messages_24h, m.avg_daily_7d),
             ),
             factor(
                 RiskFactorType::AccountAge,
@@ -438,19 +417,13 @@ impl RiskScoringEngine {
                 RiskFactorType::ListQuality,
                 list_quality_score(m.bounce_rate, m.spam_rate),
                 w.list_quality,
-                format!(
-                    "Bounce {:.2}% + Spam {:.3}%",
-                    m.bounce_rate, m.spam_rate
-                ),
+                format!("Bounce {:.2}% + Spam {:.3}%", m.bounce_rate, m.spam_rate),
             ),
             factor(
                 RiskFactorType::EngagementRate,
                 engagement_score(m.open_rate, m.click_rate),
                 w.engagement_rate,
-                format!(
-                    "Open {:.1}%, Click {:.1}%",
-                    m.open_rate, m.click_rate
-                ),
+                format!("Open {:.1}%, Click {:.1}%", m.open_rate, m.click_rate),
             ),
         ];
 
@@ -483,11 +456,7 @@ impl RiskScoringEngine {
         }
     }
 
-    fn generate_flags(
-        &self,
-        m: &TenantMetrics,
-        _level: RiskLevel,
-    ) -> Vec<RiskFlag> {
+    fn generate_flags(&self, m: &TenantMetrics, _level: RiskLevel) -> Vec<RiskFlag> {
         let mut flags = vec![];
         let now = Utc::now();
 
@@ -535,10 +504,7 @@ impl RiskScoringEngine {
             flags.push(RiskFlag {
                 flag_type: RiskFlagType::PhishingContent,
                 severity: FlagSeverity::Critical,
-                message: format!(
-                    "{} phishing detections found",
-                    m.phishing_detections
-                ),
+                message: format!("{} phishing detections found", m.phishing_detections),
                 raised_at: now,
                 resolved_at: None,
                 auto_resolved: false,
@@ -548,16 +514,10 @@ impl RiskScoringEngine {
         flags
     }
 
-    async fn persist_profile(
-        &self,
-        p: &TenantRiskProfile,
-    ) -> Result<(), String> {
-        let factors_json =
-            serde_json::to_value(&p.factors).map_err(|e| format!("JSON: {e}"))?;
-        let limits_json =
-            serde_json::to_value(&p.limits).map_err(|e| format!("JSON: {e}"))?;
-        let flags_json =
-            serde_json::to_value(&p.flags).map_err(|e| format!("JSON: {e}"))?;
+    async fn persist_profile(&self, p: &TenantRiskProfile) -> Result<(), String> {
+        let factors_json = serde_json::to_value(&p.factors).map_err(|e| format!("JSON: {e}"))?;
+        let limits_json = serde_json::to_value(&p.limits).map_err(|e| format!("JSON: {e}"))?;
+        let flags_json = serde_json::to_value(&p.flags).map_err(|e| format!("JSON: {e}"))?;
 
         sqlx::query(
             "INSERT INTO risk_profiles
@@ -595,9 +555,9 @@ impl RiskScoringEngine {
 // ─── Scoring Functions (pure, unit-testable) ───────────────────
 
 fn weighted_average(factors: &[RiskFactor]) -> f64 {
-    let (sum_sw, sum_w) = factors
-        .iter()
-        .fold((0.0_f64, 0.0_f64), |(sw, w), f| (sw + f.score * f.weight, w + f.weight));
+    let (sum_sw, sum_w) = factors.iter().fold((0.0_f64, 0.0_f64), |(sw, w), f| {
+        (sw + f.score * f.weight, w + f.weight)
+    });
     if sum_w == 0.0 {
         0.0
     } else {
@@ -695,19 +655,22 @@ fn engagement_score(open_rate: f64, click_rate: f64) -> f64 {
     if open_rate <= 0.0 && click_rate <= 0.0 {
         50.0 // no data = moderate risk
     } else {
-// Good engagement:open_rate ~20-30%, click ~2-5% → low risk
-        let open_factor = if open_rate >= 20.0 { 0.0 } else { (20.0 - open_rate) / 20.0 * 50.0 };
-        let click_factor = if click_rate >= 3.0 { 0.0 } else { (3.0 - click_rate) / 3.0 * 50.0 };
+        // Good engagement:open_rate ~20-30%, click ~2-5% → low risk
+        let open_factor = if open_rate >= 20.0 {
+            0.0
+        } else {
+            (20.0 - open_rate) / 20.0 * 50.0
+        };
+        let click_factor = if click_rate >= 3.0 {
+            0.0
+        } else {
+            (3.0 - click_rate) / 3.0 * 50.0
+        };
         ((open_factor + click_factor) / 2.0).clamp(0.0, 100.0)
     }
 }
 
-fn factor(
-    factor_type: RiskFactorType,
-    score: f64,
-    weight: f64,
-    details: String,
-) -> RiskFactor {
+fn factor(factor_type: RiskFactorType, score: f64, weight: f64, details: String) -> RiskFactor {
     RiskFactor {
         factor_type,
         score,
@@ -742,10 +705,8 @@ impl ProfileRow {
             risk_level: RiskLevel::from_score(self.risk_score),
             factors: serde_json::from_value(self.factors)
                 .map_err(|e| format!("factors JSON: {e}"))?,
-            limits: serde_json::from_value(self.limits)
-                .map_err(|e| format!("limits JSON: {e}"))?,
-            flags: serde_json::from_value(self.flags)
-                .map_err(|e| format!("flags JSON: {e}"))?,
+            limits: serde_json::from_value(self.limits).map_err(|e| format!("limits JSON: {e}"))?,
+            flags: serde_json::from_value(self.flags).map_err(|e| format!("flags JSON: {e}"))?,
             last_assessed_at: self.last_assessed_at,
             next_assessment_at: self.next_assessment_at,
             created_at: self.created_at,
@@ -841,7 +802,7 @@ mod tests {
             factor(RiskFactorType::SpamComplaints, 50.0, 1.5, String::new()),
             factor(RiskFactorType::BounceRate, 30.0, 1.2, String::new()),
         ];
-// (50*1.5 + 30*1.2) / (1.5+1.2) = (75+36)/2.7 = 111/2.7 ≈ 41.11 → 41
+        // (50*1.5 + 30*1.2) / (1.5+1.2) = (75+36)/2.7 = 111/2.7 ≈ 41.11 → 41
         let avg = weighted_average(&factors);
         assert_eq!(avg, 41.0);
     }
@@ -853,10 +814,10 @@ mod tests {
 
     #[test]
     fn test_risk_level_determines_limits() {
-// Low → multiplier 1.0, no forced DOI
+        // Low → multiplier 1.0, no forced DOI
         let cfg = ComplianceConfig::from_env();
         let engine = RiskScoringEngine::new(
-// We only test compute_limits which doesn't touch DB.
+            // We only test compute_limits which doesn't touch DB.
             unsafe_dummy_pool(),
             cfg,
         );
@@ -888,7 +849,9 @@ mod tests {
         let mut m = TenantMetrics::default();
         m.blocklisted = true;
         let flags = engine.generate_flags(&m, RiskLevel::High);
-        assert!(flags.iter().any(|f| f.flag_type == RiskFlagType::BlocklistDetected));
+        assert!(flags
+            .iter()
+            .any(|f| f.flag_type == RiskFlagType::BlocklistDetected));
     }
 
     #[test]
@@ -899,7 +862,9 @@ mod tests {
         m.messages_24h = 10_000;
         m.avg_daily_7d = 1_000.0;
         let flags = engine.generate_flags(&m, RiskLevel::Medium);
-        assert!(flags.iter().any(|f| f.flag_type == RiskFlagType::UnusualSendingPattern));
+        assert!(flags
+            .iter()
+            .any(|f| f.flag_type == RiskFlagType::UnusualSendingPattern));
     }
 
     #[test]
@@ -909,10 +874,12 @@ mod tests {
         let mut m = TenantMetrics::default();
         m.phishing_detections = 2;
         let flags = engine.generate_flags(&m, RiskLevel::Critical);
-        assert!(flags.iter().any(|f| f.flag_type == RiskFlagType::PhishingContent));
+        assert!(flags
+            .iter()
+            .any(|f| f.flag_type == RiskFlagType::PhishingContent));
     }
 
-/// Shared Tokio runtime for tests that need `connect_lazy` (sqlx 0.8 requires it).
+    /// Shared Tokio runtime for tests that need `connect_lazy` (sqlx 0.8 requires it).
     fn test_runtime() -> &'static tokio::runtime::Runtime {
         use std::sync::OnceLock;
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -924,7 +891,7 @@ mod tests {
         })
     }
 
-/// Create a dummy PgPool for tests that only exercise non-DB methods.
+    /// Create a dummy PgPool for tests that only exercise non-DB methods.
     fn unsafe_dummy_pool() -> PgPool {
         use sqlx::postgres::PgPoolOptions;
         let _guard = test_runtime().enter();

@@ -39,7 +39,7 @@ pub fn decode_payload(input: &str, max_depth: usize) -> String {
 fn decode_one_layer(input: &str) -> String {
     let step1 = url_decode(input);
     let step2 = html_entity_decode(&step1);
-    
+
     unicode_escape_decode(&step2)
 }
 
@@ -93,7 +93,7 @@ pub fn html_entity_decode(input: &str) -> String {
 }
 
 fn decode_html_entity(entity: &str) -> Option<char> {
-// Named entities
+    // Named entities
     match entity {
         "amp" => return Some('&'),
         "lt" => return Some('<'),
@@ -106,10 +106,10 @@ fn decode_html_entity(entity: &str) -> Option<char> {
         "bsol" => return Some('\\'),
         _ => {}
     }
-// Numeric (&#NNN;)
+    // Numeric (&#NNN;)
     if let Some(num_str) = entity.strip_prefix('#') {
         if num_str.starts_with('x') || num_str.starts_with('X') {
-// Hex &#xHH;
+            // Hex &#xHH;
             let hex_str = &num_str[1..];
             if let Ok(n) = u32::from_str_radix(hex_str, 16) {
                 return char::from_u32(n);
@@ -168,11 +168,11 @@ fn fold_confusable(c: char) -> char {
         '\u{FF5C}' => '|',
         '\u{FF04}' => '$',
         '\u{0430}' | '\u{03B1}' => 'a', // Cyrillic/Greek alpha
-        '\u{0435}' => 'e', // Cyrillic e
-        '\u{043E}' => 'o', // Cyrillic o
-        '\u{0440}' => 'p', // Cyrillic er
-        '\u{0441}' => 'c', // Cyrillic es
-        '\u{0445}' => 'x', // Cyrillic ha
+        '\u{0435}' => 'e',              // Cyrillic e
+        '\u{043E}' => 'o',              // Cyrillic o
+        '\u{0440}' => 'p',              // Cyrillic er
+        '\u{0441}' => 'c',              // Cyrillic es
+        '\u{0445}' => 'x',              // Cyrillic ha
         _ => c,
     }
 }
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_multi_layer_decode() {
-// Double URL-encoded
+        // Double URL-encoded
         let payload = "%253Cscript%253E";
         let decoded = decode_payload(payload, 5);
         assert_eq!(decoded, "<script>");

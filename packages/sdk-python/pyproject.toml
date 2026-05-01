@@ -9,7 +9,7 @@ description = "Official Python SDK for ApexMail - Transactional Email API"
 readme = "README.md"
 license = "MIT"
 authors = [
-    { name = "Bel Consulting OÜ", email = "contact@apexmail.ee" }
+    { name = "Bel Consulting OÜ", email = "support@apexmail.ee" }
 ]
 keywords = [
     "email",

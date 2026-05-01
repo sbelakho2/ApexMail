@@ -10,7 +10,7 @@ use crate::{DdosProtector, ProtectionDecision, RequestContext};
 /// State wrapper for the DDoS protector in Axum
 #[derive(Clone)]
 pub struct DdosMiddlewareState {
-/// The DDoS protector instance
+    /// The DDoS protector instance
     pub protector: Arc<DdosProtector>,
 }
 
@@ -30,7 +30,7 @@ pub struct RequestContextBuilder {
 }
 
 impl RequestContextBuilder {
-/// Create a new builder with required fields
+    /// Create a new builder with required fields
     pub fn new(ip: IpAddr, path: &str, method: &str) -> Self {
         Self {
             ip,
@@ -45,43 +45,43 @@ impl RequestContextBuilder {
         }
     }
 
-/// Set TLS fingerprint
+    /// Set TLS fingerprint
     pub fn tls_fingerprint(mut self, fp: &str) -> Self {
         self.tls_fingerprint = Some(fp.to_string());
         self
     }
 
-/// Set HTTP/2 fingerprint
+    /// Set HTTP/2 fingerprint
     pub fn h2_fingerprint(mut self, fp: &str) -> Self {
         self.h2_fingerprint = Some(fp.to_string());
         self
     }
 
-/// Set User-Agent
+    /// Set User-Agent
     pub fn user_agent(mut self, ua: &str) -> Self {
         self.user_agent = Some(ua.to_string());
         self
     }
 
-/// Set request body size
+    /// Set request body size
     pub fn body_size(mut self, size: usize) -> Self {
         self.body_size = size;
         self
     }
 
-/// Set tenant ID
+    /// Set tenant ID
     pub fn tenant_id(mut self, id: &str) -> Self {
         self.tenant_id = Some(id.to_string());
         self
     }
 
-/// Set API key ID
+    /// Set API key ID
     pub fn api_key_id(mut self, id: &str) -> Self {
         self.api_key_id = Some(id.to_string());
         self
     }
 
-/// Build the `RequestContext`
+    /// Build the `RequestContext`
     pub fn build(self) -> RequestContext {
         RequestContext {
             ip: self.ip,
@@ -100,35 +100,32 @@ impl RequestContextBuilder {
 /// Result of DDoS middleware evaluation
 #[derive(Debug, Clone)]
 pub enum MiddlewareAction {
-/// Allow the request through
+    /// Allow the request through
     Allow,
-/// Challenge the client (return challenge response)
+    /// Challenge the client (return challenge response)
     Challenge {
-/// HTTP status to return (typically 429 or 403)
+        /// HTTP status to return (typically 429 or 403)
         status: u16,
-/// Response body (JSON with challenge)
+        /// Response body (JSON with challenge)
         body: String,
     },
-/// Rate limit the request
+    /// Rate limit the request
     RateLimit {
-/// HTTP status (429)
+        /// HTTP status (429)
         status: u16,
-/// Retry-After header value in seconds
+        /// Retry-After header value in seconds
         retry_after_secs: u64,
     },
-/// Block the request
+    /// Block the request
     Block {
-/// HTTP status (403)
+        /// HTTP status (403)
         status: u16,
     },
 }
 
 /// Evaluate a request through the DDoS protection system and return
 /// the appropriate middleware action.
-pub async fn evaluate_request(
-    protector: &DdosProtector,
-    ctx: &RequestContext,
-) -> MiddlewareAction {
+pub async fn evaluate_request(protector: &DdosProtector, ctx: &RequestContext) -> MiddlewareAction {
     match protector.evaluate(ctx).await {
         ProtectionDecision::Allow => MiddlewareAction::Allow,
 
@@ -144,10 +141,7 @@ pub async fn evaluate_request(
                     crate::decision::Challenge::Blocked => "blocked",
                 }
             );
-            MiddlewareAction::Challenge {
-                status: 429,
-                body,
-            }
+            MiddlewareAction::Challenge { status: 429, body }
         }
 
         ProtectionDecision::RateLimit { retry_after } => MiddlewareAction::RateLimit {
@@ -170,14 +164,14 @@ pub fn extract_client_ip(
     cf_connecting_ip: Option<&str>,
     direct_ip: IpAddr,
 ) -> IpAddr {
-// X-Real-IP
+    // X-Real-IP
     if let Some(ip_str) = x_real_ip {
         if let Ok(ip) = ip_str.trim().parse::<IpAddr>() {
             return ip;
         }
     }
 
-// X-Forwarded-For (first entry)
+    // X-Forwarded-For (first entry)
     if let Some(xff) = x_forwarded_for {
         if let Some(first) = xff.split(',').next() {
             if let Ok(ip) = first.trim().parse::<IpAddr>() {
@@ -186,7 +180,7 @@ pub fn extract_client_ip(
         }
     }
 
-// CF-Connecting-IP
+    // CF-Connecting-IP
     if let Some(ip_str) = cf_connecting_ip {
         if let Ok(ip) = ip_str.trim().parse::<IpAddr>() {
             return ip;
@@ -248,7 +242,7 @@ mod tests {
     #[test]
     fn test_extract_client_ip_priority_order() {
         let direct: IpAddr = "127.0.0.1".parse().unwrap();
-// X-Real-IP takes priority over XFF
+        // X-Real-IP takes priority over XFF
         let result = extract_client_ip(
             Some("10.0.0.1"),
             Some("10.0.0.2, 10.0.0.3"),

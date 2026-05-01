@@ -15,15 +15,15 @@ pub struct Plan {
     pub name: String,
     pub display_name: String,
     pub description: String,
-/// Monthly price in **cents**.
+    /// Monthly price in **cents**.
     pub price_monthly: i64,
-/// Yearly price in **cents** (discounted).
+    /// Yearly price in **cents** (discounted).
     pub price_yearly: i64,
-/// Monthly email sending limit (−1 = unlimited).
+    /// Monthly email sending limit (−1 = unlimited).
     pub email_limit: i64,
-/// Monthly API-call limit (−1 = unlimited).
+    /// Monthly API-call limit (−1 = unlimited).
     pub api_call_limit: i64,
-/// JSON-encoded feature flags.
+    /// JSON-encoded feature flags.
     pub features: PlanFeatures,
     pub stripe_price_id_monthly: Option<String>,
     pub stripe_price_id_yearly: Option<String>,
@@ -36,49 +36,49 @@ pub struct Plan {
 /// Feature flags attached to a plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanFeatures {
-// Infrastructure
+    // Infrastructure
     pub dedicated_ip: bool,
     pub dedicated_ip_count: i32,
     pub max_sending_domains: i32,
 
-// Auth & Security
+    // Auth & Security
     pub sso_enabled: bool,
     pub audit_logs: bool,
 
-// API & Integrations
+    // API & Integrations
     pub api_access: bool,
     pub webhooks_enabled: bool,
     pub inbound_email: bool,
 
-// Analytics
+    // Analytics
     pub advanced_analytics: bool,
     pub send_time_optimization: bool,
     pub ab_testing: bool,
     pub time_travel_debugging: bool,
     pub data_export: bool,
 
-// Customization
+    // Customization
     pub custom_tracking_domain: bool,
     pub custom_templates: bool,
     pub template_approval_workflow: bool,
     pub white_label: bool,
     pub powered_by_footer: bool,
 
-// Retention
+    // Retention
     pub custom_retention: bool,
     pub max_retention_days: i32,
 
-// Team
+    // Team
     pub max_team_members: i32,
     pub subaccounts: bool,
     pub max_subaccounts: i32,
 
-// Support
+    // Support
     pub support_level: SupportLevel,
     pub dedicated_csm: bool,
     pub priority_onboarding: bool,
 
-// Enterprise
+    // Enterprise
     pub byoip: bool,
     pub sla_guarantee: bool,
     pub sla_credit_percentage: i32,
@@ -239,9 +239,9 @@ pub enum InvoiceStatus {
 pub struct InvoiceLineItem {
     pub description: String,
     pub quantity: i64,
-/// Unit price in cents.
+    /// Unit price in cents.
     pub unit_price: i64,
-/// Line total in cents.
+    /// Line total in cents.
     pub amount: i64,
     pub vat_rate: i32,
     pub vat_amount: i64,
@@ -255,7 +255,7 @@ pub struct Invoice {
     pub invoice_number: String,
     pub status: InvoiceStatus,
     pub currency: String,
-/// Subtotal in cents.
+    /// Subtotal in cents.
     pub subtotal: i64,
     pub vat_total: i64,
     pub total: i64,
@@ -316,18 +316,18 @@ pub struct QuotaLimit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitTier {
-/// Free tier – strict limits.
+    /// Free tier – strict limits.
     Free,
-/// Starter / Pro.
+    /// Starter / Pro.
     Standard,
-/// Growth / Scale.
+    /// Growth / Scale.
     High,
-/// Enterprise – highest throughput.
+    /// Enterprise – highest throughput.
     Unlimited,
 }
 
 impl RateLimitTier {
-/// Requests per second for the API.
+    /// Requests per second for the API.
     pub fn rps(&self) -> u32 {
         match self {
             Self::Free => 10,
@@ -445,8 +445,14 @@ mod tests {
         // BUG DETECTION: Default plan must NOT include dedicated IP.
         // If defaults change, this test catches the security regression.
         let f = PlanFeatures::default();
-        assert!(!f.dedicated_ip, "default plan must not include dedicated IP");
-        assert_eq!(f.dedicated_ip_count, 0, "default dedicated_ip_count must be 0");
+        assert!(
+            !f.dedicated_ip,
+            "default plan must not include dedicated IP"
+        );
+        assert_eq!(
+            f.dedicated_ip_count, 0,
+            "default dedicated_ip_count must be 0"
+        );
     }
 
     #[test]
@@ -505,8 +511,11 @@ mod tests {
             vat_rate: 20,
             vat_amount: 1200,
         };
-        assert_eq!(item.amount, item.quantity * item.unit_price,
-            "line amount must equal quantity * unit_price");
+        assert_eq!(
+            item.amount,
+            item.quantity * item.unit_price,
+            "line amount must equal quantity * unit_price"
+        );
     }
 
     #[test]
@@ -521,8 +530,11 @@ mod tests {
         ];
         for kind in critical {
             let json = serde_json::to_string(&kind).unwrap();
-            assert!(serde_json::from_str::<BillingEventKind>(&json).is_ok(),
-                "critical event kind {:?} must roundtrip", kind);
+            assert!(
+                serde_json::from_str::<BillingEventKind>(&json).is_ok(),
+                "critical event kind {:?} must roundtrip",
+                kind
+            );
         }
     }
 
@@ -542,6 +554,9 @@ mod tests {
             metrics: serde_json::json!({}),
         };
         // Overages are valid - percent_used > 100 means over limit
-        assert!(summary.percent_used > 100.0, "overage must be representable");
+        assert!(
+            summary.percent_used > 100.0,
+            "overage must be representable"
+        );
     }
 }

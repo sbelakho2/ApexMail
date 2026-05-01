@@ -58,7 +58,7 @@ pub struct DkimConfig {
     #[serde(default = "default_dkim_selector")]
     pub selector: String,
     pub private_key_path: Option<String>,
-/// Base64-encoded private key (alternative to file path)
+    /// Base64-encoded private key (alternative to file path)
     pub private_key: Option<String>,
 }
 
@@ -87,19 +87,45 @@ pub struct LimitsConfig {
 }
 
 // Default value functions
-fn default_grpc_port() -> u16 { 50051 }
-fn default_max_connections() -> u32 { 20 }
-fn default_connect_timeout() -> u64 { 10 }
-fn default_true() -> bool { true }
-fn default_dkim_selector() -> String { "apexmail2026".to_string() }
-fn default_max_retries() -> u32 { 5 }
-fn default_retry_delay() -> u64 { 300 }
-fn default_concurrent_deliveries() -> usize { 10 }
-fn default_smtp_timeout() -> u64 { 60 }
-fn default_max_message_size() -> usize { 25 * 1024 * 1024 } // 25MB
-fn default_max_recipients() -> usize { 100 }
-fn default_quota_bytes() -> u64 { 1024 * 1024 * 1024 } // 1GB
-fn default_rate_limit() -> u32 { 100 }
+fn default_grpc_port() -> u16 {
+    50051
+}
+fn default_max_connections() -> u32 {
+    20
+}
+fn default_connect_timeout() -> u64 {
+    10
+}
+fn default_true() -> bool {
+    true
+}
+fn default_dkim_selector() -> String {
+    "apexmail2026".to_string()
+}
+fn default_max_retries() -> u32 {
+    5
+}
+fn default_retry_delay() -> u64 {
+    300
+}
+fn default_concurrent_deliveries() -> usize {
+    10
+}
+fn default_smtp_timeout() -> u64 {
+    60
+}
+fn default_max_message_size() -> usize {
+    25 * 1024 * 1024
+} // 25MB
+fn default_max_recipients() -> usize {
+    100
+}
+fn default_quota_bytes() -> u64 {
+    1024 * 1024 * 1024
+} // 1GB
+fn default_rate_limit() -> u32 {
+    100
+}
 
 impl Default for LimitsConfig {
     fn default() -> Self {
@@ -154,19 +180,19 @@ impl Default for Config {
 }
 
 impl Config {
-/// Load configuration from file
+    /// Load configuration from file
     pub fn load_from(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
 
-/// Load configuration from environment variables
+    /// Load configuration from environment variables
     pub fn from_env() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
-        
+
         let mut config = Config::default();
-        
+
         if let Ok(val) = std::env::var("MAIL_HOSTNAME") {
             config.server.hostname = val;
         }
@@ -188,7 +214,7 @@ impl Config {
         if let Ok(val) = std::env::var("DKIM_PRIVATE_KEY_PATH") {
             config.dkim.private_key_path = Some(val);
         }
-        
+
         Ok(config)
     }
 }

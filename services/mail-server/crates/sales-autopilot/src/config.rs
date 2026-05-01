@@ -7,19 +7,19 @@ use tracing::error;
 /// never customer data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SalesConfig {
-/// Base URL of the enrichment / company-lookup API.
+    /// Base URL of the enrichment / company-lookup API.
     pub enrichment_api_url: String,
 
-/// How often (in seconds) to sync the calendar with external providers.
+    /// How often (in seconds) to sync the calendar with external providers.
     pub calendar_sync_interval_secs: u64,
 
-/// Maximum number of active campaigns allowed at once.
+    /// Maximum number of active campaigns allowed at once.
     pub max_campaigns: usize,
 
-/// Port the HTTP server listens on (default 3010).
+    /// Port the HTTP server listens on (default 3010).
     pub port: u16,
 
-/// Scraper requests-per-minute cap – ethical rate limit.
+    /// Scraper requests-per-minute cap – ethical rate limit.
     pub scraper_rpm: u32,
 }
 
@@ -36,7 +36,7 @@ impl Default for SalesConfig {
 }
 
 impl SalesConfig {
-/// Build a config from environment variables, falling back to defaults.
+    /// Build a config from environment variables, falling back to defaults.
     pub fn from_env() -> Self {
         let config = Self {
             enrichment_api_url: std::env::var("ENRICHMENT_API_URL")
@@ -73,7 +73,9 @@ impl SalesConfig {
         if self.enrichment_api_url.trim().is_empty() {
             return Err("ENRICHMENT_API_URL must not be empty".into());
         }
-        if !(self.enrichment_api_url.starts_with("http://") || self.enrichment_api_url.starts_with("https://")) {
+        if !(self.enrichment_api_url.starts_with("http://")
+            || self.enrichment_api_url.starts_with("https://"))
+        {
             return Err("ENRICHMENT_API_URL must be http/https".into());
         }
         if self.calendar_sync_interval_secs == 0 {

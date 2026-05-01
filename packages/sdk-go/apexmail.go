@@ -63,6 +63,8 @@ type Client struct {
 	Templates        *TemplatesAPI
 	Suppressions     *SuppressionsAPI
 	Events           *EventsAPI
+	Analytics        *AnalyticsAPI
+	APIKeys          *APIKeysAPI
 }
 
 // Config holds optional configuration for the client.
@@ -113,6 +115,8 @@ func New(apiKey string, cfg ...Config) *Client {
 	cl.Templates = &TemplatesAPI{client: cl}
 	cl.Suppressions = &SuppressionsAPI{client: cl}
 	cl.Events = &EventsAPI{client: cl}
+	cl.Analytics = &AnalyticsAPI{client: cl}
+	cl.APIKeys = &APIKeysAPI{client: cl}
 	return cl
 }
 
@@ -1194,6 +1198,101 @@ func (a *EventsAPI) Get(ctx context.Context, eventID string) (*GetEventResponse,
 	var resp GetEventResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/events/"+url.PathEscape(eventID), nil, &resp)
 	return &resp, err
+}
+
+// APIKeysAPI provides API key management helpers.
+type APIKeysAPI struct{ client *Client }
+
+// CreateAPIKeyRequest is the request body for creating an API key.
+type CreateAPIKeyRequest struct {
+	Name      string `json:"name"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+}
+
+// APIKeyResponse is a flexible API-key response payload.
+type APIKeyResponse map[string]interface{}
+
+// ListAPIKeysOptions configures API key list pagination.
+type ListAPIKeysOptions struct {
+	Limit  int
+	Offset int
+}
+
+// ListAPIKeysResponse is a flexible API-key list response payload.
+type ListAPIKeysResponse map[string]interface{}
+
+// Create creates a new API key.
+func (a *APIKeysAPI) Create(ctx context.Context, req *CreateAPIKeyRequest) (APIKeyResponse, error) {
+	if req == nil || strings.TrimSpace(req.Name) == "" {
+		return nil, fmt.Errorf("apexmail: api key name is required")
+	}
+	var out APIKeyResponse
+	err := a.client.do(ctx, http.MethodPost, "/v1/auth/api-keys", req, &out)
+	return out, err
+}
+
+// List returns API keys for the authenticated account.
+func (a *APIKeysAPI) List(ctx context.Context, opts ...ListAPIKeysOptions) (ListAPIKeysResponse, error) {
+	options := ListAPIKeysOptions{Limit: 50, Offset: 0}
+	if len(opts) > 0 {
+		options = opts[0]
+		if options.Limit == 0 {
+			options.Limit = 50
+		}
+	}
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(options.Limit))
+	query.Set("offset", strconv.Itoa(options.Offset))
+	var out ListAPIKeysResponse
+	err := a.client.do(ctx, http.MethodGet, "/v1/auth/api-keys?"+query.Encode(), nil, &out)
+	return out, err
+}
+
+// Revoke revokes an API key by ID.
+func (a *APIKeysAPI) Revoke(ctx context.Context, id string) error {
+	return a.client.do(ctx, http.MethodDelete, "/v1/auth/api-keys/"+url.PathEscape(id), nil, nil)
+}
+
+// AnalyticsAPI provides aggregate analytics helpers.
+type AnalyticsAPI struct{ client *Client }
+
+// AnalyticsOptions configures analytics queries.
+type AnalyticsOptions struct {
+	From    string
+	To      string
+	GroupBy string
+	Tag     string
+}
+
+// AnalyticsResponse is a flexible analytics response payload.
+type AnalyticsResponse map[string]interface{}
+
+// Get fetches analytics with optional filters.
+func (a *AnalyticsAPI) Get(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
+	var options AnalyticsOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	query := url.Values{}
+	if options.From != "" {
+		query.Set("from", options.From)
+	}
+	if options.To != "" {
+		query.Set("to", options.To)
+	}
+	if options.GroupBy != "" {
+		query.Set("groupBy", options.GroupBy)
+	}
+	if options.Tag != "" {
+		query.Set("tag", options.Tag)
+	}
+	path := "/v1/analytics"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var out AnalyticsResponse
+	err := a.client.do(ctx, http.MethodGet, path, nil, &out)
+	return out, err
 }
 
 func optInt(v *int, def int) int {

@@ -35,7 +35,7 @@ retention, SSO/HIPAA/SOC2 compliance, and white-label.
 | SSO / SAML                 | **Scale+**        | No               |
 | HIPAA / SOC2               | **Enterprise**    | SOC2 only        |
 | White-label                | **Enterprise**    | No               |
-| SDKs                       | **6 languages**   | 4 languages      |
+| SDKs                       | **5 languages**   | 4 languages      |
 | Dedicated IPs              | **From Pro ($30)**| Scale only ($30) |
 | Overage cost               | **$0.40/1K**      | $0.90/1K         |
 
@@ -96,7 +96,7 @@ Warmup, monitoring, and autoscaling included.
 | Feature                        | Free | Starter | Pro       | Growth    | Scale       | Enterprise  |
 |--------------------------------|------|---------|-----------|-----------|-------------|-------------|
 | REST API + SMTP relay          | ✓    | ✓       | ✓         | ✓         | ✓           | ✓           |
-| SDKs (Node, Python, Go, Ruby, PHP, Java) | ✓ | ✓  | ✓         | ✓         | ✓           | ✓           |
+| SDKs (Python, Go, Ruby, PHP, Java) | ✓ | ✓  | ✓         | ✓         | ✓           | ✓           |
 | Basic analytics                | ✓    | ✓       | ✓         | ✓         | ✓           | ✓           |
 | Webhooks                       | —    | ✓       | ✓         | ✓         | ✓           | ✓           |
 | Custom templates               | —    | ✓       | ✓         | ✓         | ✓           | ✓           |
@@ -134,22 +134,7 @@ Warmup, monitoring, and autoscaling included.
 
 ---
 
-## Margin Analysis (internal only — NEVER disclose)
-
-Infrastructure provider: AWS SES ($0.10 per 1,000 emails) for shared pool.
-Dedicated IP cost: ~€4/mo per IP (Hetzner Cloud floating IP).
-
-| Plan       | Revenue | COGS (max) | Gross Margin |
-|------------|---------|------------|--------------|
-| Free       | $0      | $0.30          | N/A (lead gen) |
-| Starter    | $25     | $5.00          | 80%          |
-| Pro        | $65     | $15.00         | 77%          |
-| Growth     | $150    | ~$54.00 (includes 1 IP) | 64%  |
-| Scale      | $350    | ~$212.00 (includes 3 IPs) | 39%  |
-| Enterprise | $800    | ~$540.00 (includes 10 IPs) | 33%  |
-
-Scale and Enterprise margins improve significantly when customers use
-less than their email allocation (typical utilisation: 40–60%).
+Internal margin modelling is maintained outside this public pricing reference.
 
 ---
 

@@ -1,10 +1,10 @@
 //! Cryptographic utilities — HMAC, hashing, passwords, timing-safe comparison.
 
+use argon2::{password_hash::SaltString, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use rand::rngs::OsRng;
+use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -42,8 +42,8 @@ pub fn timing_safe_compare(a: &str, b: &str) -> bool {
     let b_bytes = b.as_bytes();
     let len_matches = a_bytes.len() == b_bytes.len();
 
-// Always iterate over at least one full pass to avoid timing leaks.
-// Compare against the first string if lengths differ (result is discarded).
+    // Always iterate over at least one full pass to avoid timing leaks.
+    // Compare against the first string if lengths differ (result is discarded).
     let compare_against = if len_matches { b_bytes } else { a_bytes };
     let mut result: u8 = 0;
     for (x, y) in a_bytes.iter().zip(compare_against.iter()) {
@@ -77,7 +77,9 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
 /// Verify a password against an Argon2id hash.
 pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::password_hash::Error> {
     let parsed = PasswordHash::new(hash)?;
-    Ok(Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
 }
 
 #[cfg(test)]
@@ -88,7 +90,7 @@ mod tests {
     fn test_hmac_signature() {
         let sig = create_hmac_signature(b"secret", b"hello world");
         assert_eq!(sig.len(), 64); // hex-encoded SHA-256 = 64 chars
-// Deterministic
+                                   // Deterministic
         let sig2 = create_hmac_signature(b"secret", b"hello world");
         assert_eq!(sig, sig2);
     }
@@ -97,7 +99,7 @@ mod tests {
     fn test_hmac_base64() {
         let sig = create_hmac_signature_base64(b"secret", b"test");
         assert!(!sig.is_empty());
-// Should be valid base64
+        // Should be valid base64
         assert!(BASE64.decode(&sig).is_ok());
     }
 
@@ -114,9 +116,9 @@ mod tests {
     fn test_hash_api_key() {
         let hash = hash_api_key("am_live_abc123");
         assert_eq!(hash.len(), 64);
-// Deterministic
+        // Deterministic
         assert_eq!(hash, hash_api_key("am_live_abc123"));
-// Different key → different hash
+        // Different key → different hash
         assert_ne!(hash, hash_api_key("am_live_xyz789"));
     }
 

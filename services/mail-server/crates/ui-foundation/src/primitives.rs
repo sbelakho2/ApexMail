@@ -7,35 +7,180 @@ pub struct PrimitiveSpec {
 }
 
 pub const PRIMITIVES: &[PrimitiveSpec] = &[
-    PrimitiveSpec { checklist_id: "4.3", rust_name: "Button", contract_id: "primitive/button", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.4", rust_name: "Input", contract_id: "primitive/input", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.5", rust_name: "Textarea", contract_id: "primitive/textarea", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.6", rust_name: "Checkbox", contract_id: "primitive/checkbox", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.7", rust_name: "Select", contract_id: "primitive/select", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.8", rust_name: "Switch", contract_id: "primitive/switch", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.9", rust_name: "Slider", contract_id: "primitive/slider", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.10", rust_name: "RadioGroup", contract_id: "primitive/radio-group", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.11", rust_name: "Label", contract_id: "primitive/label", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.12", rust_name: "Progress", contract_id: "primitive/progress", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.13", rust_name: "Dialog", contract_id: "primitive/dialog", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.14", rust_name: "AlertDialog", contract_id: "primitive/alert-dialog", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.15", rust_name: "DropdownMenu", contract_id: "primitive/dropdown-menu", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.16", rust_name: "Popover", contract_id: "primitive/popover", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.17", rust_name: "Tooltip", contract_id: "primitive/tooltip", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.18", rust_name: "Accordion", contract_id: "primitive/accordion", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.19", rust_name: "Tabs", contract_id: "primitive/tabs", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.20", rust_name: "ScrollArea", contract_id: "primitive/scroll-area", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.21", rust_name: "Table", contract_id: "primitive/table", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.22", rust_name: "Card", contract_id: "primitive/card", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.23", rust_name: "Badge", contract_id: "primitive/badge", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.24", rust_name: "Avatar", contract_id: "primitive/avatar", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.25", rust_name: "EmptyState", contract_id: "primitive/empty-state", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.26", rust_name: "AsyncState", contract_id: "primitive/async-state", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.27", rust_name: "Skeleton", contract_id: "primitive/skeleton", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.28", rust_name: "StatusIndicator", contract_id: "primitive/status-indicator", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.29", rust_name: "PaginationControls", contract_id: "primitive/pagination-controls", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.30", rust_name: "Toast", contract_id: "primitive/toast", status: "implemented" },
-    PrimitiveSpec { checklist_id: "4.31", rust_name: "Charts", contract_id: "primitive/charts", status: "implemented" },
+    PrimitiveSpec {
+        checklist_id: "4.3",
+        rust_name: "Button",
+        contract_id: "primitive/button",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.4",
+        rust_name: "Input",
+        contract_id: "primitive/input",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.5",
+        rust_name: "Textarea",
+        contract_id: "primitive/textarea",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.6",
+        rust_name: "Checkbox",
+        contract_id: "primitive/checkbox",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.7",
+        rust_name: "Select",
+        contract_id: "primitive/select",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.8",
+        rust_name: "Switch",
+        contract_id: "primitive/switch",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.9",
+        rust_name: "Slider",
+        contract_id: "primitive/slider",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.10",
+        rust_name: "RadioGroup",
+        contract_id: "primitive/radio-group",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.11",
+        rust_name: "Label",
+        contract_id: "primitive/label",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.12",
+        rust_name: "Progress",
+        contract_id: "primitive/progress",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.13",
+        rust_name: "Dialog",
+        contract_id: "primitive/dialog",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.14",
+        rust_name: "AlertDialog",
+        contract_id: "primitive/alert-dialog",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.15",
+        rust_name: "DropdownMenu",
+        contract_id: "primitive/dropdown-menu",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.16",
+        rust_name: "Popover",
+        contract_id: "primitive/popover",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.17",
+        rust_name: "Tooltip",
+        contract_id: "primitive/tooltip",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.18",
+        rust_name: "Accordion",
+        contract_id: "primitive/accordion",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.19",
+        rust_name: "Tabs",
+        contract_id: "primitive/tabs",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.20",
+        rust_name: "ScrollArea",
+        contract_id: "primitive/scroll-area",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.21",
+        rust_name: "Table",
+        contract_id: "primitive/table",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.22",
+        rust_name: "Card",
+        contract_id: "primitive/card",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.23",
+        rust_name: "Badge",
+        contract_id: "primitive/badge",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.24",
+        rust_name: "Avatar",
+        contract_id: "primitive/avatar",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.25",
+        rust_name: "EmptyState",
+        contract_id: "primitive/empty-state",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.26",
+        rust_name: "AsyncState",
+        contract_id: "primitive/async-state",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.27",
+        rust_name: "Skeleton",
+        contract_id: "primitive/skeleton",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.28",
+        rust_name: "StatusIndicator",
+        contract_id: "primitive/status-indicator",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.29",
+        rust_name: "PaginationControls",
+        contract_id: "primitive/pagination-controls",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.30",
+        rust_name: "Toast",
+        contract_id: "primitive/toast",
+        status: "implemented",
+    },
+    PrimitiveSpec {
+        checklist_id: "4.31",
+        rust_name: "Charts",
+        contract_id: "primitive/charts",
+        status: "implemented",
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,8 +196,16 @@ pub struct Button<'a> {
 
 impl<'a> Button<'a> {
     pub fn render_html(&self) -> String {
-        let disabled = if self.disabled || self.loading { " disabled aria-disabled=\"true\"" } else { "" };
-        let loading = if self.loading { "<span class=\"mr-2 h-4 w-4 animate-spin\"></span>" } else { "" };
+        let disabled = if self.disabled || self.loading {
+            " disabled aria-disabled=\"true\""
+        } else {
+            ""
+        };
+        let loading = if self.loading {
+            "<span class=\"mr-2 h-4 w-4 animate-spin\"></span>"
+        } else {
+            ""
+        };
         let left_icon = if !self.loading {
             self.left_icon
                 .map(|icon| format!("<span class=\"mr-2\">{icon}</span>"))
@@ -98,7 +251,11 @@ pub struct Input<'a> {
 impl<'a> Input<'a> {
     pub fn render_html(&self) -> String {
         let resolved_variant = self.error.map(|_| "error").unwrap_or(self.variant);
-        let disabled = if self.disabled { " disabled aria-disabled=\"true\"" } else { "" };
+        let disabled = if self.disabled {
+            " disabled aria-disabled=\"true\""
+        } else {
+            ""
+        };
         let input_markup = format!(
             "<input type=\"{}\" value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-sm border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 shadow-sm {} {}{}\" data-variant=\"{}\" data-size=\"{}\" />",
             self.input_type,
@@ -114,14 +271,17 @@ impl<'a> Input<'a> {
         let base = if self.left_icon.is_some() || self.right_icon.is_some() {
             let left = self.left_icon.map(|icon| format!("<div class=\"absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</div>")).unwrap_or_default();
             let right = self.right_icon.map(|icon| format!("<div class=\"absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</div>")).unwrap_or_default();
-            let adjusted = input_markup.replace("class=\"flex w-full", "class=\"flex w-full pl-10 pr-10");
+            let adjusted =
+                input_markup.replace("class=\"flex w-full", "class=\"flex w-full pl-10 pr-10");
             format!("<div class=\"relative\">{}{adjusted}{}</div>", left, right)
         } else {
             input_markup
         };
 
         if let Some(error) = self.error {
-            return format!("<div>{base}<p class=\"text-xs text-destructive\" role=\"alert\">{error}</p></div>");
+            return format!(
+                "<div>{base}<p class=\"text-xs text-destructive\" role=\"alert\">{error}</p></div>"
+            );
         }
 
         base
@@ -152,7 +312,10 @@ impl<'a> Textarea<'a> {
 
         if self.show_count {
             let count = self.value.chars().count();
-            let suffix = self.max_length.map(|max| format!("{count}/{max}")).unwrap_or_else(|| count.to_string());
+            let suffix = self
+                .max_length
+                .map(|max| format!("{count}/{max}"))
+                .unwrap_or_else(|| count.to_string());
             return format!("<div class=\"relative\">{textarea}<span class=\"absolute bottom-2 right-2 text-xs text-muted-foreground\">{suffix}</span></div>");
         }
 
@@ -171,9 +334,25 @@ pub struct Checkbox {
 
 impl Checkbox {
     pub fn render_html(&self) -> String {
-        let state = if self.indeterminate { "indeterminate" } else if self.checked { "checked" } else { "unchecked" };
-        let disabled = if self.disabled { " disabled aria-disabled=\"true\"" } else { "" };
-        let indicator = if self.indeterminate { "<span class=\"w-full h-full p-0.5\">−</span>" } else if self.checked { "<span class=\"w-full h-full p-0.5\">✓</span>" } else { "" };
+        let state = if self.indeterminate {
+            "indeterminate"
+        } else if self.checked {
+            "checked"
+        } else {
+            "unchecked"
+        };
+        let disabled = if self.disabled {
+            " disabled aria-disabled=\"true\""
+        } else {
+            ""
+        };
+        let indicator = if self.indeterminate {
+            "<span class=\"w-full h-full p-0.5\">−</span>"
+        } else if self.checked {
+            "<span class=\"w-full h-full p-0.5\">✓</span>"
+        } else {
+            ""
+        };
         format!(
             "<button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" class=\"peer shrink-0 border ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 relative after:absolute after:left-1/2 after:top-1/2 after:h-[44px] after:w-[44px] after:-translate-x-1/2 after:-translate-y-1/2 after:content-[\"\"] {} {}\" data-state=\"{}\"{}>{}</button>",
             self.checked || self.indeterminate,
@@ -255,7 +434,11 @@ pub struct Switch {
 
 impl Switch {
     pub fn render_html(&self) -> String {
-        let disabled = if self.disabled { " disabled aria-disabled=\"true\"" } else { "" };
+        let disabled = if self.disabled {
+            " disabled aria-disabled=\"true\""
+        } else {
+            ""
+        };
         let state = if self.checked { "checked" } else { "unchecked" };
         format!(
             "<button type=\"button\" role=\"switch\" aria-checked=\"{}\" class=\"peer inline-flex shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 hover:opacity-90 active:scale-95 duration-200 relative after:absolute after:left-1/2 after:top-1/2 after:h-[44px] after:w-[44px] after:-translate-x-1/2 after:-translate-y-1/2 after:content-[\"\"] {} {}\" data-state=\"{}\"{}><span class=\"pointer-events-none block rounded-full bg-background ring-0 transition-transform shadow-md {} {}\"></span></button>",
@@ -348,9 +531,9 @@ impl<'a> RadioGroup<'a> {
         )
     }
 
-/// Keyboard navigation contract:ArrowDown/ArrowRight moves to next,
-/// ArrowUp/ArrowLeft moves to previous, Home/End jump to first/last,
-/// wrapping enabled by default.
+    /// Keyboard navigation contract:ArrowDown/ArrowRight moves to next,
+    /// ArrowUp/ArrowLeft moves to previous, Home/End jump to first/last,
+    /// wrapping enabled by default.
     pub fn keyboard_navigation_contract() -> RadioGroupKeyboardContract {
         RadioGroupKeyboardContract {
             arrow_down_moves_next: true,
@@ -388,9 +571,24 @@ pub struct Label<'a> {
 
 impl<'a> Label<'a> {
     pub fn render_html(&self) -> String {
-        let suffix = if self.required { "<span class=\"ml-1 text-destructive\">*</span>" } else { "" };
-        let optional = if self.optional { "<span class=\"ml-1 text-muted-foreground\">(optional)</span>" } else { "" };
-        format!("<label class=\"text-sm font-medium leading-none {} {}\">{}{}{}</label>", label_variant_class(self.variant), label_size_class(self.size), self.text, suffix, optional)
+        let suffix = if self.required {
+            "<span class=\"ml-1 text-destructive\">*</span>"
+        } else {
+            ""
+        };
+        let optional = if self.optional {
+            "<span class=\"ml-1 text-muted-foreground\">(optional)</span>"
+        } else {
+            ""
+        };
+        format!(
+            "<label class=\"text-sm font-medium leading-none {} {}\">{}{}{}</label>",
+            label_variant_class(self.variant),
+            label_size_class(self.size),
+            self.text,
+            suffix,
+            optional
+        )
     }
 }
 
@@ -405,9 +603,16 @@ pub struct Progress {
 
 impl Progress {
     pub fn render_html(&self) -> String {
-        let animated = if self.animated { " animate-progress" } else { "" };
+        let animated = if self.animated {
+            " animate-progress"
+        } else {
+            ""
+        };
         let value = if self.show_value {
-            format!("<span class=\"text-sm text-muted-foreground apex-metric-number\">{}%</span>", self.value)
+            format!(
+                "<span class=\"text-sm text-muted-foreground apex-metric-number\">{}%</span>",
+                self.value
+            )
         } else {
             String::new()
         };
@@ -433,7 +638,10 @@ pub struct Badge<'a> {
 
 impl<'a> Badge<'a> {
     pub fn render_html(&self) -> String {
-        let icon = self.icon.map(|markup| format!("<span class=\"mr-1\">{markup}</span>")).unwrap_or_default();
+        let icon = self
+            .icon
+            .map(|markup| format!("<span class=\"mr-1\">{markup}</span>"))
+            .unwrap_or_default();
         format!(
             "<div class=\"inline-flex items-center rounded-sm border px-2.5 py-1 text-[14px] font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 max-w-full min-w-0 truncate {} {}\" data-variant=\"{}\" data-size=\"{}\">{}{}</div>",
             badge_variant_class(self.variant),
@@ -508,30 +716,64 @@ impl<'a> EmptyState<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsyncState<'a> {
-    Loading { label: &'a str, source_label: Option<&'a str> },
-    Error { title: &'a str, description: &'a str, retry_label: Option<&'a str> },
-    Empty { title: &'a str, description: &'a str, action_label: Option<&'a str> },
+    Loading {
+        label: &'a str,
+        source_label: Option<&'a str>,
+    },
+    Error {
+        title: &'a str,
+        description: &'a str,
+        retry_label: Option<&'a str>,
+    },
+    Empty {
+        title: &'a str,
+        description: &'a str,
+        action_label: Option<&'a str>,
+    },
 }
 
 impl<'a> AsyncState<'a> {
     pub fn render_html(&self) -> String {
         match self {
-            Self::Loading { label, source_label } => {
-                let badge = source_label.map(|value| Badge { text: value, variant: "outline", size: "default", icon: None }.render_html()).unwrap_or_default();
+            Self::Loading {
+                label,
+                source_label,
+            } => {
+                let badge = source_label
+                    .map(|value| {
+                        Badge {
+                            text: value,
+                            variant: "outline",
+                            size: "default",
+                            icon: None,
+                        }
+                        .render_html()
+                    })
+                    .unwrap_or_default();
                 format!("<div class=\"flex items-center justify-center min-h-[320px]\"><div class=\"flex flex-col items-center gap-3\"><svg class=\"animate-spin h-8 w-8 text-muted-foreground\" viewBox=\"0 0 24 24\"></svg><p class=\"text-sm text-muted-foreground font-medium\">{}</p>{}</div></div>", label, badge)
             }
-            Self::Error { title, description, retry_label } => EmptyState {
+            Self::Error {
+                title,
+                description,
+                retry_label,
+            } => EmptyState {
                 icon_markup: Some("<span class=\"h-8 w-8 text-muted-foreground/60\">!</span>"),
                 title,
                 description: Some(description),
                 action_label: *retry_label,
-            }.render_html(),
-            Self::Empty { title, description, action_label } => EmptyState {
+            }
+            .render_html(),
+            Self::Empty {
+                title,
+                description,
+                action_label,
+            } => EmptyState {
                 icon_markup: Some("<span class=\"h-8 w-8 text-muted-foreground/60\">⌂</span>"),
                 title,
                 description: Some(description),
                 action_label: *action_label,
-            }.render_html(),
+            }
+            .render_html(),
         }
     }
 }
@@ -544,7 +786,11 @@ pub struct Skeleton<'a> {
 
 impl<'a> Skeleton<'a> {
     pub fn render_html(&self) -> String {
-        format!("<div class=\"animate-pulse rounded-md {} {}\"></div>", skeleton_variant_class(self.variant), self.class_name)
+        format!(
+            "<div class=\"animate-pulse rounded-md {} {}\"></div>",
+            skeleton_variant_class(self.variant),
+            self.class_name
+        )
     }
 }
 
@@ -584,14 +830,17 @@ pub struct Dialog<'a> {
 
 impl<'a> Dialog<'a> {
     pub fn render_html(&self) -> String {
-        let description = self.description.map(|value| format!("<p class=\"text-sm text-muted-foreground\">{}</p>", value)).unwrap_or_default();
+        let description = self
+            .description
+            .map(|value| format!("<p class=\"text-sm text-muted-foreground\">{}</p>", value))
+            .unwrap_or_default();
         let close = if self.hide_close_button {
             String::new()
         } else {
-            "<button class=\"absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\" aria-label=\"Close\"><span class=\"h-4 w-4\">✕</span><span class=\"sr-only\">Close</span></button>".to_string()
+            "<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\" aria-label=\"Close\"><span class=\"h-4 w-4\">✕</span><span class=\"sr-only\">Close</span></button>".to_string()
         };
         format!(
-            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-2xl duration-200 sm:rounded-xl {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 class=\"text-lg font-semibold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
+            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-2xl duration-200 sm:rounded-xl {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 class=\"text-lg font-semibold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
             dialog_size_class(self.size),
             dialog_variant_class(self.variant),
             self.title,
@@ -614,16 +863,22 @@ pub struct AlertDialog<'a> {
 
 impl<'a> AlertDialog<'a> {
     pub fn render_html(&self) -> String {
+        let initial_focus = if self.dialog_type == "confirm" {
+            "[data-alert-dialog-cancel]"
+        } else {
+            "[data-alert-dialog-confirm]"
+        };
         let cancel = if self.dialog_type == "confirm" {
             format!(
-                "<button class=\"px-4 py-2 rounded-lg text-sm font-medium bg-muted text-foreground hover:bg-muted/80 transition-colors\">{}</button>",
+                "<button data-alert-dialog-cancel class=\"px-4 py-2 rounded-lg text-sm font-medium bg-muted text-foreground hover:bg-muted/80 transition-colors\">{}</button>",
                 self.cancel_label.unwrap_or("Cancel")
             )
         } else {
             String::new()
         };
         format!(
-            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"dialog-title\" aria-describedby=\"dialog-message\"><h2 id=\"dialog-title\" class=\"text-lg font-semibold text-foreground mb-2\">{}</h2><p id=\"dialog-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button class=\"px-4 py-2 rounded-lg text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
+            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"dialog-title\" aria-describedby=\"dialog-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"dialog-title\" class=\"text-lg font-semibold text-foreground mb-2\">{}</h2><p id=\"dialog-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-lg text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
+            initial_focus,
             self.title,
             self.message,
             cancel,
@@ -679,7 +934,11 @@ pub struct DropdownMenu<'a> {
 impl<'a> DropdownMenu<'a> {
     pub fn render_html(&self) -> String {
         let label = self.label.map(|value| format!("<div class=\"px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-widest text-surface-600\">{}</div>", value)).unwrap_or_default();
-        let separator = if self.show_separator { "<div class=\"-mx-1 my-1 h-px bg-surface-200/50\"></div>" } else { "" };
+        let separator = if self.show_separator {
+            "<div class=\"-mx-1 my-1 h-px bg-surface-200/50\"></div>"
+        } else {
+            ""
+        };
         let items = self.items.iter().map(|item| {
             let destructive = if item.destructive { " text-destructive focus:bg-destructive/10 focus:text-destructive" } else { "" };
             let inset = if item.inset { " pl-8" } else { "" };
@@ -703,7 +962,7 @@ impl<'a> Tooltip<'a> {
         format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden rounded-md border px-3 py-1.5 text-xs shadow-md animate-in fade-in-0 zoom-in-95 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
     }
 
-/// Tooltip delay and positioning contract:matches Radix Tooltip behavior.
+    /// Tooltip delay and positioning contract:matches Radix Tooltip behavior.
     pub fn positioning_contract() -> TooltipPositioningContract {
         TooltipPositioningContract {
             default_delay_ms: 700,
@@ -782,7 +1041,7 @@ impl<'a> Accordion<'a> {
         )
     }
 
-/// Animation contract:matches the tailwind `accordion-down`/`accordion-up` keyframes.
+    /// Animation contract:matches the tailwind `accordion-down`/`accordion-up` keyframes.
     pub fn animation_contract() -> AccordionAnimationContract {
         AccordionAnimationContract {
             expand_duration_ms: 200,
@@ -794,7 +1053,7 @@ impl<'a> Accordion<'a> {
         }
     }
 
-/// Keyboard navigation contract.
+    /// Keyboard navigation contract.
     pub fn keyboard_contract() -> AccordionKeyboardContract {
         AccordionKeyboardContract {
             space_toggles: true,
@@ -961,14 +1220,38 @@ pub struct ApexPieChart<'a> {
 
 impl<'a> ApexPieChart<'a> {
     pub fn render_html(&self) -> String {
-        let legend = self.slices.iter().map(|slice| ChartLegendItem { key: slice.label, name: slice.label, color: slice.color }).collect::<Vec<_>>();
+        let legend = self
+            .slices
+            .iter()
+            .map(|slice| ChartLegendItem {
+                key: slice.label,
+                name: slice.label,
+                color: slice.color,
+            })
+            .collect::<Vec<_>>();
         let content = if self.slices.is_empty() {
             chart_empty_state_markup(self.empty_state_reason)
         } else {
-            let labels = self.slices.iter().map(|slice| format!("<div class=\"text-xs text-muted-foreground\">{} ({})</div>", slice.label, slice.value)).collect::<Vec<_>>().join("");
+            let labels = self
+                .slices
+                .iter()
+                .map(|slice| {
+                    format!(
+                        "<div class=\"text-xs text-muted-foreground\">{} ({})</div>",
+                        slice.label, slice.value
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
             format!("{}<div data-chart-kind=\"pie\" data-inner-radius=\"{}\" data-outer-radius=\"{}\" class=\"rounded-lg border border-border/50 bg-background/40\">{}</div>", chart_legend_markup(&legend), self.inner_radius, self.outer_radius, labels)
         };
-        render_chart_frame(self.title, self.description, self.last_updated_label, self.height, &content)
+        render_chart_frame(
+            self.title,
+            self.description,
+            self.last_updated_label,
+            self.height,
+            &content,
+        )
     }
 }
 
@@ -997,15 +1280,29 @@ impl<'a> Table<'a> {
             }).collect::<Vec<_>>().join("");
             format!("<tr class=\"border-b transition-colors hover:bg-muted/50 min-h-[44px]\">{}</tr>", cells)
         }).collect::<Vec<_>>().join("");
-        let caption = self.caption.map(|value| format!("<caption class=\"mt-4 text-sm text-muted-foreground\">{}</caption>", value)).unwrap_or_default();
+        let caption = self
+            .caption
+            .map(|value| {
+                format!(
+                    "<caption class=\"mt-4 text-sm text-muted-foreground\">{}</caption>",
+                    value
+                )
+            })
+            .unwrap_or_default();
         format!("<div class=\"relative w-full overflow-x-auto\"><table class=\"w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"[&_tr]:border-b sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody class=\"[&_tr:last-child]:border-0\">{}</tbody>{}</table></div>", headers, rows, caption)
     }
 }
 
 impl<'a> Toast<'a> {
     pub fn render_html(&self) -> String {
-        let title = self.title.map(|value| format!("<div class=\"text-sm font-semibold\">{}</div>", value)).unwrap_or_default();
-        let description = self.description.map(|value| format!("<div class=\"text-sm opacity-90\">{}</div>", value)).unwrap_or_default();
+        let title = self
+            .title
+            .map(|value| format!("<div class=\"text-sm font-semibold\">{}</div>", value))
+            .unwrap_or_default();
+        let description = self
+            .description
+            .map(|value| format!("<div class=\"text-sm opacity-90\">{}</div>", value))
+            .unwrap_or_default();
         let action = self.action_label.map(|value| format!("<button class=\"inline-flex h-8 shrink-0 items-center justify-center rounded-md border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-secondary\">{}</button>", value)).unwrap_or_default();
         format!("<div class=\"group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-xl border p-4 pr-8 transition-all shadow-xl {}\" role=\"status\"><div class=\"flex items-start gap-3\">{}<div class=\"grid gap-1\">{}{}</div></div>{}<button class=\"absolute right-2 top-2 rounded-md p-1 text-foreground/50\" aria-label=\"Close notification\">✕</button></div>", toast_variant_class(self.variant), toast_icon_markup(self.variant), title, description, action)
     }
@@ -1017,7 +1314,11 @@ impl PaginationControls {
         let is_first_page = self.page <= 1;
         let is_last_page = self.page >= safe_total_pages;
         let button = |label: &str, disabled: bool| {
-            let disabled_attr = if disabled { " disabled aria-disabled=\"true\"" } else { "" };
+            let disabled_attr = if disabled {
+                " disabled aria-disabled=\"true\""
+            } else {
+                ""
+            };
             format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-lg text-[14px] font-sans font-semibold tracking-[0.01em] border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground h-9 rounded-sm px-3 text-sm min-h-[44px]\"{}>{}</button>", disabled_attr, label)
         };
         format!(
@@ -1039,9 +1340,17 @@ impl PaginationControls {
     ) -> String {
         let safe_total_pages = self.total_pages.max(1);
         let current_page = self.page.clamp(1, safe_total_pages);
-        let preserved = extra_query.filter(|value| !value.is_empty()).map(|value| format!("&{}", value)).unwrap_or_default();
+        let preserved = extra_query
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("&{}", value))
+            .unwrap_or_default();
         let persistence_attr = persistence_key
-            .map(|value| format!(" data-pagination-storage-key=\"{}\" data-preserve-query=\"true\"", value))
+            .map(|value| {
+                format!(
+                    " data-pagination-storage-key=\"{}\" data-preserve-query=\"true\"",
+                    value
+                )
+            })
             .unwrap_or_default();
         let link = |label: &str, target_page: usize, disabled: bool| {
             if disabled {
@@ -1154,7 +1463,9 @@ fn button_size_class(size: &str) -> &'static str {
 
 fn input_variant_class(variant: &str) -> &'static str {
     match variant {
-        "error" => "border-destructive focus-visible:ring-destructive/20 focus-visible:border-destructive",
+        "error" => {
+            "border-destructive focus-visible:ring-destructive/20 focus-visible:border-destructive"
+        }
         "success" => "border-success focus-visible:ring-success/20 focus-visible:border-success",
         "ghost" => "border-transparent bg-transparent shadow-none hover:bg-muted/50",
         _ => "border-input",
@@ -1214,7 +1525,9 @@ fn select_size_class(size: &str) -> &'static str {
 fn switch_variant_class(variant: &str) -> &'static str {
     match variant {
         "success" => "data-[state=checked]:bg-success data-[state=unchecked]:bg-muted shadow-inner",
-        "destructive" => "data-[state=checked]:bg-destructive data-[state=unchecked]:bg-muted shadow-inner",
+        "destructive" => {
+            "data-[state=checked]:bg-destructive data-[state=unchecked]:bg-muted shadow-inner"
+        }
         _ => "data-[state=checked]:bg-primary data-[state=unchecked]:bg-muted shadow-inner",
     }
 }
@@ -1382,17 +1695,49 @@ fn skeleton_variant_class(variant: &str) -> &'static str {
 
 fn status_indicator_config(status: &str) -> (&str, &str, &str) {
     match status.to_ascii_lowercase().as_str() {
-        "draft" => ("Draft", "secondary", "<span class=\"mr-1 h-3 w-3\">○</span>"),
+        "draft" => (
+            "Draft",
+            "secondary",
+            "<span class=\"mr-1 h-3 w-3\">○</span>",
+        ),
         "scheduled" => ("Scheduled", "info", "<span class=\"mr-1 h-3 w-3\">◷</span>"),
-        "sending" => ("Sending", "warning", "<span class=\"mr-1 h-3 w-3\">◷</span>"),
+        "sending" => (
+            "Sending",
+            "warning",
+            "<span class=\"mr-1 h-3 w-3\">◷</span>",
+        ),
         "sent" => ("Sent", "success", "<span class=\"mr-1 h-3 w-3\">✓</span>"),
         "paused" => ("Paused", "outline", "<span class=\"mr-1 h-3 w-3\">Ⅱ</span>"),
-        "subscribed" => ("Subscribed", "success", "<span class=\"mr-1 h-3 w-3\">✓</span>"),
-        "unsubscribed" => ("Unsubscribed", "secondary", "<span class=\"mr-1 h-3 w-3\">Ⅱ</span>"),
-        "bounced" => ("Bounced", "warning", "<span class=\"mr-1 h-3 w-3\">!</span>"),
-        "complained" => ("Complained", "error", "<span class=\"mr-1 h-3 w-3\">✕</span>"),
-        "delivered" => ("Delivered", "success", "<span class=\"mr-1 h-3 w-3\">✓</span>"),
-        "queued" => ("Queued", "secondary", "<span class=\"mr-1 h-3 w-3\">◷</span>"),
+        "subscribed" => (
+            "Subscribed",
+            "success",
+            "<span class=\"mr-1 h-3 w-3\">✓</span>",
+        ),
+        "unsubscribed" => (
+            "Unsubscribed",
+            "secondary",
+            "<span class=\"mr-1 h-3 w-3\">Ⅱ</span>",
+        ),
+        "bounced" => (
+            "Bounced",
+            "warning",
+            "<span class=\"mr-1 h-3 w-3\">!</span>",
+        ),
+        "complained" => (
+            "Complained",
+            "error",
+            "<span class=\"mr-1 h-3 w-3\">✕</span>",
+        ),
+        "delivered" => (
+            "Delivered",
+            "success",
+            "<span class=\"mr-1 h-3 w-3\">✓</span>",
+        ),
+        "queued" => (
+            "Queued",
+            "secondary",
+            "<span class=\"mr-1 h-3 w-3\">◷</span>",
+        ),
         "failed" => ("Failed", "error", "<span class=\"mr-1 h-3 w-3\">✕</span>"),
         _ => (status, "secondary", "<span class=\"mr-1 h-3 w-3\">○</span>"),
     }
@@ -1470,7 +1815,9 @@ fn toast_icon_markup(variant: &str) -> &'static str {
 
 fn chart_empty_description(reason: &str) -> &'static str {
     match reason {
-        "filtered-out" => "No data matches the current filters. Adjust filters or broaden the timeframe.",
+        "filtered-out" => {
+            "No data matches the current filters. Adjust filters or broaden the timeframe."
+        }
         "permission" => "Chart data is unavailable for your current access scope.",
         "delayed" => "Chart data is delayed while sources catch up. Retry shortly for live values.",
         _ => "No chartable data is available for this range.",
@@ -1483,7 +1830,12 @@ fn chart_empty_state_markup(reason: &str) -> String {
 
 fn chart_meta_markup(last_updated_label: Option<&str>) -> String {
     last_updated_label
-        .map(|value| format!("<p class=\"mt-1 text-xs text-muted-foreground\">Last updated {}</p>", value))
+        .map(|value| {
+            format!(
+                "<p class=\"mt-1 text-xs text-muted-foreground\">Last updated {}</p>",
+                value
+            )
+        })
         .unwrap_or_default()
 }
 
@@ -1501,7 +1853,13 @@ fn chart_legend_markup(items: &[ChartLegendItem<'_>]) -> String {
     format!("<div class=\"mb-3 flex flex-wrap items-center gap-x-4 gap-y-2\" aria-label=\"Chart legend\">{}</div>", entries)
 }
 
-fn render_chart_frame(title: Option<&str>, description: Option<&str>, last_updated_label: Option<&str>, height: usize, content: &str) -> String {
+fn render_chart_frame(
+    title: Option<&str>,
+    description: Option<&str>,
+    last_updated_label: Option<&str>,
+    height: usize,
+    content: &str,
+) -> String {
     let header = if title.is_some() || description.is_some() {
         format!(
             "<div class=\"flex flex-col space-y-1.5 p-6\">{}{}{}</div>",
@@ -1516,7 +1874,16 @@ fn render_chart_frame(title: Option<&str>, description: Option<&str>, last_updat
     format!("<div class=\"rounded-xl border border-border bg-card text-card-foreground shadow-sm\">{}<div class=\"p-6\"><div style=\"height: {}px\">{}</div></div></div>", header, height, content)
 }
 
-fn render_chart_shell(title: Option<&str>, description: Option<&str>, last_updated_label: Option<&str>, height: usize, legend_items: &[ChartLegendItem<'_>], data_count: usize, empty_state_reason: &str, chart_markup: &str) -> String {
+fn render_chart_shell(
+    title: Option<&str>,
+    description: Option<&str>,
+    last_updated_label: Option<&str>,
+    height: usize,
+    legend_items: &[ChartLegendItem<'_>],
+    data_count: usize,
+    empty_state_reason: &str,
+    chart_markup: &str,
+) -> String {
     let content = if data_count == 0 {
         chart_empty_state_markup(empty_state_reason)
     } else {
@@ -1536,7 +1903,9 @@ fn table_align_class(align: &str) -> &'static str {
 
 fn tabs_list_variant_class(variant: &str) -> &'static str {
     match variant {
-        "underline" => "border-b border-border bg-transparent w-full justify-start gap-8 px-0 rounded-none",
+        "underline" => {
+            "border-b border-border bg-transparent w-full justify-start gap-8 px-0 rounded-none"
+        }
         "pills" => "gap-1 bg-transparent",
         _ => "rounded-lg bg-muted/50 p-1 text-muted-foreground border border-border/50",
     }
@@ -1553,7 +1922,9 @@ fn tabs_trigger_variant_class(variant: &str) -> &'static str {
 fn radio_variant_class(variant: &str) -> &'static str {
     match variant {
         "success" => "border-success text-success data-[state=checked]:border-success",
-        "destructive" => "border-destructive text-destructive data-[state=checked]:border-destructive",
+        "destructive" => {
+            "border-destructive text-destructive data-[state=checked]:border-destructive"
+        }
         _ => "border-primary text-primary data-[state=checked]:border-primary",
     }
 }
@@ -1848,7 +2219,11 @@ impl TableInteractionContract {
 }
 
 /// Renderable sortable table header.
-pub fn render_sortable_header(label: &str, sort_key: &str, current_sort: Option<(&str, &str)>) -> String {
+pub fn render_sortable_header(
+    label: &str,
+    sort_key: &str,
+    current_sort: Option<(&str, &str)>,
+) -> String {
     let (indicator, aria_sort) = match current_sort {
         Some((key, "asc")) if key == sort_key => ("▲", "ascending"),
         Some((key, "desc")) if key == sort_key => ("▼", "descending"),
@@ -1992,7 +2367,10 @@ pub fn render_chart_gridlines(count: usize) -> String {
     let lines = (0..count).map(|_| {
         "<line class=\"gridline\" stroke=\"rgb(var( --border))\" stroke-opacity=\"0.3\" stroke-dasharray=\"3 3\" />"
     }).collect::<Vec<_>>().join("");
-    format!("<g class=\"chart-gridlines\" aria-hidden=\"true\">{}</g>", lines)
+    format!(
+        "<g class=\"chart-gridlines\" aria-hidden=\"true\">{}</g>",
+        lines
+    )
 }
 
 /// Routing behavior contracts (4.32):nested layouts, redirects, query params, hash, back/forward, scroll restoration.
@@ -2068,9 +2446,33 @@ mod tests {
 
     #[test]
     fn renders_core_scaffolds() {
-        let button = Button { label: "Save", variant: "default", size: "default", disabled: false, loading: false, left_icon: None, right_icon: None };
-        let input = Input { input_type: "email", value: "", placeholder: "you@example.com", variant: "default", size: "default", left_icon: None, right_icon: None, error: None, disabled: false };
-        let progress = Progress { value: 42, variant: "default", size: "default", animated: false, show_value: true };
+        let button = Button {
+            label: "Save",
+            variant: "default",
+            size: "default",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None,
+        };
+        let input = Input {
+            input_type: "email",
+            value: "",
+            placeholder: "you@example.com",
+            variant: "default",
+            size: "default",
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false,
+        };
+        let progress = Progress {
+            value: 42,
+            variant: "default",
+            size: "default",
+            animated: false,
+            show_value: true,
+        };
 
         assert!(button.render_html().contains("Save"));
         assert!(input.render_html().contains("you@example.com"));
@@ -2096,7 +2498,8 @@ mod tests {
         assert!(html.contains("disabled aria-disabled=\"true\""));
         assert!(html.contains("<span class=\"mr-2\"><svg></svg></span>"));
         assert!(html.contains("<span class=\"ml-2\"><svg></svg></span>"));
-        assert!(html.contains("focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"));
+        assert!(html
+            .contains("focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"));
         assert!(html.contains("hover:!shadow-none"));
         assert!(html.contains("active:!shadow-none"));
     }
@@ -2274,8 +2677,18 @@ mod tests {
             size: "lg",
             open: true,
             options: vec![
-                SelectOption { value: "starter", label: "Starter", disabled: false, selected: false },
-                SelectOption { value: "enterprise", label: "Enterprise", disabled: false, selected: true },
+                SelectOption {
+                    value: "starter",
+                    label: "Starter",
+                    disabled: false,
+                    selected: false,
+                },
+                SelectOption {
+                    value: "enterprise",
+                    label: "Enterprise",
+                    disabled: false,
+                    selected: true,
+                },
             ],
         }
         .render_html();
@@ -2324,8 +2737,16 @@ mod tests {
         let html = Tabs {
             variant: "underline",
             tabs: vec![
-                TabItem { value: "overview", label: "Overview", active: true },
-                TabItem { value: "usage", label: "Usage", active: false },
+                TabItem {
+                    value: "overview",
+                    label: "Overview",
+                    active: true,
+                },
+                TabItem {
+                    value: "usage",
+                    label: "Usage",
+                    active: false,
+                },
             ],
             content_html: "<section>Panel</section>",
         }
@@ -2370,9 +2791,23 @@ mod tests {
 
     #[test]
     fn async_state_supports_loading_error_and_empty() {
-        let loading = AsyncState::Loading { label: "Loading...", source_label: Some("api") }.render_html();
-        let error = AsyncState::Error { title: "Something went wrong", description: "Retry later", retry_label: Some("Retry") }.render_html();
-        let empty = AsyncState::Empty { title: "No data", description: "Nothing to show", action_label: None }.render_html();
+        let loading = AsyncState::Loading {
+            label: "Loading...",
+            source_label: Some("api"),
+        }
+        .render_html();
+        let error = AsyncState::Error {
+            title: "Something went wrong",
+            description: "Retry later",
+            retry_label: Some("Retry"),
+        }
+        .render_html();
+        let empty = AsyncState::Empty {
+            title: "No data",
+            description: "Nothing to show",
+            action_label: None,
+        }
+        .render_html();
 
         assert!(loading.contains("Loading..."));
         assert!(loading.contains("api"));
@@ -2383,7 +2818,11 @@ mod tests {
 
     #[test]
     fn skeleton_supports_variants() {
-        let html = Skeleton { variant: "circle", class_name: "h-10 w-10" }.render_html();
+        let html = Skeleton {
+            variant: "circle",
+            class_name: "h-10 w-10",
+        }
+        .render_html();
         assert!(html.contains("animate-pulse"));
         assert!(html.contains("rounded-full"));
         assert!(html.contains("h-10 w-10"));
@@ -2391,14 +2830,21 @@ mod tests {
 
     #[test]
     fn status_indicator_maps_known_statuses() {
-        let html = StatusIndicator { status: "delivered" }.render_html();
+        let html = StatusIndicator {
+            status: "delivered",
+        }
+        .render_html();
         assert!(html.contains("Delivered"));
         assert!(html.contains("success"));
     }
 
     #[test]
     fn pagination_controls_render_navigation_states() {
-        let html = PaginationControls { page: 2, total_pages: 5 }.render_html();
+        let html = PaginationControls {
+            page: 2,
+            total_pages: 5,
+        }
+        .render_html();
         assert!(html.contains("aria-label=\"Pagination controls\""));
         assert!(html.contains("Page 2 of 5"));
         assert!(html.contains("First"));
@@ -2407,8 +2853,15 @@ mod tests {
 
     #[test]
     fn pagination_controls_can_render_query_preserving_links() {
-        let html = PaginationControls { page: 3, total_pages: 7 }
-            .render_html_with_links("/campaigns", Some("status=draft&query=spring"), Some("apexmail:campaigns:page"));
+        let html = PaginationControls {
+            page: 3,
+            total_pages: 7,
+        }
+        .render_html_with_links(
+            "/campaigns",
+            Some("status=draft&query=spring"),
+            Some("apexmail:campaigns:page"),
+        );
 
         assert!(html.contains("href=\"/campaigns?page=1&status=draft&query=spring\""));
         assert!(html.contains("href=\"/campaigns?page=2&status=draft&query=spring\""));
@@ -2430,6 +2883,8 @@ mod tests {
         .render_html();
 
         assert!(html.contains("role=\"dialog\""));
+        assert!(html.contains("data-focus-trap=\"true\""));
+        assert!(html.contains("data-dialog-close"));
         assert!(html.contains("max-w-2xl"));
         assert!(html.contains("glass border-white/10"));
         assert!(html.contains("Close"));
@@ -2448,6 +2903,9 @@ mod tests {
         .render_html();
 
         assert!(html.contains("role=\"alertdialog\""));
+        assert!(html.contains("data-focus-trap=\"true\""));
+        assert!(html.contains("data-alert-dialog-cancel"));
+        assert!(html.contains("data-alert-dialog-confirm"));
         assert!(html.contains("Delete domain"));
         assert!(html.contains("Cancel"));
         assert!(html.contains("bg-destructive text-destructive-foreground"));
@@ -2477,8 +2935,18 @@ mod tests {
         let html = DropdownMenu {
             label: Some("Actions"),
             items: vec![
-                DropdownMenuItem { label: "Edit", inset: false, destructive: false, shortcut: Some("⌘E") },
-                DropdownMenuItem { label: "Delete", inset: false, destructive: true, shortcut: None },
+                DropdownMenuItem {
+                    label: "Edit",
+                    inset: false,
+                    destructive: false,
+                    shortcut: Some("⌘E"),
+                },
+                DropdownMenuItem {
+                    label: "Delete",
+                    inset: false,
+                    destructive: true,
+                    shortcut: None,
+                },
             ],
             show_separator: true,
         }
@@ -2492,7 +2960,13 @@ mod tests {
 
     #[test]
     fn tooltip_supports_variant_side_and_delay() {
-        let html = Tooltip { content: "Helpful hint", variant: "light", side: "right", delay_duration: 200 }.render_html();
+        let html = Tooltip {
+            content: "Helpful hint",
+            variant: "light",
+            side: "right",
+            delay_duration: 200,
+        }
+        .render_html();
         assert!(html.contains("role=\"tooltip\""));
         assert!(html.contains("data-delay=\"200\""));
         assert!(html.contains("bg-white text-surface-900"));
@@ -2500,7 +2974,11 @@ mod tests {
 
     #[test]
     fn scroll_area_supports_orientation() {
-        let html = ScrollArea { orientation: "both", content: "<div>Rows</div>" }.render_html();
+        let html = ScrollArea {
+            orientation: "both",
+            content: "<div>Rows</div>",
+        }
+        .render_html();
         assert!(html.contains("overflow-auto"));
         assert!(html.contains("scrollbar-thin"));
         assert!(html.contains("Rows"));
@@ -2530,7 +3008,11 @@ mod tests {
             description: Some("No chartable data available for the selected period"),
             last_updated_label: Some("2 minutes ago"),
             height: 240,
-            areas: vec![ChartSeries { key: "sent", name: "Sent", color: "rgb(var( --primary))" }],
+            areas: vec![ChartSeries {
+                key: "sent",
+                name: "Sent",
+                color: "rgb(var( --primary))",
+            }],
             data_count: 0,
             empty_state_reason: "no-data",
         }
@@ -2542,8 +3024,16 @@ mod tests {
             last_updated_label: None,
             height: 300,
             slices: vec![
-                ChartPoint { label: "API", value: "42%", color: "rgb(var( --chart-1))" },
-                ChartPoint { label: "CSV", value: "58%", color: "rgb(var( --surface-500))" },
+                ChartPoint {
+                    label: "API",
+                    value: "42%",
+                    color: "rgb(var( --chart-1))",
+                },
+                ChartPoint {
+                    label: "CSV",
+                    value: "58%",
+                    color: "rgb(var( --surface-500))",
+                },
             ],
             empty_state_reason: "no-data",
             inner_radius: 60,
@@ -2565,8 +3055,14 @@ mod tests {
     fn table_supports_headers_rows_and_caption() {
         let html = Table {
             columns: vec![
-                TableColumn { label: "Campaign", align: "left" },
-                TableColumn { label: "Delivered", align: "right" },
+                TableColumn {
+                    label: "Campaign",
+                    align: "left",
+                },
+                TableColumn {
+                    label: "Delivered",
+                    align: "right",
+                },
             ],
             rows: vec![vec!["Launch", "1200"]],
             caption: Some("Delivery summary"),
@@ -2587,8 +3083,16 @@ mod tests {
         let html = Tabs {
             variant: "pills",
             tabs: vec![
-                TabItem { value: "overview", label: "Overview", active: true },
-                TabItem { value: "deliverability", label: "Deliverability", active: false },
+                TabItem {
+                    value: "overview",
+                    label: "Overview",
+                    active: true,
+                },
+                TabItem {
+                    value: "deliverability",
+                    label: "Deliverability",
+                    active: false,
+                },
             ],
             content_html: "<section>Tab content</section>",
         }
@@ -2608,7 +3112,11 @@ mod tests {
             description: Some("Rolling seven-day delivery volume"),
             last_updated_label: Some("just now"),
             height: 280,
-            series: vec![ChartSeries { key: "delivered", name: "Delivered", color: "rgb(var( --chart-1))" }],
+            series: vec![ChartSeries {
+                key: "delivered",
+                name: "Delivered",
+                color: "rgb(var( --chart-1))",
+            }],
             data_count: 7,
             empty_state_reason: "no-data",
         }
@@ -2618,7 +3126,11 @@ mod tests {
             description: Some("Grouped by channel"),
             last_updated_label: None,
             height: 260,
-            bars: vec![ChartSeries { key: "api", name: "API", color: "rgb(var( --chart-2))" }],
+            bars: vec![ChartSeries {
+                key: "api",
+                name: "API",
+                color: "rgb(var( --chart-2))",
+            }],
             data_count: 3,
             layout: "vertical",
             empty_state_reason: "no-data",
@@ -2650,9 +3162,9 @@ mod tests {
         assert!(html.contains("42,000 emails"));
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.10 RadioGroup — render + keyboard + variants/sizes
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.10 RadioGroup — render + keyboard + variants/sizes
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn radio_group_renders_all_items_with_roles() {
@@ -2663,9 +3175,21 @@ mod tests {
             size: "md",
             orientation: "vertical",
             items: vec![
-                RadioGroupItem { value: "free", label: "Free", disabled: false },
-                RadioGroupItem { value: "pro", label: "Pro", disabled: false },
-                RadioGroupItem { value: "enterprise", label: "Enterprise", disabled: true },
+                RadioGroupItem {
+                    value: "free",
+                    label: "Free",
+                    disabled: false,
+                },
+                RadioGroupItem {
+                    value: "pro",
+                    label: "Pro",
+                    disabled: false,
+                },
+                RadioGroupItem {
+                    value: "enterprise",
+                    label: "Enterprise",
+                    disabled: true,
+                },
             ],
         }
         .render_html();
@@ -2705,8 +3229,16 @@ mod tests {
             size: "md",
             orientation: "horizontal",
             items: vec![
-                RadioGroupItem { value: "slow", label: "Slow", disabled: false },
-                RadioGroupItem { value: "fast", label: "Fast", disabled: false },
+                RadioGroupItem {
+                    value: "slow",
+                    label: "Slow",
+                    disabled: false,
+                },
+                RadioGroupItem {
+                    value: "fast",
+                    label: "Fast",
+                    disabled: false,
+                },
             ],
         }
         .render_html();
@@ -2728,9 +3260,9 @@ mod tests {
         assert!(kc.space_selects);
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.18 Accordion — render + animation + keyboard
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.18 Accordion — render + animation + keyboard
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn accordion_renders_items_with_aria() {
@@ -2740,8 +3272,16 @@ mod tests {
             orientation: "vertical",
             open_values: vec!["faq-1"],
             items: vec![
-                AccordionItem { value: "faq-1", trigger_label: "What is ApexMail?", content: "An email platform." },
-                AccordionItem { value: "faq-2", trigger_label: "Pricing?", content: "See pricing page." },
+                AccordionItem {
+                    value: "faq-1",
+                    trigger_label: "What is ApexMail?",
+                    content: "An email platform.",
+                },
+                AccordionItem {
+                    value: "faq-2",
+                    trigger_label: "Pricing?",
+                    content: "See pricing page.",
+                },
             ],
         }
         .render_html();
@@ -2753,7 +3293,7 @@ mod tests {
         assert!(html.contains("What is ApexMail?"));
         assert!(html.contains("An email platform."));
         assert!(html.contains("Pricing?"));
-// closed content still in DOM (for animation), but has hidden attribute
+        // closed content still in DOM (for animation), but has hidden attribute
         assert!(html.contains("hidden"));
     }
 
@@ -2765,15 +3305,27 @@ mod tests {
             orientation: "vertical",
             open_values: vec!["a", "b"],
             items: vec![
-                AccordionItem { value: "a", trigger_label: "A", content: "Content A" },
-                AccordionItem { value: "b", trigger_label: "B", content: "Content B" },
-                AccordionItem { value: "c", trigger_label: "C", content: "Content C" },
+                AccordionItem {
+                    value: "a",
+                    trigger_label: "A",
+                    content: "Content A",
+                },
+                AccordionItem {
+                    value: "b",
+                    trigger_label: "B",
+                    content: "Content B",
+                },
+                AccordionItem {
+                    value: "c",
+                    trigger_label: "C",
+                    content: "Content C",
+                },
             ],
         }
         .render_html();
 
-// Two open items × 3 data-state attrs each (wrapper, trigger, panel) = 6
-// One closed item × 3 = 3
+        // Two open items × 3 data-state attrs each (wrapper, trigger, panel) = 6
+        // One closed item × 3 = 3
         assert_eq!(html.matches("data-state=\"open\"").count(), 6);
         assert_eq!(html.matches("data-state=\"closed\"").count(), 3);
     }
@@ -2801,9 +3353,9 @@ mod tests {
         assert!(kc.end_moves_last);
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.3 Button density contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.3 Button density contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn button_density_contract_specifies_three_levels() {
@@ -2820,9 +3372,9 @@ mod tests {
         assert!(button_density_class("comfortable").contains("h-14"));
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.4 Input helper-text, autofill/paste/IME contracts
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.4 Input helper-text, autofill/paste/IME contracts
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn input_helper_text_renders_all_variants() {
@@ -2832,8 +3384,15 @@ mod tests {
             ("success", "text-success"),
             ("warning", "text-warning"),
         ] {
-            let html = InputHelperText { text: "Hint", variant }.render_html();
-            assert!(html.contains(expected_class), "variant {variant} should have class {expected_class}");
+            let html = InputHelperText {
+                text: "Hint",
+                variant,
+            }
+            .render_html();
+            assert!(
+                html.contains(expected_class),
+                "variant {variant} should have class {expected_class}"
+            );
             assert!(html.contains("Hint"));
             assert!(html.contains("role=\"status\""));
         }
@@ -2848,9 +3407,9 @@ mod tests {
         assert!(c.autofill_css.contains("autofill"));
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.7 Select positioning/collision/keyboard contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.7 Select positioning/collision/keyboard contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn select_behavior_contract_covers_keyboard_and_positioning() {
@@ -2866,9 +3425,9 @@ mod tests {
         assert_eq!(c.max_height_viewport_percent, 40);
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.13 Dialog behavior contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.13 Dialog behavior contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn dialog_behavior_contract_covers_focus_trap_and_animation() {
@@ -2886,9 +3445,9 @@ mod tests {
         assert!(c.initial_focus_selector.contains("autofocus"));
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.15 Dropdown menu behavior contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.15 Dropdown menu behavior contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn dropdown_menu_behavior_contract_covers_nested_and_keyboard() {
@@ -2905,9 +3464,9 @@ mod tests {
         assert_eq!(c.collision_padding, 8);
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.16 Popover arrow/collision contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.16 Popover arrow/collision contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn popover_behavior_contract_covers_arrow_and_collision() {
@@ -2921,9 +3480,9 @@ mod tests {
         assert!(c.close_on_escape);
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.17 Tooltip delay/positioning contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.17 Tooltip delay/positioning contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn tooltip_positioning_contract_covers_delay_and_collision() {
@@ -2936,9 +3495,9 @@ mod tests {
         assert_eq!(c.collision_padding, 8);
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.19 Tabs keyboard/focus contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.19 Tabs keyboard/focus contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn tabs_behavior_contract_covers_keyboard_and_focus() {
@@ -2951,9 +3510,9 @@ mod tests {
         assert!(c.loop_navigation);
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.20 ScrollArea momentum contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.20 ScrollArea momentum contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn scroll_area_behavior_contract_covers_momentum() {
@@ -2965,9 +3524,9 @@ mod tests {
         assert!(c.css_scroll_behavior.contains("overflow-scrolling"));
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.21 Table sorting/selection contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.21 Table sorting/selection contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn table_interaction_contract_covers_sort_and_select() {
@@ -3008,9 +3567,9 @@ mod tests {
         assert!(unchecked.contains("data-state=\"unchecked\""));
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.27 Skeleton shimmer/dimensions contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.27 Skeleton shimmer/dimensions contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn skeleton_animation_contract_specifies_shimmer() {
@@ -3038,9 +3597,9 @@ mod tests {
         assert!(html.contains("rounded-md"));
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.30 Toast timing/dismissal contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.30 Toast timing/dismissal contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn toast_behavior_contract_covers_timing_and_dismissal() {
@@ -3056,9 +3615,9 @@ mod tests {
         assert!(c.close_button_always_visible);
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.31 Chart axis/gridline/hover contract
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.31 Chart axis/gridline/hover contract
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn chart_interaction_contract_covers_axis_and_hover() {
@@ -3086,9 +3645,9 @@ mod tests {
         assert!(html.contains("stroke-dasharray=\"3 3\""));
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.32 Routing behavior contracts
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.32 Routing behavior contracts
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn routing_behavior_contract_covers_all_navigation() {
@@ -3104,9 +3663,9 @@ mod tests {
         assert_eq!(c.auth_redirect_target, "/login");
     }
 
-// ────────────────────────────────────────────────────────────
-// Phase 4.33 Shell tab persistence / command palette contracts
-// ────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────
+    // Phase 4.33 Shell tab persistence / command palette contracts
+    // ────────────────────────────────────────────────────────────
 
     #[test]
     fn shell_behavior_contract_covers_persistence_and_palette() {

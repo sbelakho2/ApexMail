@@ -25,6 +25,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Any
 
 from common_paths import data_path
+from audit_output import emit
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CANONICAL VALUES FROM docs/pricing.md (February 2026)
@@ -339,22 +340,22 @@ class TrainingDataAuditor:
     
     def report(self) -> bool:
         """Print audit report and return True if all checks pass."""
-        print("=" * 70)
-        print("COMPREHENSIVE AI TRAINING DATA AUDIT")
-        print("=" * 70)
-        print(f"\nFile: {self.filepath}")
-        print(f"Total training examples: {self.total_lines:,}")
+        emit("=" * 70)
+        emit("COMPREHENSIVE AI TRAINING DATA AUDIT")
+        emit("=" * 70)
+        emit(f"\nFile: {self.filepath}")
+        emit(f"Total training examples: {self.total_lines:,}")
         
-        print(f"\n{'─' * 70}")
-        print("PLAN DISTRIBUTION")
-        print("─" * 70)
+        emit(f"\n{'─' * 70}")
+        emit("PLAN DISTRIBUTION")
+        emit("─" * 70)
         for plan in ['Free', 'Starter', 'Pro', 'Growth', 'Scale', 'Enterprise']:
             count = self.plan_counts.get(plan, 0)
-            print(f"  {plan:12} : {count:4} examples")
+            emit(f"  {plan:12} : {count:4} examples")
         
-        print(f"\n{'═' * 70}")
-        print(f"CRITICAL ISSUES: {len(self.issues)}")
-        print("═" * 70)
+        emit(f"\n{'═' * 70}")
+        emit(f"CRITICAL ISSUES: {len(self.issues)}")
+        emit("═" * 70)
         
         if self.issues:
             # Group by type
@@ -388,32 +389,32 @@ class TrainingDataAuditor:
                     categories['⚠️ Other'].append(issue)
             
             for category, issues in sorted(categories.items()):
-                print(f"\n{category} ({len(issues)}):")
+                emit(f"\n{category} ({len(issues)}):")
                 for issue in issues[:15]:
-                    print(f"  • {issue}")
+                    emit(f"  • {issue}")
                 if len(issues) > 15:
-                    print(f"  ... and {len(issues) - 15} more")
+                    emit(f"  ... and {len(issues) - 15} more")
         else:
-            print("\n✅ No critical issues found!")
+            emit("\n✅ No critical issues found!")
         
-        print(f"\n{'─' * 70}")
-        print(f"WARNINGS: {len(self.warnings)}")
-        print("─" * 70)
+        emit(f"\n{'─' * 70}")
+        emit(f"WARNINGS: {len(self.warnings)}")
+        emit("─" * 70)
         
         if self.warnings:
             for warning in self.warnings[:20]:
-                print(f"  ⚠️ {warning}")
+                emit(f"  ⚠️ {warning}")
             if len(self.warnings) > 20:
-                print(f"  ... and {len(self.warnings) - 20} more")
+                emit(f"  ... and {len(self.warnings) - 20} more")
         else:
-            print("\n✅ No warnings!")
+            emit("\n✅ No warnings!")
         
-        print(f"\n{'═' * 70}")
+        emit(f"\n{'═' * 70}")
         if not self.issues:
-            print("✅ AUDIT PASSED - All training data is accurate!")
+            emit("✅ AUDIT PASSED - All training data is accurate!")
         else:
-            print(f"❌ AUDIT FAILED - {len(self.issues)} issues need fixing")
-        print("═" * 70)
+            emit(f"❌ AUDIT FAILED - {len(self.issues)} issues need fixing")
+        emit("═" * 70)
         
         return len(self.issues) == 0
 

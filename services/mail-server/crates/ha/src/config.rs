@@ -224,22 +224,40 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.into())
 }
 fn env_or_u16(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_or_u32(key: &str, default: u32) -> u32 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_or_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_or_u8(key: &str, default: u8) -> u8 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_or_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_or_bool(key: &str, default: bool) -> bool {
-    std::env::var(key).ok().map(|v| v == "true" || v == "1").unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(default)
 }
 
 fn generated_runtime_secret(label: &str) -> String {
@@ -401,9 +419,15 @@ mod tests {
 
     #[test]
     fn test_routing_mode_parse() {
-        assert_eq!(RoutingMode::parse("latency"), Some(RoutingMode::LatencyBased));
+        assert_eq!(
+            RoutingMode::parse("latency"),
+            Some(RoutingMode::LatencyBased)
+        );
         assert_eq!(RoutingMode::parse("weighted"), Some(RoutingMode::Weighted));
-        assert_eq!(RoutingMode::parse("round-robin"), Some(RoutingMode::RoundRobin));
+        assert_eq!(
+            RoutingMode::parse("round-robin"),
+            Some(RoutingMode::RoundRobin)
+        );
         assert!(RoutingMode::parse("invalid").is_none());
     }
 
@@ -424,7 +448,10 @@ mod tests {
             standby_host: None,
             standby_port: 5432,
         };
-        assert_eq!(db.primary_url(), "postgres://user:pass@db.example.com:5432/apexmail");
+        assert_eq!(
+            db.primary_url(),
+            "postgres://user:pass@db.example.com:5432/apexmail"
+        );
         assert!(db.replica_url().is_none());
         assert!(db.standby_url().is_none());
     }
@@ -432,23 +459,37 @@ mod tests {
     #[test]
     fn test_db_replica_url() {
         let db = DatabaseConfig {
-            host: "primary".into(), port: 5432, database: "db".into(),
-            user: "u".into(), password: "p".into(), pool_max: 1,
-            idle_timeout_ms: 1, connection_timeout_ms: 1,
+            host: "primary".into(),
+            port: 5432,
+            database: "db".into(),
+            user: "u".into(),
+            password: "p".into(),
+            pool_max: 1,
+            idle_timeout_ms: 1,
+            connection_timeout_ms: 1,
             replica_host: Some("replica-1".into()),
             replica_port: 5433,
             replica_hosts: vec![],
             standby_host: Some("standby-1".into()),
             standby_port: 5434,
         };
-        assert_eq!(db.replica_url().unwrap(), "postgres://u:p@replica-1:5433/db");
-        assert_eq!(db.standby_url().unwrap(), "postgres://u:p@standby-1:5434/db");
+        assert_eq!(
+            db.replica_url().unwrap(),
+            "postgres://u:p@replica-1:5433/db"
+        );
+        assert_eq!(
+            db.standby_url().unwrap(),
+            "postgres://u:p@standby-1:5434/db"
+        );
     }
 
     #[test]
     fn test_redis_url() {
         let r = RedisConfig {
-            host: "localhost".into(), port: 6379, password: None, db: 0,
+            host: "localhost".into(),
+            port: 6379,
+            password: None,
+            db: 0,
             sentinel_master: "mymaster".into(),
         };
         assert_eq!(r.url(), "redis://localhost:6379/0");

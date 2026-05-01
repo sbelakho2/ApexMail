@@ -97,15 +97,15 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing-zola", "/compare") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/compare/index.html"
         )),
-        ("marketing", "/compare/postmark") | ("marketing-zola", "/compare/postmark") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/postmark/index.html"
-        )),
-        ("marketing", "/compare/resend") | ("marketing-zola", "/compare/resend") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/resend/index.html"
-        )),
-        ("marketing", "/compare/sendgrid") | ("marketing-zola", "/compare/sendgrid") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/compare/sendgrid/index.html"
-        )),
+        ("marketing", "/compare/postmark") | ("marketing-zola", "/compare/postmark") => Some(
+            include_str!("../../../../../apps/marketing-zola/public/compare/postmark/index.html"),
+        ),
+        ("marketing", "/compare/resend") | ("marketing-zola", "/compare/resend") => Some(
+            include_str!("../../../../../apps/marketing-zola/public/compare/resend/index.html"),
+        ),
+        ("marketing", "/compare/sendgrid") | ("marketing-zola", "/compare/sendgrid") => Some(
+            include_str!("../../../../../apps/marketing-zola/public/compare/sendgrid/index.html"),
+        ),
         ("marketing", "/cookies") | ("marketing-zola", "/cookies") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/cookies/index.html"
         )),
@@ -115,9 +115,9 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing", "/docs") | ("marketing-zola", "/docs") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/docs/index.html"
         )),
-        ("marketing", "/docs/analytics") | ("marketing-zola", "/docs/analytics") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/analytics/index.html"
-        )),
+        ("marketing", "/docs/analytics") | ("marketing-zola", "/docs/analytics") => Some(
+            include_str!("../../../../../apps/marketing-zola/public/docs/analytics/index.html"),
+        ),
         ("marketing", "/docs/api") | ("marketing-zola", "/docs/api") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/docs/api/index.html"
         )),
@@ -127,9 +127,9 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing", "/docs/sdks") | ("marketing-zola", "/docs/sdks") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/docs/sdks/index.html"
         )),
-        ("marketing", "/docs/webhooks") | ("marketing-zola", "/docs/webhooks") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/docs/webhooks/index.html"
-        )),
+        ("marketing", "/docs/webhooks") | ("marketing-zola", "/docs/webhooks") => Some(
+            include_str!("../../../../../apps/marketing-zola/public/docs/webhooks/index.html"),
+        ),
         ("marketing", "/features") | ("marketing-zola", "/features") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/features/index.html"
         )),
@@ -139,15 +139,15 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing", "/pricing") | ("marketing-zola", "/pricing") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/pricing/index.html"
         )),
-        ("marketing", "/pricing/calculator") | ("marketing-zola", "/pricing/calculator") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/pricing/calculator/index.html"
-        )),
+        ("marketing", "/pricing/calculator") | ("marketing-zola", "/pricing/calculator") => Some(
+            include_str!("../../../../../apps/marketing-zola/public/pricing/calculator/index.html"),
+        ),
         ("marketing", "/privacy") | ("marketing-zola", "/privacy") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/privacy/index.html"
         )),
-        ("marketing", "/private-cloud") | ("marketing-zola", "/private-cloud") => Some(include_str!(
-            "../../../../../apps/marketing-zola/public/private-cloud/index.html"
-        )),
+        ("marketing", "/private-cloud") | ("marketing-zola", "/private-cloud") => Some(
+            include_str!("../../../../../apps/marketing-zola/public/private-cloud/index.html"),
+        ),
         ("marketing", "/sla") | ("marketing-zola", "/sla") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/sla/index.html"
         )),
@@ -197,13 +197,11 @@ pub fn render_route_with_query(surface: &str, path: &str, query: Option<&str>) -
         "web" => {
             let inner = render_inner(surface, path, query)?;
             match path {
-        "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
-        | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
-                _ => leptos_views::web_root_layout(
-                    &leptos_views::web_dashboard_layout(&inner),
-                ),
+                "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
+                | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
+                _ => leptos_views::web_root_layout(&leptos_views::web_dashboard_layout(&inner)),
             }
-        },
+        }
         "control-plane" => {
             let inner = render_inner(surface, path, query)?;
             leptos_views::control_plane_root_layout(&inner)
@@ -273,9 +271,7 @@ fn render_web(path: &str, query: Option<&str>) -> Option<String> {
         p if p.starts_with("/campaigns/") && p.ends_with("/edit") => {
             leptos_views::web_campaign_edit_page()
         }
-        p if p.starts_with("/campaigns/") => {
-            leptos_views::web_campaign_detail_page()
-        }
+        p if p.starts_with("/campaigns/") => leptos_views::web_campaign_detail_page(),
         _ => return None,
     })
 }
@@ -334,7 +330,9 @@ fn render_marketing(surface: &str, path: &str) -> Option<String> {
         "/terms" => leptos_views::marketing_legal_page("Terms of Service", "terms"),
         "/privacy" => leptos_views::marketing_legal_page("Privacy Policy", "privacy"),
         "/cookies" => leptos_views::marketing_legal_page("Cookie Policy", "cookies"),
-        "/aup" | "/acceptable-use" => leptos_views::marketing_legal_page("Acceptable Use Policy", "aup"),
+        "/aup" | "/acceptable-use" => {
+            leptos_views::marketing_legal_page("Acceptable Use Policy", "aup")
+        }
         "/dpa" => leptos_views::marketing_legal_page("Data Processing Agreement", "dpa"),
         "/sla" => leptos_views::marketing_legal_page("Service Level Agreement", "sla"),
         "/api-console" => leptos_views::marketing_api_console_page(),
@@ -377,22 +375,27 @@ mod tests {
     fn every_rendered_route_contains_html() {
         let routes = ssr::ssr_routes();
         for route in &routes {
-            let html = render_route(route.surface, route.pattern)
-                .unwrap_or_else(|| panic!("missing view for [{}] {}", route.surface, route.pattern));
+            let html = render_route(route.surface, route.pattern).unwrap_or_else(|| {
+                panic!("missing view for [{}] {}", route.surface, route.pattern)
+            });
             assert!(
                 has_html_doctype(&html),
                 "[{}] {} missing DOCTYPE",
-                route.surface, route.pattern
+                route.surface,
+                route.pattern
             );
             assert!(
                 html.contains("</html>"),
                 "[{}] {} missing closing html tag",
-                route.surface, route.pattern
+                route.surface,
+                route.pattern
             );
             assert!(
                 html.len() > 200,
                 "[{}] {} suspiciously short ({})",
-                route.surface, route.pattern, html.len()
+                route.surface,
+                route.pattern,
+                html.len()
             );
         }
     }
@@ -459,17 +462,27 @@ mod tests {
             "rendered {}/{} baseline routes",
             total_rendered, total_baseline
         );
-        assert_eq!(total_baseline, routing::total_route_count(), "baseline route total drifted");
-        assert_eq!(total_rendered, ssr::ssr_routes().len(), "rendered route total drifted from SSR registry");
+        assert_eq!(
+            total_baseline,
+            routing::total_route_count(),
+            "baseline route total drifted"
+        );
+        assert_eq!(
+            total_rendered,
+            ssr::ssr_routes().len(),
+            "rendered route total drifted from SSR registry"
+        );
     }
 
     #[test]
     fn concrete_dynamic_manifest_paths_resolve() {
-        let detail = render_route("web", "/campaigns/c_1").expect("campaign detail route should resolve");
+        let detail =
+            render_route("web", "/campaigns/c_1").expect("campaign detail route should resolve");
         assert!(detail.contains("Campaign Detail"));
         assert!(detail.contains("data-sidebar-storage-key=\"apexmail-ui\""));
 
-        let edit = render_route("web", "/campaigns/c_1/edit").expect("campaign edit route should resolve");
+        let edit =
+            render_route("web", "/campaigns/c_1/edit").expect("campaign edit route should resolve");
         assert!(edit.contains("Edit Campaign"));
         assert!(edit.contains("Campaign Name"));
     }
@@ -534,11 +547,18 @@ mod tests {
 
     #[test]
     fn rendered_routes_only_allow_structured_data_script_tags() {
-        let forbidden_markers = [" onclick=", " onload=", " onerror=", " onsubmit=", concat!("java", "script:")];
+        let forbidden_markers = [
+            " onclick=",
+            " onload=",
+            " onerror=",
+            " onsubmit=",
+            concat!("java", "script:"),
+        ];
 
         for route in ssr::ssr_routes() {
-            let html = render_route(route.surface, route.pattern)
-                .unwrap_or_else(|| panic!("missing view for [{}] {}", route.surface, route.pattern));
+            let html = render_route(route.surface, route.pattern).unwrap_or_else(|| {
+                panic!("missing view for [{}] {}", route.surface, route.pattern)
+            });
 
             for marker in forbidden_markers {
                 assert!(

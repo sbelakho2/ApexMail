@@ -1,10 +1,10 @@
 //! Functional tests for template-renderer:transpiler, sandbox, plaintext.
 //! Tests that don't require a database.
 
-use template_renderer::transpiler;
+use template_renderer::config::SandboxConfig;
 use template_renderer::plaintext::html_to_plaintext;
 use template_renderer::sandbox::Sandbox;
-use template_renderer::config::SandboxConfig;
+use template_renderer::transpiler;
 use template_renderer::types::RenderOptions;
 
 fn test_sandbox() -> Sandbox {
@@ -40,11 +40,12 @@ fn variable_substitution_nested_props() {
 
 #[test]
 fn missing_variable_keeps_placeholder() {
-    let html = transpiler::resolve_placeholders(
-        "Hello {{ missing_var }}!",
-        &serde_json::json!({}),
+    let html = transpiler::resolve_placeholders("Hello {{ missing_var }}!", &serde_json::json!({}));
+    assert!(
+        html.contains("{{ missing_var }}"),
+        "missing vars should be preserved, got: {}",
+        html
     );
-    assert!(html.contains("{{ missing_var }}"), "missing vars should be preserved, got: {}", html);
 }
 
 // ── HTML to plaintext ──────────────────────────────────────────
@@ -61,7 +62,7 @@ fn html_to_plaintext_strips_tags() {
 #[test]
 fn html_to_plaintext_removes_style_and_script() {
     let pt = html_to_plaintext(
-        "<style>body{color:red}</style><script>alert('x')</script><p>Content</p>"
+        "<style>body{color:red}</style><script>alert('x')</script><p>Content</p>",
     );
     assert!(!pt.contains("color"));
     assert!(!pt.contains("alert"));
@@ -82,7 +83,11 @@ fn validate_source_rejects_forbidden_imports() {
 fn validate_source_allows_plain_markup() {
     let source = r#"<html><p>{{ name }}</p></html>"#;
     let result = transpiler::validate_source(source, 512 * 1024);
-    assert!(result.valid, "plain markup should be allowed, errors: {:?}", result.errors);
+    assert!(
+        result.valid,
+        "plain markup should be allowed, errors: {:?}",
+        result.errors
+    );
 }
 
 // ── Sandbox execution ──────────────────────────────────────────

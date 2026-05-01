@@ -10,9 +10,7 @@ use tracing::info;
 use edge_cases::config::EdgeCasesConfig;
 use edge_cases::routes::{self, AppState};
 use edge_cases::services::{
-    attachment::AttachmentService,
-    calendar::CalendarService,
-    delivery::DeliveryService,
+    attachment::AttachmentService, calendar::CalendarService, delivery::DeliveryService,
     eai::EAIService,
 };
 
@@ -23,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
     let config = EdgeCasesConfig::from_env()?;
     info!(port = config.port, "Starting edge-cases server");
 
-// Database pool
+    // Database pool
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -32,13 +30,13 @@ async fn main() -> anyhow::Result<()> {
         .connect(&config.database_url)
         .await?;
 
-// Redis pool
+    // Redis pool
     let redis_cfg = deadpool_redis::Config::from_url(&config.redis_url);
     let redis_pool = redis_cfg
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .expect("Failed to create redis pool");
 
-// Build services
+    // Build services
     let eai = EAIService::new(pool.clone(), redis_pool.clone());
     let attachment = AttachmentService::new(
         pool.clone(),
@@ -64,10 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cors = CorsLayer::new()
         .allow_methods(Any)
-        .allow_headers(vec![
-            header::CONTENT_TYPE,
-            header::AUTHORIZATION,
-        ]);
+        .allow_headers(vec![header::CONTENT_TYPE, header::AUTHORIZATION]);
     if config.node_env == "development" {
         cors = cors.allow_origin(Any);
     }
@@ -80,7 +75,9 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     let shutdown = async {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

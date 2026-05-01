@@ -94,10 +94,11 @@ pub struct SecretsConfig {
 }
 
 impl ComplianceConfig {
-/// Load configuration from environment variables with sane defaults.
+    /// Load configuration from environment variables with sane defaults.
     pub fn from_env() -> Self {
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
-        let is_production = node_env.eq_ignore_ascii_case("production") || node_env.eq_ignore_ascii_case("prod");
+        let is_production =
+            node_env.eq_ignore_ascii_case("production") || node_env.eq_ignore_ascii_case("prod");
 
         let mut auth_token = env_or("COMPLIANCE_AUTH_TOKEN", "");
         let mut audit_signing_key = env_or("AUDIT_SIGNING_KEY", "");
@@ -190,9 +191,7 @@ impl ComplianceConfig {
                 max_attachment_size: env_or("CONTENT_MAX_ATTACHMENT_SIZE", "26214400")
                     .parse()
                     .unwrap_or(26_214_400),
-                max_ocr_images: env_or("CONTENT_MAX_OCR_IMAGES", "5")
-                    .parse()
-                    .unwrap_or(5),
+                max_ocr_images: env_or("CONTENT_MAX_OCR_IMAGES", "5").parse().unwrap_or(5),
                 banned_domains: env_or("CONTENT_BANNED_DOMAINS", "")
                     .split(',')
                     .filter(|s| !s.is_empty())
@@ -212,14 +211,8 @@ impl ComplianceConfig {
                 deletion_grace_period_days: env_i64("GDPR_DELETION_GRACE_PERIOD", 30),
                 request_expiration_days: env_i64("GDPR_REQUEST_EXPIRATION_DAYS", 30),
                 export_expiration_days: env_i64("GDPR_EXPORT_EXPIRATION_DAYS", 7),
-                export_base_url: env_or(
-                    "GDPR_EXPORT_BASE_URL",
-                    "https://exports.apexmail.ee",
-                ),
-                verify_base_url: env_or(
-                    "GDPR_VERIFY_BASE_URL",
-                    "https://gdpr.apexmail.ee",
-                ),
+                export_base_url: env_or("GDPR_EXPORT_BASE_URL", "https://exports.apexmail.ee"),
+                verify_base_url: env_or("GDPR_VERIFY_BASE_URL", "https://gdpr.apexmail.ee"),
             },
 
             secrets: SecretsConfig {

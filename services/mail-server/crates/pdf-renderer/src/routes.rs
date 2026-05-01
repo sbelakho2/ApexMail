@@ -51,7 +51,10 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided.as_deref().is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token)) {
+    if provided
+        .as_deref()
+        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
+    {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -97,10 +100,13 @@ async fn health() -> impl IntoResponse {
 async fn render_pdf_stream(Json(req): Json<RenderRequest>) -> Result<Response, PdfApiError> {
     info!(template = %req.template, "PDF render request (stream)");
 
-    let pdf_bytes = compiler::render_pdf(&req.template, &req.data)
-        .map_err(PdfApiError::Render)?;
+    let pdf_bytes = compiler::render_pdf(&req.template, &req.data).map_err(PdfApiError::Render)?;
 
-    let filename = format!("{}-{}.pdf", req.template, chrono::Utc::now().format("%Y%m%d"));
+    let filename = format!(
+        "{}-{}.pdf",
+        req.template,
+        chrono::Utc::now().format("%Y%m%d")
+    );
 
     Ok((
         StatusCode::OK,
@@ -119,11 +125,12 @@ async fn render_pdf_stream(Json(req): Json<RenderRequest>) -> Result<Response, P
 
 /// Render a PDF and return it as base64-encoded JSON.
 /// Useful for clients that can't handle binary responses directly.
-async fn render_pdf_json(Json(req): Json<RenderRequest>) -> Result<Json<RenderResponse>, PdfApiError> {
+async fn render_pdf_json(
+    Json(req): Json<RenderRequest>,
+) -> Result<Json<RenderResponse>, PdfApiError> {
     info!(template = %req.template, "PDF render request (JSON)");
 
-    let pdf_bytes = compiler::render_pdf(&req.template, &req.data)
-        .map_err(PdfApiError::Render)?;
+    let pdf_bytes = compiler::render_pdf(&req.template, &req.data).map_err(PdfApiError::Render)?;
 
     use base64::Engine;
     let pdf_base64 = base64::engine::general_purpose::STANDARD.encode(&pdf_bytes);
@@ -152,7 +159,10 @@ impl IntoResponse for PdfApiError {
             }
             PdfApiError::Render(e) => {
                 error!(error = %e, "PDF render failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Render error: {e}"))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Render error: {e}"),
+                )
             }
         };
 
@@ -172,7 +182,12 @@ mod tests {
         let app = pdf_router(String::new());
 
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 

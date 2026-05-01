@@ -83,7 +83,7 @@ impl GmailAnnotationsService {
         Self
     }
 
-/// Generate JSON‑LD + HTML annotations for a Gmail promotion tab email.
+    /// Generate JSON‑LD + HTML annotations for a Gmail promotion tab email.
     pub fn generate_annotations(&self, config: &GmailAnnotationConfig) -> GmailAnnotationResult {
         let validation = self.validate_config(config);
         let json_ld = self.build_json_ld(config);
@@ -96,7 +96,7 @@ impl GmailAnnotationsService {
         }
     }
 
-/// Validate annotation config.
+    /// Validate annotation config.
     pub fn validate_config(&self, config: &GmailAnnotationConfig) -> ValidationResult {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
@@ -143,8 +143,8 @@ impl GmailAnnotationsService {
         }
     }
 
-/// Generate a "preview badge" HTML snippet for the deal.
-/// #153:HTML-escapes user-provided text to prevent XSS.
+    /// Generate a "preview badge" HTML snippet for the deal.
+    /// #153:HTML-escapes user-provided text to prevent XSS.
     pub fn generate_preview_badge(&self, deal: &DealBadge) -> String {
         let mut badge = String::from("<span class=\"gmail-promo-badge\">");
         badge.push_str(&html_escape(&deal.description));
@@ -155,7 +155,7 @@ impl GmailAnnotationsService {
         badge
     }
 
-/// Get recommended image sizes.
+    /// Get recommended image sizes.
     pub fn get_image_recommendations(&self) -> ImageRecommendations {
         ImageRecommendations {
             logo: ImageSpec {
@@ -179,7 +179,7 @@ impl GmailAnnotationsService {
         }
     }
 
-/// Generate a complete promotion email annotation (convenience wrapper).
+    /// Generate a complete promotion email annotation (convenience wrapper).
     pub fn generate_promotion_email_annotations(
         &self,
         config: &GmailAnnotationConfig,
@@ -187,7 +187,7 @@ impl GmailAnnotationsService {
         self.generate_annotations(config)
     }
 
-// ── internal ───────────────────────────────────────────────────────────────
+    // ── internal ───────────────────────────────────────────────────────────────
 
     fn build_json_ld(&self, config: &GmailAnnotationConfig) -> String {
         let mut json = serde_json::json!({
@@ -206,7 +206,7 @@ impl GmailAnnotationsService {
             json["image"] = serde_json::json!(logo);
         }
 
-// Deal
+        // Deal
         if let Some(ref deal) = config.deal {
             let mut offer = serde_json::json!({
                 "@type": "Offer",
@@ -224,7 +224,7 @@ impl GmailAnnotationsService {
             json["offers"] = serde_json::json!([offer]);
         }
 
-// Products carousel
+        // Products carousel
         if !config.products.is_empty() {
             let items: Vec<serde_json::Value> = config
                 .products
@@ -252,7 +252,7 @@ impl GmailAnnotationsService {
             json["itemListElement"] = serde_json::json!(items);
         }
 
-// GoToAction
+        // GoToAction
         if let Some(ref action) = config.go_to_action {
             let mut act = serde_json::json!({
                 "@type": "ViewAction",
@@ -265,7 +265,7 @@ impl GmailAnnotationsService {
             json["potentialAction"] = act;
         }
 
-// #154:Log an error instead of silently returning empty on serialization failure
+        // #154:Log an error instead of silently returning empty on serialization failure
         serde_json::to_string_pretty(&json).unwrap_or_else(|e| {
             tracing::error!(error = %e, "Failed to serialize Gmail annotation JSON-LD");
             String::new()
@@ -273,9 +273,7 @@ impl GmailAnnotationsService {
     }
 
     fn build_html(&self, json_ld: &str) -> String {
-        format!(
-            "<script type=\"application/ld+json\">\n{json_ld}\n</script>"
-        )
+        format!("<script type=\"application/ld+json\">\n{json_ld}\n</script>")
     }
 }
 

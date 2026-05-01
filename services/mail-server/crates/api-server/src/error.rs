@@ -197,10 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validation_includes_details() {
-        let err = ApiError::Validation(vec![
-            "email is required".into(),
-            "name too long".into(),
-        ]);
+        let err = ApiError::Validation(vec!["email is required".into(), "name too long".into()]);
         let resp = err.into_response();
         let (status, json) = response_json(resp).await;
 

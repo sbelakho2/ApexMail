@@ -19,7 +19,7 @@ impl RateLimitService {
         Self { redis }
     }
 
-/// Sliding-window rate limit using Redis sorted sets.
+    /// Sliding-window rate limit using Redis sorted sets.
     pub async fn check_rate_limit(
         &self,
         key: &str,
@@ -85,7 +85,7 @@ impl RateLimitService {
         })
     }
 
-/// Token bucket using a Lua script for atomicity.
+    /// Token bucket using a Lua script for atomicity.
     pub async fn check_token_bucket(
         &self,
         key: &str,
@@ -158,7 +158,7 @@ impl RateLimitService {
         })
     }
 
-/// Check workspace quota for a specific metric.
+    /// Check workspace quota for a specific metric.
     pub async fn check_workspace_quota(
         &self,
         workspace_id: &str,
@@ -205,7 +205,7 @@ impl RateLimitService {
         }
     }
 
-/// Read-only rate limit status.
+    /// Read-only rate limit status.
     pub async fn get_rate_limit_status(
         &self,
         key: &str,
@@ -219,7 +219,7 @@ impl RateLimitService {
 
         let mut conn = self.redis.get().await?;
 
-// Remove expired entries and count
+        // Remove expired entries and count
         let _: () = conn
             .zrembyscore(&redis_key, "-inf", window_start_ms)
             .await?;
@@ -237,7 +237,7 @@ impl RateLimitService {
         })
     }
 
-/// Reset a rate limit key.
+    /// Reset a rate limit key.
     pub async fn reset_rate_limit(
         &self,
         key: &str,
@@ -251,7 +251,7 @@ impl RateLimitService {
         Ok(())
     }
 
-/// Get rate limit configs for a workspace based on quota.
+    /// Get rate limit configs for a workspace based on quota.
     pub fn get_workspace_rate_limit_configs(
         quota: &QuotaConfig,
     ) -> std::collections::HashMap<String, RateLimitConfig> {
@@ -286,7 +286,7 @@ impl RateLimitService {
         configs
     }
 
-// ── Resource Limits (non-time-based) ───────────────────
+    // ── Resource Limits (non-time-based) ───────────────────
 
     async fn check_resource_limit(
         &self,
@@ -340,7 +340,7 @@ impl RateLimitService {
         })
     }
 
-/// Increment a resource counter.
+    /// Increment a resource counter.
     pub async fn increment_resource_count(
         &self,
         workspace_id: &str,
@@ -353,7 +353,7 @@ impl RateLimitService {
         Ok(new_val)
     }
 
-/// Decrement a resource counter (floor at 0).
+    /// Decrement a resource counter (floor at 0).
     pub async fn decrement_resource_count(
         &self,
         workspace_id: &str,
@@ -369,7 +369,7 @@ impl RateLimitService {
         Ok(new_val)
     }
 
-/// Set a resource count directly.
+    /// Set a resource count directly.
     pub async fn set_resource_count(
         &self,
         workspace_id: &str,

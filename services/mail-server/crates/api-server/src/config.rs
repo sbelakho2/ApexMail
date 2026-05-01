@@ -8,13 +8,13 @@ use std::time::Duration;
 /// Top-level configuration for the API server.
 #[derive(Debug, Clone)]
 pub struct Config {
-// ── Server ──────────────────────────────────────────────
+    // ── Server ──────────────────────────────────────────────
     pub port: u16,
     pub host: String,
     pub base_url: String,
     pub environment: Environment,
 
-// ── Database ────────────────────────────────────────────
+    // ── Database ────────────────────────────────────────────
     pub db_host: String,
     pub db_port: u16,
     pub db_name: String,
@@ -22,84 +22,84 @@ pub struct Config {
     pub db_password: String,
     pub db_max_connections: u32,
 
-// ── Redis ───────────────────────────────────────────────
+    // ── Redis ───────────────────────────────────────────────
     pub redis_host: String,
     pub redis_port: u16,
     pub redis_password: Option<String>,
     pub redis_db: u8,
     pub redis_pool_max_size: usize,
 
-// ── Auth ────────────────────────────────────────────────
+    // ── Auth ────────────────────────────────────────────────
     pub jwt_private_key_pem: String,
     pub jwt_public_key_pem: String,
     pub jwt_expiry: Duration,
     pub api_key_hash_secret: String,
 
-// ── Rate limiting ───────────────────────────────────────
+    // ── Rate limiting ───────────────────────────────────────
     pub rate_limit_window_ms: u64,
     pub rate_limit_max_requests: u64,
 
-// ── Backpressure ────────────────────────────────────────
+    // ── Backpressure ────────────────────────────────────────
     pub max_inflight_requests: usize,
 
-// ── CORS ────────────────────────────────────────────────
+    // ── CORS ────────────────────────────────────────────────
     pub cors_origins: Vec<String>,
     pub trusted_proxies: Vec<String>,
 
-// ── UI surface routing ──────────────────────────────────
+    // ── UI surface routing ──────────────────────────────────
     pub ui_web_hosts: Vec<String>,
     pub ui_control_plane_hosts: Vec<String>,
     pub ui_marketing_hosts: Vec<String>,
     pub ui_marketing_surface: String,
     pub ui_default_surface: Option<String>,
 
-// ── Webhooks ────────────────────────────────────────────
+    // ── Webhooks ────────────────────────────────────────────
     pub webhook_signing_secret: String,
     pub webhook_timeout_ms: u64,
     pub webhook_max_retries: u32,
 
-// ── Idempotency ─────────────────────────────────────────
+    // ── Idempotency ─────────────────────────────────────────
     pub idempotency_ttl_seconds: u64,
 
-// ── AWS SES (dedicated IPs) ─────────────────────────────
+    // ── AWS SES (dedicated IPs) ─────────────────────────────
     pub aws_region: String,
     pub ses_ip_pool_prefix: String,
     pub ses_default_warmup_days: u32,
-/// SES configuration set for event tracking (bounces, complaints, deliveries).
+    /// SES configuration set for event tracking (bounces, complaints, deliveries).
     pub ses_configuration_set: Option<String>,
 
-// ── OAuth / SSO ─────────────────────────────────────────
+    // ── OAuth / SSO ─────────────────────────────────────────
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
     pub oauth_redirect_base_url: String,
 
-// ── Session / Impersonation ─────────────────────────────
+    // ── Session / Impersonation ─────────────────────────────
     pub session_secret: String,
     pub impersonation_secret: String,
     pub csrf_secret: String,
 
-// ── Control Plane ───────────────────────────────────────
-/// Static API key used by the control-plane backend to authenticate
-/// internal requests. If set, X-API-Key matching this value bypasses
-/// the normal api_keys DB lookup and returns a super-admin identity.
+    // ── Control Plane ───────────────────────────────────────
+    /// Static API key used by the control-plane backend to authenticate
+    /// internal requests. If set, X-API-Key matching this value bypasses
+    /// the normal api_keys DB lookup and returns a super-admin identity.
     pub control_plane_api_key: Option<String>,
     pub sales_autopilot_base_url: String,
     pub internal_service_token: Option<String>,
 
-// ── Tracking / SSE ──────────────────────────────────────
-/// Shared HMAC secret with the tracking-service, used to issue short-lived
-/// SSE stream tokens. Must match the tracking-service `TRACKING_SECRET_KEY`.
+    // ── Tracking / SSE ──────────────────────────────────────
+    /// Shared HMAC secret with the tracking-service, used to issue short-lived
+    /// SSE stream tokens. Must match the tracking-service `TRACKING_SECRET_KEY`.
     pub tracking_secret_key: String,
 
-// ── Billing documents ───────────────────────────────────
+    // ── Billing documents ───────────────────────────────────
     pub billing_company_iban: String,
     pub billing_company_phone: String,
 
-// ── Metrics ──────────────────────────────────────────────
-/// Port for the dedicated Prometheus metrics HTTP endpoint (default:9090).
-/// Set to 0 to disable the metrics server.
+    // ── Metrics ──────────────────────────────────────────────
+    /// Port for the dedicated Prometheus metrics HTTP endpoint (default:9090).
+    /// Set to 0 to disable the metrics server.
     pub metrics_port: u16,
 }
 
@@ -180,7 +180,7 @@ fn parse_usize(key: &str, val: &str) -> Result<usize, ConfigError> {
 }
 
 fn parse_duration_hours(key: &str, val: &str) -> Result<Duration, ConfigError> {
-// Accept formats:"24h", "1h", or plain seconds
+    // Accept formats:"24h", "1h", or plain seconds
     let trimmed = val.trim();
     if let Some(h) = trimmed.strip_suffix('h') {
         let hours: u64 = h.parse().map_err(|_| ConfigError::Invalid {
@@ -198,12 +198,13 @@ fn parse_duration_hours(key: &str, val: &str) -> Result<Duration, ConfigError> {
 }
 
 fn parse_csv(val: &str) -> Vec<String> {
-    let items: Vec<String> = val.split(',')
+    let items: Vec<String> = val
+        .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    
-// With "*" in the list, specific origins are ignored.
+
+    // With "*" in the list, specific origins are ignored.
     if items.iter().any(|s| s == "*") && items.len() > 1 {
         tracing::warn!(
             "CORS_ORIGINS contains '*' along with {} other origin(s). \
@@ -303,17 +304,25 @@ fn normalize_host(host: &str) -> String {
 }
 
 impl Config {
-/// Load configuration from environment variables.
+    /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self, ConfigError> {
         let environment = match env_or("ENVIRONMENT", "development").to_lowercase().as_str() {
             "production" | "prod" => Environment::Production,
             "staging" => Environment::Staging,
             _ => Environment::Development,
         };
-        let session_secret_env = env::var("SESSION_SECRET").ok().filter(|value| !value.trim().is_empty());
-        let impersonation_secret_env = env::var("IMPERSONATION_SECRET").ok().filter(|value| !value.trim().is_empty());
-        let csrf_secret_env = env::var("CSRF_SECRET").ok().filter(|value| !value.trim().is_empty());
-        let tracking_secret_key_env = env::var("TRACKING_SECRET_KEY").ok().filter(|value| !value.trim().is_empty());
+        let session_secret_env = env::var("SESSION_SECRET")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let impersonation_secret_env = env::var("IMPERSONATION_SECRET")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let csrf_secret_env = env::var("CSRF_SECRET")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let tracking_secret_key_env = env::var("TRACKING_SECRET_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
 
         let jwt_private_key_pem = env_required_pem("JWT_PRIVATE_KEY_PEM")?;
         let jwt_public_key_pem = env_required_pem("JWT_PUBLIC_KEY_PEM")?;
@@ -324,11 +333,10 @@ impl Config {
             Ok(value) => parse_csv(&value),
             Err(_) => default_cors_origins(environment, &base_url),
         };
-        let db_max_connections = parse_u32(
-            "DB_MAX_CONNECTIONS",
-            &env_or("DB_MAX_CONNECTIONS", "20"),
-        )?;
-        let redis_pool_default = std::cmp::max(32usize, (db_max_connections as usize).saturating_mul(2));
+        let db_max_connections =
+            parse_u32("DB_MAX_CONNECTIONS", &env_or("DB_MAX_CONNECTIONS", "20"))?;
+        let redis_pool_default =
+            std::cmp::max(32usize, (db_max_connections as usize).saturating_mul(2));
         let redis_pool_default_str = redis_pool_default.to_string();
         let max_inflight_requests_default = default_max_inflight_requests(db_max_connections);
         let max_inflight_requests = parse_usize(
@@ -385,10 +393,7 @@ impl Config {
             cors_origins,
             trusted_proxies: parse_csv(&env_or("TRUSTED_PROXIES", "")),
 
-            ui_web_hosts: parse_csv(&env_or(
-                "UI_WEB_HOSTS",
-                "app.apexmail.ee,127.0.0.1",
-            )),
+            ui_web_hosts: parse_csv(&env_or("UI_WEB_HOSTS", "app.apexmail.ee,127.0.0.1")),
             ui_control_plane_hosts: parse_csv(&env_or(
                 "UI_CONTROL_PLANE_HOSTS",
                 "admin.apexmail.ee,control.apexmail.ee,localhost",
@@ -448,9 +453,13 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| generated_dev_secret("csrf-secret")),
 
-            control_plane_api_key: env::var("CONTROL_PLANE_API_KEY").ok().filter(|s| !s.is_empty()),
+            control_plane_api_key: env::var("CONTROL_PLANE_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
             sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://localhost:3010"),
-            internal_service_token: env::var("INTERNAL_SERVICE_TOKEN").ok().filter(|s| !s.is_empty()),
+            internal_service_token: env::var("INTERNAL_SERVICE_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
 
             tracking_secret_key: tracking_secret_key_env
                 .clone()
@@ -461,7 +470,7 @@ impl Config {
             metrics_port: parse_u16("METRICS_PORT", &env_or("METRICS_PORT", "9090"))?,
         };
 
-// Production security checks
+        // Production security checks
         if config.environment.is_production() {
             for (name, value) in [
                 ("SESSION_SECRET", session_secret_env.as_deref()),
@@ -479,20 +488,22 @@ impl Config {
         Ok(config)
     }
 
-/// Build a Postgres connection URL from the config.
-/// User and password are percent-encoded so that special characters
-/// (like `@`, `:`, `/`) do not corrupt the URL.
+    /// Build a Postgres connection URL from the config.
+    /// User and password are percent-encoded so that special characters
+    /// (like `@`, `:`, `/`) do not corrupt the URL.
     pub fn database_url(&self) -> String {
         use url::form_urlencoded;
-        let encoded_user: String = form_urlencoded::byte_serialize(self.db_user.as_bytes()).collect();
-        let encoded_pass: String = form_urlencoded::byte_serialize(self.db_password.as_bytes()).collect();
+        let encoded_user: String =
+            form_urlencoded::byte_serialize(self.db_user.as_bytes()).collect();
+        let encoded_pass: String =
+            form_urlencoded::byte_serialize(self.db_password.as_bytes()).collect();
         format!(
             "postgres://{}:{}@{}:{}/{}",
             encoded_user, encoded_pass, self.db_host, self.db_port, self.db_name
         )
     }
 
-/// Build a Redis connection URL from the config.
+    /// Build a Redis connection URL from the config.
     pub fn redis_url(&self) -> String {
         match &self.redis_password {
             Some(pw) => format!(
@@ -546,7 +557,7 @@ impl Config {
             .any(|candidate| normalize_host(candidate) == host)
     }
 
-/// Validate secrets and settings for production safety.
+    /// Validate secrets and settings for production safety.
     fn validate_production(&self) -> Result<(), ConfigError> {
         if !self.jwt_private_key_pem.contains("BEGIN") {
             return Err(ConfigError::SecurityCheck(
@@ -667,7 +678,9 @@ mod tests {
             default_cors_origins(Environment::Development, "http://127.0.0.1:3000"),
             vec!["*"]
         );
-        assert!(default_cors_origins(Environment::Development, "https://app.example.com").is_empty());
+        assert!(
+            default_cors_origins(Environment::Development, "https://app.example.com").is_empty()
+        );
         assert!(default_cors_origins(Environment::Staging, "http://localhost:3000").is_empty());
     }
 
@@ -695,7 +708,8 @@ mod tests {
             redis_password: None,
             redis_db: 0,
             redis_pool_max_size: 40,
-            jwt_private_key_pem: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----".into(),
+            jwt_private_key_pem: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
+                .into(),
             jwt_public_key_pem: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----".into(),
             jwt_expiry: Duration::from_secs(86400),
             api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
@@ -825,12 +839,27 @@ mod tests {
             metrics_port: 9090,
         };
 
-        assert_eq!(config.ui_surface_for_host(Some("app.apexmail.ee")), Some("web"));
+        assert_eq!(
+            config.ui_surface_for_host(Some("app.apexmail.ee")),
+            Some("web")
+        );
         assert_eq!(config.ui_surface_for_host(Some("127.0.0.1")), Some("web"));
-        assert_eq!(config.ui_surface_for_host(Some("localhost")), Some("control-plane"));
-        assert_eq!(config.ui_surface_for_host(Some("admin.apexmail.ee:3002")), Some("control-plane"));
-        assert_eq!(config.ui_surface_for_host(Some("apexmail.ee")), Some("marketing-zola"));
-        assert_eq!(config.ui_surface_for_host(Some("unknown.example.com")), Some("web"));
+        assert_eq!(
+            config.ui_surface_for_host(Some("localhost")),
+            Some("control-plane")
+        );
+        assert_eq!(
+            config.ui_surface_for_host(Some("admin.apexmail.ee:3002")),
+            Some("control-plane")
+        );
+        assert_eq!(
+            config.ui_surface_for_host(Some("apexmail.ee")),
+            Some("marketing-zola")
+        );
+        assert_eq!(
+            config.ui_surface_for_host(Some("unknown.example.com")),
+            Some("web")
+        );
         assert!(config.is_explicit_web_host(Some("app.apexmail.ee")));
         assert!(config.is_explicit_web_host(Some("127.0.0.1")));
         assert!(!config.is_explicit_web_host(Some("localhost")));

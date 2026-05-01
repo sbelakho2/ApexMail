@@ -56,8 +56,20 @@ const MARKETING_FIXTURES: [(&str, &str); 20] = [
 ];
 
 const MARKETING_VIEWPORTS: [(&str, Viewport); 2] = [
-    ("desktop", Viewport { width: 1440, height: 900 }),
-    ("mobile", Viewport { width: 375, height: 812 }),
+    (
+        "desktop",
+        Viewport {
+            width: 1440,
+            height: 900,
+        },
+    ),
+    (
+        "mobile",
+        Viewport {
+            width: 375,
+            height: 812,
+        },
+    ),
 ];
 
 fn route_file_stem(route: &str) -> String {
@@ -76,7 +88,10 @@ fn marketing_html_file(surface: &str, route: &str) -> String {
     format!("{}-{}.html", surface, route_file_stem(route))
 }
 
-fn export_auth_fixtures(out_dir: &PathBuf, manifest: &mut FixtureManifest) -> Result<(), Box<dyn std::error::Error>> {
+fn export_auth_fixtures(
+    out_dir: &PathBuf,
+    manifest: &mut FixtureManifest,
+) -> Result<(), Box<dyn std::error::Error>> {
     for (id, surface, route) in AUTH_FIXTURES {
         let html_file = auth_html_file(id);
         let html = axum_router::render_route(surface, route)
@@ -99,7 +114,10 @@ fn export_auth_fixtures(out_dir: &PathBuf, manifest: &mut FixtureManifest) -> Re
     Ok(())
 }
 
-fn export_marketing_fixtures(out_dir: &PathBuf, manifest: &mut FixtureManifest) -> Result<(), Box<dyn std::error::Error>> {
+fn export_marketing_fixtures(
+    out_dir: &PathBuf,
+    manifest: &mut FixtureManifest,
+) -> Result<(), Box<dyn std::error::Error>> {
     for (surface, route) in MARKETING_FIXTURES {
         let html_file = marketing_html_file(surface, route);
         let route_stem = route_file_stem(route);
@@ -126,11 +144,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("services/mail-server/crates/ui-foundation/baselines/rust-ui"));
+        .unwrap_or_else(|| {
+            PathBuf::from("services/mail-server/crates/ui-foundation/baselines/rust-ui")
+        });
 
     fs::create_dir_all(&out_dir)?;
 
-    let mut manifest = FixtureManifest { fixtures: Vec::new() };
+    let mut manifest = FixtureManifest {
+        fixtures: Vec::new(),
+    };
 
     export_auth_fixtures(&out_dir, &mut manifest)?;
     export_marketing_fixtures(&out_dir, &mut manifest)?;
@@ -138,7 +160,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     fs::write(out_dir.join("manifest.json"), manifest_json)?;
 
-    println!("exported {} visual fixtures to {}", manifest.fixtures.len(), out_dir.display());
+    println!(
+        "exported {} visual fixtures to {}",
+        manifest.fixtures.len(),
+        out_dir.display()
+    );
 
     Ok(())
 }

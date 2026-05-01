@@ -1,0 +1,29 @@
+minimum_pre_commit_version: "3.6.0"
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+        exclude: ^(secrets/|reports/|target/)
+      - id: trailing-whitespace
+        exclude: ^(secrets/|reports/|target/)
+      - id: check-yaml
+      - id: check-json
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt-mail-server
+        name: cargo fmt (mail-server)
+        entry: cargo fmt --manifest-path services/mail-server/Cargo.toml --all -- --check
+        language: system
+        pass_filenames: false
+        files: ^services/mail-server/.*\.rs$
+
+      - id: forbidden-pattern-gate
+        name: forbidden pattern gate
+        entry: bash tools/check-forbidden-patterns.sh
+        language: system
+        pass_filenames: false

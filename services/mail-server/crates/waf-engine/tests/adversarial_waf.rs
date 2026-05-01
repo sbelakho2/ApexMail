@@ -52,7 +52,10 @@ fn test_sqli_union_all_select_bypass_regression() {
         headers: &[],
         body: None,
     };
-    assert!(is_blocked(&e, &req), "UNION ALL SELECT must be blocked — P0 regression");
+    assert!(
+        is_blocked(&e, &req),
+        "UNION ALL SELECT must be blocked — P0 regression"
+    );
 }
 
 /// Basic UNION SELECT (2-token, no ALL).
@@ -67,7 +70,10 @@ fn test_sqli_union_select() {
         headers: &[],
         body: Some("user=admin'/**/UNION/**/SELECT/**/password/**/FROM/**/users --"),
     };
-    assert!(is_blocked(&e, &req), "Comment-padded UNION SELECT must be blocked");
+    assert!(
+        is_blocked(&e, &req),
+        "Comment-padded UNION SELECT must be blocked"
+    );
 }
 
 /// Case variation:`uNiOn AlL sElEcT`.
@@ -82,7 +88,10 @@ fn test_sqli_union_all_select_mixed_case() {
         headers: &[],
         body: None,
     };
-    assert!(is_blocked(&e, &req), "Mixed-case UNION ALL SELECT must be blocked");
+    assert!(
+        is_blocked(&e, &req),
+        "Mixed-case UNION ALL SELECT must be blocked"
+    );
 }
 
 /// Tautology injection:`1=1`.
@@ -148,7 +157,10 @@ fn test_path_allowlist_does_not_bypass_body() {
         headers: &[],
         body: Some("payload=<script>alert(1)</script>"),
     };
-    assert!(is_blocked(&e, &req), "Path allowlist must NOT bypass body inspection");
+    assert!(
+        is_blocked(&e, &req),
+        "Path allowlist must NOT bypass body inspection"
+    );
 }
 
 /// IP allowlist IS a full bypass (trusted internal traffic).
@@ -165,7 +177,7 @@ fn test_ip_allowlist_is_full_bypass() {
         headers: &[],
         body: None,
     };
-// IP-allowlisted traffic gets a full bypass (scanner, health-checker)
+    // IP-allowlisted traffic gets a full bypass (scanner, health-checker)
     let info = e.inspect(&req);
     assert!(
         !matches!(info.decision, WafDecision::Block(_)),
@@ -202,7 +214,10 @@ fn test_xss_url_encoded() {
         headers: &[],
         body: None,
     };
-    assert!(is_blocked(&e, &req), "URL-encoded XSS must be blocked after decoding");
+    assert!(
+        is_blocked(&e, &req),
+        "URL-encoded XSS must be blocked after decoding"
+    );
 }
 
 /// `javascript:` URI.
@@ -227,9 +242,10 @@ fn test_xss_javascript_uri() {
 #[test]
 fn test_cmdi_in_user_agent_header_regression() {
     let e = engine();
-    let headers = vec![
-        ("User-Agent".to_string(), "curl/7.68; $(cat /etc/passwd)".to_string()),
-    ];
+    let headers = vec![(
+        "User-Agent".to_string(),
+        "curl/7.68; $(cat /etc/passwd)".to_string(),
+    )];
     let req = HttpRequest {
         client_ip: client_ip(),
         method: "GET",
@@ -248,9 +264,10 @@ fn test_cmdi_in_user_agent_header_regression() {
 #[test]
 fn test_cmdi_in_x_forwarded_for() {
     let e = engine();
-    let headers = vec![
-        ("X-Forwarded-For".to_string(), "127.0.0.1 | whoami".to_string()),
-    ];
+    let headers = vec![(
+        "X-Forwarded-For".to_string(),
+        "127.0.0.1 | whoami".to_string(),
+    )];
     let req = HttpRequest {
         client_ip: client_ip(),
         method: "GET",
@@ -259,7 +276,10 @@ fn test_cmdi_in_x_forwarded_for() {
         headers: &headers,
         body: None,
     };
-    assert!(is_blocked(&e, &req), "Command injection in X-Forwarded-For must be blocked");
+    assert!(
+        is_blocked(&e, &req),
+        "Command injection in X-Forwarded-For must be blocked"
+    );
 }
 
 // ── Clean requests must NOT be blocked (false-positive guard) ─────────────────
@@ -274,11 +294,17 @@ fn test_clean_request_not_blocked() {
         query_string: Some("page=1&limit=20&sort=name"),
         headers: &[
             ("Accept".to_string(), "application/json".to_string()),
-            ("User-Agent".to_string(), "Mozilla/5.0 (compatible)".to_string()),
+            (
+                "User-Agent".to_string(),
+                "Mozilla/5.0 (compatible)".to_string(),
+            ),
         ],
         body: None,
     };
-    assert!(!is_blocked(&e, &req), "Clean legitimate request must NOT be blocked");
+    assert!(
+        !is_blocked(&e, &req),
+        "Clean legitimate request must NOT be blocked"
+    );
 }
 
 // ── CMDI no-space bypass regressions (P1 fix) ────────────────────────────────
@@ -611,4 +637,3 @@ fn test_sqli_string_tautology_eq_same_blocked() {
         "`' OR 'admin'='admin' --` equal string tautology must still be blocked"
     );
 }
-

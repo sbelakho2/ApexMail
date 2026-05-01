@@ -15,70 +15,71 @@ use crate::tls_fingerprint::TlsFingerprint;
 /// A single login event
 #[derive(Debug, Clone)]
 pub struct LoginEvent {
-/// User identifier
+    /// User identifier
     pub user_id: String,
-/// IP address of the login attempt
+    /// IP address of the login attempt
     pub ip_address: String,
-/// User-Agent header
+    /// User-Agent header
     pub user_agent: String,
-/// Latitude (from GeoIP lookup, if available)
+    /// Latitude (from GeoIP lookup, if available)
     pub latitude: Option<f64>,
-/// Longitude (from GeoIP lookup, if available)
+    /// Longitude (from GeoIP lookup, if available)
     pub longitude: Option<f64>,
-/// Timestamp of the event
+    /// Timestamp of the event
     pub timestamp: DateTime<Utc>,
-/// Whether the login was successful
+    /// Whether the login was successful
     pub success: bool,
-/// TLS client fingerprint (JA4-style), if extracted from the TLS handshake
+    /// TLS client fingerprint (JA4-style), if extracted from the TLS handshake
     pub tls_fingerprint: Option<TlsFingerprint>,
 }
 
 /// Derived device fingerprint
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeviceFingerprint {
-/// SHA-256 hash of device attributes
+    /// SHA-256 hash of device attributes
     pub hash: String,
-/// Original user agent (for display/logging)
+    /// Original user agent (for display/logging)
     pub user_agent: String,
 }
 
 impl DeviceFingerprint {
-/// Create a fingerprint from login attributes
-/// The fingerprint is a SHA-256 hash of multiple device characteristics:/// - User-Agent header
-/// - IP prefix (first 2 octets for IPv4 /16, making it network-aware but not too specific)
-/// - TLS fingerprint hash (JA4-style, if available)
-/// TLS fingerprints are much harder to spoof than User-Agent and help
-/// detect credential stuffing from automated tools even when they
-/// rotate through residential proxy networks.
+    /// Create a fingerprint from login attributes
+    /// The fingerprint is a SHA-256 hash of multiple device characteristics:/// - User-Agent header
+    /// - IP prefix (first 2 octets for IPv4 /16, making it network-aware but not too specific)
+    /// - TLS fingerprint hash (JA4-style, if available)
+    /// TLS fingerprints are much harder to spoof than User-Agent and help
+    /// detect credential stuffing from automated tools even when they
+    /// rotate through residential proxy networks.
     pub fn from_event(event: &LoginEvent) -> Self {
         let mut hasher = Sha256::new();
-        
-// User-Agent (primary identifier, easily spoofed but indicative)
+
+        // User-Agent (primary identifier, easily spoofed but indicative)
         hasher.update(event.user_agent.as_bytes());
-        
-// IP prefix (/16 instead of /24 to be more permissive for legitimate users
-// on dynamic IPs, while still catching cross-network attacks)
-        let ip_prefix = event.ip_address
+
+        // IP prefix (/16 instead of /24 to be more permissive for legitimate users
+        // on dynamic IPs, while still catching cross-network attacks)
+        let ip_prefix = event
+            .ip_address
             .splitn(4, '.')
             .take(2) // Changed from 3 to 2 (/16 instead of /24)
             .collect::<Vec<_>>()
             .join(".");
         hasher.update(ip_prefix.as_bytes());
-        
-// TLS fingerprint (if available - much harder to spoof)
-// This catches automated tools even when they spoof User-Agent
+
+        // TLS fingerprint (if available - much harder to spoof)
+        // This catches automated tools even when they spoof User-Agent
         if let Some(ref tls_fp) = event.tls_fingerprint {
             hasher.update(tls_fp.hash.as_bytes());
         }
-        
+
         let hash = hex::encode(hasher.finalize());
         Self {
             hash,
             user_agent: event.user_agent.clone(),
         }
     }
-    
-/// Create a fingerprint with explicit TLS component for testing
+
+    /// Create a fingerprint with explicit TLS component for testing
     #[cfg(test)]
     pub fn from_components(user_agent: &str, ip_address: &str, tls_hash: Option<&str>) -> Self {
         let mut hasher = Sha256::new();
@@ -103,16 +104,16 @@ impl DeviceFingerprint {
 /// Per-user login history
 #[derive(Debug, Clone)]
 pub struct UserLoginHistory {
-/// Recent login events (most recent first)
+    /// Recent login events (most recent first)
     pub events: Vec<LoginEvent>,
-/// Known device fingerprints
+    /// Known device fingerprints
     pub known_devices: Vec<DeviceFingerprint>,
-/// Maximum entries to retain
+    /// Maximum entries to retain
     max_entries: usize,
 }
 
 impl UserLoginHistory {
-/// Create a new history with the given capacity
+    /// Create a new history with the given capacity
     pub fn new(max_entries: usize) -> Self {
         Self {
             events: Vec::new(),
@@ -121,14 +122,17 @@ impl UserLoginHistory {
         }
     }
 
-/// Record a login event, returns whether the device is new
+    /// Record a login event, returns whether the device is new
     pub fn record(&mut self, event: LoginEvent) -> bool {
         let fingerprint = DeviceFingerprint::from_event(&event);
-        let is_new_device = !self.known_devices.iter().any(|d| d.hash == fingerprint.hash);
+        let is_new_device = !self
+            .known_devices
+            .iter()
+            .any(|d| d.hash == fingerprint.hash);
 
         if is_new_device {
             self.known_devices.push(fingerprint);
-// Cap known devices at a reasonable limit
+            // Cap known devices at a reasonable limit
             if self.known_devices.len() > 20 {
                 self.known_devices.remove(0);
             }
@@ -142,12 +146,12 @@ impl UserLoginHistory {
         is_new_device
     }
 
-/// Get the last successful login event
+    /// Get the last successful login event
     pub fn last_successful(&self) -> Option<&LoginEvent> {
         self.events.iter().find(|e| e.success)
     }
 
-/// Count failed attempts in the last N seconds
+    /// Count failed attempts in the last N seconds
     pub fn recent_failures(&self, window_secs: u64) -> u32 {
         let cutoff = Utc::now() - chrono::Duration::seconds(window_secs as i64);
         self.events
@@ -156,7 +160,7 @@ impl UserLoginHistory {
             .count() as u32
     }
 
-/// Get the most common login hour (0-23) for this user
+    /// Get the most common login hour (0-23) for this user
     pub fn typical_login_hour(&self) -> Option<u32> {
         if self.events.is_empty() {
             return None;
@@ -164,7 +168,10 @@ impl UserLoginHistory {
         let mut hours = [0u32; 24];
         for event in &self.events {
             if event.success {
-                let hour = event.timestamp.format("%H").to_string()
+                let hour = event
+                    .timestamp
+                    .format("%H")
+                    .to_string()
                     .parse::<usize>()
                     .unwrap_or(0);
                 if hour < 24 {
@@ -188,7 +195,7 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-/// Create a new session store
+    /// Create a new session store
     pub fn new(max_entries_per_user: usize) -> Self {
         Self {
             histories: Arc::new(DashMap::new()),
@@ -196,20 +203,21 @@ impl SessionStore {
         }
     }
 
-/// Record a login event, returns whether the device is new for this user
+    /// Record a login event, returns whether the device is new for this user
     pub fn record_login(&self, event: &LoginEvent) -> bool {
-        let mut entry = self.histories
+        let mut entry = self
+            .histories
             .entry(event.user_id.clone())
             .or_insert_with(|| UserLoginHistory::new(self.max_entries_per_user));
         entry.record(event.clone())
     }
 
-/// Get user history (cloned snapshot)
+    /// Get user history (cloned snapshot)
     pub fn get_history(&self, user_id: &str) -> Option<UserLoginHistory> {
         self.histories.get(user_id).map(|h| h.value().clone())
     }
 
-/// Count recent failed attempts for a user
+    /// Count recent failed attempts for a user
     pub fn recent_failures(&self, user_id: &str, window_secs: u64) -> u32 {
         self.histories
             .get(user_id)
@@ -217,7 +225,7 @@ impl SessionStore {
             .unwrap_or(0)
     }
 
-/// Total tracked users
+    /// Total tracked users
     pub fn user_count(&self) -> usize {
         self.histories.len()
     }

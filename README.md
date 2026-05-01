@@ -127,7 +127,7 @@ All API requests require authentication via API key in the `X-API-Key` header:
 
 ```bash
 # Using X-API-Key header (for API keys)
-curl -H "X-API-Key: am_live_your_api_key" https://api.yourdomain.com/v1/messages
+curl -H "X-API-Key: am_live_your_api_key" https://api.apexmail.ee/v1/messages
 
 # Bearer token is used for dashboard JWT sessions only
 ```
@@ -222,7 +222,8 @@ See `.env.example` for all available configuration options.
 | `EMAIL_TRANSPORT_TYPE` | `ses` (default) or `smtp` | No (defaults to `ses`) |
 | `DATABASE_URL` | PostgreSQL connection string | Yes |
 | `REDIS_URL` | Redis connection string | Yes |
-| `JWT_SECRET` | Secret for JWT signing (32+ chars) | Yes |
+| `JWT_PRIVATE_KEY_PEM` | RSA private key used for JWT signing | Yes |
+| `JWT_PUBLIC_KEY_PEM` | RSA public key used for JWT verification | Yes |
 | `MCAPTCHA_ENABLED` | Enable server-side login CAPTCHA verification (`true`/`false`) | No |
 | `MCAPTCHA_SITE_KEY` | mCaptcha site key for verification API | When enabled |
 | `MCAPTCHA_SECRET` | mCaptcha secret for verification API | When enabled |

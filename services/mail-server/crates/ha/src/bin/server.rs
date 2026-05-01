@@ -21,20 +21,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     let config = Arc::new(Config::from_env());
-    info!(port = config.port, version = config.version, "Starting HA service");
+    info!(
+        port = config.port,
+        version = config.version,
+        "Starting HA service"
+    );
 
-// Build DB pool
+    // Build DB pool
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(config.database.pool_max)
-        .idle_timeout(std::time::Duration::from_millis(config.database.idle_timeout_ms))
-        .acquire_timeout(std::time::Duration::from_millis(config.database.connection_timeout_ms))
+        .idle_timeout(std::time::Duration::from_millis(
+            config.database.idle_timeout_ms,
+        ))
+        .acquire_timeout(std::time::Duration::from_millis(
+            config.database.connection_timeout_ms,
+        ))
         .max_lifetime(std::time::Duration::from_secs(1800))
         .connect(&config.database.primary_url())
         .await?;
 
-// Build shared state
+    // Build shared state
     let config_for_services = Arc::clone(&config);
-// BackupService::new returns Result to validate encryption key at startup
+    // BackupService::new returns Result to validate encryption key at startup
     let backup_service = BackupService::new(pool.clone(), Arc::clone(&config_for_services))
         .map_err(|e| anyhow::anyhow!("Failed to initialize backup service: {}", e))?;
     let state = Arc::new(AppState {
@@ -48,7 +56,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         config: config_for_services,
     });
 
-// Background cron:health checks
+    // Background cron:health checks
     {
         let s = state.clone();
         let interval = config.health.interval_ms;
@@ -64,7 +72,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-// Background cron:replication lag recording
+    // Background cron:replication lag recording
     {
         let s = state.clone();
         tokio::spawn(async move {
@@ -78,7 +86,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-// Background cron:backup retention cleanup (daily)
+    // Background cron:backup retention cleanup (daily)
     {
         let s = state.clone();
         tokio::spawn(async move {
@@ -97,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-// Background cron:replication lag history cleanup (hourly)
+    // Background cron:replication lag history cleanup (hourly)
     {
         let s = state.clone();
         tokio::spawn(async move {
@@ -111,14 +119,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-// Start HTTP server
+    // Start HTTP server
     let app = build_router(state);
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = TcpListener::bind(&addr).await?;
     info!(addr, "HA service listening");
 
     let shutdown = async {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

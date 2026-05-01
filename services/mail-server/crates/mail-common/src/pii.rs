@@ -99,7 +99,10 @@ mod tests {
 
     #[test]
     fn email_normal() {
-        assert_eq!(redact_email("alice@example.com").to_string(), "a***@example.com");
+        assert_eq!(
+            redact_email("alice@example.com").to_string(),
+            "a***@example.com"
+        );
     }
 
     #[test]

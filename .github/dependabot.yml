@@ -1,0 +1,65 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: cargo
+    directory: "/services/mail-server"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+      include: scope
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+      include: scope
+
+  - package-ecosystem: pip
+    directory: "/packages/sdk-python"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+      include: scope
+
+  - package-ecosystem: gomod
+    directory: "/packages/sdk-go"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+      include: scope
+
+  - package-ecosystem: maven
+    directory: "/packages/sdk-java"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+      include: scope
+
+  - package-ecosystem: composer
+    directory: "/packages/sdk-php"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+      include: scope
+
+  - package-ecosystem: bundler
+    directory: "/packages/sdk-ruby"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+      include: scope

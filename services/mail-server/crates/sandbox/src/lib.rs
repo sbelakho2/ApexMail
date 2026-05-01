@@ -29,42 +29,42 @@
 
 pub mod config;
 pub mod dynamic_analyzers;
+pub mod engine;
 pub mod file_inspector;
 pub mod policy;
-pub mod engine;
 
 use thiserror::Error;
 
 /// Sandbox errors
 #[derive(Debug, Error)]
 pub enum SandboxError {
-/// I/O error during file operations
+    /// I/O error during file operations
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-/// File exceeds maximum allowed size
+    /// File exceeds maximum allowed size
     #[error("File too large: {size} bytes (max: {max})")]
     FileTooLarge {
-/// Actual size
+        /// Actual size
         size: u64,
-/// Maximum allowed
+        /// Maximum allowed
         max: u64,
     },
 
-/// Nesting depth exceeded (zip bomb detection)
+    /// Nesting depth exceeded (zip bomb detection)
     #[error("Nesting depth exceeded: {depth} (max: {max})")]
     NestingDepthExceeded {
-/// Actual depth
+        /// Actual depth
         depth: u32,
-/// Maximum allowed
-    max: u32,
+        /// Maximum allowed
+        max: u32,
     },
 
-/// Policy violation
+    /// Policy violation
     #[error("Policy violation: {0}")]
     PolicyViolation(String),
 
-/// Internal analysis error
+    /// Internal analysis error
     #[error("Analysis error: {0}")]
     AnalysisError(String),
 }

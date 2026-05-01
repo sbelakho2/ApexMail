@@ -319,7 +319,7 @@ Official SDKs raise specific error types that extend a common base class:
 **Python error handling:**
 
 ```python
-from apexmail.errors import ApexMailError, RateLimitError
+from apexmail.exceptions import ApexMailError, RateLimitError
 
 try:
     client.emails.send(...)

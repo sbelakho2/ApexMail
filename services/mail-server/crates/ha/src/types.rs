@@ -753,9 +753,9 @@ pub struct BackupRow {
 
 impl BackupRow {
     pub fn into_backup(self) -> Backup {
-        let tables: Option<Vec<String>> = self.tables_included.and_then(|v| {
-            serde_json::from_value(v).ok()
-        });
+        let tables: Option<Vec<String>> = self
+            .tables_included
+            .and_then(|v| serde_json::from_value(v).ok());
         Backup {
             id: self.id,
             backup_type: self.backup_type,
@@ -937,9 +937,12 @@ mod tests {
     #[test]
     fn test_failover_state_round_trip() {
         for state in &[
-            FailoverState::Normal, FailoverState::Detecting,
-            FailoverState::FailingOver, FailoverState::FailedOver,
-            FailoverState::FailingBack, FailoverState::SplitBrain,
+            FailoverState::Normal,
+            FailoverState::Detecting,
+            FailoverState::FailingOver,
+            FailoverState::FailedOver,
+            FailoverState::FailingBack,
+            FailoverState::SplitBrain,
         ] {
             assert_eq!(FailoverState::parse(&state.to_string()), *state);
         }
@@ -955,8 +958,12 @@ mod tests {
     #[test]
     fn test_backup_status_round_trip() {
         for s in &[
-            BackupStatus::Pending, BackupStatus::InProgress, BackupStatus::Completed,
-            BackupStatus::Failed, BackupStatus::Expired, BackupStatus::Cancelled,
+            BackupStatus::Pending,
+            BackupStatus::InProgress,
+            BackupStatus::Completed,
+            BackupStatus::Failed,
+            BackupStatus::Expired,
+            BackupStatus::Cancelled,
         ] {
             assert_eq!(BackupStatus::parse(&s.to_string()), *s);
         }
@@ -964,7 +971,11 @@ mod tests {
 
     #[test]
     fn test_circuit_state_round_trip() {
-        for s in &[CircuitState::Closed, CircuitState::Open, CircuitState::HalfOpen] {
+        for s in &[
+            CircuitState::Closed,
+            CircuitState::Open,
+            CircuitState::HalfOpen,
+        ] {
             assert_eq!(CircuitState::parse(&s.to_string()), *s);
         }
     }
@@ -979,7 +990,10 @@ mod tests {
     #[test]
     fn test_experiment_type_parse() {
         assert!(ExperimentType::parse("dns_failure").is_some());
-        assert_eq!(ExperimentType::parse("latency"), Some(ExperimentType::LatencyInjection));
+        assert_eq!(
+            ExperimentType::parse("latency"),
+            Some(ExperimentType::LatencyInjection)
+        );
         assert!(ExperimentType::parse("nope").is_none());
     }
 
@@ -1001,8 +1015,10 @@ mod tests {
     #[test]
     fn test_experiment_status_round_trip() {
         for s in &[
-            ExperimentStatus::Pending, ExperimentStatus::Running,
-            ExperimentStatus::Completed, ExperimentStatus::Failed,
+            ExperimentStatus::Pending,
+            ExperimentStatus::Running,
+            ExperimentStatus::Completed,
+            ExperimentStatus::Failed,
             ExperimentStatus::Aborted,
         ] {
             assert_eq!(ExperimentStatus::parse(&s.to_string()), *s);

@@ -176,7 +176,7 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
   hosts:
-    - host: mail.example.com
+    - host: api.apexmail.ee
       paths:
         - path: /api/enterprise
           pathType: Prefix
@@ -193,7 +193,7 @@ ingress:
   tls:
     - secretName: apexmail-tls
       hosts:
-        - mail.example.com
+        - api.apexmail.ee
 
 # ── PostgreSQL (Bitnami subchart) ────────────────────────────────────────────
 

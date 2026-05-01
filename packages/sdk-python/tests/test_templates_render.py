@@ -62,6 +62,8 @@ class FakeClient:
 
     def _request(self, method: str, path: str, **kwargs):
         self.calls.append({"method": method, "path": path, **kwargs})
+        if not path.endswith("/render"):
+            return {"template": {"data": {"id": "template-123", "name": "Welcome v2"}}}
         return {
             "subject": "Welcome",
             "html": "<p>Hello Alice</p>",
@@ -75,6 +77,8 @@ class FakeAsyncClient:
 
     async def _request(self, method: str, path: str, **kwargs):
         self.calls.append({"method": method, "path": path, **kwargs})
+        if not path.endswith("/render"):
+            return {"template": {"data": {"id": "template-123", "name": "Welcome v2"}}}
         return {
             "subject": "Welcome",
             "html": "<p>Hello Alice</p>",
@@ -104,6 +108,24 @@ class TemplatesRenderTests(unittest.TestCase):
 
         self.assertEqual(client.calls[0]["json"], {"variables": {}})
 
+    def test_update_uses_patch_payload(self) -> None:
+        client = FakeClient()
+        resource = TemplatesResource(client)
+
+        response = resource.update("template-123", name="Welcome v2", subject="Hello")
+
+        self.assertEqual(client.calls[0]["method"], "PATCH")
+        self.assertEqual(client.calls[0]["path"], "/v1/templates/template-123")
+        self.assertEqual(client.calls[0]["json"], {"name": "Welcome v2", "subject": "Hello"})
+        self.assertEqual(response.data["name"], "Welcome v2")
+
+    def test_update_rejects_empty_payload(self) -> None:
+        client = FakeClient()
+        resource = TemplatesResource(client)
+
+        with self.assertRaises(ValidationError):
+            resource.update("template-123")
+
 
 class AsyncTemplatesRenderTests(unittest.IsolatedAsyncioTestCase):
     async def test_render_uses_variables_payload(self) -> None:
@@ -118,3 +140,21 @@ class AsyncTemplatesRenderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.subject, "Welcome")
         self.assertEqual(response.html, "<p>Hello Alice</p>")
         self.assertEqual(response.text, "Hello Alice")
+
+    async def test_update_uses_patch_payload(self) -> None:
+        client = FakeAsyncClient()
+        resource = AsyncTemplatesResource(client)
+
+        response = await resource.update("template-123", name="Welcome v2", subject="Hello")
+
+        self.assertEqual(client.calls[0]["method"], "PATCH")
+        self.assertEqual(client.calls[0]["path"], "/v1/templates/template-123")
+        self.assertEqual(client.calls[0]["json"], {"name": "Welcome v2", "subject": "Hello"})
+        self.assertEqual(response.data["name"], "Welcome v2")
+
+    async def test_update_rejects_empty_payload(self) -> None:
+        client = FakeAsyncClient()
+        resource = AsyncTemplatesResource(client)
+
+        with self.assertRaises(ValidationError):
+            await resource.update("template-123")

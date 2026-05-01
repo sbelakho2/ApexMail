@@ -42,12 +42,20 @@ fn check_payloads_in_query(label: &str, payloads: &[&str]) {
     }
 
     let total = payloads.len();
-    let rate = if total > 0 { (blocked as f64 / total as f64) * 100.0 } else { 100.0 };
+    let rate = if total > 0 {
+        (blocked as f64 / total as f64) * 100.0
+    } else {
+        100.0
+    };
     // We want at least 80% detection rate.
     assert!(
         rate >= 80.0,
         "[{}] Detection rate {:.1}% ({}/{}) — missed: {:?}",
-        label, rate, blocked, total, &missed[..missed.len().min(10)]
+        label,
+        rate,
+        blocked,
+        total,
+        &missed[..missed.len().min(10)]
     );
 }
 
@@ -73,11 +81,19 @@ fn check_payloads_in_body(label: &str, payloads: &[&str]) {
     }
 
     let total = payloads.len();
-    let rate = if total > 0 { (blocked as f64 / total as f64) * 100.0 } else { 100.0 };
+    let rate = if total > 0 {
+        (blocked as f64 / total as f64) * 100.0
+    } else {
+        100.0
+    };
     assert!(
         rate >= 80.0,
         "[{}] Detection rate {:.1}% ({}/{}) — missed: {:?}",
-        label, rate, blocked, total, &missed[..missed.len().min(10)]
+        label,
+        rate,
+        blocked,
+        total,
+        &missed[..missed.len().min(10)]
     );
 }
 
@@ -497,7 +513,9 @@ fn test_header_injection() {
     assert!(
         rate >= 70.0,
         "Header injection detection rate {:.1}% ({}/{}) is too low",
-        rate, blocked, total
+        rate,
+        blocked,
+        total
     );
 }
 
@@ -585,14 +603,49 @@ fn test_false_positive_clean_requests() {
     let clean_requests = vec![
         ("GET", "/", None, None),
         ("GET", "/api/users", Some("page=1&limit=20"), None),
-        ("POST", "/api/login", None, Some("username=admin&password=secret123")),
+        (
+            "POST",
+            "/api/login",
+            None,
+            Some("username=admin&password=secret123"),
+        ),
         ("GET", "/search", Some("q=hello+world"), None),
-        ("POST", "/api/data", None, Some("{\"name\":\"John\",\"email\":\"john@example.com\"}")),
-        ("GET", "/products", Some("category=electronics&sort=price"), None),
-        ("PUT", "/api/users/123", None, Some("{\"firstName\":\"Jane\",\"lastName\":\"O'Brien\"}")),
-        ("GET", "/api/reports", Some("from=2024-01-01&to=2024-12-31"), None),
-        ("POST", "/api/comments", None, Some("comment=This is a perfectly normal comment about the product.")),
-        ("GET", "/api/search", Some("q=SELECT+brand+name+for+users+guide"), None),
+        (
+            "POST",
+            "/api/data",
+            None,
+            Some("{\"name\":\"John\",\"email\":\"john@example.com\"}"),
+        ),
+        (
+            "GET",
+            "/products",
+            Some("category=electronics&sort=price"),
+            None,
+        ),
+        (
+            "PUT",
+            "/api/users/123",
+            None,
+            Some("{\"firstName\":\"Jane\",\"lastName\":\"O'Brien\"}"),
+        ),
+        (
+            "GET",
+            "/api/reports",
+            Some("from=2024-01-01&to=2024-12-31"),
+            None,
+        ),
+        (
+            "POST",
+            "/api/comments",
+            None,
+            Some("comment=This is a perfectly normal comment about the product."),
+        ),
+        (
+            "GET",
+            "/api/search",
+            Some("q=SELECT+brand+name+for+users+guide"),
+            None,
+        ),
     ];
 
     let mut false_positives = Vec::new();

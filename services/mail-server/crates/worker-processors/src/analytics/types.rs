@@ -43,7 +43,7 @@ pub struct AggregatedStats {
 }
 
 impl AggregatedStats {
-/// Create new stats for a tenant and period.
+    /// Create new stats for a tenant and period.
     pub fn new(
         tenant_id: String,
         domain_id: Option<String>,
@@ -61,7 +61,7 @@ impl AggregatedStats {
         }
     }
 
-/// Increment the appropriate counter based on event type.
+    /// Increment the appropriate counter based on event type.
     pub fn increment(&mut self, event_type: &str) {
         match event_type {
             "sent" => self.sent += 1,
@@ -92,7 +92,7 @@ pub enum EventType {
 }
 
 impl EventType {
-/// Convert to string.
+    /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Sent => "sent",

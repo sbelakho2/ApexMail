@@ -1,6 +1,6 @@
 # ApexMail Documentation
 
-Enterprise-grade transactional email platform with zero paid SaaS dependencies.
+Enterprise-grade transactional email platform.
 
 ## Documentation Structure
 
@@ -26,6 +26,8 @@ docs/
 │   │   ├── events.md               ✅
 │   │   └── templates.md            ✅
 │   ├── errors.md                   ✅
+│   ├── openapi.yaml                ✅
+│   ├── changelog.md                ✅
 │   ├── rate-limits.md              ✅
 │   └── webhooks.md                 ✅
 ├── architecture/           # System Architecture
@@ -100,6 +102,8 @@ docs/
 
 - [Quick Start Guide](deployment/quickstart.md)
 - [API Reference](api/endpoints/messages.md)
+- [OpenAPI Specification](api/openapi.yaml)
+- [API Changelog & Deprecation Policy](api/changelog.md)
 - [Architecture Overview](architecture/overview.md)
 
 ### Analytics & Data Science
@@ -169,6 +173,12 @@ docs/
 - [On-Call Procedures](operations/on-call.md)
 - [SLO Management](operations/slo-management.md)
 
+### Webhooks & Integrations
+
+- [Webhook Delivery Guide](api/webhooks.md)
+- [Authentication Reference](api/authentication.md)
+- [Rate Limits](api/rate-limits.md)
+
 ### Development
 
 - [Marketing Website](marketing/README.md)
@@ -198,5 +208,5 @@ ApexMail is a brand of **Bel Consulting OÜ**, Estonia.
 - **Address**: Sakala 7-2, 10141 Tallinn, Estonia
 - **Registry Code**: 16192499
 - **VAT Number**: EE102951727
-- **Email**: contact@apexmail.ee
+- **Email**: support@apexmail.ee
 - **Website**: https://apexmail.ee

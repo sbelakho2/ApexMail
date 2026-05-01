@@ -32,6 +32,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer, SFTConfig
 from datasets import load_dataset
+from training_data import expand_system_prompt_refs
 
 # ── Paths (overridable via env) ─────────────────────────────────
 MODEL_PATH = os.environ.get("MODEL_PATH", "/workspace/models/Qwen3-Next-80B-A3B-Instruct")
@@ -122,6 +123,8 @@ def main():
         print(f"    Val:   {VAL_DATA}")
     train_ds = load_dataset("json", data_files=TRAIN_DATA, split="train")
     val_ds   = load_dataset("json", data_files=VAL_DATA, split="train")
+    train_ds = expand_system_prompt_refs(train_ds, TRAIN_DATA)
+    val_ds = expand_system_prompt_refs(val_ds, VAL_DATA)
     if is_main:
         print(f"    Train: {len(train_ds)} examples")
         print(f"    Val:   {len(val_ds)} examples")

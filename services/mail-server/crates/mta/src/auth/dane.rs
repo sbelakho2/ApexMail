@@ -25,7 +25,7 @@ const DOH_PROVIDERS: &[&str] = &[
 static TLSA_CACHE: LazyLock<Cache<String, Vec<TlsaRecord>>> = LazyLock::new(|| {
     Cache::builder()
         .max_capacity(1_000)
-    .time_to_live(Duration::from_secs(tlsa_cache_ttl_secs()))
+        .time_to_live(Duration::from_secs(tlsa_cache_ttl_secs()))
         .build()
 });
 
@@ -33,7 +33,7 @@ static DOH_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-    .ok()
+        .ok()
 });
 
 fn tlsa_cache_ttl_secs() -> u64 {
@@ -47,13 +47,13 @@ fn tlsa_cache_ttl_secs() -> u64 {
 /// Parsed TLSA record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsaRecord {
-/// 0 = PKIX-TA, 1 = PKIX-EE, 2 = DANE-TA, 3 = DANE-EE
+    /// 0 = PKIX-TA, 1 = PKIX-EE, 2 = DANE-TA, 3 = DANE-EE
     pub usage: u8,
-/// 0 = Full certificate, 1 = SubjectPublicKeyInfo
+    /// 0 = Full certificate, 1 = SubjectPublicKeyInfo
     pub selector: u8,
-/// 0 = Exact, 1 = SHA-256, 2 = SHA-512
+    /// 0 = Exact, 1 = SHA-256, 2 = SHA-512
     pub matching_type: u8,
-/// Hex‑encoded association data.
+    /// Hex‑encoded association data.
     pub certificate_association_data: String,
 }
 
@@ -99,7 +99,7 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
 
     let name = format!("_{port}._{protocol}.{domain}");
 
-// #133:Check TLSA cache first
+    // #133:Check TLSA cache first
     if let Some(cached) = TLSA_CACHE.get(&name) {
         if !cached.is_empty() {
             result.supported = true;
@@ -126,11 +126,13 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
 
     let Some(client) = DOH_CLIENT.as_ref() else {
         result.errors.push("DoH HTTP client unavailable".into());
-        result.recommendations.push("Ensure DANE client configuration is valid".into());
+        result
+            .recommendations
+            .push("Ensure DANE client configuration is valid".into());
         return result;
     };
 
-// #132:Try multiple DoH providers with fallback
+    // #132:Try multiple DoH providers with fallback
     let mut doh_body: Option<serde_json::Value> = None;
     for provider in DOH_PROVIDERS {
         let doh_url = format!("{provider}?name={name}&type=TLSA");
@@ -163,32 +165,40 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
     let body = match doh_body {
         Some(b) => b,
         None => {
-            result.errors.push("All DoH providers failed for TLSA lookup".into());
-            result.recommendations.push("Ensure DANE TLSA records are published".into());
+            result
+                .errors
+                .push("All DoH providers failed for TLSA lookup".into());
+            result
+                .recommendations
+                .push("Ensure DANE TLSA records are published".into());
             return result;
         }
     };
 
-// Check AD flag (DNSSEC authenticated)
+    // Check AD flag (DNSSEC authenticated)
     let ad = body.get("AD").and_then(|v| v.as_bool()).unwrap_or(false);
     if !ad {
-        result.errors.push("DNSSEC validation not confirmed (AD flag not set)".into());
-        result.recommendations.push("Enable DNSSEC and ensure validated resolver sets AD for TLSA lookups".into());
+        result
+            .errors
+            .push("DNSSEC validation not confirmed (AD flag not set)".into());
+        result
+            .recommendations
+            .push("Enable DNSSEC and ensure validated resolver sets AD for TLSA lookups".into());
         return result;
     }
 
-// Parse TLSA answers
+    // Parse TLSA answers
     if let Some(answers) = body.get("Answer").and_then(|v| v.as_array()) {
         for answer in answers {
             let rtype = answer.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
             if rtype != 52 {
-// 52 = TLSA
+                // 52 = TLSA
                 continue;
             }
             if let Some(data) = answer.get("data").and_then(|v| v.as_str()) {
                 if let Some(record) = parse_tlsa_data(data) {
                     result.supported = true;
-// Determine mode from usage
+                    // Determine mode from usage
                     match record.usage {
                         3 => {
                             if result.mode != DaneMode::DaneTa {
@@ -210,9 +220,9 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
     }
 
     if !result.supported {
-        result.recommendations.push(format!(
-            "Add TLSA record at {name} for DANE support"
-        ));
+        result
+            .recommendations
+            .push(format!("Add TLSA record at {name} for DANE support"));
     } else {
         match fetch_remote_leaf_certificate(domain, port).await {
             Ok(cert_der) => {
@@ -222,7 +232,9 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
                     .any(|record| validate_certificate_against_tlsa(&cert_der, record));
 
                 if !matches_tlsa {
-                    result.errors.push("TLSA records do not match the target server certificate".into());
+                    result
+                        .errors
+                        .push("TLSA records do not match the target server certificate".into());
                     result.supported = false;
                 }
             }
@@ -235,7 +247,7 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
         }
     }
 
-// #133:Cache the result
+    // #133:Cache the result
     TLSA_CACHE.insert(name, result.tlsa_records.clone());
 
     result
@@ -254,7 +266,7 @@ pub fn generate_tlsa_record(
     let mut errors = Vec::new();
     let mut recommendations = Vec::new();
 
-// Extract DER from PEM
+    // Extract DER from PEM
     let der = match extract_der_from_pem(cert_pem) {
         Some(d) => d,
         None => {
@@ -273,7 +285,7 @@ pub fn generate_tlsa_record(
         }
     };
 
-// Compute association data
+    // Compute association data
     let data = match matching_type {
         0 => hex::encode(&der),
         1 => {
@@ -294,7 +306,8 @@ pub fn generate_tlsa_record(
     let dns_record = format!("{name} IN TLSA {usage} {selector} {matching_type} {data}");
 
     if usage == 3 {
-        recommendations.push("DANE-EE (usage=3) requires DNSSEC to be enabled on the domain".into());
+        recommendations
+            .push("DANE-EE (usage=3) requires DNSSEC to be enabled on the domain".into());
     }
 
     DaneRecordGenerationResult {
@@ -446,7 +459,8 @@ mod tests {
 
     #[test]
     fn test_generate_tlsa_record_sha256() {
-        let pem = " -----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJALRiMLAh4EEAMA0G\n-----END CERTIFICATE-----";
+        let pem =
+            " -----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJALRiMLAh4EEAMA0G\n-----END CERTIFICATE-----";
         let result = generate_tlsa_record(pem, "example.com", 25, "tcp", 3, 1, 1);
         assert!(!result.record.certificate_association_data.is_empty());
         assert!(result.dns_record.contains("_25._tcp.example.com"));

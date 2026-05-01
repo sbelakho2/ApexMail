@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Datelike, TimeDelta, TimeZone, Timelike, Utc};
-use std::sync::RwLock;
 use sqlx::PgPool;
+use std::sync::RwLock;
 use tokio::sync::Notify;
 use tokio::time::{interval, sleep};
 use tracing::{debug, error, info, warn};
@@ -35,7 +35,7 @@ pub struct AnalyticsProcessor {
 }
 
 impl AnalyticsProcessor {
-/// Create a new analytics processor.
+    /// Create a new analytics processor.
     pub fn new(db: PgPool, redis: RedisPool, config: AnalyticsConfig) -> Self {
         Self {
             db,
@@ -50,7 +50,7 @@ impl AnalyticsProcessor {
         }
     }
 
-/// Start the processor.
+    /// Start the processor.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
         info!(
             "Starting analytics processor (batch_size={}, flush_interval={:?})",
@@ -59,36 +59,36 @@ impl AnalyticsProcessor {
 
         self.is_running.store(true, Ordering::SeqCst);
 
-// Spawn flush task
+        // Spawn flush task
         let this = Arc::clone(&self);
         tokio::spawn(async move {
             this.flush_loop().await;
         });
 
-// Spawn hourly aggregation task
+        // Spawn hourly aggregation task
         let this = Arc::clone(&self);
         tokio::spawn(async move {
             this.hourly_aggregation_loop().await;
         });
 
-// Run the poll loop
+        // Run the poll loop
         self.poll_loop().await;
 
         Ok(())
     }
 
-/// Stop the processor gracefully.
+    /// Stop the processor gracefully.
     pub async fn stop(&self) -> ProcessorResult<()> {
         info!("Stopping analytics processor");
         self.is_running.store(false, Ordering::SeqCst);
         self.shutdown_notify.notify_waiters();
 
-// Flush remaining buffers
+        // Flush remaining buffers
         if let Err(e) = self.flush_buffers().await {
             error!("Error flushing buffers during shutdown: {}", e);
         }
 
-// Wait for active jobs to complete
+        // Wait for active jobs to complete
         let max_wait = Duration::from_secs(30);
         let start = std::time::Instant::now();
 
@@ -100,13 +100,13 @@ impl AnalyticsProcessor {
         Ok(())
     }
 
-/// Main poll loop.
+    /// Main poll loop.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
             match self.poll_batch().await {
                 Ok(count) => {
                     if count == 0 {
-// No events, wait before polling again
+                        // No events, wait before polling again
                         tokio::select! {
                             _ = sleep(self.config.base.poll_interval) => {}
                             _ = self.shutdown_notify.notified() => break,
@@ -121,7 +121,7 @@ impl AnalyticsProcessor {
         }
     }
 
-/// Poll and process a batch of events.
+    /// Poll and process a batch of events.
     async fn poll_batch(&self) -> ProcessorResult<usize> {
         let events = self.fetch_events(self.config.base.batch_size).await?;
         let count = events.len();
@@ -133,7 +133,7 @@ impl AnalyticsProcessor {
         Ok(count)
     }
 
-/// Fetch events from the queue with FOR UPDATE SKIP LOCKED.
+    /// Fetch events from the queue with FOR UPDATE SKIP LOCKED.
     async fn fetch_events(&self, limit: usize) -> ProcessorResult<Vec<AnalyticsEvent>> {
         let events = sqlx::query_as::<_, AnalyticsEvent>(
             r#"
@@ -161,7 +161,7 @@ impl AnalyticsProcessor {
         Ok(events)
     }
 
-/// Mark events as fully processed.
+    /// Mark events as fully processed.
     async fn mark_events_processed(&self, event_ids: &[String]) -> ProcessorResult<()> {
         if event_ids.is_empty() {
             return Ok(());
@@ -181,7 +181,7 @@ impl AnalyticsProcessor {
         Ok(())
     }
 
-/// Reset processing flag for failed events.
+    /// Reset processing flag for failed events.
     async fn reset_processing(&self, event_ids: &[String]) -> ProcessorResult<()> {
         if event_ids.is_empty() {
             return Ok(());
@@ -201,7 +201,7 @@ impl AnalyticsProcessor {
         Ok(())
     }
 
-/// Process a batch of events.
+    /// Process a batch of events.
     async fn process_events(&self, events: Vec<AnalyticsEvent>) -> ProcessorResult<()> {
         self.active_jobs.fetch_add(1, Ordering::SeqCst);
 
@@ -212,7 +212,7 @@ impl AnalyticsProcessor {
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
 
         if result.is_err() {
-// Reset processing flag for retry
+            // Reset processing flag for retry
             if let Err(e) = self.reset_processing(&event_ids).await {
                 error!("Failed to reset processing flag: {}", e);
             }
@@ -221,16 +221,16 @@ impl AnalyticsProcessor {
         result
     }
 
-/// Inner processing logic (separated for borrow checker).
+    /// Inner processing logic (separated for borrow checker).
     async fn process_events_inner(&self, events: Vec<AnalyticsEvent>) -> ProcessorResult<()> {
         let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
-        
-// Add to event buffer (sync operation)
+
+        // Add to event buffer (sync operation)
         let should_flush = {
             let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
             buffer.extend(events.iter().cloned());
 
-// Enforce buffer size cap
+            // Enforce buffer size cap
             if buffer.len() > MAX_EVENT_BUFFER_SIZE {
                 let dropped = buffer.len() - MAX_EVENT_BUFFER_SIZE;
                 buffer.drain(0..dropped);
@@ -240,27 +240,27 @@ impl AnalyticsProcessor {
                     "Event buffer exceeded cap, dropped oldest events"
                 );
             }
-            
+
             buffer.len() >= self.config.base.batch_size
         };
 
-// Update aggregation counters (sync operation)
+        // Update aggregation counters (sync operation)
         for event in &events {
             self.update_aggregation(event);
         }
 
-// Flush if buffer is full (async operation, lock already released)
+        // Flush if buffer is full (async operation, lock already released)
         if should_flush {
             self.flush_buffers().await?;
         }
 
-// Mark events as processed
+        // Mark events as processed
         self.mark_events_processed(&event_ids).await?;
 
         Ok(())
     }
 
-/// Update aggregation buffer with an event.
+    /// Update aggregation buffer with an event.
     fn update_aggregation(&self, event: &AnalyticsEvent) {
         let period_start = match Utc.with_ymd_and_hms(
             event.timestamp.year(),
@@ -273,22 +273,22 @@ impl AnalyticsProcessor {
             chrono::LocalResult::Single(dt) => dt,
             _ => {
                 warn!("Failed to construct period_start from event timestamp, using truncated");
-                event.timestamp.date_naive().and_hms_opt(event.timestamp.hour(), 0, 0)
+                event
+                    .timestamp
+                    .date_naive()
+                    .and_hms_opt(event.timestamp.hour(), 0, 0)
                     .map(|dt| dt.and_utc())
                     .unwrap_or(event.timestamp)
             }
         };
         let period_end = period_start + TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
 
-// Use epoch milliseconds for period key (no ambiguous ':' characters)
+        // Use epoch milliseconds for period key (no ambiguous ':' characters)
         let period_key = period_start.timestamp_millis().to_string();
 
-// Generate aggregation keys
-        let mut keys: Vec<(String, Option<String>, Option<String>)> = vec![(
-            format!("T:{}:{}", event.tenant_id, period_key),
-            None,
-            None,
-        )];
+        // Generate aggregation keys
+        let mut keys: Vec<(String, Option<String>, Option<String>)> =
+            vec![(format!("T:{}:{}", event.tenant_id, period_key), None, None)];
 
         if let Some(domain_id) = &event.domain_id {
             keys.push((
@@ -317,7 +317,10 @@ impl AnalyticsProcessor {
             ));
         }
 
-        let mut buffer = self.aggregation_buffer.write().unwrap_or_else(|e| e.into_inner());
+        let mut buffer = self
+            .aggregation_buffer
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
 
         for (key, domain_id, campaign_id) in keys {
             let stats = buffer.entry(key).or_insert_with(|| {
@@ -340,7 +343,11 @@ impl AnalyticsProcessor {
                 .map(|(k, v)| (k.clone(), v.period_start))
                 .collect();
             keys_by_age.sort_by_key(|(_, ts)| *ts);
-            let keys_to_remove: Vec<String> = keys_by_age.into_iter().take(excess).map(|(k, _)| k).collect();
+            let keys_to_remove: Vec<String> = keys_by_age
+                .into_iter()
+                .take(excess)
+                .map(|(k, _)| k)
+                .collect();
             for key in &keys_to_remove {
                 buffer.remove(key);
             }
@@ -353,7 +360,7 @@ impl AnalyticsProcessor {
         }
     }
 
-/// Periodic flush loop.
+    /// Periodic flush loop.
     async fn flush_loop(&self) {
         let mut flush_interval = interval(self.config.base.flush_interval);
         flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -370,9 +377,9 @@ impl AnalyticsProcessor {
         }
     }
 
-/// Flush event and aggregation buffers.
+    /// Flush event and aggregation buffers.
     async fn flush_buffers(&self) -> ProcessorResult<()> {
-// Mutex to prevent concurrent flushes
+        // Mutex to prevent concurrent flushes
         if self
             .is_flushing
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -397,7 +404,10 @@ impl AnalyticsProcessor {
         };
 
         let aggregations: HashMap<String, AggregatedStats> = {
-            let mut buffer = self.aggregation_buffer.write().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self
+                .aggregation_buffer
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *buffer)
         };
 
@@ -411,16 +421,16 @@ impl AnalyticsProcessor {
             "Flushing analytics buffers"
         );
 
-// Write aggregations to DB.
+        // Write aggregations to DB.
         self.write_aggregations(&aggregations).await?;
 
-// Update Redis counters (failure here won't cause double-counting)
+        // Update Redis counters (failure here won't cause double-counting)
         if let Err(e) = self.update_redis_counters(&events).await {
-// Log but don't fail - Redis counters can be rebuilt from DB
+            // Log but don't fail - Redis counters can be rebuilt from DB
             tracing::warn!(error = %e, "Failed to update Redis counters; will retry on next flush");
         }
 
-// Event buffer already drained via mem::take above - no need to remove individually.
+        // Event buffer already drained via mem::take above - no need to remove individually.
 
         debug!(
             events = events.len(),
@@ -431,7 +441,7 @@ impl AnalyticsProcessor {
         Ok(())
     }
 
-/// Write aggregations to analytics_hourly table.
+    /// Write aggregations to analytics_hourly table.
     async fn write_aggregations(
         &self,
         aggregations: &HashMap<String, AggregatedStats>,
@@ -440,7 +450,7 @@ impl AnalyticsProcessor {
             return Ok(());
         }
 
-// Batch upsert using unnest
+        // Batch upsert using unnest
         let mut ids = Vec::with_capacity(aggregations.len());
         let mut tenant_ids = Vec::with_capacity(aggregations.len());
         let mut domain_ids: Vec<Option<String>> = Vec::with_capacity(aggregations.len());
@@ -530,7 +540,7 @@ impl AnalyticsProcessor {
         Ok(())
     }
 
-/// Update real-time counters in Redis.
+    /// Update real-time counters in Redis.
     async fn update_redis_counters(&self, events: &[AnalyticsEvent]) -> ProcessorResult<()> {
         if events.is_empty() {
             return Ok(());
@@ -539,17 +549,17 @@ impl AnalyticsProcessor {
         let mut conn = self.redis.get().await?;
         let ttl_secs = self.config.stats_ttl.as_secs() as i64;
 
-// Group events by Redis key
+        // Group events by Redis key
         let mut counters: HashMap<String, i64> = HashMap::new();
 
         for event in events {
             let date = event.timestamp.format("%Y-%m-%d").to_string();
 
-// Tenant-level counter
+            // Tenant-level counter
             let key = format!("stats:{}:{}:{}", event.tenant_id, date, event.event_type);
             *counters.entry(key).or_insert(0) += 1;
 
-// Domain-level counter
+            // Domain-level counter
             if let Some(domain_id) = &event.domain_id {
                 let key = format!(
                     "stats:{}:{}:domain:{}:{}",
@@ -558,7 +568,7 @@ impl AnalyticsProcessor {
                 *counters.entry(key).or_insert(0) += 1;
             }
 
-// Campaign-level counter
+            // Campaign-level counter
             if let Some(campaign_id) = &event.campaign_id {
                 let key = format!(
                     "stats:{}:{}:campaign:{}:{}",
@@ -568,7 +578,7 @@ impl AnalyticsProcessor {
             }
         }
 
-// Execute Redis commands
+        // Execute Redis commands
         let mut pipe = redis::pipe();
         for (key, increment) in &counters {
             pipe.cmd("INCRBY").arg(key).arg(*increment).ignore();
@@ -580,18 +590,23 @@ impl AnalyticsProcessor {
         Ok(())
     }
 
-/// Hourly aggregation loop (rolls up data from events table).
+    /// Hourly aggregation loop (rolls up data from events table).
     async fn hourly_aggregation_loop(&self) {
-// Run at the start of each hour
+        // Run at the start of each hour
         while self.is_running.load(Ordering::SeqCst) {
-// Calculate time until next hour
+            // Calculate time until next hour
             let now = Utc::now();
             let one_hour = TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
             let next_hour = (now + one_hour)
-                .with_minute(0).unwrap_or(now + one_hour)
-                .with_second(0).unwrap_or(now + one_hour)
-                .with_nanosecond(0).unwrap_or(now + one_hour);
-            let wait_duration = (next_hour - now).to_std().unwrap_or(Duration::from_secs(3600));
+                .with_minute(0)
+                .unwrap_or(now + one_hour)
+                .with_second(0)
+                .unwrap_or(now + one_hour)
+                .with_nanosecond(0)
+                .unwrap_or(now + one_hour);
+            let wait_duration = (next_hour - now)
+                .to_std()
+                .unwrap_or(Duration::from_secs(3600));
 
             tokio::select! {
                 _ = sleep(wait_duration) => {
@@ -604,11 +619,11 @@ impl AnalyticsProcessor {
         }
     }
 
-/// Run hourly aggregation from events table.
+    /// Run hourly aggregation from events table.
     async fn run_hourly_aggregation(&self) -> ProcessorResult<()> {
         info!("Running hourly aggregation");
 
-// Aggregate the previous hour's data
+        // Aggregate the previous hour's data
         let prev_hour = Utc::now() - TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
         let period_start = match Utc.with_ymd_and_hms(
             prev_hour.year(),

@@ -69,6 +69,26 @@ pub struct ComplianceOverview {
     pub recent_alerts: Vec<AlertEntry>,
 }
 
+fn summarize_gdpr_request_counts(rows: &[(String, i64)], overdue: i64) -> GdprRequestSummary {
+    let mut summary = GdprRequestSummary {
+        pending: 0,
+        processing: 0,
+        completed: 0,
+        overdue,
+    };
+
+    for (status, count) in rows {
+        match status.as_str() {
+            "pending" => summary.pending = *count,
+            "processing" => summary.processing = *count,
+            "completed" => summary.completed = *count,
+            _ => {}
+        }
+    }
+
+    summary
+}
+
 async fn get_compliance_overview(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -81,105 +101,127 @@ async fn get_compliance_overview(
     let has_alerts = table_exists(db, "system_alerts").await;
     let has_domains = table_exists(db, "domains").await;
 
-// Risk summary
-    let mut risk_summary = RiskSummary { low: 0, medium: 0, high: 0, critical: 0 };
+    // Risk summary
+    let mut risk_summary = RiskSummary {
+        low: 0,
+        medium: 0,
+        high: 0,
+        critical: 0,
+    };
     if has_alerts {
-        let rows: Vec<(String, String)> = sqlx::query_as(
+        let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT CASE
                 WHEN severity = 'critical' THEN 'critical'
                 WHEN severity = 'high' THEN 'high'
                 WHEN severity = 'medium' THEN 'medium'
                 ELSE 'low'
              END as risk_level,
-             COUNT(*)::text
+             COUNT(*)::bigint
              FROM system_alerts WHERE acknowledged = false
              GROUP BY risk_level",
         )
         .fetch_all(db)
-        .await
-        ?;
+        .await?;
 
-        for (level, count_str) in &rows {
-            let count: i64 = count_str.parse().unwrap_or(0);
+        for (level, count) in &rows {
             match level.as_str() {
-                "low" => risk_summary.low = count,
-                "medium" => risk_summary.medium = count,
-                "high" => risk_summary.high = count,
-                "critical" => risk_summary.critical = count,
+                "low" => risk_summary.low = *count,
+                "medium" => risk_summary.medium = *count,
+                "high" => risk_summary.high = *count,
+                "critical" => risk_summary.critical = *count,
                 _ => {}
             }
         }
     }
 
-// GDPR requests summary
-    let mut gdpr_requests = GdprRequestSummary { pending: 0, processing: 0, completed: 0, overdue: 0 };
+    // GDPR requests summary
+    let mut gdpr_requests = GdprRequestSummary {
+        pending: 0,
+        processing: 0,
+        completed: 0,
+        overdue: 0,
+    };
     if has_gdpr {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT status, COUNT(*)::text FROM gdpr_requests GROUP BY status",
-        )
-        .fetch_all(db)
-        .await
-        ?;
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT status, COUNT(*)::bigint FROM gdpr_requests GROUP BY status")
+                .fetch_all(db)
+                .await?;
 
-        for (status, count_str) in &rows {
-            let count: i64 = count_str.parse().unwrap_or(0);
-            match status.as_str() {
-                "pending" => gdpr_requests.pending = count,
-                "processing" => gdpr_requests.processing = count,
-                "completed" => gdpr_requests.completed = count,
-                "overdue" => gdpr_requests.overdue = count,
-                _ => {}
-            }
-        }
+        let overdue = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::bigint
+             FROM gdpr_requests
+             WHERE status NOT IN ('completed', 'rejected')
+               AND sla_deadline < NOW()",
+        )
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
+
+        gdpr_requests = summarize_gdpr_request_counts(&rows, overdue);
     }
 
-// Audit stats
-    let audit_row: (String, String) = sqlx::query_as(
-        "SELECT COUNT(*) FILTER (WHERE timestamp >= CURRENT_DATE)::text,
-                COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '7 days')::text
+    // Audit stats
+    let audit_row: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE timestamp >= CURRENT_DATE)::bigint,
+                COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '7 days')::bigint
          FROM audit_logs",
     )
     .fetch_one(db)
     .await
-    .unwrap_or(("0".into(), "0".into()));
+    .unwrap_or((0, 0));
 
     let alerts_triggered = if has_alerts {
-        sqlx::query_scalar::<_, String>(
-            "SELECT COUNT(*)::text FROM system_alerts WHERE created_at >= NOW() - INTERVAL '24 hours' AND severity IN ('high', 'critical')",
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::bigint FROM system_alerts WHERE created_at >= NOW() - INTERVAL '24 hours' AND severity IN ('high', 'critical')",
         )
         .fetch_one(db)
         .await
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0i64)
-    } else { 0 };
+        .unwrap_or(0)
+    } else {
+        0
+    };
 
     let audit_stats = AuditStats {
-        today_events: audit_row.0.parse().unwrap_or(0),
-        week_events: audit_row.1.parse().unwrap_or(0),
+        today_events: audit_row.0,
+        week_events: audit_row.1,
         alerts_triggered,
     };
 
-// Policy compliance (domains)
+    // Policy compliance (domains)
     let policy_compliance = if has_domains {
-        let row: Option<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT COUNT(*)::text,
-                    COUNT(*) FILTER (WHERE spf_configured = true)::text,
-                    COUNT(*) FILTER (WHERE dkim_selector IS NOT NULL AND dkim_selector <> '')::text,
-                    COUNT(*) FILTER (WHERE dmarc_configured = true)::text,
-                    COUNT(*) FILTER (WHERE is_verified = true)::text
+        let row: Option<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT COUNT(*)::bigint,
+                    COUNT(*) FILTER (WHERE spf_configured = true)::bigint,
+                    COUNT(*) FILTER (WHERE dkim_selector IS NOT NULL AND dkim_selector <> '')::bigint,
+                    COUNT(*) FILTER (WHERE dmarc_configured = true)::bigint,
+                    COUNT(*) FILTER (WHERE is_verified = true)::bigint
              FROM domains",
         )
         .fetch_optional(db)
         .await?;
 
-        if let Some((total_str, spf, dkim, dmarc, verified)) = row {
-            let total: i64 = total_str.parse().unwrap_or(0);
+        if let Some((total, spf, dkim, dmarc, verified)) = row {
             vec![
-                PolicyCompliance { name: "SPF Records".into(), compliant: spf.parse().unwrap_or(0), total },
-                PolicyCompliance { name: "DKIM Signing".into(), compliant: dkim.parse().unwrap_or(0), total },
-                PolicyCompliance { name: "DMARC Policy".into(), compliant: dmarc.parse().unwrap_or(0), total },
-                PolicyCompliance { name: "Domain Verification".into(), compliant: verified.parse().unwrap_or(0), total },
+                PolicyCompliance {
+                    name: "SPF Records".into(),
+                    compliant: spf,
+                    total,
+                },
+                PolicyCompliance {
+                    name: "DKIM Signing".into(),
+                    compliant: dkim,
+                    total,
+                },
+                PolicyCompliance {
+                    name: "DMARC Policy".into(),
+                    compliant: dmarc,
+                    total,
+                },
+                PolicyCompliance {
+                    name: "Domain Verification".into(),
+                    compliant: verified,
+                    total,
+                },
             ]
         } else {
             vec![]
@@ -188,34 +230,41 @@ async fn get_compliance_overview(
         vec![]
     };
 
-// Recent alerts
+    // Recent alerts
     let recent_alerts = if has_alerts {
-        let rows: Vec<(String, String, Option<String>, String, Option<serde_json::Value>, chrono::DateTime<chrono::Utc>)> =
-            sqlx::query_as(
-                "SELECT id, alert_type, message, severity, metadata, created_at
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<serde_json::Value>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT id, alert_type, message, severity, metadata, created_at
                  FROM system_alerts ORDER BY created_at DESC LIMIT 10",
-            )
-            .fetch_all(db)
-            .await
-            ?;
+        )
+        .fetch_all(db)
+        .await?;
 
         rows.into_iter()
-            .map(|(id, alert_type, message, severity, metadata, created_at)| {
-                let tenant_id = metadata
-                    .as_ref()
-                    .and_then(|m| m.get("tenantId"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+            .map(
+                |(id, alert_type, message, severity, metadata, created_at)| {
+                    let tenant_id = metadata
+                        .as_ref()
+                        .and_then(|m| m.get("tenantId"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
 
-                AlertEntry {
-                    id,
-                    alert_type,
-                    message: message.unwrap_or_default(),
-                    severity,
-                    tenant_id,
-                    timestamp: created_at.to_rfc3339(),
-                }
-            })
+                    AlertEntry {
+                        id,
+                        alert_type,
+                        message: message.unwrap_or_default(),
+                        severity,
+                        tenant_id,
+                        timestamp: created_at.to_rfc3339(),
+                    }
+                },
+            )
             .collect()
     } else {
         vec![]
@@ -228,4 +277,26 @@ async fn get_compliance_overview(
         policy_compliance,
         recent_alerts,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_gdpr_request_counts_uses_deadline_based_overdue_total() {
+        let rows = vec![
+            ("pending".to_string(), 3),
+            ("processing".to_string(), 2),
+            ("completed".to_string(), 5),
+            ("overdue".to_string(), 99),
+        ];
+
+        let summary = summarize_gdpr_request_counts(&rows, 4);
+
+        assert_eq!(summary.pending, 3);
+        assert_eq!(summary.processing, 2);
+        assert_eq!(summary.completed, 5);
+        assert_eq!(summary.overdue, 4);
+    }
 }

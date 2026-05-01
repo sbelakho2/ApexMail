@@ -2,90 +2,90 @@
 //!
 //! Provides various challenge mechanisms to distinguish legitimate users from bots.
 
-use sha2::{Sha256, Digest};
+use rand::{thread_rng, Rng};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use rand::{Rng, thread_rng};
-use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 /// Verification outcome for replay-aware challenge checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChallengeVerifyResult {
-/// Whether the submitted solution is valid.
+    /// Whether the submitted solution is valid.
     pub valid: bool,
-/// Whether this submission was replayed.
+    /// Whether this submission was replayed.
     pub replayed: bool,
-/// Whether the challenge was expired.
+    /// Whether the challenge was expired.
     pub expired: bool,
 }
 
 /// Audit event for challenge lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChallengeAuditRecord {
-/// Challenge identifier.
+    /// Challenge identifier.
     pub challenge_id: String,
-/// Challenge type label (pow/js/cookie/captcha).
+    /// Challenge type label (pow/js/cookie/captcha).
     pub challenge_type: String,
-/// Outcome label (issued/passed/failed/replay/expired).
+    /// Outcome label (issued/passed/failed/replay/expired).
     pub outcome: String,
-/// Optional client fingerprint or address token.
+    /// Optional client fingerprint or address token.
     pub client_fingerprint: Option<String>,
-/// Event timestamp (unix seconds).
+    /// Event timestamp (unix seconds).
     pub timestamp: u64,
 }
 
 /// Challenge types available
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChallengeType {
-/// JavaScript execution challenge
+    /// JavaScript execution challenge
     JavaScript(JsChallenge),
-/// Proof of work challenge
+    /// Proof of work challenge
     ProofOfWork(PowChallenge),
-/// Cookie-based challenge (simple)
+    /// Cookie-based challenge (simple)
     Cookie(CookieChallenge),
-/// CAPTCHA challenge
+    /// CAPTCHA challenge
     Captcha(CaptchaChallenge),
 }
 
 /// JavaScript challenge
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsChallenge {
-/// Unique challenge ID
+    /// Unique challenge ID
     pub challenge_id: String,
-/// JavaScript code to execute
+    /// JavaScript code to execute
     pub script: String,
-/// Expected result hash
+    /// Expected result hash
     pub expected_hash: String,
-/// Time limit in seconds
+    /// Time limit in seconds
     pub time_limit_secs: u32,
-/// Creation timestamp
+    /// Creation timestamp
     pub created_at: u64,
 }
 
 impl JsChallenge {
-/// Generate a new JS challenge
+    /// Generate a new JS challenge
     pub fn generate() -> Self {
         let mut rng = thread_rng();
         let challenge_id = generate_challenge_id();
-        
-// Generate random numbers for calculation
+
+        // Generate random numbers for calculation
         let a: u32 = rng.gen_range(1000..10000);
         let b: u32 = rng.gen_range(1000..10000);
         let expected_result = (a as u64 * b as u64) ^ 0xDEADBEEF;
-        
-// Generate expected hash
+
+        // Generate expected hash
         let expected_hash = hash_result(&expected_result.to_string());
-        
-// Generate variable names ONCE and reuse them so the produced
-// JavaScript actually references the correct variables.
-// Previously every {} placeholder got a fresh random name,
-// causing parseInt to reference non-existent variables (BUG).
+
+        // Generate variable names ONCE and reuse them so the produced
+        // JavaScript actually references the correct variables.
+        // Previously every {} placeholder got a fresh random name,
+        // causing parseInt to reference non-existent variables (BUG).
         let var_a_str = hex::encode(&rng.gen::<[u8; 4]>());
         let var_a_int = hex::encode(&rng.gen::<[u8; 4]>());
         let var_b_str = hex::encode(&rng.gen::<[u8; 4]>());
         let var_b_int = hex::encode(&rng.gen::<[u8; 4]>());
-        
+
         let script = format!(
             r#"(function(){{
                 var _0x{var_a_str}='{hex_a}';
@@ -102,7 +102,7 @@ impl JsChallenge {
             hex_b = format!("{:x}", b),
             var_b_int = var_b_int,
         );
-        
+
         Self {
             challenge_id,
             script,
@@ -111,15 +111,15 @@ impl JsChallenge {
             created_at: current_timestamp(),
         }
     }
-    
-/// Verify solution
+
+    /// Verify solution
     pub fn verify(&self, solution: &str) -> bool {
-// Check if expired
+        // Check if expired
         if current_timestamp() > self.created_at + self.time_limit_secs as u64 {
             return false;
         }
-        
-// Check solution hash
+
+        // Check solution hash
         let solution_hash = hash_result(solution);
         self.expected_hash == solution_hash
     }
@@ -128,24 +128,24 @@ impl JsChallenge {
 /// Proof of Work challenge
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PowChallenge {
-/// Challenge ID
+    /// Challenge ID
     pub challenge_id: String,
-/// Challenge prefix to hash
+    /// Challenge prefix to hash
     pub prefix: String,
-/// Required number of leading zero bits
+    /// Required number of leading zero bits
     pub difficulty: u8,
-/// Time limit in seconds
+    /// Time limit in seconds
     pub time_limit_secs: u32,
-/// Creation timestamp
+    /// Creation timestamp
     pub created_at: u64,
 }
 
 impl PowChallenge {
-/// Generate a new PoW challenge
+    /// Generate a new PoW challenge
     pub fn generate(difficulty: u8) -> Self {
         let challenge_id = generate_challenge_id();
         let prefix = generate_random_hex(16);
-        
+
         Self {
             challenge_id,
             prefix,
@@ -154,44 +154,44 @@ impl PowChallenge {
             created_at: current_timestamp(),
         }
     }
-    
-/// Verify solution (nonce)
+
+    /// Verify solution (nonce)
     pub fn verify(&self, nonce: &str) -> bool {
-// Check if expired
+        // Check if expired
         if current_timestamp() > self.created_at + self.time_limit_secs as u64 {
             return false;
         }
-        
-// Compute hash
+
+        // Compute hash
         let data = format!("{}{}", self.prefix, nonce);
         let mut hasher = Sha256::new();
         hasher.update(data.as_bytes());
         let hash = hasher.finalize();
-        
-// Check leading zeros
+
+        // Check leading zeros
         let required_zeros = self.difficulty as usize;
         let required_bytes = required_zeros / 8;
         let remaining_bits = required_zeros % 8;
-        
-// Check full bytes
+
+        // Check full bytes
         for i in 0..required_bytes {
             if hash[i] != 0 {
                 return false;
             }
         }
-        
-// Check remaining bits
+
+        // Check remaining bits
         if remaining_bits > 0 {
             let mask = 0xFF << (8 - remaining_bits);
             if hash[required_bytes] & mask != 0 {
                 return false;
             }
         }
-        
+
         true
     }
-    
-/// Solve the challenge (for testing)
+
+    /// Solve the challenge (for testing)
     #[cfg(test)]
     pub fn solve(&self) -> String {
         let mut nonce = 0u64;
@@ -206,31 +206,31 @@ impl PowChallenge {
             }
         }
     }
-    
+
     #[cfg(test)]
     fn verify_inner(&self, nonce: &str) -> bool {
         let data = format!("{}{}", self.prefix, nonce);
         let mut hasher = Sha256::new();
         hasher.update(data.as_bytes());
         let hash = hasher.finalize();
-        
+
         let required_zeros = self.difficulty as usize;
         let required_bytes = required_zeros / 8;
         let remaining_bits = required_zeros % 8;
-        
+
         for i in 0..required_bytes {
             if hash[i] != 0 {
                 return false;
             }
         }
-        
+
         if remaining_bits > 0 {
             let mask = 0xFF << (8 - remaining_bits);
             if hash[required_bytes] & mask != 0 {
                 return false;
             }
         }
-        
+
         true
     }
 }
@@ -238,32 +238,32 @@ impl PowChallenge {
 /// Cookie-based challenge
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookieChallenge {
-/// Challenge ID
+    /// Challenge ID
     pub challenge_id: String,
-/// Cookie name to set
+    /// Cookie name to set
     pub cookie_name: String,
-/// Cookie value (signed token)
+    /// Cookie value (signed token)
     pub cookie_value: String,
-/// HMAC signature
+    /// HMAC signature
     pub signature: String,
-/// Expiration timestamp
+    /// Expiration timestamp
     pub expires_at: u64,
 }
 
 impl CookieChallenge {
-/// Generate a new cookie challenge
+    /// Generate a new cookie challenge
     pub fn generate(secret: &[u8; 32]) -> Self {
         let challenge_id = generate_challenge_id();
         let cookie_name = "__apexmail_verify".to_string();
-        
-// Create token with timestamp
+
+        // Create token with timestamp
         let expires_at = current_timestamp() + 3600; // 1 hour
         let token = format!("{}:{}", challenge_id, expires_at);
-        
-// Sign token
+
+        // Sign token
         let signature = hmac_sign(secret, token.as_bytes());
         let cookie_value = format!("{}.{}", token, signature);
-        
+
         Self {
             challenge_id,
             cookie_name,
@@ -272,29 +272,34 @@ impl CookieChallenge {
             expires_at,
         }
     }
-    
-/// Verify cookie value
+
+    /// Verify cookie value
     pub fn verify(cookie_value: &str, secret: &[u8; 32]) -> bool {
         let parts: Vec<&str> = cookie_value.rsplitn(2, '.').collect();
         if parts.len() != 2 {
             return false;
         }
-        
+
         let signature = parts[0];
         let token = parts[1];
-        
-// Verify signature using constant-time comparison (E-107 fix:prevents timing attacks)
+
+        // Verify signature using constant-time comparison (E-107 fix:prevents timing attacks)
         let expected_sig = hmac_sign(secret, token.as_bytes());
-        if signature.as_bytes().ct_eq(expected_sig.as_bytes()).unwrap_u8() != 1 {
+        if signature
+            .as_bytes()
+            .ct_eq(expected_sig.as_bytes())
+            .unwrap_u8()
+            != 1
+        {
             return false;
         }
-        
-// Check expiration
+
+        // Check expiration
         let token_parts: Vec<&str> = token.split(':').collect();
         if token_parts.len() != 2 {
             return false;
         }
-        
+
         if let Ok(expires_at) = token_parts[1].parse::<u64>() {
             if current_timestamp() > expires_at {
                 return false;
@@ -302,7 +307,7 @@ impl CookieChallenge {
         } else {
             return false;
         }
-        
+
         true
     }
 }
@@ -310,31 +315,31 @@ impl CookieChallenge {
 /// CAPTCHA challenge (external service integration)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptchaChallenge {
-/// Challenge ID
+    /// Challenge ID
     pub challenge_id: String,
-/// CAPTCHA site key
+    /// CAPTCHA site key
     pub site_key: String,
-/// CAPTCHA provider
+    /// CAPTCHA provider
     pub provider: CaptchaProvider,
-/// Time limit in seconds
+    /// Time limit in seconds
     pub time_limit_secs: u32,
-/// Creation timestamp
+    /// Creation timestamp
     pub created_at: u64,
 }
 
 /// Supported CAPTCHA providers
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CaptchaProvider {
-/// Cloudflare Turnstile
+    /// Cloudflare Turnstile
     Turnstile,
-/// hCaptcha
+    /// hCaptcha
     HCaptcha,
-/// Google reCAPTCHA
+    /// Google reCAPTCHA
     ReCaptcha,
 }
 
 impl CaptchaChallenge {
-/// Generate a new CAPTCHA challenge
+    /// Generate a new CAPTCHA challenge
     pub fn generate(provider: CaptchaProvider, site_key: &str) -> Self {
         Self {
             challenge_id: generate_challenge_id(),
@@ -344,8 +349,8 @@ impl CaptchaChallenge {
             created_at: current_timestamp(),
         }
     }
-    
-/// Check if expired
+
+    /// Check if expired
     pub fn is_expired(&self) -> bool {
         current_timestamp() > self.created_at + self.time_limit_secs as u64
     }
@@ -353,26 +358,26 @@ impl CaptchaChallenge {
 
 /// Challenge manager for issuing and verifying challenges
 pub struct ChallengeManager {
-/// Secret key for signing
+    /// Secret key for signing
     secret: [u8; 32],
-/// Default JS challenge timeout
+    /// Default JS challenge timeout
     js_timeout: Duration,
-/// Default PoW difficulty
+    /// Default PoW difficulty
     pow_difficulty: u8,
-/// CAPTCHA site key (if configured)
+    /// CAPTCHA site key (if configured)
     captcha_site_key: Option<String>,
-/// CAPTCHA provider
+    /// CAPTCHA provider
     captcha_provider: Option<CaptchaProvider>,
-/// Used challenge responses to prevent replay
+    /// Used challenge responses to prevent replay
     used_responses: parking_lot::RwLock<HashSet<String>>,
-/// Bounded in-memory audit log
+    /// Bounded in-memory audit log
     audit_log: parking_lot::RwLock<VecDeque<ChallengeAuditRecord>>,
-/// Max records retained in audit log
+    /// Max records retained in audit log
     max_audit_records: usize,
 }
 
 impl ChallengeManager {
-/// Create new challenge manager
+    /// Create new challenge manager
     pub fn new(secret: [u8; 32]) -> Self {
         Self {
             secret,
@@ -385,21 +390,21 @@ impl ChallengeManager {
             max_audit_records: 10_000,
         }
     }
-    
-/// Configure CAPTCHA
+
+    /// Configure CAPTCHA
     pub fn with_captcha(mut self, provider: CaptchaProvider, site_key: String) -> Self {
         self.captcha_provider = Some(provider);
         self.captcha_site_key = Some(site_key);
         self
     }
-    
-/// Set PoW difficulty
+
+    /// Set PoW difficulty
     pub fn with_pow_difficulty(mut self, difficulty: u8) -> Self {
         self.pow_difficulty = difficulty;
         self
     }
-    
-/// Issue JavaScript challenge
+
+    /// Issue JavaScript challenge
     pub fn issue_js_challenge(&self) -> ChallengeType {
         let challenge = JsChallenge::generate();
         self.record_audit(ChallengeAuditRecord {
@@ -411,8 +416,8 @@ impl ChallengeManager {
         });
         ChallengeType::JavaScript(challenge)
     }
-    
-/// Issue Proof of Work challenge
+
+    /// Issue Proof of Work challenge
     pub fn issue_pow_challenge(&self) -> ChallengeType {
         let challenge = PowChallenge::generate(self.pow_difficulty);
         self.record_audit(ChallengeAuditRecord {
@@ -424,8 +429,8 @@ impl ChallengeManager {
         });
         ChallengeType::ProofOfWork(challenge)
     }
-    
-/// Issue cookie challenge
+
+    /// Issue cookie challenge
     pub fn issue_cookie_challenge(&self) -> ChallengeType {
         let challenge = CookieChallenge::generate(&self.secret);
         self.record_audit(ChallengeAuditRecord {
@@ -437,23 +442,25 @@ impl ChallengeManager {
         });
         ChallengeType::Cookie(challenge)
     }
-    
-/// Issue CAPTCHA challenge
+
+    /// Issue CAPTCHA challenge
     pub fn issue_captcha_challenge(&self) -> Option<ChallengeType> {
         let (provider, site_key) = match (&self.captcha_provider, &self.captcha_site_key) {
             (Some(p), Some(k)) => (p.clone(), k.clone()),
             _ => return None,
         };
-        
-        Some(ChallengeType::Captcha(CaptchaChallenge::generate(provider, &site_key)))
+
+        Some(ChallengeType::Captcha(CaptchaChallenge::generate(
+            provider, &site_key,
+        )))
     }
-    
-/// Verify a cookie challenge
+
+    /// Verify a cookie challenge
     pub fn verify_cookie(&self, cookie_value: &str) -> bool {
         CookieChallenge::verify(cookie_value, &self.secret)
     }
 
-/// Verify PoW challenge with replay protection and audit logging.
+    /// Verify PoW challenge with replay protection and audit logging.
     pub fn verify_pow_response(
         &self,
         challenge: &PowChallenge,
@@ -508,7 +515,7 @@ impl ChallengeManager {
         }
     }
 
-/// Verify JS challenge with replay protection and audit logging.
+    /// Verify JS challenge with replay protection and audit logging.
     pub fn verify_js_response(
         &self,
         challenge: &JsChallenge,
@@ -563,7 +570,7 @@ impl ChallengeManager {
         }
     }
 
-/// Read challenge audit records (oldest to newest).
+    /// Read challenge audit records (oldest to newest).
     pub fn audit_records(&self) -> Vec<ChallengeAuditRecord> {
         self.audit_log.read().iter().cloned().collect()
     }
@@ -575,21 +582,21 @@ impl ChallengeManager {
             audit.pop_front();
         }
     }
-    
-/// Select appropriate challenge based on risk level
+
+    /// Select appropriate challenge based on risk level
     pub fn select_challenge(&self, risk_score: f64) -> ChallengeType {
         if risk_score > 0.9 {
-// Very high risk - require CAPTCHA
+            // Very high risk - require CAPTCHA
             self.issue_captcha_challenge()
                 .unwrap_or_else(|| self.issue_pow_challenge())
         } else if risk_score > 0.7 {
-// High risk - PoW
+            // High risk - PoW
             self.issue_pow_challenge()
         } else if risk_score > 0.5 {
-// Medium risk - JS challenge
+            // Medium risk - JS challenge
             self.issue_js_challenge()
         } else {
-// Low risk - simple cookie
+            // Low risk - simple cookie
             self.issue_cookie_challenge()
         }
     }
@@ -623,11 +630,11 @@ fn hash_result(s: &str) -> String {
 }
 
 fn hmac_sign(secret: &[u8; 32], data: &[u8]) -> String {
-    use sha2::Sha256;
     use hmac::{Hmac, Mac};
-    
+    use sha2::Sha256;
+
     type HmacSha256 = Hmac<Sha256>;
-    
+
     let mut mac = match HmacSha256::new_from_slice(secret) {
         Ok(mac) => mac,
         Err(error) => {
@@ -642,21 +649,21 @@ fn hmac_sign(secret: &[u8; 32], data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_js_challenge_generation() {
         let challenge = JsChallenge::generate();
         assert!(!challenge.challenge_id.is_empty());
         assert!(!challenge.script.is_empty());
     }
-    
+
     #[test]
     fn test_pow_challenge() {
-// Use low difficulty for fast testing
+        // Use low difficulty for fast testing
         let challenge = PowChallenge::generate(8);
         let nonce = challenge.solve();
-        
-// Re-create challenge with same values but fresh timestamp
+
+        // Re-create challenge with same values but fresh timestamp
         let challenge = PowChallenge {
             challenge_id: challenge.challenge_id,
             prefix: challenge.prefix,
@@ -664,30 +671,30 @@ mod tests {
             time_limit_secs: 30,
             created_at: current_timestamp(),
         };
-        
+
         assert!(challenge.verify(&nonce));
     }
-    
+
     #[test]
     fn test_cookie_challenge() {
         let secret = [0u8; 32];
         let challenge = CookieChallenge::generate(&secret);
-        
+
         assert!(CookieChallenge::verify(&challenge.cookie_value, &secret));
     }
-    
+
     #[test]
     fn test_challenge_manager() {
         let secret = [0u8; 32];
         let manager = ChallengeManager::new(secret);
-        
-// Test challenge selection
+
+        // Test challenge selection
         let low_risk = manager.select_challenge(0.3);
         assert!(matches!(low_risk, ChallengeType::Cookie(_)));
-        
+
         let medium_risk = manager.select_challenge(0.6);
         assert!(matches!(medium_risk, ChallengeType::JavaScript(_)));
-        
+
         let high_risk = manager.select_challenge(0.8);
         assert!(matches!(high_risk, ChallengeType::ProofOfWork(_)));
     }

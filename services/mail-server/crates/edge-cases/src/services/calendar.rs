@@ -145,7 +145,7 @@ impl CalendarService {
         Self { pool }
     }
 
-/// Create a calendar invite.
+    /// Create a calendar invite.
     pub fn create_invite(
         &self,
         summary: &str,
@@ -193,12 +193,12 @@ impl CalendarService {
         })
     }
 
-/// Parse ICS content.
+    /// Parse ICS content.
     pub fn parse_ics(&self, content: &str) -> anyhow::Result<ParsedCalendar> {
         parse_ics_content(content)
     }
 
-/// Check if content type is calendar.
+    /// Check if content type is calendar.
     pub fn is_calendar_content_type(content_type: &str) -> bool {
         let lower = content_type.to_lowercase();
         crate::config::CALENDAR_CONTENT_TYPES
@@ -206,12 +206,8 @@ impl CalendarService {
             .any(|ct| lower.contains(ct))
     }
 
-/// Store event in DB.
-    pub async fn store_event(
-        &self,
-        message_id: &str,
-        event: &CalendarEvent,
-    ) -> anyhow::Result<()> {
+    /// Store event in DB.
+    pub async fn store_event(&self, message_id: &str, event: &CalendarEvent) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO edge_calendar_events
                (id, message_id, uid, summary, organizer_email, start_time, end_time,
@@ -257,7 +253,10 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
     }
 
     if event.all_day {
-        lines.push(format!("DTSTART;VALUE=DATE:{}", format_date_only(&event.start)));
+        lines.push(format!(
+            "DTSTART;VALUE=DATE:{}",
+            format_date_only(&event.start)
+        ));
         lines.push(format!("DTEND;VALUE=DATE:{}", format_date_only(&event.end)));
     } else {
         lines.push(format!("DTSTART:{}", format_datetime(&event.start)));
@@ -268,9 +267,12 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
     lines.push(format!("SEQUENCE:{}", event.sequence));
     lines.push(format!("DTSTAMP:{}", format_datetime(&event.created)));
     lines.push(format!("CREATED:{}", format_datetime(&event.created)));
-    lines.push(format!("LAST-MODIFIED:{}", format_datetime(&event.last_modified)));
+    lines.push(format!(
+        "LAST-MODIFIED:{}",
+        format_datetime(&event.last_modified)
+    ));
 
-// Organizer
+    // Organizer
     if let Some(ref name) = event.organizer.name {
         lines.push(format!(
             "ORGANIZER;CN={}:mailto:{}",
@@ -280,7 +282,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         lines.push(format!("ORGANIZER:mailto:{}", event.organizer.email));
     }
 
-// Attendees
+    // Attendees
     for att in &event.attendees {
         let mut params = Vec::new();
         if let Some(ref name) = att.name {
@@ -296,26 +298,26 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         ));
     }
 
-// URL (validate scheme)
+    // URL (validate scheme)
     if let Some(ref url) = event.url {
         if url.starts_with("http://") || url.starts_with("https://") {
             lines.push(format!("URL:{url}"));
         }
     }
 
-// Categories
+    // Categories
     if let Some(ref cats) = event.categories {
         if !cats.is_empty() {
             lines.push(format!("CATEGORIES:{}", cats.join(",")));
         }
     }
 
-// Priority
+    // Priority
     if let Some(pri) = event.priority {
         lines.push(format!("PRIORITY:{pri}"));
     }
 
-// Recurrence
+    // Recurrence
     if let Some(ref rrule) = event.recurrence {
         lines.push(generate_rrule(rrule));
     }
@@ -343,13 +345,20 @@ fn generate_rrule(rule: &RecurrenceRule) -> String {
     if let Some(ref months) = rule.by_month {
         parts.push(format!(
             "BYMONTH={}",
-            months.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(",")
+            months
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         ));
     }
     if let Some(ref days) = rule.by_month_day {
         parts.push(format!(
             "BYMONTHDAY={}",
-            days.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",")
+            days.iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         ));
     }
     format!("RRULE:{}", parts.join(";"))
@@ -430,10 +439,8 @@ fn format_date_only(dt: &DateTime<Utc>) -> String {
 // ── ICS parsing ────────────────────────────────────────────────────────────────
 
 fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
-// Unfold continuation lines
-    let unfolded = content
-        .replace("\r\n ", "")
-        .replace("\r\n\t", "");
+    // Unfold continuation lines
+    let unfolded = content.replace("\r\n ", "").replace("\r\n\t", "");
 
     let mut events = Vec::new();
     let mut method = CalendarMethod::Publish;
@@ -463,7 +470,7 @@ fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
             continue;
         }
 
-// Extract property name and value
+        // Extract property name and value
         let (prop_with_params, value) = match line.split_once(':') {
             Some((p, v)) => (p, v),
             None => continue,
@@ -511,7 +518,8 @@ fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
                     });
                 }
                 "CATEGORIES" => {
-                    builder.categories = Some(value.split(',').map(|s| s.trim().to_string()).collect());
+                    builder.categories =
+                        Some(value.split(',').map(|s| s.trim().to_string()).collect());
                 }
                 "RRULE" => builder.rrule = Some(value.to_string()),
                 _ => {}
@@ -528,19 +536,19 @@ fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
 
 fn parse_ics_datetime(value: &str) -> Option<DateTime<Utc>> {
     let clean = value.trim();
-// YYYYMMDDTHHMMSSZ
+    // YYYYMMDDTHHMMSSZ
     if clean.len() == 16 && clean.ends_with('Z') {
         return chrono::NaiveDateTime::parse_from_str(&clean[..15], "%Y%m%dT%H%M%S")
             .ok()
             .map(|n| n.and_utc());
     }
-// YYYYMMDDTHHMMSS
+    // YYYYMMDDTHHMMSS
     if clean.len() == 15 {
         return chrono::NaiveDateTime::parse_from_str(clean, "%Y%m%dT%H%M%S")
             .ok()
             .map(|n| n.and_utc());
     }
-// YYYYMMDD (date only)
+    // YYYYMMDD (date only)
     if clean.len() == 8 {
         return NaiveDate::parse_from_str(clean, "%Y%m%d")
             .ok()
@@ -592,7 +600,9 @@ impl CalendarEventBuilder {
     fn build(self) -> anyhow::Result<CalendarEvent> {
         let now = Utc::now();
         Ok(CalendarEvent {
-            uid: self.uid.unwrap_or_else(|| format!("{}@apexmail.ee", Uuid::new_v4())),
+            uid: self
+                .uid
+                .unwrap_or_else(|| format!("{}@apexmail.ee", Uuid::new_v4())),
             summary: self.summary.unwrap_or_default(),
             description: self.description,
             location: self.location,
@@ -621,7 +631,7 @@ impl CalendarEventBuilder {
 /// Parse an RRULE string into a RecurrenceRule struct.
 /// Example:"FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR;COUNT=10"
 fn parse_rrule(rrule: &str) -> Option<RecurrenceRule> {
-// Remove the "RRULE:" prefix if present
+    // Remove the "RRULE:" prefix if present
     let s = rrule.strip_prefix("RRULE:").unwrap_or(rrule);
 
     let mut freq = None;
@@ -650,7 +660,7 @@ fn parse_rrule(rrule: &str) -> Option<RecurrenceRule> {
                     value
                         .split(',')
                         .filter_map(|s| s.trim().parse::<u32>().ok())
-                        .collect()
+                        .collect(),
                 );
             }
             "BYMONTHDAY" => {
@@ -658,14 +668,14 @@ fn parse_rrule(rrule: &str) -> Option<RecurrenceRule> {
                     value
                         .split(',')
                         .filter_map(|s| s.trim().parse::<i32>().ok())
-                        .collect()
+                        .collect(),
                 );
             }
             _ => {} // Ignore unknown properties
         }
     }
 
-// FREQ is required
+    // FREQ is required
     let freq = freq?;
 
     Some(RecurrenceRule {
@@ -688,10 +698,27 @@ fn generate_html_preview(event: &CalendarEvent) -> String {
         event.start.format("%B %d, %Y %H:%M"),
         event.end.format("%H:%M %Z")
     );
-    let location_html = event.location.as_deref().map(escape_html).unwrap_or_default();
-    let desc_html = event.description.as_deref().map(escape_html).unwrap_or_default();
-    let organizer_html = event.organizer.name.as_deref()
-        .map(|n| format!("{} ({})", escape_html(n), escape_html(&event.organizer.email)))
+    let location_html = event
+        .location
+        .as_deref()
+        .map(escape_html)
+        .unwrap_or_default();
+    let desc_html = event
+        .description
+        .as_deref()
+        .map(escape_html)
+        .unwrap_or_default();
+    let organizer_html = event
+        .organizer
+        .name
+        .as_deref()
+        .map(|n| {
+            format!(
+                "{} ({})",
+                escape_html(n),
+                escape_html(&event.organizer.email)
+            )
+        })
         .unwrap_or_else(|| escape_html(&event.organizer.email));
 
     let mut attendee_rows = String::new();
@@ -723,8 +750,16 @@ fn generate_html_preview(event: &CalendarEvent) -> String {
   {att_table}
 </div>
 </div>"#,
-        loc = if location_html.is_empty() { String::new() } else { format!("<p><strong>Where:</strong> {location_html}</p>") },
-        desc = if desc_html.is_empty() { String::new() } else { format!("<p>{desc_html}</p>") },
+        loc = if location_html.is_empty() {
+            String::new()
+        } else {
+            format!("<p><strong>Where:</strong> {location_html}</p>")
+        },
+        desc = if desc_html.is_empty() {
+            String::new()
+        } else {
+            format!("<p>{desc_html}</p>")
+        },
         att_table = if attendee_rows.is_empty() {
             String::new()
         } else {
@@ -827,8 +862,14 @@ mod tests {
 
     #[test]
     fn test_calendar_method() {
-        assert_eq!(CalendarMethod::from_str("REQUEST").unwrap(), CalendarMethod::Request);
-        assert_eq!(CalendarMethod::from_str("cancel").unwrap(), CalendarMethod::Cancel);
+        assert_eq!(
+            CalendarMethod::from_str("REQUEST").unwrap(),
+            CalendarMethod::Request
+        );
+        assert_eq!(
+            CalendarMethod::from_str("cancel").unwrap(),
+            CalendarMethod::Cancel
+        );
         assert_eq!(CalendarMethod::Request.as_str(), "REQUEST");
     }
 
@@ -861,7 +902,10 @@ mod tests {
             end: Utc::now(),
             all_day: false,
             timezone: None,
-            organizer: Organizer { email: "org@test.com".into(), name: None },
+            organizer: Organizer {
+                email: "org@test.com".into(),
+                name: None,
+            },
             attendees: vec![],
             method: CalendarMethod::Publish,
             status: CalendarStatus::Confirmed,
@@ -874,7 +918,7 @@ mod tests {
             recurrence: None,
         };
         let html = generate_html_preview(&event);
-// Should properly escape HTML
+        // Should properly escape HTML
         assert!(html.contains("Test &lt;Event&gt;"));
         assert!(html.contains("org@test.com"));
     }

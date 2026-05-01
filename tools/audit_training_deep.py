@@ -10,6 +10,7 @@ import re
 from collections import defaultdict
 
 from common_paths import data_path
+from audit_output import emit
 
 # Canonical limits from plans.ts
 CANONICAL = {
@@ -207,21 +208,21 @@ def audit_training_data():
             issues.append(f"Line {i}: Invalid JSON")
     
     # Print report
-    print("=" * 70)
-    print("COMPREHENSIVE TRAINING DATA AUDIT REPORT")
-    print("=" * 70)
-    print(f"\nTotal training examples: {total_lines}")
-    print(f"\nPlan distribution:")
+    emit("=" * 70)
+    emit("COMPREHENSIVE TRAINING DATA AUDIT REPORT")
+    emit("=" * 70)
+    emit(f"\nTotal training examples: {total_lines}")
+    emit(f"\nPlan distribution:")
     for plan in PLAN_ORDER:
         if plan in plan_counts:
-            print(f"  {plan:12}: {plan_counts[plan]:4} examples")
+            emit(f"  {plan:12}: {plan_counts[plan]:4} examples")
     
     payg_count = sum(1 for line in lines if 'PAYG' in line and 'Plan: ' not in line[:200])
-    print(f"  {'PAYG':12}: ~{payg_count:4} references")
+    emit(f"  {'PAYG':12}: ~{payg_count:4} references")
     
-    print(f"\n{'=' * 70}")
-    print(f"CRITICAL ISSUES: {len(issues)}")
-    print("=" * 70)
+    emit(f"\n{'=' * 70}")
+    emit(f"CRITICAL ISSUES: {len(issues)}")
+    emit("=" * 70)
     
     if issues:
         # Group by type
@@ -243,30 +244,30 @@ def audit_training_data():
             ('⚠️  Other', other_issues),
         ]:
             if items:
-                print(f"\n{category} Issues ({len(items)}):")
+                emit(f"\n{category} Issues ({len(items)}):")
                 for item in items[:5]:
-                    print(f"  {item}")
+                    emit(f"  {item}")
                 if len(items) > 5:
-                    print(f"  ... and {len(items)-5} more")
+                    emit(f"  ... and {len(items)-5} more")
     else:
-        print("\n✅ No critical issues found!")
+        emit("\n✅ No critical issues found!")
     
     if warnings:
-        print(f"\n{'=' * 70}")
-        print(f"WARNINGS: {len(warnings)}")
-        print("=" * 70)
+        emit(f"\n{'=' * 70}")
+        emit(f"WARNINGS: {len(warnings)}")
+        emit("=" * 70)
         for w in warnings[:10]:
-            print(f"  {w}")
+            emit(f"  {w}")
         if len(warnings) > 10:
-            print(f"  ... and {len(warnings)-10} more")
+            emit(f"  ... and {len(warnings)-10} more")
     
-    print(f"\n{'=' * 70}")
-    print("SUMMARY")
-    print("=" * 70)
-    print(f"Total examples:    {total_lines}")
-    print(f"Critical issues:   {len(issues)}")
-    print(f"Warnings:          {len(warnings)}")
-    print(f"Status:            {'✅ PASS' if len(issues) == 0 else '❌ FAIL'}")
+    emit(f"\n{'=' * 70}")
+    emit("SUMMARY")
+    emit("=" * 70)
+    emit(f"Total examples:    {total_lines}")
+    emit(f"Critical issues:   {len(issues)}")
+    emit(f"Warnings:          {len(warnings)}")
+    emit(f"Status:            {'✅ PASS' if len(issues) == 0 else '❌ FAIL'}")
     
     return issues, warnings
 

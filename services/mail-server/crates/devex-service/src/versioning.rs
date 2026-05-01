@@ -19,7 +19,7 @@ impl Default for VersionRegistry {
 }
 
 impl VersionRegistry {
-/// Build the registry with the canonical version history.
+    /// Build the registry with the canonical version history.
     pub fn new() -> Self {
         let versions = vec![
             ApiVersion {
@@ -160,12 +160,12 @@ impl VersionRegistry {
         Self { versions }
     }
 
-/// Return all known versions, newest first.
+    /// Return all known versions, newest first.
     pub fn list_versions(&self) -> &[ApiVersion] {
         &self.versions
     }
 
-/// Look up a specific version by its `YYYY-MM` string.
+    /// Look up a specific version by its `YYYY-MM` string.
     pub fn get_version(&self, version: &str) -> Result<&ApiVersion, DevExError> {
         self.versions
             .iter()
@@ -173,7 +173,7 @@ impl VersionRegistry {
             .ok_or_else(|| DevExError::VersionNotFound(version.to_string()))
     }
 
-/// Check if a version is deprecated or sunset.
+    /// Check if a version is deprecated or sunset.
     pub fn is_deprecated(&self, version: &str) -> bool {
         self.versions.iter().any(|v| {
             v.version == version
@@ -181,14 +181,20 @@ impl VersionRegistry {
         })
     }
 
-/// Compare two version strings chronologically.
-/// Returns `Ordering::Less` if `a` was released before `b`,
-/// `Ordering::Greater` if after, and `Ordering::Equal` if same.
+    /// Compare two version strings chronologically.
+    /// Returns `Ordering::Less` if `a` was released before `b`,
+    /// `Ordering::Greater` if after, and `Ordering::Equal` if same.
     pub fn compare_versions(&self, a: &str, b: &str) -> std::cmp::Ordering {
         let parse = |v: &str| -> (i32, u32) {
             let parts: Vec<&str> = v.split('-').collect();
-            let year = parts.first().and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
-            let month = parts.get(1).and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+            let year = parts
+                .first()
+                .and_then(|p| p.parse::<i32>().ok())
+                .unwrap_or(0);
+            let month = parts
+                .get(1)
+                .and_then(|p| p.parse::<u32>().ok())
+                .unwrap_or(0);
             (year, month)
         };
         let va = parse(a);
@@ -242,7 +248,10 @@ mod tests {
     fn test_compare_versions() {
         let reg = VersionRegistry::new();
         assert_eq!(reg.compare_versions("2023-06", "2024-01"), Ordering::Less);
-        assert_eq!(reg.compare_versions("2024-01", "2023-10"), Ordering::Greater);
+        assert_eq!(
+            reg.compare_versions("2024-01", "2023-10"),
+            Ordering::Greater
+        );
         assert_eq!(reg.compare_versions("2023-10", "2023-10"), Ordering::Equal);
         assert_eq!(reg.compare_versions("2022-10", "2023-01"), Ordering::Less);
     }

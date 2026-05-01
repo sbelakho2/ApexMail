@@ -29,7 +29,10 @@ fn pixel_response() -> Response {
         .status(200)
         .header("content-type", "image/gif")
         .header("content-length", len)
-        .header("cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate")
+        .header(
+            "cache-control",
+            "no-store, no-cache, must-revalidate, proxy-revalidate",
+        )
         .header("pragma", "no-cache")
         .header("expires", "0")
         .header("vary", "*")
@@ -72,13 +75,8 @@ pub async fn handle_pixel_gif(
 
 // ── Shared open-recording logic ───────────────────────────────────────────────
 
-async fn record_open(
-    tracking_id: String,
-    headers: &HeaderMap,
-    addr: SocketAddr,
-    state: &AppState,
-) {
-// E-148:Validate length before any decryption attempt.
+async fn record_open(tracking_id: String, headers: &HeaderMap, addr: SocketAddr, state: &AppState) {
+    // E-148:Validate length before any decryption attempt.
     if tracking_id.len() < 10 || tracking_id.len() > 4096 {
         debug!(len = tracking_id.len(), "Pixel: invalid trackingId length");
         return;
@@ -91,12 +89,10 @@ async fn record_open(
 
     let ip = extract_client_ip(headers, addr.ip(), state);
 
-// E-190:Bot check — skip recording for known scanner/proxy UAs.
+    // E-190:Bot check — skip recording for known scanner/proxy UAs.
     let is_bot = state.bot_detector.is_bot(user_agent.as_deref(), Some(&ip));
     if is_bot {
-        info!(
-            "E-190: Bot detected on open pixel, skipping recording"
-        );
+        info!("E-190: Bot detected on open pixel, skipping recording");
         return;
     }
 
@@ -113,13 +109,16 @@ async fn record_open(
 
     let processor = state.processor.clone();
     tokio::spawn(async move {
-        if let Err(e) = processor.record_open(OpenData {
-            tenant_id: data.tenant_id,
-            message_id: data.message_id,
-            recipient: data.recipient,
-            user_agent,
-            ip_address: Some(ip),
-        }).await {
+        if let Err(e) = processor
+            .record_open(OpenData {
+                tenant_id: data.tenant_id,
+                message_id: data.message_id,
+                recipient: data.recipient,
+                user_agent,
+                ip_address: Some(ip),
+            })
+            .await
+        {
             error!(error = %e, "Failed to record open event");
         }
     });

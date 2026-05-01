@@ -29,7 +29,6 @@ node_modules/
 
 # Documentation (not needed at runtime)
 docs/
-*.md
 LICENSE
 !docs/
 !docs/api-contract-manifest.json

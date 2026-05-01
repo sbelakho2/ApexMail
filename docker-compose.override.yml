@@ -4,6 +4,8 @@
 # The main docker-compose.yml uses read_only + apparmor which prevents
 # containers from starting in typical dev environments.
 # This override provides standalone dev-friendly service definitions.
+# By default it starts only Postgres and Redis; opt into application services
+# with --profile full-stack, --profile monitoring, or --profile dev.
 # =============================================================================
 
 services:
@@ -17,7 +19,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-apexmail}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./tools/migrations:/docker-entrypoint-initdb.d:ro
     ports:
       - "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
     healthcheck:
@@ -27,7 +28,6 @@ services:
       retries: 5
     networks:
       - apexmail_data
-    security_opt: !override []
     secrets:
       - postgres_password
 
@@ -39,7 +39,7 @@ services:
     environment:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_MAXMEMORY: "256mb"
-      REDIS_MAXMEMORY_POLICY: "allkeys-lru"
+      REDIS_MAXMEMORY_POLICY: "noeviction"
     volumes:
       - redis_data:/data
       - ./deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
@@ -52,9 +52,24 @@ services:
       retries: 5
     networks:
       - apexmail_data
-    security_opt: !override []
     secrets:
       - redis_password
+
+  tracking:
+    profiles:
+      - full-stack
+
+  enterprise:
+    profiles:
+      - full-stack
+
+  pdf-renderer:
+    profiles:
+      - full-stack
+
+  clickhouse:
+    profiles:
+      - full-stack
 
 networks:
   apexmail_data:

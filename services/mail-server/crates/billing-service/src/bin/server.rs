@@ -13,37 +13,37 @@ use billing_service::{config::BillingConfig, maintenance, routes, AppState};
 #[derive(Parser, Debug)]
 #[command(name = "billing-service", about = "ApexMail billing service")]
 struct Cli {
-/// Listen address (overrides BILLING_LISTEN_ADDR).
+    /// Listen address (overrides BILLING_LISTEN_ADDR).
     #[arg(long, env = "BILLING_LISTEN_ADDR", default_value = "0.0.0.0:4100")]
     listen: String,
 
-/// Database URL.
+    /// Database URL.
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
 
-/// Redis URL.
+    /// Redis URL.
     #[arg(long, env = "REDIS_URL")]
     redis_url: String,
 
-/// Service auth token.
+    /// Service auth token.
     #[arg(long, env = "SERVICE_AUTH_TOKEN", default_value = "")]
     service_auth_token: String,
 
-/// Stripe webhook signing secret.
+    /// Stripe webhook signing secret.
     #[arg(long, env = "STRIPE_WEBHOOK_SECRET", default_value = "")]
     stripe_webhook_secret: String,
 
-/// Internal API base URL.
+    /// Internal API base URL.
     #[arg(long, env = "API_BASE_URL", default_value = "http://localhost:3001")]
     api_base_url: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-// Load .env if present (ignore errors).
+    // Load .env if present (ignore errors).
     let _ = dotenvy::dotenv();
 
-// Logging.
+    // Logging.
     fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(listen = %cli.listen, "starting billing-service");
 
-// Database pool.
+    // Database pool.
     let db = PgPoolOptions::new()
         .max_connections(20)
         .min_connections(2)
@@ -65,14 +65,14 @@ async fn main() -> anyhow::Result<()> {
         .connect(&cli.database_url)
         .await?;
 
-// Migrations are managed externally (apexmail-db crate or deploy tooling).
-// If you need auto-migration, point sqlx::migrate! at the correct path.
+    // Migrations are managed externally (apexmail-db crate or deploy tooling).
+    // If you need auto-migration, point sqlx::migrate! at the correct path.
 
-// Redis pool.
+    // Redis pool.
     let redis_cfg = deadpool_redis::Config::from_url(&cli.redis_url);
     let redis = redis_cfg.create_pool(Some(Runtime::Tokio1))?;
 
-// App state.
+    // App state.
     let config = BillingConfig {
         database_url: cli.database_url,
         redis_url: cli.redis_url,
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let app = routes::router(state.clone());
     maintenance::start_periodic_jobs(state.clone());
 
-// Bind & serve.
+    // Bind & serve.
     let listener = tokio::net::TcpListener::bind(&cli.listen).await?;
     tracing::info!("billing-service listening on {}", cli.listen);
 

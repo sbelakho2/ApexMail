@@ -21,7 +21,10 @@ fn optional_relation_rows<T>(
     match result {
         Ok(rows) => Ok(rows),
         Err(error) if is_optional_schema_error(&error) => {
-            tracing::warn!(table, "system health table missing; returning empty dataset");
+            tracing::warn!(
+                table,
+                "system health table missing; returning empty dataset"
+            );
             Ok(Vec::new())
         }
         Err(error) => Err(error.into()),
@@ -88,7 +91,7 @@ async fn system_health(
 ) -> Result<Json<SystemHealthResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-// ── Queues ─────────────────────────────────────────────────
+    // ── Queues ─────────────────────────────────────────────────
     let queue_rows = optional_relation_rows(
         sqlx::query_as::<_, (String, i64, i64)>(
             "SELECT queue_name,
@@ -105,11 +108,16 @@ async fn system_health(
         .into_iter()
         .map(|(name, depth, proc)| {
             let status = if depth > 1000 { "warning" } else { "healthy" };
-            QueueStatus { name, depth, processing: proc, status: status.into() }
+            QueueStatus {
+                name,
+                depth,
+                processing: proc,
+                status: status.into(),
+            }
         })
         .collect();
 
-// ── Workers (derived from queue_jobs.worker_id) ────────────
+    // ── Workers (derived from queue_jobs.worker_id) ────────────
     let worker_rows = optional_relation_rows(
         sqlx::query_as::<_, (String, String, Option<chrono::DateTime<chrono::Utc>>)>(
             "SELECT DISTINCT worker_id, queue_name, MAX(updated_at)
@@ -126,7 +134,10 @@ async fn system_health(
         .map(|(id, queue, hb)| WorkerStatus {
             name: format!("{queue}-worker"),
             r#type: queue,
-            status: if hb.map(|t| t > chrono::Utc::now() - chrono::Duration::minutes(5)).unwrap_or(false) {
+            status: if hb
+                .map(|t| t > chrono::Utc::now() - chrono::Duration::minutes(5))
+                .unwrap_or(false)
+            {
                 "running".into()
             } else {
                 "idle".into()
@@ -136,18 +147,21 @@ async fn system_health(
         })
         .collect();
 
-// ── MTA nodes from ip_pool_addresses ───────────────────────
+    // ── MTA nodes from ip_pool_addresses ───────────────────────
     let mta_rows = optional_relation_rows(
-        sqlx::query_as::<_, (
-            String,
-            String,
-            Option<String>,
-            String,
-            Option<i32>,
-            Option<i64>,
-            Option<i64>,
-            bool,
-        )>(
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<i32>,
+                Option<i64>,
+                Option<i64>,
+                bool,
+            ),
+        >(
             "SELECT id::text, ip_address, pool_id::text, status,
                     warmup_day, daily_limit, daily_sent, is_fully_warmed
              FROM ip_pool_addresses ORDER BY ip_address LIMIT 50",
@@ -160,21 +174,30 @@ async fn system_health(
     let mta_nodes: Vec<MtaNode> = mta_rows
         .into_iter()
         .map(|(id, ip, pool, status, wd, dl, ds, fw)| MtaNode {
-            id, ip_address: ip, pool_id: pool, status,
-            warmup_day: wd, daily_limit: dl, daily_sent: ds, is_fully_warmed: fw,
+            id,
+            ip_address: ip,
+            pool_id: pool,
+            status,
+            warmup_day: wd,
+            daily_limit: dl,
+            daily_sent: ds,
+            is_fully_warmed: fw,
         })
         .collect();
 
-// ── Alerts ─────────────────────────────────────────────────
+    // ── Alerts ─────────────────────────────────────────────────
     let alert_rows = optional_relation_rows(
-        sqlx::query_as::<_, (
-            String,
-            String,
-            String,
-            String,
-            chrono::DateTime<chrono::Utc>,
-            bool,
-        )>(
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                chrono::DateTime<chrono::Utc>,
+                bool,
+            ),
+        >(
             "SELECT id::text, severity, component, message, timestamp, acknowledged
              FROM system_alerts ORDER BY timestamp DESC LIMIT 50",
         )
@@ -186,10 +209,19 @@ async fn system_health(
     let alerts: Vec<SystemAlert> = alert_rows
         .into_iter()
         .map(|(id, sev, comp, msg, ts, ack)| SystemAlert {
-            id, severity: sev, component: comp, message: msg,
-            timestamp: ts.to_rfc3339(), acknowledged: ack,
+            id,
+            severity: sev,
+            component: comp,
+            message: msg,
+            timestamp: ts.to_rfc3339(),
+            acknowledged: ack,
         })
         .collect();
 
-    Ok(Json(SystemHealthResponse { queues, workers, mta_nodes, alerts }))
+    Ok(Json(SystemHealthResponse {
+        queues,
+        workers,
+        mta_nodes,
+        alerts,
+    }))
 }

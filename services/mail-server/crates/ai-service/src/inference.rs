@@ -24,14 +24,14 @@ impl InferenceEngine {
         }
     }
 
-/// Register (or replace) a model in the registry.
+    /// Register (or replace) a model in the registry.
     pub fn register_model(&self, model: Model) {
         self.models.insert(model.id.clone(), model);
     }
 
-/// Run a single prediction against a registered model.
-/// In this simple implementation the "prediction" is a mock pass-through
-/// that measures latency and produces a placeholder output.
+    /// Run a single prediction against a registered model.
+    /// In this simple implementation the "prediction" is a mock pass-through
+    /// that measures latency and produces a placeholder output.
     pub fn run_prediction(
         &self,
         model_id: &str,
@@ -51,7 +51,7 @@ impl InferenceEngine {
 
         let start = Instant::now();
 
-// Simple mock inference — echo a confidence based on model accuracy
+        // Simple mock inference — echo a confidence based on model accuracy
         let confidence = model.accuracy;
         let output = serde_json::json!({
             "model": model.name,
@@ -60,10 +60,12 @@ impl InferenceEngine {
         });
 
         let latency_ms = start.elapsed().as_millis() as u64;
-        Ok(Prediction::new(model_id, input, output, confidence, latency_ms))
+        Ok(Prediction::new(
+            model_id, input, output, confidence, latency_ms,
+        ))
     }
 
-/// Run predictions for a batch of inputs.
+    /// Run predictions for a batch of inputs.
     pub fn batch_predict(
         &self,
         model_id: &str,
@@ -75,17 +77,20 @@ impl InferenceEngine {
             .collect()
     }
 
-/// Retrieve a model by ID.
+    /// Retrieve a model by ID.
     pub fn get_model(&self, id: &str) -> Option<Model> {
         self.models.get(id).map(|entry| entry.value().clone())
     }
 
-/// List all registered models.
+    /// List all registered models.
     pub fn list_models(&self) -> Vec<Model> {
-        self.models.iter().map(|entry| entry.value().clone()).collect()
+        self.models
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
-/// Return summary statistics for a model.
+    /// Return summary statistics for a model.
     pub fn model_stats(&self, id: &str) -> Result<serde_json::Value, AiError> {
         let model = self
             .models

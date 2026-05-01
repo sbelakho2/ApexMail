@@ -7,6 +7,7 @@ import os, json, time, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 from datasets import load_dataset
+from training_data import expand_system_prompt_refs
 
 MODEL_PATH  = "/workspace/models/Qwen3-Next-80B-A3B-Instruct"
 ADAPTER_DIR = "/workspace/output_agent"
@@ -45,6 +46,7 @@ def main():
     # Evaluate test set loss
     print("[3/5] Computing test set loss...")
     test_ds = load_dataset("json", data_files=TEST_DATA, split="train")
+    test_ds = expand_system_prompt_refs(test_ds, TEST_DATA)
     total_loss = 0
     total_tokens = 0
     num_samples = len(test_ds)
@@ -154,7 +156,7 @@ def main():
     system_prompt = (
         "You are ApexMail Agent — the AI support agent for the ApexMail email "
         "platform (Backend: apexmail.ee). Be helpful, accurate, and concise. "
-        "Contact: contact@apexmail.ee"
+        "Contact: support@apexmail.ee"
     )
 
     for prompt_text in sample_prompts:

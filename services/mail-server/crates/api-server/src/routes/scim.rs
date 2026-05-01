@@ -15,9 +15,18 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/Users", get(list_users).post(create_user))
-        .route("/Users/:id", get(get_user).put(update_user).delete(delete_user))
+        .route(
+            "/Users/:id",
+            get(get_user).put(update_user).delete(delete_user),
+        )
         .route("/Groups", get(list_groups).post(create_group))
-        .route("/Groups/:id", get(get_group).put(update_group).patch(patch_group).delete(delete_group))
+        .route(
+            "/Groups/:id",
+            get(get_group)
+                .put(update_group)
+                .patch(patch_group)
+                .delete(delete_group),
+        )
 }
 
 // ─── SCIM Types ────────────────────────────────────────────────
@@ -120,12 +129,10 @@ async fn list_users(
     let start_index = params.cursor.unwrap_or(params.start_index);
     let offset = (start_index - 1).max(0);
     let count = params.count.min(MAX_SCIM_COUNT);
-    let total = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM users WHERE tenant_id = $1",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_one(&state.db)
-    .await?;
+    let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
+        .bind(&auth.tenant_id)
+        .fetch_one(&state.db)
+        .await?;
 
     let rows = sqlx::query_as::<_, UserScimRow>(
         "SELECT id, email, name, status FROM users WHERE tenant_id = $1 ORDER BY email LIMIT $2 OFFSET $3",
@@ -136,17 +143,23 @@ async fn list_users(
     .fetch_all(&state.db)
     .await?;
 
-    let resources: Vec<ScimUser> = rows.into_iter().map(|r| ScimUser {
-        schemas: vec![SCIM_USER_SCHEMA.into()],
-        id: r.id.to_string(),
-        user_name: r.email.clone(),
-        name: r.name.map(|n| ScimName {
-            given_name: Some(n),
-            family_name: None,
-        }),
-        emails: vec![ScimEmail { value: r.email, primary: true }],
-        active: r.status == "active",
-    }).collect();
+    let resources: Vec<ScimUser> = rows
+        .into_iter()
+        .map(|r| ScimUser {
+            schemas: vec![SCIM_USER_SCHEMA.into()],
+            id: r.id.to_string(),
+            user_name: r.email.clone(),
+            name: r.name.map(|n| ScimName {
+                given_name: Some(n),
+                family_name: None,
+            }),
+            emails: vec![ScimEmail {
+                value: r.email,
+                primary: true,
+            }],
+            active: r.status == "active",
+        })
+        .collect();
 
     Ok(Json(ScimListResponse {
         schemas: vec![SCIM_LIST_SCHEMA.into()],
@@ -164,7 +177,9 @@ async fn create_user(
 ) -> Result<(StatusCode, Json<ScimUser>), ApiError> {
     require_scopes(&auth, &["scim:write"])?;
 
-    let email = body.emails.first()
+    let email = body
+        .emails
+        .first()
         .map(|e| e.value.clone())
         .unwrap_or(body.user_name.clone());
 
@@ -172,7 +187,7 @@ async fn create_user(
     let id = apexmail_lib::id::generate_id("", 26);
     let now = Utc::now();
 
-// SCIM users must authenticate via SSO; direct password login is blocked.
+    // SCIM users must authenticate via SSO; direct password login is blocked.
     match sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,'member','active',$6,$6)",
@@ -199,8 +214,14 @@ async fn create_user(
             schemas: vec![SCIM_USER_SCHEMA.into()],
             id: id.clone(),
             user_name: email.clone(),
-            name: name.map(|n| ScimName { given_name: Some(n), family_name: None }),
-            emails: vec![ScimEmail { value: email, primary: true }],
+            name: name.map(|n| ScimName {
+                given_name: Some(n),
+                family_name: None,
+            }),
+            emails: vec![ScimEmail {
+                value: email,
+                primary: true,
+            }],
             active: true,
         }),
     ))
@@ -226,8 +247,14 @@ async fn get_user(
         schemas: vec![SCIM_USER_SCHEMA.into()],
         id: row.id,
         user_name: row.email.clone(),
-        name: row.name.map(|n| ScimName { given_name: Some(n), family_name: None }),
-        emails: vec![ScimEmail { value: row.email, primary: true }],
+        name: row.name.map(|n| ScimName {
+            given_name: Some(n),
+            family_name: None,
+        }),
+        emails: vec![ScimEmail {
+            value: row.email,
+            primary: true,
+        }],
         active: row.status == "active",
     }))
 }
@@ -240,7 +267,11 @@ async fn update_user(
 ) -> Result<Json<ScimUser>, ApiError> {
     require_scopes(&auth, &["scim:write"])?;
 
-    let email = body.emails.first().map(|e| e.value.clone()).unwrap_or(body.user_name.clone());
+    let email = body
+        .emails
+        .first()
+        .map(|e| e.value.clone())
+        .unwrap_or(body.user_name.clone());
     let name = body.name.as_ref().and_then(|n| n.given_name.clone());
     let status = if body.active { "active" } else { "deactivated" };
 
@@ -265,8 +296,14 @@ async fn update_user(
         schemas: vec![SCIM_USER_SCHEMA.into()],
         id,
         user_name: email.clone(),
-        name: name.map(|n| ScimName { given_name: Some(n), family_name: None }),
-        emails: vec![ScimEmail { value: email, primary: true }],
+        name: name.map(|n| ScimName {
+            given_name: Some(n),
+            family_name: None,
+        }),
+        emails: vec![ScimEmail {
+            value: email,
+            primary: true,
+        }],
         active: body.active,
     }))
 }
@@ -305,12 +342,11 @@ async fn list_groups(
     let start_index = params.cursor.unwrap_or(params.start_index);
     let offset = (start_index - 1).max(0);
     let count = params.count.min(MAX_SCIM_COUNT);
-    let total = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_one(&state.db)
-    .await?;
+    let total =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1")
+            .bind(&auth.tenant_id)
+            .fetch_one(&state.db)
+            .await?;
 
     let group_rows = sqlx::query_as::<_, GroupScimRow>(
         "SELECT id, scim_id, display_name, created_at FROM scim_groups 
@@ -338,8 +374,8 @@ async fn list_groups(
         .await?
     };
 
-// Group members by group_id for efficient lookup.
-    let mut members_by_group: std::collections::HashMap<String, Vec<ScimMember>> = 
+    // Group members by group_id for efficient lookup.
+    let mut members_by_group: std::collections::HashMap<String, Vec<ScimMember>> =
         std::collections::HashMap::new();
     for m in all_members {
         members_by_group
@@ -393,7 +429,7 @@ async fn create_group(
     .execute(&state.db)
     .await?;
 
-// Add members if provided
+    // Add members if provided
     for member in &body.members {
         if let Ok(user_id) = Uuid::parse_str(&member.value) {
             sqlx::query(
@@ -446,7 +482,7 @@ async fn get_group(
             WHERE m.group_id = $1 AND m.tenant_id = $2",
     )
     .bind(row.id)
-        .bind(auth.tenant_id.to_string())
+    .bind(auth.tenant_id.to_string())
     .fetch_all(&state.db)
     .await?;
 
@@ -454,10 +490,13 @@ async fn get_group(
         schemas: vec![SCIM_GROUP_SCHEMA.into()],
         id: row.scim_id,
         display_name: row.display_name,
-        members: members.into_iter().map(|m| ScimMember {
-            value: m.user_id.to_string(),
-            display: m.display.or(m.email),
-        }).collect(),
+        members: members
+            .into_iter()
+            .map(|m| ScimMember {
+                value: m.user_id.to_string(),
+                display: m.display.or(m.email),
+            })
+            .collect(),
     }))
 }
 
@@ -479,15 +518,13 @@ async fn update_group(
     .await?
     .ok_or_else(|| ApiError::NotFound("group not found".into()))?;
 
-    sqlx::query(
-        "UPDATE scim_groups SET display_name = $1, updated_at = NOW() WHERE id = $2",
-    )
-    .bind(&body.display_name)
-    .bind(&row.id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE scim_groups SET display_name = $1, updated_at = NOW() WHERE id = $2")
+        .bind(&body.display_name)
+        .bind(&row.id)
+        .execute(&state.db)
+        .await?;
 
-// Replace members entirely
+    // Replace members entirely
     sqlx::query("DELETE FROM scim_group_members WHERE group_id = $1 AND tenant_id = $2")
         .bind(&row.id)
         .bind(auth.tenant_id.to_string())
@@ -575,7 +612,10 @@ async fn patch_group(
                         for member in members {
                             if let Some(value) = member.get("value").and_then(|v| v.as_str()) {
                                 if let Ok(user_id) = Uuid::parse_str(value) {
-                                    let display = member.get("display").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                    let display = member
+                                        .get("display")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
                                     sqlx::query(
                                         "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
                                          VALUES ($1, $2, $3, $4, $5) ON CONFLICT (group_id, user_id) DO NOTHING",
@@ -595,9 +635,11 @@ async fn patch_group(
             }
             "remove" => {
                 if let Some(path) = &op.path {
-// Path like:members[value eq "user-uuid"]
+                    // Path like:members[value eq "user-uuid"]
                     if path.starts_with("members[value eq \"") {
-                        let user_id_str = path.trim_start_matches("members[value eq \"").trim_end_matches("\"]");
+                        let user_id_str = path
+                            .trim_start_matches("members[value eq \"")
+                            .trim_end_matches("\"]");
                         if let Ok(user_id) = Uuid::parse_str(user_id_str) {
                             sqlx::query(
                                 "DELETE FROM scim_group_members WHERE group_id = $1 AND user_id = $2 AND tenant_id = $3",
@@ -615,7 +657,7 @@ async fn patch_group(
         }
     }
 
-// Fetch updated members
+    // Fetch updated members
     let members = sqlx::query_as::<_, GroupMemberRow>(
         "SELECT m.user_id, m.display, u.email 
          FROM scim_group_members m
@@ -623,7 +665,7 @@ async fn patch_group(
             WHERE m.group_id = $1 AND m.tenant_id = $2",
     )
     .bind(&row.id)
-        .bind(auth.tenant_id.to_string())
+    .bind(auth.tenant_id.to_string())
     .fetch_all(&state.db)
     .await?;
 
@@ -631,10 +673,13 @@ async fn patch_group(
         schemas: vec![SCIM_GROUP_SCHEMA.into()],
         id: scim_id,
         display_name,
-        members: members.into_iter().map(|m| ScimMember {
-            value: m.user_id.to_string(),
-            display: m.display.or(m.email),
-        }).collect(),
+        members: members
+            .into_iter()
+            .map(|m| ScimMember {
+                value: m.user_id.to_string(),
+                display: m.display.or(m.email),
+            })
+            .collect(),
     }))
 }
 
@@ -645,13 +690,11 @@ async fn delete_group(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["scim:write"])?;
 
-    let result = sqlx::query(
-        "DELETE FROM scim_groups WHERE scim_id = $1 AND tenant_id = $2",
-    )
-    .bind(&scim_id)
-    .bind(auth.tenant_id.to_string())
-    .execute(&state.db)
-    .await?;
+    let result = sqlx::query("DELETE FROM scim_groups WHERE scim_id = $1 AND tenant_id = $2")
+        .bind(&scim_id)
+        .bind(auth.tenant_id.to_string())
+        .execute(&state.db)
+        .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("group not found".into()));
@@ -705,8 +748,14 @@ mod tests {
             schemas: vec![SCIM_USER_SCHEMA.into()],
             id: String::new(),
             user_name: "alice@example.com".into(),
-            name: Some(ScimName { given_name: Some("Alice".into()), family_name: None }),
-            emails: vec![ScimEmail { value: "alice@example.com".into(), primary: true }],
+            name: Some(ScimName {
+                given_name: Some("Alice".into()),
+                family_name: None,
+            }),
+            emails: vec![ScimEmail {
+                value: "alice@example.com".into(),
+                primary: true,
+            }],
             active: true,
         };
         let json = serde_json::to_value(&user).unwrap();

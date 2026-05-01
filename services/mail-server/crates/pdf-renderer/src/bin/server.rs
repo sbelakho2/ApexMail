@@ -14,11 +14,11 @@ use pdf_renderer::pdf_router;
 #[derive(Parser, Debug)]
 #[command(name = "pdf-renderer", about = "ApexMail PDF generation service")]
 struct Args {
-/// Host to bind to
+    /// Host to bind to
     #[arg(long, env = "PDF_HOST", default_value = "0.0.0.0")]
     host: String,
 
-/// Port to listen on
+    /// Port to listen on
     #[arg(long, short, env = "PDF_PORT", default_value_t = 3004)]
     port: u16,
 }
@@ -27,7 +27,7 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-// Initialize tracing
+    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -52,7 +52,9 @@ async fn main() -> anyhow::Result<()> {
     info!(addr = %addr, "PDF renderer service listening");
 
     let shutdown = async {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

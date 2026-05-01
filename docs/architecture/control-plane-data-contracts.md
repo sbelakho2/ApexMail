@@ -69,18 +69,18 @@ Relevant current implementation files:
 ### Secrets Management
 
 #### `GET /api/secrets`
-- **Response 200:** `{ secrets: Secret[] }` (values redacted)
+- **Response 200:** `{ secrets: Secret[] }` inventory records only. The control-plane surface returns metadata and rotation status; raw secret values stay in the dedicated secrets management layer and are never returned here.
 
 #### `POST /api/secrets`
-- **Request:** `{ name: string, value: string, scope?: string }`
-- **Response 201:** `{ secret: Secret }` (value redacted in response)
+- **Request:** `{ name: string, type: string, description?: string, rotationPolicy?: string }`
+- **Response 201:** `{ secret: Secret }` inventory record created.
 
 #### `PATCH /api/secrets`
-- **Request:** `{ name: string, value?: string, scope?: string }`
-- **Response 200:** `{ secret: Secret }`
+- **Request:** `{ id: string, action: "rotate" | "revoke" }`
+- **Response 200:** `{ success: true, ... }`
 
 #### `DELETE /api/secrets`
-- **Request:** `{ name: string }`
+- **Request:** `{ id: string }`
 - **Response 200:** `{ success: true }`
 
 ### Analytics & Dashboard

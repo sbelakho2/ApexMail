@@ -22,7 +22,9 @@ pub struct CampaignsQuery {
     pub offset: i64,
 }
 
-fn default_limit() -> i64 { 50 }
+fn default_limit() -> i64 {
+    50
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,7 +48,7 @@ async fn list_campaigns(
 ) -> Result<Json<Vec<CampaignRow>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-// Check table exists
+    // Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class WHERE relname = 'drip_campaigns')",
     )
@@ -62,11 +64,21 @@ async fn list_campaigns(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-    let rows = sqlx::query_as::<_, (
-        String, String, String, Option<String>, Option<String>, Option<String>,
-        serde_json::Value, serde_json::Value,
-        chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>,
-    )>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+            serde_json::Value,
+            chrono::DateTime<chrono::Utc>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ),
+    >(
         "SELECT id::text, name, status, description, from_email, from_name,
                 COALESCE(sequence, '[]'::jsonb), COALESCE(stats, '{}'::jsonb),
                 created_at, started_at
@@ -75,17 +87,24 @@ async fn list_campaigns(
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
-    .await
-    ?;
+    .await?;
 
     let campaigns: Vec<CampaignRow> = rows
         .into_iter()
-        .map(|(id, name, status, desc, fe, fn_, seq, stats, ca, sa)| CampaignRow {
-            id, name, status, description: desc, from_email: fe, from_name: fn_,
-            sequence: seq, stats,
-            created_at: ca.to_rfc3339(),
-            started_at: sa.map(|t| t.to_rfc3339()),
-        })
+        .map(
+            |(id, name, status, desc, fe, fn_, seq, stats, ca, sa)| CampaignRow {
+                id,
+                name,
+                status,
+                description: desc,
+                from_email: fe,
+                from_name: fn_,
+                sequence: seq,
+                stats,
+                created_at: ca.to_rfc3339(),
+                started_at: sa.map(|t| t.to_rfc3339()),
+            },
+        )
         .collect();
 
     Ok(Json(campaigns))

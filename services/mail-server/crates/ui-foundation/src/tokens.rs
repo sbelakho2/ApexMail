@@ -1,7 +1,8 @@
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
-pub const BASELINE_JSON: &str = include_str!("../../../../../docs/development/ui-design-token-baseline.json");
+pub const BASELINE_JSON: &str =
+    include_str!("../../../../../docs/development/ui-design-token-baseline.json");
 
 static BASELINE: Lazy<Value> = Lazy::new(|| {
     serde_json::from_str(BASELINE_JSON).expect("ui design token baseline json should parse")
@@ -53,10 +54,7 @@ fn flatten_entries(value: &Value) -> Vec<TokenEntry> {
             .iter()
             .filter_map(entry_from_value)
             .collect::<Vec<_>>(),
-        Value::Object(map) => map
-            .values()
-            .flat_map(flatten_entries)
-            .collect::<Vec<_>>(),
+        Value::Object(map) => map.values().flat_map(flatten_entries).collect::<Vec<_>>(),
         _ => Vec::new(),
     }
 }
@@ -89,10 +87,22 @@ mod tests {
 
     #[test]
     fn resolves_known_web_tokens() {
-        assert_eq!(token_value("web", "colors", " --background").as_deref(), Some("248 246 243"));
-        assert_eq!(token_value("web", "spacing", " --space-4").as_deref(), Some("16px"));
-        assert_eq!(token_value("web", "motion", " --motion-duration-180").as_deref(), Some("180ms"));
-        assert_eq!(token_value("web", "radius", " --radius-lg").as_deref(), Some("18px"));
+        assert_eq!(
+            token_value("web", "colors", " --background").as_deref(),
+            Some("248 246 243")
+        );
+        assert_eq!(
+            token_value("web", "spacing", " --space-4").as_deref(),
+            Some("16px")
+        );
+        assert_eq!(
+            token_value("web", "motion", " --motion-duration-180").as_deref(),
+            Some("180ms")
+        );
+        assert_eq!(
+            token_value("web", "radius", " --radius-lg").as_deref(),
+            Some("18px")
+        );
     }
 
     #[test]

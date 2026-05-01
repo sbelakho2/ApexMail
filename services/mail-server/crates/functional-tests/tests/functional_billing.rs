@@ -1,7 +1,7 @@
 //! Functional tests for billing-service:plans, overage, VAT, types.
 
-use billing_service::plans::{calculate_overage_cost, default_plans};
 use billing_service::invoices::calculate_vat;
+use billing_service::plans::{calculate_overage_cost, default_plans};
 use billing_service::types::*;
 
 // ── Plans ──────────────────────────────────────────────────────
@@ -23,11 +23,17 @@ fn all_seven_default_plans_exist() {
 #[test]
 fn plan_lookup_by_name() {
     let plans = default_plans();
-    let free = plans.iter().find(|p| p.name == "free").expect("free plan must exist");
+    let free = plans
+        .iter()
+        .find(|p| p.name == "free")
+        .expect("free plan must exist");
     assert_eq!(free.price_monthly, 0);
     assert_eq!(free.email_limit, 3_000);
 
-    let ent = plans.iter().find(|p| p.name == "enterprise").expect("enterprise plan must exist");
+    let ent = plans
+        .iter()
+        .find(|p| p.name == "enterprise")
+        .expect("enterprise plan must exist");
     assert!(ent.features.hipaa_compliance);
     assert!(ent.features.sso_enabled);
 }
@@ -63,9 +69,9 @@ fn overage_unlimited_is_zero() {
 
 #[test]
 fn overage_above_limit() {
-// 1000 overage * 0.04 cents = 40 cents
+    // 1000 overage * 0.04 cents = 40 cents
     assert_eq!(calculate_overage_cost(4_000, 3_000), 40);
-// 10_000 overage * 0.04 = 400 cents
+    // 10_000 overage * 0.04 = 400 cents
     assert_eq!(calculate_overage_cost(13_000, 3_000), 400);
 }
 

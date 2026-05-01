@@ -64,7 +64,7 @@ kubectl create secret generic apexmail-kek \
 | `apiServer.replicaCount`           | 2              | API server replicas                     |
 | `trackingService.replicaCount`     | 2              | Tracking service replicas               |
 | `mta.replicaCount`                 | 2              | MTA replicas                            |
-| `ingress.hosts[0].host`            | `mail.example.com` | Your domain                         |
+| `ingress.hosts[0].host`            | `api.apexmail.ee`  | Your API domain                     |
 | `postgresql.enabled`               | `true`         | Deploy PostgreSQL subchart              |
 | `redis.enabled`                    | `true`         | Deploy Redis subchart                   |
 | `hipaa.enabled`                    | `false`        | Enable HIPAA encryption features        |

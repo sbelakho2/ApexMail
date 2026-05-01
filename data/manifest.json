@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-05-01",
+  "sourceOfTruth": "docs/pricing.md",
+  "datasets": {
+    "golden_qa.jsonl": {
+      "version": "2026-04-30",
+      "purpose": "Regression QA prompts and expected answers for product and pricing checks.",
+      "provenance": "Curated internal evaluation set kept in Git for deterministic regression testing.",
+      "owner": "ApexMail Team"
+    },
+    "system_prompts.json": {
+      "version": "2026-05-01",
+      "purpose": "Shared system prompt catalog referenced by compact training, validation, and test JSONL records.",
+      "provenance": "Extracted from repeated ChatML system blocks in the 2026-04-30 train/test/val splits.",
+      "owner": "ApexMail Team"
+    },
+    "train.jsonl": {
+      "version": "2026-05-01",
+      "purpose": "Primary compact training corpus for general ApexMail assistant behavior.",
+      "provenance": "Maintained in-repo from reviewed product and documentation examples.",
+      "owner": "ApexMail Team"
+    },
+    "train_agent.jsonl": {
+      "version": "2026-04-30",
+      "purpose": "Task-oriented agent training data for ApexMail-specific workflows.",
+      "provenance": "Derived from curated internal workflow examples and reviewed prompts.",
+      "owner": "ApexMail Team"
+    },
+    "val.jsonl": {
+      "version": "2026-05-01",
+      "purpose": "Compact validation set for tuning and regression checks during training iterations.",
+      "provenance": "Maintained alongside the training corpus to track behavior changes over time.",
+      "owner": "ApexMail Team"
+    },
+    "test.jsonl": {
+      "version": "2026-05-01",
+      "purpose": "Compact holdout evaluation set for post-training quality checks.",
+      "provenance": "Reserved in-repo evaluation dataset kept separate from training inputs.",
+      "owner": "ApexMail Team"
+    },
+    "recovered_training.jsonl": {
+      "version": "2026-04-30",
+      "purpose": "Recovered historical examples retained for auditability and selective backfill.",
+      "provenance": "Recovered legacy training data retained until every record is either re-curated or retired.",
+      "owner": "ApexMail Team"
+    }
+  }
+}

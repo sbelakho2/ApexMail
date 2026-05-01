@@ -35,43 +35,43 @@ use std::sync::OnceLock;
 /// A detected PII instance
 #[derive(Debug, Clone)]
 pub struct PiiMatch {
-/// Type of PII found
+    /// Type of PII found
     pub pii_type: PiiType,
-/// Redacted representation (e.g., "XXXX-XXXX-XXXX-1234")
+    /// Redacted representation (e.g., "XXXX-XXXX-XXXX-1234")
     pub redacted: String,
-/// Risk score for this finding (may be modified by context)
+    /// Risk score for this finding (may be modified by context)
     pub risk: f64,
-/// Original risk score before context modifiers
+    /// Original risk score before context modifiers
     pub base_risk: f64,
-/// Byte offset in the scanned text
+    /// Byte offset in the scanned text
     pub offset: usize,
-/// Context modifier applied (if any)
+    /// Context modifier applied (if any)
     pub context_modifier: Option<ContextModifier>,
 }
 
 /// Context modifiers that can reduce PII risk scores
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextModifier {
-/// Negation detected ("not my", "don't", "never send")
+    /// Negation detected ("not my", "don't", "never send")
     Negation,
-/// Example/test context ("example", "test card", "sample")
+    /// Example/test context ("example", "test card", "sample")
     Example,
-/// Documentation context ("documentation", "template")
+    /// Documentation context ("documentation", "template")
     Documentation,
-/// Quoted/code context (inside quotes or code blocks)
+    /// Quoted/code context (inside quotes or code blocks)
     Quoted,
 }
 
 /// Types of PII
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PiiType {
-/// Credit/debit card number
+    /// Credit/debit card number
     CreditCard,
-/// US Social Security Number
+    /// US Social Security Number
     Ssn,
-/// Phone number
+    /// Phone number
     PhoneNumber,
-/// Email address
+    /// Email address
     EmailAddress,
 }
 
@@ -89,9 +89,9 @@ impl std::fmt::Display for PiiType {
 fn credit_card_regex() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| {
-// Non-backtracking pattern for credit card numbers
-// Matches common formats:4111111111111111, 4111-1111-1111-1111, 4111 1111 1111 1111
-// Fixed from vulnerable pattern `(?:\d[ -]*?){13,19}` which caused ReDoS
+        // Non-backtracking pattern for credit card numbers
+        // Matches common formats:4111111111111111, 4111-1111-1111-1111, 4111 1111 1111 1111
+        // Fixed from vulnerable pattern `(?:\d[ -]*?){13,19}` which caused ReDoS
         Regex::new(r"\b(?:\d{4}[- ]?){3}\d{1,7}\b").ok()
     })
     .as_ref()
@@ -100,9 +100,9 @@ fn credit_card_regex() -> Option<&'static Regex> {
 fn ssn_regex() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| {
-// Dash-only separator to reduce false positives from dates and phone
-// fragments that match the `[-. ]` class. Real SSNs are almost
-// exclusively formatted as NNN-NN-NNNN.
+        // Dash-only separator to reduce false positives from dates and phone
+        // fragments that match the `[-. ]` class. Real SSNs are almost
+        // exclusively formatted as NNN-NN-NNNN.
         Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").ok()
     })
     .as_ref()
@@ -110,18 +110,14 @@ fn ssn_regex() -> Option<&'static Regex> {
 
 fn phone_regex() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\b(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b").ok()
-    })
-    .as_ref()
+    RE.get_or_init(|| Regex::new(r"\b(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b").ok())
+        .as_ref()
 }
 
 fn email_regex() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").ok()
-    })
-    .as_ref()
+    RE.get_or_init(|| Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").ok())
+        .as_ref()
 }
 
 // ---------------------------------------------------------------------------
@@ -182,35 +178,35 @@ const CONTEXT_RISK_FACTOR: f64 = 0.25;
 
 /// Detect context modifier for a PII match based on preceding text.
 fn detect_context_modifier(text: &str, match_offset: usize) -> Option<ContextModifier> {
-// Get context window before the match
+    // Get context window before the match
     let start = match_offset.saturating_sub(CONTEXT_WINDOW);
     let context = &text[start..match_offset].to_lowercase();
 
-// Check for negation phrases
+    // Check for negation phrases
     for phrase in NEGATION_PHRASES {
         if context.contains(phrase) {
             return Some(ContextModifier::Negation);
         }
     }
 
-// Check for example phrases
+    // Check for example phrases
     for phrase in EXAMPLE_PHRASES {
         if context.contains(phrase) {
             return Some(ContextModifier::Example);
         }
     }
 
-// Check for documentation phrases
+    // Check for documentation phrases
     for phrase in DOCUMENTATION_PHRASES {
         if context.contains(phrase) {
             return Some(ContextModifier::Documentation);
         }
     }
 
-// Check for quoted context (simplistic check)
+    // Check for quoted context (simplistic check)
     let quote_count = context.matches('"').count() + context.matches('\'').count();
     if quote_count % 2 == 1 {
-// Odd number of quotes suggests we're inside a quoted string
+        // Odd number of quotes suggests we're inside a quoted string
         return Some(ContextModifier::Quoted);
     }
 
@@ -289,7 +285,14 @@ pub fn scan_pii(
     detect_phone: bool,
     detect_email: bool,
 ) -> Vec<PiiMatch> {
-    scan_pii_with_context(text, detect_cc, detect_ssn, detect_phone, detect_email, true)
+    scan_pii_with_context(
+        text,
+        detect_cc,
+        detect_ssn,
+        detect_phone,
+        detect_email,
+        true,
+    )
 }
 
 /// Scan text for PII with optional context awareness.
@@ -305,7 +308,7 @@ pub fn scan_pii_with_context(
 ) -> Vec<PiiMatch> {
     let mut matches = Vec::new();
 
-// Credit card detection with Luhn validation
+    // Credit card detection with Luhn validation
     if detect_cc {
         if let Some(re) = credit_card_regex() {
             for m in re.find_iter(text) {
@@ -331,13 +334,13 @@ pub fn scan_pii_with_context(
         }
     }
 
-// SSN detection
+    // SSN detection
     if detect_ssn {
         if let Some(re) = ssn_regex() {
             for m in re.find_iter(text) {
                 let candidate = m.as_str();
                 let digits: String = candidate.chars().filter(|c| c.is_ascii_digit()).collect();
-// Basic SSN validation:area (001-899, not 666), group (01-99), serial (0001-9999)
+                // Basic SSN validation:area (001-899, not 666), group (01-99), serial (0001-9999)
                 if digits.len() == 9 {
                     let area: u32 = digits[0..3].parse().unwrap_or(0);
                     let group: u32 = digits[3..5].parse().unwrap_or(0);
@@ -364,7 +367,7 @@ pub fn scan_pii_with_context(
         }
     }
 
-// Phone number detection
+    // Phone number detection
     if detect_phone {
         if let Some(re) = phone_regex() {
             for m in re.find_iter(text) {
@@ -387,7 +390,7 @@ pub fn scan_pii_with_context(
         }
     }
 
-// Email address detection
+    // Email address detection
     if detect_email {
         if let Some(re) = email_regex() {
             for m in re.find_iter(text) {
@@ -419,11 +422,11 @@ mod tests {
 
     #[test]
     fn test_luhn_valid() {
-// Visa test number
+        // Visa test number
         assert!(luhn_check("4111111111111111"));
-// Mastercard test number
+        // Mastercard test number
         assert!(luhn_check("5500000000000004"));
-// Amex test number
+        // Amex test number
         assert!(luhn_check("378282246310005"));
     }
 
@@ -453,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_ssn_invalid_area() {
-// 000 area is invalid, 666 is invalid, 900+ is invalid
+        // 000 area is invalid, 666 is invalid, 900+ is invalid
         let text = "SSN: 000-12-3456 and 666-12-3456 and 900-12-3456";
         let results = scan_pii(text, false, true, false, false);
         assert!(results.is_empty(), "Invalid SSNs should not match");
@@ -470,11 +473,14 @@ mod tests {
     fn test_no_false_positives_normal_text() {
         let text = "The meeting is at 3pm in room 201. Budget is $50,000 for Q3.";
         let results = scan_pii(text, true, true, false, false);
-// Should not detect random numbers as CC or SSN
+        // Should not detect random numbers as CC or SSN
         assert!(
             results.is_empty(),
             "Normal text should not trigger PII: {:?}",
-            results.iter().map(|r| format!("{}: {}", r.pii_type, r.redacted)).collect::<Vec<_>>()
+            results
+                .iter()
+                .map(|r| format!("{}: {}", r.pii_type, r.redacted))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -483,35 +489,43 @@ mod tests {
         assert_eq!(redact_cc("4111111111111111"), "XXXX-XXXX-XXXX-1111");
     }
 
-// =========================================================================
-// CONTEXT-AWARE DETECTION TESTS (February 2026)
-// =========================================================================
+    // =========================================================================
+    // CONTEXT-AWARE DETECTION TESTS (February 2026)
+    // =========================================================================
 
     #[test]
     fn test_context_negation_reduces_risk() {
         let text = "I would never send my SSN 123-45-6789 over email.";
         let results = scan_pii(text, false, true, false, false);
-        
+
         assert!(!results.is_empty(), "Should still detect SSN");
         let ssn = &results[0];
         assert_eq!(ssn.pii_type, PiiType::Ssn);
-        
-// With negation context, risk should be reduced
-        assert!(ssn.context_modifier.is_some(), "Should have context modifier");
+
+        // With negation context, risk should be reduced
+        assert!(
+            ssn.context_modifier.is_some(),
+            "Should have context modifier"
+        );
         assert_eq!(ssn.context_modifier, Some(ContextModifier::Negation));
-        assert!(ssn.risk < ssn.base_risk, "Risk should be reduced: {} < {}", ssn.risk, ssn.base_risk);
+        assert!(
+            ssn.risk < ssn.base_risk,
+            "Risk should be reduced: {} < {}",
+            ssn.risk,
+            ssn.base_risk
+        );
     }
 
     #[test]
     fn test_context_example_reduces_risk() {
         let text = "For example, a test card number is 4111111111111111.";
         let results = scan_pii(text, true, false, false, false);
-        
+
         assert!(!results.is_empty(), "Should detect credit card");
         let cc = &results[0];
         assert_eq!(cc.pii_type, PiiType::CreditCard);
-        
-// Example context should reduce risk
+
+        // Example context should reduce risk
         assert!(cc.context_modifier.is_some());
         assert!(cc.risk < cc.base_risk);
     }
@@ -520,25 +534,25 @@ mod tests {
     fn test_context_documentation_reduces_risk() {
         let text = "Documentation: SSN format is 123-45-6789.";
         let results = scan_pii(text, false, true, false, false);
-        
+
         assert!(!results.is_empty(), "Should detect SSN");
         let ssn = &results[0];
-        
-// Documentation context should reduce risk
+
+        // Documentation context should reduce risk
         assert!(ssn.context_modifier.is_some());
         assert!(ssn.risk < ssn.base_risk);
     }
 
     #[test]
     fn test_context_no_modifier_full_risk() {
-// No negation/example context
+        // No negation/example context
         let text = "Please charge 4111111111111111 for the purchase.";
         let results = scan_pii(text, true, false, false, false);
-        
+
         assert!(!results.is_empty());
         let cc = &results[0];
-        
-// No context modifier - full risk
+
+        // No context modifier - full risk
         assert!(cc.context_modifier.is_none(), "Should have no modifier");
         assert_eq!(cc.risk, cc.base_risk, "Risk should equal base risk");
     }
@@ -546,43 +560,43 @@ mod tests {
     #[test]
     fn test_context_aware_disabled() {
         let text = "Don't use this test SSN 123-45-6789 for anything.";
-        
-// With context awareness disabled
+
+        // With context awareness disabled
         let results = scan_pii_with_context(text, false, true, false, false, false);
-        
+
         assert!(!results.is_empty());
         let ssn = &results[0];
-        
-// Context modifier should be None when disabled
+
+        // Context modifier should be None when disabled
         assert!(ssn.context_modifier.is_none());
         assert_eq!(ssn.risk, ssn.base_risk);
     }
 
-// =========================================================================
-// ADVERSARIAL TESTS FOR CONTEXT DETECTION
-// =========================================================================
+    // =========================================================================
+    // ADVERSARIAL TESTS FOR CONTEXT DETECTION
+    // =========================================================================
 
     #[test]
     fn test_adversarial_negation_bypass_attempt() {
-// Attacker tries to bypass detection by adding negation far away
+        // Attacker tries to bypass detection by adding negation far away
         let text = "I would never share my info. ...lots of text... My real SSN is 123-45-6789.";
         let results = scan_pii(text, false, true, false, false);
-        
-// The negation is too far from the SSN to count (outside 100 char window)
-// This depends on implementation - verify reasonable behavior
+
+        // The negation is too far from the SSN to count (outside 100 char window)
+        // This depends on implementation - verify reasonable behavior
         assert!(!results.is_empty());
-// The SSN at the end should likely NOT have negation modifier
-// (negation is >100 chars away)
+        // The SSN at the end should likely NOT have negation modifier
+        // (negation is >100 chars away)
     }
 
     #[test]
     fn test_adversarial_fake_example_context() {
-// Attacker includes "example" but is actually sending real PII
+        // Attacker includes "example" but is actually sending real PII
         let text = "Not really an example but here's my actual card 4111111111111111";
         let results = scan_pii(text, true, false, false, false);
-        
+
         assert!(!results.is_empty());
-// Even with reduced risk, the card is still detected
+        // Even with reduced risk, the card is still detected
         assert_eq!(results[0].pii_type, PiiType::CreditCard);
     }
 
@@ -590,15 +604,15 @@ mod tests {
     fn test_multiple_pii_different_contexts() {
         let text = "My test SSN is 111-22-3333 but my real card is 4111111111111111.";
         let results = scan_pii(text, true, true, false, false);
-        
-// Should detect both
+
+        // Should detect both
         assert!(results.len() >= 2, "Should detect multiple PII");
-        
-// Find SSN and CC
+
+        // Find SSN and CC
         let ssn = results.iter().find(|r| r.pii_type == PiiType::Ssn);
         let cc = results.iter().find(|r| r.pii_type == PiiType::CreditCard);
-        
-// SSN should have "test" context (example)
+
+        // SSN should have "test" context (example)
         if let Some(ssn) = ssn {
             assert!(ssn.context_modifier.is_some() || ssn.risk == ssn.base_risk);
         }

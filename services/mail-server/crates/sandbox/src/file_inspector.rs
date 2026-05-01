@@ -12,39 +12,39 @@ use std::fmt;
 /// Detected file type from magic bytes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileType {
-/// PDF document
+    /// PDF document
     Pdf,
-/// ZIP archive (also DOCX, XLSX, PPTX, JAR, APK)
+    /// ZIP archive (also DOCX, XLSX, PPTX, JAR, APK)
     Zip,
-/// GZIP archive
+    /// GZIP archive
     Gzip,
-/// RAR archive
+    /// RAR archive
     Rar,
-/// 7-Zip archive
+    /// 7-Zip archive
     SevenZip,
-/// OLE2 compound (DOC, XLS, PPT with macros)
+    /// OLE2 compound (DOC, XLS, PPT with macros)
     Ole2,
-/// Windows PE executable (EXE/DLL)
+    /// Windows PE executable (EXE/DLL)
     PeExe,
-/// ELF executable (Linux)
+    /// ELF executable (Linux)
     Elf,
-/// Mach-O executable (macOS)
+    /// Mach-O executable (macOS)
     MachO,
-/// JPEG image
+    /// JPEG image
     Jpeg,
-/// PNG image
+    /// PNG image
     Png,
-/// GIF image
+    /// GIF image
     Gif,
-/// HTML document
+    /// HTML document
     Html,
-/// XML document
+    /// XML document
     Xml,
-/// RTF document
+    /// RTF document
     Rtf,
-/// Plain text
+    /// Plain text
     PlainText,
-/// Unknown binary
+    /// Unknown binary
     Unknown,
 }
 
@@ -75,30 +75,30 @@ impl fmt::Display for FileType {
 /// Result of file inspection
 #[derive(Debug, Clone)]
 pub struct FileInspection {
-/// Detected file type
+    /// Detected file type
     pub file_type: FileType,
-/// SHA-256 hash (hex string)
+    /// SHA-256 hash (hex string)
     pub sha256: String,
-/// File size in bytes
+    /// File size in bytes
     pub size: u64,
-/// File extension (from filename, if provided)
+    /// File extension (from filename, if provided)
     pub extension: Option<String>,
-/// Whether the extension matches the detected type
+    /// Whether the extension matches the detected type
     pub extension_mismatch: bool,
-/// Findings from content inspection
+    /// Findings from content inspection
     pub findings: Vec<InspectionFinding>,
-/// Risk score from static analysis
+    /// Risk score from static analysis
     pub risk_score: f64,
 }
 
 /// A finding from file inspection
 #[derive(Debug, Clone)]
 pub struct InspectionFinding {
-/// Finding identifier
+    /// Finding identifier
     pub id: &'static str,
-/// Description
+    /// Description
     pub description: String,
-/// Risk contribution
+    /// Risk contribution
     pub risk: f64,
 }
 
@@ -112,46 +112,45 @@ pub fn detect_file_type(data: &[u8]) -> FileType {
         };
     }
 
-// Check magic bytes
+    // Check magic bytes
     match &data[..4] {
-// PDF:%PDF
+        // PDF:%PDF
         [0x25, 0x50, 0x44, 0x46] => FileType::Pdf,
-// ZIP (also OOXML:docx, xlsx, pptx, jar)
+        // ZIP (also OOXML:docx, xlsx, pptx, jar)
         [0x50, 0x4B, 0x03, 0x04] | [0x50, 0x4B, 0x05, 0x06] | [0x50, 0x4B, 0x07, 0x08] => {
             FileType::Zip
         }
-// GZIP
+        // GZIP
         [0x1F, 0x8B, ..] => FileType::Gzip,
-// RAR
+        // RAR
         [0x52, 0x61, 0x72, 0x21] => FileType::Rar,
-// 7Z
+        // 7Z
         [0x37, 0x7A, 0xBC, 0xAF] => FileType::SevenZip,
-// OLE2 Compound Document (DOC/XLS/PPT)
+        // OLE2 Compound Document (DOC/XLS/PPT)
         [0xD0, 0xCF, 0x11, 0xE0] => FileType::Ole2,
-// PE executable (MZ header)
+        // PE executable (MZ header)
         [0x4D, 0x5A, ..] => FileType::PeExe,
-// ELF
+        // ELF
         [0x7F, 0x45, 0x4C, 0x46] => FileType::Elf,
-// Mach-O (multiple magic values)
+        // Mach-O (multiple magic values)
         [0xFE, 0xED, 0xFA, 0xCE]
         | [0xFE, 0xED, 0xFA, 0xCF]
         | [0xCE, 0xFA, 0xED, 0xFE]
         | [0xCF, 0xFA, 0xED, 0xFE] => FileType::MachO,
-// JPEG
+        // JPEG
         [0xFF, 0xD8, 0xFF, ..] => FileType::Jpeg,
-// GIF
+        // GIF
         [0x47, 0x49, 0x46, 0x38] => FileType::Gif,
         _ => {
-// PNG (8-byte signature)
-            if data.len() >= 8 && data[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-            {
+            // PNG (8-byte signature)
+            if data.len() >= 8 && data[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
                 return FileType::Png;
             }
-// RTF
+            // RTF
             if data.len() >= 5 && &data[..5] == b"{\\rtf" {
                 return FileType::Rtf;
             }
-// HTML (heuristic)
+            // HTML (heuristic)
             if let Ok(text) = std::str::from_utf8(&data[..data.len().min(512)]) {
                 let lower = text.to_lowercase();
                 if lower.contains("<!doctype html") || lower.contains("<html") {
@@ -161,9 +160,12 @@ pub fn detect_file_type(data: &[u8]) -> FileType {
                     return FileType::Xml;
                 }
             }
-// ASCII text heuristic
+            // ASCII text heuristic
             let sample = &data[..data.len().min(8192)];
-            if sample.iter().all(|b| b.is_ascii() || *b == 0x0A || *b == 0x0D) {
+            if sample
+                .iter()
+                .all(|b| b.is_ascii() || *b == 0x0A || *b == 0x0D)
+            {
                 FileType::PlainText
             } else {
                 FileType::Unknown
@@ -183,10 +185,10 @@ pub fn detect_polyglot_signatures(data: &[u8]) -> Vec<(FileType, usize)> {
         return secondary;
     }
     let primary = detect_file_type(data);
-// Only scan a reasonable prefix (first 64KB) to avoid DOS on huge files
+    // Only scan a reasonable prefix (first 64KB) to avoid DOS on huge files
     let scan_limit = data.len().min(65536);
 
-// Signatures to look for at non-zero offsets
+    // Signatures to look for at non-zero offsets
     let signatures: &[(&[u8], FileType)] = &[
         (b"\x50\x4B\x03\x04", FileType::Zip),
         (b"\xD0\xCF\x11\xE0", FileType::Ole2),
@@ -200,7 +202,7 @@ pub fn detect_polyglot_signatures(data: &[u8]) -> Vec<(FileType, usize)> {
         if file_type == primary {
             continue; // Skip the primary type
         }
-// Search from offset 1 onward
+        // Search from offset 1 onward
         for offset in 1..scan_limit.saturating_sub(magic.len()) {
             if data[offset..].starts_with(magic) {
                 secondary.push((file_type, offset));
@@ -227,16 +229,16 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
     let mut findings = Vec::with_capacity(16);
     let mut risk_score = 0.0;
 
-// Extract extension
-    let extension = filename.and_then(|f| {
-        f.rsplit('.').next().map(|e| e.to_lowercase())
-    });
+    // Extract extension
+    let extension = filename.and_then(|f| f.rsplit('.').next().map(|e| e.to_lowercase()));
 
-// Check extension mismatch
+    // Check extension mismatch
     let extension_mismatch = if let Some(ref ext) = extension {
         let expected = match file_type {
             FileType::Pdf => Some(vec!["pdf"]),
-            FileType::Zip => Some(vec!["zip", "docx", "xlsx", "pptx", "jar", "apk", "ods", "odt"]),
+            FileType::Zip => Some(vec![
+                "zip", "docx", "xlsx", "pptx", "jar", "apk", "ods", "odt",
+            ]),
             FileType::Gzip => Some(vec!["gz", "tgz"]),
             FileType::Rar => Some(vec!["rar"]),
             FileType::PeExe => Some(vec!["exe", "dll", "scr", "com"]),
@@ -267,7 +269,7 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         false
     };
 
-// Check for executable types
+    // Check for executable types
     match file_type {
         FileType::PeExe => {
             findings.push(InspectionFinding {
@@ -296,7 +298,7 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         _ => {}
     }
 
-// Polyglot detection:scan for secondary magic signatures at non-zero offsets
+    // Polyglot detection:scan for secondary magic signatures at non-zero offsets
     let polyglot_sigs = detect_polyglot_signatures(data);
     if !polyglot_sigs.is_empty() {
         let types_desc: Vec<String> = polyglot_sigs
@@ -315,21 +317,22 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         risk_score += 7.0;
     }
 
-// OLE2:Check for VBA macro indicators
-    if file_type == FileType::Ole2
-        && has_vba_indicators(data) {
-            findings.push(InspectionFinding {
-                id: "OLE2_VBA_MACROS",
-                description: "OLE2 document contains VBA macro indicators".into(),
-                risk: 6.0,
-            });
-            risk_score += 6.0;
-        }
+    // OLE2:Check for VBA macro indicators
+    if file_type == FileType::Ole2 && has_vba_indicators(data) {
+        findings.push(InspectionFinding {
+            id: "OLE2_VBA_MACROS",
+            description: "OLE2 document contains VBA macro indicators".into(),
+            risk: 6.0,
+        });
+        risk_score += 6.0;
+    }
 
-// ZIP-based OOXML:Check for macro-enabled formats
+    // ZIP-based OOXML:Check for macro-enabled formats
     if file_type == FileType::Zip {
         if let Some(ref ext) = extension {
-            let macro_exts = ["docm", "dotm", "xlsm", "xltm", "xlam", "pptm", "potm", "ppam"];
+            let macro_exts = [
+                "docm", "dotm", "xlsm", "xltm", "xlam", "pptm", "potm", "ppam",
+            ];
             if macro_exts.contains(&ext.as_str()) {
                 findings.push(InspectionFinding {
                     id: "OOXML_MACRO",
@@ -339,60 +342,61 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
                 risk_score += 5.0;
             }
         }
-// Check for vbaProject.bin inside ZIP
+        // Check for vbaProject.bin inside ZIP
         if has_zip_vba_project(data) {
             findings.push(InspectionFinding {
                 id: "OOXML_VBA_BIN",
-                description: "vbaProject.bin or VBA/ActiveX content found in Office document".into(),
+                description: "vbaProject.bin or VBA/ActiveX content found in Office document"
+                    .into(),
                 risk: 6.0,
             });
             risk_score += 6.0;
         }
-        
-// Check for external OLE links (remote payload injection)
+
+        // Check for external OLE links (remote payload injection)
         if has_external_ole_links(data) {
             findings.push(InspectionFinding {
                 id: "OOXML_EXTERNAL_OLE",
-                description: "External OLE/relationship links detected (potential remote payload)".into(),
+                description: "External OLE/relationship links detected (potential remote payload)"
+                    .into(),
                 risk: 5.0,
             });
             risk_score += 5.0;
         }
-        
-// Check for encrypted/password-protected ZIP
+
+        // Check for encrypted/password-protected ZIP
         if is_zip_encrypted(data) {
             findings.push(InspectionFinding {
                 id: "ARCHIVE_ENCRYPTED",
-                description: "ZIP archive is password-protected (contents cannot be inspected)".into(),
+                description: "ZIP archive is password-protected (contents cannot be inspected)"
+                    .into(),
                 risk: 7.0,
             });
             risk_score += 7.0;
         }
     }
-    
-// RAR:Check for encryption
-    if file_type == FileType::Rar
-        && is_rar_encrypted(data) {
-            findings.push(InspectionFinding {
-                id: "ARCHIVE_ENCRYPTED",
-                description: "RAR archive is password-protected (contents cannot be inspected)".into(),
-                risk: 7.0,
-            });
-            risk_score += 7.0;
-        }
-    
-// 7-Zip:Check for encryption
-    if file_type == FileType::SevenZip
-        && is_7z_encrypted(data) {
-            findings.push(InspectionFinding {
-                id: "ARCHIVE_ENCRYPTED",
-                description: "7-Zip archive is encrypted (contents cannot be inspected)".into(),
-                risk: 7.0,
-            });
-            risk_score += 7.0;
-        }
 
-// PDF:Check for suspicious elements
+    // RAR:Check for encryption
+    if file_type == FileType::Rar && is_rar_encrypted(data) {
+        findings.push(InspectionFinding {
+            id: "ARCHIVE_ENCRYPTED",
+            description: "RAR archive is password-protected (contents cannot be inspected)".into(),
+            risk: 7.0,
+        });
+        risk_score += 7.0;
+    }
+
+    // 7-Zip:Check for encryption
+    if file_type == FileType::SevenZip && is_7z_encrypted(data) {
+        findings.push(InspectionFinding {
+            id: "ARCHIVE_ENCRYPTED",
+            description: "7-Zip archive is encrypted (contents cannot be inspected)".into(),
+            risk: 7.0,
+        });
+        risk_score += 7.0;
+    }
+
+    // PDF:Check for suspicious elements
     if file_type == FileType::Pdf {
         let pdf_findings = inspect_pdf(data);
         for f in &pdf_findings {
@@ -401,7 +405,7 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         findings.extend(pdf_findings);
     }
 
-// HTML:Check for script content
+    // HTML:Check for script content
     if file_type == FileType::Html {
         if let Ok(text) = std::str::from_utf8(data) {
             let lower = text.to_lowercase();
@@ -424,22 +428,24 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         }
     }
 
-// SVG / XML:Check for embedded scripts (SVG is a common XSS delivery vector)
+    // SVG / XML:Check for embedded scripts (SVG is a common XSS delivery vector)
     if file_type == FileType::Xml {
         if let Ok(text) = std::str::from_utf8(data) {
             let lower = text.to_lowercase();
-// Detect SVG documents
-            let is_svg = lower.contains("<svg") || lower.contains("xmlns=\"http://www.w3.org/2000/svg\"");
+            // Detect SVG documents
+            let is_svg =
+                lower.contains("<svg") || lower.contains("xmlns=\"http://www.w3.org/2000/svg\"");
             if is_svg {
                 if lower.contains("<script") {
                     findings.push(InspectionFinding {
                         id: "SVG_SCRIPT",
-                        description: "SVG image contains embedded <script> element (XSS risk)".into(),
+                        description: "SVG image contains embedded <script> element (XSS risk)"
+                            .into(),
                         risk: 6.0,
                     });
                     risk_score += 6.0;
                 }
-// Check for event handler attributes commonly abused in SVG
+                // Check for event handler attributes commonly abused in SVG
                 for attr in &["onload=", "onerror=", "onclick=", "onmouseover="] {
                     if lower.contains(attr) {
                         findings.push(InspectionFinding {
@@ -451,7 +457,7 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
                         break; // One finding per SVG is sufficient
                     }
                 }
-// javascript:URI in SVG href/src
+                // javascript:URI in SVG href/src
                 if lower.contains("javascript:") {
                     findings.push(InspectionFinding {
                         id: "SVG_JS_URI",
@@ -464,11 +470,11 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         }
     }
 
-// Dangerous extension check (regardless of content)
+    // Dangerous extension check (regardless of content)
     if let Some(ref ext) = extension {
         let blocked = [
-            "exe", "dll", "scr", "bat", "cmd", "com", "pif",
-            "hta", "cpl", "msi", "ps1", "vbs", "vbe", "wsf",
+            "exe", "dll", "scr", "bat", "cmd", "com", "pif", "hta", "cpl", "msi", "ps1", "vbs",
+            "vbe", "wsf",
         ];
         if blocked.contains(&ext.as_str()) {
             findings.push(InspectionFinding {
@@ -480,16 +486,12 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         }
     }
 
-// Double extension (e.g., "report.pdf.exe")
+    // Double extension (e.g., "report.pdf.exe")
     if let Some(name) = filename {
         let parts: Vec<&str> = name.split('.').collect();
         if parts.len() >= 3 {
-            let dangerous_inner = [
-                "pdf", "doc", "docx", "xls", "xlsx", "jpg", "png", "txt",
-            ];
-            let dangerous_outer = [
-                "exe", "scr", "bat", "cmd", "com", "pif", "js", "vbs",
-            ];
+            let dangerous_inner = ["pdf", "doc", "docx", "xls", "xlsx", "jpg", "png", "txt"];
+            let dangerous_outer = ["exe", "scr", "bat", "cmd", "com", "pif", "js", "vbs"];
             if parts.len() >= 3 {
                 let second_to_last = parts[parts.len() - 2].to_lowercase();
                 let last = parts[parts.len() - 1].to_lowercase();
@@ -520,7 +522,7 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
 
 /// Check for VBA indicators in OLE2 data (heuristic)
 fn has_vba_indicators(data: &[u8]) -> bool {
-// Look for "VBA" and "Attribute VB_" strings
+    // Look for "VBA" and "Attribute VB_" strings
     let vba_signatures: &[&[u8]] = &[
         b"Attribute VB_",
         b"VBAProject",
@@ -543,45 +545,51 @@ fn has_vba_indicators(data: &[u8]) -> bool {
 
 /// Check for vbaProject.bin and other VBA/ActiveX indicators inside a ZIP file (OOXML)
 fn has_zip_vba_project(data: &[u8]) -> bool {
-// Look for any of these indicators in the ZIP contents
+    // Look for any of these indicators in the ZIP contents
     const VBA_INDICATORS: &[&[u8]] = &[
-        b"vbaProject.bin", // Main VBA project binary
+        b"vbaProject.bin",          // Main VBA project binary
         b"vbaProjectSignature.bin", // VBA project signature
-        b"xl/vbaProject", // Excel VBA project path
+        b"xl/vbaProject",           // Excel VBA project path
         b"word/vbaProject", // Word VBA project path         b"ppt/vbaProject", // PowerPoint VBA project path
-        b"VBA/", // VBA directory
+        b"VBA/",            // VBA directory
         b"_VBA_PROJECT_CUR", // VBA stream marker
-        b"activeX", // ActiveX controls (can execute code)
-        b"oleObject", // OLE objects (can embed executables)
-        b"embeddedHtml", // Embedded HTML (can contain scripts)
+        b"activeX",         // ActiveX controls (can execute code)
+        b"oleObject",       // OLE objects (can embed executables)
+        b"embeddedHtml",    // Embedded HTML (can contain scripts)
     ];
-    
+
     for indicator in VBA_INDICATORS {
-        if data.windows(indicator.len()).any(|w| w.eq_ignore_ascii_case(indicator)) {
+        if data
+            .windows(indicator.len())
+            .any(|w| w.eq_ignore_ascii_case(indicator))
+        {
             return true;
         }
     }
-    
+
     false
 }
 
 /// Check for external OLE links in OOXML that may pull remote payloads
 pub fn has_external_ole_links(data: &[u8]) -> bool {
-// Look for relationship targets pointing to external resources
+    // Look for relationship targets pointing to external resources
     const EXTERNAL_INDICATORS: &[&[u8]] = &[
-        b"Target=\"http", // External HTTP link
-        b"Target=\"https", // External HTTPS link
+        b"Target=\"http",           // External HTTP link
+        b"Target=\"https",          // External HTTPS link
         b"TargetMode=\"External\"", // Explicit external target mode
-        b"oleLink", // OLE link reference
-        b"mso-application:", // MS Office application directive
+        b"oleLink",                 // OLE link reference
+        b"mso-application:",        // MS Office application directive
     ];
-    
+
     for indicator in EXTERNAL_INDICATORS {
-        if data.windows(indicator.len()).any(|w| w.eq_ignore_ascii_case(indicator)) {
+        if data
+            .windows(indicator.len())
+            .any(|w| w.eq_ignore_ascii_case(indicator))
+        {
             return true;
         }
     }
-    
+
     false
 }
 
@@ -595,80 +603,82 @@ pub fn has_external_ole_links(data: &[u8]) -> bool {
 /// This function checks multiple local file headers in case some files
 /// are encrypted and others are not.
 pub fn is_zip_encrypted(data: &[u8]) -> bool {
-// ZIP local file header signature:PK\x03\x04
+    // ZIP local file header signature:PK\x03\x04
     const LOCAL_HEADER_SIG: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
-    
-// Minimum header size before the bit flag
+
+    // Minimum header size before the bit flag
     if data.len() < 10 {
         return false;
     }
-    
+
     let mut offset = 0;
     while offset + 30 < data.len() {
-// Find the next local file header
+        // Find the next local file header
         if data[offset..offset + 4] == LOCAL_HEADER_SIG {
-// General purpose bit flag is at offset 6-7 from the header start
+            // General purpose bit flag is at offset 6-7 from the header start
             let flags = u16::from_le_bytes([data[offset + 6], data[offset + 7]]);
-            
-// Bit 0 = file is encrypted
+
+            // Bit 0 = file is encrypted
             if flags & 0x0001 != 0 {
                 return true;
             }
-            
-// Bit 3 = data descriptor present (used with encryption)
-// Bit 6 = strong encryption
+
+            // Bit 3 = data descriptor present (used with encryption)
+            // Bit 6 = strong encryption
             if flags & 0x0040 != 0 {
                 return true;
             }
-            
-// Move to next header (need to parse more to be accurate, but we'll
-// just scan forward to find the next signature for simplicity)
+
+            // Move to next header (need to parse more to be accurate, but we'll
+            // just scan forward to find the next signature for simplicity)
             offset += 30;
         } else {
             offset += 1;
         }
     }
-    
-// Also check for encryption in central directory (end of ZIP)
-// Look for AES encryption marker
-    if data.windows(2).any(|w| w == [0x99, 0x01]) { // AES extra field ID
+
+    // Also check for encryption in central directory (end of ZIP)
+    // Look for AES encryption marker
+    if data.windows(2).any(|w| w == [0x99, 0x01]) {
+        // AES extra field ID
         return true;
     }
-    
+
     false
 }
 
 /// Check if a RAR file is password-protected.
 /// RAR encryption is indicated in the file header flags.
 pub fn is_rar_encrypted(data: &[u8]) -> bool {
-// RAR signature:Rar!\x1a\x07\x00 (RAR 4.x) or Rar!\x1a\x07\x01\x00 (RAR 5.x)
+    // RAR signature:Rar!\x1a\x07\x00 (RAR 4.x) or Rar!\x1a\x07\x01\x00 (RAR 5.x)
     if data.len() < 14 {
         return false;
     }
-    
-// Check for RAR5 encrypted archive flag (byte 11, bit 0x0004)
+
+    // Check for RAR5 encrypted archive flag (byte 11, bit 0x0004)
     if data.len() > 12 {
-// RAR5:Archive header at offset 7 has flags
-// Check for common encryption indicators
-// RAR5 uses different structure, but commonly has encryption flag
-        if data[0..4] == [0x52, 0x61, 0x72, 0x21] { // "Rar!"
-// Look for HEAD_CRYPT header type or encryption flag
-// This is simplified - full parsing would be more complex
+        // RAR5:Archive header at offset 7 has flags
+        // Check for common encryption indicators
+        // RAR5 uses different structure, but commonly has encryption flag
+        if data[0..4] == [0x52, 0x61, 0x72, 0x21] {
+            // "Rar!"
+            // Look for HEAD_CRYPT header type or encryption flag
+            // This is simplified - full parsing would be more complex
             for i in 7..data.len().min(200) {
-// HEAD_TYPE = 4 for encryption header
+                // HEAD_TYPE = 4 for encryption header
                 if data[i] == 0x04 && i + 3 < data.len() {
                     return true;
                 }
             }
         }
     }
-    
-// RAR4:Check for encrypted header flag (bit 2 in archive header flags)
-// Archive header is typically at offset 7
+
+    // RAR4:Check for encrypted header flag (bit 2 in archive header flags)
+    // Archive header is typically at offset 7
     if data.len() > 12 && data[9] & 0x04 != 0 {
         return true;
     }
-    
+
     false
 }
 
@@ -676,14 +686,14 @@ pub fn is_rar_encrypted(data: &[u8]) -> bool {
 /// 7z format is complex, but we can detect encryption by looking for
 /// specific codec IDs in the header.
 pub fn is_7z_encrypted(data: &[u8]) -> bool {
-// 7z signature:7z\xBC\xAF\x27\x1C
+    // 7z signature:7z\xBC\xAF\x27\x1C
     if data.len() < 32 || data[0..6] != [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C] {
         return false;
     }
-    
-// Look for AES encryption codec ID in the stream
-// 7z stores encryption method as a codec:0x06F10701 (AES-256)
-// In the 7z format, this appears as bytes:06 F1 07 01
+
+    // Look for AES encryption codec ID in the stream
+    // 7z stores encryption method as a codec:0x06F10701 (AES-256)
+    // In the 7z format, this appears as bytes:06 F1 07 01
     let aes_marker = [0x06, 0xF1, 0x07, 0x01];
     data.windows(4).any(|w| w == aes_marker)
 }
@@ -691,13 +701,13 @@ pub fn is_7z_encrypted(data: &[u8]) -> bool {
 /// Archived file encryption status
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveEncryption {
-/// Archive is not encrypted
+    /// Archive is not encrypted
     NotEncrypted,
-/// Archive files are encrypted
+    /// Archive files are encrypted
     FilesEncrypted,
-/// Archive header is encrypted (filename hidden)
+    /// Archive header is encrypted (filename hidden)
     HeaderEncrypted,
-/// Could not determine
+    /// Could not determine
     Unknown,
 }
 
@@ -733,10 +743,10 @@ pub fn check_archive_encryption(data: &[u8], file_type: FileType) -> ArchiveEncr
 fn inspect_pdf(data: &[u8]) -> Vec<InspectionFinding> {
     let mut findings = Vec::new();
 
-// Convert to string for pattern matching (PDF is mostly ASCII)
+    // Convert to string for pattern matching (PDF is mostly ASCII)
     let text = String::from_utf8_lossy(data);
 
-// JavaScript in PDF
+    // JavaScript in PDF
     if text.contains("/JavaScript") || text.contains("/JS ") {
         findings.push(InspectionFinding {
             id: "PDF_JAVASCRIPT",
@@ -745,7 +755,7 @@ fn inspect_pdf(data: &[u8]) -> Vec<InspectionFinding> {
         });
     }
 
-// OpenAction (auto-execute on open)
+    // OpenAction (auto-execute on open)
     if text.contains("/OpenAction") {
         findings.push(InspectionFinding {
             id: "PDF_OPENACTION",
@@ -754,7 +764,7 @@ fn inspect_pdf(data: &[u8]) -> Vec<InspectionFinding> {
         });
     }
 
-// Launch action (execute external program)
+    // Launch action (execute external program)
     if text.contains("/Launch") {
         findings.push(InspectionFinding {
             id: "PDF_LAUNCH",
@@ -763,7 +773,7 @@ fn inspect_pdf(data: &[u8]) -> Vec<InspectionFinding> {
         });
     }
 
-// Embedded file
+    // Embedded file
     if text.contains("/EmbeddedFile") {
         findings.push(InspectionFinding {
             id: "PDF_EMBEDDED_FILE",
@@ -772,7 +782,7 @@ fn inspect_pdf(data: &[u8]) -> Vec<InspectionFinding> {
         });
     }
 
-// URI action
+    // URI action
     if text.contains("/URI") {
         findings.push(InspectionFinding {
             id: "PDF_URI",
@@ -781,7 +791,7 @@ fn inspect_pdf(data: &[u8]) -> Vec<InspectionFinding> {
         });
     }
 
-// Encrypted/obfuscated streams
+    // Encrypted/obfuscated streams
     if text.contains("/Encrypt") {
         findings.push(InspectionFinding {
             id: "PDF_ENCRYPTED",
@@ -866,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_extension_mismatch() {
-// PE magic but .pdf extension
+        // PE magic but .pdf extension
         let data = [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
         let result = inspect_file(&data, Some("document.pdf"));
         assert!(result.extension_mismatch);
@@ -879,8 +889,12 @@ mod tests {
         let result = inspect_file(data, Some("report.pdf"));
         assert_eq!(result.file_type, FileType::Pdf);
         assert!(!result.extension_mismatch);
-// Simple PDF without JS/Launch should have low risk
-        assert!(result.risk_score < 5.0, "Clean PDF risk: {}", result.risk_score);
+        // Simple PDF without JS/Launch should have low risk
+        assert!(
+            result.risk_score < 5.0,
+            "Clean PDF risk: {}",
+            result.risk_score
+        );
     }
 
     #[test]
@@ -902,13 +916,13 @@ mod tests {
 
     #[test]
     fn test_polyglot_pdf_zip() {
-// A PDF file with an embedded ZIP signature at offset 32
+        // A PDF file with an embedded ZIP signature at offset 32
         let mut data = b"%PDF-1.4\n1 0 obj\n<< /Type >>\n".to_vec();
-// Pad to offset 32
+        // Pad to offset 32
         while data.len() < 32 {
             data.push(b' ');
         }
-// Embed a ZIP signature
+        // Embed a ZIP signature
         data.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]);
         data.extend_from_slice(b"\nendobj\n");
 
@@ -923,25 +937,29 @@ mod tests {
 
     #[test]
     fn test_polyglot_detection_no_false_positive() {
-// A normal PDF without embedded signatures should NOT trigger polyglot
+        // A normal PDF without embedded signatures should NOT trigger polyglot
         let data = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
         let sigs = detect_polyglot_signatures(data);
-        assert!(sigs.is_empty(), "Clean PDF should not trigger polyglot: {:?}", sigs);
+        assert!(
+            sigs.is_empty(),
+            "Clean PDF should not trigger polyglot: {:?}",
+            sigs
+        );
     }
 
     #[test]
     fn test_encrypted_archive_uninspectable_risk() {
-// ZIP local file header:signature (4) + version needed (2) + bit flag (2) + ...
-// Initialize with enough bytes so indices 6 and 7 exist.
+        // ZIP local file header:signature (4) + version needed (2) + bit flag (2) + ...
+        // Initialize with enough bytes so indices 6 and 7 exist.
         let mut data = vec![
             0x50, 0x4B, 0x03, 0x04, // ZIP signature
             0x14, 0x00, // version needed
             0x00, 0x00, // general purpose bit flag (will patch below)
         ];
-// Set general purpose bit flag bit 0 (encrypted)
+        // Set general purpose bit flag bit 0 (encrypted)
         data[6] = 0x01;
         data[7] = 0x00;
-// Pad out
+        // Pad out
         data.extend_from_slice(&[0x00; 30]);
         let result = inspect_file(&data, Some("secrets.zip"));
         assert!(

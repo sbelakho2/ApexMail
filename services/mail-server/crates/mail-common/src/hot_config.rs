@@ -38,51 +38,51 @@ impl<T> HotConfig<T>
 where
     T: Send + Sync + 'static,
 {
-/// Create a new `HotConfig` with an initial value.
+    /// Create a new `HotConfig` with an initial value.
     pub fn new(initial: T) -> Self {
         Self {
             inner: ArcSwap::new(Arc::new(initial)),
         }
     }
 
-/// Create a new `HotConfig` from an already-`Arc`-wrapped initial value.
+    /// Create a new `HotConfig` from an already-`Arc`-wrapped initial value.
     pub fn from_arc(initial: Arc<T>) -> Self {
         Self {
             inner: ArcSwap::new(initial),
         }
     }
 
-/// Load the current config.
-/// This is an **extremely fast** operation (a single atomic pointer load).
-/// The returned [`Arc<T>`] keeps the config value alive even if [`reload`]
-/// is called concurrently; callers should *not* hold the returned `Arc`
-/// across lengthy operations so that outdated configs can be freed.
-/// [`reload`]:Self::reload
+    /// Load the current config.
+    /// This is an **extremely fast** operation (a single atomic pointer load).
+    /// The returned [`Arc<T>`] keeps the config value alive even if [`reload`]
+    /// is called concurrently; callers should *not* hold the returned `Arc`
+    /// across lengthy operations so that outdated configs can be freed.
+    /// [`reload`]:Self::reload
     #[inline]
     pub fn load(&self) -> Arc<T> {
         self.inner.load_full()
     }
 
-/// Atomically swap in a new configuration value.
-/// All subsequent calls to [`load`] return the new value. Active readers
-/// holding a guard from a previous [`load`] continue using the old config
-/// safely until they drop their guard — there is no blocking or data race.
-/// [`load`]:Self::load
+    /// Atomically swap in a new configuration value.
+    /// All subsequent calls to [`load`] return the new value. Active readers
+    /// holding a guard from a previous [`load`] continue using the old config
+    /// safely until they drop their guard — there is no blocking or data race.
+    /// [`load`]:Self::load
     pub fn reload(&self, new_config: T) {
         self.inner.store(Arc::new(new_config));
     }
 
-/// Atomically swap in a new configuration value from a pre-built `Arc`.
-/// Identical to [`reload`] but avoids an extra allocation when the caller
-/// already owns an `Arc<T>`.
-/// [`reload`]:Self::reload
+    /// Atomically swap in a new configuration value from a pre-built `Arc`.
+    /// Identical to [`reload`] but avoids an extra allocation when the caller
+    /// already owns an `Arc<T>`.
+    /// [`reload`]:Self::reload
     pub fn reload_arc(&self, new_config: Arc<T>) {
         self.inner.store(new_config);
     }
 
-/// Apply a function to the current config and store the result.
-/// Uses `arc_swap::ArcSwap::rcu` for a retry-loop that eliminates the
-/// TOCTOU race between `load()` and `store()`.
+    /// Apply a function to the current config and store the result.
+    /// Uses `arc_swap::ArcSwap::rcu` for a retry-loop that eliminates the
+    /// TOCTOU race between `load()` and `store()`.
     pub fn update<F>(&self, f: F)
     where
         T: Clone,
@@ -108,7 +108,7 @@ where
 /// Extension trait that adds a `reload_logged` method for engines that want
 /// automatic tracing on every config swap.
 pub trait HotConfigExt<T: Send + Sync + 'static> {
-/// Reload the config and emit a `tracing::info!` event with the type name.
+    /// Reload the config and emit a `tracing::info!` event with the type name.
     fn reload_logged(&self, new_config: T);
 }
 
@@ -152,16 +152,18 @@ mod tests {
         let cfg = HotConfig::new(TestConfig { threshold: 100 });
         let old = cfg.load(); // holds ref to v1
         cfg.reload(TestConfig { threshold: 200 });
-// The old Arc still reads v1 safely
+        // The old Arc still reads v1 safely
         assert_eq!(old.threshold, 100);
-// New loads return v2
+        // New loads return v2
         assert_eq!(cfg.load().threshold, 200);
     }
 
     #[test]
     fn test_update_applies_partial_change() {
         let cfg = HotConfig::new(TestConfig { threshold: 50 });
-        cfg.update(|c| TestConfig { threshold: c.threshold + 10 });
+        cfg.update(|c| TestConfig {
+            threshold: c.threshold + 10,
+        });
         assert_eq!(cfg.load().threshold, 60);
     }
 

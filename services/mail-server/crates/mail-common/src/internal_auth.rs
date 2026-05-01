@@ -29,7 +29,7 @@ pub async fn require_service_token<S: HasServiceToken + Send + Sync + 'static>(
 ) -> Result<Response, StatusCode> {
     let expected = state.service_token();
     if expected.is_empty() {
-// No token configured — deny all for safety
+        // No token configured — deny all for safety
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -43,11 +43,11 @@ pub async fn require_service_token<S: HasServiceToken + Send + Sync + 'static>(
 }
 
 fn extract_token(headers: &HeaderMap) -> Option<String> {
-// Check X-Api-Key first
+    // Check X-Api-Key first
     if let Some(value) = headers.get("x-api-key") {
         return value.to_str().ok().map(|s| s.to_string());
     }
-// Fall back to Authorization:Bearer <token>
+    // Fall back to Authorization:Bearer <token>
     if let Some(value) = headers.get(AUTHORIZATION) {
         if let Ok(raw) = value.to_str() {
             if let Some(token) = raw.trim().strip_prefix("Bearer ") {

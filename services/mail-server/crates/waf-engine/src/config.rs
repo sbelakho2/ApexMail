@@ -1,50 +1,50 @@
 //! WAF configuration
 
-use serde::{Deserialize, Serialize};
 use crate::ParanoiaLevel;
+use serde::{Deserialize, Serialize};
 
 /// WAF engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WafConfig {
-/// Paranoia level (1-4)
+    /// Paranoia level (1-4)
     pub paranoia_level: u8,
-/// Anomaly score threshold for blocking
+    /// Anomaly score threshold for blocking
     pub blocking_threshold: u32,
-/// Anomaly score threshold for logging/monitoring
+    /// Anomaly score threshold for logging/monitoring
     pub detection_threshold: u32,
-/// Maximum request body size to inspect (bytes)
+    /// Maximum request body size to inspect (bytes)
     pub max_body_size: usize,
-/// Maximum URL length
+    /// Maximum URL length
     pub max_url_length: usize,
-/// Maximum number of query parameters
+    /// Maximum number of query parameters
     pub max_query_params: usize,
-/// Maximum header count
+    /// Maximum header count
     pub max_headers: usize,
-/// Maximum individual header value length
+    /// Maximum individual header value length
     pub max_header_value_length: usize,
-/// Enable SQL injection detection
+    /// Enable SQL injection detection
     pub enable_sqli: bool,
-/// Enable XSS detection
+    /// Enable XSS detection
     pub enable_xss: bool,
-/// Enable path traversal detection
+    /// Enable path traversal detection
     pub enable_path_traversal: bool,
-/// Enable command injection detection
+    /// Enable command injection detection
     pub enable_command_injection: bool,
-/// Enable protocol violation detection
+    /// Enable protocol violation detection
     pub enable_protocol_checks: bool,
-/// Enable NoSQL injection detection (MongoDB, Redis, Elasticsearch)
+    /// Enable NoSQL injection detection (MongoDB, Redis, Elasticsearch)
     pub enable_nosqli: bool,
-/// Enable SSRF detection (internal IPs, dangerous URL schemes)
+    /// Enable SSRF detection (internal IPs, dangerous URL schemes)
     pub enable_ssrf: bool,
-/// Enable HTTP request smuggling detection
+    /// Enable HTTP request smuggling detection
     pub enable_smuggling: bool,
-/// IP allowlist (bypass WAF)
+    /// IP allowlist (bypass WAF)
     pub allowlist_ips: Vec<String>,
-/// URL path allowlist (bypass WAF for specific paths)
+    /// URL path allowlist (bypass WAF for specific paths)
     pub allowlist_paths: Vec<String>,
-/// Maximum recursion depth for decoders
+    /// Maximum recursion depth for decoders
     pub max_decode_depth: usize,
-/// Enable Unicode normalization and confusable folding during canonicalization
+    /// Enable Unicode normalization and confusable folding during canonicalization
     pub enable_unicode_normalization: bool,
 }
 
@@ -76,7 +76,7 @@ impl Default for WafConfig {
 }
 
 impl WafConfig {
-/// Get the paranoia level enum
+    /// Get the paranoia level enum
     pub fn paranoia(&self) -> ParanoiaLevel {
         match self.paranoia_level {
             1 => ParanoiaLevel::Low,

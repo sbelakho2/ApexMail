@@ -99,7 +99,9 @@ struct PreparedBulkEntry<'a> {
     reason: &'a str,
 }
 
-fn prepare_bulk_entries<'a>(entries: &'a [BulkEntry]) -> (Vec<PreparedBulkEntry<'a>>, usize, usize) {
+fn prepare_bulk_entries<'a>(
+    entries: &'a [BulkEntry],
+) -> (Vec<PreparedBulkEntry<'a>>, usize, usize) {
     let mut invalid = 0usize;
     let mut duplicates = 0usize;
     let mut seen = std::collections::HashSet::new();
@@ -139,7 +141,7 @@ async fn create_suppression(
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
 
-// Check duplicate
+    // Check duplicate
     let exists = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = $2",
     )
@@ -261,7 +263,7 @@ async fn bulk_suppress(
     let mut created = 0usize;
     let (valid_entries, mut duplicates, invalid) = prepare_bulk_entries(&body.entries);
 
-// Batch query for existing emails to avoid N+1
+    // Batch query for existing emails to avoid N+1
     if !valid_entries.is_empty() {
         let emails: Vec<&str> = valid_entries.iter().map(|e| e.email.as_str()).collect();
         let existing: Vec<(String,)> = sqlx::query_as(
@@ -275,7 +277,7 @@ async fn bulk_suppress(
         let existing_set: std::collections::HashSet<&str> =
             existing.iter().map(|(e,)| e.as_str()).collect();
 
-// Batch insert non-duplicates
+        // Batch insert non-duplicates
         let now = Utc::now();
         for entry in &valid_entries {
             if existing_set.contains(entry.email.as_str()) {
@@ -305,7 +307,11 @@ async fn bulk_suppress(
         }
     }
 
-    Ok(Json(BulkSuppressResponse { created, duplicates, invalid }))
+    Ok(Json(BulkSuppressResponse {
+        created,
+        duplicates,
+        invalid,
+    }))
 }
 
 // ─── Row types ─────────────────────────────────────────────────

@@ -37,16 +37,14 @@ impl OrgRow {
             slug: self.slug,
             billing_email: self.billing_email,
             plan: self.plan,
-            status: TenantStatus::parse(&self.status)
-                .unwrap_or(TenantStatus::Pending),
+            status: TenantStatus::parse(&self.status).unwrap_or(TenantStatus::Pending),
             isolation_level: IsolationLevel::parse(&self.isolation_level)
                 .unwrap_or(IsolationLevel::Shared),
             schema_name: self.schema_name,
             database_name: self.database_name,
             owner_id: self.owner_id,
             metadata: self.metadata,
-            settings: serde_json::from_value(self.settings)
-                .unwrap_or_default(),
+            settings: serde_json::from_value(self.settings).unwrap_or_default(),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -101,8 +99,21 @@ fn validate_identifier(name: &str) -> bool {
 }
 
 fn sanitize_identifier(id: &str) -> String {
-    let s: String = id.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect();
-    if s.len() > 63 { s[..63].to_string() } else { s }
+    let s: String = id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.len() > 63 {
+        s[..63].to_string()
+    } else {
+        s
+    }
 }
 
 fn validated_identifier(name: &str) -> anyhow::Result<String> {
@@ -154,7 +165,7 @@ impl TenantService {
         }
     }
 
-// ── Organization CRUD ──────────────────────────────────
+    // ── Organization CRUD ──────────────────────────────────
 
     pub async fn create_organization(
         &self,
@@ -170,13 +181,12 @@ impl TenantService {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
-// Check slug uniqueness
-        let existing: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM iso_organizations WHERE slug = $1"
-        )
-            .bind(slug)
-            .fetch_optional(&self.db)
-            .await?;
+        // Check slug uniqueness
+        let existing: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM iso_organizations WHERE slug = $1")
+                .bind(slug)
+                .fetch_optional(&self.db)
+                .await?;
 
         if existing.is_some() {
             anyhow::bail!("Organization slug '{}' already exists", slug);
@@ -185,12 +195,9 @@ impl TenantService {
         let schema_name = if level == IsolationLevel::DedicatedSchema {
             let sn = format!("org_{}", sanitize_identifier(&id));
             let safe_schema = validated_identifier(&sanitize_identifier(&sn))?;
-            sqlx::query(&format!(
-                "CREATE SCHEMA IF NOT EXISTS \"{}\"",
-                safe_schema
-            ))
-            .execute(&self.db)
-            .await?;
+            sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", safe_schema))
+                .execute(&self.db)
+                .await?;
             Some(safe_schema)
         } else {
             None
@@ -214,8 +221,8 @@ impl TenantService {
             .execute(&mut *tx)
             .await?;
 
-// Organization ownership is tracked via owner_id on iso_organizations.
-// Workspace membership is created when a concrete workspace is created.
+        // Organization ownership is tracked via owner_id on iso_organizations.
+        // Workspace membership is created when a concrete workspace is created.
 
         tx.commit().await?;
 
@@ -248,7 +255,7 @@ impl TenantService {
             r#"SELECT id, name, slug, billing_email, plan, status, isolation_level,
                       schema_name, database_name, owner_id, metadata, settings,
                       created_at, updated_at
-               FROM iso_organizations WHERE id = $1"#
+               FROM iso_organizations WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -272,8 +279,9 @@ impl TenantService {
         let name = name.unwrap_or(&existing.name);
         let billing_email = billing_email.unwrap_or(&existing.billing_email);
         let plan = plan.unwrap_or(&existing.plan);
-        let settings_val = settings
-            .unwrap_or_else(|| serde_json::to_value(&existing.settings).expect("existing settings must serialize"));
+        let settings_val = settings.unwrap_or_else(|| {
+            serde_json::to_value(&existing.settings).expect("existing settings must serialize")
+        });
 
         sqlx::query(
             "UPDATE iso_organizations SET name=$1, billing_email=$2, plan=$3, settings=$4, updated_at=$5 WHERE id=$6"
@@ -287,7 +295,12 @@ impl TenantService {
         self.get_organization(id).await
     }
 
-    pub async fn suspend_organization(&self, id: &str, reason: &str, actor_id: &str) -> anyhow::Result<()> {
+    pub async fn suspend_organization(
+        &self,
+        id: &str,
+        reason: &str,
+        actor_id: &str,
+    ) -> anyhow::Result<()> {
         let mut tx = self.db.begin().await?;
         let now = Utc::now();
 
@@ -300,11 +313,12 @@ impl TenantService {
             .await?;
 
         sqlx::query(
-            "UPDATE iso_workspaces SET status='suspended', updated_at=$1 WHERE organization_id=$2"
+            "UPDATE iso_workspaces SET status='suspended', updated_at=$1 WHERE organization_id=$2",
         )
-            .bind(now).bind(id)
-            .execute(&mut *tx)
-            .await?;
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         self.org_cache.remove(id);
@@ -312,7 +326,7 @@ impl TenantService {
         Ok(())
     }
 
-// ── Workspace CRUD ─────────────────────────────────────
+    // ── Workspace CRUD ─────────────────────────────────────
 
     pub async fn create_workspace(
         &self,
@@ -324,28 +338,34 @@ impl TenantService {
     ) -> anyhow::Result<Workspace> {
         let org = self.get_organization(organization_id).await?;
 
-// Check workspace count limit
+        // Check workspace count limit
         let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM iso_workspaces WHERE organization_id=$1 AND status != 'deleted'"
+            "SELECT COUNT(*) FROM iso_workspaces WHERE organization_id=$1 AND status != 'deleted'",
         )
-            .bind(organization_id)
-            .fetch_one(&self.db)
-            .await?;
+        .bind(organization_id)
+        .fetch_one(&self.db)
+        .await?;
 
         if count.0 >= self.config.tenant.max_workspaces_per_org as i64 {
-            anyhow::bail!("Maximum workspace limit ({}) reached", self.config.tenant.max_workspaces_per_org);
+            anyhow::bail!(
+                "Maximum workspace limit ({}) reached",
+                self.config.tenant.max_workspaces_per_org
+            );
         }
 
-// Check slug uniqueness within org
-        let slug_exists: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM iso_workspaces WHERE organization_id=$1 AND slug=$2"
-        )
-            .bind(organization_id).bind(slug)
-            .fetch_optional(&self.db)
-            .await?;
+        // Check slug uniqueness within org
+        let slug_exists: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM iso_workspaces WHERE organization_id=$1 AND slug=$2")
+                .bind(organization_id)
+                .bind(slug)
+                .fetch_optional(&self.db)
+                .await?;
 
         if slug_exists.is_some() {
-            anyhow::bail!("Workspace slug '{}' already exists in this organization", slug);
+            anyhow::bail!(
+                "Workspace slug '{}' already exists in this organization",
+                slug
+            );
         }
 
         let id = Uuid::new_v4().to_string();
@@ -376,7 +396,7 @@ impl TenantService {
             .execute(&mut *tx)
             .await?;
 
-// Add creator as admin
+        // Add creator as admin
         sqlx::query(
             "INSERT INTO iso_workspace_members (id, workspace_id, user_id, role, permissions, created_at, updated_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7)"
@@ -415,7 +435,7 @@ impl TenantService {
         let row: WorkspaceRow = sqlx::query_as::<_, WorkspaceRow>(
             r#"SELECT id, organization_id, name, slug, status, schema_name, database_name,
                       quota, usage, settings, created_at, updated_at
-               FROM iso_workspaces WHERE id = $1"#
+               FROM iso_workspaces WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -435,13 +455,15 @@ impl TenantService {
     ) -> anyhow::Result<Workspace> {
         let existing = self.get_workspace(id).await?;
         let name = name.unwrap_or(&existing.name);
-        let settings_val = settings
-            .unwrap_or_else(|| serde_json::to_value(&existing.settings).expect("existing settings must serialize"));
+        let settings_val = settings.unwrap_or_else(|| {
+            serde_json::to_value(&existing.settings).expect("existing settings must serialize")
+        });
 
-        sqlx::query(
-            "UPDATE iso_workspaces SET name=$1, settings=$2, updated_at=$3 WHERE id=$4"
-        )
-            .bind(name).bind(&settings_val).bind(Utc::now()).bind(id)
+        sqlx::query("UPDATE iso_workspaces SET name=$1, settings=$2, updated_at=$3 WHERE id=$4")
+            .bind(name)
+            .bind(&settings_val)
+            .bind(Utc::now())
+            .bind(id)
             .execute(&self.db)
             .await?;
 
@@ -451,24 +473,26 @@ impl TenantService {
 
     pub async fn delete_workspace(&self, id: &str, actor_id: &str) -> anyhow::Result<()> {
         let now = Utc::now();
-        sqlx::query(
-            "UPDATE iso_workspaces SET status='deleted', updated_at=$1 WHERE id=$2"
-        )
-            .bind(now).bind(id)
+        sqlx::query("UPDATE iso_workspaces SET status='deleted', updated_at=$1 WHERE id=$2")
+            .bind(now)
+            .bind(id)
             .execute(&self.db)
             .await?;
 
-// Schedule cleanup with 30-day delay
+        // Schedule cleanup with 30-day delay
         let cleanup_at = now + chrono::Duration::days(30);
         sqlx::query(
             "INSERT INTO iso_cleanup_queue (id, workspace_id, scheduled_at, created_by, created_at)
-             VALUES ($1, $2, $3, $4, $5)"
+             VALUES ($1, $2, $3, $4, $5)",
         )
-            .bind(Uuid::new_v4().to_string()).bind(id)
-            .bind(cleanup_at).bind(actor_id).bind(now)
-            .execute(&self.db)
-            .await
-            .ok(); // Ignore if table doesn't exist
+        .bind(Uuid::new_v4().to_string())
+        .bind(id)
+        .bind(cleanup_at)
+        .bind(actor_id)
+        .bind(now)
+        .execute(&self.db)
+        .await
+        .ok(); // Ignore if table doesn't exist
 
         self.workspace_cache.remove(id);
         info!(workspace_id = id, "Workspace soft-deleted");
@@ -481,7 +505,7 @@ impl TenantService {
                       quota, usage, settings, created_at, updated_at
                FROM iso_workspaces
                WHERE organization_id = $1 AND status != 'deleted'
-               ORDER BY created_at DESC"#
+               ORDER BY created_at DESC"#,
         )
         .bind(organization_id)
         .fetch_all(&self.db)
@@ -490,7 +514,7 @@ impl TenantService {
         rows.into_iter().map(|r| r.into_workspace()).collect()
     }
 
-// ── Members ────────────────────────────────────────────
+    // ── Members ────────────────────────────────────────────
 
     pub async fn add_workspace_member(
         &self,
@@ -499,16 +523,18 @@ impl TenantService {
         role: &TenantRole,
         inviter_id: &str,
     ) -> anyhow::Result<()> {
-// Check member count
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM iso_workspace_members WHERE workspace_id=$1"
-        )
-            .bind(workspace_id)
-            .fetch_one(&self.db)
-            .await?;
+        // Check member count
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM iso_workspace_members WHERE workspace_id=$1")
+                .bind(workspace_id)
+                .fetch_one(&self.db)
+                .await?;
 
         if count.0 >= self.config.tenant.max_users_per_workspace as i64 {
-            anyhow::bail!("Maximum member limit ({}) reached", self.config.tenant.max_users_per_workspace);
+            anyhow::bail!(
+                "Maximum member limit ({}) reached",
+                self.config.tenant.max_users_per_workspace
+            );
         }
 
         let now = Utc::now();
@@ -533,10 +559,9 @@ impl TenantService {
         workspace_id: &str,
         user_id: &str,
     ) -> anyhow::Result<()> {
-        sqlx::query(
-            "DELETE FROM iso_workspace_members WHERE workspace_id=$1 AND user_id=$2"
-        )
-            .bind(workspace_id).bind(user_id)
+        sqlx::query("DELETE FROM iso_workspace_members WHERE workspace_id=$1 AND user_id=$2")
+            .bind(workspace_id)
+            .bind(user_id)
             .execute(&self.db)
             .await?;
         Ok(())
@@ -548,11 +573,12 @@ impl TenantService {
         user_id: &str,
     ) -> anyhow::Result<MemberAccess> {
         let row: Option<(String,)> = sqlx::query_as(
-            "SELECT role FROM iso_workspace_members WHERE workspace_id=$1 AND user_id=$2"
+            "SELECT role FROM iso_workspace_members WHERE workspace_id=$1 AND user_id=$2",
         )
-            .bind(workspace_id).bind(user_id)
-            .fetch_optional(&self.db)
-            .await?;
+        .bind(workspace_id)
+        .bind(user_id)
+        .fetch_optional(&self.db)
+        .await?;
 
         match row {
             Some((role,)) => Ok(MemberAccess {
@@ -566,7 +592,7 @@ impl TenantService {
         }
     }
 
-// ── Quota ──────────────────────────────────────────────
+    // ── Quota ──────────────────────────────────────────────
 
     pub async fn check_quota(
         &self,
@@ -578,8 +604,14 @@ impl TenantService {
         let (current, limit) = match metric {
             "emails_per_month" => (ws.usage.emails_sent_this_month, ws.quota.emails_per_month),
             "storage_bytes" => (ws.usage.storage_used_bytes, ws.quota.storage_bytes),
-            "api_requests_per_minute" => (ws.usage.api_requests_this_minute, ws.quota.api_requests_per_minute),
-            "webhooks_per_month" => (ws.usage.webhooks_sent_this_month, ws.quota.webhooks_per_month),
+            "api_requests_per_minute" => (
+                ws.usage.api_requests_this_minute,
+                ws.quota.api_requests_per_minute,
+            ),
+            "webhooks_per_month" => (
+                ws.usage.webhooks_sent_this_month,
+                ws.quota.webhooks_per_month,
+            ),
             "contacts" => (ws.usage.contacts_count, ws.quota.contacts_limit),
             "templates" => (ws.usage.templates_count, ws.quota.templates_limit),
             "domains" => (ws.usage.domains_count, ws.quota.domains_limit),
@@ -588,15 +620,11 @@ impl TenantService {
         Ok(current + amount <= limit)
     }
 
-    pub async fn update_quota(
-        &self,
-        workspace_id: &str,
-        quota: QuotaConfig,
-    ) -> anyhow::Result<()> {
-        sqlx::query(
-            "UPDATE iso_workspaces SET quota=$1, updated_at=$2 WHERE id=$3"
-        )
-            .bind(serde_json::to_value(&quota)?).bind(Utc::now()).bind(workspace_id)
+    pub async fn update_quota(&self, workspace_id: &str, quota: QuotaConfig) -> anyhow::Result<()> {
+        sqlx::query("UPDATE iso_workspaces SET quota=$1, updated_at=$2 WHERE id=$3")
+            .bind(serde_json::to_value(&quota)?)
+            .bind(Utc::now())
+            .bind(workspace_id)
             .execute(&self.db)
             .await?;
         self.workspace_cache.remove(workspace_id);
@@ -624,7 +652,9 @@ impl TenantService {
         }
 
         sqlx::query("UPDATE iso_workspaces SET usage=$1, updated_at=$2 WHERE id=$3")
-            .bind(serde_json::to_value(&usage)?).bind(Utc::now()).bind(workspace_id)
+            .bind(serde_json::to_value(&usage)?)
+            .bind(Utc::now())
+            .bind(workspace_id)
             .execute(&self.db)
             .await?;
 
@@ -632,7 +662,7 @@ impl TenantService {
         Ok(())
     }
 
-// ── Cache Helpers ─────────────────────────────────────
+    // ── Cache Helpers ─────────────────────────────────────
 
     fn get_cached_org(&self, id: &str) -> Option<Organization> {
         let entry = self.org_cache.get(id)?;
@@ -654,13 +684,13 @@ impl TenantService {
         Some(entry.value.clone())
     }
 
-        fn cache_org(&self, id: &str, org: &Organization) {
+    fn cache_org(&self, id: &str, org: &Organization) {
         self.prune_org_cache();
         self.org_cache
             .insert(id.to_string(), CacheEntry::new(org.clone()));
     }
 
-        fn cache_workspace(&self, id: &str, workspace: &Workspace) {
+    fn cache_workspace(&self, id: &str, workspace: &Workspace) {
         self.prune_workspace_cache();
         self.workspace_cache
             .insert(id.to_string(), CacheEntry::new(workspace.clone()));
@@ -678,8 +708,7 @@ impl TenantService {
         }
     }
 
-
-// ── Schema Helpers ─────────────────────────────────────
+    // ── Schema Helpers ─────────────────────────────────────
 
     async fn create_workspace_schema(&self, schema_name: &str) -> anyhow::Result<()> {
         let safe = validated_identifier(&sanitize_identifier(schema_name))?;
@@ -687,11 +716,20 @@ impl TenantService {
             .execute(&self.db)
             .await?;
 
-// Create standard tables in the schema
+        // Create standard tables in the schema
         for table_sql in &[
-            format!(r#"CREATE TABLE IF NOT EXISTS "{}".emails (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, subject TEXT, body TEXT, created_at TIMESTAMPTZ DEFAULT NOW())"#, safe),
-            format!(r#"CREATE TABLE IF NOT EXISTS "{}".contacts (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, email TEXT NOT NULL, name TEXT, created_at TIMESTAMPTZ DEFAULT NOW())"#, safe),
-            format!(r#"CREATE TABLE IF NOT EXISTS "{}".templates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT, created_at TIMESTAMPTZ DEFAULT NOW())"#, safe),
+            format!(
+                r#"CREATE TABLE IF NOT EXISTS "{}".emails (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, subject TEXT, body TEXT, created_at TIMESTAMPTZ DEFAULT NOW())"#,
+                safe
+            ),
+            format!(
+                r#"CREATE TABLE IF NOT EXISTS "{}".contacts (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, email TEXT NOT NULL, name TEXT, created_at TIMESTAMPTZ DEFAULT NOW())"#,
+                safe
+            ),
+            format!(
+                r#"CREATE TABLE IF NOT EXISTS "{}".templates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT, created_at TIMESTAMPTZ DEFAULT NOW())"#,
+                safe
+            ),
         ] {
             sqlx::query(table_sql).execute(&self.db).await?;
         }
@@ -795,7 +833,7 @@ mod tests {
             updated_at: Utc::now(),
         };
         let org = row.into_org().unwrap();
-// Falls back to defaults
+        // Falls back to defaults
         assert_eq!(org.status, TenantStatus::Pending);
         assert_eq!(org.isolation_level, IsolationLevel::Shared);
     }

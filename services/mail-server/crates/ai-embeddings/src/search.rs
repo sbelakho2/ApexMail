@@ -29,7 +29,7 @@ impl<'a> SearchEngine<'a> {
         }
     }
 
-/// Search by text query — generates embedding then searches.
+    /// Search by text query — generates embedding then searches.
     pub async fn search_by_text(
         &self,
         query: &str,
@@ -47,7 +47,7 @@ impl<'a> SearchEngine<'a> {
         Ok(results)
     }
 
-/// Search by raw vector — skips embedding generation.
+    /// Search by raw vector — skips embedding generation.
     pub fn search_by_vector(
         &self,
         vector: &[f32],
@@ -64,7 +64,7 @@ impl<'a> SearchEngine<'a> {
         results
     }
 
-/// Add text with auto-embedding to the store.
+    /// Add text with auto-embedding to the store.
     pub async fn add_text(
         &self,
         text: String,
@@ -72,8 +72,11 @@ impl<'a> SearchEngine<'a> {
         metadata: serde_json::Value,
     ) -> Result<Uuid, EmbeddingError> {
         let vector = self.embedding_service.embed(&text).await?;
-        self.vector_store
-            .add(text, vector, metadata_with_tenant_scope(metadata, tenant_id))
+        self.vector_store.add(
+            text,
+            vector,
+            metadata_with_tenant_scope(metadata, tenant_id),
+        )
     }
 }
 
@@ -86,8 +89,20 @@ mod tests {
     #[test]
     fn test_search_by_vector() {
         let store = VectorStore::new(3, 1000, 900);
-        store.add("similar".into(), l2_normalize(vec![0.9, 0.1, 0.0]), serde_json::json!({"tenant_id":"tenant-a"})).unwrap();
-        store.add("different".into(), l2_normalize(vec![0.0, 0.0, 1.0]), serde_json::json!({"tenant_id":"tenant-a"})).unwrap();
+        store
+            .add(
+                "similar".into(),
+                l2_normalize(vec![0.9, 0.1, 0.0]),
+                serde_json::json!({"tenant_id":"tenant-a"}),
+            )
+            .unwrap();
+        store
+            .add(
+                "different".into(),
+                l2_normalize(vec![0.0, 0.0, 1.0]),
+                serde_json::json!({"tenant_id":"tenant-a"}),
+            )
+            .unwrap();
 
         let config = crate::config::InferenceConfig {
             url: "http://localhost:8080".into(),
@@ -109,8 +124,20 @@ mod tests {
     #[test]
     fn test_search_with_min_score() {
         let store = VectorStore::new(3, 1000, 900);
-        store.add("close".into(), l2_normalize(vec![0.99, 0.01, 0.0]), serde_json::json!({"tenant_id":"tenant-a"})).unwrap();
-        store.add("far".into(), l2_normalize(vec![0.0, 0.0, 1.0]), serde_json::json!({"tenant_id":"tenant-a"})).unwrap();
+        store
+            .add(
+                "close".into(),
+                l2_normalize(vec![0.99, 0.01, 0.0]),
+                serde_json::json!({"tenant_id":"tenant-a"}),
+            )
+            .unwrap();
+        store
+            .add(
+                "far".into(),
+                l2_normalize(vec![0.0, 0.0, 1.0]),
+                serde_json::json!({"tenant_id":"tenant-a"}),
+            )
+            .unwrap();
 
         let config = crate::config::InferenceConfig {
             url: "http://localhost:8080".into(),
@@ -125,7 +152,7 @@ mod tests {
 
         let query = l2_normalize(vec![1.0, 0.0, 0.0]);
         let results = engine.search_by_vector(&query, 10, Some(0.5), "tenant-a");
-// Only "close" should pass the threshold
+        // Only "close" should pass the threshold
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text, "close");
     }
@@ -153,8 +180,20 @@ mod tests {
     #[test]
     fn test_search_by_vector_filters_other_tenants() {
         let store = VectorStore::new(3, 1000, 900);
-        store.add("tenant-a".into(), l2_normalize(vec![1.0, 0.0, 0.0]), serde_json::json!({"tenant_id":"tenant-a"})).unwrap();
-        store.add("tenant-b".into(), l2_normalize(vec![1.0, 0.0, 0.0]), serde_json::json!({"tenant_id":"tenant-b"})).unwrap();
+        store
+            .add(
+                "tenant-a".into(),
+                l2_normalize(vec![1.0, 0.0, 0.0]),
+                serde_json::json!({"tenant_id":"tenant-a"}),
+            )
+            .unwrap();
+        store
+            .add(
+                "tenant-b".into(),
+                l2_normalize(vec![1.0, 0.0, 0.0]),
+                serde_json::json!({"tenant_id":"tenant-b"}),
+            )
+            .unwrap();
 
         let config = crate::config::InferenceConfig {
             url: "http://localhost:8080".into(),

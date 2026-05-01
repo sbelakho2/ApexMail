@@ -57,12 +57,14 @@ async fn start_impersonation(
         return Err(ApiError::BadRequest("missing impersonation token".into()));
     }
 
-// Validate the impersonation token
+    // Validate the impersonation token
     let payload = verify_impersonation_token(&body.token, &state.config.impersonation_secret)?;
 
-// Validate token type
+    // Validate token type
     if payload.token_type.as_deref() != Some("impersonation") {
-        return Err(ApiError::Unauthorized("invalid impersonation token type".into()));
+        return Err(ApiError::Unauthorized(
+            "invalid impersonation token type".into(),
+        ));
     }
 
     let tenant_id = payload
@@ -73,14 +75,11 @@ async fn start_impersonation(
         .operator_id
         .as_deref()
         .ok_or_else(|| ApiError::BadRequest("missing operator_id in impersonation token".into()))?;
-    let operator_name = payload
-        .operator_name
-        .as_deref()
-        .unwrap_or("Operator");
+    let operator_name = payload.operator_name.as_deref().unwrap_or("Operator");
     let exp = payload.exp.unwrap_or(0);
     let jti = payload.jti.as_deref().unwrap_or_default();
 
-// Audit log the impersonation start before creating the session cookie.
+    // Audit log the impersonation start before creating the session cookie.
     write_impersonation_audit_log(
         &state,
         "impersonation_session_started",
@@ -102,7 +101,7 @@ async fn start_impersonation(
         "Impersonation session started"
     );
 
-// Create session token for the impersonation
+    // Create session token for the impersonation
     let session_payload = serde_json::json!({
         "type": "impersonation",
         "tenantId": tenant_id,
@@ -113,7 +112,7 @@ async fn start_impersonation(
     });
     let session_token = create_signed_token(&session_payload, &state.config.session_secret)?;
 
-// Calculate cookie max-age from token expiry
+    // Calculate cookie max-age from token expiry
     let now_ms = chrono::Utc::now().timestamp_millis();
     let max_age_secs = if exp > now_ms {
         (exp - now_ms) / 1000
@@ -141,29 +140,41 @@ async fn end_impersonation(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-// Try to read the impersonation cookie for audit logging
+    // Try to read the impersonation cookie for audit logging
     let imp_token = extract_cookie(&headers, "impersonation_session");
     if let Some(token) = imp_token {
         if let Ok(payload) = verify_session_token_soft(&token, &state.config.session_secret) {
-// Audit log the end before clearing the impersonation cookie.
+            // Audit log the end before clearing the impersonation cookie.
             write_impersonation_audit_log(
                 &state,
                 "impersonation_session_ended",
-                payload.get("tokenId").and_then(|v| v.as_str()).unwrap_or(""),
-                payload.get("tenantId").and_then(|v| v.as_str()).unwrap_or(""),
+                payload
+                    .get("tokenId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                payload
+                    .get("tenantId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
                 payload.clone(),
             )
             .await?;
 
             tracing::info!(
-                operator_id = payload.get("operatorId").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                tenant_id = payload.get("tenantId").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                operator_id = payload
+                    .get("operatorId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
+                tenant_id = payload
+                    .get("tenantId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
                 "Impersonation session ended"
             );
         }
     }
 
-// Clear the impersonation cookie
+    // Clear the impersonation cookie
     let mut response = (
         StatusCode::OK,
         Json(EndImpersonationResponse { success: true }),
@@ -172,7 +183,11 @@ async fn end_impersonation(
 
     let clear_cookie = format!(
         "impersonation_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict{}",
-        if state.config.environment.is_production() { "; Secure" } else { "" }
+        if state.config.environment.is_production() {
+            "; Secure"
+        } else {
+            ""
+        }
     );
     let val = clear_cookie.parse().map_err(|e| {
         tracing::error!(error = %e, "failed to build clear-impersonation cookie header");
@@ -219,7 +234,9 @@ fn verify_impersonation_token(
 
     let parts: Vec<&str> = token.rsplitn(2, '.').collect();
     if parts.len() != 2 {
-        return Err(ApiError::Unauthorized("invalid impersonation token format".into()));
+        return Err(ApiError::Unauthorized(
+            "invalid impersonation token format".into(),
+        ));
     }
     let (sig_part, payload_part) = (parts[0], parts[1]);
 
@@ -227,11 +244,9 @@ fn verify_impersonation_token(
         .map_err(|_| ApiError::Internal("HMAC key error".into()))?;
     mac.update(payload_part.as_bytes());
 
-    let sig_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        sig_part,
-    )
-    .map_err(|_| ApiError::Unauthorized("invalid token signature encoding".into()))?;
+    let sig_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig_part)
+            .map_err(|_| ApiError::Unauthorized("invalid token signature encoding".into()))?;
 
     mac.verify_slice(&sig_bytes)
         .map_err(|_| ApiError::Unauthorized("invalid impersonation token signature".into()))?;
@@ -245,7 +260,7 @@ fn verify_impersonation_token(
     let payload: ImpersonationTokenPayload = serde_json::from_slice(&payload_bytes)
         .map_err(|_| ApiError::Unauthorized("invalid token payload".into()))?;
 
-// Check expiry
+    // Check expiry
     if let Some(exp) = payload.exp {
         let now_ms = chrono::Utc::now().timestamp_millis();
         if now_ms > exp {
@@ -271,18 +286,12 @@ fn create_signed_token(payload: &serde_json::Value, secret: &str) -> Result<Stri
         .map_err(|_| ApiError::Internal("HMAC key error".into()))?;
     mac.update(payload_b64.as_bytes());
     let sig = mac.finalize().into_bytes();
-    let sig_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        sig,
-    );
+    let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig);
 
     Ok(format!("{payload_b64}.{sig_b64}"))
 }
 
-fn verify_session_token_soft(
-    token: &str,
-    secret: &str,
-) -> Result<serde_json::Value, ()> {
+fn verify_session_token_soft(token: &str, secret: &str) -> Result<serde_json::Value, ()> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -294,11 +303,9 @@ fn verify_session_token_soft(
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| ())?;
     mac.update(payload_part.as_bytes());
-    let sig_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        sig_part,
-    )
-    .map_err(|_| ())?;
+    let sig_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig_part)
+            .map_err(|_| ())?;
     mac.verify_slice(&sig_bytes).map_err(|_| ())?;
 
     let payload_bytes = base64::Engine::decode(
@@ -321,7 +328,7 @@ mod tests {
         let token = create_signed_token(&payload, secret).unwrap();
         assert!(token.contains('.'));
 
-// Verify the soft verification also works
+        // Verify the soft verification also works
         let decoded = verify_session_token_soft(&token, secret).unwrap();
         assert_eq!(decoded["type"], "impersonation");
         assert_eq!(decoded["tenantId"], "t1");
@@ -331,7 +338,7 @@ mod tests {
     fn test_create_signed_token_tamper_detection() {
         let payload = serde_json::json!({"type": "impersonation"});
         let token = create_signed_token(&payload, "secret1").unwrap();
-// Should fail with different secret
+        // Should fail with different secret
         assert!(verify_session_token_soft(&token, "wrong-secret").is_err());
     }
 }

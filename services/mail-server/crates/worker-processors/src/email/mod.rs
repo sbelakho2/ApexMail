@@ -16,7 +16,9 @@ mod types;
 
 pub use processor::EmailProcessor;
 pub use tracking::{add_tracking_pixel, encode_tracking_id, rewrite_links, TrackingPayload};
-pub use transport::{create_transport, create_transport_from_config, EmailTransport, SesTransport, SmtpTransport};
+pub use transport::{
+    create_transport, create_transport_from_config, EmailTransport, SesTransport, SmtpTransport,
+};
 pub use transport_router::{RoutingTransport, TransportRouter};
 pub use types::{
     Attachment, CachedSuppression, DkimConfig, Domain, EmailJob, PreparedEmail, RateLimitResult,

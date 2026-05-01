@@ -12,12 +12,15 @@ if [ -f "$REDIS_PASSWORD_FILE" ]; then
         exit 1
     fi
 else
-    echo "ERROR: Redis password secret not found at $REDIS_PASSWORD_FILE" >&2
-    exit 1
+    REDIS_PASSWORD="${REDIS_PASSWORD:-}"
+    if [ -z "$REDIS_PASSWORD" ]; then
+        echo "ERROR: Redis password secret not found at $REDIS_PASSWORD_FILE and REDIS_PASSWORD is unset" >&2
+        exit 1
+    fi
 fi
 
 exec redis-server \
     --appendonly yes \
     --maxmemory "${REDIS_MAXMEMORY:-256mb}" \
-    --maxmemory-policy "${REDIS_MAXMEMORY_POLICY:-allkeys-lru}" \
+    --maxmemory-policy "${REDIS_MAXMEMORY_POLICY:-noeviction}" \
     --requirepass "$REDIS_PASSWORD"

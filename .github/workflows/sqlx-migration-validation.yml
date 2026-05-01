@@ -1,0 +1,80 @@
+name: SQLx Migration Validation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/sqlx-migration-validation.yml
+      - services/mail-server/Cargo.toml
+      - services/mail-server/migrations/**
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/sqlx-migration-validation.yml
+      - services/mail-server/Cargo.toml
+      - services/mail-server/migrations/**
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgres://apexmail:apexmail@127.0.0.1:5432/apexmail
+
+jobs:
+  validate-migrations:
+    name: Validate SQLx migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: apexmail
+          POSTGRES_USER: apexmail
+          POSTGRES_PASSWORD: apexmail
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U apexmail -d apexmail"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --locked --no-default-features --features rustls,postgres
+
+      - name: Apply migrations to a clean database
+        run: sqlx migrate run --source services/mail-server/migrations
+
+      - name: Verify migrations are idempotent on a current schema
+        run: sqlx migrate run --source services/mail-server/migrations
+
+      - name: Inspect migration state
+        run: sqlx migrate info --source services/mail-server/migrations

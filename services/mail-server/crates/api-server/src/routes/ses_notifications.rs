@@ -19,11 +19,11 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use rsa::RsaPublicKey;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs1v15::{Signature as RsaSignature, VerifyingKey};
 use rsa::signature::Verifier;
+use rsa::RsaPublicKey;
 use serde::Deserialize;
 use sha1::Sha1;
 use sha2::Sha256;
@@ -46,15 +46,15 @@ pub fn router() -> Router<AppState> {
 #[serde(rename_all = "PascalCase")]
 #[allow(dead_code)]
 struct SnsMessage {
-/// "Notification", "SubscriptionConfirmation", "UnsubscribeConfirmation"
+    /// "Notification", "SubscriptionConfirmation", "UnsubscribeConfirmation"
     #[serde(rename = "Type")]
     message_type: String,
-/// For SubscriptionConfirmation — URL to GET to confirm.
+    /// For SubscriptionConfirmation — URL to GET to confirm.
     #[serde(alias = "SubscribeURL")]
     subscribe_url: Option<String>,
-/// JSON-encoded SES event payload (for Notification type).
+    /// JSON-encoded SES event payload (for Notification type).
     message: Option<String>,
-/// SNS message ID.
+    /// SNS message ID.
     message_id: Option<String>,
     subject: Option<String>,
     timestamp: Option<String>,
@@ -63,7 +63,7 @@ struct SnsMessage {
     signature_version: Option<String>,
     #[serde(alias = "SigningCertURL")]
     signing_cert_url: Option<String>,
-/// Topic ARN for validation.
+    /// Topic ARN for validation.
     topic_arn: Option<String>,
 }
 
@@ -72,7 +72,7 @@ struct SnsMessage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SesEvent {
-/// "Bounce", "Complaint", "Delivery", "Send", "Reject", "Open", "Click"
+    /// "Bounce", "Complaint", "Delivery", "Send", "Reject", "Open", "Click"
     event_type: String,
     mail: Option<SesMail>,
     bounce: Option<SesBounce>,
@@ -87,7 +87,7 @@ struct SesMail {
     message_id: Option<String>,
     source: Option<String>,
     destination: Option<Vec<String>>,
-/// Custom headers we attached (e.g. X-ApexMail-MessageId, X-ApexMail-TenantId)
+    /// Custom headers we attached (e.g. X-ApexMail-MessageId, X-ApexMail-TenantId)
     headers: Option<Vec<SesHeader>>,
     common_headers: Option<SesCommonHeaders>,
 }
@@ -159,7 +159,7 @@ async fn handle_sns_notification(
     _headers: HeaderMap,
     body: String,
 ) -> Result<StatusCode, ApiError> {
-// SNS sends Content-Type:text/plain with a JSON body.
+    // SNS sends Content-Type:text/plain with a JSON body.
     let sns_msg: SnsMessage = serde_json::from_str(&body).map_err(|e| {
         warn!(error = %e, "Failed to parse SNS message");
         ApiError::Validation(vec![format!("Invalid SNS message: {e}")])
@@ -169,12 +169,8 @@ async fn handle_sns_notification(
     validate_sns_message(&state.http_client, &sns_msg, &allowed_arns_raw).await?;
 
     match sns_msg.message_type.as_str() {
-        "SubscriptionConfirmation" => {
-            handle_subscription_confirmation(&state, &sns_msg).await
-        }
-        "Notification" => {
-            handle_notification(&state, &sns_msg).await
-        }
+        "SubscriptionConfirmation" => handle_subscription_confirmation(&state, &sns_msg).await,
+        "Notification" => handle_notification(&state, &sns_msg).await,
         "UnsubscribeConfirmation" => {
             info!(topic = ?sns_msg.topic_arn, "SNS unsubscribe confirmation received");
             Ok(StatusCode::OK)
@@ -192,15 +188,15 @@ async fn handle_subscription_confirmation(
     state: &AppState,
     msg: &SnsMessage,
 ) -> Result<StatusCode, ApiError> {
-    let url = msg.subscribe_url.as_deref().ok_or_else(|| {
-        ApiError::Validation(vec!["Missing SubscribeURL in confirmation".into()])
-    })?;
+    let url = msg
+        .subscribe_url
+        .as_deref()
+        .ok_or_else(|| ApiError::Validation(vec!["Missing SubscribeURL in confirmation".into()]))?;
 
-// SSRF defence:only allow URLs from official AWS SNS endpoints.
-// Legitimate SubscribeURLs look like:// https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&...
-    let parsed = url::Url::parse(url).map_err(|_| {
-        ApiError::Validation(vec!["Invalid SubscribeURL".into()])
-    })?;
+    // SSRF defence:only allow URLs from official AWS SNS endpoints.
+    // Legitimate SubscribeURLs look like:// https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&...
+    let parsed = url::Url::parse(url)
+        .map_err(|_| ApiError::Validation(vec!["Invalid SubscribeURL".into()]))?;
     let host = parsed.host_str().unwrap_or("");
     let is_aws_sns = parsed.scheme() == "https"
         && (host.ends_with(".amazonaws.com") || host.ends_with(".amazonaws.com.cn"));
@@ -213,15 +209,10 @@ async fn handle_subscription_confirmation(
 
     info!(topic = ?msg.topic_arn, "Auto-confirming SNS subscription");
 
-    state
-        .http_client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to confirm SNS subscription");
-            ApiError::ServiceUnavailable(format!("SNS confirmation failed: {e}"))
-        })?;
+    state.http_client.get(url).send().await.map_err(|e| {
+        error!(error = %e, "Failed to confirm SNS subscription");
+        ApiError::ServiceUnavailable(format!("SNS confirmation failed: {e}"))
+    })?;
 
     info!(topic = ?msg.topic_arn, "SNS subscription confirmed");
     Ok(StatusCode::OK)
@@ -273,14 +264,12 @@ async fn validate_sns_signature(
 }
 
 fn validate_signing_cert_url(cert_url: &str) -> Result<(), ApiError> {
-    let parsed = url::Url::parse(cert_url).map_err(|_| {
-        ApiError::Validation(vec!["Invalid SigningCertURL in SNS message".into()])
-    })?;
+    let parsed = url::Url::parse(cert_url)
+        .map_err(|_| ApiError::Validation(vec!["Invalid SigningCertURL in SNS message".into()]))?;
 
     let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
     let path = parsed.path();
-    let is_allowed_host = (host == "sns.amazonaws.com"
-        || host.starts_with("sns."))
+    let is_allowed_host = (host == "sns.amazonaws.com" || host.starts_with("sns."))
         && (host.ends_with(".amazonaws.com") || host.ends_with(".amazonaws.com.cn"));
     let is_allowed_path = path.starts_with("/SimpleNotificationService-") && path.ends_with(".pem");
     let port_ok = parsed.port_or_known_default().unwrap_or(443) == 443;
@@ -333,16 +322,19 @@ async fn fetch_sns_signing_key(
     })
 }
 
-fn verify_sns_signature_with_key(msg: &SnsMessage, public_key: &RsaPublicKey) -> Result<(), ApiError> {
-    let encoded_signature = msg.signature.as_deref().ok_or_else(|| {
-        ApiError::Validation(vec!["Missing Signature in SNS message".into()])
-    })?;
-    let signature = BASE64.decode(encoded_signature).map_err(|_| {
-        ApiError::Validation(vec!["Invalid SNS signature encoding".into()])
-    })?;
-    let signature = RsaSignature::try_from(signature.as_slice()).map_err(|_| {
-        ApiError::Validation(vec!["Invalid SNS signature".into()])
-    })?;
+fn verify_sns_signature_with_key(
+    msg: &SnsMessage,
+    public_key: &RsaPublicKey,
+) -> Result<(), ApiError> {
+    let encoded_signature = msg
+        .signature
+        .as_deref()
+        .ok_or_else(|| ApiError::Validation(vec!["Missing Signature in SNS message".into()]))?;
+    let signature = BASE64
+        .decode(encoded_signature)
+        .map_err(|_| ApiError::Validation(vec!["Invalid SNS signature encoding".into()]))?;
+    let signature = RsaSignature::try_from(signature.as_slice())
+        .map_err(|_| ApiError::Validation(vec!["Invalid SNS signature".into()]))?;
     let string_to_sign = build_sns_string_to_sign(msg)?;
 
     match msg.signature_version.as_deref() {
@@ -352,7 +344,9 @@ fn verify_sns_signature_with_key(msg: &SnsMessage, public_key: &RsaPublicKey) ->
             .verify(string_to_sign.as_bytes(), &signature),
         Some(other) => {
             warn!(signature_version = %other, "Rejected unsupported SNS signature version");
-            return Err(ApiError::Validation(vec!["Unsupported SNS signature version".into()]));
+            return Err(ApiError::Validation(vec![
+                "Unsupported SNS signature version".into(),
+            ]));
         }
         None => {
             return Err(ApiError::Validation(vec![
@@ -380,7 +374,11 @@ fn build_sns_string_to_sign(msg: &SnsMessage) -> Result<String, ApiError> {
         "SubscriptionConfirmation" | "UnsubscribeConfirmation" => {
             append_required_field(&mut string_to_sign, "Message", msg.message.as_deref())?;
             append_required_field(&mut string_to_sign, "MessageId", msg.message_id.as_deref())?;
-            append_required_field(&mut string_to_sign, "SubscribeURL", msg.subscribe_url.as_deref())?;
+            append_required_field(
+                &mut string_to_sign,
+                "SubscribeURL",
+                msg.subscribe_url.as_deref(),
+            )?;
             append_required_field(&mut string_to_sign, "Timestamp", msg.timestamp.as_deref())?;
             append_required_field(&mut string_to_sign, "Token", msg.token.as_deref())?;
             append_required_field(&mut string_to_sign, "TopicArn", msg.topic_arn.as_deref())?;
@@ -401,9 +399,8 @@ fn append_required_field(
     name: &str,
     value: Option<&str>,
 ) -> Result<(), ApiError> {
-    let value = value.ok_or_else(|| {
-        ApiError::Validation(vec![format!("Missing {name} in SNS message")])
-    })?;
+    let value = value
+        .ok_or_else(|| ApiError::Validation(vec![format!("Missing {name} in SNS message")]))?;
     append_field(string_to_sign, name, value);
     Ok(())
 }
@@ -416,13 +413,11 @@ fn append_field(string_to_sign: &mut String, name: &str, value: &str) {
 }
 
 /// Process an SES event notification.
-async fn handle_notification(
-    state: &AppState,
-    msg: &SnsMessage,
-) -> Result<StatusCode, ApiError> {
-    let event_json = msg.message.as_deref().ok_or_else(|| {
-        ApiError::Validation(vec!["Missing Message in SNS notification".into()])
-    })?;
+async fn handle_notification(state: &AppState, msg: &SnsMessage) -> Result<StatusCode, ApiError> {
+    let event_json = msg
+        .message
+        .as_deref()
+        .ok_or_else(|| ApiError::Validation(vec!["Missing Message in SNS notification".into()]))?;
 
     let event: SesEvent = serde_json::from_str(event_json).map_err(|e| {
         warn!(error = %e, "Failed to parse SES event");
@@ -449,15 +444,20 @@ async fn handle_notification(
 
 /// Extract our internal message_id from SES mail headers.
 fn extract_apexmail_header(mail: &SesMail, header_name: &str) -> Option<String> {
-    mail.headers.as_ref()?.iter().find(|h| h.name == header_name).map(|h| h.value.clone())
+    mail.headers
+        .as_ref()?
+        .iter()
+        .find(|h| h.name == header_name)
+        .map(|h| h.value.clone())
 }
 
 // ─── Bounce processing ────────────────────────────────────────
 
 async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
-    let bounce = event.bounce.as_ref().ok_or_else(|| {
-        ApiError::Validation(vec!["Bounce event missing bounce details".into()])
-    })?;
+    let bounce = event
+        .bounce
+        .as_ref()
+        .ok_or_else(|| ApiError::Validation(vec!["Bounce event missing bounce details".into()]))?;
 
     let mail = event.mail.as_ref();
     let ses_message_id = mail.and_then(|m| m.message_id.clone());
@@ -485,7 +485,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     format!("ses_soft_bounce:{bounce_sub_type}")
                 };
 
-// Auto-suppress hard bounces
+                // Auto-suppress hard bounces
                 if is_permanent {
                     if let Err(e) = sqlx::query(
                         "INSERT INTO suppression_list (id, email, reason, source, created_at)
@@ -503,7 +503,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     }
                 }
 
-// Update message status if we have the internal ID
+                // Update message status if we have the internal ID
                 if let Some(ref msg_id) = apexmail_message_id {
                     let status = if is_permanent { "bounced" } else { "deferred" };
                     if let Err(e) = sqlx::query(
@@ -520,7 +520,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                     }
                 }
 
-// Queue webhook event for the tenant
+                // Queue webhook event for the tenant
                 if let Some(ref tid) = tenant_id {
                     let payload = serde_json::json!({
                         "event": "email.bounced",
@@ -544,16 +544,20 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
 // ─── Complaint processing ──────────────────────────────────────
 
 async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
-    let complaint = event.complaint.as_ref().ok_or_else(|| {
-        ApiError::Validation(vec!["Complaint event missing details".into()])
-    })?;
+    let complaint = event
+        .complaint
+        .as_ref()
+        .ok_or_else(|| ApiError::Validation(vec!["Complaint event missing details".into()]))?;
 
     let mail = event.mail.as_ref();
     let ses_message_id = mail.and_then(|m| m.message_id.clone());
     let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
     let tenant_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-TenantId"));
 
-    let feedback_type = complaint.complaint_feedback_type.as_deref().unwrap_or("abuse");
+    let feedback_type = complaint
+        .complaint_feedback_type
+        .as_deref()
+        .unwrap_or("abuse");
 
     info!(
         feedback_type = %feedback_type,
@@ -567,7 +571,7 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
             if let Some(email) = &recipient.email_address {
                 let reason = format!("ses_complaint:{feedback_type}");
 
-// Always suppress — complaints are serious
+                // Always suppress — complaints are serious
                 if let Err(e) = sqlx::query(
                     "INSERT INTO suppression_list (id, email, reason, source, created_at)
                      VALUES (gen_random_uuid(), $1, $2, 'ses_complaint', NOW())
@@ -583,7 +587,7 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                     info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed complained address");
                 }
 
-// Update message status
+                // Update message status
                 if let Some(ref msg_id) = apexmail_message_id {
                     if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = 'complained', updated_at = NOW()
@@ -597,7 +601,7 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                     }
                 }
 
-// Queue webhook
+                // Queue webhook
                 if let Some(ref tid) = tenant_id {
                     let payload = serde_json::json!({
                         "event": "email.complained",
@@ -619,9 +623,10 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
 // ─── Delivery processing ──────────────────────────────────────
 
 async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
-    let delivery = event.delivery.as_ref().ok_or_else(|| {
-        ApiError::Validation(vec!["Delivery event missing details".into()])
-    })?;
+    let delivery = event
+        .delivery
+        .as_ref()
+        .ok_or_else(|| ApiError::Validation(vec!["Delivery event missing details".into()]))?;
 
     let mail = event.mail.as_ref();
     let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
@@ -633,7 +638,7 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
         "SES delivery confirmed"
     );
 
-// Update message status to 'delivered'
+    // Update message status to 'delivered'
     if let Some(ref msg_id) = apexmail_message_id {
         if let Err(e) = sqlx::query(
             "UPDATE messages SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
@@ -647,7 +652,7 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
         }
     }
 
-// Queue webhook
+    // Queue webhook
     if let Some(ref tid) = tenant_id {
         let payload = serde_json::json!({
             "event": "email.delivered",
@@ -703,9 +708,9 @@ async fn queue_webhook_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsa::RsaPrivateKey;
     use rsa::pkcs1v15::SigningKey;
     use rsa::signature::{SignatureEncoding, Signer};
+    use rsa::RsaPrivateKey;
 
     #[test]
     fn test_parse_sns_subscription_confirmation() {
@@ -817,7 +822,7 @@ mod tests {
         let msg: SnsMessage = serde_json::from_str(&sns_json).unwrap();
         assert_eq!(msg.message_type, "Notification");
         assert!(msg.message.is_some());
-// Parse the inner SES event
+        // Parse the inner SES event
         let event: SesEvent = serde_json::from_str(msg.message.as_ref().unwrap()).unwrap();
         assert_eq!(event.event_type, "Send");
     }
@@ -848,8 +853,10 @@ mod tests {
 
     #[test]
     fn test_validate_signing_cert_url_rejects_non_aws_host() {
-        let err = validate_signing_cert_url("https://evil.example.com/SimpleNotificationService-test.pem")
-            .unwrap_err();
+        let err = validate_signing_cert_url(
+            "https://evil.example.com/SimpleNotificationService-test.pem",
+        )
+        .unwrap_err();
         assert!(matches!(err, ApiError::Validation(_)));
     }
 

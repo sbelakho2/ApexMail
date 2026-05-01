@@ -89,7 +89,8 @@ impl Default for AnalyticsConfig {
 impl AnalyticsConfig {
     pub fn from_env() -> Self {
         if let Err(error) = dotenvy::dotenv() {
-            if !matches!(error, dotenvy::Error::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound) {
+            if !matches!(error, dotenvy::Error::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound)
+            {
                 eprintln!("failed to load .env: {error}");
             }
         }
@@ -123,10 +124,8 @@ impl AnalyticsConfig {
                     .unwrap_or_else(|_| "http://clickhouse:8123".into()),
                 database: std::env::var("CLICKHOUSE_DATABASE")
                     .unwrap_or_else(|_| "apexmail".into()),
-                user: std::env::var("CLICKHOUSE_USER")
-                    .unwrap_or_else(|_| "default".into()),
-                password: std::env::var("CLICKHOUSE_PASSWORD")
-                    .unwrap_or_default(),
+                user: std::env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".into()),
+                password: std::env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
                 max_connections: std::env::var("CLICKHOUSE_MAX_CONNECTIONS")
                     .ok()
                     .and_then(|v| v.parse().ok())

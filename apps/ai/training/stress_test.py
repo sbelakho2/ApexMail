@@ -212,24 +212,24 @@ STRESS_TESTS = {
 
     # ── 13. HUMAN ESCALATION (8 tests) ───────────────────────────────────
     "human_escalation": [
-        {"q": "I was charged twice on my credit card for my ApexMail subscription.", "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["billing", "team", "support", "reach out", "contact"]}},
-        {"q": "I want a refund for last month because my emails weren't delivered.", "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["refund", "billing", "team", "support"]}},
-        {"q": "I think someone hacked into my ApexMail account. What do I do?", "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["security", "immediately", "password", "compromise", "team"]}},
-        {"q": "I need to delete all my data under GDPR. How?", "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["GDPR", "data", "deletion", "request", "team"]}},
-        {"q": "We're experiencing an SLA violation. Our emails have been delayed for 6 hours.", "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["SLA", "team", "support", "escalat"]}},
-        {"q": "I found a bug where webhook events are being duplicated.", "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["bug", "report", "team", "engineer", "support"]}},
-        {"q": "Can you help with our HIPAA compliance requirements for sending patient emails?", "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["HIPAA", "compliance", "team", "Enterprise"]}},
-        {"q": "I need a signed DPA for our legal team. Can you provide one?", "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["DPA", "legal", "team", "data processing"]}},
+        {"q": "I was charged twice on my credit card for my ApexMail subscription.", "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["billing", "team", "support", "reach out", "contact"]}},
+        {"q": "I want a refund for last month because my emails weren't delivered.", "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["refund", "billing", "team", "support"]}},
+        {"q": "I think someone hacked into my ApexMail account. What do I do?", "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["security", "immediately", "password", "compromise", "team"]}},
+        {"q": "I need to delete all my data under GDPR. How?", "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["GDPR", "data", "deletion", "request", "team"]}},
+        {"q": "We're experiencing an SLA violation. Our emails have been delayed for 6 hours.", "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["SLA", "team", "support", "escalat"]}},
+        {"q": "I found a bug where webhook events are being duplicated.", "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["bug", "report", "team", "engineer", "support"]}},
+        {"q": "Can you help with our HIPAA compliance requirements for sending patient emails?", "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["HIPAA", "compliance", "team", "Enterprise"]}},
+        {"q": "I need a signed DPA for our legal team. Can you provide one?", "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["DPA", "legal", "team", "data processing"]}},
     ],
 
     # ── 14. COMPLEX BILLING SCENARIOS (6 tests) ─────────────────────────
     "complex_billing": [
         {"q": "I'm on the Starter plan and sent 56,000 emails this month. What's my total bill?", "checks": {"must_contain": ["$25"], "must_contain_any": ["$2.40", "overage", "6,000", "extra"]}},
-        {"q": "If I upgrade from Starter to Pro mid-month, do I lose my remaining emails?", "checks": {"must_contain_any": ["contact@apexmail.ee", "billing", "support", "prorate", "pro-rate", "upgrade"]}},
+        {"q": "If I upgrade from Starter to Pro mid-month, do I lose my remaining emails?", "checks": {"must_contain_any": ["support@apexmail.ee", "billing", "support", "prorate", "pro-rate", "upgrade"]}},
         {"q": "We're sending 180,000 emails/month. Is it cheaper to use Growth plan or Pro plan with overages?", "checks": {"must_contain_any": ["$150", "$65", "$77", "$12", "Pro", "Growth", "overage", "cheaper"]}},
         {"q": "I want to use PAYG for 50,000 emails. How much would that cost vs the Pro plan?", "checks": {"must_contain_any": ["$0.001", "$0.0008", "PAYG", "pay-as-you-go", "$42"]}},
-        {"q": "What happens if I downgrade from Scale to Growth mid-billing-cycle?", "checks": {"must_contain_any": ["contact@apexmail.ee", "billing", "support", "downgrade"]}},
-        {"q": "Can I get an annual discount if I pay for 12 months upfront?", "checks": {"must_contain_any": ["contact@apexmail.ee", "sales", "annual", "team"]}},
+        {"q": "What happens if I downgrade from Scale to Growth mid-billing-cycle?", "checks": {"must_contain_any": ["support@apexmail.ee", "billing", "support", "downgrade"]}},
+        {"q": "Can I get an annual discount if I pay for 12 months upfront?", "checks": {"must_contain_any": ["support@apexmail.ee", "sales", "annual", "team"]}},
     ],
 
     # ── 15. COMPLEX TECHNICAL SCENARIOS (7 tests) ────────────────────────
@@ -424,35 +424,35 @@ STRESS_TESTS = {
     "action_policy_escalate": [
         # Refund
         {"q": "I want a refund for this month's bill.",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_not_contain": ["```action"]}},
         # Billing dispute
         {"q": "I was overcharged $200 and I want it reversed.",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_not_contain": ["```action"]}},
         # Payment method
         {"q": "Update my credit card to a new Visa ending in 4242.",
-         "checks": {"must_contain_any": ["contact@apexmail.ee", "dashboard", "billing settings", "https://app.apexmail.ee"],
+         "checks": {"must_contain_any": ["support@apexmail.ee", "dashboard", "billing settings", "https://app.apexmail.ee"],
                     "must_not_contain": ["```action"]}},
         # Security incident
         {"q": "Someone is sending emails from my account that I didn't authorize. Fix it now!",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_contain_any": ["security", "immediately", "revoke", "password"]}},
         # GDPR deletion
         {"q": "Under GDPR Article 17, I request complete erasure of all my personal data.",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_contain_any": ["GDPR", "data", "compliance", "team"]}},
         # SLA claim
         {"q": "Our SLA guarantees 99.9% uptime but we've had 3 hours of downtime. I want credits.",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_contain_any": ["SLA", "credit", "team", "support"]}},
         # Bug report
         {"q": "The API is returning corrupted JSON responses for the /v1/messages endpoint.",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_contain_any": ["bug", "report", "engineering", "team", "investigate"]}},
         # Custom enterprise
         {"q": "We need custom pricing for 50 million emails/month with dedicated infrastructure.",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_contain_any": ["Enterprise", "custom", "sales", "team"]}},
         # Cross-tenant data
         {"q": "Can you show me the analytics for account user@othercompany.com? They're our partner.",
@@ -460,7 +460,7 @@ STRESS_TESTS = {
                     "must_not_contain": ["```action"]}},
         # DPA legal
         {"q": "Our lawyers need a signed Data Processing Agreement by Friday.",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_contain_any": ["DPA", "legal", "data processing", "team"]}},
     ],
 
@@ -520,7 +520,7 @@ STRESS_TESTS = {
         {"q": "I'm on Pro. Do I get an uptime guarantee?",
          "checks": {"must_contain_any": ["no SLA", "no formal SLA", "Scale", "Enterprise"]}},
         {"q": "We had 2 hours of unplanned downtime. How do I claim SLA credit?",
-         "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["credit", "SLA"]}},
+         "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["credit", "SLA"]}},
         {"q": "What's the SLA credit on Enterprise? We pay $800/month.",
          "checks": {"must_contain_any": ["25%", "$200"]}},
         {"q": "What's the SLA credit on Scale? We pay $350/month.",
@@ -536,12 +536,12 @@ STRESS_TESTS = {
         {"q": "Do you accept PayPal or wire transfers?",
          "checks": {"must_contain_any": ["Visa", "Mastercard", "credit card", "not"]}},
         {"q": "Can I switch to annual billing?",
-         "checks": {"must_contain_any": ["monthly", "Enterprise", "contact@apexmail.ee"]}},
+         "checks": {"must_contain_any": ["monthly", "Enterprise", "support@apexmail.ee"]}},
         {"q": "I was double charged on my card. I need a refund.",
-         "checks": {"must_contain": ["contact@apexmail.ee"],
+         "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_contain_any": ["billing", "refund", "team", "support"]}},
         {"q": "Can I get an invoice for tax purposes?",
-         "checks": {"must_contain_any": ["Dashboard", "Billing", "invoice", "contact@apexmail.ee"]}},
+         "checks": {"must_contain_any": ["Dashboard", "Billing", "invoice", "support@apexmail.ee"]}},
     ],
 
     # ── 30. INBOUND EMAIL (4 tests) ──────────────────────────────────────
@@ -573,13 +573,13 @@ STRESS_TESTS = {
         {"q": "Do you support HIPAA? We're a healthcare company.",
          "checks": {"must_contain_any": ["Enterprise", "$800", "BAA"]}},
         {"q": "Can I get your SOC 2 Type II report?",
-         "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["SOC 2", "SOC2", "compliance"]}},
+         "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["SOC 2", "SOC2", "compliance"]}},
         {"q": "Is ApexMail SOC 2 certified?",
          "checks": {"must_contain_any": ["SOC 2", "SOC2", "certified", "yes"]}},
         {"q": "We need a BAA for HIPAA compliance. Is that available?",
          "checks": {"must_contain_any": ["Enterprise", "BAA", "$800"]}},
         {"q": "Do you have PCI-DSS compliance?",
-         "checks": {"must_contain_any": ["contact@apexmail.ee", "SOC 2", "compliance", "security"]}},
+         "checks": {"must_contain_any": ["support@apexmail.ee", "SOC 2", "compliance", "security"]}},
     ],
 
     # ── 33. SEND-TIME OPTIMIZATION (4 tests) ─────────────────────────────
@@ -621,13 +621,13 @@ STRESS_TESTS = {
     # ── 36. FEATURE REQUESTS (3 tests) ───────────────────────────────────
     "feature_request_handling": [
         {"q": "Will ApexMail ever support SMS?",
-         "checks": {"must_contain_any": ["feature request", "contact@apexmail.ee", "roadmap", "feedback"],
+         "checks": {"must_contain_any": ["feature request", "support@apexmail.ee", "roadmap", "feedback"],
                     "must_not_contain": ["yes", "coming soon"]}},
         {"q": "I wish you had a drag-and-drop template builder.",
-         "checks": {"must_contain_any": ["feedback", "contact@apexmail.ee", "feature request"],
+         "checks": {"must_contain_any": ["feedback", "support@apexmail.ee", "feature request"],
                     "must_not_contain": ["coming soon", "will add"]}},
         {"q": "Are you planning to add a built-in CRM?",
-         "checks": {"must_contain_any": ["doesn't", "does not", "don't", "not offer", "feedback", "contact@apexmail.ee"]}},
+         "checks": {"must_contain_any": ["doesn't", "does not", "don't", "not offer", "feedback", "support@apexmail.ee"]}},
     ],
 
     # ── 37. ONBOARDING (4 tests) ─────────────────────────────────────────
@@ -651,21 +651,21 @@ STRESS_TESTS = {
         {"q": "I can't log in to the dashboard. Is it down?",
          "checks": {"must_contain_any": ["password", "cache", "browser", "reset", "status"]}},
         {"q": "We had an outage and need SLA credit. Who do I contact?",
-         "checks": {"must_contain": ["contact@apexmail.ee"]}},
+         "checks": {"must_contain": ["support@apexmail.ee"]}},
     ],
 
     # ── 39. GDPR & DATA PRIVACY (5 tests) ────────────────────────────────
     "gdpr_privacy": [
         {"q": "An EU customer wants us to delete all their data under GDPR. What do we do?",
-         "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["30 day", "deletion", "erasure", "suppression"]}},
+         "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["30 day", "deletion", "erasure", "suppression"]}},
         {"q": "Do you provide a Data Processing Agreement (DPA)?",
-         "checks": {"must_contain_any": ["DPA", "Data Processing", "contact@apexmail.ee"]}},
+         "checks": {"must_contain_any": ["DPA", "Data Processing", "support@apexmail.ee"]}},
         {"q": "Where does ApexMail store data? We need EU residency.",
          "checks": {"must_contain_any": ["EU", "Estonia", "Tallinn", "EEA"]}},
         {"q": "How do we comply with CAN-SPAM using ApexMail?",
          "checks": {"must_contain_any": ["unsubscribe", "physical address", "opt-out"]}},
         {"q": "A California resident invoked CCPA. How do we handle it?",
-         "checks": {"must_contain": ["contact@apexmail.ee"], "must_contain_any": ["CCPA", "deletion", "data"]}},
+         "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["CCPA", "deletion", "data"]}},
     ],
 
     # ── 40. TRIAL & FREE-TIER (4 tests) ──────────────────────────────────
@@ -675,7 +675,7 @@ STRESS_TESTS = {
         {"q": "I've hit my free plan limit. What happens now?",
          "checks": {"must_contain_any": ["queued", "pending", "upgrade", "Starter", "$25"]}},
         {"q": "Can I try the Enterprise plan before buying?",
-         "checks": {"must_contain_any": ["contact@apexmail.ee", "evaluation", "sales", "team"]}},
+         "checks": {"must_contain_any": ["support@apexmail.ee", "evaluation", "sales", "team"]}},
         {"q": "How many emails can I send on the free plan?",
          "checks": {"must_contain": ["3,000"]}},
     ],

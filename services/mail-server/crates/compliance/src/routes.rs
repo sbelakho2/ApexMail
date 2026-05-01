@@ -11,11 +11,11 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
-use chrono::Utc;
 
 use crate::audit_logger::AuditLogger;
 use crate::config::ComplianceConfig;
@@ -42,9 +42,9 @@ type S = Arc<AppState>;
 
 pub fn create_router(state: S) -> Router {
     Router::new()
-// Health
+        // Health
         .route("/health", get(health_check))
-// Risk Scoring
+        // Risk Scoring
         .route("/risk/assess/:tenant_id", post(risk_assess))
         .route("/risk/profile/:tenant_id", get(risk_profile))
         .route("/risk/force-reassess/:tenant_id", post(risk_force_reassess))
@@ -52,13 +52,13 @@ pub fn create_router(state: S) -> Router {
         .route("/risk/flags/:tenant_id/resolve", post(risk_resolve_flag))
         .route("/risk/critical", get(risk_critical_tenants))
         .route("/risk/stats", get(risk_stats))
-// Content Scanning
+        // Content Scanning
         .route("/scan", post(scan_content))
         .route("/scan/spam", post(scan_spam))
         .route("/scan/phishing", post(scan_phishing))
         .route("/scan/malware", post(scan_malware))
         .route("/scan/policy/:tenant_id", post(scan_policy))
-// Audit
+        // Audit
         .route("/audit/log", post(audit_create))
         .route("/audit/logs", get(audit_query))
         .route("/audit/verify/:tenant_id", get(audit_verify_chain))
@@ -66,22 +66,34 @@ pub fn create_router(state: S) -> Router {
         .route("/audit/stats/:tenant_id", get(audit_stats))
         .route("/audit/archive", post(audit_archive))
         .route("/audit/webhooks", post(audit_register_webhook))
-// Secrets
+        // Secrets
         .route("/secrets", post(secret_create))
         .route("/secrets/:secret_id", get(secret_get))
         .route("/secrets/:secret_id", put(secret_update))
         .route("/secrets/:secret_id", delete(secret_delete))
         .route("/secrets/:secret_id/rotate", post(secret_rotate))
         .route("/secrets/:secret_id/access", post(secret_grant_access))
-        .route("/secrets/:secret_id/access/:user_id", delete(secret_revoke_access))
+        .route(
+            "/secrets/:secret_id/access/:user_id",
+            delete(secret_revoke_access),
+        )
         .route("/secrets/:secret_id/versions", get(secret_versions))
-        .route("/secrets/:secret_id/rollback/:version", post(secret_rollback))
+        .route(
+            "/secrets/:secret_id/rollback/:version",
+            post(secret_rollback),
+        )
         .route("/secrets/tenant/:tenant_id", get(secrets_list))
-// GDPR
+        // GDPR
         .route("/gdpr/request", post(gdpr_submit_request))
-        .route("/gdpr/request/:request_id/verify", post(gdpr_verify_request))
+        .route(
+            "/gdpr/request/:request_id/verify",
+            post(gdpr_verify_request),
+        )
         .route("/gdpr/consent", post(gdpr_record_consent))
-        .route("/gdpr/consent/:tenant_id/:subscriber_id", get(gdpr_get_consents))
+        .route(
+            "/gdpr/consent/:tenant_id/:subscriber_id",
+            get(gdpr_get_consents),
+        )
         .route("/gdpr/double-opt-in", post(gdpr_initiate_doi))
         .route("/gdpr/double-opt-in/confirm", post(gdpr_confirm_doi))
         .route("/gdpr/stats/:tenant_id", get(gdpr_stats))
@@ -142,7 +154,11 @@ fn ok_json<T: serde::Serialize>(val: &T) -> axum::response::Response {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "JSON serialization failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err_json("internal serialization error")).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                err_json("internal serialization error"),
+            )
+                .into_response()
         }
     }
 }
@@ -154,7 +170,11 @@ fn created_json<T: serde::Serialize>(val: &T) -> axum::response::Response {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "JSON serialization failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err_json("internal serialization error")).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                err_json("internal serialization error"),
+            )
+                .into_response()
         }
     }
 }
@@ -276,11 +296,7 @@ async fn risk_resolve_flag(
     };
     match state
         .risk_engine
-        .resolve_flag(
-            &tenant_id,
-            &flag_type,
-            &body.resolution,
-        )
+        .resolve_flag(&tenant_id, &flag_type, &body.resolution)
         .await
     {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
@@ -288,10 +304,7 @@ async fn risk_resolve_flag(
     }
 }
 
-async fn risk_critical_tenants(
-    State(state): State<S>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn risk_critical_tenants(State(state): State<S>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
@@ -301,10 +314,7 @@ async fn risk_critical_tenants(
     }
 }
 
-async fn risk_stats(
-    State(state): State<S>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn risk_stats(State(state): State<S>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
@@ -324,11 +334,7 @@ async fn scan_content(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    match state
-        .content_scanner
-        .scan_email(&body.content)
-        .await
-    {
+    match state.content_scanner.scan_email(&body.content).await {
         Ok(result) => ok_json(&result),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
@@ -385,7 +391,7 @@ async fn scan_policy(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-// #283:enforce path tenant_id over body tenant_id
+    // #283:enforce path tenant_id over body tenant_id
     let mut scoped = body.content.clone();
     scoped.tenant_id = tenant_id;
     match state.content_scanner.scan_email(&scoped).await {
@@ -522,7 +528,11 @@ async fn audit_verify_chain(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    match state.audit_logger.verify_chain(Some(&tenant_id), None, None).await {
+    match state
+        .audit_logger
+        .verify_chain(Some(&tenant_id), None, None)
+        .await
+    {
         Ok(result) => ok_json(&result),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
@@ -544,7 +554,7 @@ async fn audit_export(
         return (e.0, err_json(e.1)).into_response();
     }
 
-// First fetch the entries
+    // First fetch the entries
     let query = AuditLogQuery {
         tenant_id: Some(tenant_id),
         user_id: None,
@@ -651,7 +661,7 @@ async fn secret_create(
     }
     match state.secret_manager.create_secret(&body).await {
         Ok(secret) => {
-// Return secret without encrypted value for security
+            // Return secret without encrypted value for security
             let resp = serde_json::json!({
                 "id": secret.id,
                 "name": secret.name,
@@ -711,7 +721,11 @@ async fn secret_update(
         .update_secret(&secret_id, &user_id, &body)
         .await
     {
-        Ok(secret) => (StatusCode::OK, Json(serde_json::json!({"id": secret.id, "name": secret.name}))).into_response(),
+        Ok(secret) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"id": secret.id, "name": secret.name})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -801,10 +815,20 @@ async fn secret_grant_access(
     };
     match state
         .secret_manager
-        .grant_access(&secret_id, &body.user_id, access_type, &granted_by, body.expires_at)
+        .grant_access(
+            &secret_id,
+            &body.user_id,
+            access_type,
+            &granted_by,
+            body.expires_at,
+        )
         .await
     {
-        Ok(access) => (StatusCode::CREATED, Json(serde_json::json!({"id": access.id}))).into_response(),
+        Ok(access) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"id": access.id})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::FORBIDDEN, err_json(&e)).into_response(),
     }
 }
@@ -876,7 +900,11 @@ async fn secret_rollback(
         .rollback_to_version(&secret_id, version, &user_id)
         .await
     {
-        Ok(secret) => (StatusCode::OK, Json(serde_json::json!({"id": secret.id, "version": secret.version}))).into_response(),
+        Ok(secret) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"id": secret.id, "version": secret.version})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::FORBIDDEN, err_json(&e)).into_response(),
     }
 }
@@ -995,7 +1023,11 @@ async fn gdpr_verify_request(
             if valid {
                 (StatusCode::OK, Json(serde_json::json!({"verified": true}))).into_response()
             } else {
-                (StatusCode::BAD_REQUEST, err_json("Invalid or expired token")).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    err_json("Invalid or expired token"),
+                )
+                    .into_response()
             }
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
@@ -1052,7 +1084,11 @@ async fn gdpr_record_consent(
         )
         .await
     {
-        Ok(record) => (StatusCode::CREATED, Json(serde_json::json!({"id": record.id, "granted": record.granted}))).into_response(),
+        Ok(record) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"id": record.id, "granted": record.granted})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -1065,7 +1101,11 @@ async fn gdpr_get_consents(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    match state.gdpr.get_consent_records(&tenant_id, &subscriber_id).await {
+    match state
+        .gdpr
+        .get_consent_records(&tenant_id, &subscriber_id)
+        .await
+    {
         Ok(records) => ok_json(&records),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
@@ -1098,10 +1138,19 @@ async fn gdpr_initiate_doi(
     };
     match state
         .gdpr
-        .initiate_double_opt_in(&body.tenant_id, &body.subscriber_id, consent_type, &body.email)
+        .initiate_double_opt_in(
+            &body.tenant_id,
+            &body.subscriber_id,
+            consent_type,
+            &body.email,
+        )
         .await
     {
-        Ok(token) => (StatusCode::CREATED, Json(serde_json::json!({"token": token}))).into_response(),
+        Ok(token) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"token": token})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
 }
@@ -1133,14 +1182,23 @@ async fn gdpr_confirm_doi(
     };
     match state
         .gdpr
-        .confirm_double_opt_in(&body.tenant_id, &body.subscriber_id, consent_type, &body.token)
+        .confirm_double_opt_in(
+            &body.tenant_id,
+            &body.subscriber_id,
+            consent_type,
+            &body.token,
+        )
         .await
     {
         Ok(valid) => {
             if valid {
                 (StatusCode::OK, Json(serde_json::json!({"confirmed": true}))).into_response()
             } else {
-                (StatusCode::BAD_REQUEST, err_json("Invalid or expired token")).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    err_json("Invalid or expired token"),
+                )
+                    .into_response()
             }
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),

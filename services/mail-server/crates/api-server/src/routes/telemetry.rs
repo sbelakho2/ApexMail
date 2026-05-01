@@ -36,13 +36,16 @@ pub struct TelemetryResponse {
 async fn auth_telemetry(
     body: Result<Json<TelemetryPayload>, axum::extract::rejection::JsonRejection>,
 ) -> Json<TelemetryResponse> {
-// Telemetry endpoint is non-blocking:never fail
+    // Telemetry endpoint is non-blocking:never fail
     match body {
         Ok(Json(payload)) => {
             let reason = sanitize_log_string(payload.reason.as_deref(), "unknown", 64);
             let status = sanitize_status(&payload.status);
-            let network_class = sanitize_log_string(payload.network_class.as_deref(), "unknown", 32);
-            let at = payload.at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+            let network_class =
+                sanitize_log_string(payload.network_class.as_deref(), "unknown", 32);
+            let at = payload
+                .at
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
 
             tracing::info!(
                 reason = %reason,
@@ -53,7 +56,7 @@ async fn auth_telemetry(
             );
         }
         Err(_) => {
-// Non-blocking:silently ignore parse errors
+            // Non-blocking:silently ignore parse errors
         }
     }
 
@@ -104,8 +107,14 @@ mod tests {
 
     #[test]
     fn test_sanitize_log_string() {
-        assert_eq!(sanitize_log_string(Some("hello world"), "default", 64), "hello world");
-        assert_eq!(sanitize_log_string(Some("hello\r\nworld\ttab"), "default", 64), "hello world tab");
+        assert_eq!(
+            sanitize_log_string(Some("hello world"), "default", 64),
+            "hello world"
+        );
+        assert_eq!(
+            sanitize_log_string(Some("hello\r\nworld\ttab"), "default", 64),
+            "hello world tab"
+        );
         assert_eq!(sanitize_log_string(None, "default", 64), "default");
         assert_eq!(sanitize_log_string(Some(""), "default", 64), "default");
         assert_eq!(sanitize_log_string(Some("abcdefgh"), "default", 5), "abcde");
@@ -118,6 +127,9 @@ mod tests {
         assert_eq!(sanitize_status(&Some(serde_json::json!(600))), None);
         assert_eq!(sanitize_status(&Some(serde_json::json!(99))), None);
         assert_eq!(sanitize_status(&None), None);
-        assert_eq!(sanitize_status(&Some(serde_json::json!("not a number"))), None);
+        assert_eq!(
+            sanitize_status(&Some(serde_json::json!("not a number"))),
+            None
+        );
     }
 }

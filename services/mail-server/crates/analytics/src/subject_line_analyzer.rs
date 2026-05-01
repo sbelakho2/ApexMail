@@ -34,51 +34,97 @@ const BASELINE_OPEN_RATE: f64 = 0.20;
 
 static URGENCY_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "urgent", "hurry", "limited", "now", "today", "act", "expires",
-        "deadline", "last chance", "final", "don't miss", "ending",
+        "urgent",
+        "hurry",
+        "limited",
+        "now",
+        "today",
+        "act",
+        "expires",
+        "deadline",
+        "last chance",
+        "final",
+        "don't miss",
+        "ending",
     ]
 });
 static EXCLUSIVITY_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "exclusive", "vip", "invitation", "private", "members only",
-        "insider", "selected", "elite",
+        "exclusive",
+        "vip",
+        "invitation",
+        "private",
+        "members only",
+        "insider",
+        "selected",
+        "elite",
     ]
 });
 static BENEFIT_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "free", "save", "discount", "bonus", "reward", "earn", "win",
-        "upgrade", "benefit", "value", "deal",
+        "free", "save", "discount", "bonus", "reward", "earn", "win", "upgrade", "benefit",
+        "value", "deal",
     ]
 });
 static CURIOSITY_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "secret", "reveal", "discover", "surprising", "unexpected",
-        "hidden", "mystery", "unlock",
+        "secret",
+        "reveal",
+        "discover",
+        "surprising",
+        "unexpected",
+        "hidden",
+        "mystery",
+        "unlock",
     ]
 });
 static SOCIAL_PROOF_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "popular", "trending", "everyone", "best-selling", "top rated",
-        "customer favorite", "most loved", "recommended",
+        "popular",
+        "trending",
+        "everyone",
+        "best-selling",
+        "top rated",
+        "customer favorite",
+        "most loved",
+        "recommended",
     ]
 });
-static PERSONALIZATION_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    vec!["{first_name}", "{name}", "{company}", "you", "your"]
-});
+static PERSONALIZATION_PATTERNS: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| vec!["{first_name}", "{name}", "{company}", "you", "your"]);
 static SPAM_TOKENS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "buy now", "click here", "act now", "limited time",
-        "100%", "free!!!", "!!!", "$$", "winner", "congrats",
-        "guarantee", "no obligation", "risk free", "dear friend",
-        "make money", "cash bonus", "double your",
+        "buy now",
+        "click here",
+        "act now",
+        "limited time",
+        "100%",
+        "free!!!",
+        "!!!",
+        "$$",
+        "winner",
+        "congrats",
+        "guarantee",
+        "no obligation",
+        "risk free",
+        "dear friend",
+        "make money",
+        "cash bonus",
+        "double your",
     ]
 });
 static SPAM_BIGRAMS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    vec!["buy now", "act now", "click here", "free offer", "risk free", "no cost"]
+    vec![
+        "buy now",
+        "act now",
+        "click here",
+        "free offer",
+        "risk free",
+        "no cost",
+    ]
 });
-static EMOJI_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    compile_regex(r"[\p{Emoji_Presentation}\p{Emoji}\u{200d}\u{fe0f}]")
-});
+static EMOJI_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| compile_regex(r"[\p{Emoji_Presentation}\p{Emoji}\u{200d}\u{fe0f}]"));
 
 fn compile_regex(pattern: &str) -> Option<Regex> {
     match Regex::new(pattern) {
@@ -103,7 +149,7 @@ impl SubjectLineAnalyzer {
         Self
     }
 
-/// Analyze a subject line and return scored results.
+    /// Analyze a subject line and return scored results.
     pub fn analyze(&self, subject: &str) -> SubjectLineScore {
         let lower = subject.to_lowercase();
         let tokens = tokenize(&lower);
@@ -175,9 +221,7 @@ pub fn classify_tokens(tokens: &[String]) -> Vec<TokenAnalysis> {
 
             let _is_question = token.contains('?');
             let _is_number = token.chars().all(|c| c.is_ascii_digit());
-            let _has_emoji = EMOJI_RE
-                .as_ref()
-                .is_some_and(|regex| regex.is_match(token));
+            let _has_emoji = EMOJI_RE.as_ref().is_some_and(|regex| regex.is_match(token));
 
             TokenAnalysis {
                 token: token.clone(),
@@ -223,20 +267,20 @@ pub fn personalization_check(subject: &str) -> f64 {
 pub fn score_clarity(subject: &str) -> f64 {
     let mut score = 100.0;
 
-// Penalize ALL CAPS
-    let upper_ratio = subject.chars().filter(|c| c.is_uppercase()).count() as f64
-        / subject.len().max(1) as f64;
+    // Penalize ALL CAPS
+    let upper_ratio =
+        subject.chars().filter(|c| c.is_uppercase()).count() as f64 / subject.len().max(1) as f64;
     if upper_ratio > 0.5 {
         score -= 30.0;
     }
 
-// Penalize excessive punctuation
+    // Penalize excessive punctuation
     let punct_count = subject.chars().filter(|c| *c == '!' || *c == '?').count();
     if punct_count > 2 {
         score -= (punct_count as f64 - 2.0) * 10.0;
     }
 
-// Penalize very short subjects
+    // Penalize very short subjects
     if subject.len() < 10 {
         score -= 20.0;
     }
@@ -260,7 +304,7 @@ pub fn spam_check(lower: &str) -> f64 {
         }
     }
 
-// Also check for excessive caps or special chars
+    // Also check for excessive caps or special chars
     if lower.contains("!!!") {
         spam_hits += 2.0;
     }
@@ -396,7 +440,7 @@ mod tests {
     fn test_predicted_open_rate_range() {
         let analyzer = SubjectLineAnalyzer::new();
         let result = analyzer.analyze("Your exclusive weekly newsletter is ready");
-// Should be between 10% and 30% for a decent subject
+        // Should be between 10% and 30% for a decent subject
         assert!(result.predicted_open_rate > 0.10);
         assert!(result.predicted_open_rate < 0.40);
     }

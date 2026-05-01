@@ -112,12 +112,12 @@ fn test_bandit_selection_throughput() {
     let iterations = 100_000;
     let bandit = BanditOptimizer::new(0.1);
 
-// Register arms
+    // Register arms
     let arm_a = bandit.add_arm("variant-a");
     let arm_b = bandit.add_arm("variant-b");
     let arm_c = bandit.add_arm("variant-c");
 
-// Seed some rewards so the exploit path has data
+    // Seed some rewards so the exploit path has data
     for _ in 0..100 {
         let _ = bandit.record_reward(&arm_a, 1.0);
         let _ = bandit.record_reward(&arm_b, 0.5);

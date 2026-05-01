@@ -8,24 +8,24 @@ use crate::reputation::{self, ReputationClass, ReputationScore, SourceScore};
 /// Threat intel lookup result
 #[derive(Debug, Clone)]
 pub struct ThreatVerdict {
-/// IP reputation (if IP was checked)
+    /// IP reputation (if IP was checked)
     pub ip_reputation: Option<ReputationScore>,
-/// Domain reputation (if domain was checked)
+    /// Domain reputation (if domain was checked)
     pub domain_reputation: Option<ReputationScore>,
-/// Combined action recommendation
+    /// Combined action recommendation
     pub action: ThreatAction,
-/// Summary
+    /// Summary
     pub summary: String,
 }
 
 /// Recommended action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreatAction {
-/// No threat detected
+    /// No threat detected
     Allow,
-/// Suspicious — flag for monitoring
+    /// Suspicious — flag for monitoring
     Flag,
-/// Known threat — block
+    /// Known threat — block
     Block,
 }
 
@@ -47,7 +47,7 @@ pub struct ThreatIntelEngine {
 }
 
 impl ThreatIntelEngine {
-/// Create engine with default config
+    /// Create engine with default config
     pub fn new() -> Self {
         let config = ThreatIntelConfig::default();
         Self {
@@ -57,7 +57,7 @@ impl ThreatIntelEngine {
         }
     }
 
-/// Create engine with custom config
+    /// Create engine with custom config
     pub fn with_config(config: ThreatIntelConfig) -> Self {
         Self {
             ip_blocklist: IpBlocklist::new(config.max_ip_entries),
@@ -66,24 +66,25 @@ impl ThreatIntelEngine {
         }
     }
 
-/// Get a reference to the IP blocklist for loading feeds
+    /// Get a reference to the IP blocklist for loading feeds
     pub fn ip_blocklist(&self) -> &IpBlocklist {
         &self.ip_blocklist
     }
 
-/// Get a reference to the domain blocklist for loading feeds
+    /// Get a reference to the domain blocklist for loading feeds
     pub fn domain_blocklist(&self) -> &DomainBlocklist {
         &self.domain_blocklist
     }
 
-/// Look up an IP address for threat intelligence
+    /// Look up an IP address for threat intelligence
     pub fn check_ip(&self, ip_str: &str) -> ThreatVerdict {
         let mut sources = Vec::new();
         let mut trust_scores = Vec::new();
         let mut monitor_only = false;
 
         if let Some(entry) = self.ip_blocklist.lookup_str(ip_str) {
-            let (effective_score, is_monitor_only) = self.feed_adjusted_score(&entry.source, entry.confidence);
+            let (effective_score, is_monitor_only) =
+                self.feed_adjusted_score(&entry.source, entry.confidence);
             let trust = self.feed_trust_score(&entry.source);
             monitor_only |= is_monitor_only;
             sources.push(SourceScore {
@@ -94,7 +95,7 @@ impl ThreatIntelEngine {
             trust_scores.push(trust);
         }
 
-// Use trust-weighted reputation scoring by default
+        // Use trust-weighted reputation scoring by default
         let ip_rep = reputation::compute_reputation_weighted(
             ip_str,
             sources,
@@ -123,14 +124,15 @@ impl ThreatIntelEngine {
         }
     }
 
-/// Look up a domain for threat intelligence
+    /// Look up a domain for threat intelligence
     pub fn check_domain(&self, domain: &str) -> ThreatVerdict {
         let mut sources = Vec::new();
         let mut trust_scores = Vec::new();
         let mut monitor_only = false;
 
         if let Some(entry) = self.domain_blocklist.lookup(domain) {
-            let (effective_score, is_monitor_only) = self.feed_adjusted_score(&entry.source, entry.confidence);
+            let (effective_score, is_monitor_only) =
+                self.feed_adjusted_score(&entry.source, entry.confidence);
             let trust = self.feed_trust_score(&entry.source);
             monitor_only |= is_monitor_only;
             sources.push(SourceScore {
@@ -141,7 +143,7 @@ impl ThreatIntelEngine {
             trust_scores.push(trust);
         }
 
-// Use trust-weighted reputation scoring by default
+        // Use trust-weighted reputation scoring by default
         let domain_rep = reputation::compute_reputation_weighted(
             domain,
             sources,
@@ -160,7 +162,10 @@ impl ThreatIntelEngine {
             action = ThreatAction::Flag;
         }
 
-        let summary = format!("Domain {} — {} (score: {:.1})", domain, action, domain_rep.score);
+        let summary = format!(
+            "Domain {} — {} (score: {:.1})",
+            domain, action, domain_rep.score
+        );
 
         ThreatVerdict {
             ip_reputation: None,
@@ -170,13 +175,19 @@ impl ThreatIntelEngine {
         }
     }
 
-/// Check both IP and domain, returning the worst verdict
+    /// Check both IP and domain, returning the worst verdict
     pub fn check(&self, ip_str: Option<&str>, domain: Option<&str>) -> ThreatVerdict {
         let ip_verdict = ip_str.map(|ip| self.check_ip(ip));
         let domain_verdict = domain.map(|d| self.check_domain(d));
 
-        let ip_action = ip_verdict.as_ref().map(|v| v.action).unwrap_or(ThreatAction::Allow);
-        let domain_action = domain_verdict.as_ref().map(|v| v.action).unwrap_or(ThreatAction::Allow);
+        let ip_action = ip_verdict
+            .as_ref()
+            .map(|v| v.action)
+            .unwrap_or(ThreatAction::Allow);
+        let domain_action = domain_verdict
+            .as_ref()
+            .map(|v| v.action)
+            .unwrap_or(ThreatAction::Allow);
 
         let worst_action = match (ip_action, domain_action) {
             (ThreatAction::Block, _) | (_, ThreatAction::Block) => ThreatAction::Block,
@@ -186,8 +197,14 @@ impl ThreatIntelEngine {
 
         let summary = format!(
             "IP: {} | Domain: {}",
-            ip_verdict.as_ref().map(|v| v.summary.as_str()).unwrap_or("not checked"),
-            domain_verdict.as_ref().map(|v| v.summary.as_str()).unwrap_or("not checked"),
+            ip_verdict
+                .as_ref()
+                .map(|v| v.summary.as_str())
+                .unwrap_or("not checked"),
+            domain_verdict
+                .as_ref()
+                .map(|v| v.summary.as_str())
+                .unwrap_or("not checked"),
         );
 
         ThreatVerdict {
@@ -198,12 +215,12 @@ impl ThreatIntelEngine {
         }
     }
 
-/// Purge all expired entries from both blocklists
+    /// Purge all expired entries from both blocklists
     pub fn purge_expired(&self) -> usize {
         self.ip_blocklist.purge_expired() + self.domain_blocklist.purge_expired()
     }
 
-/// Statistics about current blocklist sizes
+    /// Statistics about current blocklist sizes
     pub fn stats(&self) -> ThreatIntelStats {
         ThreatIntelStats {
             ip_exact_entries: self.ip_blocklist.exact_count(),
@@ -212,16 +229,16 @@ impl ThreatIntelEngine {
         }
     }
 
-/// Check whether blocklist memory pressure is above the configured
-/// threshold and, if so, trigger an immediate purge of expired entries.
-/// Returns the number of entries purged. Call this after every feed
-/// refresh to prevent OOM when feeds grow unexpectedly.
+    /// Check whether blocklist memory pressure is above the configured
+    /// threshold and, if so, trigger an immediate purge of expired entries.
+    /// Returns the number of entries purged. Call this after every feed
+    /// refresh to prevent OOM when feeds grow unexpectedly.
     pub fn purge_if_pressure(&self) -> usize {
         let threshold = self.config.purge_pressure_threshold;
         let ip_load = (self.ip_blocklist.exact_count() + self.ip_blocklist.cidr_count()) as f64
             / self.config.max_ip_entries.max(1) as f64;
-        let domain_load = self.domain_blocklist.count() as f64
-            / self.config.max_domain_entries.max(1) as f64;
+        let domain_load =
+            self.domain_blocklist.count() as f64 / self.config.max_domain_entries.max(1) as f64;
 
         if ip_load >= threshold || domain_load >= threshold {
             self.purge_expired()
@@ -250,25 +267,25 @@ impl ThreatIntelEngine {
         (adjusted, monitor_only)
     }
 
-/// Get the configured trust score for a named feed (default 5.0 if unknown).
+    /// Get the configured trust score for a named feed (default 5.0 if unknown).
     fn feed_trust_score(&self, source_name: &str) -> f64 {
         self.config
             .feeds
             .iter()
             .find(|f| f.enabled && f.name.eq_ignore_ascii_case(source_name))
             .map(|f| f.trust_score.clamp(0.0, 10.0))
-// Unknown (unconfigured) feeds receive full trust so that trust-
-// weighting only reduces scores when explicitly configured.
-// Operators must actively set a low trust_score to down-weight a
-// feed; omitting a feed should never silently suppress blocking.
+            // Unknown (unconfigured) feeds receive full trust so that trust-
+            // weighting only reduces scores when explicitly configured.
+            // Operators must actively set a low trust_score to down-weight a
+            // feed; omitting a feed should never silently suppress blocking.
             .unwrap_or(10.0)
     }
 }
 
 #[cfg(feature = "events")]
 impl ThreatIntelEngine {
-/// Check IP/domain and also produce a normalized security event.
-/// Requires the `events` feature flag (which enables the `mail-common` dep).
+    /// Check IP/domain and also produce a normalized security event.
+    /// Requires the `events` feature flag (which enables the `mail-common` dep).
     pub fn check_with_event(
         &self,
         ip_str: Option<&str>,
@@ -276,9 +293,8 @@ impl ThreatIntelEngine {
         correlation: Option<mail_common::security::CorrelationContext>,
     ) -> (ThreatVerdict, mail_common::security::SecurityEvent) {
         let verdict = self.check(ip_str, domain);
-        let correlation = correlation.unwrap_or_else(
-            mail_common::security::CorrelationContext::generated,
-        );
+        let correlation =
+            correlation.unwrap_or_else(mail_common::security::CorrelationContext::generated);
 
         let (action, severity) = match verdict.action {
             ThreatAction::Allow => (
@@ -295,8 +311,16 @@ impl ThreatIntelEngine {
             ),
         };
 
-        let ip_score = verdict.ip_reputation.as_ref().map(|r| r.score).unwrap_or(0.0);
-        let domain_score = verdict.domain_reputation.as_ref().map(|r| r.score).unwrap_or(0.0);
+        let ip_score = verdict
+            .ip_reputation
+            .as_ref()
+            .map(|r| r.score)
+            .unwrap_or(0.0);
+        let domain_score = verdict
+            .domain_reputation
+            .as_ref()
+            .map(|r| r.score)
+            .unwrap_or(0.0);
         let risk_score = ip_score.max(domain_score).min(10.0);
 
         let mut event = mail_common::security::SecurityEvent::new(
@@ -316,7 +340,9 @@ impl ThreatIntelEngine {
         }
 
         if let Some(alert) = mail_common::security::ingest_security_event(event.clone()) {
-            event.metadata.insert("composite_alert".to_string(), "true".to_string());
+            event
+                .metadata
+                .insert("composite_alert".to_string(), "true".to_string());
             event.metadata.insert(
                 "composite_score".to_string(),
                 format!("{:.2}", alert.composite_score),
@@ -340,11 +366,11 @@ impl Default for ThreatIntelEngine {
 /// Blocklist statistics
 #[derive(Debug, Clone)]
 pub struct ThreatIntelStats {
-/// Number of exact IP entries
+    /// Number of exact IP entries
     pub ip_exact_entries: usize,
-/// Number of CIDR range entries
+    /// Number of CIDR range entries
     pub ip_cidr_entries: usize,
-/// Number of domain entries
+    /// Number of domain entries
     pub domain_entries: usize,
 }
 
@@ -387,10 +413,9 @@ mod tests {
     #[test]
     fn test_blocked_ip() {
         let engine = ThreatIntelEngine::new();
-        engine.ip_blocklist().add_ip(
-            "1.2.3.4".parse().expect("valid"),
-            ip_entry("1.2.3.4"),
-        );
+        engine
+            .ip_blocklist()
+            .add_ip("1.2.3.4".parse().expect("valid"), ip_entry("1.2.3.4"));
         let verdict = engine.check_ip("1.2.3.4");
         assert_eq!(verdict.action, ThreatAction::Block);
     }
@@ -398,7 +423,10 @@ mod tests {
     #[test]
     fn test_blocked_cidr() {
         let engine = ThreatIntelEngine::new();
-        engine.ip_blocklist().add_cidr("10.0.0.0/8", ip_entry("10.0.0.0/8")).expect("valid");
+        engine
+            .ip_blocklist()
+            .add_cidr("10.0.0.0/8", ip_entry("10.0.0.0/8"))
+            .expect("valid");
         let verdict = engine.check_ip("10.1.2.3");
         assert_eq!(verdict.action, ThreatAction::Block);
     }
@@ -406,7 +434,9 @@ mod tests {
     #[test]
     fn test_blocked_domain() {
         let engine = ThreatIntelEngine::new();
-        engine.domain_blocklist().add("evil.com", domain_entry("evil.com"));
+        engine
+            .domain_blocklist()
+            .add("evil.com", domain_entry("evil.com"));
         let verdict = engine.check_domain("evil.com");
         assert_eq!(verdict.action, ThreatAction::Block);
     }
@@ -414,7 +444,9 @@ mod tests {
     #[test]
     fn test_subdomain_blocked() {
         let engine = ThreatIntelEngine::new();
-        engine.domain_blocklist().add("evil.com", domain_entry("evil.com"));
+        engine
+            .domain_blocklist()
+            .add("evil.com", domain_entry("evil.com"));
         let verdict = engine.check_domain("phish.evil.com");
         assert_eq!(verdict.action, ThreatAction::Block);
     }
@@ -422,8 +454,10 @@ mod tests {
     #[test]
     fn test_combined_check_worst_wins() {
         let engine = ThreatIntelEngine::new();
-        engine.domain_blocklist().add("evil.com", domain_entry("evil.com"));
-// IP is clean, domain is blocked → Block wins
+        engine
+            .domain_blocklist()
+            .add("evil.com", domain_entry("evil.com"));
+        // IP is clean, domain is blocked → Block wins
         let verdict = engine.check(Some("8.8.8.8"), Some("evil.com"));
         assert_eq!(verdict.action, ThreatAction::Block);
     }
@@ -431,9 +465,16 @@ mod tests {
     #[test]
     fn test_stats() {
         let engine = ThreatIntelEngine::new();
-        engine.ip_blocklist().add_ip("1.2.3.4".parse().expect("valid"), ip_entry("1.2.3.4"));
-        engine.ip_blocklist().add_cidr("10.0.0.0/8", ip_entry("10.0.0.0/8")).expect("valid");
-        engine.domain_blocklist().add("evil.com", domain_entry("evil.com"));
+        engine
+            .ip_blocklist()
+            .add_ip("1.2.3.4".parse().expect("valid"), ip_entry("1.2.3.4"));
+        engine
+            .ip_blocklist()
+            .add_cidr("10.0.0.0/8", ip_entry("10.0.0.0/8"))
+            .expect("valid");
+        engine
+            .domain_blocklist()
+            .add("evil.com", domain_entry("evil.com"));
 
         let stats = engine.stats();
         assert_eq!(stats.ip_exact_entries, 1);

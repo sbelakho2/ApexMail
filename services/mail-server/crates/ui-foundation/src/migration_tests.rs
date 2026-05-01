@@ -14,7 +14,8 @@ use crate::primitives;
 use crate::routing;
 use crate::ssr;
 
-const UI_RUST_MIGRATION_PLAN_JSON: &str = include_str!("../../../../../docs/development/ui-rust-migration-plan.json");
+const UI_RUST_MIGRATION_PLAN_JSON: &str =
+    include_str!("../../../../../docs/development/ui-rust-migration-plan.json");
 const STRIPE_TOOL_CONTRACT_MD: &str = include_str!("../../../../../docs/tool-contracts/stripe.md");
 
 fn rendered_routes() -> Vec<ssr::SsrRoute> {
@@ -73,19 +74,29 @@ fn assert_no_stripe_browser_embed(label: &str, html: &str) {
 fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
     match route.surface {
         "web" => {
-            assert!(html.contains("<title>ApexMail</title>"), "[web] {} missing web title", route.pattern);
             assert!(
-                html.contains(&format!("<html lang=\"en\" class=\"{}\">", leptos_views::WEB_ROOT_HTML_CLASSES)),
+                html.contains("<title>ApexMail</title>"),
+                "[web] {} missing web title",
+                route.pattern
+            );
+            assert!(
+                html.contains(&format!(
+                    "<html lang=\"en\" class=\"{}\">",
+                    leptos_views::WEB_ROOT_HTML_CLASSES
+                )),
                 "[web] {} missing web html font classes",
                 route.pattern
             );
             assert!(
-                html.contains(&format!("<body class=\"{}\">", leptos_views::WEB_ROOT_BODY_CLASSES)),
+                html.contains(&format!(
+                    "<body class=\"{}\">",
+                    leptos_views::WEB_ROOT_BODY_CLASSES
+                )),
                 "[web] {} missing web body class",
                 route.pattern
             );
             assert!(
-                html.contains("<main id=\"app-main\" class=\"min-h-screen bg-background\">") ,
+                html.contains("<main id=\"app-main\" class=\"min-h-screen bg-background\">"),
                 "[web] {} missing web main wrapper",
                 route.pattern
             );
@@ -171,7 +182,11 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
 #[test]
 fn migration_all_93_routes_have_view_functions() {
     let routes = rendered_routes();
-    assert_eq!(routes.len(), routing::total_route_count(), "SSR route count drifted from manifest");
+    assert_eq!(
+        routes.len(),
+        routing::total_route_count(),
+        "SSR route count drifted from manifest"
+    );
 
     let mut missing = Vec::new();
     for route in &routes {
@@ -206,7 +221,8 @@ fn migration_docs_define_rust_ui_and_current_stripe_boundary() {
         "Stripe tool contract no longer documents the current server-side Stripe integration boundary"
     );
     assert!(
-        STRIPE_TOOL_CONTRACT_MD.contains("webhook verification is implemented manually in `billing-service`"),
+        STRIPE_TOOL_CONTRACT_MD
+            .contains("webhook verification is implemented manually in `billing-service`"),
         "Stripe tool contract no longer documents manual webhook verification ownership"
     );
     assert!(
@@ -241,18 +257,26 @@ fn migration_every_surface_fully_covered() {
 
 #[test]
 fn migration_primitives_render_valid_html() {
-// Every primitive struct must produce valid HTML
+    // Every primitive struct must produce valid HTML
     let btn = primitives::Button {
-        variant: "default", size: "default", label: "Test", disabled: false,
-        loading: false, left_icon: None, right_icon: None,
+        variant: "default",
+        size: "default",
+        label: "Test",
+        disabled: false,
+        loading: false,
+        left_icon: None,
+        right_icon: None,
     };
     let html = btn.render_html();
     assert!(html.contains("<button"), "Button missing <button> tag");
     assert!(html.contains("Test"), "Button missing label");
 
     let card = primitives::Card {
-        title: "Title", body: "Body", variant: "default",
-        padding: "default", interactive: false,
+        title: "Title",
+        body: "Body",
+        variant: "default",
+        padding: "default",
+        interactive: false,
     };
     let html = card.render_html();
     assert!(html.contains("Title"), "Card missing title");
@@ -260,7 +284,10 @@ fn migration_primitives_render_valid_html() {
 
     let table = primitives::Table {
         caption: Some("Cap"),
-        columns: vec![primitives::TableColumn { label: "Col", align: "left" }],
+        columns: vec![primitives::TableColumn {
+            label: "Col",
+            align: "left",
+        }],
         rows: vec![],
     };
     let html = table.render_html();
@@ -268,9 +295,15 @@ fn migration_primitives_render_valid_html() {
     assert!(html.contains("Col"), "Table missing column label");
 
     let input = primitives::Input {
-        input_type: "text", variant: "default", size: "default",
-        placeholder: "test", value: "", left_icon: None, right_icon: None,
-        error: None, disabled: false,
+        input_type: "text",
+        variant: "default",
+        size: "default",
+        placeholder: "test",
+        value: "",
+        left_icon: None,
+        right_icon: None,
+        error: None,
+        disabled: false,
     };
     let html = input.render_html();
     assert!(html.contains("<input"), "Input missing <input> tag");
@@ -287,7 +320,11 @@ fn migration_login_pages_preserve_field_ids() {
     }
 
     let cp = leptos_views::control_plane_login_page();
-    let cp_ids = ["id=\"login-email\"", "id=\"login-password\"", "id=\"login-mfa\""];
+    let cp_ids = [
+        "id=\"login-email\"",
+        "id=\"login-password\"",
+        "id=\"login-mfa\"",
+    ];
     for id in &cp_ids {
         assert!(cp.contains(id), "control-plane login missing {}", id);
     }
@@ -296,19 +333,34 @@ fn migration_login_pages_preserve_field_ids() {
 #[test]
 fn migration_forms_have_action_attributes() {
     let login = leptos_views::web_login_page();
-    assert!(login.contains("action=\"/v1/auth/login\""), "login missing action");
+    assert!(
+        login.contains("action=\"/v1/auth/login\""),
+        "login missing action"
+    );
 
     let signup = leptos_views::web_signup_page();
-    assert!(signup.contains("action=\"/v1/auth/signup\""), "signup missing action");
+    assert!(
+        signup.contains("action=\"/v1/auth/signup\""),
+        "signup missing action"
+    );
 
     let forgot = leptos_views::web_forgot_password_page();
-    assert!(forgot.contains("action=\"/v1/auth/forgot-password\""), "forgot missing action");
+    assert!(
+        forgot.contains("action=\"/v1/auth/forgot-password\""),
+        "forgot missing action"
+    );
 
     let reset = leptos_views::web_reset_password_page();
-    assert!(reset.contains("action=\"/v1/auth/reset-password\""), "reset missing action");
+    assert!(
+        reset.contains("action=\"/v1/auth/reset-password\""),
+        "reset missing action"
+    );
 
     let cp_login = leptos_views::control_plane_login_page();
-    assert!(cp_login.contains("action=\"/api/auth/login\""), "cp login missing action");
+    assert!(
+        cp_login.contains("action=\"/api/auth/login\""),
+        "cp login missing action"
+    );
 }
 
 #[test]
@@ -326,15 +378,24 @@ fn migration_security_data_attributes_present() {
 #[test]
 fn migration_sidebar_data_attributes_present() {
     let html = leptos_views::web_dashboard_layout("<div></div>");
-    assert!(html.contains("data-sidebar-storage-key=\"apexmail-ui\""), "sidebar key missing");
+    assert!(
+        html.contains("data-sidebar-storage-key=\"apexmail-ui\""),
+        "sidebar key missing"
+    );
     assert!(html.contains("data-toast-store"), "toast store missing");
-    assert!(html.contains("aria-label=\"Primary sidebar navigation\""), "sidebar aria missing");
+    assert!(
+        html.contains("aria-label=\"Primary sidebar navigation\""),
+        "sidebar aria missing"
+    );
 }
 
 #[test]
 fn migration_marketing_shell_attributes_present() {
     let html = leptos_views::marketing_page("<div></div>");
-    assert!(html.contains("data-marketing-shell=\"footer\""), "marketing footer missing");
+    assert!(
+        html.contains("data-marketing-shell=\"footer\""),
+        "marketing footer missing"
+    );
     assert!(html.contains("font-apex"), "apex font class missing");
 }
 
@@ -451,7 +512,12 @@ fn migration_marketing_pages_have_content() {
 
 #[test]
 fn migration_unknown_routes_are_rejected_for_every_surface() {
-    let unknown = ["/definitely-missing", "/billing/checkout", "/webhooks/stripe", "/_next/static/app.js"];
+    let unknown = [
+        "/definitely-missing",
+        "/billing/checkout",
+        "/webhooks/stripe",
+        "/_next/static/app.js",
+    ];
     let surfaces = ["web", "control-plane", "marketing", "marketing-zola"];
 
     for surface in surfaces {
@@ -473,22 +539,34 @@ fn migration_web_and_cp_share_primitives() {
     let web_login = leptos_views::web_login_page();
     let cp_login = leptos_views::control_plane_login_page();
 
-// Both should use the same button class pattern
+    // Both should use the same button class pattern
     let btn_class = "inline-flex items-center justify-center";
-    assert!(web_login.contains(btn_class), "web login missing common button class");
-    assert!(cp_login.contains(btn_class), "cp login missing common button class");
+    assert!(
+        web_login.contains(btn_class),
+        "web login missing common button class"
+    );
+    assert!(
+        cp_login.contains(btn_class),
+        "cp login missing common button class"
+    );
 
-// Both should use input class pattern
+    // Both should use input class pattern
     let input_class = "flex h-10 w-full rounded-md border border-input";
-    assert!(web_login.contains(input_class), "web login missing common input class");
-    assert!(cp_login.contains(input_class), "cp login missing common input class");
+    assert!(
+        web_login.contains(input_class),
+        "web login missing common input class"
+    );
+    assert!(
+        cp_login.contains(input_class),
+        "cp login missing common input class"
+    );
 }
 
 // ─── Rendering determinism (pixel parity prerequisite) ─────
 
 #[test]
 fn migration_rendering_is_deterministic() {
-// Same function called twice must produce identical output
+    // Same function called twice must produce identical output
     let surfaces_and_paths: Vec<(&str, &str)> = vec![
         ("web", "/"),
         ("web", "/login"),
@@ -513,8 +591,8 @@ fn migration_rendering_is_deterministic() {
 
 #[test]
 fn migration_pixel_parity_self_check() {
-// When comparing a page's HTML against itself, parity must be perfect.
-// This validates the parity framework works correctly.
+    // When comparing a page's HTML against itself, parity must be perfect.
+    // This validates the parity framework works correctly.
     let test_pages: Vec<(&str, &str)> = vec![
         ("web", "/"),
         ("web", "/login"),
@@ -529,7 +607,9 @@ fn migration_pixel_parity_self_check() {
         assert!(
             result.is_identical,
             "[{}] {} self-parity check failed:\n{}",
-            surface, path, result.report()
+            surface,
+            path,
+            result.report()
         );
     }
 }
@@ -554,8 +634,7 @@ fn migration_pixel_parity_detects_adversarial_mutations() {
         assert!(
             !result.is_identical,
             "[{}] {} parity engine failed to detect text mutation",
-            surface,
-            path
+            surface, path
         );
         assert!(
             result.total_diffs() > 0,
@@ -574,7 +653,7 @@ fn migration_critical_css_classes_preserved() {
     let classes = pixel_parity::extract_classes(&web_home);
     let flat: Vec<&String> = classes.iter().flat_map(|c| c.iter()).collect();
 
-// Essential Tailwind classes that must be preserved
+    // Essential Tailwind classes that must be preserved
     let required = ["min-h-screen", "text-4xl", "font-bold", "bg-gray-50"];
     for cls in &required {
         assert!(
@@ -589,16 +668,17 @@ fn migration_critical_css_classes_preserved() {
 fn migration_dashboard_layout_css_classes_preserved() {
     let html = leptos_views::web_dashboard_layout("<div></div>");
 
-// Sidebar uses data attributes, not CSS classes
+    // Sidebar uses data attributes, not CSS classes
     assert!(
         html.contains("data-sidebar-storage-key"),
         "dashboard layout missing sidebar data attribute"
     );
-// Verify Tailwind utility classes are present
+    // Verify Tailwind utility classes are present
     let classes = pixel_parity::extract_classes(&html);
     let flat: Vec<&String> = classes.iter().flat_map(|c| c.iter()).collect();
     assert!(
-        flat.iter().any(|c| c.contains("flex") || c.contains("grid")),
+        flat.iter()
+            .any(|c| c.contains("flex") || c.contains("grid")),
         "dashboard layout missing layout CSS classes"
     );
 }
@@ -618,7 +698,7 @@ fn migration_settings_links_are_valid_routes() {
     ];
     for link in &links {
         assert!(html.contains(link), "settings missing link to {}", link);
-// Each linked page must exist as a renderable route
+        // Each linked page must exist as a renderable route
         assert!(
             axum_router::render_route("web", link).is_some(),
             "settings links to {} but no view function exists",
@@ -647,8 +727,15 @@ fn migration_cp_infrastructure_links_are_valid() {
 fn migration_auth_requirements_match_manifest() {
     let routes = ssr::ssr_routes();
 
-// Public pages that should NOT require auth
-    let public_paths = ["/", "/login", "/signup", "/forgot-password", "/reset-password", "/verify-email"];
+    // Public pages that should NOT require auth
+    let public_paths = [
+        "/",
+        "/login",
+        "/signup",
+        "/forgot-password",
+        "/reset-password",
+        "/verify-email",
+    ];
     for route in routes.iter().filter(|r| r.surface == "web") {
         if public_paths.contains(&route.pattern) {
             assert!(
@@ -659,8 +746,11 @@ fn migration_auth_requirements_match_manifest() {
         }
     }
 
-// Marketing pages should never require auth
-    for route in routes.iter().filter(|r| r.surface == "marketing" || r.surface == "marketing-zola") {
+    // Marketing pages should never require auth
+    for route in routes
+        .iter()
+        .filter(|r| r.surface == "marketing" || r.surface == "marketing-zola")
+    {
         assert!(
             !route.auth_required,
             "marketing {} should not require auth",
@@ -689,27 +779,32 @@ fn migration_all_rendered_pages_have_valid_html_structure() {
         assert!(
             has_html_doctype(&html),
             "[{}] {} missing DOCTYPE",
-            route.surface, route.pattern
+            route.surface,
+            route.pattern
         );
         assert!(
             html.contains("<html"),
             "[{}] {} missing <html>",
-            route.surface, route.pattern
+            route.surface,
+            route.pattern
         );
         assert!(
             html.contains("</html>"),
             "[{}] {} missing </html>",
-            route.surface, route.pattern
+            route.surface,
+            route.pattern
         );
         assert!(
             html.contains("<head>") || html.contains("<head "),
             "[{}] {} missing <head>",
-            route.surface, route.pattern
+            route.surface,
+            route.pattern
         );
         assert!(
             html.contains("<body"),
             "[{}] {} missing <body>",
-            route.surface, route.pattern
+            route.surface,
+            route.pattern
         );
     }
 }
@@ -718,13 +813,39 @@ fn migration_all_rendered_pages_have_valid_html_structure() {
 fn migration_total_route_count() {
     let routes = rendered_routes();
     let web = routes.iter().filter(|r| r.surface == "web").count();
-    let cp = routes.iter().filter(|r| r.surface == "control-plane").count();
+    let cp = routes
+        .iter()
+        .filter(|r| r.surface == "control-plane")
+        .count();
     let mkt = routes.iter().filter(|r| r.surface == "marketing").count();
-    let zola = routes.iter().filter(|r| r.surface == "marketing-zola").count();
+    let zola = routes
+        .iter()
+        .filter(|r| r.surface == "marketing-zola")
+        .count();
 
-    assert_eq!(web, routing::declared_route_count("web").unwrap(), "web route count drifted");
-    assert_eq!(cp, routing::declared_route_count("control-plane").unwrap(), "control-plane route count drifted");
-    assert_eq!(mkt, routing::declared_route_count("marketing").unwrap(), "marketing route count drifted");
-    assert_eq!(zola, routing::declared_route_count("marketing-zola").unwrap(), "marketing-zola route count drifted");
-    assert_eq!(routes.len(), routing::total_route_count(), "total route count drifted");
+    assert_eq!(
+        web,
+        routing::declared_route_count("web").unwrap(),
+        "web route count drifted"
+    );
+    assert_eq!(
+        cp,
+        routing::declared_route_count("control-plane").unwrap(),
+        "control-plane route count drifted"
+    );
+    assert_eq!(
+        mkt,
+        routing::declared_route_count("marketing").unwrap(),
+        "marketing route count drifted"
+    );
+    assert_eq!(
+        zola,
+        routing::declared_route_count("marketing-zola").unwrap(),
+        "marketing-zola route count drifted"
+    );
+    assert_eq!(
+        routes.len(),
+        routing::total_route_count(),
+        "total route count drifted"
+    );
 }

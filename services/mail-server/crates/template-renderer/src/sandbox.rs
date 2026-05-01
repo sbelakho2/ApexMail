@@ -20,10 +20,10 @@ impl Sandbox {
         Self { config }
     }
 
-/// Execute template rendering within sandbox constraints.
-/// - Validates source length
-/// - Enforces execution timeout
-/// - Checks output size limits
+    /// Execute template rendering within sandbox constraints.
+    /// - Validates source length
+    /// - Enforces execution timeout
+    /// - Checks output size limits
     pub fn execute(
         &self,
         source: &str,
@@ -31,7 +31,7 @@ impl Sandbox {
     ) -> Result<SandboxResult, TemplateError> {
         let start = Instant::now();
 
-// 1. Size check
+        // 1. Size check
         if source.len() > self.config.max_source_length {
             return Err(TemplateError::SourceTooLarge {
                 size: source.len(),
@@ -39,26 +39,26 @@ impl Sandbox {
             });
         }
 
-// 2. Transpile (validates imports, dangerous patterns)
+        // 2. Transpile (validates imports, dangerous patterns)
         let transpiled = transpiler::transpile(source, self.config.max_source_length)?;
 
-// 3. Check timeout
+        // 3. Check timeout
         self.check_timeout(start)?;
 
-// 4. Render HTML by resolving placeholders in original source
+        // 4. Render HTML by resolving placeholders in original source
         let html = transpiler::resolve_placeholders(source, &options.props);
 
-// 5. Check timeout again
+        // 5. Check timeout again
         self.check_timeout(start)?;
 
-// 6. Minify if requested
+        // 6. Minify if requested
         let html = if options.minify {
             minify_html(&html)
         } else {
             html
         };
 
-// 7. Output size check
+        // 7. Output size check
         if html.len() > self.config.max_output_length {
             return Err(TemplateError::OutputTooLarge {
                 size: html.len(),
@@ -245,7 +245,7 @@ mod tests {
         let html = "<div>\n  <p> Hello </p>\n  <p> World </p>\n</div>";
         let result = minify_html(html);
         assert!(!result.contains('\n'));
-// Spaces within tags are preserved
+        // Spaces within tags are preserved
         assert!(result.contains("Hello"));
     }
 

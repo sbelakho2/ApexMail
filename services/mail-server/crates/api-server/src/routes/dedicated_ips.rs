@@ -148,18 +148,17 @@ async fn allocate_ip(
 
     let region = body.and_then(|b| b.0.region);
 
-// Delegate to Hetzner IP provider (handles plan check, floating IP creation)
-    let ip_provider = state
-        .ip_provider
-        .as_ref()
-        .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
+    // Delegate to Hetzner IP provider (handles plan check, floating IP creation)
+    let ip_provider = state.ip_provider.as_ref().ok_or_else(|| {
+        ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into())
+    })?;
 
     let allocated = ip_provider
         .allocate_ip(&auth.tenant_id, region.as_deref())
         .await
         .map_err(ip_provider_to_api_error)?;
 
-// Fetch the just-created DB row for the full response
+    // Fetch the just-created DB row for the full response
     let row = sqlx::query_as::<_, DedicatedIpRow>(
         "SELECT id, ip_address, rdns_hostname, region, status,
                 warmup_progress, warmup_started_at, warmup_completed_at,
@@ -199,7 +198,7 @@ async fn list_ips(
     let limit = clamp_limit(params.limit, 200);
     let offset = params.offset.clamp(0, 100_000);
 
-// Count total IPs (non-retired) for pagination
+    // Count total IPs (non-retired) for pagination
     let (total,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM dedicated_ips
          WHERE tenant_id = $1 AND status != 'retired'",
@@ -208,9 +207,9 @@ async fn list_ips(
     .fetch_one(&state.db)
     .await?;
 
-// Fetch IPs (include retired for history, most recent first)
+    // Fetch IPs (include retired for history, most recent first)
     let rows = sqlx::query_as::<_, DedicatedIpRow>(
-         "SELECT d.id, d.ip_address, d.rdns_hostname, d.region, d.status,
+        "SELECT d.id, d.ip_address, d.rdns_hostname, d.region, d.status,
               d.warmup_progress, d.warmup_started_at, d.warmup_completed_at,
               d.billing_status, d.allocated_at, d.created_at, d.updated_at,
               COALESCE(stats.emails_sent_total, 0)::bigint as emails_sent_total,
@@ -250,7 +249,7 @@ async fn list_ips(
     .fetch_all(&state.db)
     .await?;
 
-// Build allocation summary from the tenant's plan
+    // Build allocation summary from the tenant's plan
     let allocation = build_allocation_summary(&state, &auth.tenant_id).await?;
 
     let ips: Vec<DedicatedIpResponse> = rows.into_iter().map(|r| r.into_response()).collect();
@@ -278,10 +277,9 @@ async fn release_ip(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["dedicated_ips:write"])?;
 
-    let ip_provider = state
-        .ip_provider
-        .as_ref()
-        .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
+    let ip_provider = state.ip_provider.as_ref().ok_or_else(|| {
+        ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into())
+    })?;
 
     ip_provider
         .release_ip(id, &auth.tenant_id)
@@ -307,10 +305,9 @@ async fn start_warmup(
 ) -> Result<Json<WarmupResponse>, ApiError> {
     require_scopes(&auth, &["dedicated_ips:write"])?;
 
-    let ip_provider = state
-        .ip_provider
-        .as_ref()
-        .ok_or_else(|| ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into()))?;
+    let ip_provider = state.ip_provider.as_ref().ok_or_else(|| {
+        ApiError::ServiceUnavailable("dedicated IP provisioning not configured".into())
+    })?;
 
     let status = ip_provider
         .start_warmup(id, &auth.tenant_id)
@@ -416,29 +413,24 @@ fn calculate_reputation_score(
 /// Convert IP provider errors to API errors.
 fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
     match e {
-        IpProviderError::PlanNotEligible => {
-            ApiError::Forbidden("your plan does not include dedicated IP access — please upgrade to Pro or above".into())
-        }
-        IpProviderError::LimitReached { limit, .. } => {
-            ApiError::BadRequest(format!(
-                "dedicated IP limit reached ({limit}). Contact support to increase your allocation."
-            ))
-        }
-        IpProviderError::NoAvailableServers { region } => {
-            ApiError::ServiceUnavailable(format!(
-                "no MTA servers available in {region}. Please try again shortly or contact support."
-            ))
-        }
-        IpProviderError::IpNotFound { .. } => {
-            ApiError::NotFound("dedicated IP not found".into())
-        }
+        IpProviderError::PlanNotEligible => ApiError::Forbidden(
+            "your plan does not include dedicated IP access — please upgrade to Pro or above"
+                .into(),
+        ),
+        IpProviderError::LimitReached { limit, .. } => ApiError::BadRequest(format!(
+            "dedicated IP limit reached ({limit}). Contact support to increase your allocation."
+        )),
+        IpProviderError::NoAvailableServers { region } => ApiError::ServiceUnavailable(format!(
+            "no MTA servers available in {region}. Please try again shortly or contact support."
+        )),
+        IpProviderError::IpNotFound { .. } => ApiError::NotFound("dedicated IP not found".into()),
         IpProviderError::HetznerApi(msg) => {
             tracing::error!(error = %msg, "Hetzner API error during dedicated IP operation");
             ApiError::Internal("failed to communicate with IP provisioning service".into())
         }
-        IpProviderError::NotConfigured => {
-            ApiError::ServiceUnavailable("dedicated IP provisioning is not configured — set HETZNER_API_TOKEN".into())
-        }
+        IpProviderError::NotConfigured => ApiError::ServiceUnavailable(
+            "dedicated IP provisioning is not configured — set HETZNER_API_TOKEN".into(),
+        ),
         IpProviderError::Database(err) => {
             tracing::error!(error = %err, "database error in dedicated IP operation");
             ApiError::Internal("database error".into())
@@ -608,7 +600,9 @@ mod tests {
         assert_eq!(
             estimated,
             started_at
-                + chrono::Duration::days(i64::from(crate::ip_provider::warmup_schedule::FULL_WARMUP_DAYS))
+                + chrono::Duration::days(i64::from(
+                    crate::ip_provider::warmup_schedule::FULL_WARMUP_DAYS
+                ))
         );
         assert_eq!(estimated.time(), started_at.time());
     }
@@ -667,8 +661,10 @@ mod tests {
         let err = ip_provider_to_api_error(IpProviderError::PlanNotEligible);
         match err {
             ApiError::Forbidden(msg) => {
-                assert!(msg.to_lowercase().contains("upgrade"),
-                    "PlanNotEligible must mention upgrade: {msg}");
+                assert!(
+                    msg.to_lowercase().contains("upgrade"),
+                    "PlanNotEligible must mention upgrade: {msg}"
+                );
             }
             other => panic!("expected Forbidden, got {other:?}"),
         }
@@ -682,7 +678,10 @@ mod tests {
         });
         match err {
             ApiError::BadRequest(msg) => {
-                assert!(msg.contains("42"), "LimitReached must include limit number: {msg}");
+                assert!(
+                    msg.contains("42"),
+                    "LimitReached must include limit number: {msg}"
+                );
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
@@ -702,8 +701,10 @@ mod tests {
 
     #[test]
     fn test_add_on_price_is_30_dollars() {
-        assert_eq!(ADD_ON_PRICE_CENTS, 3000,
-            "add-on price must be $30.00 = 3000 cents");
+        assert_eq!(
+            ADD_ON_PRICE_CENTS, 3000,
+            "add-on price must be $30.00 = 3000 cents"
+        );
     }
 
     #[test]
@@ -791,8 +792,10 @@ mod tests {
             blocklisted: false,
         };
         let resp = row.into_response();
-        assert_eq!(resp.warmup.progress_percent, 50.0,
-            "0.5 progress must display as 50%");
+        assert_eq!(
+            resp.warmup.progress_percent, 50.0,
+            "0.5 progress must display as 50%"
+        );
     }
 
     #[test]
@@ -828,7 +831,10 @@ mod tests {
     fn test_reputation_score_clamped_at_zero() {
         // Extreme bounce + complaint + blocklisted should still be >= 0
         let score = calculate_reputation_score(100, 100, 100, true);
-        assert!(score >= 0.0, "reputation must never go below 0: got {score}");
+        assert!(
+            score >= 0.0,
+            "reputation must never go below 0: got {score}"
+        );
     }
 
     #[test]

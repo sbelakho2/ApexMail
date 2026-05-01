@@ -76,7 +76,7 @@ Reviewers should verify:
 - [ ] Input validation for all new API endpoints.
 - [ ] SQL injection prevention (parameterised queries).
 - [ ] Appropriate error handling (no stack traces exposed to users).
-- [ ] Test coverage for new or changed behaviour.
+- [ ] Test coverage for new or changed behavior.
 - [ ] Migration safety (see §6).
 - [ ] No unnecessary permission escalation.
 - [ ] Logging does not capture sensitive data.
@@ -177,7 +177,7 @@ immediately visible to all users. This decouples deployment from release.
 
 ### 7.2 Guidelines
 
-- New features behind flags by default if they affect user-facing behaviour.
+- New features behind flags by default if they affect user-facing behavior.
 - Flags have an owner and a planned removal date (max 90 days after full rollout).
 - Stale flags (past removal date) are tracked and cleaned up in regular maintenance.
 - Flag state stored in the database or configuration, not hardcoded.

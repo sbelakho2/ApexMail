@@ -9,30 +9,30 @@ use chrono::Utc;
 /// Composite DLP verdict
 #[derive(Debug, Clone)]
 pub struct DlpVerdict {
-/// Total risk score
+    /// Total risk score
     pub risk_score: f64,
-/// Recommended action
+    /// Recommended action
     pub action: DlpAction,
-/// PII findings
+    /// PII findings
     pub pii_findings: Vec<PiiMatch>,
-/// High-entropy (potential secret) findings
+    /// High-entropy (potential secret) findings
     pub entropy_findings: Vec<entropy::EntropyFinding>,
-/// Content policy matches
+    /// Content policy matches
     pub policy_matches: Vec<content_policy::PolicyMatch>,
-/// Summary of all findings for logging
+    /// Summary of all findings for logging
     pub summary: String,
 }
 
 /// DLP action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DlpAction {
-/// Allow (no sensitive content detected)
+    /// Allow (no sensitive content detected)
     Allow,
-/// Audit (log findings but allow)
+    /// Audit (log findings but allow)
     Audit,
-/// Quarantine for human review
+    /// Quarantine for human review
     Quarantine,
-/// Block outbound delivery
+    /// Block outbound delivery
     Block,
 }
 
@@ -53,31 +53,31 @@ pub struct DlpEngine {
 }
 
 impl DlpEngine {
-/// Create engine with default config
+    /// Create engine with default config
     pub fn new() -> Self {
         Self {
             config: DlpConfig::default(),
         }
     }
 
-/// Create engine with custom config
+    /// Create engine with custom config
     pub fn with_config(config: DlpConfig) -> Self {
         Self { config }
     }
 
-/// Scan outbound email content for sensitive data
-/// # Arguments
-/// * `body` - Email body text
-/// * `recipient_domain` - The recipient's domain (for allowlist check)
+    /// Scan outbound email content for sensitive data
+    /// # Arguments
+    /// * `body` - Email body text
+    /// * `recipient_domain` - The recipient's domain (for allowlist check)
     pub fn scan(&self, body: &str, recipient_domain: Option<&str>) -> DlpVerdict {
-// Even for allowlisted domains, run a PII baseline scan so that
-// the result contains the findings (for auditing). The action
-// will still be Allow, but the findings are visible.
+        // Even for allowlisted domains, run a PII baseline scan so that
+        // the result contains the findings (for auditing). The action
+        // will still be Allow, but the findings are visible.
         let is_allowlisted = recipient_domain
             .map(|domain| self.config.allowlisted_domains.iter().any(|d| d == domain))
             .unwrap_or(false);
 
-// Truncate body to max scan size (safe UTF-8 boundary)
+        // Truncate body to max scan size (safe UTF-8 boundary)
         let scan_text = if body.len() > self.config.max_scan_size {
             let boundary = body.floor_char_boundary(self.config.max_scan_size);
             &body[..boundary]
@@ -88,7 +88,7 @@ impl DlpEngine {
         let mut total_risk = 0.0;
         let mut summary_parts = Vec::with_capacity(16);
 
-// 1. PII scanning
+        // 1. PII scanning
         let pii_findings = pii::scan_pii(
             scan_text,
             self.config.detect_credit_cards,
@@ -101,7 +101,7 @@ impl DlpEngine {
             summary_parts.push(format!("{}: {}", finding.pii_type, finding.redacted));
         }
 
-// 2. Entropy analysis (secret detection)
+        // 2. Entropy analysis (secret detection)
         let entropy_result = if self.config.detect_secrets {
             entropy::scan_entropy(
                 scan_text,
@@ -116,14 +116,15 @@ impl DlpEngine {
         };
         total_risk += entropy_result.risk_score;
         for finding in &entropy_result.findings {
-            summary_parts.push(format!("Secret: {} (entropy={:.1})", finding.token_preview, finding.entropy));
+            summary_parts.push(format!(
+                "Secret: {} (entropy={:.1})",
+                finding.token_preview, finding.entropy
+            ));
         }
 
-// 3. Content policy scanning
-        let policy_matches = content_policy::scan_content_policy(
-            scan_text,
-            &self.config.confidential_keywords,
-        );
+        // 3. Content policy scanning
+        let policy_matches =
+            content_policy::scan_content_policy(scan_text, &self.config.confidential_keywords);
         for pm in &policy_matches {
             total_risk += pm.risk;
             summary_parts.push(format!("Policy: \"{}\"", pm.keyword));
@@ -133,7 +134,7 @@ impl DlpEngine {
             total_risk *= self.risk_multiplier_for_domain(domain);
         }
 
-// Determine action
+        // Determine action
         let mut action = if total_risk >= self.config.block_threshold {
             DlpAction::Block
         } else if total_risk >= self.config.quarantine_threshold {
@@ -144,10 +145,11 @@ impl DlpEngine {
             DlpAction::Allow
         };
 
-// For allowlisted domains, override action to Allow but keep findings for audit
+        // For allowlisted domains, override action to Allow but keep findings for audit
         if is_allowlisted {
             action = DlpAction::Allow;
-            summary_parts.push("Recipient domain is allowlisted (findings retained for audit)".into());
+            summary_parts
+                .push("Recipient domain is allowlisted (findings retained for audit)".into());
         }
 
         if let Some(domain) = recipient_domain {
@@ -178,7 +180,7 @@ impl DlpEngine {
         }
     }
 
-/// Scan with default recipient (no allowlist bypass)
+    /// Scan with default recipient (no allowlist bypass)
     pub fn scan_body(&self, body: &str) -> DlpVerdict {
         self.scan(body, None)
     }
@@ -207,18 +209,22 @@ impl DlpEngine {
         1.0
     }
 
-    fn matching_active_exception(&self, domain: &str) -> Option<&crate::config::DlpTemporaryException> {
+    fn matching_active_exception(
+        &self,
+        domain: &str,
+    ) -> Option<&crate::config::DlpTemporaryException> {
         let now = Utc::now().timestamp();
-        self.config.temporary_exceptions.iter().find(|ex| {
-            ex.recipient_domain.eq_ignore_ascii_case(domain) && ex.expires_at_unix > now
-        })
+        self.config
+            .temporary_exceptions
+            .iter()
+            .find(|ex| ex.recipient_domain.eq_ignore_ascii_case(domain) && ex.expires_at_unix > now)
     }
 }
 
 #[cfg(feature = "events")]
 impl DlpEngine {
-/// Scan outbound content and also produce a normalized security event.
-/// Requires the `events` feature flag (which enables the `mail-common` dep).
+    /// Scan outbound content and also produce a normalized security event.
+    /// Requires the `events` feature flag (which enables the `mail-common` dep).
     pub fn scan_with_event(
         &self,
         body: &str,
@@ -226,9 +232,8 @@ impl DlpEngine {
         correlation: Option<mail_common::security::CorrelationContext>,
     ) -> (DlpVerdict, mail_common::security::SecurityEvent) {
         let verdict = self.scan(body, recipient_domain);
-        let correlation = correlation.unwrap_or_else(
-            mail_common::security::CorrelationContext::generated,
-        );
+        let correlation =
+            correlation.unwrap_or_else(mail_common::security::CorrelationContext::generated);
 
         let (action, severity) = match verdict.action {
             DlpAction::Allow => (
@@ -265,7 +270,9 @@ impl DlpEngine {
         );
 
         if let Some(alert) = mail_common::security::ingest_security_event(event.clone()) {
-            event.metadata.insert("composite_alert".to_string(), "true".to_string());
+            event
+                .metadata
+                .insert("composite_alert".to_string(), "true".to_string());
             event.metadata.insert(
                 "composite_score".to_string(),
                 format!("{:.2}", alert.composite_score),
@@ -304,26 +311,31 @@ mod tests {
         let engine = DlpEngine::new();
         let verdict = engine.scan_body("Please charge card 4111 1111 1111 1111 for the order.");
         assert!(!verdict.pii_findings.is_empty());
-        assert!(verdict.pii_findings.iter().any(|f| f.pii_type == PiiType::CreditCard));
+        assert!(verdict
+            .pii_findings
+            .iter()
+            .any(|f| f.pii_type == PiiType::CreditCard));
         assert!(verdict.risk_score >= 5.0);
     }
 
     #[test]
     fn test_ssn_triggers_block() {
         let engine = DlpEngine::new();
-        let verdict = engine.scan_body(
-            "Employee SSN: 123-45-6789. Card: 4111 1111 1111 1111. CONFIDENTIAL."
+        let verdict =
+            engine.scan_body("Employee SSN: 123-45-6789. Card: 4111 1111 1111 1111. CONFIDENTIAL.");
+        assert_eq!(
+            verdict.action,
+            DlpAction::Block,
+            "CC + SSN + confidential should block (score={})",
+            verdict.risk_score
         );
-        assert_eq!(verdict.action, DlpAction::Block,
-            "CC + SSN + confidential should block (score={})", verdict.risk_score);
     }
 
     #[test]
     fn test_confidential_marker() {
         let engine = DlpEngine::new();
-        let verdict = engine.scan_body(
-            "This message is CONFIDENTIAL and contains PROPRIETARY information."
-        );
+        let verdict =
+            engine.scan_body("This message is CONFIDENTIAL and contains PROPRIETARY information.");
         assert!(!verdict.policy_matches.is_empty());
         assert!(verdict.risk_score > 0.0);
     }
@@ -339,7 +351,7 @@ mod tests {
             "SSN: 123-45-6789 CONFIDENTIAL",
             Some("internal.example.com"),
         );
-// Allowlisted domains still get action=Allow but findings are retained for audit
+        // Allowlisted domains still get action=Allow but findings are retained for audit
         assert_eq!(verdict.action, DlpAction::Allow);
         assert!(
             !verdict.pii_findings.is_empty() || !verdict.policy_matches.is_empty(),
@@ -351,9 +363,9 @@ mod tests {
     fn test_api_key_detection() {
         let engine = DlpEngine::new();
         let verdict = engine.scan_body(
-            "Here is the production key: sk_live_4eC39HqLyjWDarjtT1zdp7dc please deploy"
+            "Here is the production key: sk_live_4eC39HqLyjWDarjtT1zdp7dc please deploy",
         );
-// Should detect high-entropy secret
+        // Should detect high-entropy secret
         assert!(verdict.risk_score > 0.0, "Should detect API key");
     }
 
@@ -377,7 +389,10 @@ mod tests {
             "Card 4111 1111 1111 1111 confidential",
             Some("trusted.example.com"),
         );
-        assert!(matches!(verdict.action, DlpAction::Audit | DlpAction::Allow));
+        assert!(matches!(
+            verdict.action,
+            DlpAction::Audit | DlpAction::Allow
+        ));
     }
 
     #[test]
@@ -392,10 +407,7 @@ mod tests {
             ..Default::default()
         };
         let engine = DlpEngine::with_config(config);
-        let verdict = engine.scan(
-            "SSN 123-45-6789",
-            Some("partner.example.com"),
-        );
+        let verdict = engine.scan("SSN 123-45-6789", Some("partner.example.com"));
         assert_eq!(verdict.action, DlpAction::Audit);
     }
 }

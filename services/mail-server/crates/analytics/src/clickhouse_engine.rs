@@ -6,7 +6,6 @@
 //! - 730-day retention with columnar compression
 //! - Real-time event ingestion via async inserts
 
-
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
@@ -63,7 +62,7 @@ struct FunnelRow {
 }
 
 impl ClickHouseEngine {
-/// Create a new ClickHouse engine with the given configuration.
+    /// Create a new ClickHouse engine with the given configuration.
     pub async fn new(config: ClickHouseConfig) -> anyhow::Result<Self> {
         let client = Client::default()
             .with_url(&config.url)
@@ -76,18 +75,18 @@ impl ClickHouseEngine {
 
         let engine = Self { client, config };
 
-// Initialize schema
+        // Initialize schema
         engine.init_schema().await?;
 
-        info!(url = %engine.config.url, database = %engine.config.database, 
+        info!(url = %engine.config.url, database = %engine.config.database,
               "ClickHouse analytics engine initialized");
 
         Ok(engine)
     }
 
-/// Initialize the analytics schema with MergeTree tables.
+    /// Initialize the analytics schema with MergeTree tables.
     async fn init_schema(&self) -> anyhow::Result<()> {
-// Main events table - partitioned by month, ordered for efficient tenant+time queries
+        // Main events table - partitioned by month, ordered for efficient tenant+time queries
         self.client
             .query(
                 r#"
@@ -120,7 +119,7 @@ impl ClickHouseEngine {
             .execute()
             .await?;
 
-// Materialized view for daily aggregates - automatic rollup
+        // Materialized view for daily aggregates - automatic rollup
         self.client
             .query(
                 r#"
@@ -139,7 +138,7 @@ impl ClickHouseEngine {
             .execute()
             .await?;
 
-// Hourly aggregates for real-time dashboards
+        // Hourly aggregates for real-time dashboards
         self.client
             .query(
                 r#"
@@ -157,7 +156,7 @@ impl ClickHouseEngine {
             .execute()
             .await?;
 
-// Materialized view to populate daily aggregates automatically
+        // Materialized view to populate daily aggregates automatically
         self.client
             .query(
                 r#"
@@ -175,7 +174,7 @@ impl ClickHouseEngine {
             .execute()
             .await?;
 
-// Materialized view for hourly aggregates
+        // Materialized view for hourly aggregates
         self.client
             .query(
                 r#"
@@ -197,7 +196,7 @@ impl ClickHouseEngine {
         Ok(())
     }
 
-/// Insert events using async inserts for high throughput.
+    /// Insert events using async inserts for high throughput.
     pub async fn insert_events(&self, events: &[ClickHouseEvent]) -> anyhow::Result<()> {
         if events.is_empty() {
             return Ok(());
@@ -213,7 +212,7 @@ impl ClickHouseEngine {
         Ok(())
     }
 
-/// Time-series query with automatic granularity.
+    /// Time-series query with automatic granularity.
     pub async fn time_series(
         &self,
         tenant_id: &str,
@@ -230,10 +229,17 @@ impl ClickHouseEngine {
             _ => "toDate(timestamp)",
         };
 
-// Allowlist valid event types to prevent SQL injection (#178)
+        // Allowlist valid event types to prevent SQL injection (#178)
         const ALLOWED_EVENT_TYPES: &[&str] = &[
-            "sent", "delivered", "bounced", "deferred", "dropped",
-            "opened", "clicked", "complained", "unsubscribed",
+            "sent",
+            "delivered",
+            "bounced",
+            "deferred",
+            "dropped",
+            "opened",
+            "clicked",
+            "complained",
+            "unsubscribed",
         ];
         let event_filter = if let Some(types) = event_types {
             let safe: Vec<String> = types
@@ -284,7 +290,7 @@ impl ClickHouseEngine {
             .collect())
     }
 
-/// Aggregation by dimension with percentage calculation.
+    /// Aggregation by dimension with percentage calculation.
     pub async fn aggregate_by_dimension(
         &self,
         tenant_id: &str,
@@ -292,9 +298,10 @@ impl ClickHouseEngine {
         end: DateTime<Utc>,
         dimension: &str,
     ) -> anyhow::Result<Vec<AggregationResult>> {
-// Allowlist dimensions to prevent SQL injection
+        // Allowlist dimensions to prevent SQL injection
         let dim_col = match dimension {
-            "event_type" | "recipient_domain" | "country" | "device_type" | "link_id" | "campaign_id" => dimension,
+            "event_type" | "recipient_domain" | "country" | "device_type" | "link_id"
+            | "campaign_id" => dimension,
             _ => "event_type",
         };
 
@@ -339,7 +346,7 @@ impl ClickHouseEngine {
             .collect())
     }
 
-/// Funnel analysis:conversion through event stages.
+    /// Funnel analysis:conversion through event stages.
     pub async fn funnel_analysis(
         &self,
         tenant_id: &str,
@@ -351,10 +358,17 @@ impl ClickHouseEngine {
             return Ok(Vec::new());
         }
 
-// Allowlist stages to prevent SQL injection (#178)
+        // Allowlist stages to prevent SQL injection (#178)
         const ALLOWED_STAGES: &[&str] = &[
-            "sent", "delivered", "bounced", "deferred", "dropped",
-            "opened", "clicked", "complained", "unsubscribed",
+            "sent",
+            "delivered",
+            "bounced",
+            "deferred",
+            "dropped",
+            "opened",
+            "clicked",
+            "complained",
+            "unsubscribed",
         ];
         let safe_stages: Vec<String> = stages
             .iter()
@@ -401,7 +415,7 @@ impl ClickHouseEngine {
 
         for stage in stages {
             let count = counts.get(*stage).copied().unwrap_or(0);
-            
+
             let dropoff = previous_count
                 .map(|prev| {
                     if prev > 0 {
@@ -427,7 +441,7 @@ impl ClickHouseEngine {
         Ok(results)
     }
 
-/// Get deliverability metrics.
+    /// Get deliverability metrics.
     pub async fn deliverability_metrics(
         &self,
         tenant_id: &str,
@@ -454,10 +468,8 @@ impl ClickHouseEngine {
             .fetch_all::<AggregationRow>()
             .await?;
 
-        let counts: std::collections::HashMap<String, u64> = rows
-            .into_iter()
-            .map(|r| (r.dimension, r.count))
-            .collect();
+        let counts: std::collections::HashMap<String, u64> =
+            rows.into_iter().map(|r| (r.dimension, r.count)).collect();
 
         let sent = *counts.get("sent").unwrap_or(&0) as f64;
         let delivered = *counts.get("delivered").unwrap_or(&0) as f64;
@@ -479,7 +491,7 @@ impl ClickHouseEngine {
         })
     }
 
-/// Get event count for a time range.
+    /// Get event count for a time range.
     pub async fn event_count(
         &self,
         tenant_id: &str,
@@ -511,7 +523,7 @@ impl ClickHouseEngine {
         Ok(row.count)
     }
 
-/// Get storage statistics for monitoring.
+    /// Get storage statistics for monitoring.
     pub async fn storage_stats(&self) -> anyhow::Result<StorageStats> {
         #[derive(Debug, Row, Deserialize)]
         struct StatsRow {
@@ -544,7 +556,7 @@ impl ClickHouseEngine {
         })
     }
 
-/// Health check.
+    /// Health check.
     pub async fn health_check(&self) -> anyhow::Result<bool> {
         self.client.query("SELECT 1").execute().await?;
         Ok(true)
@@ -563,9 +575,9 @@ pub struct StorageStats {
 mod tests {
     use super::*;
 
-// Integration tests require a running ClickHouse instance
-// Run with:docker run -d -p 8123:8123 clickhouse/clickhouse-server
-    
+    // Integration tests require a running ClickHouse instance
+    // Run with:docker run -d -p 8123:8123 clickhouse/clickhouse-server
+
     #[tokio::test]
     #[ignore = "requires running ClickHouse"]
     async fn test_clickhouse_init() {

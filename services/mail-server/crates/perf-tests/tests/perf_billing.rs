@@ -14,7 +14,7 @@ fn test_plan_lookup_throughput() {
     let start = Instant::now();
     for i in 0..iterations {
         let plan = &plans[i % plans.len()];
-// Simulate plan lookup by name comparison and feature access
+        // Simulate plan lookup by name comparison and feature access
         let _ = plan.name;
         let _ = plan.price_monthly;
         let _ = plan.email_limit;
@@ -116,7 +116,7 @@ fn test_quota_check_throughput() {
     for i in 0..iterations {
         let tier = tiers[i % tiers.len()];
         let rps = tier.rps();
-// Simulate quota check:is usage under the rate limit?
+        // Simulate quota check:is usage under the rate limit?
         let current_rps: u32 = (i % 1000) as u32;
         let _ = current_rps <= rps;
     }

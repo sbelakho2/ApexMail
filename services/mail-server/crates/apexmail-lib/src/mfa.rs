@@ -12,7 +12,7 @@ const TIME_STEP: u64 = 30;
 /// Allows ±1 time-step drift to tolerate minor clock skew between the
 /// server and the user's authenticator app.
 pub fn verify_totp_code(secret_base32: &str, code: &str) -> bool {
-// Reject obviously invalid codes early.
+    // Reject obviously invalid codes early.
     if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
         return false;
     }
@@ -28,7 +28,7 @@ pub fn verify_totp_code(secret_base32: &str, code: &str) -> bool {
         .as_secs();
     let time_step = now / TIME_STEP;
 
-// Check current window and ±1 for clock drift.
+    // Check current window and ±1 for clock drift.
     for offset in [0i64, -1, 1] {
         let counter = (time_step as i64 + offset) as u64;
         let expected = generate_totp(&secret, counter);
@@ -46,7 +46,7 @@ fn generate_totp(secret: &[u8], counter: u64) -> String {
     mac.update(&counter.to_be_bytes());
     let result = mac.finalize().into_bytes();
 
-// Dynamic truncation per RFC 4226 §5.4.
+    // Dynamic truncation per RFC 4226 §5.4.
     let offset = (result[result.len() - 1] & 0x0f) as usize;
     let code = u32::from_be_bytes([
         result[offset] & 0x7f,
@@ -100,8 +100,8 @@ mod tests {
 
     #[test]
     fn test_base32_decode() {
-// This common OTP example decodes to the 10-byte payload
-// "Hello!\xDE\xAD\xBE\xEF".
+        // This common OTP example decodes to the 10-byte payload
+        // "Hello!\xDE\xAD\xBE\xEF".
         let decoded = base32_decode("JBSWY3DPEHPK3PXP").unwrap();
         assert_eq!(decoded, b"Hello!\xDE\xAD\xBE\xEF");
     }

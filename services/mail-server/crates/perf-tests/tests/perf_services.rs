@@ -19,21 +19,15 @@ fn test_metrics_recording_throughput() {
     let start = Instant::now();
     for i in 0..iterations {
         match i % 3 {
-            0 => collector.record_counter(
-                "http_requests_total",
-                1.0,
-                "Total HTTP requests",
-            ),
+            0 => collector.record_counter("http_requests_total", 1.0, "Total HTTP requests"),
             1 => collector.record_histogram(
                 "http_request_duration_seconds",
                 0.042,
                 "Request duration",
             ),
-            _ => collector.record_gauge(
-                "active_connections",
-                (i % 500) as f64,
-                "Active connections",
-            ),
+            _ => {
+                collector.record_gauge("active_connections", (i % 500) as f64, "Active connections")
+            }
         }
     }
     let elapsed = start.elapsed();

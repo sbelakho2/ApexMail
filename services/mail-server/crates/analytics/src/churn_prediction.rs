@@ -24,11 +24,11 @@ impl ChurnPredictionEngine {
         Self { pool, redis }
     }
 
-/// Predict churn probability for a subscriber.
+    /// Predict churn probability for a subscriber.
     pub async fn predict(&self, email: &str) -> anyhow::Result<ChurnPrediction> {
         let cache_key = format!("churn:{}", crate::send_time_optimizer::hash_email(email));
 
-// Check cache (6h TTL)
+        // Check cache (6h TTL)
         if let Ok(cached) = self.get_cached(&cache_key).await {
             return Ok(cached);
         }
@@ -53,11 +53,11 @@ impl ChurnPredictionEngine {
         Ok(prediction)
     }
 
-/// Compute individual churn signals for a subscriber.
+    /// Compute individual churn signals for a subscriber.
     async fn compute_signals(&self, email: &str) -> anyhow::Result<Vec<ChurnSignal>> {
         let mut signals = Vec::new();
 
-// Complaint signal
+        // Complaint signal
         let (complaint_count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type = 'complained' AND timestamp >= NOW() - INTERVAL '90 days'",
         )
@@ -72,7 +72,7 @@ impl ChurnPredictionEngine {
             weight: COMPLAINT_WEIGHT,
         });
 
-// Bounce signal
+        // Bounce signal
         let (bounce_count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type = 'bounced' AND timestamp >= NOW() - INTERVAL '90 days'",
         )
@@ -87,7 +87,7 @@ impl ChurnPredictionEngine {
             weight: BOUNCE_WEIGHT,
         });
 
-// Inactivity signal
+        // Inactivity signal
         let last_engagement: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
             "SELECT MAX(timestamp) FROM events WHERE recipient = $1 AND event_type IN ('opened', 'clicked')",
         )
@@ -95,7 +95,8 @@ impl ChurnPredictionEngine {
         .fetch_optional(&self.pool)
         .await?;
 
-        let days_inactive = last_engagement.map(|(t,)| (Utc::now() - t).num_days())
+        let days_inactive = last_engagement
+            .map(|(t,)| (Utc::now() - t).num_days())
             .unwrap_or(365);
         let inactivity_score = (days_inactive as f64 / 90.0).min(1.0);
         signals.push(ChurnSignal {
@@ -104,7 +105,7 @@ impl ChurnPredictionEngine {
             weight: INACTIVITY_WEIGHT,
         });
 
-// Decay signal:how quickly engagement is declining
+        // Decay signal:how quickly engagement is declining
         let decay_score = self.compute_decay(email).await?;
         signals.push(ChurnSignal {
             name: "decay".into(),
@@ -115,7 +116,7 @@ impl ChurnPredictionEngine {
         Ok(signals)
     }
 
-/// Compute engagement decay rate.
+    /// Compute engagement decay rate.
     async fn compute_decay(&self, email: &str) -> anyhow::Result<f64> {
         let now = Utc::now();
         let thirty_ago = now - Duration::days(30);
@@ -148,7 +149,7 @@ impl ChurnPredictionEngine {
         Ok(decline.max(0.0).min(1.0))
     }
 
-/// Engagement velocity:(current − previous) / previous.
+    /// Engagement velocity:(current − previous) / previous.
     async fn engagement_velocity(&self, email: &str) -> anyhow::Result<f64> {
         let now = Utc::now();
         let thirty_ago = now - Duration::days(30);
@@ -182,10 +183,7 @@ impl ChurnPredictionEngine {
 
     async fn get_cached(&self, key: &str) -> anyhow::Result<ChurnPrediction> {
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        let val: String = redis::cmd("GET")
-            .arg(key)
-            .query_async(&mut *conn)
-            .await?;
+        let val: String = redis::cmd("GET").arg(key).query_async(&mut *conn).await?;
         Ok(serde_json::from_str(&val)?)
     }
 
@@ -251,8 +249,16 @@ mod tests {
     #[test]
     fn test_raw_score_all_zero() {
         let signals = vec![
-            ChurnSignal { name: "a".into(), value: 0.0, weight: 35.0 },
-            ChurnSignal { name: "b".into(), value: 0.0, weight: 25.0 },
+            ChurnSignal {
+                name: "a".into(),
+                value: 0.0,
+                weight: 35.0,
+            },
+            ChurnSignal {
+                name: "b".into(),
+                value: 0.0,
+                weight: 25.0,
+            },
         ];
         let score = compute_raw_score(&signals);
         assert!((score - 0.0).abs() < 0.001);
@@ -261,10 +267,26 @@ mod tests {
     #[test]
     fn test_raw_score_all_max() {
         let signals = vec![
-            ChurnSignal { name: "complaint".into(), value: 1.0, weight: 35.0 },
-            ChurnSignal { name: "bounce".into(), value: 1.0, weight: 25.0 },
-            ChurnSignal { name: "inactivity".into(), value: 1.0, weight: 30.0 },
-            ChurnSignal { name: "decay".into(), value: 1.0, weight: 20.0 },
+            ChurnSignal {
+                name: "complaint".into(),
+                value: 1.0,
+                weight: 35.0,
+            },
+            ChurnSignal {
+                name: "bounce".into(),
+                value: 1.0,
+                weight: 25.0,
+            },
+            ChurnSignal {
+                name: "inactivity".into(),
+                value: 1.0,
+                weight: 30.0,
+            },
+            ChurnSignal {
+                name: "decay".into(),
+                value: 1.0,
+                weight: 20.0,
+            },
         ];
         let score = compute_raw_score(&signals);
         assert!((score - 100.0).abs() < 0.001);
@@ -273,14 +295,30 @@ mod tests {
     #[test]
     fn test_raw_score_mixed() {
         let signals = vec![
-            ChurnSignal { name: "complaint".into(), value: 0.5, weight: 35.0 },
-            ChurnSignal { name: "bounce".into(), value: 0.0, weight: 25.0 },
-            ChurnSignal { name: "inactivity".into(), value: 0.8, weight: 30.0 },
-            ChurnSignal { name: "decay".into(), value: 0.3, weight: 20.0 },
+            ChurnSignal {
+                name: "complaint".into(),
+                value: 0.5,
+                weight: 35.0,
+            },
+            ChurnSignal {
+                name: "bounce".into(),
+                value: 0.0,
+                weight: 25.0,
+            },
+            ChurnSignal {
+                name: "inactivity".into(),
+                value: 0.8,
+                weight: 30.0,
+            },
+            ChurnSignal {
+                name: "decay".into(),
+                value: 0.3,
+                weight: 20.0,
+            },
         ];
         let score = compute_raw_score(&signals);
-// (0.5*35 + 0*25 + 0.8*30 + 0.3*20) / 110 * 100
-// = (17.5 + 0 + 24 + 6) / 110 * 100 = 43.18
+        // (0.5*35 + 0*25 + 0.8*30 + 0.3*20) / 110 * 100
+        // = (17.5 + 0 + 24 + 6) / 110 * 100 = 43.18
         assert!((score - 43.18).abs() < 0.1);
     }
 

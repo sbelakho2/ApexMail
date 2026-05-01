@@ -26,7 +26,7 @@ impl EngagementTrustService {
         Self { pool }
     }
 
-/// Calculate trust score for a subscriber.
+    /// Calculate trust score for a subscriber.
     pub async fn calculate_trust(
         &self,
         tenant_id: &str,
@@ -37,7 +37,7 @@ impl EngagementTrustService {
         Ok(trust)
     }
 
-/// Get campaign-level trust metrics.
+    /// Get campaign-level trust metrics.
     pub async fn campaign_trust(
         &self,
         tenant_id: &str,
@@ -111,7 +111,11 @@ impl EngagementTrustService {
         let bounced = *map.get("bounced").unwrap_or(&0);
 
         let safe_rate = |num: i64, den: i64| -> f64 {
-            if den > 0 { num as f64 / den as f64 } else { 0.0 }
+            if den > 0 {
+                num as f64 / den as f64
+            } else {
+                0.0
+            }
         };
 
         Ok(SubscriberEngagement {
@@ -144,9 +148,9 @@ pub fn compute_trust_score(e: &SubscriberEngagement) -> TrustScore {
     let intimacy = compute_intimacy(e);
     let self_orientation = compute_self_orientation(e);
 
-// Trust = (C × 0.3 + R × 0.3 + I × 0.25) × (1 - S/100) × (100/85)
-// Where S is self-orientation 0-100 (higher = worse)
-// The (100/85) factor normalizes so max score ≈ 100 when S = 0 and C,R,I are max
+    // Trust = (C × 0.3 + R × 0.3 + I × 0.25) × (1 - S/100) × (100/85)
+    // Where S is self-orientation 0-100 (higher = worse)
+    // The (100/85) factor normalizes so max score ≈ 100 when S = 0 and C,R,I are max
     let numerator = credibility * 0.3 + reliability * 0.3 + intimacy * 0.25;
     let so_penalty = 1.0 - (self_orientation / 100.0).min(0.99);
     let raw = numerator * so_penalty * (100.0 / 85.0);
@@ -168,16 +172,12 @@ pub fn compute_trust_score(e: &SubscriberEngagement) -> TrustScore {
 
 /// Credibility:open_rate + click_rate - spam_rate, normalized to 0-100.
 fn compute_credibility(e: &SubscriberEngagement) -> f64 {
-    
     (e.open_rate * 50.0 + e.click_rate * 50.0 - e.spam_rate * 100.0).clamp(0.0, 100.0)
 }
 
 /// Reliability:preference compliance + frequency compliance + recency.
 fn compute_reliability(e: &SubscriberEngagement) -> f64 {
-    
-    (e.preference_compliance * 33.3
-        + e.send_frequency_compliance * 33.3
-        + e.recency_score * 33.4)
+    (e.preference_compliance * 33.3 + e.send_frequency_compliance * 33.3 + e.recency_score * 33.4)
         .clamp(0.0, 100.0)
 }
 
@@ -185,7 +185,10 @@ fn compute_reliability(e: &SubscriberEngagement) -> f64 {
 fn compute_intimacy(e: &SubscriberEngagement) -> f64 {
     let reply_component = (e.reply_rate * 100.0).min(40.0);
     let survey_component = e.survey_score.unwrap_or(0.0) * 0.3;
-    let nps_component = e.nps_score.map(|n| (n + 100.0) / 200.0 * 30.0).unwrap_or(15.0);
+    let nps_component = e
+        .nps_score
+        .map(|n| (n + 100.0) / 200.0 * 30.0)
+        .unwrap_or(15.0);
     let feedback_component = (e.feedback_count as f64).min(10.0);
 
     (reply_component + survey_component + nps_component + feedback_component).clamp(0.0, 100.0)
@@ -194,8 +197,7 @@ fn compute_intimacy(e: &SubscriberEngagement) -> f64 {
 /// Self-Orientation:0 = best (not self-oriented), 100 = worst (very self-oriented).
 /// Based on spam + unsubscribe + bounce signals.
 fn compute_self_orientation(e: &SubscriberEngagement) -> f64 {
-    (e.spam_rate * 200.0 + e.unsubscribe_rate * 100.0 + e.bounce_rate * 50.0)
-        .clamp(0.0, 100.0)
+    (e.spam_rate * 200.0 + e.unsubscribe_rate * 100.0 + e.bounce_rate * 50.0).clamp(0.0, 100.0)
 }
 
 /// Trust grade A-F.
@@ -265,7 +267,7 @@ mod tests {
     fn test_credibility() {
         let e = make_engagement();
         let c = compute_credibility(&e);
-// 0.6*50 + 0.2*50 - 0.01*100 = 30 + 10 - 1 = 39
+        // 0.6*50 + 0.2*50 - 0.01*100 = 30 + 10 - 1 = 39
         assert!((c - 39.0).abs() < 0.1);
     }
 
@@ -273,7 +275,7 @@ mod tests {
     fn test_reliability() {
         let e = make_engagement();
         let r = compute_reliability(&e);
-// 0.9*33.3 + 0.85*33.3 + 0.95*33.4 = 29.97 + 28.305 + 31.73 = 90.005
+        // 0.9*33.3 + 0.85*33.3 + 0.95*33.4 = 29.97 + 28.305 + 31.73 = 90.005
         assert!((r - 90.0).abs() < 0.1);
     }
 
@@ -281,11 +283,11 @@ mod tests {
     fn test_intimacy() {
         let e = make_engagement();
         let i = compute_intimacy(&e);
-// reply:min(5, 40) = 5
-// survey:75 * 0.3 = 22.5
-// nps:(30+100)/200 * 30 = 130/200*30 = 19.5
-// feedback:min(3, 10) = 3
-// Total:5 + 22.5 + 19.5 + 3 = 50
+        // reply:min(5, 40) = 5
+        // survey:75 * 0.3 = 22.5
+        // nps:(30+100)/200 * 30 = 130/200*30 = 19.5
+        // feedback:min(3, 10) = 3
+        // Total:5 + 22.5 + 19.5 + 3 = 50
         assert!((i - 50.0).abs() < 0.5);
     }
 
@@ -293,7 +295,7 @@ mod tests {
     fn test_self_orientation() {
         let e = make_engagement();
         let s = compute_self_orientation(&e);
-// 0.01*200 + 0.02*100 + 0.01*50 = 2 + 2 + 0.5 = 4.5
+        // 0.01*200 + 0.02*100 + 0.01*50 = 2 + 2 + 0.5 = 4.5
         assert!((s - 4.5).abs() < 0.1);
     }
 

@@ -9,7 +9,7 @@ use crate::types::Message;
 pub struct MessagesRepo;
 
 impl MessagesRepo {
-/// Create a new message.
+    /// Create a new message.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -47,22 +47,20 @@ impl MessagesRepo {
         .await
     }
 
-/// Find a message by ID (scoped to tenant).
+    /// Find a message by ID (scoped to tenant).
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Message>, sqlx::Error> {
-        sqlx::query_as::<_, Message>(
-            "SELECT * FROM messages WHERE id = $1 AND tenant_id = $2"
-        )
-        .bind(id)
-        .bind(tenant_id)
-        .fetch_optional(pool)
-        .await
+        sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await
     }
 
-/// List messages for a tenant with optional status filter and pagination.
+    /// List messages for a tenant with optional status filter and pagination.
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -74,7 +72,7 @@ impl MessagesRepo {
             Some(s) => {
                 sqlx::query_as::<_, Message>(
                     "SELECT * FROM messages WHERE tenant_id = $1 AND status = $2 \
-                     ORDER BY created_at DESC LIMIT $3 OFFSET $4"
+                     ORDER BY created_at DESC LIMIT $3 OFFSET $4",
                 )
                 .bind(tenant_id)
                 .bind(s)
@@ -86,7 +84,7 @@ impl MessagesRepo {
             None => {
                 sqlx::query_as::<_, Message>(
                     "SELECT * FROM messages WHERE tenant_id = $1 \
-                     ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+                     ORDER BY created_at DESC LIMIT $2 OFFSET $3",
                 )
                 .bind(tenant_id)
                 .bind(limit)
@@ -97,33 +95,28 @@ impl MessagesRepo {
         }
     }
 
-/// Update message status.
+    /// Update message status.
     pub async fn update_status(
         pool: &PgPool,
         tenant_id: Uuid,
         id: Uuid,
         status: &str,
     ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
-            "UPDATE messages SET status = $1 WHERE id = $2 AND tenant_id = $3"
-        )
-        .bind(status)
-        .bind(id)
-        .bind(tenant_id)
-        .execute(pool)
-        .await?;
+        let result =
+            sqlx::query("UPDATE messages SET status = $1 WHERE id = $2 AND tenant_id = $3")
+                .bind(status)
+                .bind(id)
+                .bind(tenant_id)
+                .execute(pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
-/// Cancel a queued or scheduled message.
-    pub async fn cancel(
-        pool: &PgPool,
-        tenant_id: Uuid,
-        id: Uuid,
-    ) -> Result<bool, sqlx::Error> {
+    /// Cancel a queued or scheduled message.
+    pub async fn cancel(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             "UPDATE messages SET status = 'cancelled' \
-             WHERE id = $1 AND tenant_id = $2 AND status IN ('queued', 'scheduled')"
+             WHERE id = $1 AND tenant_id = $2 AND status IN ('queued', 'scheduled')",
         )
         .bind(id)
         .bind(tenant_id)
@@ -132,13 +125,19 @@ impl MessagesRepo {
         Ok(result.rows_affected() > 0)
     }
 
-/// Batch-create multiple messages in a single INSERT.
+    /// Batch-create multiple messages in a single INSERT.
     pub async fn batch_create(
         pool: &PgPool,
         tenant_id: Uuid,
-        messages: &[(String, serde_json::Value, String, Option<String>, Option<String>)],
+        messages: &[(
+            String,
+            serde_json::Value,
+            String,
+            Option<String>,
+            Option<String>,
+        )],
     ) -> Result<Vec<Message>, sqlx::Error> {
-// #212:Return early on empty input to avoid invalid SQL
+        // #212:Return early on empty input to avoid invalid SQL
         if messages.is_empty() {
             return Ok(Vec::new());
         }
@@ -161,7 +160,10 @@ impl MessagesRepo {
         });
         query_builder.push(" RETURNING *");
 
-        query_builder.build_query_as::<Message>().fetch_all(pool).await
+        query_builder
+            .build_query_as::<Message>()
+            .fetch_all(pool)
+            .await
     }
 }
 

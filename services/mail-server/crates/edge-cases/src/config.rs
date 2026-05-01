@@ -84,8 +84,14 @@ impl Default for AttachmentLimits {
             max_single_size: 25 * 1024 * 1024,
             max_total_size: 35 * 1024 * 1024,
             max_count: 20,
-            blocked_extensions: DEFAULT_BLOCKED_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
-            blocked_mime_types: DEFAULT_BLOCKED_MIME_TYPES.iter().map(|s| s.to_string()).collect(),
+            blocked_extensions: DEFAULT_BLOCKED_EXTENSIONS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            blocked_mime_types: DEFAULT_BLOCKED_MIME_TYPES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }
@@ -178,7 +184,8 @@ impl EdgeCasesConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4600),
             database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-            redis_url: std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
             api_key,
             node_env,
             attachments: AttachmentLimits::default(),

@@ -34,7 +34,7 @@ impl AuditService {
         }
     }
 
-/// Log an audit event. Critical events are flushed immediately.
+    /// Log an audit event. Critical events are flushed immediately.
     pub async fn log(&self, event: AuditEvent) -> anyhow::Result<AuditEvent> {
         let is_critical = event.severity == AuditSeverity::Critical;
 
@@ -52,7 +52,7 @@ impl AuditService {
         Ok(event)
     }
 
-/// Create a new audit event with auto-generated ID and timestamp.
+    /// Create a new audit event with auto-generated ID and timestamp.
     pub fn create_event(
         &self,
         organization_id: &str,
@@ -85,7 +85,7 @@ impl AuditService {
         }
     }
 
-/// Verify the hash chain for an organization's audit logs.
+    /// Verify the hash chain for an organization's audit logs.
     pub async fn verify_hash_chain(
         &self,
         organization_id: &str,
@@ -144,7 +144,8 @@ impl AuditService {
                 });
             }
 
-            let computed = compute_event_hash(&row.id, &row.event_type, &row.details, stored_previous_hash);
+            let computed =
+                compute_event_hash(&row.id, &row.event_type, &row.details, stored_previous_hash);
             if computed != stored_hash {
                 return Ok(HashChainResult {
                     valid: false,
@@ -172,7 +173,7 @@ impl AuditService {
         })
     }
 
-/// Query audit events with pagination and filtering.
+    /// Query audit events with pagination and filtering.
     pub async fn query(&self, q: &AuditQuery) -> anyhow::Result<(Vec<AuditEvent>, i64)> {
         let limit = q.limit.unwrap_or(50).min(1000);
         let offset = q.offset.unwrap_or(0);
@@ -185,7 +186,6 @@ impl AuditService {
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<(Vec<AuditEvent>, i64)> {
-
         let mut conditions = vec!["organization_id = $1".to_string()];
         let mut param_count = 1;
 
@@ -225,7 +225,7 @@ impl AuditService {
             where_clause, limit_param, offset_param
         );
 
-// Build count query
+        // Build count query
         let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql).bind(&q.organization_id);
         let mut select_q = sqlx::query_as::<_, AuditRow>(&select_sql).bind(&q.organization_id);
 
@@ -263,56 +263,57 @@ impl AuditService {
         Ok((events, total))
     }
 
-/// Get audit statistics for an organization.
-    pub async fn get_stats(
-        &self,
-        organization_id: &str,
-        days: i64,
-    ) -> anyhow::Result<AuditStats> {
+    /// Get audit statistics for an organization.
+    pub async fn get_stats(&self, organization_id: &str, days: i64) -> anyhow::Result<AuditStats> {
         let since = Utc::now() - Duration::days(days);
 
         let total: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM iso_audit_logs WHERE organization_id=$1 AND created_at >= $2"
+            "SELECT COUNT(*) FROM iso_audit_logs WHERE organization_id=$1 AND created_at >= $2",
         )
-            .bind(organization_id).bind(since)
-            .fetch_one(&self.db)
-            .await?;
+        .bind(organization_id)
+        .bind(since)
+        .fetch_one(&self.db)
+        .await?;
 
         let by_type: Vec<(String, i64)> = sqlx::query_as(
             "SELECT event_type, COUNT(*) FROM iso_audit_logs
              WHERE organization_id=$1 AND created_at >= $2
-             GROUP BY event_type ORDER BY count DESC"
+             GROUP BY event_type ORDER BY count DESC",
         )
-            .bind(organization_id).bind(since)
-            .fetch_all(&self.db)
-            .await?;
+        .bind(organization_id)
+        .bind(since)
+        .fetch_all(&self.db)
+        .await?;
 
         let by_severity: Vec<(String, i64)> = sqlx::query_as(
             "SELECT severity, COUNT(*) FROM iso_audit_logs
              WHERE organization_id=$1 AND created_at >= $2
-             GROUP BY severity ORDER BY count DESC"
+             GROUP BY severity ORDER BY count DESC",
         )
-            .bind(organization_id).bind(since)
-            .fetch_all(&self.db)
-            .await?;
+        .bind(organization_id)
+        .bind(since)
+        .fetch_all(&self.db)
+        .await?;
 
         let by_day: Vec<(String, i64)> = sqlx::query_as(
             "SELECT TO_CHAR(created_at, 'YYYY-MM-DD'), COUNT(*) FROM iso_audit_logs
              WHERE organization_id=$1 AND created_at >= $2
-             GROUP BY 1 ORDER BY 1"
+             GROUP BY 1 ORDER BY 1",
         )
-            .bind(organization_id).bind(since)
-            .fetch_all(&self.db)
-            .await?;
+        .bind(organization_id)
+        .bind(since)
+        .fetch_all(&self.db)
+        .await?;
 
         let top_actors: Vec<(String, i64)> = sqlx::query_as(
             "SELECT actor_id, COUNT(*) FROM iso_audit_logs
              WHERE organization_id=$1 AND created_at >= $2
-             GROUP BY actor_id ORDER BY count DESC LIMIT 10"
+             GROUP BY actor_id ORDER BY count DESC LIMIT 10",
         )
-            .bind(organization_id).bind(since)
-            .fetch_all(&self.db)
-            .await?;
+        .bind(organization_id)
+        .bind(since)
+        .fetch_all(&self.db)
+        .await?;
 
         Ok(AuditStats {
             total_events: total,
@@ -323,12 +324,8 @@ impl AuditService {
         })
     }
 
-/// Export audit logs as JSON or CSV.
-    pub async fn export(
-        &self,
-        query: &AuditQuery,
-        format: &str,
-    ) -> anyhow::Result<String> {
+    /// Export audit logs as JSON or CSV.
+    pub async fn export(&self, query: &AuditQuery, format: &str) -> anyhow::Result<String> {
         let (events, _) = self.query_with_limit_offset(query, 10_000, 0).await?;
 
         match format {
@@ -337,12 +334,10 @@ impl AuditService {
         }
     }
 
-/// Delete audit logs older than retention period.
+    /// Delete audit logs older than retention period.
     pub async fn cleanup(&self) -> anyhow::Result<i64> {
         let cutoff = Utc::now() - Duration::days(self.config.audit_retention_days);
-        let result = sqlx::query(
-            "DELETE FROM iso_audit_logs WHERE created_at < $1"
-        )
+        let result = sqlx::query("DELETE FROM iso_audit_logs WHERE created_at < $1")
             .bind(cutoff)
             .execute(&self.db)
             .await?;
@@ -354,7 +349,7 @@ impl AuditService {
         Ok(deleted)
     }
 
-/// Flush remaining buffer.
+    /// Flush remaining buffer.
     pub async fn flush(&self) -> anyhow::Result<()> {
         let events = {
             let mut buf = self.buffer.write().await;
@@ -366,7 +361,7 @@ impl AuditService {
         Ok(())
     }
 
-// ── Private ────────────────────────────────────────────
+    // ── Private ────────────────────────────────────────────
 
     async fn flush_events(&self, events: Vec<AuditEvent>) -> anyhow::Result<()> {
         if events.is_empty() {
@@ -394,7 +389,12 @@ impl AuditService {
                 existing
             };
 
-            let hash = compute_event_hash(&event.id, &event.event_type.to_string(), &event.details, &prev);
+            let hash = compute_event_hash(
+                &event.id,
+                &event.event_type.to_string(),
+                &event.details,
+                &prev,
+            );
             let signature = sign_data(&self.signing_key, &hash)?;
 
             let mut metadata = event.metadata.clone();
@@ -403,7 +403,10 @@ impl AuditService {
                 .ok_or_else(|| anyhow::anyhow!("Audit metadata must be an object"))?;
             obj.insert("previous_hash".to_string(), serde_json::Value::String(prev));
             obj.insert("hash".to_string(), serde_json::Value::String(hash.clone()));
-            obj.insert("signature".to_string(), serde_json::Value::String(signature));
+            obj.insert(
+                "signature".to_string(),
+                serde_json::Value::String(signature),
+            );
 
             previous_by_org.insert(org_id, hash);
             enriched_metadata.push(metadata);
@@ -412,7 +415,7 @@ impl AuditService {
         let mut query = String::from(
             "INSERT INTO iso_audit_logs (id, organization_id, workspace_id, event_type, severity,
              actor_id, actor_type, actor_ip, actor_user_agent, resource, resource_id, action,
-             details, metadata, created_at) VALUES "
+             details, metadata, created_at) VALUES ",
         );
 
         for (i, _) in events.iter().enumerate() {
@@ -422,9 +425,21 @@ impl AuditService {
             }
             query.push_str(&format!(
                 "(${},${},${},${},${},${},${},${},${},${},${},${},${},${},${})",
-                base + 1, base + 2, base + 3, base + 4, base + 5,
-                base + 6, base + 7, base + 8, base + 9, base + 10,
-                base + 11, base + 12, base + 13, base + 14, base + 15,
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9,
+                base + 10,
+                base + 11,
+                base + 12,
+                base + 13,
+                base + 14,
+                base + 15,
             ));
         }
 
@@ -454,7 +469,7 @@ impl AuditService {
             }
             Err(e) => {
                 tracing::error!(err = %e, count = events.len(), "Failed to flush audit events");
-// Requeue events
+                // Requeue events
                 let mut buf = self.buffer.write().await;
                 let mut requeue = events;
                 requeue.extend(buf.drain(..));
@@ -510,10 +525,8 @@ impl AuditRow {
             id: self.id,
             organization_id: self.organization_id,
             workspace_id: self.workspace_id,
-            event_type: AuditEventType::parse(&self.event_type)
-                .unwrap_or(AuditEventType::DataRead),
-            severity: AuditSeverity::parse(&self.severity)
-                .unwrap_or(AuditSeverity::Info),
+            event_type: AuditEventType::parse(&self.event_type).unwrap_or(AuditEventType::DataRead),
+            severity: AuditSeverity::parse(&self.severity).unwrap_or(AuditSeverity::Info),
             actor_id: self.actor_id,
             actor_type: self.actor_type,
             actor_ip: self.actor_ip,
@@ -552,7 +565,9 @@ fn sign_data(key: &str, data: &str) -> anyhow::Result<String> {
 }
 
 fn export_csv(events: &[AuditEvent]) -> String {
-    let mut csv = String::from("id,organization_id,workspace_id,event_type,severity,actor_id,action,resource,timestamp\n");
+    let mut csv = String::from(
+        "id,organization_id,workspace_id,event_type,severity,actor_id,action,resource,timestamp\n",
+    );
     for e in events {
         csv.push_str(&format!(
             "{},{},{},{},{},{},{},{},{}\n",
@@ -595,32 +610,30 @@ mod tests {
         let h2_again = compute_event_hash("e2", "AUTH_LOGOUT", &serde_json::json!({}), &h1);
         assert_eq!(h2, h2_again);
 
-// Changing previous hash changes result
+        // Changing previous hash changes result
         let h2_diff = compute_event_hash("e2", "AUTH_LOGOUT", &serde_json::json!({}), "tampered");
         assert_ne!(h2, h2_diff);
     }
 
     #[test]
     fn test_export_csv() {
-        let events = vec![
-            AuditEvent {
-                id: "e1".into(),
-                organization_id: "org1".into(),
-                workspace_id: Some("ws1".into()),
-                event_type: AuditEventType::AuthLogin,
-                severity: AuditSeverity::Info,
-                actor_id: "user1".into(),
-                actor_type: "user".into(),
-                actor_ip: None,
-                actor_user_agent: None,
-                resource: Some("session".into()),
-                resource_id: None,
-                action: "login".into(),
-                details: serde_json::json!({}),
-                metadata: serde_json::json!({}),
-                timestamp: Utc::now(),
-            },
-        ];
+        let events = vec![AuditEvent {
+            id: "e1".into(),
+            organization_id: "org1".into(),
+            workspace_id: Some("ws1".into()),
+            event_type: AuditEventType::AuthLogin,
+            severity: AuditSeverity::Info,
+            actor_id: "user1".into(),
+            actor_type: "user".into(),
+            actor_ip: None,
+            actor_user_agent: None,
+            resource: Some("session".into()),
+            resource_id: None,
+            action: "login".into(),
+            details: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            timestamp: Utc::now(),
+        }];
         let csv = export_csv(&events);
         assert!(csv.starts_with("id,organization_id"));
         assert!(csv.contains("e1,org1,ws1,AUTH_LOGIN,info,user1,login,session,"));
@@ -628,25 +641,23 @@ mod tests {
 
     #[test]
     fn test_export_csv_empty_optional_fields() {
-        let events = vec![
-            AuditEvent {
-                id: "e2".into(),
-                organization_id: "org2".into(),
-                workspace_id: None,
-                event_type: AuditEventType::OrgCreated,
-                severity: AuditSeverity::Warning,
-                actor_id: "admin".into(),
-                actor_type: "system".into(),
-                actor_ip: None,
-                actor_user_agent: None,
-                resource: None,
-                resource_id: None,
-                action: "create".into(),
-                details: serde_json::json!({}),
-                metadata: serde_json::json!({}),
-                timestamp: Utc::now(),
-            },
-        ];
+        let events = vec![AuditEvent {
+            id: "e2".into(),
+            organization_id: "org2".into(),
+            workspace_id: None,
+            event_type: AuditEventType::OrgCreated,
+            severity: AuditSeverity::Warning,
+            actor_id: "admin".into(),
+            actor_type: "system".into(),
+            actor_ip: None,
+            actor_user_agent: None,
+            resource: None,
+            resource_id: None,
+            action: "create".into(),
+            details: serde_json::json!({}),
+            metadata: serde_json::json!({}),
+            timestamp: Utc::now(),
+        }];
         let csv = export_csv(&events);
         assert!(csv.contains("e2,org2,,ORG_CREATED,warning,admin,create,,"));
     }
@@ -696,7 +707,7 @@ mod tests {
             created_at: Utc::now(),
         };
         let event = row.into_event();
-// Defaults applied
+        // Defaults applied
         assert_eq!(event.event_type, AuditEventType::DataRead);
         assert_eq!(event.severity, AuditSeverity::Info);
     }
@@ -727,8 +738,30 @@ mod tests {
         let rt = test_runtime();
         rt.block_on(async {
             let mut buf = svc.buffer.write().await;
-            buf.push(svc.create_event("o", None, AuditEventType::DataRead, AuditSeverity::Info, "u", "user", None, None, "read", serde_json::json!({})));
-            buf.push(svc.create_event("o", None, AuditEventType::DataRead, AuditSeverity::Info, "u", "user", None, None, "read", serde_json::json!({})));
+            buf.push(svc.create_event(
+                "o",
+                None,
+                AuditEventType::DataRead,
+                AuditSeverity::Info,
+                "u",
+                "user",
+                None,
+                None,
+                "read",
+                serde_json::json!({}),
+            ));
+            buf.push(svc.create_event(
+                "o",
+                None,
+                AuditEventType::DataRead,
+                AuditSeverity::Info,
+                "u",
+                "user",
+                None,
+                None,
+                "read",
+                serde_json::json!({}),
+            ));
             assert_eq!(buf.len(), 2);
         });
     }

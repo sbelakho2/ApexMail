@@ -17,7 +17,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/tickets", post(create_ticket).get(list_tickets))
         .route("/tickets/:id", get(get_ticket).put(update_ticket))
-        .route("/tickets/:id/messages", get(list_ticket_messages).post(create_ticket_message))
+        .route(
+            "/tickets/:id/messages",
+            get(list_ticket_messages).post(create_ticket_message),
+        )
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -270,7 +273,7 @@ async fn list_ticket_messages(
     let limit = q.limit.min(200).max(1);
     let offset = q.offset.max(0);
 
-// Verify ticket belongs to tenant
+    // Verify ticket belongs to tenant
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1 AND tenant_id = $2)",
     )
@@ -298,15 +301,13 @@ async fn list_ticket_messages(
 
     let messages: Vec<TicketMessageResponse> = rows
         .into_iter()
-        .map(|r| {
-            TicketMessageResponse {
-                id: r.id,
-                ticket_id: r.ticket_id,
-                sender_id: r.sender_id.unwrap_or_default(),
-                sender_type: r.sender_type,
-                body: r.body,
-                created_at: r.created_at.to_rfc3339(),
-            }
+        .map(|r| TicketMessageResponse {
+            id: r.id,
+            ticket_id: r.ticket_id,
+            sender_id: r.sender_id.unwrap_or_default(),
+            sender_type: r.sender_type,
+            body: r.body,
+            created_at: r.created_at.to_rfc3339(),
         })
         .collect();
 
@@ -332,7 +333,7 @@ async fn create_ticket_message(
 ) -> Result<(StatusCode, Json<TicketMessageResponse>), ApiError> {
     require_scopes(&auth, &["support:write"])?;
 
-// Verify ticket belongs to tenant
+    // Verify ticket belongs to tenant
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id = $1 AND tenant_id = $2)",
     )
@@ -361,22 +362,23 @@ async fn create_ticket_message(
     .execute(&state.db)
     .await?;
 
-// Update ticket updated_at
-    sqlx::query(
-        "UPDATE support_tickets SET updated_at = NOW() WHERE id = $1",
-    )
-    .bind(&ticket_id)
-    .execute(&state.db)
-    .await?;
+    // Update ticket updated_at
+    sqlx::query("UPDATE support_tickets SET updated_at = NOW() WHERE id = $1")
+        .bind(&ticket_id)
+        .execute(&state.db)
+        .await?;
 
-    Ok((StatusCode::CREATED, Json(TicketMessageResponse {
-        id: id.to_string(),
-        ticket_id,
-        sender_id: auth.user_id.unwrap_or_default(),
-        sender_type: "user".into(),
-        body: body.body,
-        created_at: now.to_rfc3339(),
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(TicketMessageResponse {
+            id: id.to_string(),
+            ticket_id,
+            sender_id: auth.user_id.unwrap_or_default(),
+            sender_type: "user".into(),
+            body: body.body,
+            created_at: now.to_rfc3339(),
+        }),
+    ))
 }
 
 #[cfg(test)]

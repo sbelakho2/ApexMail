@@ -33,9 +33,9 @@ use axum::{
     },
 };
 use futures::stream::Stream;
+use hmac::Mac;
 use serde::Deserialize;
 use tokio_stream::StreamExt;
-use hmac::Mac;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
@@ -43,11 +43,11 @@ use crate::state::AppState;
 /// Query parameters for SSE endpoint.
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
-/// Optional:filter by event types (comma-separated).
-/// Values:opened, clicked, unsubscribed, delivered, bounced
+    /// Optional:filter by event types (comma-separated).
+    /// Values:opened, clicked, unsubscribed, delivered, bounced
     #[serde(default)]
     pub events: Option<String>,
-/// Optional:filter by specific message_id.
+    /// Optional:filter by specific message_id.
     #[serde(default)]
     pub message_id: Option<String>,
 }
@@ -55,19 +55,22 @@ pub struct StreamQuery {
 /// Minimal JWT claims for SSE authentication.
 #[derive(Debug, serde::Deserialize)]
 struct StreamClaims {
-/// Tenant ID
+    /// Tenant ID
     pub tenant_id: String,
-/// User/API key ID
+    /// User/API key ID
     pub sub: String,
-/// Scopes (must include "stream" or "*")
+    /// Scopes (must include "stream" or "*")
     #[serde(default)]
     pub scopes: Vec<String>,
-/// Expiration (unix timestamp)
+    /// Expiration (unix timestamp)
     pub exp: u64,
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
-    let authorization = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let authorization = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
     let mut parts = authorization.splitn(2, ' ');
     let scheme = parts.next()?.trim();
     let token = parts.next().unwrap_or("").trim();
@@ -85,7 +88,7 @@ pub async fn handle_stream(
     headers: HeaderMap,
     Query(params): Query<StreamQuery>,
 ) -> Response {
-// ── Validate JWT ──────────────────────────────────────────────────
+    // ── Validate JWT ──────────────────────────────────────────────────
     let Some(token) = extract_bearer_token(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -114,7 +117,7 @@ pub async fn handle_stream(
 
     let tenant_id = claims.tenant_id.clone();
 
-// ── Check concurrent connection limit ─────────────────────────────
+    // ── Check concurrent connection limit ─────────────────────────────
     let conn_key = format!("sse:conns:{}", &tenant_id);
     let conn_check: Result<bool, String> = async {
         let mut conn = state.redis.get().await.map_err(|e| format!("Redis: {e}"))?;
@@ -123,7 +126,7 @@ pub async fn handle_stream(
             .query_async(&mut *conn)
             .await
             .map_err(|e| format!("Redis INCR: {e}"))?;
-// Set expiry on first increment to auto-cleanup on crash
+        // Set expiry on first increment to auto-cleanup on crash
         if count == 1 {
             let _: () = redis::cmd("EXPIRE")
                 .arg(&conn_key)
@@ -133,7 +136,7 @@ pub async fn handle_stream(
                 .map_err(|e| format!("Redis EXPIRE: {e}"))?;
         }
         if count > 5 {
-// Decrement back since we won't actually use the slot
+            // Decrement back since we won't actually use the slot
             let _: () = redis::cmd("DECR")
                 .arg(&conn_key)
                 .query_async(&mut *conn)
@@ -160,12 +163,12 @@ pub async fn handle_stream(
         }
         Err(e) => {
             error!(error = %e, "SSE connection limit check failed");
-// Allow on Redis failure (fail open for availability)
+            // Allow on Redis failure (fail open for availability)
         }
         Ok(true) => {}
     }
 
-// ── Parse event type filter ───────────────────────────────────────
+    // ── Parse event type filter ───────────────────────────────────────
     let event_filter: Option<Vec<String>> = params.events.map(|e| {
         e.split(',')
             .map(|s| s.trim().to_lowercase())
@@ -183,10 +186,10 @@ pub async fn handle_stream(
         "SSE stream connected"
     );
 
-// ── Subscribe to Redis Pub/Sub channel ────────────────────────────
+    // ── Subscribe to Redis Pub/Sub channel ────────────────────────────
     let channel = format!("events:{}", &tenant_id);
     let redis_url = state.config.redis.url.clone();
-// Decrement connection count cleanup
+    // Decrement connection count cleanup
     let cleanup_redis = state.redis.clone();
     let cleanup_key = conn_key.clone();
 
@@ -216,9 +219,15 @@ mod tests {
     #[test]
     fn test_extract_bearer_token_accepts_authorization_header() {
         let mut headers = HeaderMap::new();
-        headers.insert(axum::http::header::AUTHORIZATION, "Bearer stream.jwt".parse().unwrap());
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer stream.jwt".parse().unwrap(),
+        );
 
-        assert_eq!(extract_bearer_token(&headers).as_deref(), Some("stream.jwt"));
+        assert_eq!(
+            extract_bearer_token(&headers).as_deref(),
+            Some("stream.jwt")
+        );
     }
 
     #[test]
@@ -226,10 +235,16 @@ mod tests {
         let mut headers = HeaderMap::new();
         assert!(extract_bearer_token(&headers).is_none());
 
-        headers.insert(axum::http::header::AUTHORIZATION, "Basic abc123".parse().unwrap());
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic abc123".parse().unwrap(),
+        );
         assert!(extract_bearer_token(&headers).is_none());
 
-        headers.insert(axum::http::header::AUTHORIZATION, "Bearer   ".parse().unwrap());
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer   ".parse().unwrap(),
+        );
         assert!(extract_bearer_token(&headers).is_none());
     }
 }
@@ -247,145 +262,142 @@ fn make_event_stream(
     cleanup_key: String,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
-// ── Initial connection event ──────────────────────────────────
-        yield Ok(Event::default()
-            .event("connected")
-            .data(serde_json::json!({
-                "tenant_id": &tenant_id,
-                "channel": &channel,
-                "filters": {
-                    "events": &event_filter,
-                    "message_id": &message_filter,
-                },
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            }).to_string()));
-
-// ── Connect to Redis Pub/Sub ──────────────────────────────────
-        let client = match redis::Client::open(redis_url.as_str()) {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = %e, "Failed to create Redis client for SSE");
-                yield Ok(Event::default()
-                    .event("error")
-                    .data(r#"{"error":"internal_error","message":"Failed to connect to event bus"}"#.to_string()));
-                decrement_conn_count(&cleanup_redis, &cleanup_key).await;
-                return;
-            }
-        };
-
-        let mut pubsub_conn = match client.get_async_pubsub().await {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = %e, "Failed to get Pub/Sub connection");
-                yield Ok(Event::default()
-                    .event("error")
-                    .data(r#"{"error":"internal_error","message":"Failed to subscribe to event bus"}"#.to_string()));
-                decrement_conn_count(&cleanup_redis, &cleanup_key).await;
-                return;
-            }
-        };
-
-        if let Err(e) = pubsub_conn.subscribe(&channel).await {
-            error!(error = %e, channel = %channel, "Failed to subscribe to channel");
+    // ── Initial connection event ──────────────────────────────────
             yield Ok(Event::default()
-                .event("error")
-                .data(r#"{"error":"internal_error","message":"Failed to subscribe to channel"}"#.to_string()));
-            decrement_conn_count(&cleanup_redis, &cleanup_key).await;
-            return;
-        }
+                .event("connected")
+                .data(serde_json::json!({
+                    "tenant_id": &tenant_id,
+                    "channel": &channel,
+                    "filters": {
+                        "events": &event_filter,
+                        "message_id": &message_filter,
+                    },
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                }).to_string()));
 
-        debug!(channel = %channel, "Subscribed to Redis Pub/Sub");
-
-// ── Stream events with 1-hour maximum duration ────────────────
-        let max_duration = tokio::time::sleep(Duration::from_secs(3600));
-        tokio::pin!(max_duration);
-
-        let mut msg_stream = pubsub_conn.on_message();
-
-        loop {
-            tokio::select! {
-// Timeout after 1 hour
-                _ = &mut max_duration => {
-                    info!(tenant_id = %tenant_id, "SSE stream max duration reached (1h)");
+    // ── Connect to Redis Pub/Sub ──────────────────────────────────
+            let client = match redis::Client::open(redis_url.as_str()) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!(error = %e, "Failed to create Redis client for SSE");
                     yield Ok(Event::default()
-                        .event("timeout")
-                        .data(r#"{"message":"Maximum stream duration reached. Please reconnect."}"#.to_string()));
-                    break;
+                        .event("error")
+                        .data(r#"{"error":"internal_error","message":"Failed to connect to event bus"}"#.to_string()));
+                    decrement_conn_count(&cleanup_redis, &cleanup_key).await;
+                    return;
                 }
-// Receive message from Redis Pub/Sub
-                msg = msg_stream.next() => {
-                    match msg {
-                        Some(msg) => {
-                            let payload: String = match msg.get_payload() {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to decode Pub/Sub message payload");
-                                    continue;
-                                }
-                            };
+            };
 
-// Parse the event JSON to apply filters
-                            if let Ok(event_json) = serde_json::from_str::<serde_json::Value>(&payload) {
-// Apply event type filter
-                                if let Some(ref filter) = event_filter {
-                                    if let Some(event_type) = event_json.get("type").and_then(|v| v.as_str()) {
-                                        if !filter.iter().any(|f| f == event_type) {
-                                            continue;
+            let mut pubsub_conn = match client.get_async_pubsub().await {
+                Ok(c) => c,
+                Err(e) => {
+                    error!(error = %e, "Failed to get Pub/Sub connection");
+                    yield Ok(Event::default()
+                        .event("error")
+                        .data(r#"{"error":"internal_error","message":"Failed to subscribe to event bus"}"#.to_string()));
+                    decrement_conn_count(&cleanup_redis, &cleanup_key).await;
+                    return;
+                }
+            };
+
+            if let Err(e) = pubsub_conn.subscribe(&channel).await {
+                error!(error = %e, channel = %channel, "Failed to subscribe to channel");
+                yield Ok(Event::default()
+                    .event("error")
+                    .data(r#"{"error":"internal_error","message":"Failed to subscribe to channel"}"#.to_string()));
+                decrement_conn_count(&cleanup_redis, &cleanup_key).await;
+                return;
+            }
+
+            debug!(channel = %channel, "Subscribed to Redis Pub/Sub");
+
+    // ── Stream events with 1-hour maximum duration ────────────────
+            let max_duration = tokio::time::sleep(Duration::from_secs(3600));
+            tokio::pin!(max_duration);
+
+            let mut msg_stream = pubsub_conn.on_message();
+
+            loop {
+                tokio::select! {
+    // Timeout after 1 hour
+                    _ = &mut max_duration => {
+                        info!(tenant_id = %tenant_id, "SSE stream max duration reached (1h)");
+                        yield Ok(Event::default()
+                            .event("timeout")
+                            .data(r#"{"message":"Maximum stream duration reached. Please reconnect."}"#.to_string()));
+                        break;
+                    }
+    // Receive message from Redis Pub/Sub
+                    msg = msg_stream.next() => {
+                        match msg {
+                            Some(msg) => {
+                                let payload: String = match msg.get_payload() {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        warn!(error = %e, "Failed to decode Pub/Sub message payload");
+                                        continue;
+                                    }
+                                };
+
+    // Parse the event JSON to apply filters
+                                if let Ok(event_json) = serde_json::from_str::<serde_json::Value>(&payload) {
+    // Apply event type filter
+                                    if let Some(ref filter) = event_filter {
+                                        if let Some(event_type) = event_json.get("type").and_then(|v| v.as_str()) {
+                                            if !filter.iter().any(|f| f == event_type) {
+                                                continue;
+                                            }
                                         }
                                     }
-                                }
 
-// Apply message_id filter
-                                if let Some(ref mid) = message_filter {
-                                    if let Some(msg_id) = event_json.get("messageId").and_then(|v| v.as_str()) {
-                                        if msg_id != mid.as_str() {
-                                            continue;
+    // Apply message_id filter
+                                    if let Some(ref mid) = message_filter {
+                                        if let Some(msg_id) = event_json.get("messageId").and_then(|v| v.as_str()) {
+                                            if msg_id != mid.as_str() {
+                                                continue;
+                                            }
                                         }
                                     }
+
+    // Determine SSE event name from the type field
+                                    let event_name = event_json
+                                        .get("type")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("event");
+
+                                    yield Ok(Event::default()
+                                        .event(event_name)
+                                        .data(payload));
+                                } else {
+    // Raw payload without valid JSON — send as-is
+                                    yield Ok(Event::default()
+                                        .event("event")
+                                        .data(payload));
                                 }
-
-// Determine SSE event name from the type field
-                                let event_name = event_json
-                                    .get("type")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("event");
-
-                                yield Ok(Event::default()
-                                    .event(event_name)
-                                    .data(payload));
-                            } else {
-// Raw payload without valid JSON — send as-is
-                                yield Ok(Event::default()
-                                    .event("event")
-                                    .data(payload));
                             }
-                        }
-                        None => {
-// Redis connection closed
-                            warn!(tenant_id = %tenant_id, "Redis Pub/Sub stream ended");
-                            yield Ok(Event::default()
-                                .event("error")
-                                .data(r#"{"error":"stream_ended","message":"Event stream connection lost. Please reconnect."}"#.to_string()));
-                            break;
+                            None => {
+    // Redis connection closed
+                                warn!(tenant_id = %tenant_id, "Redis Pub/Sub stream ended");
+                                yield Ok(Event::default()
+                                    .event("error")
+                                    .data(r#"{"error":"stream_ended","message":"Event stream connection lost. Please reconnect."}"#.to_string()));
+                                break;
+                            }
                         }
                     }
                 }
             }
-        }
 
-// Cleanup:decrement connection count
-        decrement_conn_count(&cleanup_redis, &cleanup_key).await;
-        info!(tenant_id = %tenant_id, "SSE stream disconnected");
-    }
+    // Cleanup:decrement connection count
+            decrement_conn_count(&cleanup_redis, &cleanup_key).await;
+            info!(tenant_id = %tenant_id, "SSE stream disconnected");
+        }
 }
 
 /// Decrement the per-tenant SSE connection counter in Redis.
 async fn decrement_conn_count(pool: &deadpool_redis::Pool, key: &str) {
     if let Ok(mut conn) = pool.get().await {
-        let _: Result<(), _> = redis::cmd("DECR")
-            .arg(key)
-            .query_async(&mut *conn)
-            .await;
+        let _: Result<(), _> = redis::cmd("DECR").arg(key).query_async(&mut *conn).await;
     }
 }
 
@@ -400,26 +412,26 @@ fn validate_stream_token(token: &str, state: &AppState) -> Result<StreamClaims, 
         return Err("Invalid token format".into());
     }
 
-// Decode and verify signature
+    // Decode and verify signature
     let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let signature_bytes = base64_url_decode(parts[2])
-        .map_err(|_| "Invalid token signature encoding")?;
+    let signature_bytes =
+        base64_url_decode(parts[2]).map_err(|_| "Invalid token signature encoding")?;
 
     let key = state.config.secret_key.as_bytes();
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key)
-        .map_err(|_| "Internal key error")?;
+    let mut mac =
+        hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| "Internal key error")?;
     hmac::Mac::update(&mut mac, signing_input.as_bytes());
 
     mac.verify_slice(&signature_bytes)
         .map_err(|_| "Invalid token signature")?;
 
-// Decode claims payload
-    let payload_bytes = base64_url_decode(parts[1])
-        .map_err(|_| "Invalid token payload encoding")?;
-    let claims: StreamClaims = serde_json::from_slice(&payload_bytes)
-        .map_err(|_| "Invalid token claims")?;
+    // Decode claims payload
+    let payload_bytes =
+        base64_url_decode(parts[1]).map_err(|_| "Invalid token payload encoding")?;
+    let claims: StreamClaims =
+        serde_json::from_slice(&payload_bytes).map_err(|_| "Invalid token claims")?;
 
-// Check expiry
+    // Check expiry
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -429,7 +441,7 @@ fn validate_stream_token(token: &str, state: &AppState) -> Result<StreamClaims, 
         return Err("Token expired".into());
     }
 
-// Check scope
+    // Check scope
     if !claims.scopes.iter().any(|s| s == "stream" || s == "*") {
         return Err("Token missing 'stream' scope".into());
     }

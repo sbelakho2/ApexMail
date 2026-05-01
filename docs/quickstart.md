@@ -100,8 +100,8 @@ The API enforces a default tenant-wide limit of 1,000 requests/minute. Authentic
 - 📚 [Full API Documentation](https://apexmail.ee/docs)
 - 🛡️ [Login mCaptcha Protection](./security/mcaptcha-login.md)
 - 💬 [Discord Community](https://discord.gg/apexmail)
-- 📧 [Email Support](mailto:contact@apexmail.ee)
-- 🐛 [Report a Bug](https://github.com/Bel-Consulting-OU/ApexMail/issues)
+- 📧 [Email Support](mailto:support@apexmail.ee)
+- 🐛 [Report a Bug](https://github.com/sbelakho2/ApexMail/issues)
 
 ---
 

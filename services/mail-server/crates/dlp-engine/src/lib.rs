@@ -16,27 +16,27 @@
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 
+pub mod attachment;
 pub mod config;
-pub mod pii;
-pub mod entropy;
 pub mod content_policy;
 pub mod engine;
-pub mod attachment;
+pub mod entropy;
+pub mod pii;
 
 use thiserror::Error;
 
 /// DLP errors
 #[derive(Debug, Error)]
 pub enum DlpError {
-/// Pattern compilation failed
+    /// Pattern compilation failed
     #[error("Pattern error: {0}")]
     PatternError(String),
 
-/// Content scanning error
+    /// Content scanning error
     #[error("Scan error: {0}")]
     ScanError(String),
 
-/// Policy violation
+    /// Policy violation
     #[error("Policy violation: {0}")]
     PolicyViolation(String),
 }

@@ -2,8 +2,8 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, register_gauge_vec,
-    HistogramOpts, HistogramVec, IntCounterVec, Opts, GaugeVec
+    register_gauge_vec, register_histogram_vec, register_int_counter_vec, GaugeVec, HistogramOpts,
+    HistogramVec, IntCounterVec, Opts,
 };
 
 fn safe_int_counter_vec(name: &str, help: &str, labels: &[&str]) -> Option<IntCounterVec> {
@@ -38,7 +38,12 @@ fn safe_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Option<GaugeVec> {
     }
 }
 
-fn safe_histogram_vec(name: &str, help: &str, labels: &[&str], buckets: Vec<f64>) -> Option<HistogramVec> {
+fn safe_histogram_vec(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+    buckets: Vec<f64>,
+) -> Option<HistogramVec> {
     match register_histogram_vec!(name, help, labels, buckets.clone()) {
         Ok(metric) => Some(metric),
         Err(err) => {
@@ -59,7 +64,7 @@ pub static REQUESTS_TOTAL: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_requests_total",
         "Total requests processed by DDoS protection",
-        &["decision", "layer"]
+        &["decision", "layer"],
     )
 });
 
@@ -68,7 +73,7 @@ pub static BLOCKED_IPS: Lazy<Option<GaugeVec>> = Lazy::new(|| {
     safe_gauge_vec(
         "ddos_blocked_ips",
         "Number of currently blocked IP addresses",
-        &["reason"]
+        &["reason"],
     )
 });
 
@@ -78,7 +83,7 @@ pub static ANOMALY_SCORE: Lazy<Option<HistogramVec>> = Lazy::new(|| {
         "ddos_anomaly_score",
         "Anomaly scores from ML model",
         &["endpoint"],
-        vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
     )
 });
 
@@ -88,7 +93,7 @@ pub static CHALLENGE_LATENCY: Lazy<Option<HistogramVec>> = Lazy::new(|| {
         "ddos_challenge_latency_seconds",
         "Time for clients to solve challenges",
         &["type"],
-        vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+        vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0],
     )
 });
 
@@ -97,7 +102,7 @@ pub static CHALLENGES_ISSUED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_challenges_issued_total",
         "Total challenges issued",
-        &["type"]
+        &["type"],
     )
 });
 
@@ -106,7 +111,7 @@ pub static CHALLENGES_PASSED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_challenges_passed_total",
         "Total challenges passed",
-        &["type"]
+        &["type"],
     )
 });
 
@@ -115,7 +120,7 @@ pub static CHALLENGES_FAILED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_challenges_failed_total",
         "Total challenges failed",
-        &["type"]
+        &["type"],
     )
 });
 
@@ -125,7 +130,9 @@ pub static REPUTATION_SCORE: Lazy<Option<HistogramVec>> = Lazy::new(|| {
         "ddos_reputation_score",
         "Distribution of IP reputation scores",
         &[],
-        vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+        vec![
+            0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0,
+        ],
     )
 });
 
@@ -134,7 +141,7 @@ pub static THREAT_EVENTS: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_threat_events_total",
         "Threat events shared across regions",
-        &["type", "severity", "source_region"]
+        &["type", "severity", "source_region"],
     )
 });
 
@@ -143,7 +150,7 @@ pub static COST_BUDGET_USAGE: Lazy<Option<GaugeVec>> = Lazy::new(|| {
     safe_gauge_vec(
         "ddos_cost_budget_usage_ratio",
         "Cost budget usage ratio (0-1)",
-        &["tenant_id"]
+        &["tenant_id"],
     )
 });
 
@@ -152,7 +159,7 @@ pub static UNDER_ATTACK: Lazy<Option<GaugeVec>> = Lazy::new(|| {
     safe_gauge_vec(
         "ddos_under_attack",
         "Whether the system is under attack (0 or 1)",
-        &["region"]
+        &["region"],
     )
 });
 
@@ -161,7 +168,7 @@ pub static XDP_PACKETS: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_xdp_packets_total",
         "Packets processed by XDP filter",
-        &["action"]
+        &["action"],
     )
 });
 
@@ -170,6 +177,6 @@ pub static ACTIVE_SESSIONS: Lazy<Option<GaugeVec>> = Lazy::new(|| {
     safe_gauge_vec(
         "ddos_active_sessions",
         "Number of active sessions being tracked",
-        &[]
+        &[],
     )
 });

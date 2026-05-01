@@ -22,6 +22,7 @@ from pathlib import Path
 import torch
 import yaml
 from datasets import load_dataset
+from training_data import expand_system_prompt_refs
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -137,6 +138,8 @@ def main():
         "train": cfg["dataset"]["train_file"],
         "validation": cfg["dataset"]["val_file"],
     })
+    ds["train"] = expand_system_prompt_refs(ds["train"], cfg["dataset"]["train_file"])
+    ds["validation"] = expand_system_prompt_refs(ds["validation"], cfg["dataset"]["val_file"])
     log(f"  Train: {len(ds['train'])}  Val: {len(ds['validation'])}")
 
     # ── Training config — KEEP effective batch = 28 ────────────────────────

@@ -9,8 +9,8 @@ use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use mta::config::MtaConfig;
 use mta::auth::EmailAuthenticator;
+use mta::config::MtaConfig;
 use mta::servers::{BounceServer, FeedbackLoopServer, InboundServer};
 
 #[derive(Parser)]
@@ -26,15 +26,15 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(&cli.log_level)
-        }))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+        )
         .init();
 
     let config = MtaConfig::from_env()?;
     info!(mta_id = %config.mta_id, "Starting MTA server");
 
-// Database pool
+    // Database pool
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -43,30 +43,34 @@ async fn main() -> anyhow::Result<()> {
         .connect(&config.database.connection_string)
         .await?;
 
-// Redis pool
+    // Redis pool
     let redis_cfg = deadpool_redis::Config::from_url(&config.redis.url);
     let redis_pool = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
 
-// TLS acceptor (optional)
+    // TLS acceptor (optional)
     let tls_acceptor = if config.inbound.tls.enabled {
-        let cert_path = config.inbound.tls.cert_path.as_deref().unwrap_or("cert.pem");
+        let cert_path = config
+            .inbound
+            .tls
+            .cert_path
+            .as_deref()
+            .unwrap_or("cert.pem");
         let key_path = config.inbound.tls.key_path.as_deref().unwrap_or("key.pem");
         Some(load_tls_acceptor(cert_path, key_path)?)
     } else {
         None
     };
 
-// Email authenticator
+    // Email authenticator
     let authenticator = Arc::new(
-        EmailAuthenticator::new(config.email_auth.clone(), config.inbound.hostname.clone())
-            .await?,
+        EmailAuthenticator::new(config.email_auth.clone(), config.inbound.hostname.clone()).await?,
     );
 
-// Health server
+    // Health server
     let health_pool = pool.clone();
     let health_redis = redis_pool.clone();
     let health_port = config.health_port;
-// #152:Store health server handle for proper shutdown
+    // #152:Store health server handle for proper shutdown
     let health_handle = tokio::spawn(async move {
         let app = Router::new()
             .route("/health", get(|| async { "OK" }))
@@ -86,8 +90,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }),
             );
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{health_port}"))
-            .await;
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{health_port}")).await;
         let listener = match listener {
             Ok(listener) => listener,
             Err(error) => {
@@ -99,8 +102,8 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(listener, app).await.ok();
     });
 
-// Inbound server
-// #151:Keep server references for graceful stop calls
+    // Inbound server
+    // #151:Keep server references for graceful stop calls
     let (inbound_srv, inbound_handle) = if config.inbound.enabled {
         let srv = Arc::new(InboundServer::new(
             config.inbound.clone(),
@@ -112,16 +115,19 @@ async fn main() -> anyhow::Result<()> {
         ));
         let s = srv.clone();
         let tls = tls_acceptor.clone();
-        (Some(srv), Some(tokio::spawn(async move {
-            if let Err(e) = s.start(tls).await {
-                error!(error = %e, "Inbound server failed");
-            }
-        })))
+        (
+            Some(srv),
+            Some(tokio::spawn(async move {
+                if let Err(e) = s.start(tls).await {
+                    error!(error = %e, "Inbound server failed");
+                }
+            })),
+        )
     } else {
         (None, None)
     };
 
-// Bounce server
+    // Bounce server
     let (bounce_srv, bounce_handle) = if config.bounce.enabled {
         let srv = Arc::new(BounceServer::new(
             config.bounce.clone(),
@@ -130,16 +136,19 @@ async fn main() -> anyhow::Result<()> {
             config.bounce.hostname.clone(),
         ));
         let s = srv.clone();
-        (Some(srv), Some(tokio::spawn(async move {
-            if let Err(e) = s.start().await {
-                error!(error = %e, "Bounce server failed");
-            }
-        })))
+        (
+            Some(srv),
+            Some(tokio::spawn(async move {
+                if let Err(e) = s.start().await {
+                    error!(error = %e, "Bounce server failed");
+                }
+            })),
+        )
     } else {
         (None, None)
     };
 
-// Feedback loop server
+    // Feedback loop server
     let (fbl_srv, fbl_handle) = if config.feedback.enabled {
         let srv = Arc::new(FeedbackLoopServer::new(
             config.feedback.clone(),
@@ -149,19 +158,24 @@ async fn main() -> anyhow::Result<()> {
             &[],
         ));
         let s = srv.clone();
-        (Some(srv), Some(tokio::spawn(async move {
-            if let Err(e) = s.start().await {
-                error!(error = %e, "FBL server failed");
-            }
-        })))
+        (
+            Some(srv),
+            Some(tokio::spawn(async move {
+                if let Err(e) = s.start().await {
+                    error!(error = %e, "FBL server failed");
+                }
+            })),
+        )
     } else {
         (None, None)
     };
 
-// Wait for shutdown signal (SIGINT or SIGTERM)
+    // Wait for shutdown signal (SIGINT or SIGTERM)
     info!("MTA server running. Waiting for shutdown signal.");
     {
-        let ctrl_c = async { let _ = signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             match signal::unix::signal(signal::unix::SignalKind::terminate()) {
@@ -181,20 +195,33 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("Shutting down...");
 
-// #151:Signal graceful shutdown on all servers before aborting
-    if let Some(ref srv) = inbound_srv { srv.stop(); }
-    if let Some(ref srv) = bounce_srv { srv.stop(); }
-    if let Some(ref srv) = fbl_srv { srv.stop(); }
+    // #151:Signal graceful shutdown on all servers before aborting
+    if let Some(ref srv) = inbound_srv {
+        srv.stop();
+    }
+    if let Some(ref srv) = bounce_srv {
+        srv.stop();
+    }
+    if let Some(ref srv) = fbl_srv {
+        srv.stop();
+    }
 
-// #150:Use .max(5) so grace period is AT LEAST 5s (was .min(5) = at most 5s)
+    // #150:Use .max(5) so grace period is AT LEAST 5s (was .min(5) = at most 5s)
     let grace = std::time::Duration::from_secs(config.graceful_shutdown_timeout.max(5));
     let _ = tokio::time::timeout(grace, async {
-        if let Some(h) = inbound_handle { let _ = h.await; }
-        if let Some(h) = bounce_handle { let _ = h.await; }
-        if let Some(h) = fbl_handle { let _ = h.await; }
-    }).await;
+        if let Some(h) = inbound_handle {
+            let _ = h.await;
+        }
+        if let Some(h) = bounce_handle {
+            let _ = h.await;
+        }
+        if let Some(h) = fbl_handle {
+            let _ = h.await;
+        }
+    })
+    .await;
 
-// #152:Abort health server last
+    // #152:Abort health server last
     health_handle.abort();
 
     pool.close().await;
@@ -207,7 +234,6 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<tokio_ru
     use std::fs::File;
     use std::io::BufReader;
     use tokio_rustls::rustls;
-    
 
     let cert_file = File::open(cert_path)?;
     let key_file = File::open(key_path)?;

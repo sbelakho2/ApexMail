@@ -14,9 +14,9 @@ use tokio::time::{interval_at, Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::routes::append_audit_log;
 use crate::usage::build_metering_audit_metadata;
+use crate::AppState;
 
 const HOURLY_TASK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const DEDICATED_IP_TASK_INTERVAL: Duration = Duration::from_secs(30);
@@ -42,7 +42,11 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
         match process_dedicated_ip_billing(dedicated_ip_state.as_ref(), &client).await {
             Ok(result) if result.charged > 0 || result.canceled > 0 => {
-                info!(charged = result.charged, canceled = result.canceled, "processed dedicated IP billing sync on startup");
+                info!(
+                    charged = result.charged,
+                    canceled = result.canceled,
+                    "processed dedicated IP billing sync on startup"
+                );
             }
             Ok(_) => {}
             Err(error_message) => {
@@ -50,7 +54,10 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             }
         }
 
-        let mut interval = interval_at(Instant::now() + DEDICATED_IP_TASK_INTERVAL, DEDICATED_IP_TASK_INTERVAL);
+        let mut interval = interval_at(
+            Instant::now() + DEDICATED_IP_TASK_INTERVAL,
+            DEDICATED_IP_TASK_INTERVAL,
+        );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -58,7 +65,11 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
             match process_dedicated_ip_billing(dedicated_ip_state.as_ref(), &client).await {
                 Ok(result) if result.charged > 0 || result.canceled > 0 => {
-                    info!(charged = result.charged, canceled = result.canceled, "processed dedicated IP billing sync");
+                    info!(
+                        charged = result.charged,
+                        canceled = result.canceled,
+                        "processed dedicated IP billing sync"
+                    );
                 }
                 Ok(_) => {}
                 Err(error_message) => {
@@ -70,7 +81,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
     let metering_state = state.clone();
     tokio::spawn(async move {
-        match drain_pending_metering_events(metering_state.as_ref(), METERING_RECOVERY_LIMIT).await {
+        match drain_pending_metering_events(metering_state.as_ref(), METERING_RECOVERY_LIMIT).await
+        {
             Ok(result) if result.processed_count > 0 || result.discarded_count > 0 => {
                 info!(
                     processed_count = result.processed_count,
@@ -84,13 +96,18 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             }
         }
 
-        let mut interval = interval_at(Instant::now() + METERING_TASK_INTERVAL, METERING_TASK_INTERVAL);
+        let mut interval = interval_at(
+            Instant::now() + METERING_TASK_INTERVAL,
+            METERING_TASK_INTERVAL,
+        );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             interval.tick().await;
 
-            match drain_pending_metering_events(metering_state.as_ref(), METERING_RECOVERY_LIMIT).await {
+            match drain_pending_metering_events(metering_state.as_ref(), METERING_RECOVERY_LIMIT)
+                .await
+            {
                 Ok(result) if result.processed_count > 0 || result.discarded_count > 0 => {
                     info!(
                         processed_count = result.processed_count,
@@ -108,7 +125,10 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
     let wallet_state = state.clone();
     tokio::spawn(async move {
-        let mut interval = interval_at(Instant::now() + WALLET_CLEANUP_INTERVAL, WALLET_CLEANUP_INTERVAL);
+        let mut interval = interval_at(
+            Instant::now() + WALLET_CLEANUP_INTERVAL,
+            WALLET_CLEANUP_INTERVAL,
+        );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -129,7 +149,10 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let usage_alert_state = state.clone();
     tokio::spawn(async move {
         let client = Client::new();
-        let mut interval = interval_at(Instant::now() + USAGE_ALERT_TASK_INTERVAL, USAGE_ALERT_TASK_INTERVAL);
+        let mut interval = interval_at(
+            Instant::now() + USAGE_ALERT_TASK_INTERVAL,
+            USAGE_ALERT_TASK_INTERVAL,
+        );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -153,7 +176,10 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
     let cost_margin_state = state.clone();
     tokio::spawn(async move {
-        let mut interval = interval_at(Instant::now() + COST_MARGIN_TASK_INTERVAL, COST_MARGIN_TASK_INTERVAL);
+        let mut interval = interval_at(
+            Instant::now() + COST_MARGIN_TASK_INTERVAL,
+            COST_MARGIN_TASK_INTERVAL,
+        );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -242,7 +268,11 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
             match process_scheduled_retries(state.as_ref(), &client).await {
                 Ok(result) if result.attempted > 0 => {
-                    info!(attempted = result.attempted, succeeded = result.succeeded, "processed scheduled Stripe retries");
+                    info!(
+                        attempted = result.attempted,
+                        succeeded = result.succeeded,
+                        "processed scheduled Stripe retries"
+                    );
                 }
                 Ok(_) => {}
                 Err(error_message) => {
@@ -462,10 +492,7 @@ async fn process_grace_period_expirations(
             break;
         }
 
-        let batch_purged: i64 = rows
-            .iter()
-            .map(|row| i64::from(row.purged_count))
-            .sum();
+        let batch_purged: i64 = rows.iter().map(|row| i64::from(row.purged_count)).sum();
 
         total_processed += batch_count;
         total_purged += batch_purged;
@@ -489,11 +516,9 @@ async fn drain_pending_metering_events(
     state: &AppState,
     limit: usize,
 ) -> Result<MeteringDrainResult, String> {
-    let mut conn = state
-        .redis
-        .get()
-        .await
-        .map_err(|error| format!("Failed to get Redis connection for metering recovery: {error}"))?;
+    let mut conn = state.redis.get().await.map_err(|error| {
+        format!("Failed to get Redis connection for metering recovery: {error}")
+    })?;
 
     let pending_keys = scan_metering_pending_keys(&mut conn, limit).await?;
     if pending_keys.is_empty() {
@@ -538,7 +563,9 @@ async fn drain_pending_metering_events(
     if valid_events.is_empty() {
         delete_redis_keys(&mut conn, &cleanup_keys)
             .await
-            .map_err(|error| format!("Failed to clean malformed pending metering events: {error}"))?;
+            .map_err(|error| {
+                format!("Failed to clean malformed pending metering events: {error}")
+            })?;
 
         return Ok(MeteringDrainResult {
             processed_count: 0,
@@ -554,11 +581,16 @@ async fn drain_pending_metering_events(
         pipeline.del(key).ignore();
     }
     for event in &valid_events {
-        pipeline.del(format!("meter:pending:{}", event.raw_id)).ignore();
+        pipeline
+            .del(format!("meter:pending:{}", event.raw_id))
+            .ignore();
         if inserted_id_set.contains(&event.normalized_id) {
-            let counter_key = metering_counter_key(&event.tenant_id, &event.event_type, event.timestamp);
+            let counter_key =
+                metering_counter_key(&event.tenant_id, &event.event_type, event.timestamp);
             pipeline.incr(&counter_key, event.quantity).ignore();
-            pipeline.expire(&counter_key, METERING_PERIOD_TTL_SECONDS).ignore();
+            pipeline
+                .expire(&counter_key, METERING_PERIOD_TTL_SECONDS)
+                .ignore();
         }
     }
     let _: () = pipeline
@@ -646,13 +678,12 @@ async fn insert_metering_events(
             .push_bind(&event.metadata);
     });
 
-    query_builder
-        .push(
-            r#"
+    query_builder.push(
+        r#"
             ON CONFLICT (id) DO NOTHING
             RETURNING id
             "#,
-        );
+    );
 
     let inserted_ids = query_builder
         .build_query_scalar::<Uuid>()
@@ -661,7 +692,10 @@ async fn insert_metering_events(
         .map_err(|error| format!("Failed to persist pending metering events: {error}"))?;
 
     let inserted_set: HashSet<Uuid> = inserted_ids.iter().copied().collect();
-    for event in events.iter().filter(|event| inserted_set.contains(&event.normalized_id)) {
+    for event in events
+        .iter()
+        .filter(|event| inserted_set.contains(&event.normalized_id))
+    {
         let mut audit_metadata = build_metering_audit_metadata(
             &event.event_type,
             event.quantity,
@@ -776,7 +810,12 @@ async fn process_scheduled_retries(
                 .bind(&row.tenant_id)
                 .execute(&state.db)
                 .await
-                .map_err(|error| format!("Failed to clear next_retry_at for {}: {error}", row.tenant_id))?;
+                .map_err(|error| {
+                    format!(
+                        "Failed to clear next_retry_at for {}: {error}",
+                        row.tenant_id
+                    )
+                })?;
                 return Ok(());
             };
 
@@ -814,7 +853,10 @@ async fn process_scheduled_retries(
         }
     }
 
-    Ok(RetryResult { attempted, succeeded })
+    Ok(RetryResult {
+        attempted,
+        succeeded,
+    })
 }
 
 async fn process_usage_alerts(
@@ -892,15 +934,16 @@ async fn process_usage_alerts_for_tenant(
             "alert:cooldown:{tenant_id}:{}:{}",
             config.metric_type, config.threshold_percent
         );
-        let in_cooldown: bool = conn
-            .exists(&cooldown_key)
-            .await
-            .map_err(|error| format!("Failed to check usage alert cooldown for {tenant_id}: {error}"))?;
+        let in_cooldown: bool = conn.exists(&cooldown_key).await.map_err(|error| {
+            format!("Failed to check usage alert cooldown for {tenant_id}: {error}")
+        })?;
         if in_cooldown {
             continue;
         }
 
-        let Some((current_value, limit_value)) = resolve_usage_alert_metric(&usage_summary, &config.metric_type) else {
+        let Some((current_value, limit_value)) =
+            resolve_usage_alert_metric(&usage_summary, &config.metric_type)
+        else {
             continue;
         };
 
@@ -932,7 +975,9 @@ async fn process_usage_alerts_for_tenant(
         let _: () = conn
             .set_ex(&cooldown_key, "1", USAGE_ALERT_COOLDOWN_SECONDS)
             .await
-            .map_err(|error| format!("Failed to set usage alert cooldown for {tenant_id}: {error}"))?;
+            .map_err(|error| {
+                format!("Failed to set usage alert cooldown for {tenant_id}: {error}")
+            })?;
 
         sqlx::query(
             r#"
@@ -944,7 +989,9 @@ async fn process_usage_alerts_for_tenant(
         .bind(config.id)
         .execute(&state.db)
         .await
-        .map_err(|error| format!("Failed to update usage alert trigger time for {tenant_id}: {error}"))?;
+        .map_err(|error| {
+            format!("Failed to update usage alert trigger time for {tenant_id}: {error}")
+        })?;
 
         alerts_triggered += 1;
     }
@@ -1000,8 +1047,8 @@ async fn send_usage_alert(
     current_percent: f64,
 ) -> bool {
     let email_enabled = matches!(config.notification_channel.as_str(), "email" | "both");
-    let webhook_enabled = matches!(config.notification_channel.as_str(), "webhook" | "both")
-        && webhook_url.is_some();
+    let webhook_enabled =
+        matches!(config.notification_channel.as_str(), "webhook" | "both") && webhook_url.is_some();
     if !email_enabled && !webhook_enabled {
         return false;
     }
@@ -1043,7 +1090,9 @@ async fn send_usage_alert(
         .await
         {
             Ok(_) => delivered = true,
-            Err(error) => warn!(tenant_id = %tenant_id, error = %error, "failed to enqueue usage alert email"),
+            Err(error) => {
+                warn!(tenant_id = %tenant_id, error = %error, "failed to enqueue usage alert email")
+            }
         }
     }
 
@@ -1149,9 +1198,15 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
         .bind(period_end)
         .fetch_one(&state.db)
         .await
-        .map_err(|error| format!("Failed to load invoice total for SLA credits {}: {error}", candidate.tenant_id))?;
+        .map_err(|error| {
+            format!(
+                "Failed to load invoice total for SLA credits {}: {error}",
+                candidate.tenant_id
+            )
+        })?;
 
-        let credit_amount = ((invoice_amount_cents as f64) * (credit_percent as f64 / 100.0)).round() as i64;
+        let credit_amount =
+            ((invoice_amount_cents as f64) * (credit_percent as f64 / 100.0)).round() as i64;
         if credit_amount <= 0 {
             continue;
         }
@@ -1191,7 +1246,12 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
         .bind(credit_amount)
         .fetch_one(&state.db)
         .await
-        .map_err(|error| format!("Failed to upsert SLA credit for {}: {error}", candidate.tenant_id))?;
+        .map_err(|error| {
+            format!(
+                "Failed to upsert SLA credit for {}: {error}",
+                candidate.tenant_id
+            )
+        })?;
 
         if created {
             credits_created += 1;
@@ -1205,12 +1265,8 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
 }
 
 fn feature_flag_enabled(features: &Value, keys: &[&str]) -> bool {
-    keys.iter().any(|key| {
-        features
-            .get(*key)
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    })
+    keys.iter()
+        .any(|key| features.get(*key).and_then(Value::as_bool).unwrap_or(false))
 }
 
 fn sla_credit_percentage_for_breach(breach_percent: f64) -> i32 {
@@ -1265,7 +1321,9 @@ async fn process_pending_dedicated_ip_charges(
             return Ok(0);
         }
         Err(error) => {
-            return Err(format!("Failed to load pending dedicated IP charges: {error}"));
+            return Err(format!(
+                "Failed to load pending dedicated IP charges: {error}"
+            ));
         }
     };
 
@@ -1305,7 +1363,9 @@ async fn process_pending_dedicated_ip_cancels(
             return Ok(0);
         }
         Err(error) => {
-            return Err(format!("Failed to load pending dedicated IP cancels: {error}"));
+            return Err(format!(
+                "Failed to load pending dedicated IP cancels: {error}"
+            ));
         }
     };
 
@@ -1691,7 +1751,10 @@ async fn apply_cost_throttling(state: &AppState, tenant_id: &str) {
             })
             .to_string();
 
-            let current_limit: Option<String> = match conn.get(format!("rate:limit:{tenant_id}")).await {
+            let current_limit: Option<String> = match conn
+                .get(format!("rate:limit:{tenant_id}"))
+                .await
+            {
                 Ok(value) => value,
                 Err(error) => {
                     warn!(tenant_id = %tenant_id, error = %error, "failed to read current tenant rate limit during cost throttling");
@@ -1706,7 +1769,11 @@ async fn apply_cost_throttling(state: &AppState, tenant_id: &str) {
 
             let mut pipeline = redis::pipe();
             pipeline
-                .set_ex(format!("cost:throttle:{tenant_id}"), throttle_payload, 24 * 60 * 60)
+                .set_ex(
+                    format!("cost:throttle:{tenant_id}"),
+                    throttle_payload,
+                    24 * 60 * 60,
+                )
                 .ignore()
                 .set_ex(
                     format!("rate:limit:{tenant_id}:throttled"),
@@ -1739,11 +1806,9 @@ async fn cache_cost_margin_status(
                 "checkedAt": Utc::now().to_rfc3339(),
             })
             .to_string();
-            let cache_result: Result<(), redis::RedisError> = conn.set_ex(
-                format!("cost:status:{tenant_id}"),
-                payload,
-                60 * 60,
-            ).await;
+            let cache_result: Result<(), redis::RedisError> = conn
+                .set_ex(format!("cost:status:{tenant_id}"), payload, 60 * 60)
+                .await;
             if let Err(error) = cache_result {
                 warn!(tenant_id = %tenant_id, error = %error, "failed to cache cost margin status");
             }
@@ -1901,9 +1966,8 @@ async fn cleanup_stuck_subscription_sagas(state: &AppState) -> Result<i64, Strin
         .filter(|value| *value > 0)
         .unwrap_or(60);
 
-    sqlx::query_scalar::<_, i64>(
-        &format!(
-            r#"
+    sqlx::query_scalar::<_, i64>(&format!(
+        r#"
             WITH updated AS (
                 UPDATE subscription_change_saga
                 SET status = 'failed',
@@ -1915,8 +1979,7 @@ async fn cleanup_stuck_subscription_sagas(state: &AppState) -> Result<i64, Strin
             )
             SELECT COUNT(*)::bigint AS cleaned FROM updated
             "#
-        ),
-    )
+    ))
     .fetch_one(&state.db)
     .await
     .map_err(|error| format!("Failed to clean stuck subscription sagas: {error}"))

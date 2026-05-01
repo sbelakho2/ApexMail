@@ -29,29 +29,26 @@ pub struct DnsLookup {
     resolver: TokioAsyncResolver,
 }
 
-static DEFAULT_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
-    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-});
+static DEFAULT_RESOLVER: LazyLock<TokioAsyncResolver> =
+    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
 
 impl DnsLookup {
-/// Create a new resolver with system defaults.
+    /// Create a new resolver with system defaults.
     pub fn new() -> Result<Self, DnsError> {
         Ok(Self {
             resolver: DEFAULT_RESOLVER.clone(),
         })
     }
 
-/// Create from config, honoring custom nameservers if provided.
+    /// Create from config, honoring custom nameservers if provided.
     pub fn from_config(config: &DnsConfig) -> Result<Self, DnsError> {
-        config
-            .validate()
-            .map_err(DnsError::InvalidConfig)?;
+        config.validate().map_err(DnsError::InvalidConfig)?;
         let mut opts = ResolverOpts::default();
         opts.timeout = config.query_timeout();
         opts.attempts = config.retries as usize;
         opts.use_hosts_file = false;
 
-// #193:Wire custom nameservers from config instead of always using system defaults
+        // #193:Wire custom nameservers from config instead of always using system defaults
         let resolver_config = if config.nameservers.is_empty() {
             ResolverConfig::default()
         } else {
@@ -78,7 +75,7 @@ impl DnsLookup {
         Ok(Self { resolver })
     }
 
-/// Lookup MX records for a domain.
+    /// Lookup MX records for a domain.
     pub async fn lookup_mx(&self, domain: &str) -> Result<Vec<MxRecord>, DnsError> {
         let response = self
             .resolver
@@ -95,7 +92,7 @@ impl DnsLookup {
         Ok(records)
     }
 
-/// Lookup TXT records for a domain.
+    /// Lookup TXT records for a domain.
     pub async fn lookup_txt(&self, domain: &str) -> Result<Vec<String>, DnsError> {
         let response = self
             .resolver
@@ -117,13 +114,13 @@ impl DnsLookup {
         Ok(texts)
     }
 
-/// Lookup SPF record for a domain.
+    /// Lookup SPF record for a domain.
     pub async fn lookup_spf(&self, domain: &str) -> Result<Option<SpfRecord>, DnsError> {
         let txts = self.lookup_txt(domain).await?;
         Ok(txts.iter().find_map(|txt| SpfRecord::parse(txt)))
     }
 
-/// Lookup DKIM record for a selector._domainkey.domain.
+    /// Lookup DKIM record for a selector._domainkey.domain.
     pub async fn lookup_dkim(
         &self,
         selector: &str,
@@ -134,14 +131,14 @@ impl DnsLookup {
         Ok(txts.iter().find_map(|txt| DkimRecord::parse(txt)))
     }
 
-/// Lookup DMARC record for _dmarc.domain.
+    /// Lookup DMARC record for _dmarc.domain.
     pub async fn lookup_dmarc(&self, domain: &str) -> Result<Option<DmarcPolicy>, DnsError> {
         let query = format!("_dmarc.{domain}");
         let txts = self.lookup_txt(&query).await?;
         Ok(txts.iter().find_map(|txt| DmarcPolicy::parse(txt)))
     }
 
-/// Lookup A records.
+    /// Lookup A records.
     pub async fn lookup_a(&self, domain: &str) -> Result<Vec<String>, DnsError> {
         let response = self
             .resolver
@@ -152,7 +149,7 @@ impl DnsLookup {
         Ok(response.iter().map(|ip| ip.to_string()).collect())
     }
 
-/// Lookup AAAA records.
+    /// Lookup AAAA records.
     pub async fn lookup_aaaa(&self, domain: &str) -> Result<Vec<String>, DnsError> {
         let response = self
             .resolver
@@ -163,7 +160,7 @@ impl DnsLookup {
         Ok(response.iter().map(|ip| ip.to_string()).collect())
     }
 
-/// Reverse DNS lookup.
+    /// Reverse DNS lookup.
     pub async fn reverse_lookup(&self, ip: std::net::IpAddr) -> Result<Vec<String>, DnsError> {
         let response = self
             .resolver
@@ -174,15 +171,15 @@ impl DnsLookup {
         Ok(response.iter().map(|name| name.to_string()).collect())
     }
 
-/// Validate that a domain has MX or A records (can receive email).
+    /// Validate that a domain has MX or A records (can receive email).
     pub async fn can_receive_email(&self, domain: &str) -> Result<bool, DnsError> {
-// Check MX first
+        // Check MX first
         if let Ok(mx) = self.lookup_mx(domain).await {
             if !mx.is_empty() {
                 return Ok(true);
             }
         }
-// Fall back to A record (implicit MX per RFC 5321)
+        // Fall back to A record (implicit MX per RFC 5321)
         if let Ok(a) = self.lookup_a(domain).await {
             if !a.is_empty() {
                 return Ok(true);
@@ -196,7 +193,7 @@ impl DnsLookup {
 mod tests {
     use super::*;
 
-// DNS lookups require network; we test construction and error handling.
+    // DNS lookups require network; we test construction and error handling.
 
     #[test]
     fn test_dns_lookup_creation() {

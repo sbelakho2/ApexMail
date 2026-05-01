@@ -28,21 +28,20 @@ pub struct SsrfValidator {
     extra_blocked_hosts: Vec<String>,
 }
 
-static SSRF_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
-    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-});
+static SSRF_RESOLVER: LazyLock<TokioAsyncResolver> =
+    LazyLock::new(|| TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()));
 
 impl SsrfValidator {
-/// Create a new SSRF validator.
+    /// Create a new SSRF validator.
     pub fn new() -> ProcessorResult<Self> {
         let resolver = SSRF_RESOLVER.clone();
 
         let cache = Cache::builder()
-                .max_capacity(dns_cache_max_entries())
-                .time_to_live(Duration::from_secs(dns_cache_ttl_secs()))
+            .max_capacity(dns_cache_max_entries())
+            .time_to_live(Duration::from_secs(dns_cache_ttl_secs()))
             .build();
 
-// Load extra blocked hosts from environment
+        // Load extra blocked hosts from environment
         let extra_blocked_hosts = std::env::var("WEBHOOK_BLOCKED_HOSTS")
             .unwrap_or_default()
             .split(',')
@@ -57,18 +56,18 @@ impl SsrfValidator {
         })
     }
 
-/// Validate a URL for safe webhook delivery.
+    /// Validate a URL for safe webhook delivery.
     pub async fn validate_url(&self, url_str: &str) -> ProcessorResult<()> {
         self.validate_and_resolve_url(url_str).await.map(|_| ())
     }
 
-/// Validate a URL for safe webhook delivery and return a pinned resolution result.
+    /// Validate a URL for safe webhook delivery and return a pinned resolution result.
     pub async fn validate_and_resolve_url(
         &self,
         url_str: &str,
     ) -> ProcessorResult<ResolvedWebhookTarget> {
-        let url = Url::parse(url_str)
-            .map_err(|e| ProcessorError::Job(format!("Invalid URL: {}", e)))?;
+        let url =
+            Url::parse(url_str).map_err(|e| ProcessorError::Job(format!("Invalid URL: {}", e)))?;
 
         let allow_http = std::env::var("ALLOW_WEBHOOK_HTTP").is_ok();
         if url.scheme() == "http" && !allow_http {
@@ -92,14 +91,14 @@ impl SsrfValidator {
             .ok_or_else(|| ProcessorError::Job("URL has no host".to_string()))?
             .to_lowercase();
 
-// Check blocked hostnames
+        // Check blocked hostnames
         if self.is_blocked_hostname(&hostname) {
             return Err(ProcessorError::Job(
                 "URL points to internal/localhost address".to_string(),
             ));
         }
 
-// If hostname is an IP, check directly
+        // If hostname is an IP, check directly
         if let Ok(ip) = hostname.parse::<IpAddr>() {
             if is_private_ip(&ip) {
                 return Err(ProcessorError::Job(format!(
@@ -115,7 +114,7 @@ impl SsrfValidator {
             });
         }
 
-// Resolve hostname and check all IPs
+        // Resolve hostname and check all IPs
         let ips = self.resolve_hostname(&hostname).await?;
 
         if ips.is_empty() {
@@ -141,18 +140,18 @@ impl SsrfValidator {
         })
     }
 
-/// Check if hostname is in the blocklist.
+    /// Check if hostname is in the blocklist.
     fn is_blocked_hostname(&self, hostname: &str) -> bool {
         let hostname_lower = hostname.to_lowercase();
 
-// Check static blocklist
+        // Check static blocklist
         for blocked in BLOCKED_HOSTNAMES {
             if hostname_lower == *blocked || hostname_lower.ends_with(&format!(".{}", blocked)) {
                 return true;
             }
         }
 
-// Check extra blocked hosts
+        // Check extra blocked hosts
         for blocked in &self.extra_blocked_hosts {
             if hostname_lower == *blocked || hostname_lower.ends_with(&format!(".{}", blocked)) {
                 return true;
@@ -162,29 +161,29 @@ impl SsrfValidator {
         false
     }
 
-/// Resolve hostname to IP addresses with caching.
-/// resolve again independently. To fully mitigate, use reqwest with connect_timeout
-/// and the resolved IPs directly, or configure a custom DNS resolver. For now we rely
-/// on short cache TTL and assume DNS rebinding attacks are unlikely in our threat model.
+    /// Resolve hostname to IP addresses with caching.
+    /// resolve again independently. To fully mitigate, use reqwest with connect_timeout
+    /// and the resolved IPs directly, or configure a custom DNS resolver. For now we rely
+    /// on short cache TTL and assume DNS rebinding attacks are unlikely in our threat model.
     async fn resolve_hostname(&self, hostname: &str) -> ProcessorResult<Vec<IpAddr>> {
-// Check cache first
+        // Check cache first
         if let Some(ips) = self.cache.get(hostname) {
             return Ok(ips);
         }
 
-// Resolve IPv4
+        // Resolve IPv4
         let mut ips = Vec::new();
 
         if let Ok(response) = self.resolver.ipv4_lookup(hostname).await {
             ips.extend(response.iter().map(|ip| IpAddr::V4(ip.0)));
         }
 
-// Resolve IPv6
+        // Resolve IPv6
         if let Ok(response) = self.resolver.ipv6_lookup(hostname).await {
             ips.extend(response.iter().map(|ip| IpAddr::V6(ip.0)));
         }
 
-// Cache the result
+        // Cache the result
         self.cache.insert(hostname.to_string(), ips.clone());
 
         Ok(ips)
@@ -194,7 +193,10 @@ impl SsrfValidator {
 impl Default for SsrfValidator {
     fn default() -> Self {
         Self::new().unwrap_or_else(|e| {
-            tracing::error!("Failed to create default SSRF validator: {}. Using fallback.", e);
+            tracing::error!(
+                "Failed to create default SSRF validator: {}. Using fallback.",
+                e
+            );
             Self {
                 resolver: SSRF_RESOLVER.clone(),
                 cache: Cache::builder()
@@ -219,37 +221,37 @@ pub fn is_private_ip(ip: &IpAddr) -> bool {
 fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
     let octets = ip.octets();
 
-// Loopback:127.0.0.0/8
+    // Loopback:127.0.0.0/8
     if octets[0] == 127 {
         return true;
     }
 
-// Private:10.0.0.0/8
+    // Private:10.0.0.0/8
     if octets[0] == 10 {
         return true;
     }
 
-// Private:172.16.0.0/12
+    // Private:172.16.0.0/12
     if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) {
         return true;
     }
 
-// Private:192.168.0.0/16
+    // Private:192.168.0.0/16
     if octets[0] == 192 && octets[1] == 168 {
         return true;
     }
 
-// Link-local:169.254.0.0/16 (includes AWS metadata)
+    // Link-local:169.254.0.0/16 (includes AWS metadata)
     if octets[0] == 169 && octets[1] == 254 {
         return true;
     }
 
-// Broadcast/unspecified
+    // Broadcast/unspecified
     if ip.is_broadcast() || ip.is_unspecified() {
         return true;
     }
 
-// Documentation:192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+    // Documentation:192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
     if (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
         || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
         || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
@@ -257,7 +259,7 @@ fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
         return true;
     }
 
-// Carrier-grade NAT:100.64.0.0/10
+    // Carrier-grade NAT:100.64.0.0/10
     if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) {
         return true;
     }
@@ -267,34 +269,34 @@ fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
 
 /// Check if an IPv6 address is private/internal.
 fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
-// Loopback:::1
+    // Loopback:::1
     if ip.is_loopback() {
         return true;
     }
 
-// Unspecified::
+    // Unspecified::
     if ip.is_unspecified() {
         return true;
     }
 
     let segments = ip.segments();
 
-// Link-local:fe80::/10
+    // Link-local:fe80::/10
     if segments[0] & 0xffc0 == 0xfe80 {
         return true;
     }
 
-// Unique local:fc00::/7
+    // Unique local:fc00::/7
     if segments[0] & 0xfe00 == 0xfc00 {
         return true;
     }
 
-// Site-local (deprecated):fec0::/10
+    // Site-local (deprecated):fec0::/10
     if segments[0] & 0xffc0 == 0xfec0 {
         return true;
     }
 
-// 6to4:2002::/16 - embeds IPv4 in bytes 2-5
+    // 6to4:2002::/16 - embeds IPv4 in bytes 2-5
     if segments[0] == 0x2002 {
         let embedded_ipv4 = Ipv4Addr::new(
             (segments[1] >> 8) as u8,
@@ -307,7 +309,7 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
         }
     }
 
-// Teredo:2001:0000::/32 - embeds IPv4 in last 32 bits (XORed with 0xffffffff)
+    // Teredo:2001:0000::/32 - embeds IPv4 in last 32 bits (XORed with 0xffffffff)
     if segments[0] == 0x2001 && segments[1] == 0x0000 {
         let embedded_ipv4 = Ipv4Addr::new(
             (segments[6] >> 8) as u8 ^ 0xff,
@@ -320,8 +322,8 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
         }
     }
 
-// IPv4-compatible (deprecated):::ffff:0:0/96 and ::/96
-// Check if lower 32 bits are a private IPv4
+    // IPv4-compatible (deprecated):::ffff:0:0/96 and ::/96
+    // Check if lower 32 bits are a private IPv4
     if segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0 {
         let embedded_ipv4 = Ipv4Addr::new(
             (segments[6] >> 8) as u8,
@@ -334,7 +336,7 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
         }
     }
 
-// IPv4-mapped addresses:check the embedded IPv4
+    // IPv4-mapped addresses:check the embedded IPv4
     if let Some(ipv4) = ip.to_ipv4_mapped() {
         return is_private_ipv4(&ipv4);
     }
@@ -348,37 +350,39 @@ mod tests {
 
     #[test]
     fn test_private_ipv4() {
-// Private ranges
+        // Private ranges
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
         assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
-        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(
+            169, 254, 169, 254
+        ))));
 
-// Public
+        // Public
         assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
         assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
     }
 
     #[test]
     fn test_private_ipv6() {
-// Loopback
+        // Loopback
         assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
 
-// Unspecified
+        // Unspecified
         assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
 
-// Link-local (fe80::)
+        // Link-local (fe80::)
         assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
             0xfe80, 0, 0, 0, 0, 0, 0, 1
         ))));
 
-// Unique local (fc00::)
+        // Unique local (fc00::)
         assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
             0xfc00, 0, 0, 0, 0, 0, 0, 1
         ))));
 
-// Public
+        // Public
         assert!(!is_private_ip(&IpAddr::V6(Ipv6Addr::new(
             0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888
         ))));
@@ -408,7 +412,10 @@ mod tests {
         assert_eq!(resolved.host, "8.8.8.8");
         assert_eq!(resolved.port, 443);
         assert!(resolved.host_is_ip);
-        assert_eq!(resolved.resolved_ips, vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+        assert_eq!(
+            resolved.resolved_ips,
+            vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]
+        );
     }
 
     #[tokio::test]

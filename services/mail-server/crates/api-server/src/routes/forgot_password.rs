@@ -41,23 +41,21 @@ async fn forgot_password(
     headers: HeaderMap,
     Json(body): Json<ForgotPasswordRequest>,
 ) -> Result<Json<ForgotPasswordResponse>, ApiError> {
-// Validate email
+    // Validate email
     let email = body.email.trim().to_lowercase();
     if email.is_empty() || email.len() > 254 || !email.contains('@') {
         return Err(ApiError::Validation(vec!["Invalid email address.".into()]));
     }
 
-// Rate-limit by client IP using Redis
+    // Rate-limit by client IP using Redis
     let client_ip = connect_info
         .map(|ConnectInfo(addr)| {
-            extract_public_client_ip(
-                &headers,
-                addr.ip(),
-                &state.config.trusted_proxies,
-            )
+            extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
         })
         .unwrap_or_else(|| {
-            tracing::warn!("forgot-password request missing ConnectInfo; using shared rate-limit bucket");
+            tracing::warn!(
+                "forgot-password request missing ConnectInfo; using shared rate-limit bucket"
+            );
             "unknown".to_string()
         });
 
@@ -73,7 +71,7 @@ async fn forgot_password(
             .unwrap_or(1);
 
         if count == 1 {
-// Set expiry on first request in window
+            // Set expiry on first request in window
             let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
                 .arg(&rate_key)
                 .arg(window_secs)
@@ -86,7 +84,7 @@ async fn forgot_password(
         }
     }
 
-// Look up user — always return success to avoid email enumeration
+    // Look up user — always return success to avoid email enumeration
     let user: Option<(String, String)> = sqlx::query_as(
         "SELECT id, email FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1",
     )
@@ -95,11 +93,11 @@ async fn forgot_password(
     .await?;
 
     if let Some((user_id, _user_email)) = user {
-// Generate password reset token
+        // Generate password reset token
         let token = apexmail_lib::id::generate_verification_token();
         let expires = chrono::Utc::now() + chrono::Duration::hours(1);
 
-// Store reset token in user metadata
+        // Store reset token in user metadata
         sqlx::query(
             "UPDATE users SET metadata = metadata || $1::jsonb, updated_at = NOW() WHERE id = $2",
         )
@@ -116,8 +114,8 @@ async fn forgot_password(
             "Password reset token generated"
         );
 
-// Enqueue the password reset email into the messages table so the
-// MTA worker picks it up for delivery.
+        // Enqueue the password reset email into the messages table so the
+        // MTA worker picks it up for delivery.
         let encoded_token = percent_encode_component(&token);
         let encoded_email_param = percent_encode_component(&email);
         let reset_link = format!(
@@ -168,7 +166,7 @@ async fn forgot_password(
         );
     }
 
-// Always return success to prevent email enumeration
+    // Always return success to prevent email enumeration
     Ok(Json(ForgotPasswordResponse { success: true }))
 }
 
@@ -210,13 +208,18 @@ mod tests {
         assert_eq!(percent_encode_component("hello"), "hello");
         assert_eq!(percent_encode_component("a b"), "a%20b");
         assert_eq!(percent_encode_component("a&b=c"), "a%26b%3Dc");
-        assert_eq!(percent_encode_component("user@example.com"), "user%40example.com");
+        assert_eq!(
+            percent_encode_component("user@example.com"),
+            "user%40example.com"
+        );
     }
 
     #[test]
     fn test_html_escape() {
-        assert_eq!(html_escape("<script>alert('xss')</script>"),
-                   "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;");
+        assert_eq!(
+            html_escape("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
         assert_eq!(html_escape("a&b"), "a&amp;b");
         assert_eq!(html_escape("plain text"), "plain text");
     }

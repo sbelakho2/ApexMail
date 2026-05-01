@@ -22,20 +22,23 @@ use std::time::Instant;
 mod security_header_tests {
     #[test]
     fn test_hsts_header_value_not_empty() {
-// HSTS must have a non-zero max-age
+        // HSTS must have a non-zero max-age
         let hsts = "max-age=31536000; includeSubDomains";
         assert!(hsts.contains("max-age="));
         assert!(!hsts.contains("max-age=0"), "HSTS max-age must not be zero");
-        
-// Parse max-age value
+
+        // Parse max-age value
         let max_age: u64 = hsts
             .split(';')
             .find(|s| s.contains("max-age"))
             .and_then(|s| s.split('=').nth(1))
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0);
-        
-        assert!(max_age >= 31536000, "HSTS max-age should be at least 1 year");
+
+        assert!(
+            max_age >= 31536000,
+            "HSTS max-age should be at least 1 year"
+        );
     }
 
     #[test]
@@ -52,16 +55,25 @@ mod security_header_tests {
 
     #[test]
     fn test_xss_protection_is_disabled() {
-// Modern browsers should have XSS Auditor disabled as it can cause vulnerabilities
+        // Modern browsers should have XSS Auditor disabled as it can cause vulnerabilities
         let xss = "0";
-        assert_eq!(xss, "0", "X-XSS-Protection should be 0 to disable XSS Auditor");
+        assert_eq!(
+            xss, "0",
+            "X-XSS-Protection should be 0 to disable XSS Auditor"
+        );
     }
 
     #[test]
     fn test_cache_control_prevents_caching() {
         let cc = "no-store, no-cache, must-revalidate";
-        assert!(cc.contains("no-store"), "Cache-Control must include no-store");
-        assert!(cc.contains("no-cache"), "Cache-Control must include no-cache");
+        assert!(
+            cc.contains("no-store"),
+            "Cache-Control must include no-store"
+        );
+        assert!(
+            cc.contains("no-cache"),
+            "Cache-Control must include no-cache"
+        );
     }
 }
 
@@ -75,7 +87,7 @@ mod security_header_tests {
 mod rate_limiter_stub_tests {
     use super::*;
 
-/// Simulates rate limit tracking to verify behavior.
+    /// Simulates rate limit tracking to verify behavior.
     struct TestRateLimiter {
         requests: AtomicU64,
         limit: u64,
@@ -102,36 +114,46 @@ mod rate_limiter_stub_tests {
     #[test]
     fn test_rate_limiter_actually_limits() {
         let limiter = TestRateLimiter::new(5);
-        
-// First 5 requests should pass
+
+        // First 5 requests should pass
         for i in 1..=5 {
             assert!(limiter.check(), "Request {i} should be allowed");
         }
-        
-// 6th request should be blocked
-        assert!(!limiter.check(), "Request 6 should be blocked - rate limiter must actually limit!");
-        
-// Verify the count is accurate
+
+        // 6th request should be blocked
+        assert!(
+            !limiter.check(),
+            "Request 6 should be blocked - rate limiter must actually limit!"
+        );
+
+        // Verify the count is accurate
         assert_eq!(limiter.request_count(), 6, "All requests should be counted");
     }
 
     #[test]
     fn test_rate_limiter_not_pass_through() {
         let limiter = TestRateLimiter::new(0);
-        
-// Even first request should fail with limit=0
-        assert!(!limiter.check(), "Rate limiter with limit=0 must block all requests");
+
+        // Even first request should fail with limit=0
+        assert!(
+            !limiter.check(),
+            "Rate limiter with limit=0 must block all requests"
+        );
     }
 
     #[test]
     fn test_rate_limiter_counts_all_requests() {
         let limiter = TestRateLimiter::new(100);
-        
+
         for _ in 0..50 {
             limiter.check();
         }
-        
-        assert_eq!(limiter.request_count(), 50, "Rate limiter must count every request");
+
+        assert_eq!(
+            limiter.request_count(),
+            50,
+            "Rate limiter must count every request"
+        );
     }
 }
 
@@ -186,29 +208,32 @@ mod circuit_breaker_stub_tests {
     #[test]
     fn test_circuit_breaker_actually_opens() {
         let cb = TestCircuitBreaker::new(3);
-        
+
         assert!(cb.is_allowed(), "Circuit should start closed");
         assert_eq!(cb.state(), CircuitState::Closed);
-        
-// Record failures up to threshold
+
+        // Record failures up to threshold
         cb.record_failure();
         assert!(cb.is_allowed(), "Should still be closed after 1 failure");
-        
+
         cb.record_failure();
         assert!(cb.is_allowed(), "Should still be closed after 2 failures");
-        
+
         cb.record_failure();
-        assert!(!cb.is_allowed(), "Circuit MUST open after reaching threshold - this is not a stub!");
+        assert!(
+            !cb.is_allowed(),
+            "Circuit MUST open after reaching threshold - this is not a stub!"
+        );
         assert_eq!(cb.state(), CircuitState::Open);
     }
 
     #[test]
     fn test_circuit_breaker_blocks_when_open() {
         let cb = TestCircuitBreaker::new(1);
-        
+
         cb.record_failure();
-        
-// Verify multiple checks all return false
+
+        // Verify multiple checks all return false
         for _ in 0..10 {
             assert!(!cb.is_allowed(), "Open circuit must block ALL requests");
         }
@@ -254,33 +279,48 @@ mod health_check_stub_tests {
     #[test]
     fn test_health_check_detects_db_failure() {
         let checker = HealthChecker::new();
-        
-        assert!(checker.check_ready(), "Should be ready when all deps healthy");
-        
+
+        assert!(
+            checker.check_ready(),
+            "Should be ready when all deps healthy"
+        );
+
         checker.set_db_unhealthy();
-        
-        assert!(!checker.check_ready(), "Health check MUST fail when DB is down - not a stub!");
+
+        assert!(
+            !checker.check_ready(),
+            "Health check MUST fail when DB is down - not a stub!"
+        );
     }
 
     #[test]
     fn test_health_check_detects_redis_failure() {
         let checker = HealthChecker::new();
-        
-        assert!(checker.check_ready(), "Should be ready when all deps healthy");
-        
+
+        assert!(
+            checker.check_ready(),
+            "Should be ready when all deps healthy"
+        );
+
         checker.set_redis_unhealthy();
-        
-        assert!(!checker.check_ready(), "Health check MUST fail when Redis is down - not a stub!");
+
+        assert!(
+            !checker.check_ready(),
+            "Health check MUST fail when Redis is down - not a stub!"
+        );
     }
 
     #[test]
     fn test_health_check_combines_dependency_status() {
         let checker = HealthChecker::new();
-        
+
         checker.set_db_unhealthy();
         checker.set_redis_unhealthy();
-        
-        assert!(!checker.check_ready(), "Health check must fail when multiple deps are down");
+
+        assert!(
+            !checker.check_ready(),
+            "Health check must fail when multiple deps are down"
+        );
     }
 }
 
@@ -294,7 +334,7 @@ mod health_check_stub_tests {
 mod encryption_stub_tests {
     use std::collections::HashSet;
 
-// Simple XOR "encryption" for testing (NOT cryptographically secure)
+    // Simple XOR "encryption" for testing (NOT cryptographically secure)
     fn test_encrypt(data: &[u8], key: u8) -> Vec<u8> {
         data.iter().map(|b| b ^ key).collect()
     }
@@ -307,9 +347,9 @@ mod encryption_stub_tests {
     fn test_encrypted_data_differs_from_plaintext() {
         let plaintext = b"secret api key";
         let key = 0x42;
-        
+
         let encrypted = test_encrypt(plaintext, key);
-        
+
         assert_ne!(
             &encrypted[..],
             plaintext,
@@ -321,10 +361,10 @@ mod encryption_stub_tests {
     fn test_decryption_recovers_plaintext() {
         let plaintext = b"secret api key";
         let key = 0x42;
-        
+
         let encrypted = test_encrypt(plaintext, key);
         let decrypted = test_decrypt(&encrypted, key);
-        
+
         assert_eq!(
             &decrypted[..],
             plaintext,
@@ -335,10 +375,10 @@ mod encryption_stub_tests {
     #[test]
     fn test_different_keys_produce_different_ciphertext() {
         let plaintext = b"secret";
-        
+
         let encrypted1 = test_encrypt(plaintext, 0x11);
         let encrypted2 = test_encrypt(plaintext, 0x22);
-        
+
         assert_ne!(
             encrypted1, encrypted2,
             "Different keys must produce different ciphertext"
@@ -347,18 +387,18 @@ mod encryption_stub_tests {
 
     #[test]
     fn test_encryption_produces_unique_output_per_run() {
-// This tests that a proper encryption uses random IVs/nonces
-// For our simple XOR test, we simulate this check
+        // This tests that a proper encryption uses random IVs/nonces
+        // For our simple XOR test, we simulate this check
         let plaintext = b"secret";
         let mut results = HashSet::new();
-        
-// With proper encryption, encrypting the same data multiple times
-// should produce different ciphertext (due to random IV/nonce)
+
+        // With proper encryption, encrypting the same data multiple times
+        // should produce different ciphertext (due to random IV/nonce)
         for key in 0u8..10 {
             let encrypted = test_encrypt(plaintext, key);
             results.insert(encrypted);
         }
-        
+
         assert_eq!(results.len(), 10, "Each encryption should be unique");
     }
 }
@@ -420,11 +460,11 @@ mod audit_log_stub_tests {
     #[test]
     fn test_audit_log_actually_records() {
         let log = AuditLog::new();
-        
+
         assert_eq!(log.entry_count(), 0, "Should start empty");
-        
+
         log.log("CREATE", "admin", "api_key:123");
-        
+
         assert_eq!(
             log.entry_count(),
             1,
@@ -435,11 +475,11 @@ mod audit_log_stub_tests {
     #[test]
     fn test_audit_log_records_all_entries() {
         let log = AuditLog::new();
-        
+
         for i in 0..10 {
             log.log("READ", "user", &format!("resource:{i}"));
         }
-        
+
         assert_eq!(
             log.entry_count(),
             10,
@@ -450,17 +490,19 @@ mod audit_log_stub_tests {
     #[test]
     fn test_audit_log_searchable() {
         let log = AuditLog::new();
-        
+
         log.log("CREATE", "admin", "resource:1");
         log.log("READ", "user", "resource:2");
         log.log("DELETE", "admin", "resource:3");
         log.log("READ", "user", "resource:4");
-        
+
         let reads = log.find_by_action("READ");
-        
+
         assert_eq!(reads.len(), 2, "Audit log must support search by action");
         assert!(reads.iter().all(|entry| entry.actor == "user"));
-        assert!(reads.iter().all(|entry| entry.resource.starts_with("resource:")));
+        assert!(reads
+            .iter()
+            .all(|entry| entry.resource.starts_with("resource:")));
         let now = Instant::now();
         assert!(reads.iter().all(|entry| entry.timestamp <= now));
     }
@@ -522,11 +564,14 @@ mod graceful_shutdown_stub_tests {
     #[test]
     fn test_shutdown_stops_accepting_new_requests() {
         let shutdown = GracefulShutdown::new();
-        
-        assert!(shutdown.is_accepting_requests(), "Should accept requests initially");
-        
+
+        assert!(
+            shutdown.is_accepting_requests(),
+            "Should accept requests initially"
+        );
+
         shutdown.initiate_shutdown();
-        
+
         assert!(
             !shutdown.is_accepting_requests(),
             "MUST stop accepting requests after shutdown signal"
@@ -536,20 +581,20 @@ mod graceful_shutdown_stub_tests {
     #[test]
     fn test_shutdown_waits_for_active_connections() {
         let shutdown = GracefulShutdown::new();
-        
-// Simulate active connection
+
+        // Simulate active connection
         assert!(shutdown.start_request());
-        
+
         shutdown.initiate_shutdown();
-        
+
         assert!(
             !shutdown.can_terminate(),
             "Must NOT terminate while connections are active - would drop requests!"
         );
-        
-// Connection finishes
+
+        // Connection finishes
         shutdown.end_request();
-        
+
         assert!(
             shutdown.can_terminate(),
             "Should be able to terminate after all connections finish"
@@ -559,9 +604,9 @@ mod graceful_shutdown_stub_tests {
     #[test]
     fn test_new_requests_rejected_during_shutdown() {
         let shutdown = GracefulShutdown::new();
-        
+
         shutdown.initiate_shutdown();
-        
+
         assert!(
             !shutdown.start_request(),
             "New requests must be rejected during shutdown"
@@ -571,16 +616,24 @@ mod graceful_shutdown_stub_tests {
     #[test]
     fn test_connection_tracking_accurate() {
         let shutdown = GracefulShutdown::new();
-        
+
         shutdown.start_request();
         shutdown.start_request();
         shutdown.start_request();
-        
-        assert_eq!(shutdown.active_count(), 3, "Must track all active connections");
-        
+
+        assert_eq!(
+            shutdown.active_count(),
+            3,
+            "Must track all active connections"
+        );
+
         shutdown.end_request();
-        
-        assert_eq!(shutdown.active_count(), 2, "Must decrement on request completion");
+
+        assert_eq!(
+            shutdown.active_count(),
+            2,
+            "Must decrement on request completion"
+        );
     }
 }
 
@@ -620,41 +673,62 @@ mod input_validation_stub_tests {
     fn test_email_validation_rejects_invalid() {
         assert!(!validate_email(""), "Empty email must be rejected");
         assert!(!validate_email("notanemail"), "Missing @ must be rejected");
-        assert!(!validate_email("@domain.com"), "Missing local part must be rejected");
+        assert!(
+            !validate_email("@domain.com"),
+            "Missing local part must be rejected"
+        );
         assert!(!validate_email("user@"), "Missing domain must be rejected");
-        assert!(!validate_email("user@domain"), "Missing TLD must be rejected");
+        assert!(
+            !validate_email("user@domain"),
+            "Missing TLD must be rejected"
+        );
     }
 
     #[test]
     fn test_email_validation_accepts_valid() {
-        assert!(validate_email("user@domain.com"), "Valid email must be accepted");
-        assert!(validate_email("user.name@sub.domain.com"), "Complex valid email must be accepted");
+        assert!(
+            validate_email("user@domain.com"),
+            "Valid email must be accepted"
+        );
+        assert!(
+            validate_email("user.name@sub.domain.com"),
+            "Complex valid email must be accepted"
+        );
     }
 
     #[test]
     fn test_null_byte_detection() {
-        assert!(has_null_bytes("hello\x00world"), "Null bytes must be detected");
+        assert!(
+            has_null_bytes("hello\x00world"),
+            "Null bytes must be detected"
+        );
         assert!(has_null_bytes("\x00"), "Single null byte must be detected");
-        assert!(!has_null_bytes("normal string"), "Normal strings should pass");
+        assert!(
+            !has_null_bytes("normal string"),
+            "Normal strings should pass"
+        );
     }
 
     #[test]
     fn test_sql_injection_patterns() {
         fn contains_sql_injection(input: &str) -> bool {
-            let patterns = [
-                "' OR '1'='1",
-                "'; DROP TABLE",
-                "UNION SELECT",
-                " --",
-                "/*",
-            ];
+            let patterns = ["' OR '1'='1", "'; DROP TABLE", "UNION SELECT", " --", "/*"];
             let lower = input.to_lowercase();
             patterns.iter().any(|p| lower.contains(&p.to_lowercase()))
         }
 
-        assert!(contains_sql_injection("' OR '1'='1"), "SQL injection must be detected");
-        assert!(contains_sql_injection("'; DROP TABLE users"), "DROP TABLE must be detected");
-        assert!(!contains_sql_injection("normal input"), "Normal input should pass");
+        assert!(
+            contains_sql_injection("' OR '1'='1"),
+            "SQL injection must be detected"
+        );
+        assert!(
+            contains_sql_injection("'; DROP TABLE users"),
+            "DROP TABLE must be detected"
+        );
+        assert!(
+            !contains_sql_injection("normal input"),
+            "Normal input should pass"
+        );
     }
 }
 
@@ -678,14 +752,15 @@ mod timeout_stub_tests {
     #[tokio::test]
     async fn test_timeout_actually_terminates() {
         let start = Instant::now();
-        
+
         let result = with_timeout(Duration::from_millis(50), async {
             tokio::time::sleep(Duration::from_secs(10)).await;
             "completed"
-        }).await;
-        
+        })
+        .await;
+
         let elapsed = start.elapsed();
-        
+
         assert!(result.is_none(), "Timeout must interrupt long operations");
         assert!(
             elapsed < Duration::from_secs(1),
@@ -699,8 +774,9 @@ mod timeout_stub_tests {
         let result = with_timeout(Duration::from_secs(1), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             "completed"
-        }).await;
-        
+        })
+        .await;
+
         assert_eq!(result, Some("completed"), "Fast operations must complete");
     }
 }
@@ -744,7 +820,7 @@ mod concurrency_bug_tests {
     #[test]
     fn test_rwlock_prevents_data_corruption() {
         use std::sync::RwLock;
-        
+
         let data = Arc::new(RwLock::new(Vec::new()));
         let threads: Vec<_> = (0..5)
             .map(|i| {

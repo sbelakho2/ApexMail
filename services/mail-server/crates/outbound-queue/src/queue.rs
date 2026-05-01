@@ -12,17 +12,17 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::smtp_sender::SmtpSender;
 use crate::dkim::DkimSigner;
+use crate::smtp_sender::SmtpSender;
 
 /// Result of an atomic cancel attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelResult {
-/// Email was successfully cancelled.
+    /// Email was successfully cancelled.
     Cancelled,
-/// Email was not found in the queue.
+    /// Email was not found in the queue.
     NotFound,
-/// Email exists but cannot be cancelled (with human-readable reason).
+    /// Email exists but cannot be cancelled (with human-readable reason).
     NotCancellable(String),
 }
 
@@ -104,13 +104,13 @@ impl Default for QueueConfig {
 pub struct EmailQueue {
     pool: PgPool,
     config: QueueConfig,
-/// SMTP sender no longer behind Mutex since send is &self (#114/#115)
+    /// SMTP sender no longer behind Mutex since send is &self (#114/#115)
     smtp_sender: SmtpSender,
     dkim_signer: Option<DkimSigner>,
 }
 
 impl EmailQueue {
-/// Create a new email queue
+    /// Create a new email queue
     pub fn new(pool: PgPool, config: QueueConfig, smtp_sender: SmtpSender) -> Self {
         Self {
             pool,
@@ -119,16 +119,17 @@ impl EmailQueue {
             dkim_signer: None,
         }
     }
-    
-/// Set DKIM signer
+
+    /// Set DKIM signer
     pub fn with_dkim_signer(mut self, signer: DkimSigner) -> Self {
         self.dkim_signer = Some(signer);
         self
     }
-    
-/// Initialize queue tables
+
+    /// Initialize queue tables
     pub async fn initialize(&self) -> Result<()> {
-        sqlx::query(r#"
+        sqlx::query(
+            r#"
             CREATE TABLE IF NOT EXISTS email_queue (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 from_address TEXT NOT NULL,
@@ -150,31 +151,37 @@ impl EmailQueue {
                 contact_id UUID,
                 priority INT NOT NULL DEFAULT 0
             )
-        "#)
+        "#,
+        )
         .execute(&self.pool)
         .await?;
-        
-        sqlx::query(r#"
+
+        sqlx::query(
+            r#"
             CREATE INDEX IF NOT EXISTS idx_email_queue_status 
             ON email_queue(status, next_retry_at, priority DESC)
-        "#)
+        "#,
+        )
         .execute(&self.pool)
         .await?;
-        
-        sqlx::query(r#"
+
+        sqlx::query(
+            r#"
             CREATE INDEX IF NOT EXISTS idx_email_queue_campaign 
             ON email_queue(campaign_id) WHERE campaign_id IS NOT NULL
-        "#)
+        "#,
+        )
         .execute(&self.pool)
         .await?;
-        
+
         info!("Email queue tables initialized");
         Ok(())
     }
-    
-/// Enqueue an email
+
+    /// Enqueue an email
     pub async fn enqueue(&self, email: QueuedEmail) -> Result<Uuid> {
-        let id = sqlx::query_scalar::<_, Uuid>(r#"
+        let id = sqlx::query_scalar::<_, Uuid>(
+            r#"
             INSERT INTO email_queue (
                 id, from_address, to_addresses, subject, text_body, html_body,
                 headers, status, max_attempts, campaign_id, sequence_id, 
@@ -182,7 +189,8 @@ impl EmailQueue {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12)
             RETURNING id
-        "#)
+        "#,
+        )
         .bind(&email.id)
         .bind(&email.from_address)
         .bind(&email.to_addresses)
@@ -197,19 +205,19 @@ impl EmailQueue {
         .bind(email.priority)
         .fetch_one(&self.pool)
         .await?;
-        
+
         debug!(email_id = %id, "Email enqueued");
         Ok(id)
     }
-    
-/// Bulk enqueue emails using a single multi-row INSERT for performance.
-/// Falls back to sequential inserts if the batch is empty.
+
+    /// Bulk enqueue emails using a single multi-row INSERT for performance.
+    /// Falls back to sequential inserts if the batch is empty.
     pub async fn enqueue_batch(&self, emails: Vec<QueuedEmail>) -> Result<Vec<Uuid>> {
         if emails.is_empty() {
             return Ok(Vec::new());
         }
 
-// Build a single multi-row INSERT:VALUES ($1..$12), ($13..$24), ...
+        // Build a single multi-row INSERT:VALUES ($1..$12), ($13..$24), ...
         let cols = 12; // number of bind params per row
         let mut sql = String::from(
             "INSERT INTO email_queue (
@@ -232,7 +240,7 @@ impl EmailQueue {
         }
         sql.push_str(" RETURNING id");
 
-// Bind all parameters in order using a raw query
+        // Bind all parameters in order using a raw query
         let mut query = sqlx::query_scalar::<_, Uuid>(&sql);
         for email in &emails {
             query = query
@@ -254,10 +262,11 @@ impl EmailQueue {
         info!(count = returned_ids.len(), "Batch emails enqueued");
         Ok(returned_ids)
     }
-    
-/// Fetch pending emails for processing
+
+    /// Fetch pending emails for processing
     pub async fn fetch_pending(&self, limit: i64) -> Result<Vec<QueuedEmail>> {
-        let rows = sqlx::query(r#"
+        let rows = sqlx::query(
+            r#"
             UPDATE email_queue
             SET status = 'processing', updated_at = NOW()
             WHERE id IN (
@@ -269,56 +278,64 @@ impl EmailQueue {
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING *
-        "#)
+        "#,
+        )
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        
-        let emails = rows.iter().map(|row| QueuedEmail {
-            id: row.get("id"),
-            from_address: row.get("from_address"),
-            to_addresses: row.get("to_addresses"),
-            subject: row.get("subject"),
-            text_body: row.get("text_body"),
-            html_body: row.get("html_body"),
-            headers: row.get("headers"),
-            status: EmailStatus::Processing,
-            attempts: row.get("attempts"),
-            max_attempts: row.get("max_attempts"),
-            last_error: row.get("last_error"),
-            next_retry_at: row.get("next_retry_at"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-            sent_at: row.get("sent_at"),
-            campaign_id: row.get("campaign_id"),
-            sequence_id: row.get("sequence_id"),
-            contact_id: row.get("contact_id"),
-            priority: row.get("priority"),
-        }).collect();
-        
+
+        let emails = rows
+            .iter()
+            .map(|row| QueuedEmail {
+                id: row.get("id"),
+                from_address: row.get("from_address"),
+                to_addresses: row.get("to_addresses"),
+                subject: row.get("subject"),
+                text_body: row.get("text_body"),
+                html_body: row.get("html_body"),
+                headers: row.get("headers"),
+                status: EmailStatus::Processing,
+                attempts: row.get("attempts"),
+                max_attempts: row.get("max_attempts"),
+                last_error: row.get("last_error"),
+                next_retry_at: row.get("next_retry_at"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                sent_at: row.get("sent_at"),
+                campaign_id: row.get("campaign_id"),
+                sequence_id: row.get("sequence_id"),
+                contact_id: row.get("contact_id"),
+                priority: row.get("priority"),
+            })
+            .collect();
+
         Ok(emails)
     }
-    
-/// Mark email as sent
+
+    /// Mark email as sent
     pub async fn mark_sent(&self, id: &Uuid) -> Result<()> {
-        sqlx::query(r#"
+        sqlx::query(
+            r#"
             UPDATE email_queue
             SET status = 'sent', sent_at = NOW(), updated_at = NOW()
             WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(id)
         .execute(&self.pool)
         .await?;
-        
+
         debug!(email_id = %id, "Email marked as sent");
         Ok(())
     }
 
-/// Get queued email by ID
+    /// Get queued email by ID
     pub async fn get_email(&self, id: &Uuid) -> Result<Option<QueuedEmail>> {
-        let row = sqlx::query(r#"
+        let row = sqlx::query(
+            r#"
             SELECT * FROM email_queue WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -359,14 +376,15 @@ impl EmailQueue {
         Ok(email)
     }
 
-/// Atomically cancel a queued email.
-/// Uses a single `UPDATE ... WHERE status IN ('pending','deferred') RETURNING`
-/// to eliminate the TOCTOU race between checking status and writing the
-/// cancellation. If the UPDATE affects zero rows the email either doesn't
-/// exist or is in a non-cancellable state — a follow-up SELECT distinguishes
-/// the two cases.
+    /// Atomically cancel a queued email.
+    /// Uses a single `UPDATE ... WHERE status IN ('pending','deferred') RETURNING`
+    /// to eliminate the TOCTOU race between checking status and writing the
+    /// cancellation. If the UPDATE affects zero rows the email either doesn't
+    /// exist or is in a non-cancellable state — a follow-up SELECT distinguishes
+    /// the two cases.
     pub async fn cancel_email_atomic(&self, id: &Uuid) -> Result<CancelResult> {
-        let result = sqlx::query(r#"
+        let result = sqlx::query(
+            r#"
             UPDATE email_queue
             SET status = 'failed',
                 last_error = 'Cancelled by user',
@@ -374,7 +392,8 @@ impl EmailQueue {
             WHERE id = $1
               AND status IN ('pending', 'deferred')
             RETURNING id
-        "#)
+        "#,
+        )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -383,13 +402,12 @@ impl EmailQueue {
             return Ok(CancelResult::Cancelled);
         }
 
-// Zero rows affected — determine why
-        let existing = sqlx::query_scalar::<_, String>(
-            "SELECT status FROM email_queue WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        // Zero rows affected — determine why
+        let existing =
+            sqlx::query_scalar::<_, String>("SELECT status FROM email_queue WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         match existing.as_deref() {
             None => Ok(CancelResult::NotFound),
@@ -402,27 +420,30 @@ impl EmailQueue {
             Some("processing") => Ok(CancelResult::NotCancellable(
                 "Cannot cancel: email is currently being sent".to_string(),
             )),
-            Some(other) => Ok(CancelResult::NotCancellable(
-                format!("Cannot cancel: email is in '{}' state", other),
-            )),
+            Some(other) => Ok(CancelResult::NotCancellable(format!(
+                "Cannot cancel: email is in '{}' state",
+                other
+            ))),
         }
     }
 
-/// Mark email as failed
+    /// Mark email as failed
     pub async fn mark_failed(&self, id: &Uuid, error: &str, defer: bool) -> Result<()> {
-        let email = sqlx::query(r#"
+        let email = sqlx::query(
+            r#"
             SELECT attempts, max_attempts FROM email_queue WHERE id = $1
-        "#)
+        "#,
+        )
         .bind(id)
         .fetch_one(&self.pool)
         .await?;
-        
+
         let attempts: i32 = email.get("attempts");
         let max_attempts: i32 = email.get("max_attempts");
         let new_attempts = attempts + 1;
-        
+
         if defer && new_attempts < max_attempts {
-// #113:Guard against empty retry_delays causing integer underflow
+            // #113:Guard against empty retry_delays causing integer underflow
             let delay = if self.config.retry_delays.is_empty() {
                 Duration::from_secs(DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS)
             } else {
@@ -433,76 +454,81 @@ impl EmailQueue {
             let chrono_delay = chrono::Duration::from_std(delay)
                 .unwrap_or_else(|_| chrono::Duration::seconds(300)); // fallback:5 minutes
             let next_retry = Utc::now() + chrono_delay;
-            
-            sqlx::query(r#"
+
+            sqlx::query(
+                r#"
                 UPDATE email_queue
                 SET status = 'deferred', attempts = $2, last_error = $3,
                     next_retry_at = $4, updated_at = NOW()
                 WHERE id = $1
-            "#)
+            "#,
+            )
             .bind(id)
             .bind(new_attempts)
             .bind(error)
             .bind(next_retry)
             .execute(&self.pool)
             .await?;
-            
+
             warn!(
-                email_id = %id, 
-                attempts = new_attempts, 
+                email_id = %id,
+                attempts = new_attempts,
                 next_retry = %next_retry,
                 "Email deferred for retry"
             );
         } else {
-            sqlx::query(r#"
+            sqlx::query(
+                r#"
                 UPDATE email_queue
                 SET status = 'failed', attempts = $2, last_error = $3, updated_at = NOW()
                 WHERE id = $1
-            "#)
+            "#,
+            )
             .bind(id)
             .bind(new_attempts)
             .bind(error)
             .execute(&self.pool)
             .await?;
-            
+
             error!(email_id = %id, error = error, "Email permanently failed");
         }
-        
+
         Ok(())
     }
-    
-/// Process a single email
+
+    /// Process a single email
     async fn process_email(&self, email: &QueuedEmail) -> Result<()> {
-// Extract custom headers from JSON
-        let headers: Option<std::collections::HashMap<String, String>> = email.headers
-            .as_object()
-            .map(|obj| {
+        // Extract custom headers from JSON
+        let headers: Option<std::collections::HashMap<String, String>> =
+            email.headers.as_object().map(|obj| {
                 obj.iter()
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect()
             });
-        
-// Send via SMTP — no Mutex needed, send is &self (#114/#115)
-        self.smtp_sender.send(
-            &email.from_address,
-            &email.to_addresses,
-            &email.subject,
-            email.text_body.as_deref(),
-            email.html_body.as_deref(),
-            headers,
-        ).await?;
-        
+
+        // Send via SMTP — no Mutex needed, send is &self (#114/#115)
+        self.smtp_sender
+            .send(
+                &email.from_address,
+                &email.to_addresses,
+                &email.subject,
+                email.text_body.as_deref(),
+                email.html_body.as_deref(),
+                headers,
+            )
+            .await?;
+
         Ok(())
     }
-    
-/// Start the queue processor
+
+    /// Start the queue processor
     pub async fn start_processing(self: std::sync::Arc<Self>, mut shutdown: mpsc::Receiver<()>) {
         info!(
             workers = self.config.worker_count,
             batch_size = self.config.batch_size,
             "Starting email queue processor"
         );
-        
+
         loop {
             tokio::select! {
                 _ = shutdown.recv() => {
@@ -517,25 +543,28 @@ impl EmailQueue {
             }
         }
     }
-    
-/// Process a batch of emails concurrently (#115)
+
+    /// Process a batch of emails concurrently (#115)
     async fn process_batch(&self) -> Result<()> {
         let emails = self.fetch_pending(self.config.batch_size as i64).await?;
-        
+
         if emails.is_empty() {
             return Ok(());
         }
-        
+
         info!(count = emails.len(), "Processing email batch");
-        
-// Process emails concurrently instead of sequentially
-        let futures: Vec<_> = emails.iter().map(|email| async {
-            let result = self.process_email(email).await;
-            (email.id, result)
-        }).collect();
-        
+
+        // Process emails concurrently instead of sequentially
+        let futures: Vec<_> = emails
+            .iter()
+            .map(|email| async {
+                let result = self.process_email(email).await;
+                (email.id, result)
+            })
+            .collect();
+
         let results = join_all(futures).await;
-        
+
         for (email_id, result) in results {
             match result {
                 Ok(()) => {
@@ -546,18 +575,20 @@ impl EmailQueue {
                     let is_temporary = error_str.contains("timeout")
                         || error_str.contains("connection refused")
                         || error_str.contains("temporarily");
-                    
-                    self.mark_failed(&email_id, &error_str, is_temporary).await?;
+
+                    self.mark_failed(&email_id, &error_str, is_temporary)
+                        .await?;
                 }
             }
         }
-        
+
         Ok(())
     }
-    
-/// Get queue statistics
+
+    /// Get queue statistics
     pub async fn get_stats(&self) -> Result<QueueStats> {
-        let row = sqlx::query(r#"
+        let row = sqlx::query(
+            r#"
             SELECT
                 COUNT(*) FILTER (WHERE status = 'pending') as pending,
                 COUNT(*) FILTER (WHERE status = 'processing') as processing,
@@ -565,10 +596,11 @@ impl EmailQueue {
                 COUNT(*) FILTER (WHERE status = 'failed') as failed,
                 COUNT(*) FILTER (WHERE status = 'deferred') as deferred
             FROM email_queue
-        "#)
+        "#,
+        )
         .fetch_one(&self.pool)
         .await?;
-        
+
         Ok(QueueStats {
             pending: row.get::<i64, _>("pending") as u64,
             processing: row.get::<i64, _>("processing") as u64,
@@ -577,33 +609,37 @@ impl EmailQueue {
             deferred: row.get::<i64, _>("deferred") as u64,
         })
     }
-    
-/// Purge old sent emails
+
+    /// Purge old sent emails
     pub async fn purge_old(&self, days: i32) -> Result<u64> {
-        let result = sqlx::query(r#"
+        let result = sqlx::query(
+            r#"
             DELETE FROM email_queue
             WHERE status = 'sent' AND sent_at < NOW() - $1::interval
-        "#)
+        "#,
+        )
         .bind(format!("{} days", days))
         .execute(&self.pool)
         .await?;
-        
+
         let count = result.rows_affected();
         info!(count = count, days = days, "Purged old sent emails");
         Ok(count)
     }
-    
-/// Cancel pending emails for a campaign
+
+    /// Cancel pending emails for a campaign
     pub async fn cancel_campaign(&self, campaign_id: &Uuid) -> Result<u64> {
-        let result = sqlx::query(r#"
+        let result = sqlx::query(
+            r#"
             UPDATE email_queue
             SET status = 'failed', last_error = 'Campaign cancelled', updated_at = NOW()
             WHERE campaign_id = $1 AND status IN ('pending', 'deferred')
-        "#)
+        "#,
+        )
         .bind(campaign_id)
         .execute(&self.pool)
         .await?;
-        
+
         let count = result.rows_affected();
         info!(campaign_id = %campaign_id, count = count, "Cancelled campaign emails");
         Ok(count)
@@ -652,9 +688,9 @@ fn push_pending_insert_row_sql(sql: &mut String, base: usize) {
 mod tests {
     use super::*;
 
-// -----------------------------------------------------------------------
-// CancelResult
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // CancelResult
+    // -----------------------------------------------------------------------
 
     #[test]
     fn cancel_result_eq_cancelled() {
@@ -696,9 +732,9 @@ mod tests {
         assert_eq!(r, c);
     }
 
-// -----------------------------------------------------------------------
-// EmailStatus
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // EmailStatus
+    // -----------------------------------------------------------------------
 
     #[test]
     fn email_status_default_is_pending() {
@@ -747,9 +783,9 @@ mod tests {
         assert_eq!(s, s2);
     }
 
-// -----------------------------------------------------------------------
-// QueueConfig
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // QueueConfig
+    // -----------------------------------------------------------------------
 
     #[test]
     fn queue_config_default_values() {
@@ -777,9 +813,9 @@ mod tests {
         assert!(cfg.retry_delays[0] <= Duration::from_secs(DEFAULT_QUEUE_RETRY_DELAY_SECS[1]));
     }
 
-// -----------------------------------------------------------------------
-// QueueStats
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // QueueStats
+    // -----------------------------------------------------------------------
 
     #[test]
     fn queue_stats_total_sums_all_fields() {
@@ -807,7 +843,7 @@ mod tests {
 
     #[test]
     fn queue_stats_total_overflow_risk() {
-// Ensure the addition doesn't panic with large but reasonable values
+        // Ensure the addition doesn't panic with large but reasonable values
         let stats = QueueStats {
             pending: u64::MAX / 5,
             processing: u64::MAX / 5,
@@ -832,9 +868,9 @@ mod tests {
         assert_eq!(parsed.total(), stats.total());
     }
 
-// -----------------------------------------------------------------------
-// QueuedEmail
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // QueuedEmail
+    // -----------------------------------------------------------------------
 
     fn make_test_email() -> QueuedEmail {
         QueuedEmail {
@@ -909,12 +945,12 @@ mod tests {
         assert!(email.to_addresses.is_empty());
     }
 
-// -----------------------------------------------------------------------
-// Batch INSERT SQL builder validation
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Batch INSERT SQL builder validation
+    // -----------------------------------------------------------------------
 
-/// Validates that the multi-row INSERT SQL builder produces correct
-/// parameter numbering for N rows.
+    /// Validates that the multi-row INSERT SQL builder produces correct
+    /// parameter numbering for N rows.
     fn validate_batch_sql(count: usize) -> String {
         let cols = 12;
         let mut sql = String::from(
@@ -941,7 +977,7 @@ mod tests {
         let sql = validate_batch_sql(1);
         assert!(sql.contains("($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12)"));
         assert!(sql.contains("RETURNING id"));
-// Should not have a second row
+        // Should not have a second row
         assert!(!sql.contains("$13"));
     }
 
@@ -958,7 +994,7 @@ mod tests {
     #[test]
     fn batch_sql_ten_rows() {
         let sql = validate_batch_sql(10);
-// Last row starts at $109 (9 * 12 + 1), ends at $120
+        // Last row starts at $109 (9 * 12 + 1), ends at $120
         assert!(sql.contains("$109,"));
         assert!(sql.contains("$120)"));
         assert!(!sql.contains("$121"));
@@ -967,7 +1003,7 @@ mod tests {
     #[test]
     fn batch_sql_hundred_rows() {
         let sql = validate_batch_sql(100);
-// Last row:base = 99 * 12 + 1 = 1189, ends at $1200
+        // Last row:base = 99 * 12 + 1 = 1189, ends at $1200
         assert!(sql.contains("$1189,"));
         assert!(sql.contains("$1200)"));
     }
@@ -979,10 +1015,9 @@ mod tests {
         let total_params = 5 * cols;
         for p in 1..=total_params {
             let needle = format!("${}", p);
-            let count = sql.matches(&needle)
-                .count();
-// Each parameter should appear exactly once (but $1 can also match
-// $10, $11, etc. so we check with trailing comma/paren)
+            let count = sql.matches(&needle).count();
+            // Each parameter should appear exactly once (but $1 can also match
+            // $10, $11, etc. so we check with trailing comma/paren)
             assert!(count >= 1, "Parameter {} should appear at least once", p);
         }
     }

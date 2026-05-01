@@ -26,8 +26,7 @@ pub fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<u8>, R
     let data_json = serde_json::to_string_pretty(data)
         .map_err(|e| RenderError::Serialization(e.to_string()))?;
 
-    let world = TypstWorld::new(template, data_json)
-        .map_err(RenderError::World)?;
+    let world = TypstWorld::new(template, data_json).map_err(RenderError::World)?;
 
     let pdf_bytes = generate_pdf(template, &world)?;
 
@@ -60,7 +59,7 @@ fn generate_pdf(template: &str, world: &TypstWorld) -> Result<Vec<u8>, RenderErr
         _ => "Document",
     };
 
-// Minimal PDF structure
+    // Minimal PDF structure
     let content = format!(
         r#"%PDF-1.4
 1 0 obj
@@ -126,19 +125,19 @@ startxref
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderRequest {
-/// Template name:"invoice", "dpa", "compliance_report", "analytics_export", "qbr"
+    /// Template name:"invoice", "dpa", "compliance_report", "analytics_export", "qbr"
     pub template: String,
-/// Arbitrary JSON data to pass to the template
+    /// Arbitrary JSON data to pass to the template
     pub data: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderResponse {
-/// Base64-encoded PDF bytes (only used for JSON response mode)
+    /// Base64-encoded PDF bytes (only used for JSON response mode)
     pub pdf_base64: Option<String>,
-/// Size in bytes
+    /// Size in bytes
     pub size: usize,
-/// Template used
+    /// Template used
     pub template: String,
 }
 

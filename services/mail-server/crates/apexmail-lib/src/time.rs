@@ -9,12 +9,14 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     if s.is_empty() {
         return Err("Empty duration string".to_string());
     }
-// #217:Handle input with no suffix (e.g., "5") with a clear error message
+    // #217:Handle input with no suffix (e.g., "5") with a clear error message
     if s.len() < 2 {
         return Err(format!("Duration '{}' must have a suffix (s/m/h/d)", s));
     }
     let (num, suffix) = s.split_at(s.len() - 1);
-    let value: u64 = num.parse().map_err(|_| format!("Invalid number in duration: '{}'", num))?;
+    let value: u64 = num
+        .parse()
+        .map_err(|_| format!("Invalid number in duration: '{}'", num))?;
     let secs = match suffix {
         "s" => value,
         "m" => value * 60,

@@ -301,11 +301,8 @@ impl ContractService {
         .await
         .map_err(|error| format!("Get contract usage: {error}"))?;
 
-        let committed_volume = calculate_period_committed_volume(
-            contract.committed_volume,
-            &periods,
-            period_index,
-        );
+        let committed_volume =
+            calculate_period_committed_volume(contract.committed_volume, &periods, period_index);
         let percent_used = if committed_volume > 0 {
             (current_usage as f64 / committed_volume as f64) * 100.0
         } else {
@@ -805,7 +802,12 @@ fn generate_contract_pdf(contract: &EnterpriseContract) -> String {
     let purchase_order_line = contract
         .purchase_order_number
         .as_ref()
-        .map(|value| format!("<p><strong>Purchase Order:</strong> {}</p>", escape_html(value)))
+        .map(|value| {
+            format!(
+                "<p><strong>Purchase Order:</strong> {}</p>",
+                escape_html(value)
+            )
+        })
         .unwrap_or_default();
 
     let additional_fees = contract
@@ -878,10 +880,25 @@ mod tests {
 
         assert_eq!(periods.len(), 3);
         assert_eq!(periods[0].start, start);
-        assert_eq!(periods[0].end, DateTime::parse_from_rfc3339("2026-02-15T00:00:00Z").unwrap().with_timezone(&Utc));
-        assert_eq!(periods[2].start, DateTime::parse_from_rfc3339("2026-03-15T00:00:00Z").unwrap().with_timezone(&Utc));
+        assert_eq!(
+            periods[0].end,
+            DateTime::parse_from_rfc3339("2026-02-15T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            periods[2].start,
+            DateTime::parse_from_rfc3339("2026-03-15T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
         assert_eq!(periods[2].end, end);
-        assert_eq!(periods[2].full_end, DateTime::parse_from_rfc3339("2026-04-15T00:00:00Z").unwrap().with_timezone(&Utc));
+        assert_eq!(
+            periods[2].full_end,
+            DateTime::parse_from_rfc3339("2026-04-15T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
     }
 
     #[test]

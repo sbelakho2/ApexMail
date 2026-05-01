@@ -25,10 +25,13 @@
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 
-mod ja4;
-mod http2;
 mod database;
+mod http2;
+mod ja4;
 
-pub use ja4::{Ja4Fingerprint, TlsVersion, ClientHello, Extension};
-pub use http2::{Http2Fingerprint, Http2Preface, FrameType, KnownHttp2Pattern};
-pub use database::{FingerprintDb, FingerprintDbConfig, ClientIdentity, SuspicionLevel, CombinedFingerprint, FingerprintClassification};
+pub use database::{
+    ClientIdentity, CombinedFingerprint, FingerprintClassification, FingerprintDb,
+    FingerprintDbConfig, SuspicionLevel,
+};
+pub use http2::{FrameType, Http2Fingerprint, Http2Preface, KnownHttp2Pattern};
+pub use ja4::{ClientHello, Extension, Ja4Fingerprint, TlsVersion};

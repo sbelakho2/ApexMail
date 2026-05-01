@@ -109,7 +109,7 @@ class TemplatesResource:
             payload["text_body"] = text_body
         if not payload:
             raise ValidationError("Update payload must include at least one field")
-        data = self._client._request("PUT", f"/v1/templates/{template_id}", json=payload)
+        data = self._client._request("PATCH", f"/v1/templates/{template_id}", json=payload)
         return Template(**_extract_item(data, "template"))
 
     def delete(self, template_id: str) -> None:
@@ -192,7 +192,7 @@ class AsyncTemplatesResource:
             payload["text_body"] = text_body
         if not payload:
             raise ValidationError("Update payload must include at least one field")
-        data = await self._client._request("PUT", f"/v1/templates/{template_id}", json=payload)
+        data = await self._client._request("PATCH", f"/v1/templates/{template_id}", json=payload)
         return Template(**_extract_item(data, "template"))
 
     async def delete(self, template_id: str) -> None:

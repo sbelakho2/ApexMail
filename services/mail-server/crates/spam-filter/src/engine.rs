@@ -16,28 +16,28 @@ use std::sync::Arc;
 /// Composite spam verdict
 #[derive(Debug, Clone)]
 pub struct SpamVerdict {
-/// Final composite score (higher = more likely spam)
+    /// Final composite score (higher = more likely spam)
     pub score: f64,
-/// Classification decision
+    /// Classification decision
     pub classification: SpamClass,
-/// Bayesian probability (0.0 = ham, 1.0 = spam)
+    /// Bayesian probability (0.0 = ham, 1.0 = spam)
     pub bayesian_probability: f64,
-/// Header analysis result
+    /// Header analysis result
     pub header_score: HeaderScore,
-/// Content analysis result
+    /// Content analysis result
     pub content_score: ContentScore,
-/// URL analysis result
+    /// URL analysis result
     pub url_score: UrlScore,
 }
 
 /// Spam classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpamClass {
-/// Legitimate email
+    /// Legitimate email
     Ham,
-/// Probable spam (flag/quarantine)
+    /// Probable spam (flag/quarantine)
     Spam,
-/// Definite spam (reject)
+    /// Definite spam (reject)
     Reject,
 }
 
@@ -54,80 +54,80 @@ impl std::fmt::Display for SpamClass {
 /// Label for a reviewed training sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingLabel {
-/// Sample is confirmed spam.
+    /// Sample is confirmed spam.
     Spam,
-/// Sample is confirmed ham (legitimate).
+    /// Sample is confirmed ham (legitimate).
     Ham,
 }
 
 /// Pending training sample awaiting review.
 #[derive(Debug, Clone)]
 pub struct PendingTrainingSample {
-/// Unique queue identifier for the sample.
+    /// Unique queue identifier for the sample.
     pub id: String,
-/// Reviewer label to apply if approved.
+    /// Reviewer label to apply if approved.
     pub label: TrainingLabel,
-/// Raw training text payload.
+    /// Raw training text payload.
     pub text: String,
-/// Identity of the user/system that submitted the sample.
+    /// Identity of the user/system that submitted the sample.
     pub submitted_by: String,
-/// Submission timestamp.
+    /// Submission timestamp.
     pub submitted_at: DateTime<Utc>,
 }
 
 /// Snapshot of Bayesian model for rollback.
 #[derive(Debug, Clone)]
 pub struct BayesianSnapshot {
-/// Unique snapshot identifier.
+    /// Unique snapshot identifier.
     pub id: String,
-/// Human-readable snapshot label.
+    /// Human-readable snapshot label.
     pub label: String,
-/// Snapshot creation timestamp.
+    /// Snapshot creation timestamp.
     pub created_at: DateTime<Utc>,
-/// Serialized model state captured at snapshot time.
+    /// Serialized model state captured at snapshot time.
     pub model: BayesianModel,
 }
 
 /// Drift signal from recent classification probabilities.
 #[derive(Debug, Clone)]
 pub struct DriftStatus {
-/// Number of samples included in the rolling window.
+    /// Number of samples included in the rolling window.
     pub sample_count: usize,
-/// Baseline mean established for drift comparison.
+    /// Baseline mean established for drift comparison.
     pub baseline_mean: Option<f64>,
-/// Current rolling mean from recent probabilities.
+    /// Current rolling mean from recent probabilities.
     pub rolling_mean: f64,
-/// Absolute delta between rolling mean and baseline.
+    /// Absolute delta between rolling mean and baseline.
     pub delta: f64,
-/// Whether the configured drift threshold is exceeded.
+    /// Whether the configured drift threshold is exceeded.
     pub alert: bool,
 }
 
 /// Per-class drift status showing ham→spam and spam→ham boundary shifts.
 #[derive(Debug, Clone)]
 pub struct PerClassDriftStatus {
-/// Overall drift status (global).
+    /// Overall drift status (global).
     pub overall: DriftStatus,
-/// Rolling mean for messages classified as spam.
+    /// Rolling mean for messages classified as spam.
     pub spam_rolling_mean: f64,
-/// Number of spam samples in the rolling window.
+    /// Number of spam samples in the rolling window.
     pub spam_sample_count: usize,
-/// Rolling mean for messages classified as ham.
+    /// Rolling mean for messages classified as ham.
     pub ham_rolling_mean: f64,
-/// Number of ham samples in the rolling window.
+    /// Number of ham samples in the rolling window.
     pub ham_sample_count: usize,
-/// Direction of drift.
+    /// Direction of drift.
     pub direction: DriftDirection,
 }
 
 /// Direction of model drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriftDirection {
-/// Model is drifting towards classifying more as spam.
+    /// Model is drifting towards classifying more as spam.
     TowardsSpam,
-/// Model is drifting towards classifying more as ham.
+    /// Model is drifting towards classifying more as ham.
     TowardsHam,
-/// Stable — no significant directional drift.
+    /// Stable — no significant directional drift.
     Stable,
 }
 
@@ -135,20 +135,20 @@ pub enum DriftDirection {
 pub struct SpamEngine {
     config: SpamConfig,
     bayesian: BayesianClassifier,
-/// Per-tenant Bayesian classifiers (key:tenant_id)
+    /// Per-tenant Bayesian classifiers (key:tenant_id)
     tenant_classifiers: Arc<RwLock<HashMap<String, BayesianClassifier>>>,
     approved_reviewers: Arc<RwLock<HashSet<String>>>,
     pending_samples: Arc<RwLock<VecDeque<PendingTrainingSample>>>,
     model_snapshots: Arc<RwLock<HashMap<String, BayesianSnapshot>>>,
     recent_probabilities: Arc<RwLock<VecDeque<f64>>>,
     baseline_probability: Arc<RwLock<Option<f64>>>,
-/// Per-class drift tracking:separate rolling windows for spam and ham
+    /// Per-class drift tracking:separate rolling windows for spam and ham
     recent_spam_probabilities: Arc<RwLock<VecDeque<f64>>>,
     recent_ham_probabilities: Arc<RwLock<VecDeque<f64>>>,
 }
 
 impl SpamEngine {
-/// Create a new spam engine with default config
+    /// Create a new spam engine with default config
     pub fn new() -> Self {
         Self {
             config: SpamConfig::default(),
@@ -164,7 +164,7 @@ impl SpamEngine {
         }
     }
 
-/// Create with custom config
+    /// Create with custom config
     pub fn with_config(config: SpamConfig) -> Self {
         Self {
             config,
@@ -180,22 +180,22 @@ impl SpamEngine {
         }
     }
 
-/// Get a reference to the Bayesian classifier for training
+    /// Get a reference to the Bayesian classifier for training
     pub fn bayesian(&self) -> &BayesianClassifier {
         &self.bayesian
     }
 
-/// Analyze an email and produce a composite verdict
+    /// Analyze an email and produce a composite verdict
     pub fn analyze(
         &self,
         body: &str,
         headers: &[(String, String)],
         auth_results: Option<&str>,
     ) -> SpamVerdict {
-// 1. Bayesian classification with cold-start protection
+        // 1. Bayesian classification with cold-start protection
         let bayesian_prob = if self.config.enable_bayesian {
             let raw_prob = self.bayesian.classify(body);
-// Cold-start:if model has insufficient training data, treat as neutral
+            // Cold-start:if model has insufficient training data, treat as neutral
             let model = self.bayesian.export_model();
             if model.total_samples() < self.config.min_training_samples {
                 0.5 // Neutral — don't let an under-trained model influence scoring
@@ -206,7 +206,7 @@ impl SpamEngine {
             0.5
         };
 
-// 2. Header analysis
+        // 2. Header analysis
         let email_headers = EmailHeaders {
             headers,
             auth_results,
@@ -214,30 +214,40 @@ impl SpamEngine {
         let header_result = if self.config.enable_header_analysis {
             header_analyzer::analyze_headers(&email_headers)
         } else {
-            HeaderScore { score: 0.0, findings: Vec::new() }
+            HeaderScore {
+                score: 0.0,
+                findings: Vec::new(),
+            }
         };
 
-// 3. Content scoring
+        // 3. Content scoring
         let content_result = if self.config.enable_content_scoring {
             content_scorer::score_content(body)
         } else {
-            ContentScore { score: 0.0, findings: Vec::new() }
+            ContentScore {
+                score: 0.0,
+                findings: Vec::new(),
+            }
         };
 
-// 4. URL analysis
+        // 4. URL analysis
         let url_result = if self.config.enable_url_analysis {
             url_analyzer::analyze_urls_with_shorteners(body, Some(&self.config.url_shorteners))
         } else {
-            UrlScore { score: 0.0, findings: Vec::new(), url_count: 0 }
+            UrlScore {
+                score: 0.0,
+                findings: Vec::new(),
+                url_count: 0,
+            }
         };
 
-// 5. Composite scoring with configurable weights
+        // 5. Composite scoring with configurable weights
         let composite = (bayesian_prob * 10.0 * self.config.bayesian_weight)
             + (header_result.score * self.config.header_weight)
             + (content_result.score * self.config.content_weight)
             + (url_result.score * self.config.url_weight);
 
-// 6. Classify
+        // 6. Classify
         let classification = if composite >= self.config.reject_threshold {
             SpamClass::Reject
         } else if composite >= self.config.spam_threshold {
@@ -258,22 +268,22 @@ impl SpamEngine {
         }
     }
 
-/// Train the Bayesian classifier with a spam sample
+    /// Train the Bayesian classifier with a spam sample
     pub fn train_spam(&self, text: &str) {
         self.bayesian.learn_spam(text);
     }
 
-/// Train the Bayesian classifier with a ham sample
+    /// Train the Bayesian classifier with a ham sample
     pub fn train_ham(&self, text: &str) {
         self.bayesian.learn_ham(text);
     }
 
-/// Add an approved reviewer identity.
+    /// Add an approved reviewer identity.
     pub fn add_reviewer(&self, reviewer: &str) {
         self.approved_reviewers.write().insert(reviewer.to_string());
     }
 
-/// Queue a training sample for explicit review/approval.
+    /// Queue a training sample for explicit review/approval.
     pub fn submit_training_sample(
         &self,
         label: TrainingLabel,
@@ -296,15 +306,14 @@ impl SpamEngine {
         Some(id)
     }
 
-/// List queued training samples.
+    /// List queued training samples.
     pub fn pending_training_samples(&self) -> Vec<PendingTrainingSample> {
         self.pending_samples.read().iter().cloned().collect()
     }
 
-/// Approve and apply a queued training sample.
+    /// Approve and apply a queued training sample.
     pub fn approve_training_sample(&self, sample_id: &str, reviewer: &str) -> bool {
-        if self.config.enable_guarded_training
-            && !self.approved_reviewers.read().contains(reviewer)
+        if self.config.enable_guarded_training && !self.approved_reviewers.read().contains(reviewer)
         {
             return false;
         }
@@ -325,7 +334,7 @@ impl SpamEngine {
         true
     }
 
-/// Reject and discard a queued training sample.
+    /// Reject and discard a queued training sample.
     pub fn reject_training_sample(&self, sample_id: &str) -> bool {
         let mut pending = self.pending_samples.write();
         let index = pending.iter().position(|s| s.id == sample_id);
@@ -336,7 +345,7 @@ impl SpamEngine {
         true
     }
 
-/// Persist an in-memory model snapshot for rollback.
+    /// Persist an in-memory model snapshot for rollback.
     pub fn create_model_snapshot(&self, label: &str) -> String {
         let snapshot = BayesianSnapshot {
             id: format!("snapshot-{}", uuid::Uuid::new_v4()),
@@ -349,7 +358,7 @@ impl SpamEngine {
         id
     }
 
-/// Restore a previously saved model snapshot.
+    /// Restore a previously saved model snapshot.
     pub fn rollback_to_snapshot(&self, snapshot_id: &str) -> bool {
         let model = self
             .model_snapshots
@@ -363,7 +372,7 @@ impl SpamEngine {
         true
     }
 
-/// Inspect current drift status.
+    /// Inspect current drift status.
     pub fn drift_status(&self) -> DriftStatus {
         let probs = self.recent_probabilities.read();
         let sample_count = probs.len();
@@ -387,7 +396,7 @@ impl SpamEngine {
         }
     }
 
-/// Enhanced per-class drift status showing ham→spam and spam→ham boundary shifts.
+    /// Enhanced per-class drift status showing ham→spam and spam→ham boundary shifts.
     pub fn per_class_drift_status(&self) -> PerClassDriftStatus {
         let spam_probs = self.recent_spam_probabilities.read();
         let ham_probs = self.recent_ham_probabilities.read();
@@ -422,10 +431,10 @@ impl SpamEngine {
         }
     }
 
-/// Analyze an email with tenant-scoped Bayesian prior adjustment.
-/// The global model provides the baseline, and the tenant classifier
-/// provides an additional offset so that one tenant's training does not
-/// shift another tenant's spam threshold.
+    /// Analyze an email with tenant-scoped Bayesian prior adjustment.
+    /// The global model provides the baseline, and the tenant classifier
+    /// provides an additional offset so that one tenant's training does not
+    /// shift another tenant's spam threshold.
     pub fn analyze_for_tenant(
         &self,
         body: &str,
@@ -439,21 +448,21 @@ impl SpamEngine {
             0.5
         };
 
-// Get or create per-tenant classifier for namespace isolation
+        // Get or create per-tenant classifier for namespace isolation
         let tenant_prob = {
             let classifiers = self.tenant_classifiers.read();
             if let Some(tc) = classifiers.get(tenant_id) {
                 tc.classify(body)
             } else {
-// No tenant-specific model yet — fall back to global
+                // No tenant-specific model yet — fall back to global
                 global_prob
             }
         };
 
-// Blend:60% global + 40% tenant-specific for stability
+        // Blend:60% global + 40% tenant-specific for stability
         let blended_prob = global_prob * 0.6 + tenant_prob * 0.4;
 
-// 2. Header analysis
+        // 2. Header analysis
         let email_headers = EmailHeaders {
             headers,
             auth_results,
@@ -461,13 +470,16 @@ impl SpamEngine {
         let header_result = if self.config.enable_header_analysis {
             header_analyzer::analyze_headers(&email_headers)
         } else {
-            HeaderScore { score: 0.0, findings: Vec::new() }
+            HeaderScore {
+                score: 0.0,
+                findings: Vec::new(),
+            }
         };
 
-// 3. Content scoring (including custom phrase blocklists)
+        // 3. Content scoring (including custom phrase blocklists)
         let content_result = if self.config.enable_content_scoring {
             let mut base_score = content_scorer::score_content(body);
-// Apply custom phrase blocklists
+            // Apply custom phrase blocklists
             let lower_body = body.to_lowercase();
             for phrase_list in &self.config.custom_phrase_blocklists {
                 for phrase in &phrase_list.phrases {
@@ -486,20 +498,27 @@ impl SpamEngine {
             }
             base_score
         } else {
-            ContentScore { score: 0.0, findings: Vec::new() }
+            ContentScore {
+                score: 0.0,
+                findings: Vec::new(),
+            }
         };
 
-// 4. URL analysis
+        // 4. URL analysis
         let url_result = if self.config.enable_url_analysis {
             url_analyzer::analyze_urls_with_shorteners(body, Some(&self.config.url_shorteners))
         } else {
-            UrlScore { score: 0.0, findings: Vec::new(), url_count: 0 }
+            UrlScore {
+                score: 0.0,
+                findings: Vec::new(),
+                url_count: 0,
+            }
         };
 
-// 5. DMARC policy enforcement check
+        // 5. DMARC policy enforcement check
         let dmarc_penalty = self.check_dmarc_policy(auth_results);
 
-// 6. Composite scoring
+        // 6. Composite scoring
         let composite = (blended_prob * 10.0 * self.config.bayesian_weight)
             + (header_result.score * self.config.header_weight)
             + (content_result.score * self.config.content_weight)
@@ -527,7 +546,7 @@ impl SpamEngine {
         }
     }
 
-/// Train the per-tenant Bayesian classifier with a spam sample
+    /// Train the per-tenant Bayesian classifier with a spam sample
     pub fn train_tenant_spam(&self, tenant_id: &str, text: &str) {
         let mut classifiers = self.tenant_classifiers.write();
         let classifier = classifiers
@@ -536,7 +555,7 @@ impl SpamEngine {
         classifier.learn_spam(text);
     }
 
-/// Train the per-tenant Bayesian classifier with a ham sample
+    /// Train the per-tenant Bayesian classifier with a ham sample
     pub fn train_tenant_ham(&self, tenant_id: &str, text: &str) {
         let mut classifiers = self.tenant_classifiers.write();
         let classifier = classifiers
@@ -545,10 +564,10 @@ impl SpamEngine {
         classifier.learn_ham(text);
     }
 
-/// Check DMARC policy enforcement from auth_results header.
-/// If DMARC fails and the policy is p=reject or p=quarantine, apply a penalty
-/// to the spam score. This ensures that even if the MTA did not enforce DMARC,
-/// the spam filter adds its own correction.
+    /// Check DMARC policy enforcement from auth_results header.
+    /// If DMARC fails and the policy is p=reject or p=quarantine, apply a penalty
+    /// to the spam score. This ensures that even if the MTA did not enforce DMARC,
+    /// the spam filter adds its own correction.
     fn check_dmarc_policy(&self, auth_results: Option<&str>) -> f64 {
         let Some(results) = auth_results else {
             return 0.0;
@@ -558,9 +577,9 @@ impl SpamEngine {
         if !dmarc_fail {
             return 0.0;
         }
-// DMARC failed — apply penalty (the actual DNS p= policy would need
-// an async lookup, so we apply a conservative penalty that acknowledges
-// the failure without blocking outright)
+        // DMARC failed — apply penalty (the actual DNS p= policy would need
+        // an async lookup, so we apply a conservative penalty that acknowledges
+        // the failure without blocking outright)
         2.5
     }
 
@@ -603,8 +622,8 @@ impl SpamEngine {
 
 #[cfg(feature = "events")]
 impl SpamEngine {
-/// Analyze an email and also produce a normalized security event.
-/// Requires the `events` feature flag (which enables the `mail-common` dep).
+    /// Analyze an email and also produce a normalized security event.
+    /// Requires the `events` feature flag (which enables the `mail-common` dep).
     pub fn analyze_with_event(
         &self,
         body: &str,
@@ -613,9 +632,8 @@ impl SpamEngine {
         correlation: Option<mail_common::security::CorrelationContext>,
     ) -> (SpamVerdict, mail_common::security::SecurityEvent) {
         let verdict = self.analyze(body, headers, auth_results);
-        let correlation = correlation.unwrap_or_else(
-            mail_common::security::CorrelationContext::generated,
-        );
+        let correlation =
+            correlation.unwrap_or_else(mail_common::security::CorrelationContext::generated);
 
         let (action, severity) = match verdict.classification {
             SpamClass::Ham => (
@@ -647,13 +665,18 @@ impl SpamEngine {
         );
 
         if let Some((_, ip_value)) = headers.iter().find(|(name, _)| {
-            name.eq_ignore_ascii_case("x-originating-ip") || name.eq_ignore_ascii_case("x-client-ip")
+            name.eq_ignore_ascii_case("x-originating-ip")
+                || name.eq_ignore_ascii_case("x-client-ip")
         }) {
-            event.metadata.insert("src_ip".to_string(), ip_value.clone());
+            event
+                .metadata
+                .insert("src_ip".to_string(), ip_value.clone());
         }
 
         if let Some(alert) = mail_common::security::ingest_security_event(event.clone()) {
-            event.metadata.insert("composite_alert".to_string(), "true".to_string());
+            event
+                .metadata
+                .insert("composite_alert".to_string(), "true".to_string());
             event.metadata.insert(
                 "composite_score".to_string(),
                 format!("{:.2}", alert.composite_score),
@@ -680,13 +703,13 @@ mod tests {
 
     fn trained_engine() -> SpamEngine {
         let engine = SpamEngine::new();
-// Train with some spam
+        // Train with some spam
         for _ in 0..10 {
             engine.train_spam("Buy viagra now! Million dollars free lottery winner act now");
             engine.train_spam("Nigerian prince needs your help wire transfer urgently");
             engine.train_spam("You have won congratulations claim your prize immediately");
         }
-// Train with some ham
+        // Train with some ham
         for _ in 0..10 {
             engine.train_ham("Hi team, please review the quarterly report attached");
             engine.train_ham("Meeting scheduled for Tuesday at 3pm in conference room B");
@@ -707,8 +730,11 @@ mod tests {
                      Act now! Limited time! Urgent!!!!!!!";
 
         let verdict = engine.analyze(body, &headers, Some("spf=fail; dkim=fail"));
-        assert!(matches!(verdict.classification, SpamClass::Spam | SpamClass::Reject),
-            "Expected Spam or Reject, got {:?}", verdict.classification);
+        assert!(
+            matches!(verdict.classification, SpamClass::Spam | SpamClass::Reject),
+            "Expected Spam or Reject, got {:?}",
+            verdict.classification
+        );
         assert!(verdict.score > 5.0, "Spam score: {}", verdict.score);
     }
 
@@ -719,7 +745,10 @@ mod tests {
             ("From".into(), "alice@company.com".into()),
             ("Message-ID".into(), "<abc123@company.com>".into()),
             ("Date".into(), "Mon, 1 Jan 2024 00:00:00 +0000".into()),
-            ("Received".into(), "from mx.company.com by mx2.company.com".into()),
+            (
+                "Received".into(),
+                "from mx.company.com by mx2.company.com".into(),
+            ),
         ];
         let body = "Hi Bob, I wanted to follow up on the project timeline we discussed. \
                      Can you send me the updated schedule by end of day? Thanks.";
@@ -731,9 +760,7 @@ mod tests {
     #[test]
     fn test_phishing_email() {
         let engine = trained_engine();
-        let headers = vec![
-            ("From".into(), "security@bank-secure.tk".into()),
-        ];
+        let headers = vec![("From".into(), "security@bank-secure.tk".into())];
         let body = "Your account has been suspended. Verify your account immediately. \
                      Click here to login: http://192.168.1.50/bank/login \
                      Update your payment information to restore access. \

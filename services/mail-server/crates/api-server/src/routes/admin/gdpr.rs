@@ -88,12 +88,10 @@ async fn list_gdpr_requests(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-// Check if table exists
-    let exists: (bool,) = sqlx::query_as(
-        "SELECT to_regclass('public.gdpr_requests') IS NOT NULL",
-    )
-    .fetch_one(&state.db)
-    .await?;
+    // Check if table exists
+    let exists: (bool,) = sqlx::query_as("SELECT to_regclass('public.gdpr_requests') IS NOT NULL")
+        .fetch_one(&state.db)
+        .await?;
 
     if !exists.0 {
         return Ok(Json(vec![]));
@@ -112,8 +110,7 @@ async fn list_gdpr_requests(
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
-    .await
-    ?;
+    .await?;
 
     let response: Vec<GdprRequestResponse> = rows
         .into_iter()

@@ -52,11 +52,15 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode> {
-    let key = headers.get("x-api-key")
+    let key = headers
+        .get("x-api-key")
         .or_else(|| headers.get("x-internal-api-key"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -74,18 +78,21 @@ fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode>
 
 pub fn build_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
-// Health
+        // Health
         .route("/health", get(health_check))
         .route("/api/v1/health", get(health_detailed))
         .route("/api/v1/health/cluster", get(cluster_status))
-// Failover
+        // Failover
         .route("/api/v1/failover/status", get(failover_status))
         .route("/api/v1/failover/initiate", post(failover_initiate))
         .route("/api/v1/failover/failback", post(failover_failback))
         .route("/api/v1/failover/history", get(failover_history))
         .route("/api/v1/failover/split-brain", get(split_brain_check))
-        .route("/api/v1/failover/split-brain/resolve", post(split_brain_resolve))
-// Backup
+        .route(
+            "/api/v1/failover/split-brain/resolve",
+            post(split_brain_resolve),
+        )
+        // Backup
         .route("/api/v1/backup", post(backup_create))
         .route("/api/v1/backup/list", get(backup_list))
         .route("/api/v1/backup/:id", get(backup_get))
@@ -94,16 +101,22 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/backup/pitr", post(backup_pitr))
         .route("/api/v1/backup/schedule", get(backup_schedule))
         .route("/api/v1/backup/retention", post(backup_retention_cleanup))
-// Replication
+        // Replication
         .route("/api/v1/replication/status", get(replication_status))
         .route("/api/v1/replication/replicas", get(replication_replicas))
         .route("/api/v1/replication/slots", get(replication_slots))
         .route("/api/v1/replication/slots", post(replication_create_slot))
-        .route("/api/v1/replication/slots/:name", delete(replication_delete_slot))
+        .route(
+            "/api/v1/replication/slots/:name",
+            delete(replication_delete_slot),
+        )
         .route("/api/v1/replication/promote", post(replication_promote))
         .route("/api/v1/replication/sync-mode", put(replication_sync_mode))
-        .route("/api/v1/replication/lag/history", get(replication_lag_history))
-// Multi-Region
+        .route(
+            "/api/v1/replication/lag/history",
+            get(replication_lag_history),
+        )
+        // Multi-Region
         .route("/api/v1/regions", get(regions_list))
         .route("/api/v1/regions", post(regions_register))
         .route("/api/v1/regions/:name", get(regions_get))
@@ -117,13 +130,13 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/regions/geo-rules", get(geo_rules_list))
         .route("/api/v1/regions/geo-rules", post(geo_rules_add))
         .route("/api/v1/regions/geo-rules/:id", delete(geo_rules_delete))
-// Circuit Breaker
+        // Circuit Breaker
         .route("/api/v1/circuit-breakers", get(circuits_list))
         .route("/api/v1/circuit-breakers/:name", get(circuits_get))
         .route("/api/v1/circuit-breakers/:name/reset", post(circuits_reset))
         .route("/api/v1/circuit-breakers", post(circuits_configure))
         .route("/api/v1/circuit-breakers/:name", delete(circuits_remove))
-// Chaos Engineering
+        // Chaos Engineering
         .route("/api/v1/chaos/experiments", get(chaos_list))
         .route("/api/v1/chaos/experiments", post(chaos_start))
         .route("/api/v1/chaos/experiments/:id", get(chaos_get))
@@ -154,7 +167,10 @@ async fn cluster_status(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.health.get_cluster_status().await
+    state
+        .health
+        .get_cluster_status()
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -181,10 +197,10 @@ async fn failover_initiate(
     Json(body): Json<FailoverRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.failover.initiate_failover(
-        crate::types::FailoverType::Manual,
-        body.reason,
-    ).await
+    state
+        .failover
+        .initiate_failover(crate::types::FailoverType::Manual, body.reason)
+        .await
         .map(|e| (StatusCode::OK, Json(e)))
         .map_err(internal_err)
 }
@@ -194,7 +210,10 @@ async fn failover_failback(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.failover.initiate_failback().await
+    state
+        .failover
+        .initiate_failback()
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -204,8 +223,12 @@ struct HistoryQuery {
     #[serde(default = "default_limit")]
     limit: i64,
 }
-fn default_limit() -> i64 { 50 }
-fn default_offset() -> i64 { 0 }
+fn default_limit() -> i64 {
+    50
+}
+fn default_offset() -> i64 {
+    0
+}
 
 #[derive(Deserialize)]
 struct PaginationQuery {
@@ -221,7 +244,10 @@ async fn failover_history(
     Query(q): Query<HistoryQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.failover.get_history(q.limit).await
+    state
+        .failover
+        .get_history(q.limit)
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -231,7 +257,10 @@ async fn split_brain_check(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.failover.detect_split_brain().await
+    state
+        .failover
+        .detect_split_brain()
+        .await
         .map(|detected| Json(serde_json::json!({ "split_brain": detected })))
         .map_err(internal_err)
 }
@@ -247,7 +276,10 @@ async fn split_brain_resolve(
     Json(body): Json<ResolveSplitBrainRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.failover.resolve_split_brain(&body.winner_node).await
+    state
+        .failover
+        .resolve_split_brain(&body.winner_node)
+        .await
         .map(|_| Json(serde_json::json!({ "resolved": true })))
         .map_err(internal_err)
 }
@@ -266,8 +298,15 @@ async fn backup_create(
     Json(body): Json<BackupCreateRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    let bt = body.backup_type.as_deref().map(BackupType::parse).unwrap_or(BackupType::Full);
-    state.backup.create_backup(bt, body.tables).await
+    let bt = body
+        .backup_type
+        .as_deref()
+        .map(BackupType::parse)
+        .unwrap_or(BackupType::Full);
+    state
+        .backup
+        .create_backup(bt, body.tables)
+        .await
         .map(|b| (StatusCode::CREATED, Json(b)))
         .map_err(internal_err)
 }
@@ -286,7 +325,10 @@ async fn backup_list(
     Query(q): Query<BackupListQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.backup.list_backups(q.backup_type.as_deref(), q.status.as_deref(), q.limit).await
+    state
+        .backup
+        .list_backups(q.backup_type.as_deref(), q.status.as_deref(), q.limit)
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -297,7 +339,10 @@ async fn backup_get(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.backup.get_backup(id).await
+    state
+        .backup
+        .get_backup(id)
+        .await
         .map_err(internal_err)?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
@@ -309,7 +354,10 @@ async fn backup_delete(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.backup.delete_backup(id).await
+    state
+        .backup
+        .delete_backup(id)
+        .await
         .map(|deleted| Json(serde_json::json!({ "deleted": deleted })))
         .map_err(internal_err)
 }
@@ -320,7 +368,10 @@ async fn backup_restore(
     Json(body): Json<RestoreOptions>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.backup.restore(body).await
+    state
+        .backup
+        .restore(body)
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -336,7 +387,10 @@ async fn backup_pitr(
     Json(body): Json<PitrRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.backup.pitr(body.target_time).await
+    state
+        .backup
+        .pitr(body.target_time)
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -354,7 +408,10 @@ async fn backup_retention_cleanup(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.backup.enforce_retention().await
+    state
+        .backup
+        .enforce_retention()
+        .await
         .map(|deleted| Json(serde_json::json!({ "deleted": deleted })))
         .map_err(internal_err)
 }
@@ -366,7 +423,10 @@ async fn replication_status(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.replication.get_stats().await
+    state
+        .replication
+        .get_stats()
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -376,7 +436,10 @@ async fn replication_replicas(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.replication.get_replicas().await
+    state
+        .replication
+        .get_replicas()
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -386,7 +449,10 @@ async fn replication_slots(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.replication.get_slots().await
+    state
+        .replication
+        .get_slots()
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -404,8 +470,16 @@ async fn replication_create_slot(
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
     let st = body.slot_type.as_deref().unwrap_or("physical");
-    state.replication.create_slot(&body.name, st).await
-        .map(|_| (StatusCode::CREATED, Json(serde_json::json!({ "created": true, "name": body.name }))))
+    state
+        .replication
+        .create_slot(&body.name, st)
+        .await
+        .map(|_| {
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "created": true, "name": body.name })),
+            )
+        })
         .map_err(internal_err)
 }
 
@@ -415,7 +489,10 @@ async fn replication_delete_slot(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.replication.drop_slot(&name).await
+    state
+        .replication
+        .drop_slot(&name)
+        .await
         .map(|_| Json(serde_json::json!({ "dropped": true })))
         .map_err(internal_err)
 }
@@ -425,7 +502,10 @@ async fn replication_promote(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.replication.promote_standby().await
+    state
+        .replication
+        .promote_standby()
+        .await
         .map(|promoted| Json(serde_json::json!({ "promoted": promoted })))
         .map_err(internal_err)
 }
@@ -441,7 +521,10 @@ async fn replication_sync_mode(
     Json(body): Json<SyncModeRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.replication.set_sync_mode(body.synchronous).await
+    state
+        .replication
+        .set_sync_mode(body.synchronous)
+        .await
         .map(|_| Json(serde_json::json!({ "synchronous": body.synchronous })))
         .map_err(internal_err)
 }
@@ -451,7 +534,9 @@ struct LagHistoryQuery {
     #[serde(default = "default_minutes")]
     minutes: i64,
 }
-fn default_minutes() -> i64 { 60 }
+fn default_minutes() -> i64 {
+    60
+}
 
 async fn replication_lag_history(
     State(state): State<Arc<AppState>>,
@@ -459,7 +544,10 @@ async fn replication_lag_history(
     Query(q): Query<LagHistoryQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.replication.get_lag_history(q.minutes).await
+    state
+        .replication
+        .get_lag_history(q.minutes)
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -474,7 +562,10 @@ async fn regions_list(
     check_api_key(&headers, &state.config)?;
     let limit = q.limit.max(1).min(200);
     let offset = q.offset.max(0);
-    state.multi_region.list_regions(limit, offset).await
+    state
+        .multi_region
+        .list_regions(limit, offset)
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -494,7 +585,15 @@ async fn regions_register(
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
     let role = RegionRole::parse(&body.role);
-    state.multi_region.register_region(&body.name, &body.endpoint, &role, body.availability_zone.as_deref()).await
+    state
+        .multi_region
+        .register_region(
+            &body.name,
+            &body.endpoint,
+            &role,
+            body.availability_zone.as_deref(),
+        )
+        .await
         .map(|r| (StatusCode::CREATED, Json(r)))
         .map_err(internal_err)
 }
@@ -505,7 +604,10 @@ async fn regions_get(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.get_region(&name).await
+    state
+        .multi_region
+        .get_region(&name)
+        .await
         .map_err(internal_err)?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
@@ -517,7 +619,10 @@ async fn regions_remove(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.remove_region(&name).await
+    state
+        .multi_region
+        .remove_region(&name)
+        .await
         .map(|removed| Json(serde_json::json!({ "removed": removed })))
         .map_err(internal_err)
 }
@@ -536,7 +641,15 @@ async fn regions_update_health(
     Json(body): Json<UpdateHealthRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.update_health(&name, body.health_score, body.latency_ms, body.replication_lag_ms).await
+    state
+        .multi_region
+        .update_health(
+            &name,
+            body.health_score,
+            body.latency_ms,
+            body.replication_lag_ms,
+        )
+        .await
         .map(|_| Json(serde_json::json!({ "updated": true })))
         .map_err(internal_err)
 }
@@ -553,7 +666,10 @@ async fn regions_set_weight(
     Json(body): Json<SetWeightRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.set_weight(&name, body.weight).await
+    state
+        .multi_region
+        .set_weight(&name, body.weight)
+        .await
         .map(|_| Json(serde_json::json!({ "updated": true })))
         .map_err(internal_err)
 }
@@ -571,7 +687,10 @@ async fn regions_fence(
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
     let reason = body.reason.as_deref().unwrap_or("Manual fence");
-    state.multi_region.fence_region(&name, reason).await
+    state
+        .multi_region
+        .fence_region(&name, reason)
+        .await
         .map(|_| Json(serde_json::json!({ "fenced": true })))
         .map_err(internal_err)
 }
@@ -582,7 +701,10 @@ async fn regions_unfence(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.unfence_region(&name).await
+    state
+        .multi_region
+        .unfence_region(&name)
+        .await
         .map(|_| Json(serde_json::json!({ "unfenced": true })))
         .map_err(internal_err)
 }
@@ -598,7 +720,10 @@ async fn regions_route(
     Query(q): Query<RouteQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.route_request(q.source_region.as_deref()).await
+    state
+        .multi_region
+        .route_request(q.source_region.as_deref())
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -608,7 +733,10 @@ async fn regions_traffic(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.get_traffic_distribution().await
+    state
+        .multi_region
+        .get_traffic_distribution()
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -621,7 +749,10 @@ async fn geo_rules_list(
     check_api_key(&headers, &state.config)?;
     let limit = q.limit.max(1).min(200);
     let offset = q.offset.max(0);
-    state.multi_region.list_geo_rules(limit, offset).await
+    state
+        .multi_region
+        .list_geo_rules(limit, offset)
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -640,7 +771,15 @@ async fn geo_rules_add(
     Json(body): Json<AddGeoRuleRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.add_geo_rule(&body.name, &body.source_region, &body.target_region, body.priority.unwrap_or(0)).await
+    state
+        .multi_region
+        .add_geo_rule(
+            &body.name,
+            &body.source_region,
+            &body.target_region,
+            body.priority.unwrap_or(0),
+        )
+        .await
         .map(|r| (StatusCode::CREATED, Json(r)))
         .map_err(internal_err)
 }
@@ -651,7 +790,10 @@ async fn geo_rules_delete(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.delete_geo_rule(id).await
+    state
+        .multi_region
+        .delete_geo_rule(id)
+        .await
         .map(|deleted| Json(serde_json::json!({ "deleted": deleted })))
         .map_err(internal_err)
 }
@@ -673,7 +815,10 @@ async fn circuits_get(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.circuit_breaker.get_stats(&name).await
+    state
+        .circuit_breaker
+        .get_stats(&name)
+        .await
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -684,7 +829,10 @@ async fn circuits_reset(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.circuit_breaker.reset(&name).await
+    state
+        .circuit_breaker
+        .reset(&name)
+        .await
         .map(|_| Json(serde_json::json!({ "reset": true })))
         .map_err(internal_err)
 }
@@ -695,8 +843,16 @@ async fn circuits_configure(
     Json(body): Json<CircuitConfig>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.circuit_breaker.configure(body).await
-        .map(|_| (StatusCode::CREATED, Json(serde_json::json!({ "configured": true }))))
+    state
+        .circuit_breaker
+        .configure(body)
+        .await
+        .map(|_| {
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "configured": true })),
+            )
+        })
         .map_err(internal_err)
 }
 
@@ -706,7 +862,10 @@ async fn circuits_remove(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.circuit_breaker.remove(&name).await
+    state
+        .circuit_breaker
+        .remove(&name)
+        .await
         .map(|removed| Json(serde_json::json!({ "removed": removed })))
         .map_err(internal_err)
 }
@@ -726,7 +885,10 @@ async fn chaos_list(
     Query(q): Query<ChaosListQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.chaos.list_experiments(q.status.as_deref(), q.limit).await
+    state
+        .chaos
+        .list_experiments(q.status.as_deref(), q.limit)
+        .await
         .map(Json)
         .map_err(internal_err)
 }
@@ -744,7 +906,10 @@ async fn chaos_start(
     Json(body): Json<ChaosStartRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.chaos.start_experiment(&body.name, body.config).await
+    state
+        .chaos
+        .start_experiment(&body.name, body.config)
+        .await
         .map(|e| (StatusCode::CREATED, Json(e)))
         .map_err(internal_err)
 }
@@ -755,7 +920,10 @@ async fn chaos_get(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.chaos.get_experiment(id).await
+    state
+        .chaos
+        .get_experiment(id)
+        .await
         .map_err(internal_err)?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
@@ -767,7 +935,10 @@ async fn chaos_delete(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.chaos.delete_experiment(id).await
+    state
+        .chaos
+        .delete_experiment(id)
+        .await
         .map(|deleted| Json(serde_json::json!({ "deleted": deleted })))
         .map_err(internal_err)
 }
@@ -778,7 +949,10 @@ async fn chaos_abort(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.chaos.abort_experiment(id).await
+    state
+        .chaos
+        .abort_experiment(id)
+        .await
         .map(|_| Json(serde_json::json!({ "aborted": true })))
         .map_err(internal_err)
 }
@@ -798,7 +972,12 @@ mod tests {
     fn test_runtime() -> &'static tokio::runtime::Runtime {
         use std::sync::OnceLock;
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-        RT.get_or_init(|| tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap())
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        })
     }
     fn test_pool() -> sqlx::PgPool {
         let _guard = test_runtime().enter();
@@ -836,7 +1015,10 @@ mod tests {
     fn test_health_endpoint() {
         test_runtime().block_on(async {
             let app: Router<()> = build_router(test_state());
-            let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+            let req = Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         });
@@ -848,7 +1030,8 @@ mod tests {
             let app: Router<()> = build_router(test_state());
             let req = Request::builder()
                 .uri("/api/v1/health")
-                .body(Body::empty()).unwrap();
+                .body(Body::empty())
+                .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         });
@@ -861,7 +1044,8 @@ mod tests {
             let req = Request::builder()
                 .uri("/api/v1/circuit-breakers")
                 .header("x-api-key", TEST_INTERNAL_API_KEY)
-                .body(Body::empty()).unwrap();
+                .body(Body::empty())
+                .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         });
@@ -874,7 +1058,8 @@ mod tests {
             let req = Request::builder()
                 .uri("/api/v1/failover/status")
                 .header("x-api-key", TEST_INTERNAL_API_KEY)
-                .body(Body::empty()).unwrap();
+                .body(Body::empty())
+                .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         });
@@ -887,7 +1072,8 @@ mod tests {
             let req = Request::builder()
                 .uri("/api/v1/backup/schedule")
                 .header("x-api-key", TEST_INTERNAL_API_KEY)
-                .body(Body::empty()).unwrap();
+                .body(Body::empty())
+                .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         });
@@ -900,7 +1086,8 @@ mod tests {
             let req = Request::builder()
                 .uri("/api/v1/failover/status")
                 .header("x-api-key", TEST_ADMIN_API_KEY)
-                .body(Body::empty()).unwrap();
+                .body(Body::empty())
+                .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         });
@@ -924,7 +1111,7 @@ mod tests {
 
     #[test]
     fn test_route_count() {
-// Verify we have 40+ routes by building the router and checking it doesn't panic
+        // Verify we have 40+ routes by building the router and checking it doesn't panic
         let _app = build_router(test_state());
     }
 }

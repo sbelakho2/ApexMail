@@ -19,7 +19,7 @@ fn sales_pipeline_lead_to_campaign() {
     let campaigns = CampaignManager::new(10);
     let optimizer = ContentOptimizer::new();
 
-// Step 1:Create a lead
+    // Step 1:Create a lead
     let lead = crm.create_lead(
         "alice@acme.com".into(),
         "Alice VP".into(),
@@ -29,17 +29,17 @@ fn sales_pipeline_lead_to_campaign() {
     );
     assert_eq!(lead.email, "alice@acme.com");
 
-// Step 2:Enrich the lead
+    // Step 2:Enrich the lead
     let company = enricher.enrich_lead(&lead.email).unwrap();
     assert_eq!(company.domain, "acme.com");
     assert_eq!(company.industry, "SaaS");
 
-// Step 3:Score a subject line for the outreach
+    // Step 3:Score a subject line for the outreach
     let score = optimizer.score_subject_line("Hi Alice, quick question about Acme's email infra");
     assert!(score > 0);
     assert!(score <= 100);
 
-// Step 4:Create a campaign targeting this lead
+    // Step 4:Create a campaign targeting this lead
     let campaign = campaigns
         .create_campaign(
             "tenant-a".into(),
@@ -61,7 +61,7 @@ fn billing_plan_quota_hierarchy() {
 
     let plans = default_plans();
 
-// Collect (sort_order, email_limit) pairs
+    // Collect (sort_order, email_limit) pairs
     let mut limits: Vec<(i32, i64)> = plans
         .iter()
         .filter(|p| p.email_limit > 0) // exclude unlimited (-1)
@@ -69,7 +69,7 @@ fn billing_plan_quota_hierarchy() {
         .collect();
     limits.sort_by_key(|&(order, _)| order);
 
-// Higher-tier plans should have higher or equal limits
+    // Higher-tier plans should have higher or equal limits
     for w in limits.windows(2) {
         assert!(
             w[1].1 >= w[0].1,
@@ -79,7 +79,7 @@ fn billing_plan_quota_hierarchy() {
         );
     }
 
-// Verify specific plans
+    // Verify specific plans
     let free = plans.iter().find(|p| p.name == "free").unwrap();
     let starter = plans.iter().find(|p| p.name == "starter").unwrap();
     assert!(starter.email_limit > free.email_limit);
@@ -99,7 +99,7 @@ fn ai_pipeline_register_predict_evaluate() {
     let engine = InferenceEngine::new();
     let trainer = TrainingManager::new();
 
-// Step 1:Register a model
+    // Step 1:Register a model
     engine.register_model(Model {
         id: "clf-v1".into(),
         name: "email-classifier".into(),
@@ -110,14 +110,14 @@ fn ai_pipeline_register_predict_evaluate() {
         status: ModelStatus::Ready,
     });
 
-// Step 2:Run a prediction
+    // Step 2:Run a prediction
     let pred = engine
         .run_prediction("clf-v1", serde_json::json!({"text": "hello"}))
         .unwrap();
     assert_eq!(pred.model_id, "clf-v1");
     assert!((pred.confidence - 0.95).abs() < f64::EPSILON);
 
-// Step 3:Evaluate model quality
+    // Step 3:Evaluate model quality
     let predictions = vec![1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
     let actuals = vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0];
     let eval = trainer.evaluate_model(&predictions, &actuals).unwrap();
@@ -138,7 +138,7 @@ fn observability_alert_pipeline() {
     let alert_mgr = AlertManager::new();
     let metrics = MetricsCollector::new(vec![0.1, 0.5, 1.0]);
 
-// Step 1:Define an alert rule
+    // Step 1:Define an alert rule
     alert_mgr.add_rule(AlertRule {
         name: "high_error_rate".into(),
         condition_description: "error_rate > 0.05".into(),
@@ -148,10 +148,10 @@ fn observability_alert_pipeline() {
         cooldown_secs: 0,
     });
 
-// Step 2:Record metrics that exceed threshold
+    // Step 2:Record metrics that exceed threshold
     metrics.record_gauge("error_rate", 0.12, "Error rate");
 
-// Step 3:Evaluate alert rules against metric summaries
+    // Step 3:Evaluate alert rules against metric summaries
     let summaries = metrics.get_summary();
     let alert_summaries: Vec<MetricSummary> = summaries
         .iter()
@@ -167,7 +167,7 @@ fn observability_alert_pipeline() {
     assert_eq!(fired[0].rule_name, "high_error_rate");
     assert_eq!(fired[0].status, AlertStatus::Firing);
 
-// Step 4:Acknowledge the alert
+    // Step 4:Acknowledge the alert
     let alert_id = fired[0].id.clone();
     assert!(alert_mgr.acknowledge(&alert_id));
     assert!(alert_mgr.list_active_alerts().is_empty());
@@ -185,26 +185,26 @@ async fn ops_warmup_pipeline() {
     let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
     let warmup = IpWarmupManager::new(pool);
 
-// Step 1:Create a warmup schedule
+    // Step 1:Create a warmup schedule
     let schedule = warmup.create_schedule_sync("10.0.0.1", 100_000, 14);
     assert_eq!(schedule.ip, "10.0.0.1");
     assert_eq!(schedule.target_volume, 100_000);
     assert_eq!(schedule.day, 0);
     let initial_volume = schedule.current_volume;
 
-// Step 2:Advance a few days
+    // Step 2:Advance a few days
     assert!(warmup.advance_day_sync("10.0.0.1"));
     assert!(warmup.advance_day_sync("10.0.0.1"));
     assert!(warmup.advance_day_sync("10.0.0.1"));
 
-// Step 3:Volume should have increased
+    // Step 3:Volume should have increased
     let day3_volume = warmup.get_daily_volume("10.0.0.1", 3).unwrap();
     assert!(day3_volume > initial_volume);
 
-// Step 4:Warmup not complete yet
+    // Step 4:Warmup not complete yet
     assert!(!warmup.is_warmup_complete("10.0.0.1"));
 
-// Step 5:Advance to completion
+    // Step 5:Advance to completion
     for _ in 0..20 {
         warmup.advance_day_sync("10.0.0.1");
     }
@@ -221,19 +221,22 @@ fn ai_content_score_improve_rescore() {
 
     let opt = ContentOptimizer::new();
 
-// Step 1:Score a short, weak subject
+    // Step 1:Score a short, weak subject
     let original = "Hi";
     let score1 = opt.score_subject_line(original);
 
-// Step 2:Get suggestions
+    // Step 2:Get suggestions
     let suggestions = opt.suggest_improvements(original);
-    assert!(!suggestions.is_empty(), "Should have improvement suggestions for short subject");
+    assert!(
+        !suggestions.is_empty(),
+        "Should have improvement suggestions for short subject"
+    );
 
-// Step 3:Use the first suggestion and re-score
+    // Step 3:Use the first suggestion and re-score
     let improved = &suggestions[0].suggested;
     let score2 = opt.score_subject_line(improved);
 
-// Improved subject should generally score better (longer, more descriptive)
+    // Improved subject should generally score better (longer, more descriptive)
     assert!(
         score2 >= score1,
         "Improved subject '{}' (score {}) should score >= original '{}' (score {})",
@@ -252,10 +255,22 @@ fn ai_content_score_improve_rescore() {
 fn compliance_pattern_matching_pipeline() {
     use pattern_matcher::{Rule, RuleCategory, RuleSet, Severity};
 
-// Step 1:Define spam/phishing rules
+    // Step 1:Define spam/phishing rules
     let rules = vec![
-        Rule::new("buy now", "SPAM-001", RuleCategory::Spam, Severity::Medium, 5),
-        Rule::new("free money", "SPAM-002", RuleCategory::Spam, Severity::High, 8),
+        Rule::new(
+            "buy now",
+            "SPAM-001",
+            RuleCategory::Spam,
+            Severity::Medium,
+            5,
+        ),
+        Rule::new(
+            "free money",
+            "SPAM-002",
+            RuleCategory::Spam,
+            Severity::High,
+            8,
+        ),
         Rule::new(
             "verify your account",
             "PHISH-001",
@@ -274,19 +289,19 @@ fn compliance_pattern_matching_pipeline() {
     let ruleset = RuleSet::new(rules);
     assert_eq!(ruleset.rule_count(), 4);
 
-// Step 2:Evaluate an email body
+    // Step 2:Evaluate an email body
     let email_body = "Dear user, buy now to get free money! Verify your account.";
     let matches = ruleset.evaluate(email_body);
     assert_eq!(matches.len(), 3); // buy now, free money, verify your account
 
-// Step 3:Check total severity score
+    // Step 3:Check total severity score
     let total = ruleset.total_score(email_body);
     assert!((total - 23.0).abs() < f64::EPSILON); // 5 + 8 + 10
 
-// Step 4:Verify critical detection triggers blocking
+    // Step 4:Verify critical detection triggers blocking
     assert!(ruleset.has_critical(email_body));
 
-// Step 5:Clean email passes
+    // Step 5:Clean email passes
     let clean = "Hello, here is your weekly newsletter update.";
     assert!(ruleset.evaluate(clean).is_empty());
     assert!(!ruleset.has_critical(clean));
@@ -300,27 +315,27 @@ fn compliance_pattern_matching_pipeline() {
 fn bandit_optimisation_loop() {
     use ai_service::bandits::BanditOptimizer;
 
-// Use epsilon=0.0 so selection is pure exploitation
+    // Use epsilon=0.0 so selection is pure exploitation
     let bandits = BanditOptimizer::new(0.0);
 
-// Step 1:Register three arms (subject line variants)
+    // Step 1:Register three arms (subject line variants)
     let arm_a = bandits.add_arm("Subject A: 🔥 Hot deals");
     let arm_b = bandits.add_arm("Subject B: Weekly update");
     let arm_c = bandits.add_arm("Subject C: Don't miss out!");
 
-// Step 2:Simulate reward observations
-// Arm A:high performer
+    // Step 2:Simulate reward observations
+    // Arm A:high performer
     for _ in 0..100 {
         bandits.record_reward(&arm_a, 1.0).unwrap();
     }
-// Arm B:medium performer
+    // Arm B:medium performer
     for _ in 0..100 {
         bandits.record_reward(&arm_b, 0.0).unwrap();
     }
     for _ in 0..30 {
         bandits.record_reward(&arm_b, 1.0).unwrap();
     }
-// Arm C:low performer
+    // Arm C:low performer
     for _ in 0..100 {
         bandits.record_reward(&arm_c, 0.0).unwrap();
     }
@@ -328,11 +343,11 @@ fn bandit_optimisation_loop() {
         bandits.record_reward(&arm_c, 1.0).unwrap();
     }
 
-// Step 3:Get statistics
+    // Step 3:Get statistics
     let stats = bandits.get_stats();
     assert_eq!(stats.len(), 3);
 
-// Arm A should have highest conversion rate
+    // Arm A should have highest conversion rate
     let a_stats = stats.iter().find(|s| s.id == arm_a).unwrap();
     let b_stats = stats.iter().find(|s| s.id == arm_b).unwrap();
     let c_stats = stats.iter().find(|s| s.id == arm_c).unwrap();
@@ -340,8 +355,8 @@ fn bandit_optimisation_loop() {
     assert!(a_stats.conversion_rate() > b_stats.conversion_rate());
     assert!(b_stats.conversion_rate() > c_stats.conversion_rate());
 
-// Step 4:With epsilon=0, selection should consistently pick arm A
-// (It picks the one with best conversion rate)
+    // Step 4:With epsilon=0, selection should consistently pick arm A
+    // (It picks the one with best conversion rate)
     let selected = bandits.select_arm().unwrap();
     assert_eq!(selected, arm_a, "Should exploit best arm with epsilon=0");
 }

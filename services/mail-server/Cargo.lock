@@ -306,6 +306,7 @@ dependencies = [
 name = "api-server"
 version = "0.1.0"
 dependencies = [
+ "analytics",
  "anyhow",
  "apexmail-db",
  "apexmail-dns-resolver",
@@ -334,6 +335,7 @@ dependencies = [
  "mail-common",
  "metrics",
  "metrics-exporter-prometheus",
+ "observability-service",
  "ops-service",
  "rand 0.8.5",
  "redis",

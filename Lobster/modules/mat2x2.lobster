@@ -24,7 +24,7 @@ struct mat2x2 : float4
         return adjugate() / determinant()
 
     def trace():
-        return x*w
+        return x + w
 
 
 // The identity matrix:

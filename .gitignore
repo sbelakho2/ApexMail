@@ -57,10 +57,13 @@ lerna-debug.log*
 .env.*
 !.env.example
 !.env.sample
+!.env.production.example
 .vast_api_key
 vast_instance_id.txt
 *.pem
+!deploy/nginx/ssl/dhparam.pem
 *.key
+secrets/
 **/secrets/
 *.p12
 *.pfx

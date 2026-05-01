@@ -27,7 +27,7 @@ impl InboxPlacementService {
         Self { pool }
     }
 
-/// Get placement summary for a tenant.
+    /// Get placement summary for a tenant.
     pub async fn get_placement_summary(
         &self,
         tenant_id: &str,
@@ -67,13 +67,15 @@ impl InboxPlacementService {
             }
 
             let provider = classify_provider(domain);
-            let entry = by_provider.entry(provider).or_insert_with(|| ProviderPlacement {
-                provider: classify_provider(domain),
-                inbox: 0,
-                spam: 0,
-                bounced: 0,
-                inbox_rate: 0.0,
-            });
+            let entry = by_provider
+                .entry(provider)
+                .or_insert_with(|| ProviderPlacement {
+                    provider: classify_provider(domain),
+                    inbox: 0,
+                    spam: 0,
+                    bounced: 0,
+                    inbox_rate: 0.0,
+                });
 
             match placement.as_str() {
                 "inbox" => entry.inbox += cnt,
@@ -83,7 +85,7 @@ impl InboxPlacementService {
             }
         }
 
-// Compute inbox rates
+        // Compute inbox rates
         for entry in by_provider.values_mut() {
             let total = entry.inbox + entry.spam + entry.bounced;
             entry.inbox_rate = if total > 0 {
@@ -113,7 +115,7 @@ impl InboxPlacementService {
         })
     }
 
-/// Get placement trends over time.
+    /// Get placement trends over time.
     pub async fn get_trends(
         &self,
         tenant_id: &str,
@@ -176,7 +178,7 @@ pub fn classify_provider(domain: &str) -> String {
             return provider.to_string();
         }
     }
-// Group Microsoft together
+    // Group Microsoft together
     if lower.contains("microsoft") || lower.contains("live.com") {
         return "outlook.com".to_string();
     }
@@ -184,10 +186,7 @@ pub fn classify_provider(domain: &str) -> String {
 }
 
 /// Generate recommendations based on placement data.
-pub fn generate_recommendations(
-    overall_rate: f64,
-    providers: &[ProviderPlacement],
-) -> Vec<String> {
+pub fn generate_recommendations(overall_rate: f64, providers: &[ProviderPlacement]) -> Vec<String> {
     let mut recs = Vec::with_capacity(providers.len().saturating_add(3));
 
     if overall_rate < 0.90 {
@@ -208,7 +207,7 @@ pub fn generate_recommendations(
         }
     }
 
-// Gmail-specific
+    // Gmail-specific
     if let Some(gmail) = providers.iter().find(|p| p.provider == "gmail.com") {
         if gmail.inbox_rate < 0.85 {
             recs.push("Gmail placement is low. Ensure proper DMARC alignment and avoid engagement-bait content.".into());
@@ -286,7 +285,9 @@ mod tests {
             inbox_rate: 0.667,
         }];
         let recs = generate_recommendations(0.90, &providers);
-        assert!(recs.iter().any(|r| r.contains("gmail.com") || r.contains("Gmail")));
+        assert!(recs
+            .iter()
+            .any(|r| r.contains("gmail.com") || r.contains("Gmail")));
     }
 
     #[test]

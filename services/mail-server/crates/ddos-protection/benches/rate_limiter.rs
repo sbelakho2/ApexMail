@@ -61,7 +61,7 @@ impl SlidingWindow {
     #[inline]
     fn check(&mut self, key: &str) -> bool {
         let now = Instant::now();
-        
+
         if let Some((count, start)) = self.counters.get_mut(key) {
             if start.elapsed().as_millis() as u64 > self.window_ms {
                 *count = 1;
@@ -110,9 +110,7 @@ fn bench_sliding_window(c: &mut Criterion) {
 
     group.bench_function("check_single_key", |b| {
         let mut limiter = SlidingWindow::new(1000, 1000);
-        b.iter(|| {
-            black_box(limiter.check("192.168.1.1"))
-        })
+        b.iter(|| black_box(limiter.check("192.168.1.1")))
     });
 
     group.bench_function("check_many_keys", |b| {
@@ -136,7 +134,7 @@ fn bench_ip_hashing(c: &mut Criterion) {
     use std::hash::{Hash, Hasher};
 
     let mut group = c.benchmark_group("ip_hashing");
-    
+
     group.bench_function("hash_ipv4_string", |b| {
         let ip = "192.168.1.100";
         b.iter(|| {

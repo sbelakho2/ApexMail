@@ -9,9 +9,40 @@ These scripts are part of the current repeatable developer workflow and are refe
 - `browser_smoke.py`: visual/browser smoke validation used by the VS Code visual parity tasks.
 - `run-mail-server-tests.sh`: mail-server test wrapper used by focused cargo task definitions.
 - `run-compose-smoke.sh`: Docker Compose smoke validation helper.
+- `validate-compose-secrets.sh`: preflight check that required local Docker secret files exist and are non-empty before compose startup.
 - `dev-start.sh`: local development startup helper.
 - `bootstrap.sh`: repository/bootstrap helper.
-- `migrations/`: migration-related helpers.
+- `check-forbidden-patterns.sh`: quality gate that blocks known regression patterns in production Rust, Docker Compose, and GitHub workflow changes.
+- `update-checksums.sh`: refreshes `tools/checksums.sha256` from real local release artifacts instead of hand-editing hashes.
+
+## Quality Gates
+
+### Forbidden Pattern Gate
+
+Run `bash tools/check-forbidden-patterns.sh` before pushing changes that touch Rust runtime code, Docker Compose, or workflow files.
+
+The gate currently checks for:
+
+- `todo!()` and `unimplemented!()` in production Rust code
+- localhost fallback connection strings in service binaries
+- floating container image tags in compose files
+- unpinned GitHub Actions versions
+- CI jobs missing `timeout-minutes`
+- accidental resurrection of the removed legacy `apps/billing` package
+
+### Toolchain Checksums
+
+`tools/checksums.sha256` stores the release hashes that the current bootstrap flow can verify. The checked-in entries now cover the Go archives used by `tools/bootstrap.sh`; add other ecosystems only when the bootstrap path actually downloads and verifies them.
+
+Refresh the file from actual downloaded artifacts with:
+
+```bash
+bash tools/update-checksums.sh \
+	go-darwin-arm64 /path/to/go1.22.6.darwin-arm64.tar.gz \
+	go-linux-amd64 /path/to/go1.22.6.linux-amd64.tar.gz
+```
+
+The script rewrites the checksum file atomically so stale placeholder hashes do not linger across releases.
 
 ## Historical Audit And Remediation Scripts
 
@@ -27,3 +58,4 @@ These scripts are intentionally kept as historical/manual utilities, but they ar
 
 - If a script is part of an active workflow, give it a stable descriptive name and document it here.
 - If a script is a one-off investigation aid, treat it as temporary and archive or remove it once its purpose has ended.
+- If a new script is kept under `tools/`, add it to either the supported workflow list above or the historical/manual category in this section during the same change.

@@ -139,6 +139,7 @@ Routes mounted under /v1/auth are public at the router boundary for login, regis
 | /v1/admin/crm/leads | routes::admin::crm_leads |
 | /v1/admin/leads/discovery | routes::admin::leads_discovery |
 | /v1/admin/support | routes::admin::support |
+| /v1/admin/support/reply | routes::admin::support |
 | /v1/admin/support/analytics | routes::admin::support_analytics |
 | /v1/admin/system/health | routes::admin::system_health |
 

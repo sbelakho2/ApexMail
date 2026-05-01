@@ -69,13 +69,17 @@ async fn create_campaign(
 
     if body.name.is_empty() || body.subject.is_empty() {
         return Err(ApiError::Validation(vec![
-            "name and subject are required".into(),
+            "name and subject are required".into()
         ]));
     }
 
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let status = if body.scheduled_at.is_some() { "scheduled" } else { "draft" };
+    let status = if body.scheduled_at.is_some() {
+        "scheduled"
+    } else {
+        "draft"
+    };
     let template_id = body.template_id.clone();
 
     sqlx::query(
@@ -165,7 +169,8 @@ async fn resume_campaign(
     Path(id): Path<String>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
-    update_campaign_status_validated(&state, &auth.tenant_id, id, "sending", &["paused", "draft"]).await
+    update_campaign_status_validated(&state, &auth.tenant_id, id, "sending", &["paused", "draft"])
+        .await
 }
 
 async fn pause_campaign(
@@ -174,7 +179,14 @@ async fn pause_campaign(
     Path(id): Path<String>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
-    update_campaign_status_validated(&state, &auth.tenant_id, id, "paused", &["sending", "scheduled"]).await
+    update_campaign_status_validated(
+        &state,
+        &auth.tenant_id,
+        id,
+        "paused",
+        &["sending", "scheduled"],
+    )
+    .await
 }
 
 async fn update_campaign_status_validated(
@@ -184,13 +196,14 @@ async fn update_campaign_status_validated(
     new_status: &str,
     valid_current_states: &[&str],
 ) -> Result<Json<CampaignResponse>, ApiError> {
-// Fetch current campaign to validate state transition.
+    // Fetch current campaign to validate state transition.
     let current = fetch_campaign(state, tenant_id, id.clone()).await?;
-    
+
     if !valid_current_states.contains(&current.status.as_str()) {
-        return Err(ApiError::Validation(vec![
-            format!("cannot transition from '{}' to '{}'", current.status, new_status)
-        ]));
+        return Err(ApiError::Validation(vec![format!(
+            "cannot transition from '{}' to '{}'",
+            current.status, new_status
+        )]));
     }
 
     let result = sqlx::query(
@@ -241,7 +254,11 @@ impl From<CampaignRow> for CampaignResponse {
     }
 }
 
-async fn fetch_campaign(state: &AppState, tenant_id: &str, id: String) -> Result<CampaignRow, ApiError> {
+async fn fetch_campaign(
+    state: &AppState,
+    tenant_id: &str,
+    id: String,
+) -> Result<CampaignRow, ApiError> {
     sqlx::query_as::<_, CampaignRow>(
         "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
          FROM campaigns WHERE id = $1 AND tenant_id = $2",
@@ -262,7 +279,7 @@ async fn resend_campaign(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
 
-// Verify campaign exists and belongs to tenant, and is in a resendable state
+    // Verify campaign exists and belongs to tenant, and is in a resendable state
     let campaign_status = sqlx::query_scalar::<_, String>(
         "SELECT status FROM campaigns WHERE id = $1 AND tenant_id = $2",
     )
@@ -279,7 +296,7 @@ async fn resend_campaign(
         )));
     }
 
-// Create a new send job for failed/unsent recipients
+    // Create a new send job for failed/unsent recipients
     let new_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO campaign_jobs (id, campaign_id, tenant_id, status, created_at)
@@ -291,13 +308,11 @@ async fn resend_campaign(
     .execute(&state.db)
     .await?;
 
-// Update campaign status
-    sqlx::query(
-        "UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1",
-    )
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    // Update campaign status
+    sqlx::query("UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
 
     Ok(Json(serde_json::json!({
         "job_id": new_id,

@@ -4,13 +4,13 @@
 //! optimization, inference engine, send-time optimization (STO), and
 //! model training management.
 
-pub mod config;
-pub mod types;
 pub mod analytics;
 pub mod assistant;
 pub mod bandits;
+pub mod config;
 pub mod content;
 pub mod inference;
+pub mod routes;
 pub mod sto;
 pub mod training;
-pub mod routes;
+pub mod types;

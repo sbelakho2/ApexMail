@@ -13,8 +13,11 @@ impl QueryEngine {
         Self { pool }
     }
 
-/// Time-series data grouped by period.
-    pub async fn get_time_series(&self, query: &AnalyticsQuery) -> anyhow::Result<Vec<TimeSeriesPoint>> {
+    /// Time-series data grouped by period.
+    pub async fn get_time_series(
+        &self,
+        query: &AnalyticsQuery,
+    ) -> anyhow::Result<Vec<TimeSeriesPoint>> {
         let group_by = query.group_by.as_deref().unwrap_or("day");
         let trunc = time_trunc_expression(group_by);
         let limit = query.limit.unwrap_or(1000);
@@ -55,7 +58,7 @@ impl QueryEngine {
             .collect())
     }
 
-/// Aggregation by dimension.
+    /// Aggregation by dimension.
     pub async fn get_aggregation(
         &self,
         query: &AnalyticsQuery,
@@ -94,7 +97,7 @@ impl QueryEngine {
             .collect())
     }
 
-/// Funnel analysis:queued → sent → delivered → opened → clicked.
+    /// Funnel analysis:queued → sent → delivered → opened → clicked.
     pub async fn get_funnel_analysis(
         &self,
         query: &AnalyticsQuery,
@@ -102,7 +105,7 @@ impl QueryEngine {
         let rows = sqlx::query_as::<_, (String, i64)>(
             "SELECT event_type, COUNT(DISTINCT message_id) as cnt FROM events \
              WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp < $3 \
-             GROUP BY event_type"
+             GROUP BY event_type",
         )
         .bind(&query.tenant_id)
         .bind(query.start_date)
@@ -110,8 +113,7 @@ impl QueryEngine {
         .fetch_all(&self.pool)
         .await?;
 
-        let counts: std::collections::HashMap<String, i64> =
-            rows.into_iter().collect();
+        let counts: std::collections::HashMap<String, i64> = rows.into_iter().collect();
 
         let stages = ["queued", "sent", "delivered", "opened", "clicked"];
         let mut result: Vec<FunnelStage> = Vec::with_capacity(stages.len());
@@ -119,7 +121,11 @@ impl QueryEngine {
 
         for stage in &stages {
             let count = counts.get(*stage).copied().unwrap_or(0);
-            let first_count = if result.is_empty() { count.max(1) } else { result[0].count.max(1) };
+            let first_count = if result.is_empty() {
+                count.max(1)
+            } else {
+                result[0].count.max(1)
+            };
             let dropoff = match prev_count {
                 Some(prev) if prev > 0 => ((1.0 - count as f64 / prev as f64) * 100.0).round(),
                 _ => 0.0,
@@ -136,7 +142,7 @@ impl QueryEngine {
         Ok(result)
     }
 
-/// Deliverability metrics.
+    /// Deliverability metrics.
     pub async fn get_deliverability_metrics(
         &self,
         query: &AnalyticsQuery,
@@ -144,7 +150,7 @@ impl QueryEngine {
         let rows = sqlx::query_as::<_, (String, i64)>(
             "SELECT event_type, COUNT(*) as cnt FROM events \
              WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp < $3 \
-             GROUP BY event_type"
+             GROUP BY event_type",
         )
         .bind(&query.tenant_id)
         .bind(query.start_date)
@@ -152,8 +158,7 @@ impl QueryEngine {
         .fetch_all(&self.pool)
         .await?;
 
-        let counts: std::collections::HashMap<String, i64> =
-            rows.into_iter().collect();
+        let counts: std::collections::HashMap<String, i64> = rows.into_iter().collect();
 
         let sent = *counts.get("sent").unwrap_or(&0) as f64;
         let delivered = *counts.get("delivered").unwrap_or(&0) as f64;
@@ -175,7 +180,7 @@ impl QueryEngine {
         })
     }
 
-/// Engagement histogram.
+    /// Engagement histogram.
     pub async fn get_engagement_histogram(
         &self,
         query: &AnalyticsQuery,
@@ -216,7 +221,7 @@ impl QueryEngine {
             .collect())
     }
 
-/// Real-time stats from Redis.
+    /// Real-time stats from Redis.
     pub async fn get_realtime_stats(
         &self,
         redis: &deadpool_redis::Pool,
@@ -224,7 +229,14 @@ impl QueryEngine {
     ) -> anyhow::Result<serde_json::Value> {
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let hour = chrono::Utc::now().format("%H").to_string();
-        let event_types = ["sent", "delivered", "bounced", "opened", "clicked", "complained"];
+        let event_types = [
+            "sent",
+            "delivered",
+            "bounced",
+            "opened",
+            "clicked",
+            "complained",
+        ];
 
         let mut conn = redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut today_stats = serde_json::Map::new();

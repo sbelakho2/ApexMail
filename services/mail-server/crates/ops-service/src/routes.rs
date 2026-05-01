@@ -1,5 +1,6 @@
 //! Axum HTTP routes for the operations service.
 
+use axum::middleware::Next;
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -8,14 +9,13 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use axum::middleware::Next;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::time::{Duration, Instant};
 use std::sync::Arc;
-use uuid::Uuid;
-use dashmap::DashMap;
+use std::time::{Duration, Instant};
 use tower_http::timeout::TimeoutLayer;
+use uuid::Uuid;
 
 use crate::health::HealthChecker;
 use crate::incidents::IncidentManager;
@@ -102,11 +102,11 @@ async fn create_incident(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateIncidentPayload>,
 ) -> Result<(StatusCode, Json<CreateIncidentResponse>), (StatusCode, Json<serde_json::Value>)> {
-    match state.incidents.create_incident(
-        payload.title,
-        payload.severity,
-        payload.affected_services,
-    ).await {
+    match state
+        .incidents
+        .create_incident(payload.title, payload.severity, payload.affected_services)
+        .await
+    {
         Ok(id) => Ok((StatusCode::CREATED, Json(CreateIncidentResponse { id }))),
         Err(err) => {
             tracing::error!(error = %err, "Failed to create incident");
@@ -151,7 +151,7 @@ async fn get_trust(
         }
         state.trust_cache.remove(&tenant_id);
     }
-// Query real metrics from the analytics database
+    // Query real metrics from the analytics database
     let metrics_row: Option<(f64, f64, f64, i64, i32)> = sqlx::query_as(
         "WITH recent_stats AS (
             SELECT
@@ -190,7 +190,7 @@ async fn get_trust(
             volume: volume as u64,
         },
         None => {
-// Fallback for new tenants with no data
+            // Fallback for new tenants with no data
             TenantMetrics {
                 tenant_id,
                 bounce_rate: 0.0,
@@ -204,7 +204,7 @@ async fn get_trust(
 
     let score = TrustScorer::compute_score(&metrics);
 
-// Store the computed score in trust_metrics table for historical tracking
+    // Store the computed score in trust_metrics table for historical tracking
     if let Err(error) = sqlx::query(
         "INSERT INTO trust_metrics (tenant_id, trust_score, bounce_rate, complaint_rate, engagement_rate, send_volume, computed_at)
          VALUES ($1, $2, $3, $4, $5, $6, NOW())
@@ -284,8 +284,7 @@ mod tests {
                 db_url
                     .as_deref()
                     .unwrap_or("postgres://localhost/apexmail_test"),
-            )
-            ?;
+            )?;
         Ok(AppState {
             db: db.clone(),
             health: HealthChecker::new(100),
@@ -355,7 +354,10 @@ mod tests {
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["count"], serde_json::json!(1));
-        assert_eq!(payload["incidents"][0]["title"], serde_json::json!("Test incident"));
+        assert_eq!(
+            payload["incidents"][0]["title"],
+            serde_json::json!("Test incident")
+        );
         assert_eq!(payload["incidents"][0]["severity"], serde_json::json!("P2"));
     }
 

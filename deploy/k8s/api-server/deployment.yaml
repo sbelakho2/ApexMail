@@ -69,6 +69,10 @@ spec:
               value: "9090"
             - name: RUST_LOG
               value: "info"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "api-server"
             - name: BASE_URL
               valueFrom:
                 configMapKeyRef:
@@ -219,6 +223,15 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: api-server
+                topologyKey: kubernetes.io/hostname
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone

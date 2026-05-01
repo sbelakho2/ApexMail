@@ -57,7 +57,7 @@ impl OnboardingService {
         Self
     }
 
-/// Generate a quickstart guide for the requested language.
+    /// Generate a quickstart guide for the requested language.
     pub fn create_quickstart(&self, language: &str) -> QuickstartGuide {
         let (install_cmd, send_code) = match language {
             "python" => (
@@ -139,7 +139,9 @@ client.emails().send(SendEmailParams.builder()
                 QuickstartStep {
                     order: 2,
                     title: "Get your API key".into(),
-                    description: "Copy your API key from the ApexMail dashboard → Settings → API Keys.".into(),
+                    description:
+                        "Copy your API key from the ApexMail dashboard → Settings → API Keys."
+                            .into(),
                     code_snippet: None,
                 },
                 QuickstartStep {
@@ -151,14 +153,16 @@ client.emails().send(SendEmailParams.builder()
                 QuickstartStep {
                     order: 4,
                     title: "Verify domain".into(),
-                    description: "Add DNS records (SPF, DKIM, DMARC) to authenticate your sending domain.".into(),
+                    description:
+                        "Add DNS records (SPF, DKIM, DMARC) to authenticate your sending domain."
+                            .into(),
                     code_snippet: None,
                 },
             ],
         }
     }
 
-/// Get the default onboarding checklist for a tenant.
+    /// Get the default onboarding checklist for a tenant.
     pub fn get_checklist(&self, tenant_id: &str) -> OnboardingChecklist {
         let items = vec![
             ChecklistItem {
@@ -217,16 +221,16 @@ client.emails().send(SendEmailParams.builder()
         OnboardingChecklist {
             tenant_id: tenant_id.to_string(),
             items,
-            progress_pct: if total > 0.0 { (done / total) * 100.0 } else { 0.0 },
+            progress_pct: if total > 0.0 {
+                (done / total) * 100.0
+            } else {
+                0.0
+            },
         }
     }
 
-/// Mark a checklist step as complete (returns updated checklist).
-    pub fn mark_step_complete(
-        &self,
-        checklist: &mut OnboardingChecklist,
-        step_id: &str,
-    ) -> bool {
+    /// Mark a checklist step as complete (returns updated checklist).
+    pub fn mark_step_complete(&self, checklist: &mut OnboardingChecklist, step_id: &str) -> bool {
         let mut found = false;
         for item in &mut checklist.items {
             if item.id == step_id {
@@ -234,14 +238,18 @@ client.emails().send(SendEmailParams.builder()
                 found = true;
             }
         }
-// Recalculate progress.
+        // Recalculate progress.
         let total = checklist.items.len() as f32;
         let done = checklist.items.iter().filter(|i| i.completed).count() as f32;
-        checklist.progress_pct = if total > 0.0 { (done / total) * 100.0 } else { 0.0 };
+        checklist.progress_pct = if total > 0.0 {
+            (done / total) * 100.0
+        } else {
+            0.0
+        };
         found
     }
 
-/// Generate a short API key management guide.
+    /// Generate a short API key management guide.
     pub fn generate_api_key_guide(&self) -> String {
         let guide = r#"# ApexMail API Key Guide
 
@@ -293,7 +301,11 @@ mod tests {
         let svc = OnboardingService::new();
         let guide = svc.create_quickstart("python");
         assert_eq!(guide.steps.len(), 4);
-        assert!(guide.steps[0].code_snippet.as_ref().unwrap().contains("pip install"));
+        assert!(guide.steps[0]
+            .code_snippet
+            .as_ref()
+            .unwrap()
+            .contains("pip install"));
         assert_eq!(guide.estimated_minutes, 5);
     }
 
@@ -303,7 +315,7 @@ mod tests {
         let cl = svc.get_checklist("tenant_123");
         assert_eq!(cl.tenant_id, "tenant_123");
         assert_eq!(cl.items.len(), 6);
-// Only "create_account" is pre-completed.
+        // Only "create_account" is pre-completed.
         assert!((cl.progress_pct - (1.0 / 6.0) * 100.0).abs() < 0.1);
     }
 
@@ -312,10 +324,16 @@ mod tests {
         let svc = OnboardingService::new();
         let mut cl = svc.get_checklist("t1");
         assert!(svc.mark_step_complete(&mut cl, "generate_api_key"));
-        assert!(cl.items.iter().find(|i| i.id == "generate_api_key").unwrap().completed);
-// Progress should increase.
+        assert!(
+            cl.items
+                .iter()
+                .find(|i| i.id == "generate_api_key")
+                .unwrap()
+                .completed
+        );
+        // Progress should increase.
         assert!((cl.progress_pct - (2.0 / 6.0) * 100.0).abs() < 0.1);
-// Unknown step returns false.
+        // Unknown step returns false.
         assert!(!svc.mark_step_complete(&mut cl, "nonexistent"));
     }
 }

@@ -9,6 +9,7 @@ import sys
 from collections import defaultdict
 
 from common_paths import data_path
+from audit_output import emit
 
 # Canonical limits from plans.ts
 CANONICAL = {
@@ -99,17 +100,17 @@ def audit_training_data():
             except json.JSONDecodeError:
                 issues.append(f"Line {i}: Invalid JSON")
     
-    print("=" * 60)
-    print("TRAINING DATA AUDIT REPORT")
-    print("=" * 60)
-    print(f"\nTotal training examples analyzed: {i}")
-    print(f"\nPlan distribution:")
+    emit("=" * 60)
+    emit("TRAINING DATA AUDIT REPORT")
+    emit("=" * 60)
+    emit(f"\nTotal training examples analyzed: {i}")
+    emit(f"\nPlan distribution:")
     for plan, count in sorted(plan_counts.items()):
-        print(f"  {plan}: {count}")
+        emit(f"  {plan}: {count}")
     
-    print(f"\n{'=' * 60}")
-    print(f"ISSUES FOUND: {len(issues)}")
-    print("=" * 60)
+    emit(f"\n{'=' * 60}")
+    emit(f"ISSUES FOUND: {len(issues)}")
+    emit("=" * 60)
     
     if issues:
         # Group by issue type
@@ -120,41 +121,41 @@ def audit_training_data():
         other_issues = [x for x in issues if x not in email_issues + api_issues + team_issues + price_issues]
         
         if email_issues:
-            print(f"\n📧 Email Limit Issues ({len(email_issues)}):")
+            emit(f"\n📧 Email Limit Issues ({len(email_issues)}):")
             for issue in email_issues[:10]:
-                print(f"  {issue}")
+                emit(f"  {issue}")
             if len(email_issues) > 10:
-                print(f"  ... and {len(email_issues)-10} more")
+                emit(f"  ... and {len(email_issues)-10} more")
                 
         if api_issues:
-            print(f"\n🔌 API Limit Issues ({len(api_issues)}):")
+            emit(f"\n🔌 API Limit Issues ({len(api_issues)}):")
             for issue in api_issues[:10]:
-                print(f"  {issue}")
+                emit(f"  {issue}")
             if len(api_issues) > 10:
-                print(f"  ... and {len(api_issues)-10} more")
+                emit(f"  ... and {len(api_issues)-10} more")
                 
         if team_issues:
-            print(f"\n👥 Team Limit Issues ({len(team_issues)}):")
+            emit(f"\n👥 Team Limit Issues ({len(team_issues)}):")
             for issue in team_issues[:10]:
-                print(f"  {issue}")
+                emit(f"  {issue}")
             if len(team_issues) > 10:
-                print(f"  ... and {len(team_issues)-10} more")
+                emit(f"  ... and {len(team_issues)-10} more")
                 
         if price_issues:
-            print(f"\n💰 Price Issues ({len(price_issues)}):")
+            emit(f"\n💰 Price Issues ({len(price_issues)}):")
             for issue in price_issues[:10]:
-                print(f"  {issue}")
+                emit(f"  {issue}")
             if len(price_issues) > 10:
-                print(f"  ... and {len(price_issues)-10} more")
+                emit(f"  ... and {len(price_issues)-10} more")
                 
         if other_issues:
-            print(f"\n⚠️ Other Issues ({len(other_issues)}):")
+            emit(f"\n⚠️ Other Issues ({len(other_issues)}):")
             for issue in other_issues[:10]:
-                print(f"  {issue}")
+                emit(f"  {issue}")
             if len(other_issues) > 10:
-                print(f"  ... and {len(other_issues)-10} more")
+                emit(f"  ... and {len(other_issues)-10} more")
     else:
-        print("\n✅ No issues found!")
+        emit("\n✅ No issues found!")
     
     return issues
 

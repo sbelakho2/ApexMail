@@ -249,7 +249,7 @@ We follow [Semantic Versioning](https://semver.org/):
 ## Getting Help
 
 - **Documentation**: Read the docs first
-- **Discussions**: [GitHub Discussions](https://github.com/Bel-Consulting-OU/ApexMail/discussions)
+- **Discussions**: [GitHub Discussions](https://github.com/sbelakho2/ApexMail/discussions)
 - **Discord**: Join our community server
 - **Issues**: For bugs and features
 

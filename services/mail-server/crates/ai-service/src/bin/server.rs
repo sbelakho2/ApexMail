@@ -7,7 +7,7 @@ use ai_service::{config::AiConfig, routes};
 
 #[tokio::main]
 async fn main() {
-// Initialise structured logging
+    // Initialise structured logging
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -28,7 +28,13 @@ async fn main() {
         "starting AI service"
     );
 
-    let state = Arc::new(routes::AppState::new(config));
+    let state = match routes::AppState::new(config) {
+        Ok(state) => Arc::new(state),
+        Err(err) => {
+            tracing::error!(error = %err, "failed to initialize AI service state");
+            return;
+        }
+    };
     let app = routes::build_router(state);
 
     let bind = std::env::var("AI_BIND").unwrap_or_else(|_| "0.0.0.0:3012".into());
@@ -42,7 +48,9 @@ async fn main() {
     tracing::info!(%bind, "AI service listening");
 
     let shutdown = async {
-        let ctrl_c = async { let _ = tokio::signal::ctrl_c().await; };
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         #[cfg(unix)]
         let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

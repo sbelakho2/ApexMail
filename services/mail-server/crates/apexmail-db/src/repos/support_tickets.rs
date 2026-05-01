@@ -9,7 +9,7 @@ use crate::types::SupportTicket;
 pub struct SupportTicketsRepo;
 
 impl SupportTicketsRepo {
-/// Create a new support ticket.
+    /// Create a new support ticket.
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -21,7 +21,7 @@ impl SupportTicketsRepo {
             "INSERT INTO support_tickets \
              (id, tenant_id, subject, description, priority, status, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, 'open', NOW(), NOW()) \
-             RETURNING *"
+             RETURNING *",
         )
         .bind(Uuid::new_v4())
         .bind(tenant_id)
@@ -32,14 +32,14 @@ impl SupportTicketsRepo {
         .await
     }
 
-/// Find a support ticket by ID.
+    /// Find a support ticket by ID.
     pub async fn find_by_id(
         pool: &PgPool,
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<SupportTicket>, sqlx::Error> {
         sqlx::query_as::<_, SupportTicket>(
-            "SELECT * FROM support_tickets WHERE id = $1 AND tenant_id = $2"
+            "SELECT * FROM support_tickets WHERE id = $1 AND tenant_id = $2",
         )
         .bind(id)
         .bind(tenant_id)
@@ -47,7 +47,7 @@ impl SupportTicketsRepo {
         .await
     }
 
-/// List support tickets for a tenant.
+    /// List support tickets for a tenant.
     pub async fn list(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -64,7 +64,7 @@ impl SupportTicketsRepo {
         .await
     }
 
-/// Update support ticket status.
+    /// Update support ticket status.
     pub async fn update_status(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -74,7 +74,7 @@ impl SupportTicketsRepo {
     ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             "UPDATE support_tickets SET status = $1, assigned_to = $2, updated_at = NOW() \
-             WHERE id = $3 AND tenant_id = $4"
+             WHERE id = $3 AND tenant_id = $4",
         )
         .bind(status)
         .bind(assigned_to)

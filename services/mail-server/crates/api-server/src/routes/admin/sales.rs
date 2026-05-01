@@ -5,10 +5,9 @@ use super::super::helpers::{column_exists, table_exists};
 use axum::extract::{Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use deadpool_redis::redis;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Mutex;
-use std::time::Instant;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -223,47 +222,69 @@ async fn list_leads(
         .push_bind(offset);
 
     let rows: Vec<(
-        String, String, String, Option<String>, Option<String>,
-        String, String, Option<i32>, Option<String>,
-        serde_json::Value, Option<f64>,
-        chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        Option<i32>,
+        Option<String>,
+        serde_json::Value,
+        Option<f64>,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
     )> = leads_builder.build_query_as().fetch_all(&state.db).await?;
 
     let leads: Vec<LeadEntry> = rows
         .into_iter()
-        .map(|(id, company, domain, email, name, status, source, score, notes, tags, deal, ca, ua)| {
-            LeadEntry {
+        .map(
+            |(
                 id,
-                company_name: company,
+                company,
                 domain,
-                contact_email: email,
-                contact_name: name,
+                email,
+                name,
                 status,
                 source,
                 score,
                 notes,
-                tags: serde_json::from_value(tags).unwrap_or_default(),
-                deal_value: deal,
-                created_at: ca.to_rfc3339(),
-                updated_at: ua.to_rfc3339(),
-            }
-        })
+                tags,
+                deal,
+                ca,
+                ua,
+            )| {
+                LeadEntry {
+                    id,
+                    company_name: company,
+                    domain,
+                    contact_email: email,
+                    contact_name: name,
+                    status,
+                    source,
+                    score,
+                    notes,
+                    tags: serde_json::from_value(tags).unwrap_or_default(),
+                    deal_value: deal,
+                    created_at: ca.to_rfc3339(),
+                    updated_at: ua.to_rfc3339(),
+                }
+            },
+        )
         .collect();
 
-// Aggregate stats
+    // Aggregate stats
     let provider_stats: Vec<(String, String)> = sqlx::query_as(
         "SELECT COALESCE(source, 'unknown'), COUNT(*)::text FROM sales_leads GROUP BY source",
     )
     .fetch_all(&state.db)
-    .await
-    ?;
+    .await?;
 
-    let source_stats: Vec<(String, String)> = sqlx::query_as(
-        "SELECT status, COUNT(*)::text FROM sales_leads GROUP BY status",
-    )
-    .fetch_all(&state.db)
-    .await
-    ?;
+    let source_stats: Vec<(String, String)> =
+        sqlx::query_as("SELECT status, COUNT(*)::text FROM sales_leads GROUP BY status")
+            .fetch_all(&state.db)
+            .await?;
 
     let stats_by_provider: serde_json::Value = provider_stats
         .into_iter()
@@ -277,7 +298,12 @@ async fn list_leads(
         .collect::<serde_json::Map<String, serde_json::Value>>()
         .into();
 
-    Ok(Json(LeadsResponse { leads, total, stats_by_provider, stats_by_source }))
+    Ok(Json(LeadsResponse {
+        leads,
+        total,
+        stats_by_provider,
+        stats_by_source,
+    }))
 }
 
 // ──────────────────────────────────────────
@@ -318,15 +344,22 @@ async fn update_leads(
 
     if let Some(ref status) = body.status {
         let allowed = [
-            "new", "prospect", "contacted", "qualified", "engaged",
-            "demo_scheduled", "converted", "lost", "unqualified",
+            "new",
+            "prospect",
+            "contacted",
+            "qualified",
+            "engaged",
+            "demo_scheduled",
+            "converted",
+            "lost",
+            "unqualified",
         ];
         if !allowed.contains(&status.as_str()) {
             return Err(ApiError::Validation(vec!["Invalid status".into()]));
         }
     }
 
-// Build dynamic SET clause
+    // Build dynamic SET clause
     let mut sets: Vec<String> = Vec::new();
     let mut bind_idx = 2u32; // $1 = ids array
 
@@ -368,12 +401,24 @@ async fn update_leads(
 
     let mut query = sqlx::query(&sql).bind(&ids);
 
-    if let Some(ref status) = body.status { query = query.bind(status); }
-    if let Some(ref notes) = body.notes { query = query.bind(notes); }
-    if let Some(ref tags) = body.tags { query = query.bind(serde_json::json!(tags)); }
-    if let Some(ref email) = body.contact_email { query = query.bind(email); }
-    if let Some(ref name) = body.contact_name { query = query.bind(name); }
-    if let Some(deal) = body.deal_value { query = query.bind(deal); }
+    if let Some(ref status) = body.status {
+        query = query.bind(status);
+    }
+    if let Some(ref notes) = body.notes {
+        query = query.bind(notes);
+    }
+    if let Some(ref tags) = body.tags {
+        query = query.bind(serde_json::json!(tags));
+    }
+    if let Some(ref email) = body.contact_email {
+        query = query.bind(email);
+    }
+    if let Some(ref name) = body.contact_name {
+        query = query.bind(name);
+    }
+    if let Some(deal) = body.deal_value {
+        query = query.bind(deal);
+    }
 
     let result = query.execute(&state.db).await?;
 
@@ -381,7 +426,11 @@ async fn update_leads(
         &state.db,
         "control_plane.sales.leads_updated",
         "sales_lead",
-        if ids.len() == 1 { Some(ids[0].as_str()) } else { None },
+        if ids.len() == 1 {
+            Some(ids[0].as_str())
+        } else {
+            None
+        },
         json!({
             "ids": ids,
             "updated": result.rows_affected(),
@@ -394,6 +443,8 @@ async fn update_leads(
         }),
     )
     .await;
+
+    crate::routes::admin::dashboard::invalidate_dashboard_cache();
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -447,12 +498,11 @@ async fn enrich_leads(
         })));
     }
 
-    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, contact_email, domain FROM sales_leads WHERE id = ANY($1)",
-    )
-    .bind(&body.lead_ids)
-    .fetch_all(&state.db)
-    .await?;
+    let rows: Vec<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT id, contact_email, domain FROM sales_leads WHERE id = ANY($1)")
+            .bind(&body.lead_ids)
+            .fetch_all(&state.db)
+            .await?;
 
     let mut results = Vec::new();
     let mut skipped = Vec::new();
@@ -481,7 +531,10 @@ async fn enrich_leads(
         };
 
         let response = with_internal_service_auth(
-            state.http_client.post(format!("{base_url}/enrich")).json(&payload),
+            state
+                .http_client
+                .post(format!("{base_url}/enrich"))
+                .json(&payload),
             &state,
         )
         .timeout(std::time::Duration::from_secs(30))
@@ -565,9 +618,17 @@ async fn list_campaigns(
     let has_recipients = table_exists(&state.db, "campaign_recipients").await;
 
     let rows: Vec<(
-        String, String, String, String,
-        String, String, String, String, String,
-        chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
     )> = if has_recipients {
         sqlx::query_as(
             "SELECT c.id, c.name, c.status, COALESCE(c.campaign_type, 'email'),
@@ -597,9 +658,11 @@ async fn list_campaigns(
 
     let campaigns: Vec<Campaign> = rows
         .into_iter()
-        .map(|(id, name, status, ctype, total, sent, opened, clicked, replied, ca, ua)| {
-            Campaign {
-                id, name, status,
+        .map(
+            |(id, name, status, ctype, total, sent, opened, clicked, replied, ca, ua)| Campaign {
+                id,
+                name,
+                status,
                 campaign_type: ctype,
                 total_recipients: total.parse().unwrap_or(0),
                 sent: sent.parse().unwrap_or(0),
@@ -608,8 +671,8 @@ async fn list_campaigns(
                 replied: replied.parse().unwrap_or(0),
                 created_at: ca.to_rfc3339(),
                 updated_at: ua.to_rfc3339(),
-            }
-        })
+            },
+        )
         .collect();
 
     Ok(Json(campaigns))
@@ -640,11 +703,12 @@ async fn update_campaign(
         _ => return Err(ApiError::Validation(vec!["Invalid action".into()])),
     };
 
-    let result = sqlx::query("UPDATE drip_campaigns SET status = $1, updated_at = NOW() WHERE id = $2")
-        .bind(new_status)
-        .bind(&body.id)
-        .execute(&state.db)
-        .await?;
+    let result =
+        sqlx::query("UPDATE drip_campaigns SET status = $1, updated_at = NOW() WHERE id = $2")
+            .bind(new_status)
+            .bind(&body.id)
+            .execute(&state.db)
+            .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("campaign not found".into()));
@@ -661,6 +725,8 @@ async fn update_campaign(
         }),
     )
     .await;
+
+    crate::routes::admin::dashboard::invalidate_dashboard_cache();
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -695,11 +761,15 @@ async fn run_discovery(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
     if body.sources.is_empty() {
-        return Err(ApiError::Validation(vec!["At least one source required".into()]));
+        return Err(ApiError::Validation(vec![
+            "At least one source required".into()
+        ]));
     }
 
     let job_id = apexmail_lib::id::generate_id("disc", 22);
-    if !table_exists(&state.db, "sales_leads").await || !table_exists(&state.db, "enriched_companies").await {
+    if !table_exists(&state.db, "sales_leads").await
+        || !table_exists(&state.db, "enriched_companies").await
+    {
         log_sales_audit(
             &state.db,
             "control_plane.sales.discovery_run",
@@ -723,7 +793,13 @@ async fn run_discovery(
     }
 
     let limit = i64::from(body.max_pages.clamp(1, 10)) * 25;
-    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
         "SELECT tenant_id, domain, company_name, industry, description
          FROM enriched_companies
          WHERE tenant_id = $2
@@ -809,6 +885,8 @@ async fn run_discovery(
     )
     .await;
 
+    crate::routes::admin::dashboard::invalidate_dashboard_cache();
+
     Ok(Json(serde_json::json!({
         "jobId": job_id,
         "status": "completed",
@@ -822,9 +900,38 @@ async fn run_discovery(
 // Outreach
 // ──────────────────────────────────────────
 
-static OUTREACH_LIMITER: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
 const OUTREACH_RATE_LIMIT: u32 = 5;
 const OUTREACH_RATE_WINDOW_SECS: u64 = 600;
+
+fn build_outreach_rate_limit_key(tenant_id: &str) -> String {
+    format!("apexmail:admin:sales:outreach_rate_limit:{tenant_id}")
+}
+
+async fn check_outreach_rate_limit(state: &AppState, tenant_id: &str) -> Result<(), ApiError> {
+    let mut conn = state.redis.get().await?;
+    let ttl_secs = OUTREACH_RATE_WINDOW_SECS.max(1) as i64;
+    let key = build_outreach_rate_limit_key(tenant_id);
+    let script = redis::Script::new(
+        r#"
+        local count = redis.call('INCR', KEYS[1])
+        if count == 1 then
+            redis.call('EXPIRE', KEYS[1], ARGV[1])
+        end
+        return count
+        "#,
+    );
+    let count: u32 = script
+        .key(key)
+        .arg(ttl_secs)
+        .invoke_async(&mut *conn)
+        .await?;
+
+    if count > OUTREACH_RATE_LIMIT {
+        return Err(ApiError::RateLimited);
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -847,36 +954,21 @@ async fn start_outreach(
         return Err(ApiError::Validation(vec!["1-100 lead IDs allowed".into()]));
     }
 
-// In-memory rate limiter
-    {
-        if let Ok(mut guard) = OUTREACH_LIMITER.lock() {
-            let now = Instant::now();
-            match guard.as_mut() {
-                Some((ref ts, ref mut count)) if now.duration_since(*ts).as_secs() < OUTREACH_RATE_WINDOW_SECS => {
-                    if *count >= OUTREACH_RATE_LIMIT {
-                        return Err(ApiError::RateLimited);
-                    }
-                    *count += 1;
-                }
-                _ => {
-                    *guard = Some((now, 1));
-                }
-            }
-        }
-    }
+    check_outreach_rate_limit(&state, &auth.tenant_id).await?;
 
     if !table_exists(&state.db, "sales_leads").await {
-        return Err(ApiError::ServiceUnavailable("sales leads unavailable".into()));
+        return Err(ApiError::ServiceUnavailable(
+            "sales leads unavailable".into(),
+        ));
     }
 
     ensure_campaign_tables(&state.db).await?;
 
-    let lead_rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT id, contact_email FROM sales_leads WHERE id = ANY($1)",
-    )
-    .bind(&body.lead_ids)
-    .fetch_all(&state.db)
-    .await?;
+    let lead_rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, contact_email FROM sales_leads WHERE id = ANY($1)")
+            .bind(&body.lead_ids)
+            .fetch_all(&state.db)
+            .await?;
 
     let mut valid_recipients = Vec::new();
     let mut skipped = Vec::new();
@@ -905,7 +997,11 @@ async fn start_outreach(
     let template = body.template_name.unwrap_or_else(|| "default".into());
     let campaign_id = apexmail_lib::id::generate_id("cmp", 22);
     let campaign_name = if let Some(ref offer_id) = body.offer_id {
-        format!("{} - {}", offer_id.replace('_', " "), chrono::Utc::now().date_naive())
+        format!(
+            "{} - {}",
+            offer_id.replace('_', " "),
+            chrono::Utc::now().date_naive()
+        )
     } else {
         format!("{} - {}", template, chrono::Utc::now().date_naive())
     };
@@ -962,6 +1058,7 @@ async fn start_outreach(
     )
     .await;
 
+    crate::routes::admin::dashboard::invalidate_dashboard_cache();
     Ok(Json(serde_json::json!({
         "success": true,
         "campaignId": campaign_id,
@@ -1025,7 +1122,7 @@ async fn save_settings(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-// Ensure table exists
+    // Ensure table exists
     if let Err(e) = sqlx::query(
         "CREATE TABLE IF NOT EXISTS sales_settings (
             id SERIAL PRIMARY KEY,
@@ -1041,7 +1138,7 @@ async fn save_settings(
         tracing::warn!(error = %e, "Failed to ensure sales_settings table exists");
     }
 
-// Upsert settings (single row)
+    // Upsert settings (single row)
     sqlx::query(
         "INSERT INTO sales_settings (id, scoring_weights, schedule, notifications, updated_at)
          VALUES (1, $1, $2, $3, NOW())
@@ -1071,4 +1168,17 @@ async fn save_settings(
     .await;
 
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_outreach_rate_limit_key_scopes_by_tenant() {
+        assert_eq!(
+            build_outreach_rate_limit_key("tenant_123"),
+            "apexmail:admin:sales:outreach_rate_limit:tenant_123"
+        );
+    }
 }

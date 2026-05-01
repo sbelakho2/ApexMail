@@ -15,6 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use apexmail_lib::{ErrorCode, ErrorEnvelope};
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
@@ -24,62 +27,56 @@ use axum::{
     Json, Router,
 };
 use chrono::Datelike;
-use apexmail_lib::{ErrorCode, ErrorEnvelope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
-use axum::middleware::Next;
-use axum::response::Response;
 
 use crate::{
     config::{BillingConfig, PaygCalculationError, PaygPricing},
-    invoices,
-    plans,
-    subscriptions,
+    invoices, plans, subscriptions,
     types::{BillingInterval, MeterEventType, Plan, PlanFeatures, SupportLevel},
-    usage,
-    AppState,
+    usage, AppState,
 };
 
 /// Build the full Axum router for billing.
 pub fn router(state: Arc<AppState>) -> Router {
     let shared = state.clone();
     Router::new()
-    .merge(crate::stripe_webhooks::router())
-// Plans
-    .route("/plans", get(list_plans).post(create_plan))
-    .route("/plans/tenant/current", get(get_current_plan))
-    .route("/plans/features/:feature", get(get_plan_feature))
-    .route("/plans/tenant/features", get(get_plan_features))
-    .route("/plans/tenant/limits", get(get_plan_limits))
-    .route("/plans/compare/:planId1/:planId2", get(compare_plans))
-    .route("/plans/seed", post(seed_plans))
-    .route("/plans/:planId", get(get_plan).patch(update_plan))
-    .route("/payg/pricing", get(get_payg_pricing))
-    .route("/payg/estimate", post(estimate_payg_cost))
-    .route("/payg/usage", get(get_payg_usage))
-    .route("/overage/estimate", post(estimate_overage_cost))
-    .route("/switch-plan", post(switch_plan))
-    .route("/cancel", post(cancel_subscription_request))
-    .route("/reports/revenue", get(get_revenue_report))
-    .route("/reports/mrr", get(get_mrr_report))
-    .route("/reports/churn", get(get_churn_report))
-    .route("/reports/dunning", get(get_dunning_report))
-    .route("/reports/costs", get(get_cost_report))
-    .route("/export", get(export_billing_data))
-// Usage
+        .merge(crate::stripe_webhooks::router())
+        // Plans
+        .route("/plans", get(list_plans).post(create_plan))
+        .route("/plans/tenant/current", get(get_current_plan))
+        .route("/plans/features/:feature", get(get_plan_feature))
+        .route("/plans/tenant/features", get(get_plan_features))
+        .route("/plans/tenant/limits", get(get_plan_limits))
+        .route("/plans/compare/:planId1/:planId2", get(compare_plans))
+        .route("/plans/seed", post(seed_plans))
+        .route("/plans/:planId", get(get_plan).patch(update_plan))
+        .route("/payg/pricing", get(get_payg_pricing))
+        .route("/payg/estimate", post(estimate_payg_cost))
+        .route("/payg/usage", get(get_payg_usage))
+        .route("/overage/estimate", post(estimate_overage_cost))
+        .route("/switch-plan", post(switch_plan))
+        .route("/cancel", post(cancel_subscription_request))
+        .route("/reports/revenue", get(get_revenue_report))
+        .route("/reports/mrr", get(get_mrr_report))
+        .route("/reports/churn", get(get_churn_report))
+        .route("/reports/dunning", get(get_dunning_report))
+        .route("/reports/costs", get(get_cost_report))
+        .route("/export", get(export_billing_data))
+        // Usage
         .route("/usage", get(get_usage))
         .route("/usage/record", post(record_usage))
         .route("/usage/record-checked", post(record_usage_checked))
-// Invoices
+        // Invoices
         .route("/invoices", get(list_invoices))
-    .route("/invoices/:id", get(get_invoice))
-// Subscription
+        .route("/invoices/:id", get(get_invoice))
+        // Subscription
         .route("/subscription", get(get_subscription))
-// Quota
+        // Quota
         .route("/quota", get(check_quota))
-// Health
+        // Health
         .route("/health", get(health))
         .with_state(state)
         .layer(middleware::from_fn_with_state(shared, require_service_auth))
@@ -95,18 +92,12 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
 
-fn error_response(
-    status: StatusCode,
-    code: ErrorCode,
-    message: impl Into<String>,
-) -> Response {
+fn error_response(status: StatusCode, code: ErrorCode, message: impl Into<String>) -> Response {
     (status, Json(ErrorEnvelope::new(code, message))).into_response()
 }
 
 /// GET /plans
-async fn list_plans(
-    State(state): State<Arc<AppState>>,
-) -> Result<Response, ApiError> {
+async fn list_plans(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
     let plans = plans::get_active_plans(&state.db).await?;
     let plans: Vec<LegacyPlanDto> = plans.into_iter().map(Into::into).collect();
     Ok(Json(serde_json::json!({ "plans": plans })).into_response())
@@ -119,7 +110,11 @@ async fn get_plan(
 ) -> Result<Response, ApiError> {
     let plan = plans::get_plan_by_name(&state.db, &plan_id).await?;
     match plan {
-        Some(plan) => Ok((StatusCode::OK, Json(to_json_value(LegacyPlanDto::from(plan))?)).into_response()),
+        Some(plan) => Ok((
+            StatusCode::OK,
+            Json(to_json_value(LegacyPlanDto::from(plan))?),
+        )
+            .into_response()),
         None => Ok(error_response(
             StatusCode::NOT_FOUND,
             ErrorCode::NotFound,
@@ -364,7 +359,9 @@ fn parse_legacy_support_level(level: &str) -> SupportLevel {
     }
 }
 
-fn legacy_feature_map(features: &LegacyPlanFeaturesPayload) -> serde_json::Map<String, serde_json::Value> {
+fn legacy_feature_map(
+    features: &LegacyPlanFeaturesPayload,
+) -> serde_json::Map<String, serde_json::Value> {
     serde_json::to_value(features)
         .ok()
         .and_then(|value| value.as_object().cloned())
@@ -374,7 +371,9 @@ fn legacy_feature_map(features: &LegacyPlanFeaturesPayload) -> serde_json::Map<S
 fn truthy_json(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Bool(value) => *value,
-        serde_json::Value::Number(value) => value.as_i64().map(|n| n != 0)
+        serde_json::Value::Number(value) => value
+            .as_i64()
+            .map(|n| n != 0)
             .or_else(|| value.as_u64().map(|n| n != 0))
             .or_else(|| value.as_f64().map(|n| n != 0.0))
             .unwrap_or(false),
@@ -396,18 +395,20 @@ fn comparison_differences(
 ) -> Vec<serde_json::Value> {
     let features1 = legacy_feature_map(plan1);
     let features2 = legacy_feature_map(plan2);
-    let mut keys: Vec<String> = features1
-        .keys()
-        .chain(features2.keys())
-        .cloned()
-        .collect();
+    let mut keys: Vec<String> = features1.keys().chain(features2.keys()).cloned().collect();
     keys.sort();
     keys.dedup();
 
     keys.into_iter()
         .filter_map(|feature| {
-            let value1 = features1.get(&feature).cloned().unwrap_or(serde_json::Value::Bool(false));
-            let value2 = features2.get(&feature).cloned().unwrap_or(serde_json::Value::Bool(false));
+            let value1 = features1
+                .get(&feature)
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(false));
+            let value2 = features2
+                .get(&feature)
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(false));
             if value1 == value2 {
                 None
             } else {
@@ -446,7 +447,8 @@ async fn get_plan_feature(
     Ok(Json(serde_json::json!({
         "feature": feature,
         "hasAccess": has_access,
-    })).into_response())
+    }))
+    .into_response())
 }
 
 async fn get_plan_features(
@@ -455,7 +457,10 @@ async fn get_plan_features(
 ) -> Result<Response, ApiError> {
     let plan = plans::get_plan_for_tenant(&state.db, &q.tenant_id).await?;
     match plan {
-        Some(plan) => Ok(Json(to_json_value(LegacyPlanFeaturesPayload::from(plan.features))?).into_response()),
+        Some(plan) => Ok(Json(to_json_value(LegacyPlanFeaturesPayload::from(
+            plan.features,
+        ))?)
+        .into_response()),
         None => Ok(Json(serde_json::json!({})).into_response()),
     }
 }
@@ -506,7 +511,8 @@ async fn compare_plans(
                         &LegacyPlanFeaturesPayload::from(plan2.features),
                     ),
                 }
-            })).into_response())
+            }))
+            .into_response())
         }
         _ => Ok(error_response(
             StatusCode::NOT_FOUND,
@@ -535,9 +541,14 @@ async fn create_plan(
             stripe_price_id_monthly: body.stripe_price_id_monthly,
             stripe_price_id_yearly: body.stripe_price_id_yearly,
         },
-    ).await?;
+    )
+    .await?;
 
-    Ok((StatusCode::CREATED, Json(to_json_value(LegacyPlanDto::from(plan))?)).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(to_json_value(LegacyPlanDto::from(plan))?),
+    )
+        .into_response())
 }
 
 async fn update_plan(
@@ -574,17 +585,20 @@ async fn update_plan(
                 .unwrap_or(existing.api_call_limit),
             sort_order: existing.sort_order,
             features: body.features.map(Into::into).unwrap_or(existing.features),
-            stripe_price_id_monthly: body.stripe_price_id_monthly.or(existing.stripe_price_id_monthly),
-            stripe_price_id_yearly: body.stripe_price_id_yearly.or(existing.stripe_price_id_yearly),
+            stripe_price_id_monthly: body
+                .stripe_price_id_monthly
+                .or(existing.stripe_price_id_monthly),
+            stripe_price_id_yearly: body
+                .stripe_price_id_yearly
+                .or(existing.stripe_price_id_yearly),
         },
-    ).await?;
+    )
+    .await?;
 
     Ok(Json(to_json_value(LegacyPlanDto::from(updated))?).into_response())
 }
 
-async fn seed_plans(
-    State(state): State<Arc<AppState>>,
-) -> Result<Response, ApiError> {
+async fn seed_plans(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
     for plan in plans::default_plans() {
         plans::upsert_plan(&state.db, &plan).await?;
     }
@@ -659,7 +673,11 @@ fn legacy_payg_email_pricing(pricing: &PaygPricing) -> Vec<LegacyPaygEmailTierDt
         .email_tiers
         .iter()
         .map(|tier| LegacyPaygEmailTierDto {
-            up_to: if tier.up_to == u64::MAX { None } else { Some(tier.up_to) },
+            up_to: if tier.up_to == u64::MAX {
+                None
+            } else {
+                Some(tier.up_to)
+            },
             price_per_email_millicents: tier.price_per_email_millicents,
         })
         .collect()
@@ -693,7 +711,8 @@ fn legacy_payg_cost(
     emails_sent: u64,
     api_calls: u64,
 ) -> Result<LegacyPaygCostDto, PaygCalculationError> {
-    let (email_cost_cents, api_cost_cents, total_cost_cents) = pricing.calculate(emails_sent, api_calls)?;
+    let (email_cost_cents, api_cost_cents, total_cost_cents) =
+        pricing.calculate(emails_sent, api_calls)?;
 
     Ok(LegacyPaygCostDto {
         email_cost_cents,
@@ -701,7 +720,9 @@ fn legacy_payg_cost(
         total_cost_cents: total_cost_cents.max(LEGACY_PAYG_MINIMUM_MONTHLY_CHARGE_CENTS),
         email_cost_usd: cents_to_usd_string(email_cost_cents),
         api_cost_usd: cents_to_usd_string(api_cost_cents),
-        total_cost_usd: cents_to_usd_string(total_cost_cents.max(LEGACY_PAYG_MINIMUM_MONTHLY_CHARGE_CENTS)),
+        total_cost_usd: cents_to_usd_string(
+            total_cost_cents.max(LEGACY_PAYG_MINIMUM_MONTHLY_CHARGE_CENTS),
+        ),
     })
 }
 
@@ -754,7 +775,8 @@ async fn estimate_payg_cost(
         },
         "cost": cost,
         "pricing": legacy_payg_pricing_payload(&pricing),
-    })).into_response())
+    }))
+    .into_response())
 }
 
 async fn estimate_overage_cost(
@@ -773,7 +795,8 @@ async fn estimate_overage_cost(
         },
         "overageCostCents": overage_cost_cents,
         "overageCostUsd": cents_to_usd_string(overage_cost_cents),
-    })).into_response())
+    }))
+    .into_response())
 }
 
 async fn get_payg_usage(
@@ -781,13 +804,8 @@ async fn get_payg_usage(
     Query(q): Query<TenantIdQuery>,
 ) -> Result<Response, ApiError> {
     let now = chrono::Utc::now();
-    let month_start_date = now
-        .date_naive()
-        .with_day(1)
-        .unwrap_or(now.date_naive());
-    let period_start = month_start_date
-        .and_time(chrono::NaiveTime::MIN)
-        .and_utc();
+    let month_start_date = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+    let period_start = month_start_date.and_time(chrono::NaiveTime::MIN).and_utc();
     let period_end = period_start + chrono::Months::new(1);
 
     let summary = usage::get_usage(&state.db, &q.tenant_id, period_start, period_end).await?;
@@ -810,7 +828,8 @@ async fn get_payg_usage(
         },
         "cost": cost,
         "pricing": legacy_payg_pricing_payload(&pricing),
-    })).into_response())
+    }))
+    .into_response())
 }
 
 const MILLISECONDS_PER_DAY: i64 = 86_400_000;
@@ -892,7 +911,11 @@ fn legacy_billing_interval(interval: BillingInterval) -> &'static str {
     }
 }
 
-fn prorated_amount(total_price_cents: i64, days_remaining: i64, days_in_period: i64) -> Result<i64, String> {
+fn prorated_amount(
+    total_price_cents: i64,
+    days_remaining: i64,
+    days_in_period: i64,
+) -> Result<i64, String> {
     if days_remaining <= 0 {
         return Ok(0);
     }
@@ -1070,7 +1093,12 @@ fn build_proration_explanation(
 }
 
 fn generate_audit_log_id() -> String {
-    Uuid::new_v4().simple().to_string().chars().take(26).collect()
+    Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(26)
+        .collect()
 }
 
 fn compute_audit_log_hash(
@@ -1233,12 +1261,13 @@ async fn switch_plan(
             .map_err(ApiError::Plans)?;
         }
 
-        let tenant_update = sqlx::query("UPDATE tenants SET plan = 'payg', updated_at = $1 WHERE id = $2")
-            .bind(now)
-            .bind(&q.tenant_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiError::Plans)?;
+        let tenant_update =
+            sqlx::query("UPDATE tenants SET plan = 'payg', updated_at = $1 WHERE id = $2")
+                .bind(now)
+                .bind(&q.tenant_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(ApiError::Plans)?;
 
         if tenant_update.rows_affected() != 1 {
             return Ok(error_response(
@@ -1261,7 +1290,8 @@ async fn switch_plan(
                 "effectiveDate": effective_date,
             }),
             now,
-        ).await?;
+        )
+        .await?;
 
         tx.commit().await.map_err(ApiError::Plans)?;
 
@@ -1270,7 +1300,7 @@ async fn switch_plan(
             "message": "Switched to Pay As You Go billing",
             "effectiveDate": effective_date,
         }))
-            .into_response());
+        .into_response());
     }
 
     let subscription = match get_route_subscription(&state.db, &q.tenant_id).await? {
@@ -1306,17 +1336,17 @@ async fn switch_plan(
         }
     };
 
-    let proration = match preview_plan_proration(&state.config, &current_plan, &new_plan, &subscription)
-    {
-        Ok(proration) => proration,
-        Err(error) => {
-            return Ok(error_response(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidInput,
-                error,
-            ))
-        }
-    };
+    let proration =
+        match preview_plan_proration(&state.config, &current_plan, &new_plan, &subscription) {
+            Ok(proration) => proration,
+            Err(error) => {
+                return Ok(error_response(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidInput,
+                    error,
+                ))
+            }
+        };
 
     let mut tx = state.db.begin().await.map_err(ApiError::Plans)?;
 
@@ -1376,7 +1406,8 @@ async fn switch_plan(
             "changeType": if proration.net_amount >= 0 { "upgrade" } else { "downgrade" },
         }),
         now,
-    ).await?;
+    )
+    .await?;
 
     tx.commit().await.map_err(ApiError::Plans)?;
 
@@ -1386,7 +1417,7 @@ async fn switch_plan(
         "newPlan": body.plan_name,
         "billingInterval": legacy_billing_interval(body.billing_interval),
     }))
-        .into_response())
+    .into_response())
 }
 
 async fn cancel_subscription_request(
@@ -1482,7 +1513,8 @@ async fn cancel_subscription_request(
             "effectiveDate": effective_date,
         }),
         now,
-    ).await?;
+    )
+    .await?;
 
     tx.commit().await.map_err(ApiError::Plans)?;
 
@@ -1496,7 +1528,7 @@ async fn cancel_subscription_request(
         "effectiveDate": effective_date,
         "willDowngradeTo": LEGACY_DOWNGRADE_PLAN,
     }))
-        .into_response())
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -1552,11 +1584,13 @@ fn csv_text_response(body: String, filename: Option<String>) -> Response {
 
     builder
         .body(axum::body::Body::from(body))
-        .unwrap_or_else(|_| error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::InternalError,
-            "Operation failed",
-        ))
+        .unwrap_or_else(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "Operation failed",
+            )
+        })
 }
 
 fn sanitize_csv_value(value: &serde_json::Value) -> String {
@@ -1593,7 +1627,9 @@ fn json_rows_to_csv(data: &serde_json::Value) -> String {
         let object = row.as_object().cloned().unwrap_or_default();
         let values = headers
             .iter()
-            .map(|header| sanitize_csv_value(object.get(header).unwrap_or(&serde_json::Value::Null)))
+            .map(|header| {
+                sanitize_csv_value(object.get(header).unwrap_or(&serde_json::Value::Null))
+            })
             .collect::<Vec<_>>();
         csv_rows.push(values.join(","));
     }
@@ -1602,14 +1638,19 @@ fn json_rows_to_csv(data: &serde_json::Value) -> String {
 }
 
 fn safe_export_date(value: &str) -> String {
-    value.chars().filter(|character| character.is_ascii_digit() || *character == '-').collect()
+    value
+        .chars()
+        .filter(|character| character.is_ascii_digit() || *character == '-')
+        .collect()
 }
 
 async fn get_revenue_report(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Response, ApiError> {
-    let (Some(start_date), Some(end_date)) = (query.start_date.as_deref(), query.end_date.as_deref()) else {
+    let (Some(start_date), Some(end_date)) =
+        (query.start_date.as_deref(), query.end_date.as_deref())
+    else {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             ErrorCode::ValidationError,
@@ -1617,7 +1658,9 @@ async fn get_revenue_report(
         ));
     };
 
-    let (Some(start_date), Some(end_date)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
+    let (Some(start_date), Some(end_date)) =
+        (parse_query_date(start_date), parse_query_date(end_date))
+    else {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidInput,
@@ -1651,9 +1694,7 @@ async fn get_revenue_report(
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
-async fn get_mrr_report(
-    State(state): State<Arc<AppState>>,
-) -> Result<Response, ApiError> {
+async fn get_mrr_report(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
     let report: serde_json::Value = sqlx::query_scalar(
         r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
@@ -1684,9 +1725,7 @@ async fn get_mrr_report(
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
-async fn get_churn_report(
-    State(state): State<Arc<AppState>>,
-) -> Result<Response, ApiError> {
+async fn get_churn_report(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
     let report: serde_json::Value = sqlx::query_scalar(
         r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
@@ -1735,9 +1774,7 @@ async fn get_churn_report(
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
-async fn get_dunning_report(
-    State(state): State<Arc<AppState>>,
-) -> Result<Response, ApiError> {
+async fn get_dunning_report(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
     let report: serde_json::Value = sqlx::query_scalar(
         r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.dunning_state), '[]'::json)
@@ -1763,7 +1800,9 @@ async fn get_cost_report(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Response, ApiError> {
-    let (Some(start_date), Some(end_date)) = (query.start_date.as_deref(), query.end_date.as_deref()) else {
+    let (Some(start_date), Some(end_date)) =
+        (query.start_date.as_deref(), query.end_date.as_deref())
+    else {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             ErrorCode::ValidationError,
@@ -1771,7 +1810,9 @@ async fn get_cost_report(
         ));
     };
 
-    let (Some(start_date), Some(end_date)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
+    let (Some(start_date), Some(end_date)) =
+        (parse_query_date(start_date), parse_query_date(end_date))
+    else {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidInput,
@@ -1824,7 +1865,9 @@ async fn export_billing_data(
         ));
     };
 
-    let (Some(start_date_parsed), Some(end_date_parsed)) = (parse_query_date(start_date), parse_query_date(end_date)) else {
+    let (Some(start_date_parsed), Some(end_date_parsed)) =
+        (parse_query_date(start_date), parse_query_date(end_date))
+    else {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidInput,
@@ -1938,13 +1981,8 @@ async fn get_usage(
     Query(q): Query<TenantQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let now = chrono::Utc::now();
-    let month_start_date = now
-        .date_naive()
-        .with_day(1)
-        .unwrap_or(now.date_naive());
-    let period_start = month_start_date
-        .and_time(chrono::NaiveTime::MIN)
-        .and_utc();
+    let month_start_date = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+    let period_start = month_start_date.and_time(chrono::NaiveTime::MIN).and_utc();
     let period_end = period_start + chrono::Months::new(1);
     let summary = usage::get_usage(&state.db, &q.tenant_id, period_start, period_end).await?;
     Ok(Json(summary))
@@ -2007,7 +2045,10 @@ async fn record_usage_checked(
     } else {
         StatusCode::TOO_MANY_REQUESTS
     };
-    Ok((status, Json(serde_json::to_value(&result).unwrap_or_default())))
+    Ok((
+        status,
+        Json(serde_json::to_value(&result).unwrap_or_default()),
+    ))
 }
 
 /// Query params for invoice listing.
@@ -2127,74 +2168,62 @@ impl From<subscriptions::SubscriptionError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, code, message) = match &self {
-            ApiError::Plans(sqlx::Error::RowNotFound) => {
-                (StatusCode::NOT_FOUND, ErrorCode::NotFound, "plan not found".to_string())
-            }
+            ApiError::Plans(sqlx::Error::RowNotFound) => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                "plan not found".to_string(),
+            ),
             ApiError::Plans(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
                 "internal server error".to_string(),
             ),
-            ApiError::Usage(usage::UsageError::Db(sqlx::Error::RowNotFound)) => {
-                (
-                    StatusCode::NOT_FOUND,
-                    ErrorCode::NotFound,
-                    "billing resource not found".to_string(),
-                )
-            }
+            ApiError::Usage(usage::UsageError::Db(sqlx::Error::RowNotFound)) => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                "billing resource not found".to_string(),
+            ),
             ApiError::Usage(usage::UsageError::Redis(_))
-            | ApiError::Usage(usage::UsageError::RedisCmd(_)) => {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    ErrorCode::ServiceUnavailable,
-                    "billing cache unavailable".to_string(),
-                )
-            }
+            | ApiError::Usage(usage::UsageError::RedisCmd(_)) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::ServiceUnavailable,
+                "billing cache unavailable".to_string(),
+            ),
             ApiError::Usage(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
                 "internal server error".to_string(),
             ),
-            ApiError::Invoice(invoices::InvoiceError::Db(sqlx::Error::RowNotFound)) => {
-                (
-                    StatusCode::NOT_FOUND,
-                    ErrorCode::NotFound,
-                    "invoice not found".to_string(),
-                )
-            }
-            ApiError::Invoice(invoices::InvoiceError::NoBillingAddress) => {
-                (
-                    StatusCode::NOT_FOUND,
-                    ErrorCode::NotFound,
-                    "billing address not found for tenant".to_string(),
-                )
-            }
-            ApiError::Invoice(invoices::InvoiceError::PdfGeneration(_)) => {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    ErrorCode::ServiceUnavailable,
-                    "pdf generation unavailable".to_string(),
-                )
-            }
+            ApiError::Invoice(invoices::InvoiceError::Db(sqlx::Error::RowNotFound)) => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                "invoice not found".to_string(),
+            ),
+            ApiError::Invoice(invoices::InvoiceError::NoBillingAddress) => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                "billing address not found for tenant".to_string(),
+            ),
+            ApiError::Invoice(invoices::InvoiceError::PdfGeneration(_)) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::ServiceUnavailable,
+                "pdf generation unavailable".to_string(),
+            ),
             ApiError::Invoice(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
                 "internal server error".to_string(),
             ),
-            ApiError::Subscription(subscriptions::SubscriptionError::PlanNotFound(name)) => {
-                (
-                    StatusCode::NOT_FOUND,
-                    ErrorCode::NotFound,
-                    format!("plan not found: {name}"),
-                )
-            }
-            ApiError::Subscription(subscriptions::SubscriptionError::NotFound) => {
-                (
-                    StatusCode::NOT_FOUND,
-                    ErrorCode::NotFound,
-                    "active subscription not found".to_string(),
-                )
-            }
+            ApiError::Subscription(subscriptions::SubscriptionError::PlanNotFound(name)) => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                format!("plan not found: {name}"),
+            ),
+            ApiError::Subscription(subscriptions::SubscriptionError::NotFound) => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                "active subscription not found".to_string(),
+            ),
             ApiError::Subscription(subscriptions::SubscriptionError::UsageExceedsPlan {
                 plan_name,
                 reasons,
@@ -2206,13 +2235,13 @@ impl IntoResponse for ApiError {
                     format!("cannot change to {plan_name}: {reason_summary}"),
                 )
             }
-            ApiError::Subscription(subscriptions::SubscriptionError::Db(sqlx::Error::RowNotFound)) => {
-                (
-                    StatusCode::NOT_FOUND,
-                    ErrorCode::NotFound,
-                    "active subscription not found".to_string(),
-                )
-            }
+            ApiError::Subscription(subscriptions::SubscriptionError::Db(
+                sqlx::Error::RowNotFound,
+            )) => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                "active subscription not found".to_string(),
+            ),
             ApiError::Subscription(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
@@ -2229,8 +2258,7 @@ impl IntoResponse for ApiError {
 }
 
 fn to_json_value<T: serde::Serialize>(value: T) -> Result<serde_json::Value, ApiError> {
-    serde_json::to_value(value)
-        .map_err(|e| ApiError::Plans(sqlx::Error::Decode(Box::new(e))))
+    serde_json::to_value(value).map_err(|e| ApiError::Plans(sqlx::Error::Decode(Box::new(e))))
 }
 
 async fn require_service_auth(
@@ -2331,15 +2359,11 @@ mod tests {
         ("GET", "/payg/usage"),
     ];
 
-    const LEGACY_TRANSITION_ROUTE_SURFACE: &[(&str, &str)] = &[
-        ("POST", "/switch-plan"),
-        ("POST", "/cancel"),
-    ];
+    const LEGACY_TRANSITION_ROUTE_SURFACE: &[(&str, &str)] =
+        &[("POST", "/switch-plan"), ("POST", "/cancel")];
 
-    const CURRENT_TRANSITION_ROUTE_SURFACE: &[(&str, &str)] = &[
-        ("POST", "/switch-plan"),
-        ("POST", "/cancel"),
-    ];
+    const CURRENT_TRANSITION_ROUTE_SURFACE: &[(&str, &str)] =
+        &[("POST", "/switch-plan"), ("POST", "/cancel")];
 
     const LEGACY_ADMIN_REPORT_ROUTE_SURFACE: &[(&str, &str)] = &[
         ("GET", "/reports/revenue"),
@@ -2398,7 +2422,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_non_negative_returns_structured_validation_error() {
-        let response = validate_non_negative(-1, "emailsSent").expect_err("negative values should fail");
+        let response =
+            validate_non_negative(-1, "emailsSent").expect_err("negative values should fail");
         let (status, json) = response_json(response).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -2555,10 +2580,19 @@ mod tests {
         let payload = serde_json::to_value(legacy_payg_pricing_info(&PaygPricing::default()))
             .expect("PAYG pricing info should serialize");
 
-        assert_eq!(payload["emailPricing"][0]["upTo"], serde_json::json!(10_000));
+        assert_eq!(
+            payload["emailPricing"][0]["upTo"],
+            serde_json::json!(10_000)
+        );
         assert_eq!(payload["emailPricing"][3]["upTo"], serde_json::Value::Null);
-        assert_eq!(payload["apiPricing"]["freeCallsPerMonth"], serde_json::json!(100_000));
-        assert_eq!(payload["apiPricing"]["pricePerThousandCallsCents"], serde_json::json!(10));
+        assert_eq!(
+            payload["apiPricing"]["freeCallsPerMonth"],
+            serde_json::json!(100_000)
+        );
+        assert_eq!(
+            payload["apiPricing"]["pricePerThousandCallsCents"],
+            serde_json::json!(10)
+        );
         assert_eq!(payload["minimumMonthlyCharge"], serde_json::json!(0));
     }
 
@@ -2568,7 +2602,7 @@ mod tests {
             legacy_payg_cost(&PaygPricing::default(), 5, 101_000)
                 .expect("PAYG cost contract input should calculate"),
         )
-            .expect("PAYG cost payload should serialize");
+        .expect("PAYG cost payload should serialize");
 
         assert_eq!(payload["emailCostCents"], serde_json::json!(0));
         assert_eq!(payload["apiCostCents"], serde_json::json!(10));
@@ -2638,8 +2672,13 @@ mod tests {
         };
 
         let payload = serde_json::to_value(
-            preview_plan_proration(&BillingConfig::default(), &current_plan, &new_plan, &subscription)
-                .expect("proration preview should succeed"),
+            preview_plan_proration(
+                &BillingConfig::default(),
+                &current_plan,
+                &new_plan,
+                &subscription,
+            )
+            .expect("proration preview should succeed"),
         )
         .expect("proration preview should serialize");
 
@@ -2699,8 +2738,13 @@ mod tests {
         };
 
         let payload = serde_json::to_value(
-            preview_plan_proration(&BillingConfig::default(), &current_plan, &new_plan, &subscription)
-                .expect("yearly proration preview should succeed"),
+            preview_plan_proration(
+                &BillingConfig::default(),
+                &current_plan,
+                &new_plan,
+                &subscription,
+            )
+            .expect("yearly proration preview should succeed"),
         )
         .expect("yearly proration preview should serialize");
 
@@ -2734,7 +2778,10 @@ mod tests {
 
     #[test]
     fn csv_sanitizer_prefixes_formula_like_values() {
-        assert_eq!(sanitize_csv_value(&serde_json::json!("=SUM(A1:A2)")), "'=SUM(A1:A2)");
+        assert_eq!(
+            sanitize_csv_value(&serde_json::json!("=SUM(A1:A2)")),
+            "'=SUM(A1:A2)"
+        );
         assert_eq!(sanitize_csv_value(&serde_json::json!("plain")), "plain");
     }
 }

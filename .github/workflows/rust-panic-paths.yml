@@ -1,0 +1,26 @@
+name: Rust panic-path guardrail
+
+on:
+  pull_request:
+    paths:
+      - "services/mail-server/crates/**/*.rs"
+      - "tools/check_rust_panic_paths.py"
+      - ".github/workflows/rust-panic-paths.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "services/mail-server/crates/**/*.rs"
+      - "tools/check_rust_panic_paths.py"
+      - ".github/workflows/rust-panic-paths.yml"
+
+jobs:
+  rust-panic-paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Check unwrap/expect guardrail
+        run: python3 tools/check_rust_panic_paths.py
+      - name: Check outbound delivery contract
+        run: python3 tools/check_outbound_delivery_contract.py

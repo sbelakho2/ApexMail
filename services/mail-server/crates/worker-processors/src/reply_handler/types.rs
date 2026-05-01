@@ -25,7 +25,7 @@ pub enum ReplyClassification {
 }
 
 impl ReplyClassification {
-/// Convert to string.
+    /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::OutOfOffice => "out_of_office",
@@ -115,21 +115,19 @@ pub enum ActionType {
 /// Extracted data from reply content.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExtractedData {
-/// Return date for OOO.
+    /// Return date for OOO.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_date: Option<DateTime<Utc>>,
-/// Referred contact for wrong person.
+    /// Referred contact for wrong person.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub referred_contact: Option<String>,
-/// Whether this is a meeting request.
+    /// Whether this is a meeting request.
     pub meeting_request: bool,
-/// Detected sentiment.
+    /// Detected sentiment.
     pub sentiment: Sentiment,
-/// Urgency level.
+    /// Urgency level.
     pub urgency: Urgency,
 }
-
-
 
 /// Suggested action based on classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]

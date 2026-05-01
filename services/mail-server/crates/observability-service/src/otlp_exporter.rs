@@ -15,33 +15,35 @@
 //! ```
 
 use opentelemetry::trace::TracerProvider;
+use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     runtime,
-    trace::{BatchConfigBuilder, Config as TraceConfig, Sampler, TracerProvider as SdkTracerProvider},
+    trace::{
+        BatchConfigBuilder, Config as TraceConfig, Sampler, TracerProvider as SdkTracerProvider,
+    },
     Resource,
 };
-use opentelemetry::KeyValue;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// OTLP exporter configuration.
 #[derive(Debug, Clone)]
 pub struct OtlpConfig {
-/// OTLP collector endpoint (e.g., "http://localhost:4317")
+    /// OTLP collector endpoint (e.g., "http://localhost:4317")
     pub endpoint: String,
-/// Service name for span attribution
+    /// Service name for span attribution
     pub service_name: String,
-/// Optional service version
+    /// Optional service version
     pub service_version: Option<String>,
-/// Optional environment (e.g., "production", "staging")
+    /// Optional environment (e.g., "production", "staging")
     pub environment: Option<String>,
-/// Sampling ratio (0.0 to 1.0) — 1.0 = sample all traces
+    /// Sampling ratio (0.0 to 1.0) — 1.0 = sample all traces
     pub sample_rate: f64,
-/// Batch config:max export batch size
+    /// Batch config:max export batch size
     pub batch_size: usize,
-/// Batch config:max queue size before dropping spans
+    /// Batch config:max queue size before dropping spans
     pub max_queue_size: usize,
-/// Batch config:scheduled delay in milliseconds
+    /// Batch config:scheduled delay in milliseconds
     pub scheduled_delay_ms: u64,
 }
 
@@ -50,8 +52,7 @@ impl Default for OtlpConfig {
         Self {
             endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:4317".into()),
-            service_name: std::env::var("OTEL_SERVICE_NAME")
-                .unwrap_or_else(|_| "apexmail".into()),
+            service_name: std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "apexmail".into()),
             service_version: std::env::var("OTEL_SERVICE_VERSION").ok(),
             environment: std::env::var("OTEL_ENVIRONMENT").ok(),
             sample_rate: std::env::var("OTEL_SAMPLE_RATE")
@@ -83,35 +84,35 @@ impl Drop for TracingGuard {
 /// Dropping the guard will flush and shutdown the tracer.
 /// # Errors
 /// Returns an error if the OTLP exporter cannot be initialized.
-pub fn init_otlp_tracing(config: OtlpConfig) -> Result<TracingGuard, Box<dyn std::error::Error + Send + Sync>> {
-// Build resource attributes
-    let mut attributes = vec![
-        KeyValue::new("service.name", config.service_name.clone()),
-    ];
-    
+pub fn init_otlp_tracing(
+    config: OtlpConfig,
+) -> Result<TracingGuard, Box<dyn std::error::Error + Send + Sync>> {
+    // Build resource attributes
+    let mut attributes = vec![KeyValue::new("service.name", config.service_name.clone())];
+
     if let Some(version) = &config.service_version {
         attributes.push(KeyValue::new("service.version", version.clone()));
     }
-    
+
     if let Some(env) = &config.environment {
         attributes.push(KeyValue::new("deployment.environment", env.clone()));
     }
-    
+
     let resource = Resource::new(attributes);
 
-// Configure the OTLP exporter
+    // Configure the OTLP exporter
     let exporter = opentelemetry_otlp::new_exporter()
         .tonic()
         .with_endpoint(&config.endpoint);
 
-// Configure batch processing
+    // Configure batch processing
     let batch_config = BatchConfigBuilder::default()
         .with_max_export_batch_size(config.batch_size)
         .with_max_queue_size(config.max_queue_size)
         .with_scheduled_delay(std::time::Duration::from_millis(config.scheduled_delay_ms))
         .build();
 
-// Configure sampler
+    // Configure sampler
     let sampler = if config.sample_rate >= 1.0 {
         Sampler::AlwaysOn
     } else if config.sample_rate <= 0.0 {
@@ -120,7 +121,7 @@ pub fn init_otlp_tracing(config: OtlpConfig) -> Result<TracingGuard, Box<dyn std
         Sampler::TraceIdRatioBased(config.sample_rate)
     };
 
-// Build the tracer provider
+    // Build the tracer provider
     let trace_config = TraceConfig::default()
         .with_sampler(sampler)
         .with_resource(resource);
@@ -132,11 +133,11 @@ pub fn init_otlp_tracing(config: OtlpConfig) -> Result<TracingGuard, Box<dyn std
         .with_batch_config(batch_config)
         .install_batch(runtime::Tokio)?;
 
-// Create the tracing-opentelemetry layer
+    // Create the tracing-opentelemetry layer
     let tracer = provider.tracer(config.service_name.clone());
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-// Combine with existing tracing subscriber
+    // Combine with existing tracing subscriber
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
@@ -194,11 +195,11 @@ mod tests {
     fn test_config_default() {
         let _guard = env_lock();
 
-// Clear env vars for predictable test
+        // Clear env vars for predictable test
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         std::env::remove_var("OTEL_SERVICE_NAME");
         std::env::remove_var("OTEL_SAMPLE_RATE");
-        
+
         let config = OtlpConfig::default();
         assert_eq!(config.endpoint, "http://localhost:4317");
         assert_eq!(config.service_name, "apexmail");
@@ -212,13 +213,13 @@ mod tests {
         std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4317");
         std::env::set_var("OTEL_SERVICE_NAME", "test-service");
         std::env::set_var("OTEL_SAMPLE_RATE", "0.5");
-        
+
         let config = OtlpConfig::default();
         assert_eq!(config.endpoint, "http://collector:4317");
         assert_eq!(config.service_name, "test-service");
         assert_eq!(config.sample_rate, 0.5);
-        
-// Clean up
+
+        // Clean up
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         std::env::remove_var("OTEL_SERVICE_NAME");
         std::env::remove_var("OTEL_SAMPLE_RATE");
@@ -230,10 +231,10 @@ mod tests {
 
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         assert!(!is_otlp_enabled());
-        
+
         std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317");
         assert!(is_otlp_enabled());
-        
+
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
     }
 }

@@ -392,9 +392,19 @@ mod tests {
     #[test]
     fn test_schema_contains_all_tables() {
         let tables = [
-            "tenants", "users", "api_keys", "domains", "messages", "events",
-            "templates", "suppressions", "webhooks", "audit_logs", "contacts",
-            "campaigns", "support_tickets",
+            "tenants",
+            "users",
+            "api_keys",
+            "domains",
+            "messages",
+            "events",
+            "templates",
+            "suppressions",
+            "webhooks",
+            "audit_logs",
+            "contacts",
+            "campaigns",
+            "support_tickets",
         ];
         for table in &tables {
             assert!(

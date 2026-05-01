@@ -5,22 +5,24 @@ use serde::{Deserialize, Serialize};
 /// Top-level configuration for the AI service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiConfig {
-/// External model inference endpoint (e.g. llama-server URL).
+    /// External model inference endpoint (e.g. llama-server URL).
     pub model_endpoint: String,
-/// Embedding vector dimensionality.
+    /// Embedding vector dimensionality.
     pub embedding_dim: usize,
-/// Maximum tokens for text generation.
+    /// Maximum tokens for text generation.
     pub max_tokens: usize,
-/// Sampling temperature (0.0 = greedy).
+    /// Sampling temperature (0.0 = greedy).
     pub temperature: f64,
-/// Epsilon for epsilon-greedy bandit exploration.
+    /// Epsilon for epsilon-greedy bandit exploration.
     pub bandit_epsilon: f64,
-/// Look-back window in days for STO engagement data.
+    /// Look-back window in days for STO engagement data.
     pub sto_lookback_days: u32,
-/// Maximum number of inference requests allowed per window.
+    /// Maximum number of inference requests allowed per window.
     pub inference_rate_limit: usize,
-/// Sliding window size for inference rate limiting.
+    /// Sliding window size for inference rate limiting.
     pub inference_rate_limit_window_secs: u64,
+    /// Snapshot file used to persist bandit arm state across restarts.
+    pub bandit_state_path: String,
 }
 
 impl Default for AiConfig {
@@ -34,17 +36,17 @@ impl Default for AiConfig {
             sto_lookback_days: 90,
             inference_rate_limit: 60,
             inference_rate_limit_window_secs: 60,
+            bandit_state_path: "./data/ai-service/bandits.json".into(),
         }
     }
 }
 
 impl AiConfig {
-/// Build config from environment variables, falling back to defaults.
+    /// Build config from environment variables, falling back to defaults.
     pub fn from_env() -> Result<Self, String> {
         let defaults = Self::default();
         let config = Self {
-            model_endpoint: std::env::var("AI_MODEL_ENDPOINT")
-                .unwrap_or(defaults.model_endpoint),
+            model_endpoint: std::env::var("AI_MODEL_ENDPOINT").unwrap_or(defaults.model_endpoint),
             embedding_dim: std::env::var("AI_EMBEDDING_DIM")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -73,6 +75,8 @@ impl AiConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.inference_rate_limit_window_secs),
+            bandit_state_path: std::env::var("AI_BANDIT_STATE_PATH")
+                .unwrap_or(defaults.bandit_state_path),
         };
         config.validate()?;
         Ok(config)
@@ -82,7 +86,9 @@ impl AiConfig {
         if self.model_endpoint.trim().is_empty() {
             return Err("AI_MODEL_ENDPOINT must not be empty".into());
         }
-        if !(self.model_endpoint.starts_with("http://") || self.model_endpoint.starts_with("https://")) {
+        if !(self.model_endpoint.starts_with("http://")
+            || self.model_endpoint.starts_with("https://"))
+        {
             return Err("AI_MODEL_ENDPOINT must be http/https".into());
         }
         if self.embedding_dim == 0 {
@@ -106,6 +112,9 @@ impl AiConfig {
         if self.inference_rate_limit_window_secs == 0 {
             return Err("AI_INFERENCE_RATE_LIMIT_WINDOW_SECS must be > 0".into());
         }
+        if self.bandit_state_path.trim().is_empty() {
+            return Err("AI_BANDIT_STATE_PATH must not be empty".into());
+        }
         Ok(())
     }
 }
@@ -124,6 +133,7 @@ mod tests {
         assert_eq!(cfg.max_tokens, 768);
         assert_eq!(cfg.inference_rate_limit, 60);
         assert_eq!(cfg.inference_rate_limit_window_secs, 60);
+        assert_eq!(cfg.bandit_state_path, "./data/ai-service/bandits.json");
     }
 
     #[test]
@@ -133,5 +143,6 @@ mod tests {
         let parsed: AiConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.embedding_dim, cfg.embedding_dim);
         assert_eq!(parsed.model_endpoint, cfg.model_endpoint);
+        assert_eq!(parsed.bandit_state_path, cfg.bandit_state_path);
     }
 }

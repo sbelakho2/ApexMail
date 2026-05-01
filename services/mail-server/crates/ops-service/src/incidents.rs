@@ -9,15 +9,15 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use apexmail_db::repos::incidents::IncidentRepo;
 use crate::types::{Incident, IncidentSeverity, IncidentStatus, TimelineEntry};
+use apexmail_db::repos::incidents::IncidentRepo;
 
 /// Thread-safe incident manager with database persistence.
 #[derive(Debug, Clone)]
 pub struct IncidentManager {
     db: PgPool,
     persist_to_db: bool,
-/// In-memory cache for fast reads (write-through).
+    /// In-memory cache for fast reads (write-through).
     cache: Arc<RwLock<Vec<Incident>>>,
     timelines: Arc<RwLock<Vec<(Uuid, TimelineEntry)>>>,
 }
@@ -32,7 +32,7 @@ impl IncidentManager {
         }
     }
 
-/// Create a manager that keeps state in memory without database persistence.
+    /// Create a manager that keeps state in memory without database persistence.
     pub fn new_ephemeral() -> Self {
         Self {
             db: PgPool::connect_lazy("postgres://localhost/unused").unwrap(),
@@ -42,14 +42,14 @@ impl IncidentManager {
         }
     }
 
-/// Create a new in-memory-only manager for testing without database.
+    /// Create a new in-memory-only manager for testing without database.
     #[cfg(test)]
     pub fn new_in_memory() -> Self {
         Self::new_ephemeral()
     }
 
-/// Create a new incident and return its id.
-/// Persists to database and updates cache.
+    /// Create a new incident and return its id.
+    /// Persists to database and updates cache.
     pub async fn create_incident(
         &self,
         title: impl Into<String>,
@@ -60,7 +60,7 @@ impl IncidentManager {
         let now = Utc::now();
         let title = title.into();
 
-// Map severity to impact string for database
+        // Map severity to impact string for database
         let impact = match severity {
             IncidentSeverity::P1 => "critical",
             IncidentSeverity::P2 => "major",
@@ -101,7 +101,7 @@ impl IncidentManager {
             affected_services,
         };
 
-// Update cache
+        // Update cache
         self.cache.write().push(incident);
         self.timelines.write().push((
             id,
@@ -115,7 +115,7 @@ impl IncidentManager {
         Ok(id)
     }
 
-/// Create a new incident synchronously (for backwards compatibility in tests).
+    /// Create a new incident synchronously (for backwards compatibility in tests).
     #[cfg(test)]
     pub fn create_incident_sync(
         &self,
@@ -146,7 +146,7 @@ impl IncidentManager {
         id
     }
 
-/// Update the status of an existing incident.
+    /// Update the status of an existing incident.
     pub async fn update_status(
         &self,
         id: Uuid,
@@ -164,7 +164,9 @@ impl IncidentManager {
         let resolved = new_status == IncidentStatus::Resolved;
 
         if self.persist_to_db {
-            let result = IncidentRepo::update_status(&self.db, &id.to_string(), status_str, resolved).await?;
+            let result =
+                IncidentRepo::update_status(&self.db, &id.to_string(), status_str, resolved)
+                    .await?;
             if result.is_none() {
                 return Ok(false);
             }
@@ -203,9 +205,14 @@ impl IncidentManager {
         Ok(true)
     }
 
-/// Update status synchronously (for backwards compatibility in tests).
+    /// Update status synchronously (for backwards compatibility in tests).
     #[cfg(test)]
-    pub fn update_status_sync(&self, id: Uuid, new_status: IncidentStatus, message: impl Into<String>) -> bool {
+    pub fn update_status_sync(
+        &self,
+        id: Uuid,
+        new_status: IncidentStatus,
+        message: impl Into<String>,
+    ) -> bool {
         let mut cache = self.cache.write();
         if let Some(inc) = cache.iter_mut().find(|i| i.id == id) {
             inc.status = new_status;
@@ -226,18 +233,19 @@ impl IncidentManager {
         }
     }
 
-/// Convenience wrapper:resolve an incident.
+    /// Convenience wrapper:resolve an incident.
     pub async fn resolve(&self, id: Uuid, message: impl Into<String>) -> Result<bool, sqlx::Error> {
-        self.update_status(id, IncidentStatus::Resolved, message).await
+        self.update_status(id, IncidentStatus::Resolved, message)
+            .await
     }
 
-/// Resolve synchronously (for backwards compatibility in tests).
+    /// Resolve synchronously (for backwards compatibility in tests).
     #[cfg(test)]
     pub fn resolve_sync(&self, id: Uuid, message: impl Into<String>) -> bool {
         self.update_status_sync(id, IncidentStatus::Resolved, message)
     }
 
-/// List all incidents that are **not** resolved.
+    /// List all incidents that are **not** resolved.
     pub fn list_active(&self, limit: usize, offset: usize) -> Vec<Incident> {
         self.cache
             .read()
@@ -249,7 +257,7 @@ impl IncidentManager {
             .collect()
     }
 
-/// List active incidents from database (async).
+    /// List active incidents from database (async).
     pub async fn list_active_from_db(
         &self,
         limit: i64,
@@ -285,12 +293,12 @@ impl IncidentManager {
             .collect::<Result<Vec<_>, sqlx::Error>>()
     }
 
-/// Retrieve an incident by id from cache.
+    /// Retrieve an incident by id from cache.
     pub fn get_by_id(&self, id: Uuid) -> Option<Incident> {
         self.cache.read().iter().find(|i| i.id == id).cloned()
     }
 
-/// Retrieve an incident by id from database (async).
+    /// Retrieve an incident by id from database (async).
     pub async fn get_by_id_from_db(&self, id: Uuid) -> Result<Option<Incident>, sqlx::Error> {
         if !self.persist_to_db {
             return Ok(self.get_by_id(id));
@@ -320,7 +328,7 @@ impl IncidentManager {
         }
     }
 
-/// Return the timeline entries for a given incident from cache.
+    /// Return the timeline entries for a given incident from cache.
     pub fn get_timeline(&self, id: Uuid) -> Vec<TimelineEntry> {
         self.timelines
             .read()
@@ -330,7 +338,7 @@ impl IncidentManager {
             .collect()
     }
 
-/// Load incidents from database into cache on startup.
+    /// Load incidents from database into cache on startup.
     pub async fn load_from_db(&self) -> Result<(), sqlx::Error> {
         if !self.persist_to_db {
             return Ok(());
@@ -419,7 +427,8 @@ mod tests {
     #[tokio::test]
     async fn test_timeline() {
         let mgr = IncidentManager::new_in_memory();
-        let id = mgr.create_incident_sync("Disk full", IncidentSeverity::P1, vec!["storage".into()]);
+        let id =
+            mgr.create_incident_sync("Disk full", IncidentSeverity::P1, vec!["storage".into()]);
         mgr.update_status_sync(id, IncidentStatus::Identified, "Root cause found");
         mgr.resolve_sync(id, "Disk cleaned");
 

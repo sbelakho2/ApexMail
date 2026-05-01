@@ -78,6 +78,10 @@ spec:
               value: "info"
             - name: RUST_BACKTRACE
               value: "0"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "tracking-service"
             # Secrets injected from Kubernetes Secret objects
             - name: TRACKING_SECRET_KEY
               valueFrom:
@@ -174,6 +178,15 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: tracking-service
+                topologyKey: kubernetes.io/hostname
       topologySpreadConstraints:
         # Spread pods across availability zones for HA
         - maxSkew: 1

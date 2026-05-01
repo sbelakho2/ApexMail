@@ -6,12 +6,12 @@ pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
-            '&'  => out.push_str("&amp;"),
-            '<'  => out.push_str("&lt;"),
-            '>'  => out.push_str("&gt;"),
-            '"'  => out.push_str("&quot;"),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#039;"),
-            c    => out.push(c),
+            c => out.push(c),
         }
     }
     out
@@ -19,7 +19,8 @@ pub fn escape_html(s: &str) -> String {
 
 pub fn render_error_page(message: &str) -> String {
     let msg = escape_html(message);
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -43,12 +44,14 @@ pub fn render_error_page(message: &str) -> String {
     <p>{msg}</p>
   </div>
 </body>
-</html>"#)
+</html>"#
+    )
 }
 
 pub fn render_success_page(email: &str) -> String {
     let email_safe = escape_html(email);
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -73,15 +76,17 @@ pub fn render_success_page(email: &str) -> String {
     <p><span class="email">{email_safe}</span> has been removed from our mailing list.</p>
   </div>
 </body>
-</html>"#)
+</html>"#
+    )
 }
 
 pub fn render_confirmation_page(token: &str, email: &str, unsub_path: &str) -> String {
     let email_safe = escape_html(email);
     let token_safe = escape_html(token);
-// #196:Escape unsub_path for safe use in HTML href attributes
+    // #196:Escape unsub_path for safe use in HTML href attributes
     let unsub_path = escape_html(unsub_path);
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -110,7 +115,8 @@ pub fn render_confirmation_page(token: &str, email: &str, unsub_path: &str) -> S
     <a href="{unsub_path}/{token_safe}?confirm=1" class="btn">Yes, Unsubscribe Me</a>
   </div>
 </body>
-</html>"#)
+</html>"#
+    )
 }
 
 pub struct Category<'a> {
@@ -128,38 +134,52 @@ pub fn render_preferences_page(
 ) -> String {
     let email_safe = escape_html(email);
     let token_safe = escape_html(token);
-// #196:Escape prefs_path for safe use in HTML form action attributes
+    // #196:Escape prefs_path for safe use in HTML form action attributes
     let prefs_path = escape_html(prefs_path);
 
-    let category_html: String = categories.iter().map(|cat| {
-        let name_safe = escape_html(cat.name);
-        let desc_safe = escape_html(cat.description);
-        let checked = if cat.subscribed { " checked" } else { "" };
-        let disabled = if globally_unsubscribed { " disabled" } else { "" };
-        format!(r#"<label class="pref-item">
+    let category_html: String = categories
+        .iter()
+        .map(|cat| {
+            let name_safe = escape_html(cat.name);
+            let desc_safe = escape_html(cat.description);
+            let checked = if cat.subscribed { " checked" } else { "" };
+            let disabled = if globally_unsubscribed {
+                " disabled"
+            } else {
+                ""
+            };
+            format!(
+                r#"<label class="pref-item">
       <input type="hidden" name="category_{name_safe}" value="false">
       <input type="checkbox" name="category_{name_safe}" value="true"{checked}{disabled}>
       <div class="pref-info">
         <span class="pref-name">{name_safe}</span>
         <span class="pref-desc">{desc_safe}</span>
       </div>
-    </label>"#)
-    }).collect();
+    </label>"#
+            )
+        })
+        .collect();
 
     let body = if globally_unsubscribed {
-        format!(r#"<div class="alert alert-warning">You are currently unsubscribed from all emails. Click "Resubscribe" to start receiving emails again.</div>
+        format!(
+            r#"<div class="alert alert-warning">You are currently unsubscribed from all emails. Click "Resubscribe" to start receiving emails again.</div>
       <form method="POST" action="{prefs_path}/{token_safe}">
         <input type="hidden" name="resubscribe_all" value="true">
         <button type="submit" class="btn btn-success">Resubscribe to All</button>
-      </form>"#)
+      </form>"#
+        )
     } else {
         let cats_section = if !category_html.is_empty() {
-            format!(r#"<div class="section"><div class="section-title">Email Categories</div>{category_html}</div>
-        <div class="actions"><button type="submit" class="btn btn-primary">Save Preferences</button></div>"#)
+            format!(
+                r#"<div class="section"><div class="section-title">Email Categories</div>{category_html}</div>
+        <div class="actions"><button type="submit" class="btn btn-primary">Save Preferences</button></div>"#
+            )
         } else {
             String::new()
         };
-        format!(r#"<form method="POST" action="{prefs_path}/{token_safe}">
+        format!(
+            r#"<form method="POST" action="{prefs_path}/{token_safe}">
         {cats_section}
         <div class="divider"></div>
         <div class="section">
@@ -170,10 +190,12 @@ pub fn render_preferences_page(
       <form method="POST" action="{prefs_path}/{token_safe}">
         <input type="hidden" name="unsubscribe_all" value="true">
         <button type="submit" class="btn btn-danger">Unsubscribe from All</button>
-      </form>"#)
+      </form>"#
+        )
     };
 
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -216,5 +238,6 @@ pub fn render_preferences_page(
     {body}
   </div>
 </body>
-</html>"#)
+</html>"#
+    )
 }

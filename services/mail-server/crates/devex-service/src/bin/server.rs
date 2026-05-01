@@ -10,18 +10,15 @@ use devex_service::routes::{build_router, AppState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-// ── Structured logging ────────────────────────────────────────────
+    // ── Structured logging ────────────────────────────────────────────
     tracing_subscriber::registry()
         .with(fmt::layer().json())
-        .with(
-            EnvFilter::from_default_env()
-                .add_directive("devex_service=info".parse()?),
-        )
+        .with(EnvFilter::from_default_env().add_directive("devex_service=info".parse()?))
         .init();
 
     info!("ApexMail DevEx Service starting");
 
-// ── Config ────────────────────────────────────────────────────────
+    // ── Config ────────────────────────────────────────────────────────
     let _ = dotenvy::dotenv(); // ignore missing .env
     let cfg = DevExConfig::from_env().context("Failed to load DevEx configuration")?;
     let addr = format!("{}:{}", cfg.host, cfg.port);
@@ -33,11 +30,11 @@ async fn main() -> Result<()> {
         "Configuration loaded"
     );
 
-// ── App state + router ────────────────────────────────────────────
+    // ── App state + router ────────────────────────────────────────────
     let state = AppState::from_config(cfg).context("Failed to build DevEx app state")?;
     let router = build_router(state);
 
-// ── Bind & serve ──────────────────────────────────────────────────
+    // ── Bind & serve ──────────────────────────────────────────────────
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .context(format!("Failed to bind to {addr}"))?;

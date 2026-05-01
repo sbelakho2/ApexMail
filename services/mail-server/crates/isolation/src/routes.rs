@@ -40,30 +40,21 @@ type S = Arc<AppState>;
 
 pub fn create_router(state: S) -> Router {
     Router::new()
-// Health
+        // Health
         .route("/health", get(health_check))
-// Organizations
+        // Organizations
         .route("/organizations", post(org_create))
         .route("/organizations/:org_id", get(org_get))
         .route("/organizations/:org_id", put(org_update))
         .route("/organizations/:org_id/suspend", post(org_suspend))
-// Workspaces
-        .route(
-            "/organizations/:org_id/workspaces",
-            post(workspace_create),
-        )
-        .route(
-            "/organizations/:org_id/workspaces",
-            get(workspace_list),
-        )
+        // Workspaces
+        .route("/organizations/:org_id/workspaces", post(workspace_create))
+        .route("/organizations/:org_id/workspaces", get(workspace_list))
         .route("/workspaces/:workspace_id", get(workspace_get))
         .route("/workspaces/:workspace_id", put(workspace_update))
         .route("/workspaces/:workspace_id", delete(workspace_delete))
-// Members
-        .route(
-            "/workspaces/:workspace_id/members",
-            post(member_add),
-        )
+        // Members
+        .route("/workspaces/:workspace_id/members", post(member_add))
         .route(
             "/workspaces/:workspace_id/members/:user_id",
             delete(member_remove),
@@ -72,13 +63,10 @@ pub fn create_router(state: S) -> Router {
             "/workspaces/:workspace_id/members/:user_id/access",
             get(member_access),
         )
-// Quota
+        // Quota
         .route("/workspaces/:workspace_id/quota", get(quota_check))
-        .route(
-            "/workspaces/:workspace_id/quota",
-            put(quota_update),
-        )
-// Rate Limit
+        .route("/workspaces/:workspace_id/quota", put(quota_update))
+        // Rate Limit
         .route(
             "/workspaces/:workspace_id/rate-limit",
             get(rate_limit_status),
@@ -87,17 +75,14 @@ pub fn create_router(state: S) -> Router {
             "/workspaces/:workspace_id/rate-limit/reset",
             post(rate_limit_reset),
         )
-// Encryption
+        // Encryption
         .route("/encryption/rotate/:org_id", post(encryption_rotate))
         .route("/encryption/policy", post(encryption_create_policy))
-// Isolation
+        // Isolation
         .route("/isolation/check-access", post(isolation_check_access))
-        .route(
-            "/isolation/migrate/:org_id",
-            post(isolation_migrate),
-        )
+        .route("/isolation/migrate/:org_id", post(isolation_migrate))
         .route("/isolation/rls/:workspace_id", post(isolation_setup_rls))
-// Audit
+        // Audit
         .route("/audit/query", get(audit_query))
         .route("/audit/stats/:org_id", get(audit_stats))
         .route("/audit/export/:org_id", get(audit_export))
@@ -108,10 +93,7 @@ pub fn create_router(state: S) -> Router {
 
 // ─── Auth ───────────────────────────────────────────────────────
 
-fn verify_bearer(
-    headers: &HeaderMap,
-    config: &Config,
-) -> Result<(), (StatusCode, &'static str)> {
+fn verify_bearer(headers: &HeaderMap, config: &Config) -> Result<(), (StatusCode, &'static str)> {
     let auth = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -154,7 +136,9 @@ fn ok_json(v: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(v))
 }
 
-fn serialize_json<T: Serialize>(value: T) -> Result<serde_json::Value, (StatusCode, Json<serde_json::Value>)> {
+fn serialize_json<T: Serialize>(
+    value: T,
+) -> Result<serde_json::Value, (StatusCode, Json<serde_json::Value>)> {
     serde_json::to_value(value).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -300,7 +284,11 @@ async fn org_suspend(
     };
     match state
         .tenant
-        .suspend_organization(&org_id, body.reason.as_deref().unwrap_or("manual"), &user_id)
+        .suspend_organization(
+            &org_id,
+            body.reason.as_deref().unwrap_or("manual"),
+            &user_id,
+        )
         .await
     {
         Ok(()) => ok_json(serde_json::json!({ "status": "suspended" })),
@@ -449,7 +437,10 @@ async fn member_add(
         .add_workspace_member(&workspace_id, &body.user_id, &role, &user_id)
         .await
     {
-        Ok(()) => (StatusCode::CREATED, Json(serde_json::json!({ "status": "added" }))),
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "status": "added" })),
+        ),
         Err(e) => (StatusCode::BAD_REQUEST, err_json(&e.to_string())),
     }
 }
@@ -503,12 +494,24 @@ async fn quota_check(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-// Check all quota metrics
+    // Check all quota metrics
     let mut results = serde_json::Map::new();
-    for metric in ["emails_per_month", "storage_bytes", "api_requests_per_minute", "webhooks_per_month", "contacts", "templates", "domains"] {
+    for metric in [
+        "emails_per_month",
+        "storage_bytes",
+        "api_requests_per_minute",
+        "webhooks_per_month",
+        "contacts",
+        "templates",
+        "domains",
+    ] {
         match state.tenant.check_quota(&workspace_id, metric, 1).await {
-            Ok(ok) => { results.insert(metric.into(), serde_json::json!(ok)); }
-            Err(e) => { results.insert(metric.into(), serde_json::json!({"error": e.to_string()})); }
+            Ok(ok) => {
+                results.insert(metric.into(), serde_json::json!(ok));
+            }
+            Err(e) => {
+                results.insert(metric.into(), serde_json::json!({"error": e.to_string()}));
+            }
         }
     }
     ok_json(serde_json::Value::Object(results))
@@ -640,15 +643,14 @@ async fn encryption_create_policy(
         name: format!("{}_{}_policy", body.organization_id, body.table_name),
         resource: body.table_name.clone(),
         fields: body.fields.clone(),
-        algorithm: body.algorithm.clone().unwrap_or_else(|| "aes-256-gcm".into()),
+        algorithm: body
+            .algorithm
+            .clone()
+            .unwrap_or_else(|| "aes-256-gcm".into()),
         key_rotation_days: 90,
         enabled: true,
     };
-    match state
-        .encryption
-        .create_policy(policy)
-        .await
-    {
+    match state.encryption.create_policy(policy).await {
         Ok(policy) => match serialize_json(policy) {
             Ok(json) => (StatusCode::CREATED, Json(json)),
             Err(err) => err,
@@ -699,12 +701,7 @@ async fn isolation_check_access(
     let query_valid = state.isolation.validate_query_access(&body.query, &ctx);
     let resource_ok = state
         .isolation
-        .check_resource_access(
-            &ctx,
-            &body.resource,
-            &body.resource_id,
-            "read",
-        )
+        .check_resource_access(&ctx, &body.resource, &body.resource_id, "read")
         .await
         .unwrap_or(false);
 
@@ -728,15 +725,19 @@ async fn isolation_migrate(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-    let target = IsolationLevel::parse(&body.target_level)
-        .unwrap_or(IsolationLevel::DedicatedSchema);
+    let target =
+        IsolationLevel::parse(&body.target_level).unwrap_or(IsolationLevel::DedicatedSchema);
 
-// Need current level from org
+    // Need current level from org
     let current = match state.tenant.get_organization(&org_id).await {
         Ok(org) => org.isolation_level,
         Err(e) => return (StatusCode::NOT_FOUND, err_json(&e.to_string())),
     };
-    match state.isolation.migrate_isolation_level(&org_id, &current, &target).await {
+    match state
+        .isolation
+        .migrate_isolation_level(&org_id, &current, &target)
+        .await
+    {
         Ok(()) => ok_json(serde_json::json!({ "status": "migrated" })),
         Err(e) => (StatusCode::BAD_REQUEST, err_json(&e.to_string())),
     }
@@ -755,13 +756,11 @@ async fn isolation_setup_rls(
         Err(e) => return (StatusCode::NOT_FOUND, err_json(&e.to_string())),
     };
 
-    let schema = workspace.schema_name.unwrap_or_else(|| "public".to_string());
+    let schema = workspace
+        .schema_name
+        .unwrap_or_else(|| "public".to_string());
 
-    match state
-        .isolation
-        .setup_rls("emails", &schema)
-        .await
-    {
+    match state.isolation.setup_rls("emails", &schema).await {
         Ok(()) => ok_json(serde_json::json!({ "status": "rls_configured" })),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())),
     }
@@ -868,18 +867,9 @@ async fn audit_export(
             } else {
                 "application/json"
             };
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, ct)],
-                data,
-            )
-                .into_response()
+            (StatusCode::OK, [(header::CONTENT_TYPE, ct)], data).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            err_json(&e.to_string()),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())).into_response(),
     }
 }
 
@@ -914,8 +904,8 @@ mod tests {
 
     #[test]
     fn test_health_returns_ok() {
-// Verify the router builds without panic
-// (actual handler tested in integration)
+        // Verify the router builds without panic
+        // (actual handler tested in integration)
         let _router: Router<()> = Router::new().route("/health", get(health_check));
     }
 

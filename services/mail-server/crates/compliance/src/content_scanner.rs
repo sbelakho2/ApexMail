@@ -42,17 +42,77 @@ enum RuleTarget {
 }
 
 const SPAM_RULES: &[SpamRule] = &[
-    SpamRule { name: "FREE_MONEY", score: 8.0, description: "Free money offer", target: RuleTarget::Text, pattern: r"(?i)free\s+money|earn\s+\$?\d+" },
-    SpamRule { name: "WINNER", score: 7.0, description: "Winner notification", target: RuleTarget::Text, pattern: r"(?i)you('ve| have)\s+(been\s+)?selected|you('re| are)\s+a?\s*winner|congratulations.{0,30}winner" },
-    SpamRule { name: "URGENT_ACTION", score: 6.0, description: "Urgent action required", target: RuleTarget::Text, pattern: r"(?i)urgent.{0,20}action|immediate.{0,20}response|act\s+now|limited\s+time" },
-    SpamRule { name: "BANK_TRANSFER", score: 9.0, description: "Bank transfer solicitation", target: RuleTarget::Text, pattern: r"(?i)wire\s+transfer|bank\s+transfer|routing\s+number|swift\s+code" },
-    SpamRule { name: "NIGERIAN_PRINCE", score: 10.0, description: "Advance fee fraud", target: RuleTarget::Text, pattern: r"(?i)(prince|minister|diplomat|barrister).{0,40}(million|fund|inheritance|estate)" },
-    SpamRule { name: "MEDICATION_SPAM", score: 7.0, description: "Medication spam", target: RuleTarget::Text, pattern: r"(?i)(viagra|cialis|pharmacy|prescription).{0,30}(cheap|discount|buy|order)" },
-    SpamRule { name: "WEIGHT_LOSS", score: 5.0, description: "Weight loss spam", target: RuleTarget::Text, pattern: r"(?i)weight\s+loss|lose\s+\d+\s*(lb|kg|pound)|diet\s+pill|fat\s+burn" },
-    SpamRule { name: "CRYPTOCURRENCY_SCAM", score: 8.0, description: "Cryptocurrency scam", target: RuleTarget::Text, pattern: r"(?i)(bitcoin|crypto|blockchain).{0,30}(invest|profit|double|guaranteed)" },
-// Note:UNSUBSCRIBE_MISSING, IMAGE_ONLY, EXCESSIVE_LINKS, ALL_CAPS checks are implemented as custom logic below
-    SpamRule { name: "HIDDEN_TEXT", score: 6.0, description: "Hidden text in HTML", target: RuleTarget::Html, pattern: r#"(?i)(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0)"# },
-    SpamRule { name: "TINY_FONT", score: 5.0, description: "Extremely small font", target: RuleTarget::Html, pattern: r"(?i)font-size\s*:\s*[01](px|pt|em)" },
+    SpamRule {
+        name: "FREE_MONEY",
+        score: 8.0,
+        description: "Free money offer",
+        target: RuleTarget::Text,
+        pattern: r"(?i)free\s+money|earn\s+\$?\d+",
+    },
+    SpamRule {
+        name: "WINNER",
+        score: 7.0,
+        description: "Winner notification",
+        target: RuleTarget::Text,
+        pattern: r"(?i)you('ve| have)\s+(been\s+)?selected|you('re| are)\s+a?\s*winner|congratulations.{0,30}winner",
+    },
+    SpamRule {
+        name: "URGENT_ACTION",
+        score: 6.0,
+        description: "Urgent action required",
+        target: RuleTarget::Text,
+        pattern: r"(?i)urgent.{0,20}action|immediate.{0,20}response|act\s+now|limited\s+time",
+    },
+    SpamRule {
+        name: "BANK_TRANSFER",
+        score: 9.0,
+        description: "Bank transfer solicitation",
+        target: RuleTarget::Text,
+        pattern: r"(?i)wire\s+transfer|bank\s+transfer|routing\s+number|swift\s+code",
+    },
+    SpamRule {
+        name: "NIGERIAN_PRINCE",
+        score: 10.0,
+        description: "Advance fee fraud",
+        target: RuleTarget::Text,
+        pattern: r"(?i)(prince|minister|diplomat|barrister).{0,40}(million|fund|inheritance|estate)",
+    },
+    SpamRule {
+        name: "MEDICATION_SPAM",
+        score: 7.0,
+        description: "Medication spam",
+        target: RuleTarget::Text,
+        pattern: r"(?i)(viagra|cialis|pharmacy|prescription).{0,30}(cheap|discount|buy|order)",
+    },
+    SpamRule {
+        name: "WEIGHT_LOSS",
+        score: 5.0,
+        description: "Weight loss spam",
+        target: RuleTarget::Text,
+        pattern: r"(?i)weight\s+loss|lose\s+\d+\s*(lb|kg|pound)|diet\s+pill|fat\s+burn",
+    },
+    SpamRule {
+        name: "CRYPTOCURRENCY_SCAM",
+        score: 8.0,
+        description: "Cryptocurrency scam",
+        target: RuleTarget::Text,
+        pattern: r"(?i)(bitcoin|crypto|blockchain).{0,30}(invest|profit|double|guaranteed)",
+    },
+    // Note:UNSUBSCRIBE_MISSING, IMAGE_ONLY, EXCESSIVE_LINKS, ALL_CAPS checks are implemented as custom logic below
+    SpamRule {
+        name: "HIDDEN_TEXT",
+        score: 6.0,
+        description: "Hidden text in HTML",
+        target: RuleTarget::Html,
+        pattern: r#"(?i)(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0)"#,
+    },
+    SpamRule {
+        name: "TINY_FONT",
+        score: 5.0,
+        description: "Extremely small font",
+        target: RuleTarget::Html,
+        pattern: r"(?i)font-size\s*:\s*[01](px|pt|em)",
+    },
 ];
 
 struct CompiledSpamRule {
@@ -96,21 +156,48 @@ static FAST_SPAM_CHECK: LazyLock<Option<Regex>> = LazyLock::new(|| {
 
 static URL_REGEX: LazyLock<Option<Regex>> =
     LazyLock::new(|| compile_regex(r#"https?://[^\s<>"']+"#, "url_regex"));
-static IP_URL_REGEX: LazyLock<Option<Regex>> =
-    LazyLock::new(|| compile_regex(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", "ip_url_regex"));
+static IP_URL_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    compile_regex(
+        r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",
+        "ip_url_regex",
+    )
+});
 
 static URL_SHORTENERS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
-    compile_aho(&[
-        "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly",
-        "is.gd", "buff.ly", "adf.ly", "tiny.cc", "shorte.st",
-    ], "url_shorteners")
+    compile_aho(
+        &[
+            "bit.ly",
+            "tinyurl.com",
+            "t.co",
+            "goo.gl",
+            "ow.ly",
+            "is.gd",
+            "buff.ly",
+            "adf.ly",
+            "tiny.cc",
+            "shorte.st",
+        ],
+        "url_shorteners",
+    )
 });
 
 static SUSPICIOUS_TLDS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
-    compile_aho(&[
-        ".xyz", ".top", ".work", ".date", ".review", ".bid",
-        ".stream", ".click", ".download", ".loan", ".racing",
-    ], "suspicious_tlds")
+    compile_aho(
+        &[
+            ".xyz",
+            ".top",
+            ".work",
+            ".date",
+            ".review",
+            ".bid",
+            ".stream",
+            ".click",
+            ".download",
+            ".loan",
+            ".racing",
+        ],
+        "suspicious_tlds",
+    )
 });
 
 static BRAND_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
@@ -147,24 +234,36 @@ static URGENCY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 
 /// Homograph / confusable Unicode chars.
 static HOMOGRAPH_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    compile_regex(r"[\u{0400}-\u{04FF}\u{2000}-\u{206F}\u{FF00}-\u{FFEF}]", "homograph_regex")
+    compile_regex(
+        r"[\u{0400}-\u{04FF}\u{2000}-\u{206F}\u{FF00}-\u{FFEF}]",
+        "homograph_regex",
+    )
 });
 
 // ─── Malware ───────────────────────────────────────────
 
 static DANGEROUS_EXTENSIONS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
-    compile_aho(&[
-        ".exe", ".bat", ".cmd", ".com", ".js", ".jse", ".vbs", ".vbe",
-        ".wsf", ".wsh", ".ps1", ".scr", ".pif", ".msi", ".hta", ".cpl",
-    ], "dangerous_extensions")
+    compile_aho(
+        &[
+            ".exe", ".bat", ".cmd", ".com", ".js", ".jse", ".vbs", ".vbe", ".wsf", ".wsh", ".ps1",
+            ".scr", ".pif", ".msi", ".hta", ".cpl",
+        ],
+        "dangerous_extensions",
+    )
 });
 
 static MACRO_EXTENSIONS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
-    compile_aho(&[".docm", ".xlsm", ".pptm", ".dotm", ".xltm"], "macro_extensions")
+    compile_aho(
+        &[".docm", ".xlsm", ".pptm", ".dotm", ".xltm"],
+        "macro_extensions",
+    )
 });
 
 static PHYSICAL_ADDRESS_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    compile_regex(r"\d{1,6}\s+\w+\s+(St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl)", "physical_address_regex")
+    compile_regex(
+        r"\d{1,6}\s+\w+\s+(St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl)",
+        "physical_address_regex",
+    )
 });
 
 fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
@@ -221,11 +320,8 @@ impl ContentScanner {
         }
     }
 
-/// Scan an email through all analysis layers.
-    pub async fn scan_email(
-        &self,
-        content: &EmailContent,
-    ) -> Result<ContentScanResult, String> {
+    /// Scan an email through all analysis layers.
+    pub async fn scan_email(&self, content: &EmailContent) -> Result<ContentScanResult, String> {
         let spam = self.analyze_spam(content);
         let phishing = self.analyze_phishing(content);
         let malware = self.analyze_malware(content);
@@ -266,24 +362,20 @@ impl ContentScanner {
             actions,
         };
 
-// Persist result
+        // Persist result
         self.persist_result(&result).await?;
 
         Ok(result)
     }
 
-/// Retrieve a stored scan result.
-    pub async fn get_result(
-        &self,
-        result_id: &str,
-    ) -> Result<Option<ContentScanResult>, String> {
-        let row: Option<(serde_json::Value,)> = sqlx::query_as(
-            "SELECT results FROM scan_results WHERE id = $1",
-        )
-        .bind(result_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+    /// Retrieve a stored scan result.
+    pub async fn get_result(&self, result_id: &str) -> Result<Option<ContentScanResult>, String> {
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT results FROM scan_results WHERE id = $1")
+                .bind(result_id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| format!("DB error: {e}"))?;
 
         match row {
             Some((json,)) => {
@@ -295,13 +387,15 @@ impl ContentScanner {
         }
     }
 
-/// Get scanning statistics.
-    pub async fn get_stats(
-        &self,
-        tenant_id: Option<&str>,
-    ) -> Result<serde_json::Value, String> {
+    /// Get scanning statistics.
+    pub async fn get_stats(&self, tenant_id: Option<&str>) -> Result<serde_json::Value, String> {
         let (total, clean, suspicious, blocked, spam_count, phishing_count): (
-            i64, i64, i64, i64, i64, i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
         ) = if let Some(tid) = tenant_id {
             sqlx::query_as(
                 "SELECT
@@ -343,7 +437,7 @@ impl ContentScanner {
         }))
     }
 
-// ── Spam Analysis ─────────────────────────────────────────
+    // ── Spam Analysis ─────────────────────────────────────────
 
     fn analyze_spam(&self, content: &EmailContent) -> SpamAnalysis {
         let mut triggers: Vec<SpamTrigger> = Vec::new();
@@ -353,7 +447,7 @@ impl ContentScanner {
         let html = content.html_body.as_deref().unwrap_or("");
         let combined_text = format!("{} {}", content.subject, text);
 
-// Fast pre-check:if combined regex doesn't match, skip text rules.
+        // Fast pre-check:if combined regex doesn't match, skip text rules.
         let text_rules_may_match = FAST_SPAM_CHECK
             .as_ref()
             .is_none_or(|regex| regex.is_match(&combined_text));
@@ -374,20 +468,19 @@ impl ContentScanner {
                     }
                 }
                 RuleTarget::Html => {
-                    if !html.is_empty()
-                        && rule.regex.is_match(html) {
-                            score += rule.score;
-                            triggers.push(SpamTrigger {
-                                rule: rule.name.into(),
-                                score: rule.score,
-                                description: rule.description.into(),
-                            });
-                        }
+                    if !html.is_empty() && rule.regex.is_match(html) {
+                        score += rule.score;
+                        triggers.push(SpamTrigger {
+                            rule: rule.name.into(),
+                            score: rule.score,
+                            description: rule.description.into(),
+                        });
+                    }
                 }
             }
         }
 
-// CAN-SPAM:check for missing unsubscribe
+        // CAN-SPAM:check for missing unsubscribe
         if !text.contains("unsubscribe") && !html.contains("unsubscribe") {
             score += 3.0;
             triggers.push(SpamTrigger {
@@ -397,7 +490,7 @@ impl ContentScanner {
             });
         }
 
-// Excessive caps in subject
+        // Excessive caps in subject
         if content.subject.len() > 5 {
             let caps = content.subject.chars().filter(|c| c.is_uppercase()).count();
             let ratio = caps as f64 / content.subject.len() as f64;
@@ -410,7 +503,7 @@ impl ContentScanner {
                 });
             }
 
-// ALL CAPS subject (>90% uppercase)
+            // ALL CAPS subject (>90% uppercase)
             if ratio > 0.9 {
                 score += 4.0;
                 triggers.push(SpamTrigger {
@@ -421,21 +514,32 @@ impl ContentScanner {
             }
         }
 
-// Sender mismatch:check if From domain doesn't match Reply-To or visible domain
+        // Sender mismatch:check if From domain doesn't match Reply-To or visible domain
         let from_domain = content.from_address.split('@').next_back().unwrap_or("");
-        if let Some(reply_to) = content.headers.get("Reply-To").or_else(|| content.headers.get("reply-to")) {
-            let reply_domain = reply_to.split('@').next_back().unwrap_or("").trim_end_matches('>');
+        if let Some(reply_to) = content
+            .headers
+            .get("Reply-To")
+            .or_else(|| content.headers.get("reply-to"))
+        {
+            let reply_domain = reply_to
+                .split('@')
+                .next_back()
+                .unwrap_or("")
+                .trim_end_matches('>');
             if !from_domain.is_empty() && !reply_domain.is_empty() && from_domain != reply_domain {
                 score += 4.0;
                 triggers.push(SpamTrigger {
                     rule: "SENDER_MISMATCH".into(),
                     score: 4.0,
-                    description: format!("From domain '{}' differs from Reply-To '{}'", from_domain, reply_domain),
+                    description: format!(
+                        "From domain '{}' differs from Reply-To '{}'",
+                        from_domain, reply_domain
+                    ),
                 });
             }
         }
 
-// Excessive punctuation
+        // Excessive punctuation
         if combined_text.len() > 20 {
             let punct = combined_text
                 .chars()
@@ -452,7 +556,7 @@ impl ContentScanner {
             }
         }
 
-// Image-only check:lots of <img> but very little text
+        // Image-only check:lots of <img> but very little text
         if !html.is_empty() && text.len() < 50 {
             let img_count = html.matches("<img").count();
             if img_count > 0 {
@@ -465,7 +569,7 @@ impl ContentScanner {
             }
         }
 
-// Excessive links
+        // Excessive links
         if !html.is_empty() {
             let link_count = html.matches("<a ").count() + html.matches("<a\t").count();
             if link_count > 15 {
@@ -485,7 +589,7 @@ impl ContentScanner {
         }
     }
 
-// ── Phishing Analysis ─────────────────────────────────────
+    // ── Phishing Analysis ─────────────────────────────────────
 
     fn analyze_phishing(&self, content: &EmailContent) -> PhishingAnalysis {
         let mut indicators: Vec<PhishingIndicator> = Vec::new();
@@ -495,111 +599,105 @@ impl ContentScanner {
         let html = content.html_body.as_deref().unwrap_or("");
         let combined = format!("{} {} {}", content.subject, text, html);
 
-// URL analysis
+        // URL analysis
         if let Some(url_regex) = URL_REGEX.as_ref() {
             for url_match in url_regex.find_iter(&combined) {
                 let url_str = url_match.as_str();
 
-// IP-based URL
-            if IP_URL_REGEX
-                .as_ref()
-                .is_some_and(|regex| regex.is_match(url_str))
-            {
-                score += 15.0;
-                indicators.push(PhishingIndicator {
-                    indicator_type: PhishingIndicatorType::Url,
-                    indicator: url_str.into(),
-                    confidence: 0.7,
-                    description: "IP-based URL".into(),
-                });
-            }
+                // IP-based URL
+                if IP_URL_REGEX
+                    .as_ref()
+                    .is_some_and(|regex| regex.is_match(url_str))
+                {
+                    score += 15.0;
+                    indicators.push(PhishingIndicator {
+                        indicator_type: PhishingIndicatorType::Url,
+                        indicator: url_str.into(),
+                        confidence: 0.7,
+                        description: "IP-based URL".into(),
+                    });
+                }
 
-// URL shortener
-            if URL_SHORTENERS
-                .as_ref()
-                .is_some_and(|ac| ac.is_match(url_str))
-            {
-                score += 10.0;
-                indicators.push(PhishingIndicator {
-                    indicator_type: PhishingIndicatorType::Url,
-                    indicator: url_str.into(),
-                    confidence: 0.5,
-                    description: "URL shortener used".into(),
-                });
-            }
+                // URL shortener
+                if URL_SHORTENERS
+                    .as_ref()
+                    .is_some_and(|ac| ac.is_match(url_str))
+                {
+                    score += 10.0;
+                    indicators.push(PhishingIndicator {
+                        indicator_type: PhishingIndicatorType::Url,
+                        indicator: url_str.into(),
+                        confidence: 0.5,
+                        description: "URL shortener used".into(),
+                    });
+                }
 
-// Suspicious TLD
-            if SUSPICIOUS_TLDS
-                .as_ref()
-                .is_some_and(|ac| ac.is_match(url_str))
-            {
-                score += 8.0;
-                indicators.push(PhishingIndicator {
-                    indicator_type: PhishingIndicatorType::Url,
-                    indicator: url_str.into(),
-                    confidence: 0.4,
-                    description: "Suspicious TLD".into(),
-                });
-            }
+                // Suspicious TLD
+                if SUSPICIOUS_TLDS
+                    .as_ref()
+                    .is_some_and(|ac| ac.is_match(url_str))
+                {
+                    score += 8.0;
+                    indicators.push(PhishingIndicator {
+                        indicator_type: PhishingIndicatorType::Url,
+                        indicator: url_str.into(),
+                        confidence: 0.4,
+                        description: "Suspicious TLD".into(),
+                    });
+                }
 
-// Excessive subdomains
-            if let Ok(parsed) = url::Url::parse(url_str) {
-                if let Some(host) = parsed.host_str() {
-                    let dot_count = host.chars().filter(|c| *c == '.').count();
-                    if dot_count > 3 {
-                        score += 8.0;
-                        indicators.push(PhishingIndicator {
-                            indicator_type: PhishingIndicatorType::Url,
-                            indicator: url_str.into(),
-                            confidence: 0.6,
-                            description: "Excessive subdomains".into(),
-                        });
-                    }
+                // Excessive subdomains
+                if let Ok(parsed) = url::Url::parse(url_str) {
+                    if let Some(host) = parsed.host_str() {
+                        let dot_count = host.chars().filter(|c| *c == '.').count();
+                        if dot_count > 3 {
+                            score += 8.0;
+                            indicators.push(PhishingIndicator {
+                                indicator_type: PhishingIndicatorType::Url,
+                                indicator: url_str.into(),
+                                confidence: 0.6,
+                                description: "Excessive subdomains".into(),
+                            });
+                        }
 
-// Brand impersonation in subdomain
-                    for (brand, re) in BRAND_PATTERNS.iter() {
-                        if re.is_match(host) {
-// Only flag if it's not the real domain
-                            let real_domain = brand.to_lowercase();
-                            if !host.contains(&format!("{real_domain}.com")) {
-                                score += 20.0;
-                                indicators.push(PhishingIndicator {
-                                    indicator_type: PhishingIndicatorType::Url,
-                                    indicator: url_str.into(),
-                                    confidence: 0.8,
-                                    description: format!(
-                                        "Brand impersonation: {brand}"
-                                    ),
-                                });
+                        // Brand impersonation in subdomain
+                        for (brand, re) in BRAND_PATTERNS.iter() {
+                            if re.is_match(host) {
+                                // Only flag if it's not the real domain
+                                let real_domain = brand.to_lowercase();
+                                if !host.contains(&format!("{real_domain}.com")) {
+                                    score += 20.0;
+                                    indicators.push(PhishingIndicator {
+                                        indicator_type: PhishingIndicatorType::Url,
+                                        indicator: url_str.into(),
+                                        confidence: 0.8,
+                                        description: format!("Brand impersonation: {brand}"),
+                                    });
+                                }
                             }
                         }
-                    }
 
-// Homograph detection
-                    if HOMOGRAPH_REGEX
-                        .as_ref()
-                        .is_some_and(|regex| regex.is_match(host))
-                    {
-                        score += 20.0;
-                        indicators.push(PhishingIndicator {
-                            indicator_type: PhishingIndicatorType::Url,
-                            indicator: url_str.into(),
-                            confidence: 0.9,
-                            description: "Homograph attack suspected".into(),
-                        });
+                        // Homograph detection
+                        if HOMOGRAPH_REGEX
+                            .as_ref()
+                            .is_some_and(|regex| regex.is_match(host))
+                        {
+                            score += 20.0;
+                            indicators.push(PhishingIndicator {
+                                indicator_type: PhishingIndicatorType::Url,
+                                indicator: url_str.into(),
+                                confidence: 0.9,
+                                description: "Homograph attack suspected".into(),
+                            });
+                        }
                     }
                 }
             }
-            }
         }
 
-// Sender analysis:display name vs email domain mismatch
+        // Sender analysis:display name vs email domain mismatch
         if let Some(display) = &content.from_display_name {
-            let email_domain = content
-                .from_address
-                .rsplit('@')
-                .next()
-                .unwrap_or("");
+            let email_domain = content.from_address.rsplit('@').next().unwrap_or("");
             let display_lower = display.to_lowercase();
 
             for (brand, re) in BRAND_PATTERNS.iter() {
@@ -619,7 +717,7 @@ impl ContentScanner {
             }
         }
 
-// Urgency patterns in content
+        // Urgency patterns in content
         for re in URGENCY_PATTERNS.iter() {
             if re.is_match(&combined) {
                 score += 5.0;
@@ -632,7 +730,7 @@ impl ContentScanner {
             }
         }
 
-// HTML attachment with password form
+        // HTML attachment with password form
         for att in &content.attachments {
             let name_lower = att.filename.to_lowercase();
             if (name_lower.ends_with(".html") || name_lower.ends_with(".htm"))
@@ -657,7 +755,7 @@ impl ContentScanner {
         }
     }
 
-// ── Malware Analysis ──────────────────────────────────────
+    // ── Malware Analysis ──────────────────────────────────────
 
     fn analyze_malware(&self, content: &EmailContent) -> MalwareAnalysis {
         let mut threats: Vec<MalwareThreat> = Vec::new();
@@ -665,7 +763,7 @@ impl ContentScanner {
         for att in &content.attachments {
             let name_lower = att.filename.to_lowercase();
 
-// Dangerous extension
+            // Dangerous extension
             if DANGEROUS_EXTENSIONS
                 .as_ref()
                 .is_some_and(|ac| ac.is_match(&name_lower))
@@ -678,7 +776,7 @@ impl ContentScanner {
                 });
             }
 
-// Double extension detection (e.g., document.pdf.exe)
+            // Double extension detection (e.g., document.pdf.exe)
             let parts: Vec<&str> = att.filename.split('.').collect();
             if parts.len() > 2 {
                 let last = format!(".{}", parts.last().unwrap_or(&""));
@@ -695,18 +793,13 @@ impl ContentScanner {
                 }
             }
 
-// Magic byte mismatch
+            // Magic byte mismatch
             if let Some(header) = &att.header_bytes {
                 let ext = name_lower.rsplit('.').next().unwrap_or("");
                 if let Some(expected) = expected_magic(ext) {
-                    if header.len() >= expected.len()
-                        && &header[..expected.len()] != expected
-                    {
+                    if header.len() >= expected.len() && &header[..expected.len()] != expected {
                         threats.push(MalwareThreat {
-                            name: format!(
-                                "File signature mismatch: {}",
-                                att.filename
-                            ),
+                            name: format!("File signature mismatch: {}", att.filename),
                             threat_type: "signature_mismatch".into(),
                             severity: ThreatSeverity::High,
                             location: att.filename.clone(),
@@ -714,13 +807,10 @@ impl ContentScanner {
                     }
                 }
 
-// Password-protected ZIP
+                // Password-protected ZIP
                 if ext == "zip" && is_password_protected_zip(header) {
                     threats.push(MalwareThreat {
-                        name: format!(
-                            "Password-protected archive: {}",
-                            att.filename
-                        ),
+                        name: format!("Password-protected archive: {}", att.filename),
                         threat_type: "password_protected_archive".into(),
                         severity: ThreatSeverity::Medium,
                         location: att.filename.clone(),
@@ -728,7 +818,7 @@ impl ContentScanner {
                 }
             }
 
-// Macro-enabled documents
+            // Macro-enabled documents
             if MACRO_EXTENSIONS
                 .as_ref()
                 .is_some_and(|ac| ac.is_match(&name_lower))
@@ -741,7 +831,7 @@ impl ContentScanner {
                 });
             }
 
-// Oversized attachment
+            // Oversized attachment
             if att.size > self.config.max_attachment_size {
                 threats.push(MalwareThreat {
                     name: format!(
@@ -761,20 +851,17 @@ impl ContentScanner {
         }
     }
 
-// ── Policy Analysis ───────────────────────────────────────
+    // ── Policy Analysis ───────────────────────────────────────
 
-    async fn analyze_policy(
-        &self,
-        content: &EmailContent,
-    ) -> PolicyAnalysis {
+    async fn analyze_policy(&self, content: &EmailContent) -> PolicyAnalysis {
         let mut violations: Vec<PolicyViolation> = Vec::new();
 
-// Standard:CAN-SPAM physical address check
+        // Standard:CAN-SPAM physical address check
         let text = content.text_body.as_deref().unwrap_or("");
         let html = content.html_body.as_deref().unwrap_or("");
         let body_combined = format!("{text} {html}");
 
-// Simplified physical address heuristic (US postal pattern)
+        // Simplified physical address heuristic (US postal pattern)
         let has_address = PHYSICAL_ADDRESS_REGEX
             .as_ref()
             .is_none_or(|regex| regex.is_match(&body_combined));
@@ -787,7 +874,7 @@ impl ContentScanner {
             });
         }
 
-// RFC 5322:Message-ID header
+        // RFC 5322:Message-ID header
         if !content.headers.contains_key("message-id")
             && !content.headers.contains_key("Message-ID")
             && !content.headers.contains_key("Message-Id")
@@ -800,7 +887,7 @@ impl ContentScanner {
             });
         }
 
-// Banned domains check
+        // Banned domains check
         for domain in &self.config.banned_domains {
             if content.from_address.contains(domain) {
                 violations.push(PolicyViolation {
@@ -812,7 +899,7 @@ impl ContentScanner {
             }
         }
 
-// Tenant-specific policies from DB
+        // Tenant-specific policies from DB
         let tenant_policies: Vec<(String, serde_json::Value)> = sqlx::query_as(
             "SELECT name, rules FROM content_policies
              WHERE tenant_id = $1 AND active = true",
@@ -882,15 +969,14 @@ impl ContentScanner {
 
         PolicyAnalysis {
             compliant: violations.is_empty()
-                || violations.iter().all(|v| matches!(v.severity, ViolationSeverity::Warning)),
+                || violations
+                    .iter()
+                    .all(|v| matches!(v.severity, ViolationSeverity::Warning)),
             violations,
         }
     }
 
-    async fn persist_result(
-        &self,
-        result: &ContentScanResult,
-    ) -> Result<(), String> {
+    async fn persist_result(&self, result: &ContentScanResult) -> Result<(), String> {
         let results_json = serde_json::to_value(result).map_err(|e| format!("JSON: {e}"))?;
 
         sqlx::query(
@@ -992,7 +1078,9 @@ mod tests {
             from_display_name: Some("Sender Name".into()),
             subject: "Monthly Newsletter".into(),
             text_body: Some("Hello, here is your monthly update. unsubscribe here".into()),
-            html_body: Some("<html><body><p>Hello world</p><a href=\"#\">unsubscribe</a></body></html>".into()),
+            html_body: Some(
+                "<html><body><p>Hello world</p><a href=\"#\">unsubscribe</a></body></html>".into(),
+            ),
             headers: {
                 let mut h = HashMap::new();
                 h.insert("Message-ID".into(), "<abc@legit.com>".into());
@@ -1002,7 +1090,7 @@ mod tests {
         }
     }
 
-// ── Spam Tests ──────────────────────────────────────────
+    // ── Spam Tests ──────────────────────────────────────────
 
     #[test]
     fn test_clean_email_not_spam() {
@@ -1038,7 +1126,8 @@ mod tests {
         let scanner = ContentScanner::new(dummy_pool(), dummy_config());
         let mut email = clean_email();
         email.html_body = Some(
-            "<html><body><div style='display: none'>hidden spam</div><p>visible</p></body></html>".into(),
+            "<html><body><div style='display: none'>hidden spam</div><p>visible</p></body></html>"
+                .into(),
         );
         let result = scanner.analyze_spam(&email);
         assert!(result.triggers.iter().any(|t| t.rule == "HIDDEN_TEXT"));
@@ -1051,7 +1140,10 @@ mod tests {
         email.text_body = Some("Hello, just a note.".into());
         email.html_body = Some("<html><body><p>Hi</p></body></html>".into());
         let result = scanner.analyze_spam(&email);
-        assert!(result.triggers.iter().any(|t| t.rule == "UNSUBSCRIBE_MISSING"));
+        assert!(result
+            .triggers
+            .iter()
+            .any(|t| t.rule == "UNSUBSCRIBE_MISSING"));
     }
 
     #[test]
@@ -1068,7 +1160,8 @@ mod tests {
         let scanner = ContentScanner::new(dummy_pool(), dummy_config());
         let mut email = clean_email();
         email.text_body = Some("Hi".into());
-        email.html_body = Some("<html><body><img src='spam.png'><img src='ad.png'></body></html>".into());
+        email.html_body =
+            Some("<html><body><img src='spam.png'><img src='ad.png'></body></html>".into());
         let result = scanner.analyze_spam(&email);
         assert!(result.triggers.iter().any(|t| t.rule == "IMAGE_ONLY"));
     }
@@ -1084,7 +1177,7 @@ mod tests {
         assert!(!prefix.contains("blocked"));
     }
 
-// ── Phishing Tests ──────────────────────────────────────
+    // ── Phishing Tests ──────────────────────────────────────
 
     #[test]
     fn test_ip_url_phishing() {
@@ -1093,7 +1186,10 @@ mod tests {
         email.text_body = Some("Click here: http://192.168.1.1/login unsubscribe".into());
         let result = scanner.analyze_phishing(&email);
         assert!(!result.indicators.is_empty());
-        assert!(result.indicators.iter().any(|i| i.description == "IP-based URL"));
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| i.description == "IP-based URL"));
     }
 
     #[test]
@@ -1102,7 +1198,10 @@ mod tests {
         let mut email = clean_email();
         email.text_body = Some("Click here: https://bit.ly/abc123 unsubscribe".into());
         let result = scanner.analyze_phishing(&email);
-        assert!(result.indicators.iter().any(|i| i.description == "URL shortener used"));
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| i.description == "URL shortener used"));
     }
 
     #[test]
@@ -1111,14 +1210,19 @@ mod tests {
         let mut email = clean_email();
         email.text_body = Some("Visit https://offer.xyz/deal unsubscribe".into());
         let result = scanner.analyze_phishing(&email);
-        assert!(result.indicators.iter().any(|i| i.description == "Suspicious TLD"));
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| i.description == "Suspicious TLD"));
     }
 
     #[test]
     fn test_urgency_phishing() {
         let scanner = ContentScanner::new(dummy_pool(), dummy_config());
         let mut email = clean_email();
-        email.text_body = Some("Your account has been suspended! Verify your identity immediately. unsubscribe".into());
+        email.text_body = Some(
+            "Your account has been suspended! Verify your identity immediately. unsubscribe".into(),
+        );
         let result = scanner.analyze_phishing(&email);
         assert!(!result.indicators.is_empty());
     }
@@ -1130,9 +1234,10 @@ mod tests {
         email.from_display_name = Some("PayPal Support".into());
         email.from_address = "scammer@phish.com".into();
         let result = scanner.analyze_phishing(&email);
-        assert!(result.indicators.iter().any(|i|
-            i.indicator_type == PhishingIndicatorType::Sender
-        ));
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| i.indicator_type == PhishingIndicatorType::Sender));
     }
 
     #[test]
@@ -1157,7 +1262,7 @@ mod tests {
         assert!(!result.is_phishing);
     }
 
-// ── Malware Tests ───────────────────────────────────────
+    // ── Malware Tests ───────────────────────────────────────
 
     #[test]
     fn test_dangerous_extension() {
@@ -1171,7 +1276,10 @@ mod tests {
         });
         let result = scanner.analyze_malware(&email);
         assert!(!result.clean);
-        assert!(result.threats.iter().any(|t| t.threat_type == "dangerous_extension"));
+        assert!(result
+            .threats
+            .iter()
+            .any(|t| t.threat_type == "dangerous_extension"));
     }
 
     #[test]
@@ -1185,7 +1293,10 @@ mod tests {
             header_bytes: None,
         });
         let result = scanner.analyze_malware(&email);
-        assert!(result.threats.iter().any(|t| t.threat_type == "double_extension"));
+        assert!(result
+            .threats
+            .iter()
+            .any(|t| t.threat_type == "double_extension"));
     }
 
     #[test]
@@ -1199,7 +1310,10 @@ mod tests {
             header_bytes: Some(vec![0x4D, 0x5A, 0x90, 0x00]), // EXE magic, not PDF
         });
         let result = scanner.analyze_malware(&email);
-        assert!(result.threats.iter().any(|t| t.threat_type == "signature_mismatch"));
+        assert!(result
+            .threats
+            .iter()
+            .any(|t| t.threat_type == "signature_mismatch"));
     }
 
     #[test]
@@ -1213,7 +1327,10 @@ mod tests {
             header_bytes: Some(vec![0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, 0x01]),
         });
         let result = scanner.analyze_malware(&email);
-        assert!(result.threats.iter().any(|t| t.threat_type == "password_protected_archive"));
+        assert!(result
+            .threats
+            .iter()
+            .any(|t| t.threat_type == "password_protected_archive"));
     }
 
     #[test]
@@ -1227,7 +1344,10 @@ mod tests {
             header_bytes: None,
         });
         let result = scanner.analyze_malware(&email);
-        assert!(result.threats.iter().any(|t| t.threat_type == "macro_document"));
+        assert!(result
+            .threats
+            .iter()
+            .any(|t| t.threat_type == "macro_document"));
     }
 
     #[test]
@@ -1258,61 +1378,148 @@ mod tests {
         assert!(result.clean);
     }
 
-// ── Verdict Tests ───────────────────────────────────────
+    // ── Verdict Tests ───────────────────────────────────────
 
     #[test]
     fn test_verdict_clean() {
-        let spam = SpamAnalysis { score: 5.0, is_spam: false, triggers: vec![] };
-        let phishing = PhishingAnalysis { score: 0.0, is_phishing: false, indicators: vec![] };
-        let malware = MalwareAnalysis { clean: true, threats: vec![] };
-        let policy = PolicyAnalysis { compliant: true, violations: vec![] };
-        assert_eq!(determine_verdict(&spam, &phishing, &malware, &policy), ScanVerdict::Clean);
+        let spam = SpamAnalysis {
+            score: 5.0,
+            is_spam: false,
+            triggers: vec![],
+        };
+        let phishing = PhishingAnalysis {
+            score: 0.0,
+            is_phishing: false,
+            indicators: vec![],
+        };
+        let malware = MalwareAnalysis {
+            clean: true,
+            threats: vec![],
+        };
+        let policy = PolicyAnalysis {
+            compliant: true,
+            violations: vec![],
+        };
+        assert_eq!(
+            determine_verdict(&spam, &phishing, &malware, &policy),
+            ScanVerdict::Clean
+        );
     }
 
     #[test]
     fn test_verdict_blocked_phishing() {
-        let spam = SpamAnalysis { score: 0.0, is_spam: false, triggers: vec![] };
-        let phishing = PhishingAnalysis { score: 80.0, is_phishing: true, indicators: vec![] };
-        let malware = MalwareAnalysis { clean: true, threats: vec![] };
-        let policy = PolicyAnalysis { compliant: true, violations: vec![] };
-        assert_eq!(determine_verdict(&spam, &phishing, &malware, &policy), ScanVerdict::Blocked);
+        let spam = SpamAnalysis {
+            score: 0.0,
+            is_spam: false,
+            triggers: vec![],
+        };
+        let phishing = PhishingAnalysis {
+            score: 80.0,
+            is_phishing: true,
+            indicators: vec![],
+        };
+        let malware = MalwareAnalysis {
+            clean: true,
+            threats: vec![],
+        };
+        let policy = PolicyAnalysis {
+            compliant: true,
+            violations: vec![],
+        };
+        assert_eq!(
+            determine_verdict(&spam, &phishing, &malware, &policy),
+            ScanVerdict::Blocked
+        );
     }
 
     #[test]
     fn test_verdict_blocked_malware() {
-        let spam = SpamAnalysis { score: 0.0, is_spam: false, triggers: vec![] };
-        let phishing = PhishingAnalysis { score: 0.0, is_phishing: false, indicators: vec![] };
-        let malware = MalwareAnalysis { clean: false, threats: vec![MalwareThreat {
-            name: "test".into(), threat_type: "test".into(),
-            severity: ThreatSeverity::High, location: "test.exe".into(),
-        }]};
-        let policy = PolicyAnalysis { compliant: true, violations: vec![] };
-        assert_eq!(determine_verdict(&spam, &phishing, &malware, &policy), ScanVerdict::Blocked);
+        let spam = SpamAnalysis {
+            score: 0.0,
+            is_spam: false,
+            triggers: vec![],
+        };
+        let phishing = PhishingAnalysis {
+            score: 0.0,
+            is_phishing: false,
+            indicators: vec![],
+        };
+        let malware = MalwareAnalysis {
+            clean: false,
+            threats: vec![MalwareThreat {
+                name: "test".into(),
+                threat_type: "test".into(),
+                severity: ThreatSeverity::High,
+                location: "test.exe".into(),
+            }],
+        };
+        let policy = PolicyAnalysis {
+            compliant: true,
+            violations: vec![],
+        };
+        assert_eq!(
+            determine_verdict(&spam, &phishing, &malware, &policy),
+            ScanVerdict::Blocked
+        );
     }
 
     #[test]
     fn test_verdict_suspicious_spam() {
-        let spam = SpamAnalysis { score: 60.0, is_spam: true, triggers: vec![] };
-        let phishing = PhishingAnalysis { score: 0.0, is_phishing: false, indicators: vec![] };
-        let malware = MalwareAnalysis { clean: true, threats: vec![] };
-        let policy = PolicyAnalysis { compliant: true, violations: vec![] };
-        assert_eq!(determine_verdict(&spam, &phishing, &malware, &policy), ScanVerdict::Suspicious);
+        let spam = SpamAnalysis {
+            score: 60.0,
+            is_spam: true,
+            triggers: vec![],
+        };
+        let phishing = PhishingAnalysis {
+            score: 0.0,
+            is_phishing: false,
+            indicators: vec![],
+        };
+        let malware = MalwareAnalysis {
+            clean: true,
+            threats: vec![],
+        };
+        let policy = PolicyAnalysis {
+            compliant: true,
+            violations: vec![],
+        };
+        assert_eq!(
+            determine_verdict(&spam, &phishing, &malware, &policy),
+            ScanVerdict::Suspicious
+        );
     }
 
     #[test]
     fn test_verdict_suspicious_policy() {
-        let spam = SpamAnalysis { score: 0.0, is_spam: false, triggers: vec![] };
-        let phishing = PhishingAnalysis { score: 0.0, is_phishing: false, indicators: vec![] };
-        let malware = MalwareAnalysis { clean: true, threats: vec![] };
-        let policy = PolicyAnalysis { compliant: false, violations: vec![] };
-        assert_eq!(determine_verdict(&spam, &phishing, &malware, &policy), ScanVerdict::Suspicious);
+        let spam = SpamAnalysis {
+            score: 0.0,
+            is_spam: false,
+            triggers: vec![],
+        };
+        let phishing = PhishingAnalysis {
+            score: 0.0,
+            is_phishing: false,
+            indicators: vec![],
+        };
+        let malware = MalwareAnalysis {
+            clean: true,
+            threats: vec![],
+        };
+        let policy = PolicyAnalysis {
+            compliant: false,
+            violations: vec![],
+        };
+        assert_eq!(
+            determine_verdict(&spam, &phishing, &malware, &policy),
+            ScanVerdict::Suspicious
+        );
     }
 
-// ── Fast-check optimization ─────────────────────────────
+    // ── Fast-check optimization ─────────────────────────────
 
     #[test]
     fn test_fast_check_skips_clean_text() {
-// The combined regex should NOT match on clean text
+        // The combined regex should NOT match on clean text
         let Some(regex) = FAST_SPAM_CHECK.as_ref() else {
             assert!(FAST_SPAM_CHECK.is_some(), "FAST_SPAM_CHECK regex missing");
             return;

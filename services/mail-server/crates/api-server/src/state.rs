@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use deadpool_redis::Pool as RedisPool;
 use ddos_protection::{DdosProtector, ProtectorConfig};
+use deadpool_redis::Pool as RedisPool;
 use reqwest::Client;
 use sqlx::PgPool;
 
@@ -20,9 +20,9 @@ pub struct AppStateInner {
     pub redis: RedisPool,
     pub config: Config,
     pub http_client: Client,
-/// SES provider — used for shared-pool sending only (no dedicated IPs).
+    /// SES provider — used for shared-pool sending only (no dedicated IPs).
     pub ses_provider: SesIpProvider,
-/// Dedicated IP provider (Hetzner Cloud). `None` if HETZNER_API_TOKEN is unset.
+    /// Dedicated IP provider (Hetzner Cloud). `None` if HETZNER_API_TOKEN is unset.
     pub ip_provider: Option<DedicatedIpProvider>,
     pub ddos_protector: Arc<DdosProtector>,
 }
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn test_app_state_is_send_sync() {
-// AppState must be Send + Sync for axum handlers.
+        // AppState must be Send + Sync for axum handlers.
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AppState>();
     }

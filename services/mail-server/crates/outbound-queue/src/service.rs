@@ -7,17 +7,13 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
+use crate::queue::{CancelResult, EmailQueue, EmailStatus, QueuedEmail};
 use mail_proto::generated::{
-    outbound_service_server::OutboundService,
-    QueueEmailRequest, QueueEmailResponse,
-    SendEmailRequest, SendEmailResponse, RecipientResult,
-    GetDeliveryStatusRequest, GetDeliveryStatusResponse,
-    CancelEmailRequest, CancelEmailResponse,
-    QueueBulkEmailsRequest, QueueBulkEmailsResponse,
-    GetQueueStatsRequest, GetQueueStatsResponse,
-    DeliveryStatus,
+    outbound_service_server::OutboundService, CancelEmailRequest, CancelEmailResponse,
+    DeliveryStatus, GetDeliveryStatusRequest, GetDeliveryStatusResponse, GetQueueStatsRequest,
+    GetQueueStatsResponse, QueueBulkEmailsRequest, QueueBulkEmailsResponse, QueueEmailRequest,
+    QueueEmailResponse, RecipientResult, SendEmailRequest, SendEmailResponse,
 };
-use crate::queue::{EmailQueue, QueuedEmail, EmailStatus, CancelResult};
 
 const MAX_BULK_EMAILS: usize = 1_000;
 
@@ -34,13 +30,13 @@ impl OutboundServiceImpl {
 
 #[tonic::async_trait]
 impl OutboundService for OutboundServiceImpl {
-/// Queue email for delivery
+    /// Queue email for delivery
     async fn queue_email(
         &self,
         request: Request<QueueEmailRequest>,
     ) -> Result<Response<QueueEmailResponse>, Status> {
         let req = request.into_inner();
-        
+
         debug!(
             from = %req.from,
             to = ?req.to,
@@ -48,16 +44,23 @@ impl OutboundService for OutboundServiceImpl {
             campaign_id = %req.campaign_id,
             "Queueing email"
         );
-        
+
         let email = QueuedEmail {
             id: Uuid::new_v4(),
             from_address: req.from,
             to_addresses: req.to,
             subject: req.subject,
             text_body: Some(req.text_body), // #118:Preserve empty string as Some("")
-            html_body: if req.html_body.is_empty() { None } else { Some(req.html_body) },
+            html_body: if req.html_body.is_empty() {
+                None
+            } else {
+                Some(req.html_body)
+            },
             headers: serde_json::Value::Object(
-                req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
+                req.headers
+                    .into_iter()
+                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                    .collect(),
             ),
             status: EmailStatus::Pending,
             attempts: 0,
@@ -67,12 +70,16 @@ impl OutboundService for OutboundServiceImpl {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             sent_at: None,
-            campaign_id: if req.campaign_id.is_empty() { None } else { Uuid::parse_str(&req.campaign_id).ok() },
+            campaign_id: if req.campaign_id.is_empty() {
+                None
+            } else {
+                Uuid::parse_str(&req.campaign_id).ok()
+            },
             sequence_id: None,
             contact_id: None,
             priority: 0,
         };
-        
+
         match self.queue.enqueue(email).await {
             Ok(id) => {
                 info!(email_id = %id, "Email queued");
@@ -87,31 +94,38 @@ impl OutboundService for OutboundServiceImpl {
             }
         }
     }
-    
-/// Send email immediately (bypassing queue)
+
+    /// Send email immediately (bypassing queue)
     async fn send_email_now(
         &self,
         request: Request<SendEmailRequest>,
     ) -> Result<Response<SendEmailResponse>, Status> {
         let req = request.into_inner();
-        
+
         debug!(
             from = %req.from,
             to = ?req.to,
             subject = %req.subject,
             "Sending email immediately"
         );
-        
-// Create a queued email with high priority
+
+        // Create a queued email with high priority
         let email = QueuedEmail {
             id: Uuid::new_v4(),
             from_address: req.from.clone(),
             to_addresses: req.to.clone(),
             subject: req.subject,
             text_body: Some(req.text_body), // #118:Preserve empty string
-            html_body: if req.html_body.is_empty() { None } else { Some(req.html_body) },
+            html_body: if req.html_body.is_empty() {
+                None
+            } else {
+                Some(req.html_body)
+            },
             headers: serde_json::Value::Object(
-                req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
+                req.headers
+                    .into_iter()
+                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                    .collect(),
             ),
             status: EmailStatus::Pending,
             attempts: 0,
@@ -126,20 +140,24 @@ impl OutboundService for OutboundServiceImpl {
             contact_id: None,
             priority: 100, // High priority for immediate sends
         };
-        
+
         match self.queue.enqueue(email.clone()).await {
             Ok(id) => {
-// #116:Report queued status, not accepted:true — delivery hasn't happened yet
+                // #116:Report queued status, not accepted:true — delivery hasn't happened yet
                 info!(email_id = %id, "Email queued for immediate delivery");
-                
-                let recipients: Vec<RecipientResult> = req.to.iter().map(|email| {
-                    RecipientResult {
-                        email: email.clone(),
-                        accepted: false, // Not yet delivered
-                        error: String::default(),
-                    }
-                }).collect();
-                
+
+                let recipients: Vec<RecipientResult> = req
+                    .to
+                    .iter()
+                    .map(|email| {
+                        RecipientResult {
+                            email: email.clone(),
+                            accepted: false, // Not yet delivered
+                            error: String::default(),
+                        }
+                    })
+                    .collect();
+
                 Ok(Response::new(SendEmailResponse {
                     email_id: id.to_string(),
                     message_id: format!("<{}@apexmail.ee>", id),
@@ -160,8 +178,8 @@ impl OutboundService for OutboundServiceImpl {
             }
         }
     }
-    
-/// Get delivery status
+
+    /// Get delivery status
     async fn get_delivery_status(
         &self,
         request: Request<GetDeliveryStatusRequest>,
@@ -201,18 +219,18 @@ impl OutboundService for OutboundServiceImpl {
             attempts_detail: vec![],
         }))
     }
-    
-/// Cancel queued email
+
+    /// Cancel queued email
     async fn cancel_email(
         &self,
         request: Request<CancelEmailRequest>,
     ) -> Result<Response<CancelEmailResponse>, Status> {
         let req = request.into_inner();
-        
+
         let email_id = Uuid::parse_str(&req.email_id)
             .map_err(|e| Status::invalid_argument(format!("Invalid email ID: {}", e)))?;
-        
-// the TOCTOU race between reading status and writing the cancellation.
+
+        // the TOCTOU race between reading status and writing the cancellation.
         match self.queue.cancel_email_atomic(&email_id).await {
             Ok(CancelResult::Cancelled) => {
                 info!(email_id = %email_id, "Email cancelled");
@@ -221,15 +239,11 @@ impl OutboundService for OutboundServiceImpl {
                     error: String::new(),
                 }))
             }
-            Ok(CancelResult::NotFound) => {
-                Err(Status::not_found("Email not found"))
-            }
-            Ok(CancelResult::NotCancellable(reason)) => {
-                Ok(Response::new(CancelEmailResponse {
-                    success: false,
-                    error: reason,
-                }))
-            }
+            Ok(CancelResult::NotFound) => Err(Status::not_found("Email not found")),
+            Ok(CancelResult::NotCancellable(reason)) => Ok(Response::new(CancelEmailResponse {
+                success: false,
+                error: reason,
+            })),
             Err(e) => {
                 error!(error = %e, "Failed to cancel email");
                 Ok(Response::new(CancelEmailResponse {
@@ -239,8 +253,8 @@ impl OutboundService for OutboundServiceImpl {
             }
         }
     }
-    
-/// Queue bulk emails
+
+    /// Queue bulk emails
     async fn queue_bulk_emails(
         &self,
         request: Request<QueueBulkEmailsRequest>,
@@ -255,7 +269,7 @@ impl OutboundService for OutboundServiceImpl {
         let mut results = Vec::with_capacity(req.emails.len());
         let mut queued_count = 0i32;
         let mut failed_count = 0i32;
-        
+
         for email_req in req.emails {
             let email = QueuedEmail {
                 id: Uuid::new_v4(),
@@ -263,9 +277,17 @@ impl OutboundService for OutboundServiceImpl {
                 to_addresses: email_req.to,
                 subject: email_req.subject,
                 text_body: Some(email_req.text_body), // #118:Preserve empty string
-                html_body: if email_req.html_body.is_empty() { None } else { Some(email_req.html_body) },
+                html_body: if email_req.html_body.is_empty() {
+                    None
+                } else {
+                    Some(email_req.html_body)
+                },
                 headers: serde_json::Value::Object(
-                    email_req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
+                    email_req
+                        .headers
+                        .into_iter()
+                        .map(|(k, v)| (k, serde_json::Value::String(v)))
+                        .collect(),
                 ),
                 status: EmailStatus::Pending,
                 attempts: 0,
@@ -275,12 +297,16 @@ impl OutboundService for OutboundServiceImpl {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 sent_at: None,
-                campaign_id: if email_req.campaign_id.is_empty() { None } else { Uuid::parse_str(&email_req.campaign_id).ok() },
+                campaign_id: if email_req.campaign_id.is_empty() {
+                    None
+                } else {
+                    Uuid::parse_str(&email_req.campaign_id).ok()
+                },
                 sequence_id: None,
                 contact_id: None,
                 priority: 0,
             };
-            
+
             match self.queue.enqueue(email).await {
                 Ok(id) => {
                     queued_count += 1;
@@ -298,32 +324,34 @@ impl OutboundService for OutboundServiceImpl {
                 }
             }
         }
-        
-        info!(queued = queued_count, failed = failed_count, "Bulk emails processed");
-        
+
+        info!(
+            queued = queued_count,
+            failed = failed_count,
+            "Bulk emails processed"
+        );
+
         Ok(Response::new(QueueBulkEmailsResponse {
             results,
             queued_count,
             failed_count,
         }))
     }
-    
-/// Get queue statistics
+
+    /// Get queue statistics
     async fn get_queue_stats(
         &self,
         _request: Request<GetQueueStatsRequest>,
     ) -> Result<Response<GetQueueStatsResponse>, Status> {
         match self.queue.get_stats().await {
-            Ok(stats) => {
-                Ok(Response::new(GetQueueStatsResponse {
-                    pending_count: stats.pending as i64,
-                    sending_count: stats.processing as i64,
-                    sent_today: stats.sent as i64,
-                    failed_today: stats.failed as i64,
-                    bounced_today: 0,
-                    average_delivery_time_ms: 0.0,
-                }))
-            }
+            Ok(stats) => Ok(Response::new(GetQueueStatsResponse {
+                pending_count: stats.pending as i64,
+                sending_count: stats.processing as i64,
+                sent_today: stats.sent as i64,
+                failed_today: stats.failed as i64,
+                bounced_today: 0,
+                average_delivery_time_ms: 0.0,
+            })),
             Err(e) => {
                 error!(error = %e, "Failed to get queue stats");
                 Err(Status::internal(e.to_string()))

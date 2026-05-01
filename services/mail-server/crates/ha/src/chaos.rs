@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::types::{
-    Experiment, ExperimentConfig, ExperimentResults, ExperimentRow,
-    ExperimentStatus, ExperimentType, MetricSnapshot, SafetyCheck,
+    Experiment, ExperimentConfig, ExperimentResults, ExperimentRow, ExperimentStatus,
+    ExperimentType, MetricSnapshot, SafetyCheck,
 };
 
 /// Safety check interval during experiments.
@@ -45,7 +45,7 @@ impl ChaosEngineeringService {
         }
     }
 
-/// Create with a metrics collector for real metric capture.
+    /// Create with a metrics collector for real metric capture.
     pub fn with_metrics(pool: PgPool, config: Arc<Config>, metrics: Arc<MetricsCollector>) -> Self {
         Self {
             pool,
@@ -55,9 +55,9 @@ impl ChaosEngineeringService {
         }
     }
 
-// ── Experiment Lifecycle ───────────────────────────────
+    // ── Experiment Lifecycle ───────────────────────────────
 
-/// Create and start a new chaos experiment.
+    /// Create and start a new chaos experiment.
     pub async fn start_experiment(
         &self,
         name: &str,
@@ -67,9 +67,14 @@ impl ChaosEngineeringService {
             return Err("Chaos engineering is disabled".into());
         }
 
-// Validate experiment type
-        let _exp_type = ExperimentType::parse(&experiment_config.experiment_type)
-            .ok_or_else(|| format!("Unknown experiment type: {}", experiment_config.experiment_type))?;
+        // Validate experiment type
+        let _exp_type =
+            ExperimentType::parse(&experiment_config.experiment_type).ok_or_else(|| {
+                format!(
+                    "Unknown experiment type: {}",
+                    experiment_config.experiment_type
+                )
+            })?;
 
         if experiment_config.parameters.duration_ms == 0 {
             return Err("Experiment duration must be greater than 0ms".into());
@@ -85,11 +90,14 @@ impl ChaosEngineeringService {
         let now = Utc::now();
 
         let config_json = serde_json::to_value(&experiment_config).map_err(|e| e.to_string())?;
-        let target_json = serde_json::to_value(&experiment_config.target).map_err(|e| e.to_string())?;
-        let params_json = serde_json::to_value(&experiment_config.parameters).map_err(|e| e.to_string())?;
-        let safety_json = serde_json::to_value(&experiment_config.safety_checks).map_err(|e| e.to_string())?;
+        let target_json =
+            serde_json::to_value(&experiment_config.target).map_err(|e| e.to_string())?;
+        let params_json =
+            serde_json::to_value(&experiment_config.parameters).map_err(|e| e.to_string())?;
+        let safety_json =
+            serde_json::to_value(&experiment_config.safety_checks).map_err(|e| e.to_string())?;
 
-// Insert experiment record
+        // Insert experiment record
         sqlx::query(
             "INSERT INTO ha_chaos_experiments
              (id, name, experiment_type, status, config, target, parameters, safety_checks, created_at)
@@ -105,20 +113,22 @@ impl ChaosEngineeringService {
         .await
         .map_err(|e| format!("Insert experiment: {e}"))?;
 
-// Capture pre-experiment metrics
+        // Capture pre-experiment metrics
         let metrics_before = self.capture_metrics().await;
 
-// Mark as running
-        sqlx::query("UPDATE ha_chaos_experiments SET status = $2, started_at = NOW() WHERE id = $1")
-            .bind(id)
-            .bind(ExperimentStatus::Running.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        // Mark as running
+        sqlx::query(
+            "UPDATE ha_chaos_experiments SET status = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(ExperimentStatus::Running.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
         info!(experiment_id = %id, name, experiment_type = experiment_config.experiment_type, "Chaos experiment started");
 
-// Start safety monitoring in background
+        // Start safety monitoring in background
         let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
         {
             let mut running = self.running_experiments.write().await;
@@ -132,7 +142,17 @@ impl ChaosEngineeringService {
         let running_clone = self.running_experiments.clone();
 
         tokio::spawn(async move {
-            Self::monitor_experiment(pool_clone, id, safety_checks, duration_ms, abort_rx, metrics_before, metrics_clone, running_clone).await;
+            Self::monitor_experiment(
+                pool_clone,
+                id,
+                safety_checks,
+                duration_ms,
+                abort_rx,
+                metrics_before,
+                metrics_clone,
+                running_clone,
+            )
+            .await;
         });
 
         let experiment = Experiment {
@@ -155,7 +175,7 @@ impl ChaosEngineeringService {
         Ok(experiment)
     }
 
-/// Safety monitoring loop. Runs until experiment completes or gets aborted.
+    /// Safety monitoring loop. Runs until experiment completes or gets aborted.
     async fn monitor_experiment(
         pool: PgPool,
         experiment_id: Uuid,
@@ -167,72 +187,73 @@ impl ChaosEngineeringService {
         running_experiments: Arc<RwLock<HashMap<Uuid, tokio::sync::watch::Sender<bool>>>>,
     ) {
         let start = std::time::Instant::now();
-        let duration = std::time::Duration::from_millis(duration_ms.min(MAX_EXPERIMENT_DURATION_MS));
+        let duration =
+            std::time::Duration::from_millis(duration_ms.min(MAX_EXPERIMENT_DURATION_MS));
 
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(*SAFETY_CHECK_INTERVAL_MS)) => {
-// Check safety thresholds
-                    let current = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
-                    for check in &safety_checks {
-                        if check.abort_on_failure {
-                            let value = Self::get_metric_value(&current, &check.check_type);
-                            let violated = match check.operator.as_str() {
-                                ">" | "gt" => value > check.threshold,
-                                "<" | "lt" => value < check.threshold,
-                                ">=" | "gte" => value >= check.threshold,
-                                _ => false,
-                            };
-                            if violated {
-                                warn!(
-                                    experiment_id = %experiment_id,
-                                    check = check.name,
-                                    value,
-                                    threshold = check.threshold,
-                                    "Safety check violated — aborting experiment"
-                                );
-                                if let Err(e) = Self::complete_experiment_static(
-                                    &pool, experiment_id, ExperimentStatus::Aborted,
-                                    Some(metrics_before.clone()), Some(current), None,
-                                    vec![format!("Safety check '{}' violated: {} {} {}", check.name, value, check.operator, check.threshold)],
-                                ).await {
-                                    error!(experiment_id = %experiment_id, error = %e, "Failed to record experiment abort after safety violation");
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(*SAFETY_CHECK_INTERVAL_MS)) => {
+            // Check safety thresholds
+                                let current = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
+                                for check in &safety_checks {
+                                    if check.abort_on_failure {
+                                        let value = Self::get_metric_value(&current, &check.check_type);
+                                        let violated = match check.operator.as_str() {
+                                            ">" | "gt" => value > check.threshold,
+                                            "<" | "lt" => value < check.threshold,
+                                            ">=" | "gte" => value >= check.threshold,
+                                            _ => false,
+                                        };
+                                        if violated {
+                                            warn!(
+                                                experiment_id = %experiment_id,
+                                                check = check.name,
+                                                value,
+                                                threshold = check.threshold,
+                                                "Safety check violated — aborting experiment"
+                                            );
+                                            if let Err(e) = Self::complete_experiment_static(
+                                                &pool, experiment_id, ExperimentStatus::Aborted,
+                                                Some(metrics_before.clone()), Some(current), None,
+                                                vec![format!("Safety check '{}' violated: {} {} {}", check.name, value, check.operator, check.threshold)],
+                                            ).await {
+                                                error!(experiment_id = %experiment_id, error = %e, "Failed to record experiment abort after safety violation");
+                                            }
+                                            Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
+                                            return;
+                                        }
+                                    }
                                 }
-                                Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
-                                return;
+
+            // Check duration
+                                if start.elapsed() >= duration {
+                                    let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
+                                    if let Err(e) = Self::complete_experiment_static(
+                                        &pool, experiment_id, ExperimentStatus::Completed,
+                                        Some(metrics_before), Some(current), Some(after),
+                                        vec![],
+                                    ).await {
+                                        error!(experiment_id = %experiment_id, error = %e, "Failed to record experiment completion");
+                                    }
+                                    Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
+                                    return;
+                                }
+                            }
+                            _ = abort_rx.changed() => {
+                                if *abort_rx.borrow() {
+                                    let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
+                                    if let Err(e) = Self::complete_experiment_static(
+                                        &pool, experiment_id, ExperimentStatus::Aborted,
+                                        Some(metrics_before), None, Some(after),
+                                        vec!["Manually aborted".into()],
+                                    ).await {
+                                        error!(experiment_id = %experiment_id, error = %e, "Failed to record manual experiment abort");
+                                    }
+                                    Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
+                                    return;
+                                }
                             }
                         }
-                    }
-
-// Check duration
-                    if start.elapsed() >= duration {
-                        let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
-                        if let Err(e) = Self::complete_experiment_static(
-                            &pool, experiment_id, ExperimentStatus::Completed,
-                            Some(metrics_before), Some(current), Some(after),
-                            vec![],
-                        ).await {
-                            error!(experiment_id = %experiment_id, error = %e, "Failed to record experiment completion");
-                        }
-                        Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
-                        return;
-                    }
-                }
-                _ = abort_rx.changed() => {
-                    if *abort_rx.borrow() {
-                        let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
-                        if let Err(e) = Self::complete_experiment_static(
-                            &pool, experiment_id, ExperimentStatus::Aborted,
-                            Some(metrics_before), None, Some(after),
-                            vec!["Manually aborted".into()],
-                        ).await {
-                            error!(experiment_id = %experiment_id, error = %e, "Failed to record manual experiment abort");
-                        }
-                        Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
-                        return;
-                    }
-                }
-            }
         }
     }
 
@@ -267,9 +288,11 @@ impl ChaosEngineeringService {
 
         sqlx::query(
             "UPDATE ha_chaos_experiments SET status=$2, completed_at=NOW(),
-             duration_ms=EXTRACT(EPOCH FROM (NOW()-started_at))*1000, results=$3 WHERE id=$1"
+             duration_ms=EXTRACT(EPOCH FROM (NOW()-started_at))*1000, results=$3 WHERE id=$1",
         )
-        .bind(id).bind(status.to_string()).bind(&results_json)
+        .bind(id)
+        .bind(status.to_string())
+        .bind(&results_json)
         .execute(pool)
         .await
         .map_err(|e| format!("Complete experiment: {e}"))?;
@@ -278,7 +301,7 @@ impl ChaosEngineeringService {
         Ok(())
     }
 
-/// Abort a running experiment.
+    /// Abort a running experiment.
     pub async fn abort_experiment(&self, id: Uuid) -> Result<(), String> {
         let running = self.running_experiments.read().await;
         if let Some(tx) = running.get(&id) {
@@ -292,7 +315,7 @@ impl ChaosEngineeringService {
         }
     }
 
-// ── Query ──────────────────────────────────────────────
+    // ── Query ──────────────────────────────────────────────
 
     pub async fn get_experiment(&self, id: Uuid) -> Result<Option<Experiment>, String> {
         let row: Option<ExperimentRow> = sqlx::query_as::<_, ExperimentRow>(
@@ -330,7 +353,8 @@ impl ChaosEngineeringService {
 
         let rows: Vec<ExperimentRow> = if let Some(s) = bind_status {
             sqlx::query_as::<_, ExperimentRow>(sql)
-                .bind(s).bind(limit)
+                .bind(s)
+                .bind(limit)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| format!("List experiments: {e}"))?
@@ -345,7 +369,7 @@ impl ChaosEngineeringService {
         Ok(rows.into_iter().map(|r| r.into_experiment()).collect())
     }
 
-/// Delete an experiment record.
+    /// Delete an experiment record.
     pub async fn delete_experiment(&self, id: Uuid) -> Result<bool, String> {
         let res = sqlx::query("DELETE FROM ha_chaos_experiments WHERE id = $1")
             .bind(id)
@@ -355,24 +379,26 @@ impl ChaosEngineeringService {
         Ok(res.rows_affected() > 0)
     }
 
-// ── Metrics ────────────────────────────────────────────
+    // ── Metrics ────────────────────────────────────────────
 
     async fn capture_metrics(&self) -> MetricSnapshot {
         Self::capture_metrics_with_collector(self.metrics.as_ref()).await
     }
 
-/// Capture real metrics from the metrics collector and system.
-    async fn capture_metrics_with_collector(collector: Option<&Arc<MetricsCollector>>) -> MetricSnapshot {
-// Get system metrics (CPU and memory)
+    /// Capture real metrics from the metrics collector and system.
+    async fn capture_metrics_with_collector(
+        collector: Option<&Arc<MetricsCollector>>,
+    ) -> MetricSnapshot {
+        // Get system metrics (CPU and memory)
         let mut sys = System::new();
         sys.refresh_cpu_usage();
         sys.refresh_memory();
-        
-// CPU usage as fraction (0.0 to 1.0)
+
+        // CPU usage as fraction (0.0 to 1.0)
         let cpu_count = sys.cpus().len().max(1) as f32;
         let cpu_usage = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cpu_count / 100.0;
-        
-// Memory usage as fraction
+
+        // Memory usage as fraction
         let total_mem = sys.total_memory();
         let used_mem = sys.used_memory();
         let memory_usage = if total_mem > 0 {
@@ -381,38 +407,42 @@ impl ChaosEngineeringService {
             0.0
         };
 
-// Get application metrics from collector if available
+        // Get application metrics from collector if available
         let (error_rate, latency_p50, latency_p99, throughput) = if let Some(mc) = collector {
             let summaries = mc.get_summary();
-            
-// Look up known metric names
-            let error_rate = summaries.iter()
+
+            // Look up known metric names
+            let error_rate = summaries
+                .iter()
                 .find(|m| m.name == "error_rate" || m.name == "errors_total")
                 .map(|m| m.value)
                 .unwrap_or(0.0);
-            
-            let requests_total = summaries.iter()
+
+            let requests_total = summaries
+                .iter()
                 .find(|m| m.name == "requests_total" || m.name == "http_requests_total")
                 .map(|m| m.value)
                 .unwrap_or(0.0);
-            
-// Estimate throughput from requests counter (simplified - real impl would diff over time)
+
+            // Estimate throughput from requests counter (simplified - real impl would diff over time)
             let throughput = requests_total.min(10000.0); // Cap at reasonable value
-            
-// Look for latency histogram metrics
-            let latency_p50 = summaries.iter()
+
+            // Look for latency histogram metrics
+            let latency_p50 = summaries
+                .iter()
                 .find(|m| m.name == "latency_p50" || m.name.contains("latency"))
                 .map(|m| m.value * 1000.0) // Convert to ms if in seconds
                 .unwrap_or(0.0);
-            
-            let latency_p99 = summaries.iter()
+
+            let latency_p99 = summaries
+                .iter()
                 .find(|m| m.name == "latency_p99")
                 .map(|m| m.value * 1000.0)
                 .unwrap_or(latency_p50 * 3.0); // Estimate p99 from p50
-            
+
             (error_rate, latency_p50, latency_p99, throughput)
         } else {
-// No collector, return zeros for app metrics (system metrics still real)
+            // No collector, return zeros for app metrics (system metrics still real)
             (0.0, 0.0, 0.0, 0.0)
         };
 
@@ -460,7 +490,12 @@ mod tests {
     fn test_runtime() -> &'static tokio::runtime::Runtime {
         use std::sync::OnceLock;
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-        RT.get_or_init(|| tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap())
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        })
     }
     fn test_pool() -> PgPool {
         let _guard = test_runtime().enter();
@@ -479,13 +514,29 @@ mod tests {
             let mut cfg = Config::from_env();
             cfg.chaos.enabled = false;
             let svc = ChaosEngineeringService::new(test_pool(), Arc::new(cfg));
-            let res = svc.start_experiment("test", ExperimentConfig {
-                experiment_type: "latency_injection".into(),
-                target: ExperimentTarget { service: "api".into(), instances: vec![], percentage: 50.0 },
-                parameters: ExperimentParameters { duration_ms: 5000, intensity: 0.5, error_codes: None, latency_ms: Some(100), resource_type: None, resource_limit: None },
-                safety_checks: vec![],
-                rollback_on_failure: true,
-            }).await;
+            let res = svc
+                .start_experiment(
+                    "test",
+                    ExperimentConfig {
+                        experiment_type: "latency_injection".into(),
+                        target: ExperimentTarget {
+                            service: "api".into(),
+                            instances: vec![],
+                            percentage: 50.0,
+                        },
+                        parameters: ExperimentParameters {
+                            duration_ms: 5000,
+                            intensity: 0.5,
+                            error_codes: None,
+                            latency_ms: Some(100),
+                            resource_type: None,
+                            resource_limit: None,
+                        },
+                        safety_checks: vec![],
+                        rollback_on_failure: true,
+                    },
+                )
+                .await;
             assert!(res.is_err());
             assert!(res.unwrap_err().contains("disabled"));
         });
@@ -497,13 +548,29 @@ mod tests {
             let mut cfg = Config::from_env();
             cfg.chaos.enabled = true;
             let svc = ChaosEngineeringService::new(test_pool(), Arc::new(cfg));
-            let res = svc.start_experiment("test", ExperimentConfig {
-                experiment_type: "unknown_type".into(),
-                target: ExperimentTarget { service: "api".into(), instances: vec![], percentage: 50.0 },
-                parameters: ExperimentParameters { duration_ms: 5000, intensity: 0.5, error_codes: None, latency_ms: None, resource_type: None, resource_limit: None },
-                safety_checks: vec![],
-                rollback_on_failure: true,
-            }).await;
+            let res = svc
+                .start_experiment(
+                    "test",
+                    ExperimentConfig {
+                        experiment_type: "unknown_type".into(),
+                        target: ExperimentTarget {
+                            service: "api".into(),
+                            instances: vec![],
+                            percentage: 50.0,
+                        },
+                        parameters: ExperimentParameters {
+                            duration_ms: 5000,
+                            intensity: 0.5,
+                            error_codes: None,
+                            latency_ms: None,
+                            resource_type: None,
+                            resource_limit: None,
+                        },
+                        safety_checks: vec![],
+                        rollback_on_failure: true,
+                    },
+                )
+                .await;
             assert!(res.is_err());
             assert!(res.unwrap_err().contains("Unknown experiment type"));
         });
@@ -520,10 +587,22 @@ mod tests {
             cpu_usage: 0.75,
             memory_usage: 0.60,
         };
-        assert_eq!(ChaosEngineeringService::get_metric_value(&snap, "error_rate"), 0.05);
-        assert_eq!(ChaosEngineeringService::get_metric_value(&snap, "latency_p50"), 25.0);
-        assert_eq!(ChaosEngineeringService::get_metric_value(&snap, "cpu_usage"), 0.75);
-        assert_eq!(ChaosEngineeringService::get_metric_value(&snap, "unknown"), 0.0);
+        assert_eq!(
+            ChaosEngineeringService::get_metric_value(&snap, "error_rate"),
+            0.05
+        );
+        assert_eq!(
+            ChaosEngineeringService::get_metric_value(&snap, "latency_p50"),
+            25.0
+        );
+        assert_eq!(
+            ChaosEngineeringService::get_metric_value(&snap, "cpu_usage"),
+            0.75
+        );
+        assert_eq!(
+            ChaosEngineeringService::get_metric_value(&snap, "unknown"),
+            0.0
+        );
     }
 
     #[test]
@@ -594,14 +673,25 @@ mod tests {
     fn test_experiment_config_serialization() {
         let cfg = ExperimentConfig {
             experiment_type: "latency_injection".into(),
-            target: ExperimentTarget { service: "api".into(), instances: vec!["i-1".into()], percentage: 50.0 },
+            target: ExperimentTarget {
+                service: "api".into(),
+                instances: vec!["i-1".into()],
+                percentage: 50.0,
+            },
             parameters: ExperimentParameters {
-                duration_ms: 30000, intensity: 0.5, error_codes: Some(vec![500, 503]),
-                latency_ms: Some(200), resource_type: None, resource_limit: None,
+                duration_ms: 30000,
+                intensity: 0.5,
+                error_codes: Some(vec![500, 503]),
+                latency_ms: Some(200),
+                resource_type: None,
+                resource_limit: None,
             },
             safety_checks: vec![SafetyCheck {
-                name: "error-rate".into(), check_type: "error_rate".into(),
-                threshold: 0.1, operator: ">".into(), abort_on_failure: true,
+                name: "error-rate".into(),
+                check_type: "error_rate".into(),
+                threshold: 0.1,
+                operator: ">".into(),
+                abort_on_failure: true,
             }],
             rollback_on_failure: true,
         };

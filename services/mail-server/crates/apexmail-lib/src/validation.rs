@@ -17,11 +17,19 @@ static UUID_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 });
 
 pub fn is_valid_email(email: &str) -> bool {
-    email.len() <= 320 && EMAIL_RE.as_ref().map(|re| re.is_match(email)).unwrap_or(false)
+    email.len() <= 320
+        && EMAIL_RE
+            .as_ref()
+            .map(|re| re.is_match(email))
+            .unwrap_or(false)
 }
 
 pub fn is_valid_domain(domain: &str) -> bool {
-    domain.len() <= 253 && DOMAIN_RE.as_ref().map(|re| re.is_match(domain)).unwrap_or(false)
+    domain.len() <= 253
+        && DOMAIN_RE
+            .as_ref()
+            .map(|re| re.is_match(domain))
+            .unwrap_or(false)
 }
 
 pub fn is_valid_uuid(s: &str) -> bool {

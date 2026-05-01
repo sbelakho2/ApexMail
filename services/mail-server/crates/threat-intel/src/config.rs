@@ -5,82 +5,82 @@ use serde::{Deserialize, Serialize};
 /// Configuration for threat intelligence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatIntelConfig {
-/// Default TTL for blocklist entries in seconds (default:86400 = 24h)
+    /// Default TTL for blocklist entries in seconds (default:86400 = 24h)
     pub default_ttl_secs: u64,
 
-/// Maximum entries in IP blocklist (default:1_000_000)
+    /// Maximum entries in IP blocklist (default:1_000_000)
     pub max_ip_entries: usize,
 
-/// Maximum entries in domain blocklist (default:500_000)
+    /// Maximum entries in domain blocklist (default:500_000)
     pub max_domain_entries: usize,
 
-/// Score threshold for blocking (default:7.0)
+    /// Score threshold for blocking (default:7.0)
     pub block_threshold: f64,
 
-/// Score threshold for flagging (default:4.0)
+    /// Score threshold for flagging (default:4.0)
     pub flag_threshold: f64,
 
-/// Weight for IP reputation in composite score
+    /// Weight for IP reputation in composite score
     pub weight_ip: f64,
 
-/// Weight for domain reputation in composite score
+    /// Weight for domain reputation in composite score
     pub weight_domain: f64,
 
-/// Whether to auto-expire entries past TTL
+    /// Whether to auto-expire entries past TTL
     pub enable_ttl_expiration: bool,
 
-/// Feed source configurations
+    /// Feed source configurations
     pub feeds: Vec<FeedSource>,
 
-/// Minimum trust required for a feed to be eligible for hard block decisions
+    /// Minimum trust required for a feed to be eligible for hard block decisions
     pub min_feed_trust_score: f64,
 
-/// When the total number of IP + domain entries exceeds this fraction of
-/// the configured maximums, trigger an immediate TTL purge instead of
-/// waiting for the next scheduled purge cycle (default:0.9 = 90%).
+    /// When the total number of IP + domain entries exceeds this fraction of
+    /// the configured maximums, trigger an immediate TTL purge instead of
+    /// waiting for the next scheduled purge cycle (default:0.9 = 90%).
     pub purge_pressure_threshold: f64,
 }
 
 /// Feed enforcement mode.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FeedEnforcementMode {
-/// Feed contributes to scoring, but can only produce FLAG outcomes.
+    /// Feed contributes to scoring, but can only produce FLAG outcomes.
     Monitor,
-/// Feed contributes fully and may produce BLOCK outcomes.
+    /// Feed contributes fully and may produce BLOCK outcomes.
     Enforce,
 }
 
 /// A threat intelligence feed source
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedSource {
-/// Human-readable name
+    /// Human-readable name
     pub name: String,
-/// Feed URL
+    /// Feed URL
     pub url: String,
-/// Feed format
+    /// Feed format
     pub format: FeedFormat,
-/// Refresh interval in seconds
+    /// Refresh interval in seconds
     pub refresh_interval_secs: u64,
-/// Whether this feed is enabled
+    /// Whether this feed is enabled
     pub enabled: bool,
-/// Feed trust score (0.0-10.0)
+    /// Feed trust score (0.0-10.0)
     pub trust_score: f64,
-/// Whether matches from this feed are monitor-only or enforceable
+    /// Whether matches from this feed are monitor-only or enforceable
     pub enforcement_mode: FeedEnforcementMode,
 }
 
 /// Supported feed formats
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FeedFormat {
-/// Spamhaus DROP format (CIDR ; SBL-ID)
+    /// Spamhaus DROP format (CIDR ; SBL-ID)
     SpamhausDrop,
-/// Plain text, one IP/CIDR per line (comments start with #)
+    /// Plain text, one IP/CIDR per line (comments start with #)
     PlainText,
-/// CSV with IP in first column
+    /// CSV with IP in first column
     CsvIp,
-/// JSON array of objects with "ip" field
+    /// JSON array of objects with "ip" field
     JsonIp,
-/// Plain text domain list
+    /// Plain text domain list
     DomainList,
 }
 

@@ -76,10 +76,14 @@ impl QBRService {
         Self { db }
     }
 
-/// Schedule a new QBR
+    /// Schedule a new QBR
     pub async fn schedule(
-        &self, tenant_id: String, quarter: i32, year: i32,
-        scheduled_date: Option<chrono::NaiveDate>, attendees: Option<serde_json::Value>,
+        &self,
+        tenant_id: String,
+        quarter: i32,
+        year: i32,
+        scheduled_date: Option<chrono::NaiveDate>,
+        attendees: Option<serde_json::Value>,
     ) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
@@ -98,10 +102,10 @@ impl QBRService {
         Ok(ApiResult::ok(row.into()))
     }
 
-/// Get a QBR by ID
+    /// Get a QBR by ID
     pub async fn get(&self, id: Uuid) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
         let row = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
-            "SELECT * FROM ent_qbrs WHERE id = $1"
+            "SELECT * FROM ent_qbrs WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -114,9 +118,12 @@ impl QBRService {
         }
     }
 
-/// List QBRs for a tenant
+    /// List QBRs for a tenant
     pub async fn list(
-        &self, tenant_id: String, limit: i64, offset: i64,
+        &self,
+        tenant_id: String,
+        limit: i64,
+        offset: i64,
     ) -> Result<ApiResult<Vec<QuarterlyBusinessReview>>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let rows = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
@@ -130,12 +137,10 @@ impl QBRService {
         Ok(ApiResult::ok(rows.into_iter().map(Into::into).collect()))
     }
 
-/// Generate QBR data (gather metrics + insights)
-    pub async fn generate(
-        &self, id: Uuid,
-    ) -> Result<ApiResult<serde_json::Value>, String> {
+    /// Generate QBR data (gather metrics + insights)
+    pub async fn generate(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let qbr = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
-            "SELECT * FROM ent_qbrs WHERE id = $1"
+            "SELECT * FROM ent_qbrs WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -147,12 +152,14 @@ impl QBRService {
             None => return Ok(ApiResult::err("QBR not found", "NOT_FOUND")),
         };
 
-// Gather quarter metrics
+        // Gather quarter metrics
         let (q_start, q_end) = quarter_date_range(qbr.quarter, qbr.year);
-        let metrics = self.gather_quarter_metrics(qbr.tenant_id, q_start, q_end).await?;
+        let metrics = self
+            .gather_quarter_metrics(qbr.tenant_id, q_start, q_end)
+            .await?;
         let insights = generate_insights(&metrics);
 
-// Update QBR with generated data
+        // Update QBR with generated data
         let metrics_json = serde_json::to_value(&metrics)
             .map_err(|e| format!("failed to serialize QBR metrics: {e}"))?;
         let insights_json = serde_json::to_value(&insights)
@@ -174,8 +181,11 @@ impl QBRService {
         })))
     }
 
-/// Mark QBR as delivered
-    pub async fn mark_delivered(&self, id: Uuid) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
+    /// Mark QBR as delivered
+    pub async fn mark_delivered(
+        &self,
+        id: Uuid,
+    ) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
         let row = sqlx::query_as::<_, QuarterlyBusinessReviewDbRow>(
             "UPDATE ent_qbrs SET status = 'delivered', delivered_date = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *"
         )
@@ -190,9 +200,12 @@ impl QBRService {
         }
     }
 
-/// Submit feedback on a QBR
+    /// Submit feedback on a QBR
     pub async fn submit_feedback(
-        &self, id: Uuid, rating: i32, feedback_text: Option<&str>,
+        &self,
+        id: Uuid,
+        rating: i32,
+        feedback_text: Option<&str>,
     ) -> Result<ApiResult<QuarterlyBusinessReview>, String> {
         let feedback_val = serde_json::json!({
             "rating": rating,
@@ -212,14 +225,18 @@ impl QBRService {
         }
     }
 
-/// Update a QBR goal
+    /// Update a QBR goal
     pub async fn update_goal(
-        &self, id: Uuid, goal_id: Uuid, current_value: f64,
+        &self,
+        id: Uuid,
+        goal_id: Uuid,
+        current_value: f64,
     ) -> Result<ApiResult<QBRGoal>, String> {
         let goal_row = sqlx::query_as::<_, QBRGoal>(
-            "SELECT * FROM ent_qbr_goals WHERE id = $1 AND qbr_id = $2"
+            "SELECT * FROM ent_qbr_goals WHERE id = $1 AND qbr_id = $2",
         )
-        .bind(goal_id).bind(id)
+        .bind(goal_id)
+        .bind(id)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Get goal: {e}"))?;
@@ -232,13 +249,21 @@ impl QBRService {
         let baseline = goal.baseline_value.unwrap_or(0.0);
         let target = goal.target_value.unwrap_or(100.0);
         let progress = calculate_goal_progress(baseline, target, current_value);
-        let status = if progress >= 100.0 { "completed" } else { "in_progress" };
+        let status = if progress >= 100.0 {
+            "completed"
+        } else {
+            "in_progress"
+        };
 
         let updated = sqlx::query_as::<_, QBRGoal>(
             "UPDATE ent_qbr_goals SET current_value = $3, progress_percent = $4, status = $5
-             WHERE id = $1 AND qbr_id = $2 RETURNING *"
+             WHERE id = $1 AND qbr_id = $2 RETURNING *",
         )
-        .bind(goal_id).bind(id).bind(current_value).bind(progress).bind(status)
+        .bind(goal_id)
+        .bind(id)
+        .bind(current_value)
+        .bind(progress)
+        .bind(status)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Update goal: {e}"))?;
@@ -246,12 +271,13 @@ impl QBRService {
         Ok(ApiResult::ok(updated))
     }
 
-/// Get industry benchmarks
+    /// Get industry benchmarks
     pub async fn get_benchmarks(
-        &self, industry: &str,
+        &self,
+        industry: &str,
     ) -> Result<ApiResult<Vec<IndustryBenchmark>>, String> {
         let rows = sqlx::query_as::<_, IndustryBenchmark>(
-            "SELECT * FROM ent_industry_benchmarks WHERE industry = $1 ORDER BY metric_name"
+            "SELECT * FROM ent_industry_benchmarks WHERE industry = $1 ORDER BY metric_name",
         )
         .bind(industry)
         .fetch_all(&self.db)
@@ -261,9 +287,12 @@ impl QBRService {
         Ok(ApiResult::ok(rows))
     }
 
-/// Gather metrics for a quarter (internal)
+    /// Gather metrics for a quarter (internal)
     async fn gather_quarter_metrics(
-        &self, tenant_id: Uuid, start: chrono::DateTime<Utc>, end: chrono::DateTime<Utc>,
+        &self,
+        tenant_id: Uuid,
+        start: chrono::DateTime<Utc>,
+        end: chrono::DateTime<Utc>,
     ) -> Result<serde_json::Value, String> {
         let row: (i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT
@@ -273,9 +302,11 @@ impl QBRService {
              COALESCE(SUM(opened), 0)::bigint,
              COALESCE(SUM(clicked), 0)::bigint
              FROM ent_sending_metrics
-             WHERE account_id = $1 AND period_start >= $2 AND period_start < $3"
+             WHERE account_id = $1 AND period_start >= $2 AND period_start < $3",
         )
-        .bind(tenant_id).bind(start).bind(end)
+        .bind(tenant_id)
+        .bind(start)
+        .bind(end)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Gather metrics: {e}"))?;
@@ -286,10 +317,26 @@ impl QBRService {
         let opened = row.3;
         let clicked = row.4;
 
-        let delivery_rate = if sent > 0 { (delivered as f64 / sent as f64) * 100.0 } else { 0.0 };
-        let bounce_rate = if sent > 0 { (bounced as f64 / sent as f64) * 100.0 } else { 0.0 };
-        let open_rate = if delivered > 0 { (opened as f64 / delivered as f64) * 100.0 } else { 0.0 };
-        let click_rate = if delivered > 0 { (clicked as f64 / delivered as f64) * 100.0 } else { 0.0 };
+        let delivery_rate = if sent > 0 {
+            (delivered as f64 / sent as f64) * 100.0
+        } else {
+            0.0
+        };
+        let bounce_rate = if sent > 0 {
+            (bounced as f64 / sent as f64) * 100.0
+        } else {
+            0.0
+        };
+        let open_rate = if delivered > 0 {
+            (opened as f64 / delivered as f64) * 100.0
+        } else {
+            0.0
+        };
+        let click_rate = if delivered > 0 {
+            (clicked as f64 / delivered as f64) * 100.0
+        } else {
+            0.0
+        };
 
         Ok(serde_json::json!({
             "sent": sent,
@@ -311,7 +358,11 @@ impl QBRService {
 pub fn calculate_goal_progress(baseline: f64, target: f64, current: f64) -> f64 {
     let range = target - baseline;
     if range.abs() < f64::EPSILON {
-        return if (current - target).abs() < f64::EPSILON { 100.0 } else { 0.0 };
+        return if (current - target).abs() < f64::EPSILON {
+            100.0
+        } else {
+            0.0
+        };
     }
     let progress = ((current - baseline) / range) * 100.0;
     progress.clamp(0.0, 200.0) // Cap at 200% (over-achievement)
@@ -319,15 +370,18 @@ pub fn calculate_goal_progress(baseline: f64, target: f64, current: f64) -> f64 
 
 /// Get start/end dates for a quarter (quarter as int:1-4)
 /// #267-268:Added validation for quarter range and safe date construction
-pub fn quarter_date_range(quarter: i32, year: i32) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
-// #268:Validate quarter is 1-4, default to Q1 for invalid values with warning
+pub fn quarter_date_range(
+    quarter: i32,
+    year: i32,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    // #268:Validate quarter is 1-4, default to Q1 for invalid values with warning
     let valid_quarter = if !(1..=4).contains(&quarter) {
         tracing::warn!(quarter = quarter, "Invalid quarter value, defaulting to Q1");
         1
     } else {
         quarter
     };
-    
+
     // #268: Pre-validated above (line 324), but keep for exhaustiveness
     debug_assert!((1..=4).contains(&valid_quarter));
     let (start_month, end_month) = match valid_quarter {
@@ -343,7 +397,7 @@ pub fn quarter_date_range(quarter: i32, year: i32) -> (chrono::DateTime<Utc>, ch
     let start = chrono::NaiveDate::from_ymd_opt(year, start_month, 1)
         .and_then(|d| d.and_hms_opt(0, 0, 0))
         .unwrap_or_else(|| {
-// Fallback:January 1st of the year at midnight
+            // Fallback:January 1st of the year at midnight
             chrono::NaiveDate::from_ymd_opt(year, 1, 1)
                 .unwrap_or(chrono::NaiveDate::MIN)
                 .and_hms_opt(0, 0, 0)
@@ -372,7 +426,7 @@ pub fn generate_insights(metrics: &serde_json::Value) -> Vec<QBRInsight> {
     let open_rate = metrics["open_rate"].as_f64().unwrap_or(0.0);
     let click_rate = metrics["click_rate"].as_f64().unwrap_or(0.0);
 
-// Insight:Low delivery rate
+    // Insight:Low delivery rate
     if delivery_rate < 95.0 {
         insights.push(QBRInsight {
             category: "deliverability".into(),
@@ -384,48 +438,64 @@ pub fn generate_insights(metrics: &serde_json::Value) -> Vec<QBRInsight> {
         });
     }
 
-// Insight:High bounce rate
+    // Insight:High bounce rate
     if bounce_rate > 5.0 {
         insights.push(QBRInsight {
             category: "list_hygiene".into(),
-            severity: if bounce_rate > 10.0 { "critical".into() } else { "warning".into() },
-            message: format!("Bounce rate is {:.1}% (target: <5%). Consider list cleaning.", bounce_rate),
+            severity: if bounce_rate > 10.0 {
+                "critical".into()
+            } else {
+                "warning".into()
+            },
+            message: format!(
+                "Bounce rate is {:.1}% (target: <5%). Consider list cleaning.",
+                bounce_rate
+            ),
             metric_name: Some("bounce_rate".into()),
             metric_value: Some(bounce_rate),
             threshold: Some(5.0),
         });
     }
 
-// Insight:Low open rate
+    // Insight:Low open rate
     if open_rate < 15.0 {
         insights.push(QBRInsight {
             category: "engagement".into(),
             severity: "info".into(),
-            message: format!("Open rate is {:.1}% (industry avg: 20-25%). Review subject lines and send times.", open_rate),
+            message: format!(
+                "Open rate is {:.1}% (industry avg: 20-25%). Review subject lines and send times.",
+                open_rate
+            ),
             metric_name: Some("open_rate".into()),
             metric_value: Some(open_rate),
             threshold: Some(15.0),
         });
     }
 
-// Insight:Low click rate
+    // Insight:Low click rate
     if click_rate < 2.0 {
         insights.push(QBRInsight {
             category: "engagement".into(),
             severity: "info".into(),
-            message: format!("Click rate is {:.1}% (industry avg: 2-5%). Review email content and CTAs.", click_rate),
+            message: format!(
+                "Click rate is {:.1}% (industry avg: 2-5%). Review email content and CTAs.",
+                click_rate
+            ),
             metric_name: Some("click_rate".into()),
             metric_value: Some(click_rate),
             threshold: Some(2.0),
         });
     }
 
-// Positive insight:Good performance
+    // Positive insight:Good performance
     if delivery_rate >= 99.0 && bounce_rate < 1.0 {
         insights.push(QBRInsight {
             category: "deliverability".into(),
             severity: "positive".into(),
-            message: format!("Delivery rate {:.1}% with {:.1}% bounce rate. Outstanding performance!", delivery_rate, bounce_rate),
+            message: format!(
+                "Delivery rate {:.1}% with {:.1}% bounce rate. Outstanding performance!",
+                delivery_rate, bounce_rate
+            ),
             metric_name: Some("delivery_rate".into()),
             metric_value: Some(delivery_rate),
             threshold: None,
@@ -437,7 +507,8 @@ pub fn generate_insights(metrics: &serde_json::Value) -> Vec<QBRInsight> {
 
 /// Compare account metrics against industry benchmarks
 pub fn compare_with_benchmarks(
-    metrics: &serde_json::Value, benchmarks: &[IndustryBenchmark],
+    metrics: &serde_json::Value,
+    benchmarks: &[IndustryBenchmark],
 ) -> Vec<BenchmarkComparison> {
     let mut comparisons = Vec::new();
 
@@ -501,7 +572,11 @@ pub fn estimate_percentile(value: f64, p25: f64, median: f64, p75: f64, p90: f64
 /// Calculate quarter-over-quarter change
 pub fn qoq_change(current: f64, previous: f64) -> f64 {
     if previous.abs() < f64::EPSILON {
-        return if current.abs() < f64::EPSILON { 0.0 } else { 100.0 };
+        return if current.abs() < f64::EPSILON {
+            0.0
+        } else {
+            100.0
+        };
     }
     ((current - previous) / previous) * 100.0
 }
@@ -580,7 +655,9 @@ mod tests {
             "click_rate": 5.0,
         });
         let insights = generate_insights(&metrics);
-        assert!(insights.iter().any(|i| i.category == "deliverability" && i.severity == "critical"));
+        assert!(insights
+            .iter()
+            .any(|i| i.category == "deliverability" && i.severity == "critical"));
         assert!(insights.iter().any(|i| i.category == "list_hygiene"));
     }
 
@@ -647,23 +724,21 @@ mod tests {
             "open_rate": 22.0,
             "click_rate": 3.5,
         });
-        let benchmarks = vec![
-            IndustryBenchmark {
-                id: Uuid::new_v4(),
-                industry: "saas".into(),
-                metric_name: "delivery_rate".into(),
-                metric_value: 95.0,
-                percentile_25: Some(92.0),
-                percentile_50: Some(95.0),
-                percentile_75: Some(97.5),
-                percentile_90: Some(99.0),
-                unit: Some("percent".into()),
-                period: Some("Q1 2024".into()),
-                source: Some("industry_report".into()),
-                valid_from: None,
-                valid_until: None,
-            },
-        ];
+        let benchmarks = vec![IndustryBenchmark {
+            id: Uuid::new_v4(),
+            industry: "saas".into(),
+            metric_name: "delivery_rate".into(),
+            metric_value: 95.0,
+            percentile_25: Some(92.0),
+            percentile_50: Some(95.0),
+            percentile_75: Some(97.5),
+            percentile_90: Some(99.0),
+            unit: Some("percent".into()),
+            period: Some("Q1 2024".into()),
+            source: Some("industry_report".into()),
+            valid_from: None,
+            valid_until: None,
+        }];
         let comparisons = compare_with_benchmarks(&metrics, &benchmarks);
         assert_eq!(comparisons.len(), 1);
         assert!((comparisons[0].account_value - 97.0).abs() < 0.01);

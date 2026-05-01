@@ -3,11 +3,14 @@
 //! Loads configuration, creates connection pools, builds the Axum app,
 //! and serves with graceful shutdown on SIGTERM / SIGINT.
 
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
+use reqwest::Client;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
-use reqwest::Client;
 
 use api_server::app::build_app;
 use api_server::config::Config;
@@ -17,15 +20,10 @@ use api_server::state::AppStateInner;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-// ── Logging ─────────────────────────────────────────────
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .json()
-        .init();
+    // ── Logging ─────────────────────────────────────────────
+    let _tracing_guard = init_tracing();
 
-// ── Config ──────────────────────────────────────────────
+    // ── Config ──────────────────────────────────────────────
     let config = Config::from_env()?;
     tracing::info!(
         port = config.port,
@@ -34,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         "loaded configuration"
     );
 
-// ── Database pool ───────────────────────────────────────
+    // ── Database pool ───────────────────────────────────────
     let db = apexmail_db::pool::create_pool_from_config(
         &config.db_host,
         config.db_port,
@@ -46,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     tracing::info!("database pool created");
 
-// ── Redis pool ──────────────────────────────────────────
+    // ── Redis pool ──────────────────────────────────────────
     let mut redis_cfg = deadpool_redis::Config::from_url(&config.redis_url());
     redis_cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_max_size));
     let redis = redis_cfg
@@ -54,9 +52,11 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to create Redis pool: {e}"))?;
     tracing::info!(max_size = config.redis_pool_max_size, "redis pool created");
 
-// ── AWS SES client ──────────────────────────────────────
+    // ── AWS SES client ──────────────────────────────────────
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_sdk_sesv2::config::Region::new(config.aws_region.clone()))
+        .region(aws_sdk_sesv2::config::Region::new(
+            config.aws_region.clone(),
+        ))
         .load()
         .await;
     let ses_client = aws_sdk_sesv2::Client::new(&aws_config);
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!(region = %config.aws_region, "AWS SES client initialized (shared-pool sending only)");
 
-// ── Hetzner dedicated IP provider ───────────────────────
+    // ── Hetzner dedicated IP provider ───────────────────────
     let ip_provider = DedicatedIpProvider::from_env(db.clone());
     if ip_provider.is_some() {
         tracing::info!("Hetzner dedicated IP provider initialized");
@@ -76,17 +76,24 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("HETZNER_API_TOKEN not set — dedicated IP provisioning disabled");
     }
 
-// ── App state ───────────────────────────────────────────
+    // ── App state ───────────────────────────────────────────
     let http_client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider, ip_provider)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to initialize DDoS protector: {e}"))?;
+    let state = AppStateInner::new(
+        db,
+        redis,
+        config.clone(),
+        http_client,
+        ses_provider,
+        ip_provider,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to initialize DDoS protector: {e}"))?;
     let shutdown_state = state.clone();
 
-// ── Prometheus metrics recorder ─────────────────────────
+    // ── Prometheus metrics recorder ─────────────────────────
     if config.metrics_port > 0 {
         let metrics_addr: std::net::SocketAddr =
             format!("0.0.0.0:{}", config.metrics_port).parse()?;
@@ -94,19 +101,25 @@ async fn main() -> anyhow::Result<()> {
             .with_http_listener(metrics_addr)
             .install_recorder()
             .map_err(|e| anyhow::anyhow!("failed to install Prometheus recorder: {e}"))?;
-        tracing::info!(port = config.metrics_port, "Prometheus metrics server ready");
+        tracing::info!(
+            port = config.metrics_port,
+            "Prometheus metrics server ready"
+        );
     }
 
-// ── Build & serve ───────────────────────────────────────
+    // ── Build & serve ───────────────────────────────────────
     let app = build_app(state);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "listening");
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     shutdown_state.db.close().await;
     tracing::info!("database pool closed");
@@ -115,11 +128,35 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "api-server".into(),
+            service_version: option_env!("CARGO_PKG_VERSION").map(str::to_string),
+            environment: std::env::var("APP_ENV").ok(),
+            ..Default::default()
+        };
+
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(error) => eprintln!("failed to initialize OTLP tracing: {error}"),
+        }
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .json()
+        .init();
+    None
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = signal::ctrl_c().await {
             tracing::error!(error = %e, "failed to listen for Ctrl+C — shutdown may require SIGKILL");
-// Fall back to pending so the other branch (SIGTERM) can still work.
+            // Fall back to pending so the other branch (SIGTERM) can still work.
             std::future::pending::<()>().await;
         }
     };
@@ -127,7 +164,9 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => { sig.recv().await; }
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
             Err(e) => {
                 tracing::error!(error = %e, "failed to install SIGTERM handler");
                 std::future::pending::<()>().await;

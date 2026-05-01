@@ -8,7 +8,7 @@ Complete reference for all ApexMail configuration options.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `NODE_ENV` | ✓ | `development` | Environment: `development`, `production`, `test` |
+| `ENVIRONMENT` | ✓ | `development` | Environment: `development`, `production`, `test` |
 | `PORT` | | `3001` | API server port |
 | `HOST` | | `0.0.0.0` | Server bind address |
 | `LOG_LEVEL` | | `info` | Logging level: `debug`, `info`, `warn`, `error` |
@@ -50,14 +50,16 @@ REDIS_CLUSTER=true
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `JWT_SECRET` | ✓ | - | JWT signing secret (min 32 chars) |
+| `JWT_PRIVATE_KEY_PEM` | ✓ | - | RSA private key used for JWT signing |
+| `JWT_PUBLIC_KEY_PEM` | ✓ | - | RSA public key used for JWT verification |
 | `JWT_ACCESS_TTL` | | `3600` | Access token TTL (seconds) |
 | `JWT_REFRESH_TTL` | | `2592000` | Refresh token TTL (30 days) |
-| `JWT_ALGORITHM` | | `ES256` | JWT algorithm |
+| `JWT_ALGORITHM` | | `RS256` | JWT algorithm |
 
 ```env
-# Generate with: openssl rand -base64 64
-JWT_SECRET="your-super-secret-jwt-key-at-least-32-characters-long"
+# Generate an RSA keypair and export both PEM values for the API server.
+JWT_PRIVATE_KEY_PEM="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+JWT_PUBLIC_KEY_PEM="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
 JWT_ACCESS_TTL=3600
 JWT_REFRESH_TTL=2592000
 ```

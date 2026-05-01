@@ -290,6 +290,44 @@ resp = api.get('evt_42')
 expect('get() GET /v1/events/evt_42',      t.calls[0][:method] == 'GET' && t.calls[0][:path] == '/v1/events/evt_42')
 expect('get() returns event',              resp.dig('event', 'id') == 'evt_42')
 
+# ── API key tests ─────────────────────────────────────────────────────────
+
+puts "\nAPI Keys"
+
+t = FakeTransport.new
+t.queue_response({ 'apiKey' => { 'id' => 'key_1', 'name' => 'Deploy key' } })
+api = ApexMail::ApiKeysAPI.new(t)
+resp = api.create(name: 'Deploy key', expires_at: '2026-12-31T00:00:00Z')
+expect('create() POST /v1/auth/api-keys', t.calls[0][:method] == 'POST' && t.calls[0][:path] == '/v1/auth/api-keys')
+expect('create() body has name',          t.calls[0][:body][:name] == 'Deploy key')
+expect('create() forwards expiresAt',     t.calls[0][:body][:expiresAt] == '2026-12-31T00:00:00Z')
+expect('create() returns api key',        resp.dig('apiKey', 'id') == 'key_1')
+
+t = FakeTransport.new
+t.queue_response({ 'apiKeys' => [] })
+api = ApexMail::ApiKeysAPI.new(t)
+api.list(limit: 25, offset: 5)
+expect('list() GET /v1/auth/api-keys', t.calls[0][:method] == 'GET' && t.calls[0][:path].start_with?('/v1/auth/api-keys'))
+expect('list() forwards pagination',   t.calls[0][:path].include?('limit=25') && t.calls[0][:path].include?('offset=5'))
+
+t = FakeTransport.new
+t.queue_response({})
+api = ApexMail::ApiKeysAPI.new(t)
+api.revoke('key_1')
+expect('revoke() DELETE /v1/auth/api-keys/key_1', t.calls[0][:method] == 'DELETE' && t.calls[0][:path] == '/v1/auth/api-keys/key_1')
+
+# ── Analytics tests ───────────────────────────────────────────────────────
+
+puts "\nAnalytics"
+
+t = FakeTransport.new
+t.queue_response({ 'stats' => { 'sent' => 10 } })
+api = ApexMail::AnalyticsAPI.new(t)
+resp = api.get(from: '2026-01-01', to: '2026-01-31', group_by: 'day', tag: 'welcome')
+expect('get() GET /v1/analytics',       t.calls[0][:method] == 'GET' && t.calls[0][:path].start_with?('/v1/analytics'))
+expect('get() forwards groupBy filter', t.calls[0][:path].include?('groupBy=day'))
+expect('get() returns stats',           resp.key?('stats'))
+
 # ── Error handling ────────────────────────────────────────────────────────
 
 puts "\nError handling"
@@ -358,6 +396,8 @@ expect('Client has webhooks API',     client.webhooks.is_a?(ApexMail::WebhooksAP
 expect('Client has templates API',    client.templates.is_a?(ApexMail::TemplatesAPI))
 expect('Client has suppressions API', client.suppressions.is_a?(ApexMail::SuppressionsAPI))
 expect('Client has events API',       client.events.is_a?(ApexMail::EventsAPI))
+expect('Client has API keys API',     client.api_keys.is_a?(ApexMail::ApiKeysAPI))
+expect('Client has analytics API',    client.analytics.is_a?(ApexMail::AnalyticsAPI))
 
 # ── Summary ───────────────────────────────────────────────────────────────
 

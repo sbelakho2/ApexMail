@@ -3,10 +3,10 @@
 use std::time::{Duration, Instant};
 
 use apexmail_lib::crypto::create_hmac_signature;
-use apexmail_lib::id::generate_id;
-use apexmail_lib::validation::is_valid_email;
-use apexmail_lib::time::parse_duration;
 use apexmail_lib::error_codes::ErrorCode;
+use apexmail_lib::id::generate_id;
+use apexmail_lib::time::parse_duration;
+use apexmail_lib::validation::is_valid_email;
 
 #[test]
 fn test_hmac_throughput() {

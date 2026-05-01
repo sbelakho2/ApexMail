@@ -15,8 +15,8 @@
 //! Shared sending uses the default SES IP pool. No per-tenant pools
 //! are needed for the shared path — SES manages IP rotation internally.
 
-use aws_sdk_sesv2::Client as SesClient;
 use aws_sdk_sesv2::types::ScalingMode;
+use aws_sdk_sesv2::Client as SesClient;
 use sqlx::PgPool;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -26,9 +26,9 @@ use uuid::Uuid;
 pub struct SesIpProvider {
     client: SesClient,
     db: PgPool,
-/// Prefix for SES IP pool names (e.g. `"apexmail"`).
+    /// Prefix for SES IP pool names (e.g. `"apexmail"`).
     pool_prefix: String,
-/// AWS region used for this provider instance.
+    /// AWS region used for this provider instance.
     region: String,
 }
 
@@ -72,22 +72,31 @@ pub enum SesProviderError {
 }
 
 impl SesIpProvider {
-/// Create a new SES IP provider.
+    /// Create a new SES IP provider.
     pub fn new(client: SesClient, db: PgPool, pool_prefix: String, region: String) -> Self {
-        Self { client, db, pool_prefix, region }
+        Self {
+            client,
+            db,
+            pool_prefix,
+            region,
+        }
     }
 
-/// Build the SES pool name for a tenant.
+    /// Build the SES pool name for a tenant.
     fn pool_name_for_tenant(&self, tenant_id: &str) -> String {
         let short = tenant_id.replace('-', "");
-        let truncated = if short.len() >= 12 { &short[..12] } else { &short };
+        let truncated = if short.len() >= 12 {
+            &short[..12]
+        } else {
+            &short
+        };
         format!("{}-{}", self.pool_prefix, truncated)
     }
 
-// ── Plan gating ────────────────────────────────────────────
+    // ── Plan gating ────────────────────────────────────────────
 
-/// Check whether the tenant's plan allows dedicated IPs and how many
-/// they're entitled to. Returns `(allowed:bool, included_count:i32)`.
+    /// Check whether the tenant's plan allows dedicated IPs and how many
+    /// they're entitled to. Returns `(allowed:bool, included_count:i32)`.
     pub async fn check_plan_eligibility(
         &self,
         tenant_id: &str,
@@ -106,12 +115,12 @@ impl SesIpProvider {
 
         match row {
             Some((allowed, count)) => Ok((allowed, count)),
-// No active subscription → not eligible
+            // No active subscription → not eligible
             None => Ok((false, 0)),
         }
     }
 
-/// Count how many active (non-retired, non-releasing) dedicated IPs the tenant has.
+    /// Count how many active (non-retired, non-releasing) dedicated IPs the tenant has.
     pub async fn count_active_ips(&self, tenant_id: &str) -> Result<i64, SesProviderError> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM dedicated_ips
@@ -123,14 +132,16 @@ impl SesIpProvider {
         Ok(count)
     }
 
-// ── Pool management ────────────────────────────────────────
+    // ── Pool management ────────────────────────────────────────
 
-/// Ensure the tenant's SES IP pool exists, creating it if necessary.
+    /// Ensure the tenant's SES IP pool exists, creating it if necessary.
     async fn ensure_tenant_pool(&self, tenant_id: &str) -> Result<String, SesProviderError> {
         let pool_name = self.pool_name_for_tenant(tenant_id);
 
-// Check if pool already exists
-        match self.client.get_dedicated_ip_pool()
+        // Check if pool already exists
+        match self
+            .client
+            .get_dedicated_ip_pool()
             .pool_name(&pool_name)
             .send()
             .await
@@ -143,11 +154,11 @@ impl SesIpProvider {
                 if !msg.contains("NotFoundException") && !msg.contains("not found") {
                     return Err(SesProviderError::SesApi(msg));
                 }
-// Pool doesn't exist — create it below
+                // Pool doesn't exist — create it below
             }
         }
 
-// Create the pool
+        // Create the pool
         self.client
             .create_dedicated_ip_pool()
             .pool_name(&pool_name)
@@ -161,14 +172,14 @@ impl SesIpProvider {
         Ok(pool_name)
     }
 
-// ── IP allocation ──────────────────────────────────────────
+    // ── IP allocation ──────────────────────────────────────────
 
-/// Allocate a dedicated IP to a tenant from the pre-provisioned inventory.
-/// 1. Picks an `available` IP from `ses_ip_inventory` (region-matched).
-/// 2. Ensures the tenant's SES pool exists.
-/// 3. Calls `PutDedicatedIpInPool` to assign the IP to the tenant's pool.
-/// 4. Records the assignment in `dedicated_ips`.
-/// 5. Sets `billing_status` to `included` or `pending_charge` based on plan limits.
+    /// Allocate a dedicated IP to a tenant from the pre-provisioned inventory.
+    /// 1. Picks an `available` IP from `ses_ip_inventory` (region-matched).
+    /// 2. Ensures the tenant's SES pool exists.
+    /// 3. Calls `PutDedicatedIpInPool` to assign the IP to the tenant's pool.
+    /// 4. Records the assignment in `dedicated_ips`.
+    /// 5. Sets `billing_status` to `included` or `pending_charge` based on plan limits.
     pub async fn allocate_ip(
         &self,
         tenant_id: &str,
@@ -176,7 +187,7 @@ impl SesIpProvider {
     ) -> Result<AllocatedIp, SesProviderError> {
         let target_region = region.unwrap_or(&self.region);
 
-// ── 1. Plan gating ──
+        // ── 1. Plan gating ──
         let (allowed, included_count) = self.check_plan_eligibility(tenant_id).await?;
         if !allowed {
             return Err(SesProviderError::PlanNotEligible);
@@ -184,9 +195,13 @@ impl SesIpProvider {
 
         let active_count = self.count_active_ips(tenant_id).await?;
 
-// Max IPs:included_count + unlimited add-ons (Pro gets 0 included but can add on).
-// Enterprise-level cap is 25 (soft limit — can be raised by support).
-        let hard_cap = if included_count >= 10 { 25 } else { included_count.max(5) };
+        // Max IPs:included_count + unlimited add-ons (Pro gets 0 included but can add on).
+        // Enterprise-level cap is 25 (soft limit — can be raised by support).
+        let hard_cap = if included_count >= 10 {
+            25
+        } else {
+            included_count.max(5)
+        };
         if active_count >= hard_cap as i64 {
             return Err(SesProviderError::LimitReached {
                 tenant_id: tenant_id.to_string(),
@@ -194,8 +209,8 @@ impl SesIpProvider {
             });
         }
 
-// ── 2. Pick an available IP from inventory ──
-// Use advisory lock to prevent race conditions.
+        // ── 2. Pick an available IP from inventory ──
+        // Use advisory lock to prevent race conditions.
         let ip_row: Option<(String, String)> = sqlx::query_as(
             "SELECT ip_address, aws_region FROM ses_ip_inventory
              WHERE assignment_status = 'available' AND aws_region = $1
@@ -211,10 +226,10 @@ impl SesIpProvider {
             region: target_region.to_string(),
         })?;
 
-// ── 3. Ensure tenant pool ──
+        // ── 3. Ensure tenant pool ──
         let ses_pool_name = self.ensure_tenant_pool(tenant_id).await?;
 
-// ── 4. Assign IP to tenant's pool in SES ──
+        // ── 4. Assign IP to tenant's pool in SES ──
         self.client
             .put_dedicated_ip_in_pool()
             .ip(&ip_address)
@@ -230,7 +245,7 @@ impl SesIpProvider {
             "Assigned dedicated IP to tenant pool in SES"
         );
 
-// ── 5. Mark inventory IP as assigned ──
+        // ── 5. Mark inventory IP as assigned ──
         sqlx::query(
             "UPDATE ses_ip_inventory
              SET assignment_status = 'assigned',
@@ -243,14 +258,14 @@ impl SesIpProvider {
         .execute(&self.db)
         .await?;
 
-// ── 6. Determine billing status ──
+        // ── 6. Determine billing status ──
         let billing_status = if active_count < included_count as i64 {
             "included"
         } else {
             "pending_charge"
         };
 
-// ── 7. Insert dedicated_ips record ──
+        // ── 7. Insert dedicated_ips record ──
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO dedicated_ips
@@ -267,14 +282,10 @@ impl SesIpProvider {
         .execute(&self.db)
         .await?;
 
-// ── 8. Query SES for current warmup state ──
-        let warmup_pct = match self.client
-            .get_dedicated_ip()
-            .ip(&ip_address)
-            .send()
-            .await
-        {
-            Ok(resp) => resp.dedicated_ip()
+        // ── 8. Query SES for current warmup state ──
+        let warmup_pct = match self.client.get_dedicated_ip().ip(&ip_address).send().await {
+            Ok(resp) => resp
+                .dedicated_ip()
                 .map(|di| di.warmup_percentage())
                 .unwrap_or(0),
             Err(_) => 0,
@@ -297,18 +308,18 @@ impl SesIpProvider {
         })
     }
 
-// ── IP release ─────────────────────────────────────────────
+    // ── IP release ─────────────────────────────────────────────
 
-/// Release a dedicated IP from a tenant back to the available inventory.
-/// 1. Moves the IP out of the tenant's SES pool (back to default).
-/// 2. Marks the `dedicated_ips` record as `releasing` + `pending_cancel`.
-/// 3. Returns the IP to `available` in `ses_ip_inventory`.
+    /// Release a dedicated IP from a tenant back to the available inventory.
+    /// 1. Moves the IP out of the tenant's SES pool (back to default).
+    /// 2. Marks the `dedicated_ips` record as `releasing` + `pending_cancel`.
+    /// 3. Returns the IP to `available` in `ses_ip_inventory`.
     pub async fn release_ip(
         &self,
         dedicated_ip_id: Uuid,
         tenant_id: &str,
     ) -> Result<(), SesProviderError> {
-// Fetch the record
+        // Fetch the record
         let row: Option<(String, String)> = sqlx::query_as(
             "SELECT ip_address, ses_pool_name FROM dedicated_ips
              WHERE id = $1 AND tenant_id = $2 AND status NOT IN ('retired', 'releasing')",
@@ -322,9 +333,10 @@ impl SesIpProvider {
             ip: dedicated_ip_id.to_string(),
         })?;
 
-// Move IP out of tenant's pool → default pool in SES
-// (SES requires IPs to be in *some* pool, "default" is the unassigned state)
-        match self.client
+        // Move IP out of tenant's pool → default pool in SES
+        // (SES requires IPs to be in *some* pool, "default" is the unassigned state)
+        match self
+            .client
             .put_dedicated_ip_in_pool()
             .ip(&ip_address)
             .destination_pool_name("default")
@@ -337,7 +349,7 @@ impl SesIpProvider {
             }
         }
 
-// Mark dedicated_ips record
+        // Mark dedicated_ips record
         sqlx::query(
             "UPDATE dedicated_ips
              SET status = 'retired',
@@ -352,7 +364,7 @@ impl SesIpProvider {
         .execute(&self.db)
         .await?;
 
-// Return IP to inventory
+        // Return IP to inventory
         sqlx::query(
             "UPDATE ses_ip_inventory
              SET assignment_status = 'available',
@@ -374,11 +386,11 @@ impl SesIpProvider {
         Ok(())
     }
 
-// ── IP warmup ──────────────────────────────────────────────
+    // ── IP warmup ──────────────────────────────────────────────
 
-/// Start or resume warmup for a dedicated IP via SES warmup attributes.
-/// SES manages warmup automatically for newly provisioned IPs.
-/// This method explicitly sets warmup percentage if manual control is needed.
+    /// Start or resume warmup for a dedicated IP via SES warmup attributes.
+    /// SES manages warmup automatically for newly provisioned IPs.
+    /// This method explicitly sets warmup percentage if manual control is needed.
     pub async fn start_warmup(
         &self,
         dedicated_ip_id: Uuid,
@@ -397,7 +409,7 @@ impl SesIpProvider {
             ip: dedicated_ip_id.to_string(),
         })?;
 
-// Enable warmup in SES (percentage starts low and SES ramps automatically)
+        // Enable warmup in SES (percentage starts low and SES ramps automatically)
         self.client
             .put_dedicated_ip_warmup_attributes()
             .ip(&ip_address)
@@ -406,7 +418,7 @@ impl SesIpProvider {
             .await
             .map_err(|e| SesProviderError::SesApi(format!("{e}")))?;
 
-// Update local status
+        // Update local status
         sqlx::query(
             "UPDATE dedicated_ips
              SET status = 'warming',
@@ -419,7 +431,7 @@ impl SesIpProvider {
         .execute(&self.db)
         .await?;
 
-// Query current state from SES
+        // Query current state from SES
         let ses_status = self.get_ip_status(&ip_address).await?;
 
         info!(
@@ -432,20 +444,23 @@ impl SesIpProvider {
         Ok(ses_status)
     }
 
-// ── Status queries ─────────────────────────────────────────
+    // ── Status queries ─────────────────────────────────────────
 
-/// Get the current status of a dedicated IP from SES.
+    /// Get the current status of a dedicated IP from SES.
     pub async fn get_ip_status(&self, ip_address: &str) -> Result<SesIpStatus, SesProviderError> {
-        let resp = self.client
+        let resp = self
+            .client
             .get_dedicated_ip()
             .ip(ip_address)
             .send()
             .await
             .map_err(|e| SesProviderError::SesApi(format!("{e}")))?;
 
-        let di = resp.dedicated_ip().ok_or_else(|| SesProviderError::IpNotFound {
-            ip: ip_address.to_string(),
-        })?;
+        let di = resp
+            .dedicated_ip()
+            .ok_or_else(|| SesProviderError::IpNotFound {
+                ip: ip_address.to_string(),
+            })?;
 
         Ok(SesIpStatus {
             ip_address: ip_address.to_string(),
@@ -454,21 +469,24 @@ impl SesIpProvider {
         })
     }
 
-/// Sync warmup progress from SES into the local database for all warming IPs.
-/// Called periodically by the ops service.
+    /// Sync warmup progress from SES into the local database for all warming IPs.
+    /// Called periodically by the ops service.
     pub async fn sync_warmup_progress(&self) -> Result<u32, SesProviderError> {
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT id, ip_address FROM dedicated_ips WHERE status = 'warming'",
-        )
-        .fetch_all(&self.db)
-        .await?;
+        let rows: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT id, ip_address FROM dedicated_ips WHERE status = 'warming'")
+                .fetch_all(&self.db)
+                .await?;
 
         let mut synced = 0u32;
         for (id, ip_address) in &rows {
             match self.get_ip_status(ip_address).await {
                 Ok(status) => {
                     let progress = status.warmup_percentage as f64 / 100.0;
-                    let new_status = if status.warmup_percentage >= 100 { "active" } else { "warming" };
+                    let new_status = if status.warmup_percentage >= 100 {
+                        "active"
+                    } else {
+                        "warming"
+                    };
 
                     sqlx::query(
                         "UPDATE dedicated_ips

@@ -41,7 +41,7 @@ pub async fn idempotency_middleware(
         None => return next.run(req).await,
     };
 
-// instead of raw Uuid. Previously always fell through to "global".
+    // instead of raw Uuid. Previously always fell through to "global".
     let tenant_id = req
         .extensions()
         .get::<AuthUser>()
@@ -51,16 +51,16 @@ pub async fn idempotency_middleware(
     let cache_key = format!("apexmail:idempotency:{tenant_id}:{idempotency_key}");
     let ttl = state.config.idempotency_ttl_seconds;
 
-// 1. Check cache
+    // 1. Check cache
     if let Some(cached) = lookup_cached(&state, &cache_key).await {
         tracing::debug!(cache_key, "returning cached idempotent response");
         return cached_to_response(cached);
     }
 
-// 2. Execute the real handler
+    // 2. Execute the real handler
     let response = next.run(req).await;
 
-// 3. Store the response
+    // 3. Store the response
     store_response(&state, &cache_key, ttl, response).await
 }
 
@@ -82,11 +82,9 @@ async fn lookup_cached(state: &AppState, key: &str) -> Option<CachedResponse> {
 
 fn cached_to_response(cached: CachedResponse) -> Response {
     let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
-    let body_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &cached.body,
-    )
-    .unwrap_or_default();
+    let body_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cached.body)
+            .unwrap_or_default();
 
     let mut builder = Response::builder().status(status);
     for (k, v) in &cached.headers {
@@ -107,7 +105,7 @@ async fn store_response(state: &AppState, cache_key: &str, ttl: u64, resp: Respo
     let body_bytes = match to_bytes(body, MAX_BODY_SIZE).await {
         Ok(b) => b,
         Err(e) => {
-// response instead of returning an empty body.
+            // response instead of returning an empty body.
             tracing::warn!(cache_key, error = %e, "response body too large to cache for idempotency");
             return (
                 parts.status,
@@ -127,16 +125,9 @@ async fn store_response(state: &AppState, cache_key: &str, ttl: u64, resp: Respo
         headers: parts
             .headers
             .iter()
-            .filter_map(|(k, v)| {
-                v.to_str()
-                    .ok()
-                    .map(|val| (k.to_string(), val.to_string()))
-            })
+            .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
             .collect(),
-        body: base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &body_bytes,
-        ),
+        body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body_bytes),
     };
 
     if let Ok(json) = serde_json::to_string(&cached) {

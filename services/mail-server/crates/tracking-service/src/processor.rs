@@ -158,43 +158,45 @@ impl EventProcessor {
         }
     }
 
-/// Start the background flush loop in a detached Tokio task.
-/// Returns a handle so callers can `await` graceful shutdown.
+    /// Start the background flush loop in a detached Tokio task.
+    /// Returns a handle so callers can `await` graceful shutdown.
     pub fn start(self: Arc<Self>) {
         let interval = Duration::from_millis(self.flush_interval_ms);
         let this = self.clone();
 
         self.running.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
-            info!("EventProcessor: flush loop started (interval={}ms, batch={})",
-                this.flush_interval_ms, this.max_buffer_size);
+            info!(
+                "EventProcessor: flush loop started (interval={}ms, batch={})",
+                this.flush_interval_ms, this.max_buffer_size
+            );
 
             loop {
                 tokio::select! {
-// Re-schedule after the configured fixed interval.
-                    _ = tokio::time::sleep(interval) => {
-                        if let Err(e) = this.flush().await {
-                            error!(error = %e, "EventProcessor: flush error");
-                        }
-                    }
-// Shutdown signal received
-                    _ = this.shutdown.notified() => {
-                        info!("EventProcessor: shutdown signal received, draining WAL");
-// Drain remaining events before exit (C-093)
-                        this.drain_all().await;
-                        break;
-                    }
-                }
+                // Re-schedule after the configured fixed interval.
+                                    _ = tokio::time::sleep(interval) => {
+                                        if let Err(e) = this.flush().await {
+                                            error!(error = %e, "EventProcessor: flush error");
+                                        }
+                                    }
+                // Shutdown signal received
+                                    _ = this.shutdown.notified() => {
+                                        info!("EventProcessor: shutdown signal received, draining WAL");
+                // Drain remaining events before exit (C-093)
+                                        this.drain_all().await;
+                                        break;
+                                    }
+                                }
             }
             this.running.store(false, Ordering::SeqCst);
             info!("EventProcessor: flush loop stopped");
         });
     }
 
-/// Signal shutdown and wait for the flush loop to drain.
+    /// Signal shutdown and wait for the flush loop to drain.
     pub async fn stop(&self) {
         self.shutdown.notify_one();
-// Poll until the loop exits
+        // Poll until the loop exits
         let mut waited = 0u64;
         while self.running.load(Ordering::SeqCst) && waited < 30_000 {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -202,18 +204,24 @@ impl EventProcessor {
         }
     }
 
-// ── Record helpers ────────────────────────────────────────────────
+    // ── Record helpers ────────────────────────────────────────────────
 
-/// Record an email-open event into the Redis WAL.
+    /// Record an email-open event into the Redis WAL.
     pub async fn record_open(&self, data: OpenData) -> Result<()> {
-// Dedup:SETNX dedupe:{sha256(type:msgId:recipient)} EX 86400
+        // Dedup:SETNX dedupe:{sha256(type:msgId:recipient)} EX 86400
         let dedup_key = dedup_key("open", &data.message_id, &data.recipient, None);
-        if !self.try_set_dedup(&dedup_key, 86400).await? {
+        if !self.try_set_dedup("open", &dedup_key, 86400).await? {
             debug!(message_id = %data.message_id, "Duplicate open event, skipping");
             return Ok(());
         }
 
-        let OpenData { tenant_id, message_id, recipient, user_agent, ip_address } = data;
+        let OpenData {
+            tenant_id,
+            message_id,
+            recipient,
+            user_agent,
+            ip_address,
+        } = data;
         let event = TrackingEvent {
             id: new_id("evt"),
             event_type: EventType::Opened,
@@ -231,25 +239,39 @@ impl EventProcessor {
 
         self.enqueue_event(&event).await?;
 
-// Increment Redis counters (non-critical, fire-and-forget)
+        // Increment Redis counters (non-critical, fire-and-forget)
         let now = Utc::now();
         let date = now.format("%Y-%m-%d").to_string();
         let hour = now.format("%H").to_string();
-        self.incr_counters(&event.tenant_id, &date, &hour, "opens").await;
+        self.incr_counters(&event.tenant_id, &date, &hour, "opens")
+            .await;
 
         Ok(())
     }
 
-/// Record a click event into the Redis WAL.
+    /// Record a click event into the Redis WAL.
     pub async fn record_click(&self, data: ClickData) -> Result<()> {
-// Dedup rapid-fire clicks within 1 second
-        let dedup_key = dedup_key("click", &data.message_id, &data.recipient, Some(&data.link_id));
-        if !self.try_set_dedup(&dedup_key, 1).await? {
+        // Dedup rapid-fire clicks within 1 second
+        let dedup_key = dedup_key(
+            "click",
+            &data.message_id,
+            &data.recipient,
+            Some(&data.link_id),
+        );
+        if !self.try_set_dedup("click", &dedup_key, 1).await? {
             debug!(message_id = %data.message_id, link_id = %data.link_id, "Rapid duplicate click, skipping");
             return Ok(());
         }
 
-        let ClickData { tenant_id, message_id, recipient, link_id, link_url, user_agent, ip_address } = data;
+        let ClickData {
+            tenant_id,
+            message_id,
+            recipient,
+            link_id,
+            link_url,
+            user_agent,
+            ip_address,
+        } = data;
         let event = TrackingEvent {
             id: new_id("evt"),
             event_type: EventType::Clicked,
@@ -267,23 +289,33 @@ impl EventProcessor {
 
         self.enqueue_event(&event).await?;
 
-// Track unique clicks via a separate NX key (30-day window)
+        // Track unique clicks via a separate NX key (30-day window)
         let now = Utc::now();
         let date = now.format("%Y-%m-%d").to_string();
         let hour = now.format("%H").to_string();
-        self.incr_counters(&event.tenant_id, &date, &hour, "clicks").await;
+        self.incr_counters(&event.tenant_id, &date, &hour, "clicks")
+            .await;
 
         Ok(())
     }
 
-/// Record an unsubscribe event into the Redis WAL and immediately add the
-/// recipient to the suppression list (GDPR / CAN-SPAM requirement).
+    /// Record an unsubscribe event into the Redis WAL and immediately add the
+    /// recipient to the suppression list (GDPR / CAN-SPAM requirement).
     pub async fn record_unsubscribe(&self, data: UnsubscribeData) -> Result<()> {
-        let metadata = data.category.as_deref().map(|cat| {
-            serde_json::json!({ "category": cat })
-        });
+        let metadata = data
+            .category
+            .as_deref()
+            .map(|cat| serde_json::json!({ "category": cat }));
         let category = data.category;
-        let UnsubscribeData { tenant_id, message_id, recipient, reason, user_agent, ip_address, .. } = data;
+        let UnsubscribeData {
+            tenant_id,
+            message_id,
+            recipient,
+            reason,
+            user_agent,
+            ip_address,
+            ..
+        } = data;
         let event = TrackingEvent {
             id: new_id("evt"),
             event_type: EventType::Unsubscribed,
@@ -300,14 +332,15 @@ impl EventProcessor {
         };
 
         self.enqueue_event(&event).await?;
-        self.add_to_suppression_list(&event.tenant_id, &event.recipient, category.as_deref()).await;
+        self.add_to_suppression_list(&event.tenant_id, &event.recipient, category.as_deref())
+            .await;
 
         Ok(())
     }
 
-// ── WAL helpers ───────────────────────────────────────────────────
+    // ── WAL helpers ───────────────────────────────────────────────────
 
-/// Wrap event in a versioned envelope and RPUSH to Redis WAL.
+    /// Wrap event in a versioned envelope and RPUSH to Redis WAL.
     async fn enqueue_event(&self, event: &TrackingEvent) -> Result<()> {
         let payload = serde_json::to_string(event).context("serialize event")?;
         let cs = sha256_hex8(&payload);
@@ -323,7 +356,7 @@ impl EventProcessor {
         Ok(())
     }
 
-// ── Flush loop ────────────────────────────────────────────────────
+    // ── Flush loop ────────────────────────────────────────────────────
 
     async fn flush(&self) -> Result<()> {
         let mut conn = self.redis.get().await.context("redis pool get (flush)")?;
@@ -365,14 +398,26 @@ impl EventProcessor {
         loop {
             let mut conn = match self.redis.get().await {
                 Ok(c) => c,
-                Err(e) => { error!(error = %e, "drain_all: redis pool error"); break; }
+                Err(e) => {
+                    error!(error = %e, "drain_all: redis pool error");
+                    break;
+                }
             };
-            let len: i64 = match redis::cmd("LLEN").arg(REDIS_WAL_KEY).query_async(&mut *conn).await {
+            let len: i64 = match redis::cmd("LLEN")
+                .arg(REDIS_WAL_KEY)
+                .query_async(&mut *conn)
+                .await
+            {
                 Ok(n) => n,
-                Err(e) => { error!(error = %e, "drain_all: LLEN error"); break; }
+                Err(e) => {
+                    error!(error = %e, "drain_all: LLEN error");
+                    break;
+                }
             };
             drop(conn);
-            if len == 0 { break; }
+            if len == 0 {
+                break;
+            }
             info!(remaining = len, "Draining Redis WAL on shutdown");
             if let Err(e) = self.flush().await {
                 error!(error = %e, "drain_all: flush error, stopping drain");
@@ -405,21 +450,21 @@ impl EventProcessor {
         }
     }
 
-// ── Postgres write ─────────────────────────────────────────────────
+    // ── Postgres write ─────────────────────────────────────────────────
 
     async fn write_events(&self, events: &[TrackingEvent]) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }
 
-// Max PG params ≈ 65535; 10 columns per event → max chunk 6500
+        // Max PG params ≈ 65535; 10 columns per event → max chunk 6500
         const PARAMS_PER_EVENT: usize = 10;
         const MAX_PER_CHUNK: usize = 65000 / PARAMS_PER_EVENT;
 
         let mut tx = self.db.begin().await.context("begin transaction")?;
 
         for chunk in events.chunks(MAX_PER_CHUNK) {
-// Use sqlx query_builder for safe parameterization
+            // Use sqlx query_builder for safe parameterization
             let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
                 "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_id, link_url, user_agent, ip_address, timestamp) "
             );
@@ -436,10 +481,14 @@ impl EventProcessor {
                     .push_bind(ev.timestamp);
             });
             builder.push(" ON CONFLICT (id) DO NOTHING");
-            builder.build().execute(&mut *tx).await.context("batch insert events")?;
+            builder
+                .build()
+                .execute(&mut *tx)
+                .await
+                .context("batch insert events")?;
         }
 
-// Batch UPDATE messages stats with unnest (-042)
+        // Batch UPDATE messages stats with unnest (-042)
         let mut msg_ids: Vec<String> = Vec::new();
         let mut open_counts: Vec<i32> = Vec::new();
         let mut click_counts: Vec<i32> = Vec::new();
@@ -495,8 +544,8 @@ impl EventProcessor {
 
         tx.commit().await.context("commit transaction")?;
 
-// ── Publish events to Redis Pub/Sub for real-time SSE streaming ──
-// Fire-and-forget:SSE is best-effort; Postgres is the source of truth.
+        // ── Publish events to Redis Pub/Sub for real-time SSE streaming ──
+        // Fire-and-forget:SSE is best-effort; Postgres is the source of truth.
         let redis = self.redis.clone();
         let events_for_pubsub: Vec<(String, String)> = events
             .iter()
@@ -523,14 +572,9 @@ impl EventProcessor {
         Ok(())
     }
 
-// ── Suppression list ──────────────────────────────────────────────
+    // ── Suppression list ──────────────────────────────────────────────
 
-    async fn add_to_suppression_list(
-        &self,
-        tenant_id: &str,
-        email: &str,
-        category: Option<&str>,
-    ) {
+    async fn add_to_suppression_list(&self, tenant_id: &str, email: &str, category: Option<&str>) {
         let email_lc = email.to_lowercase();
         let sup_id = new_id("sup");
 
@@ -575,7 +619,7 @@ impl EventProcessor {
             error!(error = %e, "Failed to add suppression, event still recorded");
         }
 
-// Fire-and-forget Redis publish (F-217)
+        // Fire-and-forget Redis publish (F-217)
         let payload = serde_json::json!({
             "tenantId": tenant_id,
             "email": email_lc,
@@ -599,10 +643,10 @@ impl EventProcessor {
         });
     }
 
-// ── Redis counter helpers ─────────────────────────────────────────
+    // ── Redis counter helpers ─────────────────────────────────────────
 
     async fn incr_counters(&self, tenant_id: &str, date: &str, hour: &str, metric: &str) {
-// #180:Key format must match reader in query_engine.rs:stats:{tenant_id}:day:{date}:{metric}
+        // #180:Key format must match reader in query_engine.rs:stats:{tenant_id}:day:{date}:{metric}
         let hourly = format!("stats:{tenant_id}:hour:{date}:{hour}:{metric}");
         let daily = format!("stats:{tenant_id}:day:{date}:{metric}");
 
@@ -612,12 +656,18 @@ impl EventProcessor {
 
         tokio::spawn(async move {
             if let Ok(mut conn) = redis.get().await {
-// #200:Log Redis pipeline errors instead of silently dropping them
+                // #200:Log Redis pipeline errors instead of silently dropping them
                 if let Err(e) = redis::pipe()
-                    .cmd("INCR").arg(&hourly2)
-                    .cmd("EXPIRE").arg(&hourly2).arg(86400u64 * 7)
-                    .cmd("INCR").arg(&daily2)
-                    .cmd("EXPIRE").arg(&daily2).arg(86400u64 * 90)
+                    .cmd("INCR")
+                    .arg(&hourly2)
+                    .cmd("EXPIRE")
+                    .arg(&hourly2)
+                    .arg(86400u64 * 7)
+                    .cmd("INCR")
+                    .arg(&daily2)
+                    .cmd("EXPIRE")
+                    .arg(&daily2)
+                    .arg(86400u64 * 90)
                     .query_async::<()>(&mut *conn)
                     .await
                 {
@@ -627,20 +677,33 @@ impl EventProcessor {
         });
     }
 
-// ── Dedup via SETNX ───────────────────────────────────────────────
+    // ── Dedup via SETNX ───────────────────────────────────────────────
 
-/// Returns `true` if the key was set (new event); `false` if it already
-/// existed (duplicate).
-    async fn try_set_dedup(&self, key: &str, ttl_secs: u64) -> Result<bool> {
+    /// Returns `true` if the key was set (new event); `false` if it already
+    /// existed (duplicate).
+    async fn try_set_dedup(
+        &self,
+        event_type: &'static str,
+        key: &str,
+        ttl_secs: u64,
+    ) -> Result<bool> {
         let mut conn = self.redis.get().await.context("redis pool get (dedup)")?;
         let result: Option<String> = redis::cmd("SET")
             .arg(format!("dedupe:{key}"))
             .arg("1")
-            .arg("EX").arg(ttl_secs)
+            .arg("EX")
+            .arg(ttl_secs)
             .arg("NX")
             .query_async(&mut *conn)
             .await
             .context("SETNX dedup")?;
+        let outcome = if result.is_some() { "new" } else { "duplicate" };
+        metrics::counter!(
+            "apexmail_tracking_dedup_total",
+            "event_type" => event_type,
+            "outcome" => outcome,
+        )
+        .increment(1);
         Ok(result.is_some())
     }
 }
@@ -652,7 +715,9 @@ fn parse_wal_entries(raw: &[String]) -> Vec<TrackingEvent> {
     for entry in raw {
         match parse_single_wal_entry(entry) {
             Ok(ev) => out.push(ev),
-            Err(e) => warn!(error = %e, raw = &entry[..entry.len().min(100)], "WAL entry parse error, skipping"),
+            Err(e) => {
+                warn!(error = %e, raw = &entry[..entry.len().min(100)], "WAL entry parse error, skipping")
+            }
         }
     }
     out
@@ -667,16 +732,16 @@ fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
             anyhow::bail!("unsupported WAL version {v}");
         }
 
-// #181:Extract the `d` value from the already-parsed JSON instead of
-// fragile string searching with raw.find(",\"d\":"), which can match
-// content inside the payload itself.
+        // #181:Extract the `d` value from the already-parsed JSON instead of
+        // fragile string searching with raw.find(",\"d\":"), which can match
+        // content inside the payload itself.
         let d_value = outer.get("d").context("no 'd' key in envelope")?;
         let raw_payload = serde_json::to_string(d_value).context("re-serialize 'd' value")?;
         let expected_cs = sha256_hex8(&raw_payload);
         let actual_cs = outer["cs"].as_str().unwrap_or("");
         if actual_cs != expected_cs {
-// Fall back:try the original raw extraction for backward compatibility
-// with envelopes where checksum was computed over the raw substring
+            // Fall back:try the original raw extraction for backward compatibility
+            // with envelopes where checksum was computed over the raw substring
             let d_idx = raw.find(",\"d\":").context("no 'd' key in raw envelope")?;
             let raw_payload_legacy = &raw[d_idx + 5..raw.len() - 1];
             let expected_cs_legacy = sha256_hex8(raw_payload_legacy);
@@ -686,7 +751,7 @@ fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
         }
         serde_json::from_value(d_value.clone()).context("deserialize event from envelope")
     } else {
-// Legacy bare event
+        // Legacy bare event
         serde_json::from_str(raw).context("deserialize legacy event")
     }
 }
@@ -706,17 +771,12 @@ fn new_id(prefix: &str) -> String {
 }
 
 /// Derive a dedup cache key from event type and identifying fields.
-fn dedup_key(
-    event_type: &str,
-    message_id: &str,
-    recipient: &str,
-    link_id: Option<&str>,
-) -> String {
+fn dedup_key(event_type: &str, message_id: &str, recipient: &str, link_id: Option<&str>) -> String {
     let parts = match link_id {
         Some(l) => format!("{event_type}:{message_id}:{recipient}:{l}"),
         None => format!("{event_type}:{message_id}:{recipient}"),
     };
-// First 32 hex chars of SHA-256 (128 bits, collision-resistant for dedup)
+    // First 32 hex chars of SHA-256 (128 bits, collision-resistant for dedup)
     let hash = Sha256::digest(parts.as_bytes());
     hex::encode(&hash[..16])
 }

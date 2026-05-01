@@ -81,7 +81,7 @@ impl OpenApiGenerator {
         }
     }
 
-/// Generate the full OpenAPI 3.1 spec.
+    /// Generate the full OpenAPI 3.1 spec.
     pub fn generate_spec(&self) -> OpenApiSpec {
         OpenApiSpec {
             openapi: "3.1.0".into(),
@@ -115,7 +115,7 @@ impl OpenApiGenerator {
         }
     }
 
-/// List all registered endpoints.
+    /// List all registered endpoints.
     pub fn list_endpoints(&self) -> Vec<EndpointSummary> {
         vec![
             EndpointSummary {
@@ -198,7 +198,7 @@ impl OpenApiGenerator {
         ]
     }
 
-/// Get the JSON schema for a specific endpoint.
+    /// Get the JSON schema for a specific endpoint.
     pub fn get_endpoint_schema(&self, method: &str, path: &str) -> Option<serde_json::Value> {
         let endpoints = self.list_endpoints();
         let found = endpoints
@@ -222,7 +222,7 @@ impl OpenApiGenerator {
         }))
     }
 
-// ── private builders ─────────────────────────────────────────────────
+    // ── private builders ─────────────────────────────────────────────────
 
     fn build_paths(&self) -> serde_json::Value {
         serde_json::json!({
@@ -398,8 +398,10 @@ mod tests {
     fn test_list_endpoints() {
         let endpoints = gen().list_endpoints();
         assert!(endpoints.len() >= 10);
-// All should have non-empty method + path
-        assert!(endpoints.iter().all(|e| !e.method.is_empty() && !e.path.is_empty()));
+        // All should have non-empty method + path
+        assert!(endpoints
+            .iter()
+            .all(|e| !e.method.is_empty() && !e.path.is_empty()));
         assert!(endpoints.iter().all(|e| !e.deprecated));
     }
 
@@ -411,7 +413,7 @@ mod tests {
         assert_eq!(schema["path"], "/v1/messages");
         assert!(!schema["deprecated"].as_bool().unwrap());
 
-// Unknown endpoint returns None.
+        // Unknown endpoint returns None.
         assert!(g.get_endpoint_schema("DELETE", "/v1/foobar").is_none());
     }
 }

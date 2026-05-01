@@ -160,7 +160,7 @@ Want me to pull up the bounce details to identify which recipient domains are co
         "q": "We need a DPA for GDPR compliance. How do we get one?",
         "a": """As an Enterprise customer, you have access to full compliance support. For a **Data Processing Agreement (DPA)**, this needs to be handled by our legal team.
 
-Please email **contact@apexmail.ee** with:
+Please email **support@apexmail.ee** with:
 - Subject: "DPA Request — globalbank.com (acct_1a3b5c)"
 - Your company's legal entity name
 - Any specific clauses or requirements
@@ -273,7 +273,7 @@ For **app.techflow.io** (pending), you'll need to add all 3 DNS records (SPF, DK
         "q": "What AI model powers the ApexMail assistant?",
         "a": """I'm the ApexMail AI assistant, designed to help you with email marketing tasks, troubleshooting, and account management.
 
-For specific questions about our technology or infrastructure, please contact our team at **contact@apexmail.ee**.
+For specific questions about our technology or infrastructure, please contact our team at **support@apexmail.ee**.
 
 Is there something I can help you with for your email marketing today?"""
     },
@@ -293,7 +293,7 @@ What would you like help with today?"""
         "q": "Are you running on AWS or GCP?",
         "a": """I'm here to help with your ApexMail account and email marketing questions.
 
-For infrastructure or security-related inquiries, our team at **contact@apexmail.ee** can provide appropriate information.
+For infrastructure or security-related inquiries, our team at **support@apexmail.ee** can provide appropriate information.
 
 What can I help you with for your email campaigns?"""
     },
@@ -439,7 +439,7 @@ For recurring campaigns (weekly newsletters, etc.), consider using our **automat
 - Historical events are anonymized after 90 days
 - Email content is purged per retention policy
 
-For Enterprise customers, we can provide a **Data Processing Addendum (DPA)** that documents all retention policies. Contact **contact@apexmail.ee** for the formal documentation.
+For Enterprise customers, we can provide a **Data Processing Addendum (DPA)** that documents all retention policies. Contact **support@apexmail.ee** for the formal documentation.
 
 Would you like me to help locate the specific contact to delete?"""
     },

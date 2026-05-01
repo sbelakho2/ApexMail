@@ -101,9 +101,9 @@ pub struct Incident {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SloDefinition {
     pub name: String,
-/// Target expressed as a percentage (e.g. 99.9).
+    /// Target expressed as a percentage (e.g. 99.9).
     pub target: f64,
-/// Rolling window in days.
+    /// Rolling window in days.
     pub window_days: u32,
 }
 
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn test_service_status_ordering() {
-// Operational < MajorOutage so we can pick the worst via max.
+        // Operational < MajorOutage so we can pick the worst via max.
         assert!(ServiceStatus::Operational < ServiceStatus::MajorOutage);
         assert!(ServiceStatus::Degraded < ServiceStatus::PartialOutage);
     }

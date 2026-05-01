@@ -9,11 +9,11 @@ use crate::file_inspector::{FileInspection, FileType};
 /// Policy decision
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyDecision {
-/// Attachment is allowed
+    /// Attachment is allowed
     Allow,
-/// Attachment is quarantined for review
+    /// Attachment is quarantined for review
     Quarantine,
-/// Attachment is rejected
+    /// Attachment is rejected
     Reject,
 }
 
@@ -30,11 +30,11 @@ impl std::fmt::Display for PolicyDecision {
 /// Policy evaluation result
 #[derive(Debug, Clone)]
 pub struct PolicyResult {
-/// Decision
+    /// Decision
     pub decision: PolicyDecision,
-/// Reasons for the decision
+    /// Reasons for the decision
     pub reasons: Vec<String>,
-/// The accumulated risk score
+    /// The accumulated risk score
     pub risk_score: f64,
 }
 
@@ -44,7 +44,7 @@ pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> P
     let mut risk_score = inspection.risk_score;
     let mut force_reject = false;
 
-// 1. Blocked extension
+    // 1. Blocked extension
     if let Some(ref ext) = inspection.extension {
         if config.blocked_extensions.contains(ext) {
             reasons.push(format!("Blocked extension: .{}", ext));
@@ -52,7 +52,7 @@ pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> P
         }
     }
 
-// 2. File size limit
+    // 2. File size limit
     if inspection.size > config.max_file_size {
         reasons.push(format!(
             "File too large: {} bytes (max: {})",
@@ -61,7 +61,7 @@ pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> P
         force_reject = true;
     }
 
-// 3. Executable file types always rejected
+    // 3. Executable file types always rejected
     match inspection.file_type {
         FileType::PeExe | FileType::Elf | FileType::MachO => {
             reasons.push(format!("Executable file type: {}", inspection.file_type));
@@ -70,22 +70,26 @@ pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> P
         _ => {}
     }
 
-// 4. Extension mismatch is suspicious
+    // 4. Extension mismatch is suspicious
     if inspection.extension_mismatch {
         reasons.push("File extension does not match detected content type".into());
         risk_score += 2.0;
     }
 
-// 5. Decide based on score thresholds
+    // 5. Decide based on score thresholds
     let decision = if force_reject {
         PolicyDecision::Reject
     } else if risk_score >= config.reject_threshold {
-        reasons.push(format!("Risk score {:.1} exceeds reject threshold {:.1}",
-            risk_score, config.reject_threshold));
+        reasons.push(format!(
+            "Risk score {:.1} exceeds reject threshold {:.1}",
+            risk_score, config.reject_threshold
+        ));
         PolicyDecision::Reject
     } else if risk_score >= config.suspicious_threshold {
-        reasons.push(format!("Risk score {:.1} exceeds suspicious threshold {:.1}",
-            risk_score, config.suspicious_threshold));
+        reasons.push(format!(
+            "Risk score {:.1} exceeds suspicious threshold {:.1}",
+            risk_score, config.suspicious_threshold
+        ));
         PolicyDecision::Quarantine
     } else {
         PolicyDecision::Allow
@@ -123,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_quarantine_suspicious() {
-// PDF with JavaScript and OpenAction
+        // PDF with JavaScript and OpenAction
         let data = b"%PDF-1.4\n<< /Type /Action /S /JavaScript /JS (x) >>\n/OpenAction";
         let inspection = file_inspector::inspect_file(data, Some("invoice.pdf"));
         let config = SandboxConfig::default();
@@ -138,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_reject_oversized() {
-// Create inspection with oversized file
+        // Create inspection with oversized file
         let inspection = FileInspection {
             file_type: FileType::Zip,
             sha256: "abc123".into(),

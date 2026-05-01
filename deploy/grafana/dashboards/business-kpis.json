@@ -1,0 +1,87 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(apexmail_http_requests_total{job=\"apexmail-api\",path_pattern=~\"/v1/billing.*|/webhooks/stripe\"}[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "title": "Billing and Stripe Request Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(apexmail_http_requests_total{job=\"apexmail-api\",path_pattern=~\"/v1/messages.*|/v1/campaigns.*\"}[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "title": "Email Delivery API Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "expr": "sum(rate(apexmail_http_requests_total{job=\"apexmail-api\",path_pattern=~\"/v1/messages.*|/v1/campaigns.*\",status=~\"2..\"}[5m])) / clamp_min(sum(rate(apexmail_http_requests_total{job=\"apexmail-api\",path_pattern=~\"/v1/messages.*|/v1/campaigns.*\"}[5m])), 1)",
+          "legendFormat": "success ratio"
+        }
+      ],
+      "title": "Delivery API Success Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "expr": "redis_memory_used_bytes{job=\"redis\"}",
+          "legendFormat": "used"
+        },
+        {
+          "expr": "redis_memory_max_bytes{job=\"redis\"}",
+          "legendFormat": "max"
+        }
+      ],
+      "title": "Redis Queue Capacity",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["apexmail", "billing", "delivery"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ApexMail Business KPIs",
+  "uid": "apexmail-business-kpis",
+  "version": 1,
+  "weekStart": ""
+}

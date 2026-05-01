@@ -15,9 +15,9 @@ use crate::routing;
 /// and maps each to its rendering strategy.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SsrStrategy {
-/// Full SSR with client-side hydration (web & control-plane).
+    /// Full SSR with client-side hydration (web & control-plane).
     SsrHydrated,
-/// Static site generation with Leptos islands (marketing-zola).
+    /// Static site generation with Leptos islands (marketing-zola).
     ZolaLeptosIslands,
 }
 
@@ -81,7 +81,7 @@ pub struct CsrfMiddleware {
 }
 
 impl CsrfMiddleware {
-/// Web surface CSRF configuration.
+    /// Web surface CSRF configuration.
     pub fn web() -> Self {
         CsrfMiddleware {
             cookie_name: "csrf_token",
@@ -91,7 +91,7 @@ impl CsrfMiddleware {
         }
     }
 
-/// Control-plane surface CSRF configuration.
+    /// Control-plane surface CSRF configuration.
     pub fn control_plane() -> Self {
         CsrfMiddleware {
             cookie_name: "csrf_token",
@@ -135,7 +135,9 @@ pub fn validate_route_coverage() -> Vec<String> {
 
     for surface in routing::surface_ids() {
         for sr in routing::surface_routes(surface) {
-            let covered = registered.iter().any(|r| r.pattern == sr.path && r.surface == surface);
+            let covered = registered
+                .iter()
+                .any(|r| r.pattern == sr.path && r.surface == surface);
             if !covered {
                 missing.push(format!("[{}] {}", surface, sr.path));
             }
@@ -154,7 +156,10 @@ mod tests {
         let routes = ssr_routes();
         let surfaces: std::collections::HashSet<&str> = routes.iter().map(|r| r.surface).collect();
         assert!(surfaces.contains("web"), "web routes missing");
-        assert!(surfaces.contains("control-plane"), "control-plane routes missing");
+        assert!(
+            surfaces.contains("control-plane"),
+            "control-plane routes missing"
+        );
     }
 
     #[test]
@@ -169,10 +174,22 @@ mod tests {
 
     #[test]
     fn ssr_strategy_maps_correctly() {
-        assert_eq!(SsrStrategy::for_surface("web"), Some(SsrStrategy::SsrHydrated));
-        assert_eq!(SsrStrategy::for_surface("control-plane"), Some(SsrStrategy::SsrHydrated));
-        assert_eq!(SsrStrategy::for_surface("marketing"), Some(SsrStrategy::ZolaLeptosIslands));
-        assert_eq!(SsrStrategy::for_surface("marketing-zola"), Some(SsrStrategy::ZolaLeptosIslands));
+        assert_eq!(
+            SsrStrategy::for_surface("web"),
+            Some(SsrStrategy::SsrHydrated)
+        );
+        assert_eq!(
+            SsrStrategy::for_surface("control-plane"),
+            Some(SsrStrategy::SsrHydrated)
+        );
+        assert_eq!(
+            SsrStrategy::for_surface("marketing"),
+            Some(SsrStrategy::ZolaLeptosIslands)
+        );
+        assert_eq!(
+            SsrStrategy::for_surface("marketing-zola"),
+            Some(SsrStrategy::ZolaLeptosIslands)
+        );
         assert_eq!(SsrStrategy::for_surface("unknown"), None);
     }
 
@@ -213,11 +230,7 @@ mod tests {
             .filter(|r| r.surface == "web" && r.pattern.starts_with("/campaigns"))
             .collect();
         for r in &dashboard_routes {
-            assert!(
-                r.auth_required,
-                "{} should require auth",
-                r.pattern
-            );
+            assert!(r.auth_required, "{} should require auth", r.pattern);
         }
     }
 
@@ -225,7 +238,11 @@ mod tests {
     fn all_routes_use_get_method() {
         let routes = ssr_routes();
         for r in &routes {
-            assert_eq!(r.method, "GET", "SSR routes should all be GET: {}", r.pattern);
+            assert_eq!(
+                r.method, "GET",
+                "SSR routes should all be GET: {}",
+                r.pattern
+            );
         }
     }
 }

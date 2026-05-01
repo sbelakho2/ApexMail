@@ -80,7 +80,7 @@ async fn list_events(
 ) -> Result<Json<Vec<EventResponse>>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
 
-        let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
 
     let mut sql = String::from(
         "SELECT id, message_id, event_type, recipient, metadata, timestamp FROM events WHERE tenant_id = $1",
@@ -100,7 +100,7 @@ async fn list_events(
         param_idx + 1
     ));
 
-// Build query dynamically
+    // Build query dynamically
     let mut query = sqlx::query_as::<_, EventRow>(&sql).bind(&auth.tenant_id);
     if let Some(ref event_type) = params.event_type {
         query = query.bind(event_type);
@@ -142,7 +142,9 @@ async fn event_stats(
 ) -> Result<Json<EventStats>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
 
-    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
+    let from = params
+        .from
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
     let row = sqlx::query_as::<_, StatsRow>(
@@ -179,7 +181,9 @@ async fn event_timeseries(
 ) -> Result<Json<Vec<TimeseriesPoint>>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
 
-    let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
+    let from = params
+        .from
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
     let to = params.to.unwrap_or_else(Utc::now);
 
     let rows = sqlx::query_as::<_, TimeseriesRow>(

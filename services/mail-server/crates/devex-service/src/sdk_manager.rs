@@ -17,7 +17,7 @@ impl Default for SdkManager {
 }
 
 impl SdkManager {
-/// Build the registry with current SDK metadata.
+    /// Build the registry with current SDK metadata.
     pub fn new() -> Self {
         let sdks = vec![
             SdkInfo {
@@ -70,12 +70,12 @@ impl SdkManager {
         Self { sdks }
     }
 
-/// Return all registered SDKs.
+    /// Return all registered SDKs.
     pub fn list_sdks(&self) -> &[SdkInfo] {
         &self.sdks
     }
 
-/// Get SDK info for a specific language.
+    /// Get SDK info for a specific language.
     pub fn get_sdk_info(&self, language: SdkLanguage) -> Result<&SdkInfo, DevExError> {
         self.sdks
             .iter()
@@ -83,14 +83,14 @@ impl SdkManager {
             .ok_or_else(|| DevExError::UnsupportedLanguage(language.to_string()))
     }
 
-/// Return the canonical install command for a given language.
+    /// Return the canonical install command for a given language.
     pub fn get_install_command(&self, language: SdkLanguage) -> Result<String, DevExError> {
         self.get_sdk_info(language)
             .map(|s| s.install_command.clone())
     }
 
-/// Validate that a requested SDK version is compatible with the given API version.
-/// For now, the check is:the SDK must target the requested `api_version` (or later).
+    /// Validate that a requested SDK version is compatible with the given API version.
+    /// For now, the check is:the SDK must target the requested `api_version` (or later).
     pub fn validate_sdk_version(
         &self,
         language: SdkLanguage,
@@ -156,11 +156,17 @@ mod tests {
     #[test]
     fn test_validate_sdk_version() {
         let mgr = SdkManager::new();
-// Current SDK targets 2024-01 → requesting 2024-01 is valid.
-        assert!(mgr.validate_sdk_version(SdkLanguage::Go, "2024-01").unwrap());
-// Requesting a newer API version than SDK target should fail.
-        assert!(!mgr.validate_sdk_version(SdkLanguage::Go, "2025-01").unwrap());
-// Requesting an older version should be valid (SDK is newer).
-        assert!(mgr.validate_sdk_version(SdkLanguage::Go, "2023-06").unwrap());
+        // Current SDK targets 2024-01 → requesting 2024-01 is valid.
+        assert!(mgr
+            .validate_sdk_version(SdkLanguage::Go, "2024-01")
+            .unwrap());
+        // Requesting a newer API version than SDK target should fail.
+        assert!(!mgr
+            .validate_sdk_version(SdkLanguage::Go, "2025-01")
+            .unwrap());
+        // Requesting an older version should be valid (SDK is newer).
+        assert!(mgr
+            .validate_sdk_version(SdkLanguage::Go, "2023-06")
+            .unwrap());
     }
 }

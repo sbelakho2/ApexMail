@@ -17,21 +17,21 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InferenceConfig {
-/// URL of the inference server (llama-server or ONNX sidecar)
+    /// URL of the inference server (llama-server or ONNX sidecar)
     pub url: String,
-/// Model identifier
+    /// Model identifier
     #[serde(default = "default_model")]
     pub model: String,
-/// Embedding dimension
+    /// Embedding dimension
     #[serde(default = "default_dimension")]
     pub dimension: usize,
-/// Max concurrent embedding requests
+    /// Max concurrent embedding requests
     #[serde(default = "default_concurrency")]
     pub max_concurrency: usize,
-/// Request timeout in milliseconds
+    /// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-/// Pooling strategy
+    /// Pooling strategy
     #[serde(default)]
     pub pooling: PoolingStrategy,
 }
@@ -47,22 +47,38 @@ pub enum PoolingStrategy {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StoreConfig {
-/// Max vectors in the store
+    /// Max vectors in the store
     #[serde(default = "default_max_vectors")]
     pub max_vectors: usize,
-/// LRU eviction after this many entries
+    /// LRU eviction after this many entries
     #[serde(default = "default_eviction_threshold")]
     pub eviction_threshold: usize,
 }
 
-fn default_host() -> String { "0.0.0.0".to_string() }
-fn default_port() -> u16 { 9090 }
-fn default_model() -> String { "all-MiniLM-L6-v2".to_string() }
-fn default_dimension() -> usize { 384 }
-fn default_concurrency() -> usize { 8 }
-fn default_timeout_ms() -> u64 { 30_000 }
-fn default_max_vectors() -> usize { 100_000 }
-fn default_eviction_threshold() -> usize { 90_000 }
+fn default_host() -> String {
+    "0.0.0.0".to_string()
+}
+fn default_port() -> u16 {
+    9090
+}
+fn default_model() -> String {
+    "all-MiniLM-L6-v2".to_string()
+}
+fn default_dimension() -> usize {
+    384
+}
+fn default_concurrency() -> usize {
+    8
+}
+fn default_timeout_ms() -> u64 {
+    30_000
+}
+fn default_max_vectors() -> usize {
+    100_000
+}
+fn default_eviction_threshold() -> usize {
+    90_000
+}
 
 impl EmbeddingsConfig {
     pub fn validate(&self) -> Result<(), String> {
@@ -75,7 +91,9 @@ impl EmbeddingsConfig {
         if self.inference.url.trim().is_empty() {
             return Err("INFERENCE_URL must not be empty".into());
         }
-        if !(self.inference.url.starts_with("http://") || self.inference.url.starts_with("https://")) {
+        if !(self.inference.url.starts_with("http://")
+            || self.inference.url.starts_with("https://"))
+        {
             return Err("INFERENCE_URL must be http/https".into());
         }
         if self.inference.dimension == 0 {

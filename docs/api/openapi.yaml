@@ -34,7 +34,7 @@ info:
   version: 1.0.0
   contact:
     name: ApexMail Support
-    email: contact@apexmail.ee
+    email: support@apexmail.ee
     url: https://apexmail.ee/support
   license:
     name: MIT
@@ -2634,8 +2634,8 @@ paths:
           $ref: '#/components/responses/ServerError'
 
     post:
-      operationId: addAdminSupportReply
-      summary: Add a reply to a support ticket
+      operationId: createAdminSupportTicket
+      summary: Create a support ticket from the admin API
       tags:
         - Admin
       security:
@@ -2647,14 +2647,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AddAdminSupportReplyRequest'
+              $ref: '#/components/schemas/CreateAdminSupportTicketRequest'
       responses:
         '201':
-          description: Reply created.
+          description: Ticket created.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AdminSupportReplyResponse'
+                $ref: '#/components/schemas/AdminSupportTicket'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -2684,6 +2684,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AdminSupportTicketUpdateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /admin/support/reply:
+    post:
+      operationId: addAdminSupportReply
+      summary: Add a reply to a support ticket
+      tags:
+        - Admin
+      security:
+        - ApiKeyAuth: []
+        - SessionCookieAuth: []
+        - BearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddAdminSupportReplyRequest'
+      responses:
+        '201':
+          description: Reply created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSupportReplyResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -12585,6 +12615,41 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AdminSupportTicketMessage'
+
+    CreateAdminSupportTicketRequest:
+      type: object
+      required:
+        - subject
+        - description
+      properties:
+        subject:
+          type: string
+        description:
+          type: string
+        tenantId:
+          oneOf:
+            - type: string
+            - type: 'null'
+        tenantName:
+          oneOf:
+            - type: string
+            - type: 'null'
+        tenantEmail:
+          oneOf:
+            - type: string
+            - type: 'null'
+        priority:
+          oneOf:
+            - type: string
+            - type: 'null'
+        category:
+          oneOf:
+            - type: string
+            - type: 'null'
+        assignee:
+          oneOf:
+            - type: string
+            - type: 'null'
 
     AddAdminSupportReplyRequest:
       type: object

@@ -795,9 +795,9 @@ pub struct SupportMetrics {
 pub fn sla_deadlines(priority: &str) -> (i64, i64) {
     match priority {
         "critical" => (15, 240), // 15 min / 4 hours
-        "high" => (60, 480), // 1 hr / 8 hours
+        "high" => (60, 480),     // 1 hr / 8 hours
         "medium" => (240, 1440), // 4 hr / 24 hours
-        "low" => (480, 4320), // 8 hr / 72 hours
+        "low" => (480, 4320),    // 8 hr / 72 hours
         _ => (240, 1440),
     }
 }
@@ -1242,11 +1242,21 @@ pub struct ApiResult<T: Serialize> {
 
 impl<T: Serialize> ApiResult<T> {
     pub fn ok(data: T) -> Self {
-        Self { success: true, data: Some(data), error: None, code: None }
+        Self {
+            success: true,
+            data: Some(data),
+            error: None,
+            code: None,
+        }
     }
 
     pub fn err(error: impl Into<String>, code: impl Into<String>) -> Self {
-        Self { success: false, data: None, error: Some(error.into()), code: Some(code.into()) }
+        Self {
+            success: false,
+            data: None,
+            error: Some(error.into()),
+            code: Some(code.into()),
+        }
     }
 }
 
@@ -1257,8 +1267,12 @@ pub struct PaginationParams {
 }
 
 impl PaginationParams {
-    pub fn limit(&self) -> i64 { self.limit.unwrap_or(50).min(200) }
-    pub fn offset(&self) -> i64 { self.offset.unwrap_or(0) }
+    pub fn limit(&self) -> i64 {
+        self.limit.unwrap_or(50).min(200)
+    }
+    pub fn offset(&self) -> i64 {
+        self.offset.unwrap_or(0)
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -1269,16 +1283,31 @@ mod tests {
 
     #[test]
     fn test_compliance_framework_parse() {
-        assert_eq!("hipaa".parse::<ComplianceFramework>().unwrap(), ComplianceFramework::Hipaa);
-        assert_eq!("iso27001".parse::<ComplianceFramework>().unwrap(), ComplianceFramework::Iso27001);
+        assert_eq!(
+            "hipaa".parse::<ComplianceFramework>().unwrap(),
+            ComplianceFramework::Hipaa
+        );
+        assert_eq!(
+            "iso27001".parse::<ComplianceFramework>().unwrap(),
+            ComplianceFramework::Iso27001
+        );
         assert!("unknown".parse::<ComplianceFramework>().is_err());
     }
 
     #[test]
     fn test_stream_destination_parse() {
-        assert_eq!("s3".parse::<StreamDestinationType>().unwrap(), StreamDestinationType::S3);
-        assert_eq!("splunk".parse::<StreamDestinationType>().unwrap(), StreamDestinationType::Splunk);
-        assert_eq!("sumo_logic".parse::<StreamDestinationType>().unwrap(), StreamDestinationType::SumoLogic);
+        assert_eq!(
+            "s3".parse::<StreamDestinationType>().unwrap(),
+            StreamDestinationType::S3
+        );
+        assert_eq!(
+            "splunk".parse::<StreamDestinationType>().unwrap(),
+            StreamDestinationType::Splunk
+        );
+        assert_eq!(
+            "sumo_logic".parse::<StreamDestinationType>().unwrap(),
+            StreamDestinationType::SumoLogic
+        );
     }
 
     #[test]
@@ -1290,15 +1319,30 @@ mod tests {
 
     #[test]
     fn test_ticket_priority_parse() {
-        assert_eq!("p1".parse::<TicketPriority>().unwrap(), TicketPriority::Critical);
-        assert_eq!("high".parse::<TicketPriority>().unwrap(), TicketPriority::High);
-        assert_eq!("normal".parse::<TicketPriority>().unwrap(), TicketPriority::Medium);
+        assert_eq!(
+            "p1".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Critical
+        );
+        assert_eq!(
+            "high".parse::<TicketPriority>().unwrap(),
+            TicketPriority::High
+        );
+        assert_eq!(
+            "normal".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Medium
+        );
     }
 
     #[test]
     fn test_ticket_category_parse() {
-        assert_eq!("delivery".parse::<TicketCategory>().unwrap(), TicketCategory::Delivery);
-        assert_eq!("feature_request".parse::<TicketCategory>().unwrap(), TicketCategory::FeatureRequest);
+        assert_eq!(
+            "delivery".parse::<TicketCategory>().unwrap(),
+            TicketCategory::Delivery
+        );
+        assert_eq!(
+            "feature_request".parse::<TicketCategory>().unwrap(),
+            TicketCategory::FeatureRequest
+        );
     }
 
     #[test]
@@ -1315,7 +1359,12 @@ mod tests {
     fn test_template_status_round_trip() {
         let s = TemplateApprovalStatus::ChangesRequested;
         assert_eq!(s.to_string(), "changes_requested");
-        assert_eq!("changes_requested".parse::<TemplateApprovalStatus>().unwrap(), s);
+        assert_eq!(
+            "changes_requested"
+                .parse::<TemplateApprovalStatus>()
+                .unwrap(),
+            s
+        );
     }
 
     #[test]
@@ -1355,14 +1404,20 @@ mod tests {
 
     #[test]
     fn test_pagination_defaults() {
-        let p = PaginationParams { limit: None, offset: None };
+        let p = PaginationParams {
+            limit: None,
+            offset: None,
+        };
         assert_eq!(p.limit(), 50);
         assert_eq!(p.offset(), 0);
     }
 
     #[test]
     fn test_pagination_max_limit() {
-        let p = PaginationParams { limit: Some(500), offset: Some(10) };
+        let p = PaginationParams {
+            limit: Some(500),
+            offset: Some(10),
+        };
         assert_eq!(p.limit(), 200);
         assert_eq!(p.offset(), 10);
     }
@@ -1370,7 +1425,11 @@ mod tests {
     #[test]
     fn test_ip_warming_plan_serde() {
         let plan = IPWarmingPlan {
-            days: vec![WarmingDay { day: 1, daily_limit: 50, description: "Ramp start".into() }],
+            days: vec![WarmingDay {
+                day: 1,
+                daily_limit: 50,
+                description: "Ramp start".into(),
+            }],
             total_days: 30,
         };
         let json = serde_json::to_string(&plan).unwrap();
@@ -1463,6 +1522,9 @@ mod tests {
     #[test]
     fn test_deployment_status_display() {
         assert_eq!(DeploymentStatus::Provisioning.to_string(), "provisioning");
-        assert_eq!(DeploymentStatus::Decommissioning.to_string(), "decommissioning");
+        assert_eq!(
+            DeploymentStatus::Decommissioning.to_string(),
+            "decommissioning"
+        );
     }
 }

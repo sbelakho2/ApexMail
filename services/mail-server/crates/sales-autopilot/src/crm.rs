@@ -3,6 +3,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::crm_pg::SqlxCrmService;
 use crate::types::{Lead, LeadStatus, SalesError};
 
 /// In-memory CRM service backed by an `RwLock<Vec<Lead>>`.
@@ -26,7 +27,7 @@ impl CrmService {
         }
     }
 
-/// Insert a new lead and return its assigned id.
+    /// Insert a new lead and return its assigned id.
     pub fn create_lead(
         &self,
         email: String,
@@ -50,7 +51,7 @@ impl CrmService {
         lead
     }
 
-/// Retrieve a lead by id.
+    /// Retrieve a lead by id.
     pub fn get_lead(&self, id: Uuid) -> Result<Lead, SalesError> {
         self.leads
             .read()
@@ -60,12 +61,8 @@ impl CrmService {
             .ok_or(SalesError::LeadNotFound(id))
     }
 
-/// List leads, optionally filtering by status and/or source.
-    pub fn list_leads(
-        &self,
-        status: Option<LeadStatus>,
-        source: Option<&str>,
-    ) -> Vec<Lead> {
+    /// List leads, optionally filtering by status and/or source.
+    pub fn list_leads(&self, status: Option<LeadStatus>, source: Option<&str>) -> Vec<Lead> {
         self.leads
             .read()
             .iter()
@@ -75,12 +72,8 @@ impl CrmService {
             .collect()
     }
 
-/// Transition a lead to a new status.
-    pub fn update_lead_status(
-        &self,
-        id: Uuid,
-        new_status: LeadStatus,
-    ) -> Result<Lead, SalesError> {
+    /// Transition a lead to a new status.
+    pub fn update_lead_status(&self, id: Uuid, new_status: LeadStatus) -> Result<Lead, SalesError> {
         let mut store = self.leads.write();
         let lead = store
             .iter_mut()
@@ -90,22 +83,17 @@ impl CrmService {
         Ok(lead.clone())
     }
 
-/// Compute a deterministic lead score (0–100) from three normalised
-/// dimensions:email engagement, company size tier, and recency.
-/// Each input should be in `0.0..=1.0`.
-    pub fn score_lead(
-        email_engagement: f64,
-        company_size: f64,
-        recency: f64,
-    ) -> u8 {
-        let raw =
-            email_engagement.clamp(0.0, 1.0) * 40.0
+    /// Compute a deterministic lead score (0–100) from three normalised
+    /// dimensions:email engagement, company size tier, and recency.
+    /// Each input should be in `0.0..=1.0`.
+    pub fn score_lead(email_engagement: f64, company_size: f64, recency: f64) -> u8 {
+        let raw = email_engagement.clamp(0.0, 1.0) * 40.0
             + company_size.clamp(0.0, 1.0) * 30.0
             + recency.clamp(0.0, 1.0) * 30.0;
         (raw.round() as u8).min(100)
     }
 
-/// Full-text search over lead name, email, and company.
+    /// Full-text search over lead name, email, and company.
     pub fn search_leads(&self, query: &str) -> Vec<Lead> {
         let q = query.to_lowercase();
         self.leads
@@ -119,6 +107,91 @@ impl CrmService {
             .cloned()
             .collect()
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum CrmBackend {
+    Memory(CrmService),
+    Postgres(SqlxCrmService),
+}
+
+impl CrmBackend {
+    pub fn memory() -> Self {
+        Self::Memory(CrmService::new())
+    }
+
+    pub fn postgres(pool: sqlx::PgPool) -> Self {
+        Self::Postgres(SqlxCrmService::new(pool))
+    }
+
+    pub async fn initialize(&self) -> Result<(), SalesError> {
+        match self {
+            Self::Memory(_) => Ok(()),
+            Self::Postgres(service) => service.initialize().await,
+        }
+    }
+
+    pub async fn create_lead(
+        &self,
+        email: String,
+        name: String,
+        company: String,
+        title: String,
+        source: String,
+    ) -> Result<Lead, SalesError> {
+        match self {
+            Self::Memory(service) => Ok(service.create_lead(email, name, company, title, source)),
+            Self::Postgres(service) => {
+                service
+                    .create_lead(email, name, company, title, source)
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_lead(&self, id: Uuid) -> Result<Lead, SalesError> {
+        match self {
+            Self::Memory(service) => service.get_lead(id),
+            Self::Postgres(service) => service.get_lead(id).await,
+        }
+    }
+
+    pub async fn list_leads(
+        &self,
+        status: Option<LeadStatus>,
+        source: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Lead>, SalesError> {
+        match self {
+            Self::Memory(service) => Ok(paginate_leads(
+                service.list_leads(status, source),
+                limit,
+                offset,
+            )),
+            Self::Postgres(service) => service.list_leads(status, source, limit, offset).await,
+        }
+    }
+
+    pub async fn search_leads(
+        &self,
+        query: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Lead>, SalesError> {
+        match self {
+            Self::Memory(service) => Ok(paginate_leads(service.search_leads(query), limit, offset)),
+            Self::Postgres(service) => service.search_leads(query, limit, offset).await,
+        }
+    }
+}
+
+fn paginate_leads(leads: Vec<Lead>, limit: i64, offset: i64) -> Vec<Lead> {
+    leads
+        .into_iter()
+        .skip(offset.max(0) as usize)
+        .take(limit.max(0) as usize)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +239,7 @@ mod tests {
         let updated = svc.update_lead_status(id, LeadStatus::Contacted).unwrap();
         assert_eq!(updated.status, LeadStatus::Contacted);
 
-// missing lead
+        // missing lead
         let res = svc.update_lead_status(Uuid::new_v4(), LeadStatus::Lost);
         assert!(res.is_err());
     }
@@ -176,7 +249,7 @@ mod tests {
         assert_eq!(CrmService::score_lead(1.0, 1.0, 1.0), 100);
         assert_eq!(CrmService::score_lead(0.0, 0.0, 0.0), 0);
         assert_eq!(CrmService::score_lead(0.5, 0.5, 0.5), 50);
-// clamping
+        // clamping
         assert_eq!(CrmService::score_lead(2.0, 2.0, 2.0), 100);
     }
 
@@ -184,24 +257,24 @@ mod tests {
     fn test_search_and_filter() {
         let svc = make_svc();
 
-// search
+        // search
         let results = svc.search_leads("alice");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Alice");
 
-// filter by source
+        // filter by source
         let manual = svc.list_leads(None, Some("manual"));
         assert_eq!(manual.len(), 1);
         assert_eq!(manual[0].name, "Bob");
 
-// filter by status — both are New
+        // filter by status — both are New
         let new_leads = svc.list_leads(Some(LeadStatus::New), None);
         assert_eq!(new_leads.len(), 2);
     }
 
-// -----------------------------------------------------------------------
-// Additional comprehensive tests for all code paths
-// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Additional comprehensive tests for all code paths
+    // -----------------------------------------------------------------------
 
     #[test]
     fn default_creates_empty_service() {
@@ -213,7 +286,11 @@ mod tests {
     fn create_lead_returns_new_status_and_zero_score() {
         let svc = CrmService::new();
         let lead = svc.create_lead(
-            "t@t.com".into(), "T".into(), "C".into(), "E".into(), "src".into(),
+            "t@t.com".into(),
+            "T".into(),
+            "C".into(),
+            "E".into(),
+            "src".into(),
         );
         assert_eq!(lead.status, LeadStatus::New);
         assert_eq!(lead.score, 0);
@@ -222,8 +299,20 @@ mod tests {
     #[test]
     fn create_lead_unique_ids() {
         let svc = CrmService::new();
-        let a = svc.create_lead("a@a.com".into(), "A".into(), "".into(), "".into(), "".into());
-        let b = svc.create_lead("b@b.com".into(), "B".into(), "".into(), "".into(), "".into());
+        let a = svc.create_lead(
+            "a@a.com".into(),
+            "A".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+        );
+        let b = svc.create_lead(
+            "b@b.com".into(),
+            "B".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+        );
         assert_ne!(a.id, b.id);
     }
 
@@ -239,7 +328,13 @@ mod tests {
     #[test]
     fn update_status_all_transitions() {
         let svc = CrmService::new();
-        let lead = svc.create_lead("x@x.com".into(), "X".into(), "".into(), "".into(), "".into());
+        let lead = svc.create_lead(
+            "x@x.com".into(),
+            "X".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+        );
         let id = lead.id;
 
         for status in [
@@ -257,7 +352,13 @@ mod tests {
     #[test]
     fn search_is_case_insensitive() {
         let svc = CrmService::new();
-        svc.create_lead("UPPER@TEST.COM".into(), "LOUD".into(), "BIG".into(), "".into(), "".into());
+        svc.create_lead(
+            "UPPER@TEST.COM".into(),
+            "LOUD".into(),
+            "BIG".into(),
+            "".into(),
+            "".into(),
+        );
         assert_eq!(svc.search_leads("upper").len(), 1);
         assert_eq!(svc.search_leads("UPPER").len(), 1);
         assert_eq!(svc.search_leads("loud").len(), 1);
@@ -303,26 +404,26 @@ mod tests {
 
     #[test]
     fn score_lead_boundary_values() {
-// Exact boundaries
+        // Exact boundaries
         assert_eq!(CrmService::score_lead(0.0, 0.0, 0.0), 0);
         assert_eq!(CrmService::score_lead(1.0, 1.0, 1.0), 100);
-        
-// Negative inputs clamped to 0
+
+        // Negative inputs clamped to 0
         assert_eq!(CrmService::score_lead(-1.0, -1.0, -1.0), 0);
-        
-// Only engagement
+
+        // Only engagement
         assert_eq!(CrmService::score_lead(1.0, 0.0, 0.0), 40);
-        
-// Only company size
+
+        // Only company size
         assert_eq!(CrmService::score_lead(0.0, 1.0, 0.0), 30);
-        
-// Only recency
+
+        // Only recency
         assert_eq!(CrmService::score_lead(0.0, 0.0, 1.0), 30);
     }
 
     #[test]
     fn score_lead_fractional() {
-// 0.25 * 40 + 0.75 * 30 + 0.5 * 30 = 10 + 22.5 + 15 = 47.5 → 48
+        // 0.25 * 40 + 0.75 * 30 + 0.5 * 30 = 10 + 22.5 + 15 = 47.5 → 48
         assert_eq!(CrmService::score_lead(0.25, 0.75, 0.5), 48);
     }
 
@@ -330,21 +431,39 @@ mod tests {
     fn clone_service_shares_state() {
         let svc = CrmService::new();
         let svc2 = svc.clone();
-        svc.create_lead("a@a.com".into(), "A".into(), "".into(), "".into(), "".into());
+        svc.create_lead(
+            "a@a.com".into(),
+            "A".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+        );
         assert_eq!(svc2.list_leads(None, None).len(), 1);
     }
 
     #[test]
     fn search_matches_company_field() {
         let svc = CrmService::new();
-        svc.create_lead("x@x.com".into(), "X".into(), "Unique Corp".into(), "".into(), "".into());
+        svc.create_lead(
+            "x@x.com".into(),
+            "X".into(),
+            "Unique Corp".into(),
+            "".into(),
+            "".into(),
+        );
         assert_eq!(svc.search_leads("unique corp").len(), 1);
     }
 
     #[test]
     fn search_matches_email_field() {
         let svc = CrmService::new();
-        svc.create_lead("special@domain.com".into(), "N".into(), "C".into(), "".into(), "".into());
+        svc.create_lead(
+            "special@domain.com".into(),
+            "N".into(),
+            "C".into(),
+            "".into(),
+            "".into(),
+        );
         assert_eq!(svc.search_leads("special@domain").len(), 1);
     }
 }

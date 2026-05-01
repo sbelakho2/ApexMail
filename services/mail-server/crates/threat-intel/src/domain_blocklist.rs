@@ -7,31 +7,31 @@ use std::sync::Arc;
 /// A domain blocklist entry
 #[derive(Debug, Clone)]
 pub struct DomainBlockEntry {
-/// The blocked domain
+    /// The blocked domain
     pub domain: String,
-/// Source feed name
+    /// Source feed name
     pub source: String,
-/// Confidence score (0.0 - 10.0)
+    /// Confidence score (0.0 - 10.0)
     pub confidence: f64,
-/// Category
+    /// Category
     pub category: String,
-/// When added
+    /// When added
     pub added_at: DateTime<Utc>,
-/// When it expires
+    /// When it expires
     pub expires_at: DateTime<Utc>,
 }
 
 /// Thread-safe domain blocklist
 #[derive(Clone)]
 pub struct DomainBlocklist {
-/// Exact domain matches
+    /// Exact domain matches
     exact: Arc<DashMap<String, DomainBlockEntry>>,
-/// Maximum entries
+    /// Maximum entries
     max_entries: usize,
 }
 
 impl DomainBlocklist {
-/// Create a new domain blocklist
+    /// Create a new domain blocklist
     pub fn new(max_entries: usize) -> Self {
         Self {
             exact: Arc::new(DashMap::new()),
@@ -39,7 +39,7 @@ impl DomainBlocklist {
         }
     }
 
-/// Add a domain to the blocklist
+    /// Add a domain to the blocklist
     pub fn add(&self, domain: &str, entry: DomainBlockEntry) -> bool {
         if self.exact.len() >= self.max_entries {
             return false;
@@ -49,23 +49,23 @@ impl DomainBlocklist {
         true
     }
 
-/// Look up a domain, checking exact match and parent domain wildcards.
-/// Parent domain walk is capped at 3 levels to prevent abuse from
-/// deeply-nested subdomains (e.g., a.b.c.d.e.f.evil.com) which could
-/// cause excessive DashMap lookups per request.
+    /// Look up a domain, checking exact match and parent domain wildcards.
+    /// Parent domain walk is capped at 3 levels to prevent abuse from
+    /// deeply-nested subdomains (e.g., a.b.c.d.e.f.evil.com) which could
+    /// cause excessive DashMap lookups per request.
     pub fn lookup(&self, domain: &str) -> Option<DomainBlockEntry> {
         let normalized = domain.to_lowercase();
         let normalized = normalized.trim_end_matches('.');
         let now = Utc::now();
 
-// Exact match
+        // Exact match
         if let Some(entry) = self.exact.get(normalized) {
             if entry.expires_at > now {
                 return Some(entry.clone());
             }
         }
 
-// Walk up the domain hierarchy, capped at 3 levels
+        // Walk up the domain hierarchy, capped at 3 levels
         let mut parts = normalized;
         let mut walk_count = 0;
         const MAX_DOMAIN_WALK: usize = 3;
@@ -85,12 +85,12 @@ impl DomainBlocklist {
         None
     }
 
-/// Number of entries
+    /// Number of entries
     pub fn count(&self) -> usize {
         self.exact.len()
     }
 
-/// Remove expired entries
+    /// Remove expired entries
     pub fn purge_expired(&self) -> usize {
         let now = Utc::now();
         let mut removed = 0;
@@ -112,7 +112,12 @@ impl Default for DomainBlocklist {
 }
 
 /// Parse a plain-text domain list (one domain per line, # comments)
-pub fn parse_domain_list(content: &str, source: &str, category: &str, ttl_secs: u64) -> Vec<DomainBlockEntry> {
+pub fn parse_domain_list(
+    content: &str,
+    source: &str,
+    category: &str,
+    ttl_secs: u64,
+) -> Vec<DomainBlockEntry> {
     let now = Utc::now();
     let expires = now + chrono::Duration::seconds(ttl_secs as i64);
 
@@ -163,7 +168,7 @@ mod tests {
     fn test_subdomain_match() {
         let bl = DomainBlocklist::new(1000);
         bl.add("evil.com", make_entry("evil.com"));
-// Subdomains of blocked parent should match
+        // Subdomains of blocked parent should match
         assert!(bl.lookup("sub.evil.com").is_some());
         assert!(bl.lookup("deep.sub.evil.com").is_some());
     }

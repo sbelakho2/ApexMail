@@ -122,7 +122,7 @@
 - **3 support tiers** (Standard/Premium/Enterprise with response times 24h/4h/15min)
 - **Sub-processor**: Hetzner Online GmbH, EU
 - **SCCs** for cross-border data transfers
-- **DPA** compliance via `contact@apexmail.ee`
+- **DPA** compliance via `support@apexmail.ee`
 
 ---
 
@@ -368,7 +368,7 @@ Infrastructure code only — no training data content.
 
 ### Key Technical Facts Extracted (for system prompt / knowledge base)
 
-**Support email**: `contact@apexmail.ee`
+**Support email**: `support@apexmail.ee`
 **Company**: Bel Consulting OÜ, Tallinn, Estonia, founded 2022
 **API key scopes**: 14 scopes (emails:send/read, domains:manage/read, webhooks:manage/read, templates:manage/read, suppressions:manage/read, analytics:read, contacts:manage/read, admin)
 **RBAC roles**: Owner, Admin, Developer, Analyst, Billing

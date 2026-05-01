@@ -9,7 +9,7 @@ use sales_autopilot::types::MessageCategory;
 
 #[test]
 fn fuzz_lead_score_bounded() {
-// CrmService::score_lead must always return 0-100 for any inputs.
+    // CrmService::score_lead must always return 0-100 for any inputs.
     for _ in 0..10_000 {
         let engagement = random_f64_range(-10.0, 10.0);
         let company_size = random_f64_range(-10.0, 10.0);
@@ -24,35 +24,35 @@ fn fuzz_lead_score_bounded() {
 
 #[test]
 fn fuzz_email_extraction_no_panic() {
-// Random text fed to extract_emails_from_text must never cause a panic.
+    // Random text fed to extract_emails_from_text must never cause a panic.
     let scraper = WebScraper::new();
     for _ in 0..5_000 {
         let text = random_unicode(rand::thread_rng().gen_range(0..500));
         let emails = scraper.extract_emails_from_text(&text);
-// Emails found should all contain '@'
+        // Emails found should all contain '@'
         for email in &emails {
             assert!(email.contains('@'), "Extracted non-email: {email}");
         }
     }
-// Edge cases
+    // Edge cases
     let _ = scraper.extract_emails_from_text("");
     let _ = scraper.extract_emails_from_text(&"@".repeat(10_000));
 }
 
 #[test]
 fn fuzz_url_validation_no_panic() {
-// Random strings fed to validate_url must never panic.
+    // Random strings fed to validate_url must never panic.
     for _ in 0..5_000 {
         let input = random_ascii(rand::thread_rng().gen_range(0..300));
         let _ = WebScraper::validate_url(&input);
     }
-// Edge cases
+    // Edge cases
     assert!(!WebScraper::validate_url(""));
     assert!(!WebScraper::validate_url("\0\0\0"));
     assert!(WebScraper::validate_url("https://example.com"));
     assert!(!WebScraper::validate_url("ftp://example.com"));
 
-// Unicode URLs
+    // Unicode URLs
     for _ in 0..1_000 {
         let input = random_unicode(rand::thread_rng().gen_range(0..200));
         let _ = WebScraper::validate_url(&input);
@@ -61,7 +61,7 @@ fn fuzz_url_validation_no_panic() {
 
 #[test]
 fn fuzz_categorization_always_returns() {
-// InboxManager::categorize_message must always return a valid category.
+    // InboxManager::categorize_message must always return a valid category.
     let inbox = InboxManager::new();
     let valid_categories = [
         MessageCategory::Lead,
@@ -82,7 +82,7 @@ fn fuzz_categorization_always_returns() {
         );
         assert!(!msg.id.is_nil(), "Message ID should not be nil");
     }
-// Edge cases
+    // Edge cases
     let msg = inbox.categorize_message(String::new(), String::new());
     assert!(valid_categories.contains(&msg.category));
 }
