@@ -102,6 +102,7 @@ pub struct CreateTicketRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -626,8 +627,13 @@ mod tests {
         assert!(matches!(request, SupportPostRequest::Reply(_)));
     }
 
-    #[sqlx::test]
-    async fn create_support_ticket_persists_ticket(pool: PgPool) {
+    #[tokio::test]
+    async fn create_support_ticket_persists_ticket() {
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("create_support_ticket_persists_ticket").await
+        else {
+            return;
+        };
         apply_tool_migrations(&pool).await;
 
         let ticket = insert_support_ticket(
@@ -668,8 +674,15 @@ mod tests {
         assert_eq!(ticket.status, "open");
     }
 
-    #[sqlx::test]
-    async fn add_reply_persists_message_with_database_generated_id(pool: PgPool) {
+    #[tokio::test]
+    async fn add_reply_persists_message_with_database_generated_id() {
+        let Some(pool) = crate::test_db::optional_pg_pool(
+            "add_reply_persists_message_with_database_generated_id",
+        )
+        .await
+        else {
+            return;
+        };
         apply_tool_migrations(&pool).await;
 
         let ticket = insert_support_ticket(

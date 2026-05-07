@@ -1,14 +1,27 @@
 //! DKIM Signing
 //!
 //! Signs outbound emails with DKIM for authentication.
+//!
+//! # Security
+//!
+//! The DKIM private key is zeroized on drop to prevent exposure via memory dumps.
+//! Keys can be loaded from:
+//! - A PEM file via [`from_file`](DkimSigner::from_file)
+//! - The `DKIM_PRIVATE_KEY` environment variable via [`from_env`](DkimSigner::from_env)
+
+use std::fmt;
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rsa::pkcs1v15::SigningKey;
 use rsa::signature::{SignatureEncoding, Signer};
+use rsa::traits::PublicKeyParts;
 use rsa::{pkcs8::DecodePrivateKey, RsaPrivateKey};
 use sha2::{Digest, Sha256};
 use tracing::debug;
+use zeroize::Zeroize;
+
+const MIN_DKIM_RSA_BITS: usize = 2048;
 
 /// DKIM Configuration
 #[derive(Debug, Clone)]
@@ -17,6 +30,12 @@ pub struct DkimConfig {
     pub selector: String,
     pub private_key_pem: String,
     pub headers_to_sign: Vec<String>,
+}
+
+impl Drop for DkimConfig {
+    fn drop(&mut self) {
+        self.private_key_pem.zeroize();
+    }
 }
 
 impl Default for DkimConfig {
@@ -39,9 +58,34 @@ impl Default for DkimConfig {
 }
 
 /// DKIM Signer
+///
+/// Implements manual `Debug` to avoid leaking the private key via debug formatting
+/// while still satisfying the `T: Debug` bound required by `Result::unwrap_err()`.
 pub struct DkimSigner {
     config: DkimConfig,
+    /// The RSA private key automatically zeroizes its sensitive key material
+    /// on drop via `ZeroizeOnDrop` (enabled by the `zeroize` feature on the
+    /// `rsa` crate in the workspace Cargo.toml).
     private_key: RsaPrivateKey,
+}
+
+impl fmt::Debug for DkimSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DkimSigner")
+            .field("domain", &self.config.domain)
+            .field("selector", &self.config.selector)
+            .field("private_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for DkimSigner {
+    fn drop(&mut self) {
+        // Zeroize the PEM string before dropping
+        self.config.private_key_pem.zeroize();
+        // `RsaPrivateKey` auto-zeroizes on drop via `ZeroizeOnDrop`
+        // (the `rsa` crate bundles `zeroize` as a required dependency).
+    }
 }
 
 impl DkimSigner {
@@ -49,6 +93,14 @@ impl DkimSigner {
     pub fn new(config: DkimConfig) -> Result<Self> {
         let private_key = RsaPrivateKey::from_pkcs8_pem(&config.private_key_pem)
             .map_err(|e| anyhow!("Failed to parse DKIM private key: {}", e))?;
+        let key_bits = private_key.n().bits();
+        if key_bits < MIN_DKIM_RSA_BITS {
+            return Err(anyhow!(
+                "DKIM RSA private key is too small: {} bits (minimum: {} bits)",
+                key_bits,
+                MIN_DKIM_RSA_BITS
+            ));
+        }
 
         debug!(domain = %config.domain, selector = %config.selector, "DKIM signer initialized");
 
@@ -60,15 +112,72 @@ impl DkimSigner {
 
     /// Load DKIM signer from file
     pub async fn from_file(domain: &str, selector: &str, key_path: &str) -> Result<Self> {
+        // Warn if key file has overly permissive permissions (world-readable)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = tokio::fs::metadata(key_path).await {
+                let mode = meta.mode();
+                // Check for group/other read permission.
+                if dkim_key_mode_is_group_or_world_readable(mode) {
+                    tracing::warn!(
+                        path = %key_path,
+                        mode = format!("{:o}", mode),
+                        "DKIM private key file is group/world-readable; recommend chmod 600"
+                    );
+                }
+            }
+        }
+
         let private_key_pem = tokio::fs::read_to_string(key_path)
             .await
             .map_err(|e| anyhow!("Failed to read DKIM key file: {}", e))?;
 
+        // Build config explicitly (cannot use ..Default::default() with Drop)
         let config = DkimConfig {
             domain: domain.to_string(),
             selector: selector.to_string(),
             private_key_pem,
-            ..Default::default()
+            headers_to_sign: vec![
+                "from".to_string(),
+                "to".to_string(),
+                "subject".to_string(),
+                "date".to_string(),
+                "message-id".to_string(),
+                "content-type".to_string(),
+                "mime-version".to_string(),
+            ],
+        };
+
+        Self::new(config)
+    }
+
+    /// Load DKIM signer from the `DKIM_PRIVATE_KEY` environment variable.
+    ///
+    /// This avoids writing the private key to disk entirely, reducing the
+    /// risk of accidental exposure.
+    pub fn from_env(domain: &str, selector: &str) -> Result<Self> {
+        let private_key_pem = std::env::var("DKIM_PRIVATE_KEY")
+            .map_err(|_| anyhow!("DKIM_PRIVATE_KEY environment variable is not set"))?;
+
+        if private_key_pem.is_empty() {
+            return Err(anyhow!("DKIM_PRIVATE_KEY environment variable is empty"));
+        }
+
+        // Build config explicitly (cannot use ..Default::default() with Drop)
+        let config = DkimConfig {
+            domain: domain.to_string(),
+            selector: selector.to_string(),
+            private_key_pem,
+            headers_to_sign: vec![
+                "from".to_string(),
+                "to".to_string(),
+                "subject".to_string(),
+                "date".to_string(),
+                "message-id".to_string(),
+                "content-type".to_string(),
+                "mime-version".to_string(),
+            ],
         };
 
         Self::new(config)
@@ -209,12 +318,18 @@ impl DkimSigner {
     }
 }
 
+#[cfg(unix)]
+fn dkim_key_mode_is_group_or_world_readable(mode: u32) -> bool {
+    mode & 0o044 != 0
+}
+
 /// Generate a new DKIM key pair
 pub fn generate_dkim_keypair() -> Result<(String, String)> {
     use rsa::pkcs8::EncodePrivateKey;
     use rsa::pkcs8::EncodePublicKey;
+    use rsa::rand_core::OsRng;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     let bits = 2048;
 
     let private_key = RsaPrivateKey::new(&mut rng, bits)
@@ -239,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_canonicalize_body_relaxed() {
-        let private_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048);
+        let private_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048);
         assert!(private_key.is_ok());
         let Some(private_key) = private_key.ok() else {
             return;
@@ -253,5 +368,72 @@ mod tests {
         let canonical = signer.canonicalize_body_relaxed(body);
 
         assert_eq!(canonical, "Hello World\r\nThis is a test\r\n");
+    }
+
+    #[test]
+    fn test_dkim_config_implements_drop() {
+        // Verify DkimConfig can be dropped without panic
+        let config = DkimConfig {
+            domain: "test.com".into(),
+            selector: "sel".into(),
+            private_key_pem: "test-key".to_string(),
+            headers_to_sign: vec!["from".into()],
+        };
+        let _signer = DkimSigner {
+            config,
+            private_key: RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap(),
+        };
+        // Drop is called here — should not panic
+    }
+
+    #[test]
+    fn test_from_env_missing_var() {
+        // Temporarily remove DKIM_PRIVATE_KEY if set
+        let prev = std::env::var("DKIM_PRIVATE_KEY").ok();
+        std::env::remove_var("DKIM_PRIVATE_KEY");
+
+        let result = DkimSigner::from_env("test.com", "sel");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("DKIM_PRIVATE_KEY environment variable is not set"));
+
+        // Restore
+        if let Some(val) = prev {
+            std::env::set_var("DKIM_PRIVATE_KEY", val);
+        }
+    }
+
+    #[test]
+    fn test_dkim_signer_rejects_rsa_keys_under_2048_bits() {
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+
+        let private_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap();
+        let private_key_pem = private_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .unwrap()
+            .to_string();
+        let result = DkimSigner::new(DkimConfig {
+            domain: "test.com".into(),
+            selector: "sel".into(),
+            private_key_pem,
+            headers_to_sign: vec!["from".into()],
+        });
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("minimum: 2048 bits"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dkim_key_mode_warns_on_group_or_world_readable() {
+        assert!(!dkim_key_mode_is_group_or_world_readable(0o600));
+        assert!(dkim_key_mode_is_group_or_world_readable(0o640));
+        assert!(dkim_key_mode_is_group_or_world_readable(0o604));
+        assert!(dkim_key_mode_is_group_or_world_readable(0o644));
     }
 }

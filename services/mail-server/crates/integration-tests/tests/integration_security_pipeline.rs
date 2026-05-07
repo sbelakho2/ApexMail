@@ -204,6 +204,7 @@ mod login_pipeline {
             timestamp: Utc::now(),
             success,
             tls_fingerprint: None,
+            device_fingerprint: None,
         }
     }
 
@@ -399,6 +400,7 @@ mod network_pipeline {
 mod full_stack {
     use super::*;
     use ato_protection::{config::AtoConfig, engine::AtoEngine};
+    use dlp_engine::config::DlpConfig;
     use dlp_engine::engine::DlpEngine;
     use ids_engine::{config::IdsConfig, engine::IdsEngine};
     use sandbox::engine::SandboxEngine;
@@ -461,6 +463,10 @@ mod full_stack {
         let spam = SpamEngine::new();
         let dlp = DlpEngine::new();
 
+        // Run 500 iterations — this exercises the engines under moderate
+        // repetitive load.  No explicit resource-cleanup assertion is performed
+        // because each iteration processes independent, ephemeral data and the
+        // engines are pure stateless analyzers (no cross-iteration state leaks).
         for i in 0..500 {
             let body = format!("Test message number {} with content", i);
             let req = waf_engine::engine::HttpRequest {
@@ -475,5 +481,68 @@ mod full_stack {
             let _ = spam.analyze(&body, &[], None);
             let _ = dlp.scan(&body, None);
         }
+    }
+
+    /// Verify that a WAF engine with a pared-down config (all feature flags
+    /// disabled) still processes a request without panicking — this serves as
+    /// an invariant-violation regression test proving the engine handles the
+    /// degenerate case gracefully.
+    #[test]
+    fn test_waf_minimal_config_does_not_panic() {
+        let cfg = WafConfig {
+            enable_sqli: false,
+            enable_xss: false,
+            enable_path_traversal: false,
+            enable_command_injection: false,
+            enable_protocol_checks: false,
+            enable_nosqli: false,
+            enable_ssrf: false,
+            enable_smuggling: false,
+            ..WafConfig::default()
+        };
+        let waf = WafEngine::new(cfg);
+        let req = waf_engine::engine::HttpRequest {
+            client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            method: "GET",
+            path: "/",
+            query_string: None,
+            headers: &[],
+            body: None,
+        };
+        let _result = waf.inspect(&req);
+    }
+
+    /// Verify that an IDS engine created with extreme configuration values
+    /// (zero-length thresholds) does not panic — confirming the engine's
+    /// parameter validation is robust against degenerate inputs.
+    #[test]
+    fn test_ids_extreme_config_does_not_panic() {
+        let cfg = IdsConfig {
+            max_connections: 0,
+            connection_timeout_secs: 0,
+            portscan_threshold: 0,
+            portscan_window_secs: 0,
+            syn_flood_threshold: 0,
+            max_payload_inspect: 0,
+            ..IdsConfig::default()
+        };
+        let ids = IdsEngine::new(cfg).expect("IDS engine creation should not fail");
+        let _result = ids.inspect(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 80, "tcp", b"test");
+    }
+
+    /// Verify that a DLP engine with all detection features disabled still
+    /// handles scan requests without panicking.
+    #[test]
+    fn test_dlp_minimal_config_does_not_panic() {
+        let cfg = DlpConfig {
+            detect_credit_cards: false,
+            detect_ssn: false,
+            detect_phone_numbers: false,
+            detect_email_addresses: false,
+            detect_secrets: false,
+            ..DlpConfig::default()
+        };
+        let dlp = DlpEngine::with_config(cfg);
+        let _result = dlp.scan("some content", None);
     }
 }

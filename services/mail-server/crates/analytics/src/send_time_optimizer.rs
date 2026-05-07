@@ -1,9 +1,14 @@
 //! Send-time optimizer – Bayesian smoothing, hour/day distributions, optimal windows.
+//!
+//! # Security (O-11.5)
+//! Email hashing uses HMAC-SHA256 with a configurable salt key to prevent
+//! rainbow-table attacks on cache keys.
 
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 
 use crate::types::*;
+
+pub use crate::email_hash::hash_email;
 
 /// Global prior probabilities for hours (24) – peak at 10 AM.
 const HOUR_PRIORS: [f64; 24] = [
@@ -21,16 +26,36 @@ const COLD_START_DAY: u32 = 2; // Tuesday (0=Mon)
 pub struct SendTimeOptimizer {
     pool: sqlx::PgPool,
     redis: deadpool_redis::Pool,
+    /// HMAC-SHA256 key for salted email hashing (O-11.5).
+    /// Empty string disables HMAC (falls back to bare SHA-256).
+    hmac_key: String,
 }
 
 impl SendTimeOptimizer {
     pub fn new(pool: sqlx::PgPool, redis: deadpool_redis::Pool) -> Self {
-        Self { pool, redis }
+        Self {
+            pool,
+            redis,
+            hmac_key: String::new(),
+        }
+    }
+
+    /// Create a new optimizer with HMAC-salted email hashing (O-11.5).
+    pub fn with_hmac_key(
+        pool: sqlx::PgPool,
+        redis: deadpool_redis::Pool,
+        hmac_key: String,
+    ) -> Self {
+        Self {
+            pool,
+            redis,
+            hmac_key,
+        }
     }
 
     /// Get optimal send window for a recipient, with caching.
     pub async fn get_optimal_window(&self, email: &str) -> anyhow::Result<BulkOptimizationResult> {
-        let email_hash = hash_email(email);
+        let email_hash = hash_email(email, &self.hmac_key);
         let cache_key = format!("sto:{email_hash}");
 
         // Check Redis cache
@@ -205,13 +230,6 @@ pub fn compute_optimal_windows(profile: &RecipientProfile) -> Vec<OptimalSendWin
     windows
 }
 
-/// SHA-256 hash of email for privacy.
-pub fn hash_email(email: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(email.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,16 +259,6 @@ mod tests {
         let alpha = dynamic_alpha(10000.0);
         // max(1, 10 - log10(10001) * 3) = max(1, 10 - 12) = 1
         assert!((alpha - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_hash_email() {
-        let hash = hash_email("user@example.com");
-        assert_eq!(hash.len(), 64);
-        // Deterministic
-        assert_eq!(hash, hash_email("user@example.com"));
-        // Different for different emails
-        assert_ne!(hash, hash_email("other@example.com"));
     }
 
     #[test]

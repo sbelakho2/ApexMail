@@ -78,6 +78,11 @@ impl OutboundService for OutboundServiceImpl {
             sequence_id: None,
             contact_id: None,
             priority: 0,
+            tenant_id: if req.tenant_id.is_empty() {
+                None
+            } else {
+                Some(req.tenant_id)
+            },
         };
 
         match self.queue.enqueue(email).await {
@@ -139,6 +144,11 @@ impl OutboundService for OutboundServiceImpl {
             sequence_id: None,
             contact_id: None,
             priority: 100, // High priority for immediate sends
+            tenant_id: if req.tenant_id.is_empty() {
+                None
+            } else {
+                Some(req.tenant_id)
+            },
         };
 
         match self.queue.enqueue(email.clone()).await {
@@ -305,6 +315,11 @@ impl OutboundService for OutboundServiceImpl {
                 sequence_id: None,
                 contact_id: None,
                 priority: 0,
+                tenant_id: if email_req.tenant_id.is_empty() {
+                    None
+                } else {
+                    Some(email_req.tenant_id)
+                },
             };
 
             match self.queue.enqueue(email).await {

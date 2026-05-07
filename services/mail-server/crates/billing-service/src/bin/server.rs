@@ -53,6 +53,20 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // BS-001: Fail-fast if Stripe webhook secret is not configured.
+    // The /webhooks/stripe endpoint is exempt from service auth and relies
+    // entirely on HMAC-SHA256 signature verification. An empty secret would
+    // cause all webhook requests to be rejected, but it's better to fail at
+    // startup than silently drop webhook events in production.
+    if cli.stripe_webhook_secret.trim().is_empty() {
+        tracing::error!(
+            "STRIPE_WEBHOOK_SECRET is not configured. Stripe webhook signature \
+             verification requires this secret. Set the environment variable or \
+             pass --stripe-webhook-secret."
+        );
+        anyhow::bail!("STRIPE_WEBHOOK_SECRET is required");
+    }
+
     tracing::info!(listen = %cli.listen, "starting billing-service");
 
     // Database pool.
@@ -67,6 +81,31 @@ async fn main() -> anyhow::Result<()> {
 
     // Migrations are managed externally (apexmail-db crate or deploy tooling).
     // If you need auto-migration, point sqlx::migrate! at the correct path.
+
+    // BS-002: Validate that the dunning_config table exists at startup.
+    // Previously the table was created on-demand at runtime (with a CREATE TABLE
+    // IF NOT EXISTS in the webhook handler), which could cause race conditions
+    // and obscures schema management.  Warn early if the migration is missing.
+    {
+        let table_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = 'dunning_config'
+            )",
+        )
+        .fetch_one(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check dunning_config table existence: {e}"))?;
+
+        if !table_exists {
+            tracing::warn!(
+                "dunning_config table does not exist — dunning features will use \
+                 hardcoded defaults. Run the database migrations to create this table."
+            );
+        } else {
+            tracing::info!("dunning_config table found — dunning schema is up-to-date");
+        }
+    }
 
     // Redis pool.
     let redis_cfg = deadpool_redis::Config::from_url(&cli.redis_url);
@@ -86,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(db, redis, config);
     let app = routes::router(state.clone());
     maintenance::start_periodic_jobs(state.clone());
+    billing_service::stripe_webhooks::spawn_deadletter_retry_worker(state.clone());
 
     // Bind & serve.
     let listener = tokio::net::TcpListener::bind(&cli.listen).await?;

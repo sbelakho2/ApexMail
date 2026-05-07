@@ -34,6 +34,7 @@ async fn log_gdpr_audit(db: &sqlx::PgPool, request_id: &str, metadata: serde_jso
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GdprListQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -87,6 +88,7 @@ async fn list_gdpr_requests(
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
+    let tenant_scoped = auth.tenant_id != "system";
 
     // Check if table exists
     let exists: (bool,) = sqlx::query_as("SELECT to_regclass('public.gdpr_requests') IS NOT NULL")
@@ -97,8 +99,26 @@ async fn list_gdpr_requests(
         return Ok(Json(vec![]));
     }
 
-    let rows = sqlx::query_as::<_, GdprRequestRow>(
-        "SELECT g.id, g.type, g.status, g.email, g.tenant_id,
+    let rows = if tenant_scoped {
+        sqlx::query_as::<_, GdprRequestRow>(
+            "SELECT g.id, g.type, g.status, g.email, g.tenant_id,
+                COALESCE(t.name, g.tenant_id) as tenant_name,
+                g.created_at, g.verified_at, g.completed_at,
+                g.sla_deadline, g.notes
+         FROM gdpr_requests g
+         LEFT JOIN tenants t ON t.id = g.tenant_id
+         WHERE g.tenant_id = $3
+         ORDER BY g.created_at DESC
+         LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .bind(&auth.tenant_id)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, GdprRequestRow>(
+            "SELECT g.id, g.type, g.status, g.email, g.tenant_id,
                 COALESCE(t.name, g.tenant_id) as tenant_name,
                 g.created_at, g.verified_at, g.completed_at,
                 g.sla_deadline, g.notes
@@ -106,11 +126,12 @@ async fn list_gdpr_requests(
          LEFT JOIN tenants t ON t.id = g.tenant_id
          ORDER BY g.created_at DESC
          LIMIT $1 OFFSET $2",
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await?;
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     let response: Vec<GdprRequestResponse> = rows
         .into_iter()
@@ -151,17 +172,33 @@ async fn update_gdpr_request(
         return Err(ApiError::Validation(vec!["Invalid status".into()]));
     }
 
-    let result = sqlx::query(
-        "UPDATE gdpr_requests
+    let tenant_scoped = auth.tenant_id != "system";
+    let result = if tenant_scoped {
+        sqlx::query(
+            "UPDATE gdpr_requests
+         SET status = $2,
+             verified_at = CASE WHEN $2 = 'verified' THEN NOW() ELSE verified_at END,
+             completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE completed_at END
+         WHERE id = $1 AND tenant_id = $3",
+        )
+        .bind(&body.id)
+        .bind(&body.status)
+        .bind(&auth.tenant_id)
+        .execute(&state.db)
+        .await?
+    } else {
+        sqlx::query(
+            "UPDATE gdpr_requests
          SET status = $2,
              verified_at = CASE WHEN $2 = 'verified' THEN NOW() ELSE verified_at END,
              completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE completed_at END
          WHERE id = $1",
-    )
-    .bind(&body.id)
-    .bind(&body.status)
-    .execute(&state.db)
-    .await?;
+        )
+        .bind(&body.id)
+        .bind(&body.status)
+        .execute(&state.db)
+        .await?
+    };
 
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("gdpr request not found".into()));

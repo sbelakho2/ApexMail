@@ -174,6 +174,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SessionPayload {
     #[serde(rename = "type")]
     token_type: Option<String>,

@@ -6,6 +6,7 @@
 //! State is persisted to PostgreSQL via the ip_pool_addresses table.
 
 use dashmap::DashMap;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -29,9 +30,28 @@ impl IpWarmupManager {
     }
 
     /// Create a manager that keeps schedules in memory without database persistence.
+    /// Create an ephemeral instance for testing.
+    /// Uses lazy connection so it will not block on startup (O-23.2).
+    /// If the connection string is invalid, falls back to a warning log
+    /// instead of panicking.
     pub fn new_ephemeral() -> Self {
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost:5432/unused")
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "Ephemeral pool creation failed; creating fallback pool"
+                );
+                // Fallback: a syntactically valid URL that will fail at
+                // connection time rather than panicking at construction.
+                PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect_lazy("postgres://localhost:5432/postgres")
+                    .expect("hardcoded fallback URL is syntactically valid")
+            });
         Self {
-            db: PgPool::connect_lazy("postgres://localhost/unused").unwrap(),
+            db,
             schedules: Arc::new(DashMap::new()),
         }
     }
@@ -81,7 +101,13 @@ impl IpWarmupManager {
         Ok(schedule)
     }
 
-    /// Create a warmup schedule synchronously (for backwards compatibility in tests).
+    /// Create a warmup schedule synchronously.
+    ///
+    /// ⚠ O-23.3: This is a synchronous shim that performs only in-memory cache
+    /// operations — it does NOT block on DB I/O. However, calling it from an
+    /// async context may still block the tokio runtime thread. Use
+    /// [`create_schedule`](Self::create_schedule) in async code.
+    #[cfg(not(loom))]
     pub fn create_schedule_sync(
         &self,
         ip: impl Into<String>,
@@ -183,7 +209,12 @@ impl IpWarmupManager {
         Ok(true)
     }
 
-    /// Advance day synchronously (for backwards compatibility in tests).
+    /// Advance day synchronously.
+    ///
+    /// ⚠ O-23.3: Same caveat as [`create_schedule_sync`](Self::create_schedule_sync)
+    /// — only performs in-memory cache operations, but may block the tokio
+    /// runtime if called from an async context.
+    #[cfg(not(loom))]
     pub fn advance_day_sync(&self, ip: &str) -> bool {
         if let Some(mut entry) = self.schedules.get_mut(ip) {
             let s = entry.value_mut();

@@ -13,22 +13,28 @@
 
 use crate::engine::{DynamicAnalysisFinding, DynamicAnalyzer, DynamicDecision};
 use aho_corasick::AhoCorasick;
+use serde::{Deserialize, Serialize};
+use std::os::unix::fs::FileTypeExt;
 use std::sync::OnceLock;
 
 // ─── YARA-like Signature Analyzer ────────────────────────────────────────────
 
 /// A malware indicator rule used by [`YaraSignatureAnalyzer`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MalwareRule {
     /// Rule identifier (e.g., "RULE_EICAR_TEST")
     pub id: String,
     /// Human-readable description
     pub description: String,
-    /// Binary patterns — ALL must be present for a match (AND logic)
+    /// Binary patterns — ALL must be present for a match (AND logic).
+    /// In JSON / TOML config files patterns are specified as hex-encoded
+    /// strings (e.g. `"586B6C"`).
+    #[serde(with = "hex_patterns")]
     pub patterns: Vec<Vec<u8>>,
     /// Risk contribution when the rule fires
     pub risk: f64,
     /// Decision to recommend
+    #[serde(default)]
     pub decision: DynamicDecision,
 }
 
@@ -370,6 +376,15 @@ impl DynamicAnalyzer for YaraSignatureAnalyzer {
 /// use, wrap in `tokio::task::spawn_blocking`.
 /// - **No connection pooling**:Opens a new socket per scan. For high throughput,
 /// implement a connection pool or use ClamAV's milter interface.
+///
+/// # Security (O-15.1)
+///
+/// The socket path is validated before every connection:
+/// 1. Must be an **absolute path** (prevents relative-path / cwd attacks).
+/// 2. Must point to an **existing file** that is a **Unix socket** (not a
+///    regular file, FIFO, or device node).
+/// 3. If the path is a **symlink**, a warning is emitted so operators can
+///    audit unexpected symlink chains.
 pub struct ClamAvSocketAnalyzer {
     /// Path to the ClamAV Unix socket (e.g., `/var/run/clamav/clamd.ctl`)
     socket_path: String,
@@ -379,6 +394,12 @@ pub struct ClamAvSocketAnalyzer {
 
 impl ClamAvSocketAnalyzer {
     /// Create a new ClamAV analyzer with the given socket path.
+    ///
+    /// # Security
+    ///
+    /// The socket path is **not** validated eagerly (it may not yet exist at
+    /// construction time).  Every call to [`DynamicAnalyzer::analyze`] performs
+    /// runtime validation via [`validate_clamav_socket_path`].
     pub fn new(socket_path: String) -> Self {
         Self {
             socket_path,
@@ -393,6 +414,66 @@ impl ClamAvSocketAnalyzer {
             max_scan_size,
         }
     }
+}
+
+// ─── Socket path validation (O-15.1) ──────────────────────────────────────────
+
+/// Validate a ClamAV Unix socket path before connecting.
+///
+/// Returns `Ok(())` if the path is safe to connect to, or an `Err` with a
+/// human‑readable description of the problem.
+///
+/// Validation rules:
+/// 1. Path must be absolute.
+/// 2. If it exists, it must be a Unix socket (not a regular file, directory,
+///    FIFO, or device node).
+/// 3. If it is a symlink, a warning is logged so operators can audit the
+///    symlink target.
+fn validate_clamav_socket_path(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+
+    // 1. Must be absolute
+    if !p.is_absolute() {
+        return Err(format!(
+            "ClamAV socket path must be absolute, got: {}",
+            path
+        ));
+    }
+
+    // If the path does not yet exist we cannot validate further — the daemon
+    // may not have created the socket yet.  Allow the connection attempt to
+    // proceed; the error will be caught by `UnixStream::connect`.
+    if !p.exists() {
+        tracing::warn!(
+            socket_path = path,
+            "ClamAV socket does not exist yet — will attempt connect anyway"
+        );
+        return Ok(());
+    }
+
+    // 2. Must be a socket
+    let metadata = std::fs::metadata(p)
+        .map_err(|e| format!("Cannot read ClamAV socket metadata at {}: {}", path, e))?;
+    if !metadata.file_type().is_socket() {
+        return Err(format!(
+            "ClamAV path is not a Unix socket (got {:?}): {}",
+            metadata.file_type(),
+            path
+        ));
+    }
+
+    // 3. Warn on symlink
+    let is_symlink = std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if is_symlink {
+        tracing::warn!(
+            socket_path = path,
+            "ClamAV socket path is a symlink — verify target is trusted"
+        );
+    }
+
+    Ok(())
 }
 
 impl DynamicAnalyzer for ClamAvSocketAnalyzer {
@@ -415,6 +496,21 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
         // Attempt connection to ClamAV socket
         #[cfg(unix)]
         {
+            // ---- Socket path validation (O-15.1) --------------------------
+            if let Err(msg) = validate_clamav_socket_path(&self.socket_path) {
+                tracing::error!(
+                    socket = %self.socket_path,
+                    reason = %msg,
+                    "ClamAV socket validation failed — rejecting scan"
+                );
+                return Some(DynamicAnalysisFinding {
+                    id: "CLAMAV_SOCKET_INVALID".into(),
+                    description: format!("ClamAV socket validation failed: {}", msg),
+                    risk: 8.0,
+                    decision: DynamicDecision::Flag,
+                });
+            }
+
             let stream = match std::os::unix::net::UnixStream::connect(&self.socket_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -503,12 +599,105 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
     }
 }
 
+// ─── External rules loading (O-15.3) ──────────────────────────────────────────
+
+/// Serde helpers for hex-encoded byte patterns in [`MalwareRule`].
+///
+/// When serialising to JSON / TOML, patterns are represented as hex strings
+/// (e.g. `"586B6C"` for `b"Xkl"`).  This module handles the conversion so
+/// external rule files are human-readable.
+mod hex_patterns {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(patterns: &[Vec<u8>], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let hex_strings: Vec<String> = patterns.iter().map(hex::encode).collect();
+        hex_strings.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let hex_strings: Vec<String> = Vec::deserialize(deserializer)?;
+        hex_strings
+            .iter()
+            .map(|s| hex::decode(s).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
+/// Load YARA-like rules from a JSON file on disk.
+///
+/// The file must contain a JSON array of [`MalwareRule`] objects.  Patterns
+/// are specified as hex-encoded strings (e.g. `"586B6C"` for `Xkl`).
+///
+/// If the file cannot be read or parsed, an error is logged and `None` is
+/// returned so the caller can fall back to built-in rules.
+pub fn load_external_rules(path: &str) -> Option<Vec<MalwareRule>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| {
+            tracing::warn!(
+                path = path,
+                error = %e,
+                "Could not read external YARA rules file",
+            );
+        })
+        .ok()?;
+
+    let rules: Vec<MalwareRule> = serde_json::from_str(&content)
+        .map_err(|e| {
+            tracing::error!(
+                path = path,
+                error = %e,
+                "Failed to parse external YARA rules JSON",
+            );
+        })
+        .ok()?;
+
+    if rules.is_empty() {
+        tracing::warn!(path = path, "External YARA rules file is empty");
+    }
+
+    tracing::info!(
+        path = path,
+        count = rules.len(),
+        "Loaded external YARA rules",
+    );
+
+    Some(rules)
+}
+
 // ─── Global default analyzer ─────────────────────────────────────────────────
 
 /// Get the global default `YaraSignatureAnalyzer` (singleton).
+///
+/// # External rules (O-15.3)
+///
+/// If the `YARA_RULES_PATH` environment variable is set at first call, the
+/// rules are loaded from that JSON file.  When the file cannot be read or
+/// parsed, a warning is logged and the built-in rules are used as fallback.
+/// This allows threat intelligence updates without recompiling the binary.
 pub fn default_dynamic_analyzer() -> &'static YaraSignatureAnalyzer {
     static INSTANCE: OnceLock<YaraSignatureAnalyzer> = OnceLock::new();
-    INSTANCE.get_or_init(YaraSignatureAnalyzer::default)
+    INSTANCE.get_or_init(|| {
+        // Check for external rules file via env var (O-15.3)
+        if let Ok(path) = std::env::var("YARA_RULES_PATH") {
+            let rules = load_external_rules(&path);
+            if let Some(rules) = rules {
+                if let Some(analyzer) = YaraSignatureAnalyzer::with_rules(rules) {
+                    return analyzer;
+                }
+            }
+            tracing::warn!(
+                path = path,
+                "External YARA rules failed to compile - falling back to built-in",
+            );
+        }
+        YaraSignatureAnalyzer::default()
+    })
 }
 
 #[cfg(test)]

@@ -2,8 +2,10 @@
 //!
 //! Provides message storage and retrieval functionality.
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use clap::Parser;
+use std::fs::Metadata;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
@@ -27,6 +29,11 @@ struct Cli {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// O‑4.3:Path to a 0600 secret file containing the master encryption key.
+    /// If provided, message body content is encrypted at rest using AES‑256‑GCM.
+    #[arg(long, env = "ENCRYPTION_KEY_FILE")]
+    encryption_key_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -49,8 +56,14 @@ async fn main() -> Result<()> {
     let pool = sqlx::PgPool::connect(&cli.database_url).await?;
     info!("Connected to database");
 
-    // Create storage
-    let storage = Arc::new(MessageStorage::new(pool));
+    // Create storage with optional encryption at rest
+    let storage = if let Some(path) = cli.encryption_key_file.as_deref() {
+        let key = load_encryption_key_from_file(path)?;
+        info!("Encryption at rest enabled");
+        Arc::new(MessageStorage::with_encryption(pool, key))
+    } else {
+        Arc::new(MessageStorage::new(pool))
+    };
     storage.initialize().await?;
 
     // Create gRPC service
@@ -70,4 +83,95 @@ async fn main() -> Result<()> {
 
     info!("Mailstore Service stopped");
     Ok(())
+}
+
+fn load_encryption_key_from_file(path: &Path) -> Result<Vec<u8>> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| anyhow!("failed to inspect encryption key file: {error}"))?;
+    if !metadata.is_file() {
+        bail!("encryption key file must be a regular file");
+    }
+    validate_encryption_key_file_mode(&metadata)?;
+
+    let mut key = std::fs::read(path)
+        .map_err(|error| anyhow!("failed to read encryption key file: {error}"))?;
+    trim_trailing_line_endings(&mut key);
+    if key.len() < 32 {
+        bail!("encryption key file must contain at least 32 bytes");
+    }
+
+    Ok(key)
+}
+
+#[cfg(unix)]
+fn validate_encryption_key_file_mode(metadata: &Metadata) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        bail!("encryption key file permissions must be 0600");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_encryption_key_file_mode(_metadata: &Metadata) -> Result<()> {
+    Ok(())
+}
+
+fn trim_trailing_line_endings(bytes: &mut Vec<u8>) {
+    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        bytes.pop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_trailing_line_endings_only_removes_crlf_suffix() {
+        let mut key = b"0123456789abcdef0123456789abcdef\r\n".to_vec();
+        trim_trailing_line_endings(&mut key);
+
+        assert_eq!(key, b"0123456789abcdef0123456789abcdef");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_encryption_key_rejects_group_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "apexmail-mailstore-test-key-{}-bad",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"0123456789abcdef0123456789abcdef").expect("write test key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("set test key mode");
+
+        let error = load_encryption_key_from_file(&path).expect_err("mode must be rejected");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(error.to_string().contains("0600"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_encryption_key_accepts_0600_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "apexmail-mailstore-test-key-{}-good",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"0123456789abcdef0123456789abcdef\n").expect("write test key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("set test key mode");
+
+        let key = load_encryption_key_from_file(&path).expect("load 0600 key");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(key, b"0123456789abcdef0123456789abcdef");
+    }
 }

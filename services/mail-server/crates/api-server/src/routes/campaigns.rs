@@ -1,8 +1,12 @@
 //! Campaign management routes.
 
-use super::helpers::{clamp_limit, default_limit};
+use super::helpers::{
+    clamp_limit, compute_etag, decode_cursor, default_limit, encode_cursor, has_more,
+    is_not_modified, pagination_meta,
+};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -49,13 +53,16 @@ pub struct CampaignResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListCampaignsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    /// Cursor for cursor-based pagination — hex-encoded `created_at` timestamp
+    /// of the last item from the previous page. When provided, overrides `offset`.
     #[serde(default)]
-    pub cursor: Option<i64>,
+    pub cursor: Option<String>,
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -67,9 +74,14 @@ async fn create_campaign(
 ) -> Result<(StatusCode, Json<CampaignResponse>), ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
 
-    if body.name.is_empty() || body.subject.is_empty() {
+    if body.name.is_empty() || body.name.len() > 200 {
         return Err(ApiError::Validation(vec![
-            "name and subject are required".into()
+            "name is required and must be 200 characters or fewer".into(),
+        ]));
+    }
+    if body.subject.is_empty() || body.subject.len() > 500 {
+        return Err(ApiError::Validation(vec![
+            "subject is required and must be 500 characters or fewer".into(),
         ]));
     }
 
@@ -116,22 +128,76 @@ async fn create_campaign(
 async fn list_campaigns(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Query(params): Query<ListCampaignsQuery>,
-) -> Result<Json<Vec<CampaignResponse>>, ApiError> {
+) -> Result<Response, ApiError> {
     require_scopes(&auth, &["campaigns:read"])?;
 
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
-    let rows = sqlx::query_as::<_, CampaignRow>(
-        "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
-         FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(&auth.tenant_id)
-    .bind(clamp_limit(params.limit, 100))
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await?;
+    let limit = clamp_limit(params.limit, 100);
 
-    Ok(Json(rows.into_iter().map(Into::into).collect()))
+    // Cursor-based pagination: decode the cursor (hex-encoded created_at timestamp)
+    let cursor_value = params.cursor.as_deref().and_then(decode_cursor);
+
+    let fetch_limit = limit + 1; // fetch one extra to detect has_more
+
+    let rows = if let Some(ref cursor) = cursor_value {
+        sqlx::query_as::<_, CampaignRow>(
+            "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
+             FROM campaigns WHERE tenant_id = $1 AND created_at < $2::timestamp
+             ORDER BY created_at DESC LIMIT $3",
+        )
+        .bind(&auth.tenant_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        // Fallback to offset-based pagination for backward compatibility
+        let offset = params.offset.clamp(0, 100_000);
+        sqlx::query_as::<_, CampaignRow>(
+            "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
+             FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(&auth.tenant_id)
+        .bind(fetch_limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?
+    };
+
+    // Build the response rows and detect has_more
+    let mut details: Vec<CampaignResponse> = rows.into_iter().map(Into::into).collect();
+    let more = has_more(&mut details, limit as usize);
+
+    // Compute the next cursor from the last row
+    let next_cursor = details.last().map(|r| encode_cursor(&r.created_at));
+    let meta = pagination_meta(more, next_cursor);
+
+    // Build the response body and compute ETag
+    let body = serde_json::json!({
+        "data": details,
+        "error": null,
+        "meta": meta,
+    });
+    let body_bytes = serde_json::to_vec(&body)?;
+    let etag = compute_etag(&body_bytes);
+
+    // Check If-None-Match for 304
+    if is_not_modified(&headers, &etag) {
+        return Ok(axum::response::Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header("ETag", &etag)
+            .body(axum::body::Body::empty())
+            .unwrap());
+    }
+
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("ETag", &etag)
+        .header("Cache-Control", "private, max-age=0, must-revalidate")
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(body_bytes))
+        .unwrap())
 }
 
 async fn get_campaign(
@@ -309,8 +375,9 @@ async fn resend_campaign(
     .await?;
 
     // Update campaign status
-    sqlx::query("UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1")
+    sqlx::query("UPDATE campaigns SET status = 'resending', updated_at = NOW() WHERE id = $1 AND tenant_id = $2")
         .bind(id)
+        .bind(auth.tenant_id.to_string())
         .execute(&state.db)
         .await?;
 

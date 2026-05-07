@@ -4,7 +4,7 @@
 
 base_url = "https://apexmail.ee"
 title = "ApexMail - Enterprise Email API for Developers"
-description = "Enterprise email API with built-in compliance, real-time delivery tracking, and developer-first experience. EU-hosted, GDPR-ready, private cloud options."
+description = "Enterprise email API with compliance workflow support, delivery tracking, and developer-first APIs. EU-hosted, GDPR-ready, with Enterprise private deployment options."
 default_language = "en"
 # theme = ""  # No external theme; templates are in ./templates/
 
@@ -13,8 +13,8 @@ default_language = "en"
 compile_sass = false          # We use Tailwind CLI instead
 build_search_index = false    # Marketing site doesn't need search
 minify_html = true
-generate_feeds = false
-feed_filenames = []
+generate_feeds = true
+feed_filenames = ["atom.xml", "rss.xml"]
 
 # ── Taxonomy (not used yet but ready) ────────────────────────
 
@@ -23,10 +23,19 @@ taxonomies = []
 # ── Markdown Rendering ───────────────────────────────────────
 
 [markdown]
-highlight_code = true
-highlight_theme = "css"
-extra_syntaxes_and_themes = []
 smart_punctuation = true
+
+[markdown.highlighting]
+style = "class"
+theme = "github-light"
+extra_grammars = []
+extra_themes = []
+
+# ── Sitemap Configuration ─────────────────────────────────
+# Zola generates sitemap.xml automatically at build time.
+# To add <lastmod> and <changefreq>, create templates/sitemap.xml.
+# See: https://www.getzola.org/documentation/templates/sitemap/
+# For now, the default sitemap includes all pages.
 
 # ── Slugify ──────────────────────────────────────────────────
 
@@ -40,8 +49,10 @@ anchors = "on"
 [extra]
 site_name = "ApexMail"
 author = "Bel Consulting OÜ"
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 twitter_handle = "@apexmail"
+twitter_url = "https://twitter.com/apexmail"
+linkedin_url = "https://linkedin.com/company/apexmail"
 github_url = "https://github.com/sbelakho2/ApexMail"
 docs_url = "https://apexmail.ee/docs"
 app_url = "https://app.apexmail.ee"
@@ -58,6 +69,12 @@ cookie_consent_policy_label = "Cookie Policy"
 [[extra.cookie_consent_choices]]
 value = "necessary"
 label = "Necessary Only"
+analytics = false
+primary = false
+
+[[extra.cookie_consent_choices]]
+value = "dismiss"
+label = "Dismiss"
 analytics = false
 primary = false
 

@@ -3,7 +3,7 @@
 //! Combines Bayesian classification, content scoring, header analysis,
 //! and URL analysis into a single composite spam verdict.
 
-use crate::bayesian::{BayesianClassifier, BayesianModel};
+use crate::bayesian::{BayesianClassifier, BayesianModel, TrainingError};
 use crate::config::SpamConfig;
 use crate::content_scorer::{self, ContentFinding, ContentScore};
 use crate::header_analyzer::{self, EmailHeaders, HeaderScore};
@@ -268,14 +268,22 @@ impl SpamEngine {
         }
     }
 
-    /// Train the Bayesian classifier with a spam sample
-    pub fn train_spam(&self, text: &str) {
-        self.bayesian.learn_spam(text);
+    /// Train the Bayesian classifier with a spam sample.
+    ///
+    /// The input is validated (entropy check, token count limit) and
+    /// rate-limited before being ingested into the model. Returns an
+    /// error if the sample fails validation or the rate limit is exceeded.
+    pub fn train_spam(&self, text: &str) -> Result<(), TrainingError> {
+        self.bayesian.learn_spam_validated(text)
     }
 
-    /// Train the Bayesian classifier with a ham sample
-    pub fn train_ham(&self, text: &str) {
-        self.bayesian.learn_ham(text);
+    /// Train the Bayesian classifier with a ham sample.
+    ///
+    /// The input is validated (entropy check, token count limit) and
+    /// rate-limited before being ingested into the model. Returns an
+    /// error if the sample fails validation or the rate limit is exceeded.
+    pub fn train_ham(&self, text: &str) -> Result<(), TrainingError> {
+        self.bayesian.learn_ham_validated(text)
     }
 
     /// Add an approved reviewer identity.
@@ -705,15 +713,15 @@ mod tests {
         let engine = SpamEngine::new();
         // Train with some spam
         for _ in 0..10 {
-            engine.train_spam("Buy viagra now! Million dollars free lottery winner act now");
-            engine.train_spam("Nigerian prince needs your help wire transfer urgently");
-            engine.train_spam("You have won congratulations claim your prize immediately");
+            let _ = engine.train_spam("Buy viagra now! Million dollars free lottery winner act now");
+            let _ = engine.train_spam("Nigerian prince needs your help wire transfer urgently");
+            let _ = engine.train_spam("You have won congratulations claim your prize immediately");
         }
         // Train with some ham
         for _ in 0..10 {
-            engine.train_ham("Hi team, please review the quarterly report attached");
-            engine.train_ham("Meeting scheduled for Tuesday at 3pm in conference room B");
-            engine.train_ham("The deployment pipeline is passing all tests now");
+            let _ = engine.train_ham("Hi team, please review the quarterly report attached");
+            let _ = engine.train_ham("Meeting scheduled for Tuesday at 3pm in conference room B");
+            let _ = engine.train_ham("The deployment pipeline is passing all tests now");
         }
         engine
     }
@@ -795,9 +803,9 @@ mod tests {
     #[test]
     fn test_snapshot_and_rollback() {
         let engine = SpamEngine::new();
-        engine.train_ham("team meeting schedule quarterly roadmap");
+        let _ = engine.train_ham("team meeting schedule quarterly roadmap");
         let snap = engine.create_model_snapshot("baseline");
-        engine.train_spam("buy now lottery winner free crypto");
+        let _ = engine.train_spam("buy now lottery winner free crypto");
         assert!(engine.rollback_to_snapshot(&snap));
     }
 }

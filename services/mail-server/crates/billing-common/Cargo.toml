@@ -1,0 +1,16 @@
+[package]
+name = "billing-common"
+version.workspace = true
+edition.workspace = true
+description = "Shared billing logic (VAT rates, proration, audit, CSV) for billing-service and api-server"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]

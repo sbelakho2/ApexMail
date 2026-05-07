@@ -87,7 +87,7 @@ Location: `/workspace/output_agent/` on instance. Local metadata copies are trea
 |---|---|
 | **Accuracy** | 25/51 (49.0%) |
 
-**Analysis**: The model excels at format, tone, and general knowledge (SPF, DKIM, DMARC, deliverability topics scored 0.5–0.9 match). However, it struggles with **exact numerical recall** — hallucinating wrong plan prices ($49, $129, $249 instead of correct $25, $65, $150, $350, $800), wrong email limits, and wrong feature availability. This is a known limitation of LoRA fine-tuning for factual grounding — the adapter modifies style/behavior but doesn't fully override the base model's priors for specific numbers.
+**Analysis**: The model excels at format, tone, and general knowledge (SPF, DKIM, DMARC, deliverability topics scored 0.5–0.9 match). However, it struggles with **exact numerical recall** — hallucinating wrong plan prices ($49, $129, $249 instead of correct $25, $65, $150, $350, $3,000), wrong email limits, and wrong feature availability. This is a known limitation of LoRA fine-tuning for factual grounding — the adapter modifies style/behavior but doesn't fully override the base model's priors for specific numbers.
 
 **Failure categories**:
 - Wrong prices: 8 instances (model generates plausible but incorrect prices)
@@ -161,7 +161,7 @@ Location: `/workspace/output_agent/` on instance. Local metadata copies are trea
 - ✅ All imports resolve (prompts_v2, test_agent.ALL_TESTS, stress_test.STRESS_TESTS)
 - ✅ 262 tests across 41 categories + 247 stress tests across 40 categories
 - ✅ 50 context profiles in prompts_v2
-- ✅ All 6 pricing tiers correct ($0/$25/$65/$150/$350/$800)
+- ✅ All 6 pricing tiers correct ($0/$25/$65/$150/$350/$3,000)
 - ✅ No stale pricing references ($29, $59, $129, $399, $1299)
 - ✅ Config file valid (model, LoRA, dataset paths)
 - ✅ Data file integrity: 549+68+68 = 685 ✓

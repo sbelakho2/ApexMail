@@ -28,4 +28,8 @@ spec:
       port: {{ .Values.mta.ports.smtps }}
       targetPort: smtps
       protocol: TCP
+    - name: metrics
+      port: {{ .Values.mta.ports.metrics }}
+      targetPort: metrics
+      protocol: TCP
 {{- end }}

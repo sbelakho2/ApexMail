@@ -1,51 +1,51 @@
 {# ── Private Cloud Hero ────────────────────────────────────────── #}
 {# Converted from private-cloud/PrivateCloudHero.tsx              #}
 
-<section class="relative overflow-hidden bg-gradient-to-b from-primary-50 via-white to-white pt-32 lg:pt-40 pb-20">
+<section class="relative overflow-hidden bg-gradient-to-b from-brand-50 via-white to-white pt-32 lg:pt-40 pb-20">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="grid lg:grid-cols-2 gap-16 items-center">
       {# Left: Copy #}
       <div>
-        <div class="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary-100 text-primary-700 text-sm font-semibold mb-6 animate-in">
+        <div class="inline-flex items-center gap-2 px-4 py-2 rounded-sm bg-brand-100 text-brand-700 text-sm font-semibold mb-6 animate-in">
           <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
           Enterprise Infrastructure
         </div>
-        <h1 class="animate-in delay-100 text-4xl md:text-5xl font-bold text-surface-900 tracking-tight mb-6">
+        <h1 class="animate-in delay-100 text-4xl md:text-5xl font-bold text-surface-950 tracking-tight mb-6">
           Your Email.<br />
-          <span class="bg-gradient-to-r from-primary-600 to-primary-400 bg-clip-text text-transparent">Your Cloud.</span>
+          <span class="bg-gradient-to-r from-surface-950 to-brand-400 bg-clip-text text-transparent">Your Cloud.</span>
         </h1>
         <p class="animate-in delay-200 text-lg text-surface-600 leading-relaxed mb-8">
-          Deploy ApexMail in your own VPC with complete data sovereignty,
-          dedicated resources, and enterprise-grade isolation. Same powerful
-          API, zero shared infrastructure.
+          Enterprise includes private deployment lifecycle management for single-tenant,
+          dedicated, hybrid, and on-premise models. We track region, isolation, health,
+          dedicated IPs, and BYOIP verification from design through launch.
         </p>
 
         <div class="animate-in delay-300 space-y-4">
           <div class="flex items-start gap-3">
-            <div class="w-6 h-6 rounded-full bg-primary-100 flex items-center justify-center shrink-0 mt-0.5">
-              <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <div class="w-6 h-6 rounded-sm bg-brand-100 flex items-center justify-center shrink-0 mt-0.5">
+              <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
             <div>
-              <div class="font-semibold text-surface-900">Single-Tenant Isolation</div>
-              <div class="text-sm text-surface-500">Your data never touches shared infrastructure</div>
+              <div class="font-semibold text-surface-950">Single-Tenant Isolation</div>
+              <div class="text-sm text-surface-500">Dedicated tenancy options scoped for your risk profile</div>
             </div>
           </div>
           <div class="flex items-start gap-3">
-            <div class="w-6 h-6 rounded-full bg-primary-100 flex items-center justify-center shrink-0 mt-0.5">
-              <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <div class="w-6 h-6 rounded-sm bg-brand-100 flex items-center justify-center shrink-0 mt-0.5">
+              <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
             <div>
-              <div class="font-semibold text-surface-900">Data Sovereignty</div>
-              <div class="text-sm text-surface-500">Choose your region — EU, US, APAC, or custom</div>
+              <div class="font-semibold text-surface-950">Deployment Lifecycle</div>
+              <div class="text-sm text-surface-500">Region, sizing, health checks, and status tracked before launch</div>
             </div>
           </div>
           <div class="flex items-start gap-3">
-            <div class="w-6 h-6 rounded-full bg-primary-100 flex items-center justify-center shrink-0 mt-0.5">
-              <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <div class="w-6 h-6 rounded-sm bg-brand-100 flex items-center justify-center shrink-0 mt-0.5">
+              <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
             <div>
-              <div class="font-semibold text-surface-900">Custom Domain &amp; IPs</div>
-              <div class="text-sm text-surface-500">Dedicated sending IPs with full reputation control</div>
+              <div class="font-semibold text-surface-950">BYOIP &amp; Dedicated IPs</div>
+              <div class="text-sm text-surface-500">Dedicated sending IPs with CIDR verification and reputation tracking</div>
             </div>
           </div>
         </div>
@@ -53,22 +53,22 @@
 
       {# Right: VPC Architecture Diagram #}
       <div class="animate-in delay-300 relative">
-        <div class="bg-white border border-surface-200 rounded-2xl p-6 shadow-sm">
-          <div class="text-xs font-semibold text-surface-400 uppercase tracking-wider mb-4">Your VPC Architecture</div>
+        <div class="bg-white border border-surface-200 rounded-sm p-6  ">
+          <div class="text-xs font-semibold text-surface-400 uppercase tracking-wider mb-4">Reference Deployment Architecture</div>
 
           {# Region label #}
-          <div class="border-2 border-dashed border-primary-200 rounded-xl p-4 relative">
-            <span class="absolute -top-3 left-4 bg-white px-2 text-xs font-semibold text-primary-600">AWS / GCP / Azure Region</span>
+          <div class="border-2 border-dashed border-brand-200 rounded-sm p-4 relative">
+            <span class="absolute -top-3 left-4 bg-white px-2 text-xs font-semibold text-surface-950">Customer-selected cloud region</span>
 
             {# Private Subnet #}
-            <div class="bg-surface-50 border border-surface-200 rounded-lg p-4 mb-3">
+            <div class="bg-surface-100 border border-surface-200 rounded-sm p-4 mb-3">
               <div class="text-xs font-semibold text-surface-500 mb-3">Private Subnet</div>
               <div class="grid grid-cols-3 gap-2">
                 {% set private_services = ["MTA Cluster", "Queue Workers", "Analytics DB"] %}
                 {% for svc in private_services %}
-                <div class="bg-white border border-surface-200 rounded-lg p-3 text-center">
-                  <div class="w-8 h-8 rounded-lg bg-primary-100 flex items-center justify-center mx-auto mb-2">
-                    <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+                <div class="bg-white border border-surface-200 rounded-sm p-3 text-center">
+                  <div class="w-8 h-8 rounded-sm bg-brand-100 flex items-center justify-center mx-auto mb-2">
+                    <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
                   </div>
                   <div class="text-xs font-medium text-surface-700">{{ svc }}</div>
                 </div>
@@ -77,14 +77,14 @@
             </div>
 
             {# Public Subnet #}
-            <div class="bg-primary-50/50 border border-primary-200 rounded-lg p-4">
-              <div class="text-xs font-semibold text-primary-600 mb-3">Public Subnet</div>
+            <div class="bg-brand-50/50 border border-brand-200 rounded-sm p-4">
+              <div class="text-xs font-semibold text-surface-950 mb-3">Public Subnet</div>
               <div class="grid grid-cols-3 gap-2">
                 {% set public_services = ["API Gateway", "Load Balancer", "DNS Resolver"] %}
                 {% for svc in public_services %}
-                <div class="bg-white border border-primary-200 rounded-lg p-3 text-center">
-                  <div class="w-8 h-8 rounded-lg bg-primary-100 flex items-center justify-center mx-auto mb-2">
-                    <svg class="w-4 h-4 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                <div class="bg-white border border-brand-200 rounded-sm p-3 text-center">
+                  <div class="w-8 h-8 rounded-sm bg-brand-100 flex items-center justify-center mx-auto mb-2">
+                    <svg class="w-4 h-4 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
                   </div>
                   <div class="text-xs font-medium text-surface-700">{{ svc }}</div>
                 </div>
@@ -94,12 +94,12 @@
           </div>
 
           {# Dedicated IPs #}
-          <div class="mt-4 flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+          <div class="mt-4 flex items-center justify-between p-3 bg-success-50 border border-success-200 rounded-sm">
             <div class="flex items-center gap-2">
-              <div class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-              <span class="text-sm font-medium text-emerald-700">Dedicated IP Pool</span>
+              <div class="w-2 h-2 rounded-sm bg-success-500 animate-pulse"></div>
+              <span class="text-sm font-medium text-success-700">Dedicated IP Pool</span>
             </div>
-            <span class="text-xs text-emerald-600 font-mono">192.168.x.x/24</span>
+            <span class="text-xs text-success-600 font-mono">192.168.x.x/24</span>
           </div>
         </div>
       </div>

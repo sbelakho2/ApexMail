@@ -21,6 +21,9 @@ pub struct SalesConfig {
 
     /// Scraper requests-per-minute cap – ethical rate limit.
     pub scraper_rpm: u32,
+
+    /// Redis URL (e.g. redis://127.0.0.1:6379).
+    pub redis_url: String,
 }
 
 impl Default for SalesConfig {
@@ -31,6 +34,7 @@ impl Default for SalesConfig {
             max_campaigns: 50,
             port: 3010,
             scraper_rpm: 30,
+            redis_url: "redis://127.0.0.1:6379".into(),
         }
     }
 }
@@ -57,6 +61,8 @@ impl SalesConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
         };
         if let Err(err) = config.validate() {
             error!(error = %err, "Invalid sales-autopilot config, falling back to defaults");
@@ -116,6 +122,7 @@ mod tests {
             max_campaigns: 10,
             port: 9090,
             scraper_rpm: 60,
+            redis_url: "redis://127.0.0.1:6379".into(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: SalesConfig = serde_json::from_str(&json).unwrap();

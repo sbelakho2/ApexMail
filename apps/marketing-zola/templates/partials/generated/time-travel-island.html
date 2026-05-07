@@ -7,43 +7,43 @@
 <section class="py-20 lg:py-32 bg-white relative" id="time-travel">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-16">
-      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
+      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-sm bg-surface-100 border border-surface-200 text-xs font-medium text-surface-950 mb-6">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         Time Travel
       </div>
-      <h2 class="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">See Every Version of Every Email</h2>
+      <h2 class="text-3xl lg:text-4xl font-bold text-surface-950 mb-6 tracking-tight">See Every Version of Every Email</h2>
       <p class="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">Full version history for every template render. Compare changes, debug issues, and maintain an auditable trail of every email sent.</p>
     </div>
 
     <div class="grid lg:grid-cols-5 gap-8">
       {# Snapshot List #}
       <div class="lg:col-span-2">
-        <div class="bg-surface-50 rounded-2xl border border-surface-200 p-4">
+        <div class="bg-surface-100 rounded-sm border border-surface-200 p-4">
           <h4 class="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-4 px-2">Snapshots</h4>
           <div class="space-y-2">
-            <div class="rounded-xl bg-white border-2 border-brand-500 p-4 shadow-sm">
+            <div class="rounded-sm bg-white border-2 border-brand-500 p-4  ">
               <div class="flex justify-between items-start">
                 <div>
-                  <div class="text-sm font-semibold text-surface-900">v3 — Current</div>
+                  <div class="text-sm font-semibold text-surface-950">v3 — Current</div>
                   <div class="text-xs text-surface-500 mt-0.5">Jan 15, 2025 · 14:23 UTC</div>
                 </div>
-                <span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">Live</span>
+                <span class="inline-flex items-center rounded-sm bg-success-50 px-2 py-0.5 text-xs font-medium text-success-700">Live</span>
               </div>
               <p class="text-xs text-surface-600 mt-2">Updated CTA button copy and header image</p>
             </div>
-            <div class="rounded-xl bg-white border border-surface-200 p-4">
+            <div class="rounded-sm bg-white border border-surface-200 p-4">
               <div class="flex justify-between items-start">
                 <div>
-                  <div class="text-sm font-semibold text-surface-900">v2</div>
+                  <div class="text-sm font-semibold text-surface-950">v2</div>
                   <div class="text-xs text-surface-500 mt-0.5">Jan 12, 2025 · 09:15 UTC</div>
                 </div>
               </div>
               <p class="text-xs text-surface-600 mt-2">Added compliance footer for GDPR</p>
             </div>
-            <div class="rounded-xl bg-white border border-surface-200 p-4">
+            <div class="rounded-sm bg-white border border-surface-200 p-4">
               <div class="flex justify-between items-start">
                 <div>
-                  <div class="text-sm font-semibold text-surface-900">v1</div>
+                  <div class="text-sm font-semibold text-surface-950">v1</div>
                   <div class="text-xs text-surface-500 mt-0.5">Jan 08, 2025 · 16:42 UTC</div>
                 </div>
               </div>
@@ -55,10 +55,10 @@
 
       {# Preview #}
       <div class="lg:col-span-3">
-        <div class="bg-white rounded-2xl border border-surface-200 shadow-sm overflow-hidden">
-          <div class="border-b border-surface-200 bg-surface-50 px-6 py-3 flex items-center justify-between">
+        <div class="bg-white rounded-sm border border-surface-200   overflow-hidden">
+          <div class="border-b border-surface-200 bg-surface-100 px-6 py-3 flex items-center justify-between">
             <div class="flex items-center gap-3">
-              <span class="text-sm font-semibold text-surface-900">Welcome Email — v3</span>
+              <span class="text-sm font-semibold text-surface-950">Welcome Email — v3</span>
               <span class="text-xs text-surface-400">template_welcome_****</span>
             </div>
             <div class="flex items-center gap-2">
@@ -66,9 +66,9 @@
               <span class="inline-flex items-center rounded bg-surface-200 px-2 py-0.5 text-xs font-mono text-surface-600">12.4 KB</span>
             </div>
           </div>
-          <div class="p-8 bg-surface-50">
+          <div class="p-8 bg-surface-100">
             {# Mock email preview #}
-            <div class="max-w-md mx-auto bg-white rounded-lg shadow-sm border border-surface-200 overflow-hidden">
+            <div class="max-w-md mx-auto bg-white rounded-sm   border border-surface-200 overflow-hidden">
               <div class="bg-brand-500 px-6 py-8 text-center">
                 <div class="text-white text-xl font-bold">Welcome to ApexMail</div>
                 <div class="text-white/80 text-sm mt-1">Your email infrastructure is ready</div>
@@ -76,11 +76,11 @@
               <div class="p-6">
                 <p class="text-sm text-surface-700 leading-relaxed mb-4">Hi {{'{{'}} name {{'}}'}},</p>
                 <p class="text-sm text-surface-700 leading-relaxed mb-4">Your account is set up and ready to send. Here's how to get started in under 5 minutes.</p>
-                <div class="bg-surface-50 rounded-lg p-4 mb-4 border border-surface-200">
+                <div class="bg-surface-100 rounded-sm p-4 mb-4 border border-surface-200">
                   <code class="text-xs text-brand-600 font-mono">curl -X POST https://api.apexmail.ee/v1/messages \<br/>&nbsp;&nbsp;-H "X-API-Key: YOUR_API_KEY_HERE" \<br/>&nbsp;&nbsp;-H "Content-Type: application/json" \<br/>&nbsp;&nbsp;-d '{"from":"noreply@example.com","to":["user@example.com"],"subject":"Welcome","html":"&lt;p&gt;Hello from ApexMail&lt;/p&gt;"}'</code>
                 </div>
                 <div class="text-center">
-                  <span class="inline-block bg-brand-500 text-white px-6 py-2.5 rounded-lg text-sm font-semibold">View Dashboard &rarr;</span>
+                  <span class="inline-block bg-brand-500 text-white px-6 py-3 rounded-sm text-sm font-semibold">View Dashboard &rarr;</span>
                 </div>
               </div>
               <div class="border-t border-surface-200 px-6 py-4 text-center text-xs text-surface-400">
@@ -88,7 +88,7 @@
               </div>
             </div>
           </div>
-          <div class="border-t border-surface-200 px-6 py-3 bg-surface-50 text-xs text-surface-500">
+          <div class="border-t border-surface-200 px-6 py-3 bg-surface-100 text-xs text-surface-500">
             <div class="flex flex-wrap gap-4">
               <span><strong class="text-surface-700">Rendered:</strong> 847 times</span>
               <span><strong class="text-surface-700">Open rate:</strong> 68.2%</span>

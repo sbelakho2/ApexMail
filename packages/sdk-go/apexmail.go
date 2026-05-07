@@ -377,27 +377,16 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 		}
 
 		if resp.StatusCode >= 400 {
-			var apiErr APIError
-			if jsonErr := json.Unmarshal(respBody, &apiErr); jsonErr != nil {
-				apiErr.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))
-				apiErr.Code = "invalid_error_payload"
-			}
-			apiErr.StatusCode = resp.StatusCode
-			switch resp.StatusCode {
-			case 401:
-				return &AuthenticationError{APIError: &apiErr}
-			case 404:
-				return &NotFoundError{APIError: &apiErr}
-			case 422:
-				return &ValidationError{APIError: &apiErr}
-			case 429:
-				return &RateLimitError{APIError: &apiErr}
+			apiErr := parseAPIError(respBody, resp.StatusCode)
+			switch e := apiErr.(type) {
+			case *APIError:
+				return classifyAPIError(e)
 			default:
-				return &apiErr
+				return apiErr
 			}
 		}
 		if out != nil && len(respBody) > 0 {
-			if err := json.Unmarshal(respBody, out); err != nil {
+			if err := decodeAPIResponse(respBody, out); err != nil {
 				return fmt.Errorf("apexmail: unmarshal response: %w", err)
 			}
 		}
@@ -487,18 +476,166 @@ func sleepWithContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// APIError represents an error response from the ApexMail API.
+// APIError represents a structured API error response
 type APIError struct {
 	StatusCode int
-	Message    string `json:"error"`
-	Code       string `json:"code"`
+	Code       string   `json:"code"`
+	Message    string   `json:"message"`
+	Details    []string `json:"details,omitempty"`
 }
 
 func (e *APIError) Error() string {
 	if e.Code != "" {
-		return fmt.Sprintf("apexmail: %s (code: %s, status: %d)", e.Message, e.Code, e.StatusCode)
+		return fmt.Sprintf("apexmail API error: %s - %s", e.Code, e.Message)
 	}
 	return fmt.Sprintf("apexmail: %s (status: %d)", e.Message, e.StatusCode)
+}
+
+// apiErrorResponse is the JSON envelope from the API:
+//
+//	{"data":null,"error":{"code":"...","message":"...","details":null},"meta":null}
+type apiErrorResponse struct {
+	Data  json.RawMessage `json:"data"`
+	Error *APIError       `json:"error"`
+	Meta  json.RawMessage `json:"meta"`
+}
+
+type apiSuccessResponse struct {
+	Data  json.RawMessage `json:"data"`
+	Error *APIError       `json:"error"`
+	Meta  json.RawMessage `json:"meta"`
+}
+
+// parseAPIError attempts to parse an API error from an HTTP response body.
+func parseAPIError(body []byte, statusCode int) error {
+	var errResp apiErrorResponse
+	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != nil {
+		errResp.Error.StatusCode = statusCode
+		if errResp.Error.Message == "" {
+			errResp.Error.Message = http.StatusText(statusCode)
+		}
+		return errResp.Error
+	}
+
+	var legacy struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &legacy); err == nil {
+		message := legacy.Error
+		if message == "" {
+			message = legacy.Message
+		}
+		if message != "" {
+			return &APIError{
+				StatusCode: statusCode,
+				Code:       apiErrorCodeFromStatus(statusCode),
+				Message:    message,
+			}
+		}
+	}
+
+	return &APIError{
+		StatusCode: statusCode,
+		Code:       "INVALID_ERROR_PAYLOAD",
+		Message:    fmt.Sprintf("HTTP %d: %s", statusCode, string(body)),
+	}
+}
+
+func decodeAPIResponse(body []byte, out interface{}) error {
+	var envelope apiSuccessResponse
+	if err := json.Unmarshal(body, &envelope); err == nil && isAPIEnvelope(envelope) {
+		if envelope.Error != nil {
+			return envelope.Error
+		}
+		if len(envelope.Data) == 0 || string(envelope.Data) == "null" {
+			return nil
+		}
+		payload := mergeEnvelopeMeta(envelope.Data, envelope.Meta)
+		return json.Unmarshal(payload, out)
+	}
+
+	return json.Unmarshal(body, out)
+}
+
+func isAPIEnvelope(envelope apiSuccessResponse) bool {
+	return envelope.Data != nil || envelope.Error != nil || envelope.Meta != nil
+}
+
+func mergeEnvelopeMeta(data json.RawMessage, meta json.RawMessage) json.RawMessage {
+	if len(meta) == 0 || string(meta) == "null" {
+		return data
+	}
+
+	var dataObject map[string]json.RawMessage
+	if err := json.Unmarshal(data, &dataObject); err != nil || dataObject == nil {
+		return data
+	}
+	if _, exists := dataObject["pagination"]; exists {
+		return data
+	}
+
+	var metaObject map[string]json.RawMessage
+	if err := json.Unmarshal(meta, &metaObject); err == nil && metaObject != nil {
+		if pagination, ok := metaObject["pagination"]; ok {
+			dataObject["pagination"] = pagination
+		} else {
+			dataObject["pagination"] = meta
+		}
+	} else {
+		dataObject["pagination"] = meta
+	}
+
+	merged, err := json.Marshal(dataObject)
+	if err != nil {
+		return data
+	}
+	return merged
+}
+
+func apiErrorCodeFromStatus(statusCode int) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return "BAD_REQUEST"
+	case http.StatusUnauthorized:
+		return "UNAUTHORIZED"
+	case http.StatusForbidden:
+		return "FORBIDDEN"
+	case http.StatusNotFound:
+		return "NOT_FOUND"
+	case http.StatusConflict:
+		return "CONFLICT"
+	case http.StatusRequestTimeout:
+		return "REQUEST_TIMEOUT"
+	case http.StatusRequestEntityTooLarge:
+		return "PAYLOAD_TOO_LARGE"
+	case http.StatusTooManyRequests:
+		return "RATE_LIMIT_EXCEEDED"
+	case http.StatusServiceUnavailable:
+		return "SERVICE_UNAVAILABLE"
+	case http.StatusInternalServerError:
+		return "INTERNAL_ERROR"
+	default:
+		if statusCode >= http.StatusInternalServerError {
+			return "INTERNAL_ERROR"
+		}
+		return "HTTP_ERROR"
+	}
+}
+
+func classifyAPIError(err *APIError) error {
+	switch {
+	case err.StatusCode == http.StatusUnauthorized || err.Code == "UNAUTHORIZED" || err.Code == "INVALID_API_KEY" || err.Code == "TOKEN_EXPIRED" || err.Code == "TOKEN_BLACKLISTED":
+		return &AuthenticationError{APIError: err}
+	case err.StatusCode == http.StatusNotFound || err.Code == "NOT_FOUND":
+		return &NotFoundError{APIError: err}
+	case err.Code == "VALIDATION_ERROR" || err.Code == "INVALID_INPUT" || err.StatusCode == http.StatusUnprocessableEntity:
+		return &ValidationError{APIError: err}
+	case err.StatusCode == http.StatusTooManyRequests || err.Code == "RATE_LIMIT_EXCEEDED" || err.Code == "QUOTA_EXCEEDED":
+		return &RateLimitError{APIError: err}
+	default:
+		return err
+	}
 }
 
 // Typed error subtypes for specific HTTP status codes.
@@ -509,7 +646,7 @@ type AuthenticationError struct{ *APIError }
 // NotFoundError is returned when the requested resource does not exist (HTTP 404).
 type NotFoundError struct{ *APIError }
 
-// ValidationError is returned when request validation fails (HTTP 422).
+// ValidationError is returned when request validation fails (HTTP 400/422).
 type ValidationError struct{ *APIError }
 
 // RateLimitError is returned when the rate limit is exceeded (HTTP 429).

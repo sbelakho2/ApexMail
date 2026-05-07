@@ -45,11 +45,22 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("database pool created");
 
     // ── Redis pool ──────────────────────────────────────────
-    let mut redis_cfg = deadpool_redis::Config::from_url(&config.redis_url());
-    redis_cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_max_size));
-    let redis = redis_cfg
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .map_err(|e| anyhow::anyhow!("failed to create Redis pool: {e}"))?;
+    // PP-002: Configure pool timeouts so Redis outages don't hang indefinitely.
+    // `create_timeout` limits TCP connect to Redis; `wait_timeout` limits
+    // waiting for a pooled connection (acquire).
+    let redis_cfg = deadpool_redis::Config::from_url(&config.redis_url());
+    let mut pool_cfg = deadpool_redis::PoolConfig::new(config.redis_pool_max_size);
+    pool_cfg.timeouts = deadpool_redis::Timeouts {
+        wait: Some(std::time::Duration::from_secs(5)),
+        create: Some(std::time::Duration::from_secs(10)),
+        recycle: None,
+    };
+    let redis = deadpool_redis::Config {
+        pool: Some(pool_cfg),
+        ..redis_cfg
+    }
+    .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+    .map_err(|e| anyhow::anyhow!("failed to create Redis pool: {e}"))?;
     tracing::info!(max_size = config.redis_pool_max_size, "redis pool created");
 
     // ── AWS SES client ──────────────────────────────────────
@@ -93,6 +104,26 @@ async fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("failed to initialize DDoS protector: {e}"))?;
     let shutdown_state = state.clone();
 
+    // ── Inbox-placement scheduler ───────────────────────────
+    // Spawn the background loop that picks up `Pending` placement tests and
+    // executes them, plus the periodic seed-account health checker. The
+    // scheduler is held in `placement_scheduler` so we can signal a graceful
+    // shutdown alongside the HTTP server.
+    let placement_scheduler = if let Some(ref placement_state) = state.placement_state {
+        let scheduler = std::sync::Arc::new(inbox_placement::PlacementScheduler::new(
+            placement_state.engine.clone(),
+        ));
+        scheduler.clone().start().await;
+        tracing::info!(
+            polling_interval_secs = config.placement_polling_interval_secs,
+            "inbox-placement scheduler started"
+        );
+        Some(scheduler)
+    } else {
+        tracing::info!("inbox-placement disabled (PLACEMENT_ENABLED=false)");
+        None
+    };
+
     // ── Prometheus metrics recorder ─────────────────────────
     if config.metrics_port > 0 {
         let metrics_addr: std::net::SocketAddr =
@@ -121,6 +152,11 @@ async fn main() -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
+    if let Some(scheduler) = placement_scheduler {
+        scheduler.shutdown().await;
+        tracing::info!("inbox-placement scheduler shut down");
+    }
+
     shutdown_state.db.close().await;
     tracing::info!("database pool closed");
 
@@ -139,7 +175,7 @@ fn init_tracing() -> Option<TracingGuard> {
 
         match init_otlp_tracing(config) {
             Ok(guard) => return Some(guard),
-            Err(error) => eprintln!("failed to initialize OTLP tracing: {error}"),
+            Err(error) => tracing::error!("failed to initialize OTLP tracing: {error}"),
         }
     }
 

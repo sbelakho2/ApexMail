@@ -68,6 +68,9 @@ pub struct AtoConfig {
     /// Maximum login history entries per user (default:100)
     pub max_history_per_user: usize,
 
+    /// Maximum number of users with TLS fingerprint histories retained in memory.
+    pub max_tls_history_users: usize,
+
     /// Weight for impossible travel risk component
     pub weight_geo: f64,
 
@@ -134,6 +137,7 @@ impl Default for AtoConfig {
             lockout_duration_secs: 900,
             failed_attempt_window_secs: 300,
             max_history_per_user: 100,
+            max_tls_history_users: 100_000,
             weight_geo: 1.0,
             weight_device: 1.0,
             weight_time: 1.0,

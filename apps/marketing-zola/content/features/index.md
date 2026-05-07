@@ -1,7 +1,7 @@
 +++
 title = "Features | Enterprise-Grade Email Infrastructure"
-description = "Everything you need to send, track, and secure email at scale. Built on Rust, deployed on bare metal in Tallinn."
 template = "features.html"
+description = "Explore ApexMail's email infrastructure platform: API, deliverability, compliance workflows, analytics, enterprise controls, and deterministic Email Grader scoring."
 
 [extra]
 og_image = "/images/og-features.png"

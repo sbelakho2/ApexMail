@@ -1,12 +1,31 @@
 //! Cryptographic utilities — HMAC, hashing, passwords, timing-safe comparison.
 
-use argon2::{password_hash::SaltString, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::SaltString;
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
+use rand::TryRngCore;
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
+const BCRYPT_HASH_LEN: usize = 60;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordVerification {
+    pub valid: bool,
+    pub migrated_hash: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PasswordVerificationError {
+    #[error("argon2 password hash error: {0}")]
+    Argon2(#[from] argon2::password_hash::Error),
+    #[error("bcrypt password hash error: {0}")]
+    Bcrypt(#[from] bcrypt::BcryptError),
+    #[error("unsupported password hash scheme")]
+    UnsupportedScheme,
+}
 
 /// Create an HMAC-SHA256 signature and return as hex.
 pub fn create_hmac_signature(key: &[u8], data: &[u8]) -> String {
@@ -68,9 +87,13 @@ pub fn hash_api_key_with_secret(key: &str, secret: &str) -> String {
 
 /// Hash a password using Argon2id.
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRng);
+    let mut salt_bytes = [0u8; 16];
+    OsRng
+        .try_fill_bytes(&mut salt_bytes)
+        .map_err(|_| argon2::password_hash::Error::Crypto)?;
+    let salt = SaltString::encode_b64(&salt_bytes)?;
     let argon2 = Argon2::default();
-    let hash = argon2.hash_password(password.as_bytes(), &salt)?;
+    let hash = argon2.hash_password(password.as_bytes(), salt.as_salt())?;
     Ok(hash.to_string())
 }
 
@@ -80,6 +103,65 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::passw
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
+}
+
+/// Verify a password for login and return an Argon2id replacement hash when
+/// a legacy bcrypt hash authenticates successfully.
+pub fn verify_password_for_login(
+    password: &str,
+    hash: &str,
+) -> Result<PasswordVerification, PasswordVerificationError> {
+    if hash.starts_with("$argon2") {
+        return Ok(PasswordVerification {
+            valid: verify_password(password, hash)?,
+            migrated_hash: None,
+        });
+    }
+
+    if is_bcrypt_prefix(hash) {
+        if !is_valid_bcrypt_hash(hash) {
+            return Ok(PasswordVerification {
+                valid: false,
+                migrated_hash: None,
+            });
+        }
+
+        let valid = bcrypt::verify(password, hash)?;
+        let migrated_hash = if valid {
+            Some(hash_password(password)?)
+        } else {
+            None
+        };
+
+        return Ok(PasswordVerification {
+            valid,
+            migrated_hash,
+        });
+    }
+
+    Err(PasswordVerificationError::UnsupportedScheme)
+}
+
+pub fn is_valid_bcrypt_hash(hash: &str) -> bool {
+    let bytes = hash.as_bytes();
+    if hash.len() != BCRYPT_HASH_LEN || !is_bcrypt_prefix(hash) {
+        return false;
+    }
+
+    if bytes.get(6) != Some(&b'$') || !bytes[4..6].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+
+    bytes[7..].iter().all(|byte| {
+        matches!(
+            byte,
+            b'.' | b'/' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+        )
+    })
+}
+
+fn is_bcrypt_prefix(hash: &str) -> bool {
+    hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$")
 }
 
 #[cfg(test)]
@@ -135,5 +217,35 @@ mod tests {
         let h1 = hash_password("test").unwrap();
         let h2 = hash_password("test").unwrap();
         assert_ne!(h1, h2); // Different salts produce different hashes
+    }
+
+    #[test]
+    fn test_bcrypt_login_verification_returns_argon2_migration_hash() {
+        let bcrypt_hash = bcrypt::hash("legacy-password", 4).unwrap();
+        let result = verify_password_for_login("legacy-password", &bcrypt_hash).unwrap();
+
+        assert!(result.valid);
+        let migrated_hash = result.migrated_hash.expect("migration hash");
+        assert!(migrated_hash.starts_with("$argon2"));
+        assert!(verify_password("legacy-password", &migrated_hash).unwrap());
+    }
+
+    #[test]
+    fn test_bcrypt_login_verification_does_not_migrate_wrong_password() {
+        let bcrypt_hash = bcrypt::hash("legacy-password", 4).unwrap();
+        let result = verify_password_for_login("wrong-password", &bcrypt_hash).unwrap();
+
+        assert!(!result.valid);
+        assert!(result.migrated_hash.is_none());
+    }
+
+    #[test]
+    fn test_bcrypt_login_verification_rejects_malformed_hash_length() {
+        let bcrypt_hash = bcrypt::hash("legacy-password", 4).unwrap();
+        let truncated = &bcrypt_hash[..bcrypt_hash.len() - 1];
+        let result = verify_password_for_login("legacy-password", truncated).unwrap();
+
+        assert!(!result.valid);
+        assert!(result.migrated_hash.is_none());
     }
 }

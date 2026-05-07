@@ -154,8 +154,18 @@ static FAST_SPAM_CHECK: LazyLock<Option<Regex>> = LazyLock::new(|| {
 
 // ─── Phishing ──────────────────────────────────────────
 
-static URL_REGEX: LazyLock<Option<Regex>> =
-    LazyLock::new(|| compile_regex(r#"https?://[^\s<>"']+"#, "url_regex"));
+static URL_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    match RegexBuilder::new(r#"https?://[^\s<>"']+"#)
+        .size_limit(1 << 20)
+        .build()
+    {
+        Ok(regex) => Some(regex),
+        Err(e) => {
+            warn!(pattern = "url_regex", error = %e, "Invalid URL regex pattern; disabling matcher");
+            None
+        }
+    }
+});
 static IP_URL_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
     compile_regex(
         r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",
@@ -325,7 +335,7 @@ impl ContentScanner {
         let spam = self.analyze_spam(content);
         let phishing = self.analyze_phishing(content);
         let malware = self.analyze_malware(content);
-        let policy = self.analyze_policy(content).await;
+        let policy = self.analyze_policy(content).await?;
 
         let verdict = determine_verdict(&spam, &phishing, &malware, &policy);
 
@@ -480,8 +490,10 @@ impl ContentScanner {
             }
         }
 
-        // CAN-SPAM:check for missing unsubscribe
-        if !text.contains("unsubscribe") && !html.contains("unsubscribe") {
+        // CAN-SPAM:check for missing unsubscribe (case-insensitive per CAN-SPAM §5(a)(1))
+        if !text.to_lowercase().contains("unsubscribe")
+            && !html.to_lowercase().contains("unsubscribe")
+        {
             score += 3.0;
             triggers.push(SpamTrigger {
                 rule: "UNSUBSCRIBE_MISSING".into(),
@@ -494,22 +506,21 @@ impl ContentScanner {
         if content.subject.len() > 5 {
             let caps = content.subject.chars().filter(|c| c.is_uppercase()).count();
             let ratio = caps as f64 / content.subject.len() as f64;
-            if ratio > 0.3 {
-                score += 4.0;
-                triggers.push(SpamTrigger {
-                    rule: "EXCESSIVE_CAPS".into(),
-                    score: 4.0,
-                    description: format!("Caps ratio {:.0}% in subject", ratio * 100.0),
-                });
-            }
-
-            // ALL CAPS subject (>90% uppercase)
             if ratio > 0.9 {
+                // ALL CAPS (>90%) — most severe, add full penalty
                 score += 4.0;
                 triggers.push(SpamTrigger {
                     rule: "ALL_CAPS_SUBJECT".into(),
                     score: 4.0,
                     description: "Subject line is all caps".into(),
+                });
+            } else if ratio > 0.3 {
+                // EXCESSIVE CAPS (30-90%) — moderate penalty
+                score += 4.0;
+                triggers.push(SpamTrigger {
+                    rule: "EXCESSIVE_CAPS".into(),
+                    score: 4.0,
+                    description: format!("Caps ratio {:.0}% in subject", ratio * 100.0),
                 });
             }
         }
@@ -558,7 +569,7 @@ impl ContentScanner {
 
         // Image-only check:lots of <img> but very little text
         if !html.is_empty() && text.len() < 50 {
-            let img_count = html.matches("<img").count();
+            let img_count = html.matches("<img ").count() + html.matches("<img>").count();
             if img_count > 0 {
                 score += 4.0;
                 triggers.push(SpamTrigger {
@@ -853,7 +864,7 @@ impl ContentScanner {
 
     // ── Policy Analysis ───────────────────────────────────────
 
-    async fn analyze_policy(&self, content: &EmailContent) -> PolicyAnalysis {
+    async fn analyze_policy(&self, content: &EmailContent) -> Result<PolicyAnalysis, String> {
         let mut violations: Vec<PolicyViolation> = Vec::new();
 
         // Standard:CAN-SPAM physical address check
@@ -900,6 +911,7 @@ impl ContentScanner {
         }
 
         // Tenant-specific policies from DB
+        // L-04: Propagate DB errors instead of silently swallowing them
         let tenant_policies: Vec<(String, serde_json::Value)> = sqlx::query_as(
             "SELECT name, rules FROM content_policies
              WHERE tenant_id = $1 AND active = true",
@@ -907,7 +919,7 @@ impl ContentScanner {
         .bind(&content.tenant_id)
         .fetch_all(&self.db)
         .await
-        .unwrap_or_default();
+        .map_err(|e| format!("Failed to fetch tenant policies: {e}"))?;
 
         for (policy_name, rules) in &tenant_policies {
             if let Some(patterns) = rules.get("blocked_patterns") {
@@ -967,13 +979,13 @@ impl ContentScanner {
             }
         }
 
-        PolicyAnalysis {
+        Ok(PolicyAnalysis {
             compliant: violations.is_empty()
                 || violations
                     .iter()
                     .all(|v| matches!(v.severity, ViolationSeverity::Warning)),
             violations,
-        }
+        })
     }
 
     async fn persist_result(&self, result: &ContentScanResult) -> Result<(), String> {

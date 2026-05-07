@@ -479,10 +479,10 @@ mod tests {
     #[test]
     fn compare_classes_detects_differences() {
         let expected = r#"<div class="flex gap-4 bg-red-500"></div>"#;
-        let actual = r#"<div class="flex gap-4 bg-blue-500"></div>"#;
+        let actual = r#"<div class="flex gap-4 bg-info-500"></div>"#;
         let diffs = compare_classes(expected, actual);
         assert!(!diffs.is_empty());
-        assert!(diffs[0].contains("bg-red-500") || diffs[0].contains("bg-blue-500"));
+        assert!(diffs[0].contains("bg-red-500") || diffs[0].contains("bg-info-500"));
     }
 
     #[test]
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn parity_detects_class_mutation_on_real_page() {
         let html = leptos_views::web_login_page();
-        let tampered = html.replacen("rounded-xl", "rounded-2xl", 1);
+        let tampered = html.replacen("rounded-sm", "rounded-lg", 1);
         let result = check_parity(&html, &tampered);
         assert!(
             !result.is_identical,
@@ -757,13 +757,13 @@ mod tests {
 
         let required = [
             "min-h-screen",
-            "rounded-xl",
+            "rounded-sm",
             "border",
             "bg-white",
-            "shadow-lg",
-            "text-2xl",
+            "shadow-premium-premium",
+            "text-4xl",
             "font-bold",
-            "bg-primary",
+            "bg-brand-600",
         ];
         for cls in &required {
             assert!(flat.contains(cls), "web login missing class '{}'", cls);
@@ -781,12 +781,12 @@ mod tests {
 
         let required = [
             "min-h-screen",
-            "rounded-xl",
+            "rounded-sm",
             "border",
-            "shadow-lg",
-            "text-2xl",
+            "shadow-premium-premium",
+            "text-3xl",
             "font-bold",
-            "bg-primary",
+            "bg-brand-600",
         ];
         for cls in &required {
             assert!(flat.contains(cls), "cp login missing class '{}'", cls);

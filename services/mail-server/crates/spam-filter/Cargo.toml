@@ -24,6 +24,7 @@ regex = { version = "1.10", features = ["perf"] }
 sha2 = "0.10"
 hex = "0.4"
 url = "2.5"
+idna = "1.0"
 prometheus = "0.13"
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }

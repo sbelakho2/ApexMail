@@ -1,158 +1,152 @@
 {# ── Use Cases ─────────────────────────────────────────────────── #}
-{# Replaced fabricated case studies with factual capability showcase #}
+{# Implementation-backed use cases #}
 
 <section class="py-20 lg:py-32 relative bg-white">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="text-center mb-16">
-      <h2 class="animate-in text-3xl lg:text-4xl font-bold text-surface-900 tracking-tight mb-4">
-        Built for Real-World <span class="text-primary-600">Use Cases</span>
-      </h2>
-      <p class="animate-in delay-100 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">
-        ApexMail is designed for teams that need reliable transactional email
-        with built-in compliance, security, and developer tooling.
+    <div class="text-center mb-24">
+      <span class="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-600 border border-surface-200 rounded-sm mb-6">Execution Domain</span>
+      <h2 class="text-surface-950 mb-6 uppercase tracking-tighter">Implementation<br /><span class="text-brand-600">Use Cases.</span></h2>
+      <p class="text-[17px] leading-[1.5] text-surface-600 max-w-2xl mx-auto">
+        Functional patterns for teams that need verifiable email operations.
       </p>
     </div>
 
     <div class="space-y-12">
-      {# ── FinTech & Payments ── #}
-      <article class="animate-in relative bg-white border border-surface-200 rounded-2xl shadow-sm overflow-hidden">
-        <div class="px-8 pt-8 pb-6 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-4">
-          <div class="w-12 h-12 rounded-xl bg-primary-100 flex items-center justify-center text-primary-700">
+      <article class="bg-white border border-surface-200 rounded-sm overflow-hidden">
+        <div class="px-10 py-10 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-6 bg-surface-50">
+          <div class="w-12 h-12 rounded-sm bg-surface-950 flex items-center justify-center text-white border border-surface-800">
             <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
           </div>
           <div>
-            <h3 class="text-xl font-bold text-surface-900">FinTech &amp; Payments</h3>
-            <span class="text-sm text-surface-500 font-medium">Transaction confirmations, security alerts, statements</span>
+            <h3 class="text-xs font-bold text-surface-950 uppercase tracking-widest">FinTech &amp; Payments</h3>
+            <span class="text-[11px] font-bold text-surface-400 uppercase tracking-tight mt-1 block">Confirmations / Alerts / Statements</span>
           </div>
         </div>
-        <div class="p-8">
-          <p class="text-surface-600 leading-relaxed mb-6">
-            Financial services teams use ApexMail to send time-sensitive transactional emails &mdash; payment confirmations, fraud alerts, and account notifications. Dedicated IP pools ensure transaction emails maintain high deliverability separate from other sends.
+        <div class="px-10 py-10">
+          <p class="text-[15px] text-surface-600 leading-[1.6] mb-10 max-w-3xl">
+            Financial services can use ApexMail for high-availability transactional transmission. Dedicated IP pools and traffic separation help protect critical alerts from lower-priority sending patterns.
           </p>
-          <div class="grid sm:grid-cols-2 gap-4">
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">Dedicated IP pools with automatic warmup</span>
+          <div class="grid sm:grid-cols-2 gap-y-6 gap-x-12">
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Isolated IP Allocation</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">DKIM, SPF, DMARC, DANE, and MTA-STS</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Technical Compliance Stack</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">Real-time delivery tracking via webhooks</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Deterministic Webhooks</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">GDPR consent tracking and DPA generation</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">GDPR Workflow Support</span>
             </div>
           </div>
         </div>
       </article>
 
-      {# ── Healthcare ── #}
-      <article class="animate-in relative bg-white border border-surface-200 rounded-2xl shadow-sm overflow-hidden">
-        <div class="px-8 pt-8 pb-6 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-4">
-          <div class="w-12 h-12 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-700">
+      <article class="bg-white border border-surface-200 rounded-sm overflow-hidden">
+        <div class="px-10 py-10 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-6 bg-surface-50">
+          <div class="w-12 h-12 rounded-sm bg-surface-950 flex items-center justify-center text-white border border-surface-800">
             <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
           </div>
           <div>
-            <h3 class="text-xl font-bold text-surface-900">Healthcare</h3>
-            <span class="text-sm text-surface-500 font-medium">Patient communications, appointment reminders, lab results</span>
+            <h3 class="text-xs font-bold text-surface-950 uppercase tracking-widest">Healthcare</h3>
+            <span class="text-[11px] font-bold text-surface-400 uppercase tracking-tight mt-1 block">Patient Communications / Reminders / Lab Results</span>
           </div>
         </div>
-        <div class="p-8">
-          <p class="text-surface-600 leading-relaxed mb-6">
-            Healthcare organizations need email infrastructure that supports HIPAA requirements. ApexMail&rsquo;s Enterprise plan includes BAA support, built-in HIPAA compliance controls, and automatic DPA generation to simplify regulatory requirements.
+        <div class="px-10 py-10">
+          <p class="text-[15px] text-surface-600 leading-[1.6] mb-10 max-w-3xl">
+            Healthcare providers require infrastructure supporting HIPAA parameters. Enterprise allocation includes BAA workflow support, HIPAA control review, and compliance evidence workflows.
           </p>
-          <div class="grid sm:grid-cols-2 gap-4">
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">HIPAA compliance with BAA on Enterprise plan</span>
+          <div class="grid sm:grid-cols-2 gap-y-6 gap-x-12">
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">HIPAA BAA Workflow</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">Automatic DPA generation via integrated PDF engine</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">DPA Signature Workflow</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">TLS 1.3 encryption in transit</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">TLS 1.3 Transmission</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">Private cloud deployment option</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Custom Deployment Review</span>
             </div>
           </div>
         </div>
       </article>
 
-      {# ── E-Commerce ── #}
-      <article class="animate-in relative bg-white border border-surface-200 rounded-2xl shadow-sm overflow-hidden">
-        <div class="px-8 pt-8 pb-6 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-4">
-          <div class="w-12 h-12 rounded-xl bg-amber-100 flex items-center justify-center text-amber-700">
+      <article class="bg-white border border-surface-200 rounded-sm overflow-hidden">
+        <div class="px-10 py-10 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-6 bg-surface-50">
+          <div class="w-12 h-12 rounded-sm bg-surface-950 flex items-center justify-center text-white border border-surface-800">
             <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
           </div>
           <div>
-            <h3 class="text-xl font-bold text-surface-900">E-Commerce</h3>
-            <span class="text-sm text-surface-500 font-medium">Order confirmations, shipping updates, promotional campaigns</span>
+            <h3 class="text-xs font-bold text-surface-950 uppercase tracking-widest">E-Commerce</h3>
+            <span class="text-[11px] font-bold text-surface-400 uppercase tracking-tight mt-1 block">Confirmations / Updates / Campaigns</span>
           </div>
         </div>
-        <div class="p-8">
-          <p class="text-surface-600 leading-relaxed mb-6">
-            E-commerce platforms rely on ApexMail for order confirmations, shipping notifications, and time-sensitive alerts. AI-powered send-time optimization helps maximize engagement, while the template engine supports dynamic, personalized content.
+        <div class="px-10 py-10">
+          <p class="text-[15px] text-surface-600 leading-[1.6] mb-10 max-w-3xl">
+            Platforms can use ApexMail for high-volume execution. Send-time insights guide campaign scheduling, stored templates support personalization at scale, and engagement metrics are available through analytics workflows.
           </p>
-          <div class="grid sm:grid-cols-2 gap-4">
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">AI send-time optimization (Bayesian optimizer)</span>
+          <div class="grid sm:grid-cols-2 gap-y-6 gap-x-12">
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Send-Time Insights</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">Template engine with dynamic variables</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Analytics Workflows</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">ClickHouse analytics for engagement metrics</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Stored Template Variables</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">Suppression management and bounce processing</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Automated Suppression Engine</span>
             </div>
           </div>
         </div>
       </article>
 
-      {# ── Developer Tools & SaaS ── #}
-      <article class="animate-in relative bg-white border border-surface-200 rounded-2xl shadow-sm overflow-hidden">
-        <div class="px-8 pt-8 pb-6 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-4">
-          <div class="w-12 h-12 rounded-xl bg-violet-100 flex items-center justify-center text-violet-700">
+      <article class="bg-white border border-surface-200 rounded-sm overflow-hidden">
+        <div class="px-10 py-10 border-b border-surface-100 flex flex-col sm:flex-row items-start sm:items-center gap-6 bg-surface-50">
+          <div class="w-12 h-12 rounded-sm bg-surface-950 flex items-center justify-center text-white border border-surface-800">
             <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
           </div>
           <div>
-            <h3 class="text-xl font-bold text-surface-900">Developer Tools &amp; SaaS</h3>
-            <span class="text-sm text-surface-500 font-medium">Signup flows, notifications, CI/CD alerts</span>
+            <h3 class="text-xs font-bold text-surface-950 uppercase tracking-widest">Developer Tools &amp; SaaS</h3>
+            <span class="text-[11px] font-bold text-surface-400 uppercase tracking-tight mt-1 block">Signup Flows / Alerts / Infrastructure Integration</span>
           </div>
         </div>
-        <div class="p-8">
-          <p class="text-surface-600 leading-relaxed mb-6">
-            SaaS teams integrate ApexMail through official SDKs for Python, Go, Java, Ruby, and PHP. The interactive API console makes it easy to test requests before writing code, and HMAC-signed webhooks provide reliable delivery feedback.
+        <div class="px-10 py-10">
+          <p class="text-[15px] text-surface-600 leading-[1.6] mb-10 max-w-3xl">
+            Teams integrate ApexMail via official SDKs for deterministic execution. The interactive API console facilitates request validation prior to implementation, while HMAC-signed webhooks provide high-fidelity delivery telemetry.
           </p>
-          <div class="grid sm:grid-cols-2 gap-4">
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">SDKs for 6 languages with consistent APIs</span>
+          <div class="grid sm:grid-cols-2 gap-y-6 gap-x-12">
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Official Polyglot SDKs</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">HMAC-signed webhooks with SSRF protection</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">HMAC-Signed Telemetry</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">Interactive API console for testing</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Interactive Request Validation</span>
             </div>
-            <div class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span class="text-sm text-surface-600">SSO (SAML, OIDC) and SCIM provisioning</span>
+            <div class="flex items-start gap-4">
+              <div class="w-2 h-2 bg-brand-500 mt-2 flex-shrink-0"></div>
+              <span class="text-[13px] font-bold text-surface-950 uppercase tracking-tight">Enterprise SSO / SCIM</span>
             </div>
           </div>
         </div>

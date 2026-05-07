@@ -64,20 +64,26 @@ async fn forgot_password(
     let max_requests: i64 = 5;
 
     if let Ok(mut conn) = state.redis.get().await {
-        let count: i64 = deadpool_redis::redis::cmd("INCR")
-            .arg(&rate_key)
-            .query_async(&mut *conn)
-            .await
-            .unwrap_or(1);
-
-        if count == 1 {
-            // Set expiry on first request in window
-            let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
-                .arg(&rate_key)
-                .arg(window_secs)
-                .query_async(&mut *conn)
-                .await;
-        }
+        // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
+        // The script atomically increments the counter and sets expiry on first creation.
+        let count: i64 = deadpool_redis::redis::Script::new(
+            r#"
+                local key = KEYS[1]
+                local max_requests = tonumber(ARGV[1])
+                local window_secs = tonumber(ARGV[2])
+                local count = redis.call('INCR', key)
+                if count == 1 then
+                    redis.call('EXPIRE', key, window_secs)
+                end
+                return count
+            "#,
+        )
+        .key(&rate_key)
+        .arg(max_requests)
+        .arg(window_secs)
+        .invoke_async(&mut *conn)
+        .await
+        .unwrap_or(1);
 
         if count > max_requests {
             return Err(ApiError::RateLimited);
@@ -96,6 +102,7 @@ async fn forgot_password(
         // Generate password reset token
         let token = apexmail_lib::id::generate_verification_token();
         let expires = chrono::Utc::now() + chrono::Duration::hours(1);
+        let now_rfc = chrono::Utc::now().to_rfc3339();
 
         // Store reset token in user metadata
         sqlx::query(
@@ -104,6 +111,7 @@ async fn forgot_password(
         .bind(serde_json::json!({
             "password_reset_token_hash": hash_token(&token),
             "password_reset_expires": expires.to_rfc3339(),
+            "password_reset_iat": now_rfc,
         }))
         .bind(&user_id)
         .execute(&state.db)

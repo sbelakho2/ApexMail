@@ -6,6 +6,7 @@
 pub mod dkim;
 pub mod dnsbl;
 pub mod ip_rotation;
+pub mod provider_throttle;
 pub mod queue;
 pub mod service;
 pub mod smtp_sender;
@@ -46,7 +47,9 @@ struct Cli {
     #[arg(long, default_value = "apexmail2026")]
     dkim_selector: String,
 
-    /// DKIM private key path
+    /// DKIM private key path (alternative to DKIM_PRIVATE_KEY env var).
+    /// If set, loads DKIM key from this file path.
+    /// If absent, falls back to the DKIM_PRIVATE_KEY environment variable.
     #[arg(long)]
     dkim_key_path: Option<String>,
 
@@ -122,6 +125,7 @@ async fn main() -> Result<()> {
             .filter_map(|s| s.trim().parse().ok())
             .collect();
         if !dnsbl_ips.is_empty() {
+            let check_interval = DnsblChecker::check_interval();
             tokio::spawn(async move {
                 let checker = DnsblChecker::new();
                 loop {
@@ -138,11 +142,13 @@ async fn main() -> Result<()> {
                             debug!(ip = %ip, "DNSBL check clean");
                         }
                     }
-                    // Check every 15 minutes
-                    tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+                    tokio::time::sleep(check_interval).await;
                 }
             });
-            info!("Background DNSBL monitor started (15-minute interval)");
+            info!(
+                interval_secs = check_interval.as_secs(),
+                "Background DNSBL monitor started"
+            );
         }
     }
 
@@ -154,18 +160,52 @@ async fn main() -> Result<()> {
     };
     let mut queue = EmailQueue::new(pool.clone(), queue_config, smtp_sender);
 
-    // Load DKIM signer if configured
-    if let Some(ref key_path) = cli.dkim_key_path {
-        match DkimSigner::from_file(&cli.from_domain, &cli.dkim_selector, key_path).await {
-            Ok(signer) => {
-                info!("DKIM signer loaded from {}", key_path);
-                queue = queue.with_dkim_signer(signer);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load DKIM key: {}. Sending without DKIM.", e);
+    // Load DKIM signer (MI-002): prefer env var DKIM_PRIVATE_KEY over file,
+    // so the secret is never stored at rest in a config file.
+    let dkim_result = if let Some(ref key_path) = cli.dkim_key_path {
+        // Load from file path (legacy/development path)
+        DkimSigner::from_file(&cli.from_domain, &cli.dkim_selector, key_path)
+            .await
+            .map(|s| (s, format!("file: {}", key_path)))
+    } else {
+        // Load from DKIM_PRIVATE_KEY environment variable (production path)
+        // This avoids writing the private key to disk entirely.
+        match DkimSigner::from_env(&cli.from_domain, &cli.dkim_selector) {
+            Ok(signer) => Ok((signer, "DKIM_PRIVATE_KEY env var".to_string())),
+            Err(env_err) => {
+                // Env var not set — check if we should also try the file
+                info!(
+                    "DKIM_PRIVATE_KEY not set ({}). Trying default key path...",
+                    env_err
+                );
+                // Try default path as last resort
+                let default_path = format!("/etc/apexmail/dkim/{}.pem", &cli.from_domain);
+                DkimSigner::from_file(&cli.from_domain, &cli.dkim_selector, &default_path)
+                    .await
+                    .map(|s| (s, format!("default path: {}", default_path)))
             }
         }
+    };
+
+    match dkim_result {
+        Ok((signer, source)) => {
+            info!("DKIM signer loaded from {}", source);
+            queue = queue.with_dkim_signer(signer);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load DKIM key ({}). Sending without DKIM signature.",
+                e
+            );
+        }
     }
+
+    // Per-provider reputation throttle: gates outbound to Gmail / Outlook /
+    // Yahoo / iCloud based on signals from the postmaster scheduler. Always
+    // enabled — when no reputation summary exists yet, the throttle is 0%.
+    queue = queue
+        .with_provider_throttle(crate::provider_throttle::ProviderThrottle::new(pool.clone()));
+    info!("Per-provider reputation throttle enabled");
 
     // Initialize queue tables
     queue.initialize().await?;

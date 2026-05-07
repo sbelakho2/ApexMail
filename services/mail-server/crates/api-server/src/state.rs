@@ -4,8 +4,11 @@ use std::sync::Arc;
 
 use ddos_protection::{DdosProtector, ProtectorConfig};
 use deadpool_redis::Pool as RedisPool;
+use email_grader::{GraderConfig, GraderEngine, GraderState};
+use inbox_placement::PlacementState;
 use reqwest::Client;
 use sqlx::PgPool;
+use threat_intel::domain_blocklist::DomainBlocklist;
 
 use crate::config::Config;
 use crate::ip_provider::DedicatedIpProvider;
@@ -25,6 +28,10 @@ pub struct AppStateInner {
     /// Dedicated IP provider (Hetzner Cloud). `None` if HETZNER_API_TOKEN is unset.
     pub ip_provider: Option<DedicatedIpProvider>,
     pub ddos_protector: Arc<DdosProtector>,
+    /// Pre-built grader state (engine + config + db). `None` if grader is disabled.
+    pub grader_state: Option<Arc<GraderState>>,
+    /// Pre-built inbox-placement state (engine + db). `None` if placement is disabled.
+    pub placement_state: Option<Arc<PlacementState>>,
 }
 
 impl AppStateInner {
@@ -38,6 +45,68 @@ impl AppStateInner {
     ) -> Result<AppState, ddos_protection::DdosError> {
         let ddos_protector = Arc::new(DdosProtector::new(ProtectorConfig::default()).await?);
 
+        let grader_state = if config.grader_enabled {
+            let grader_cfg = GraderConfig {
+                enabled: true,
+                rate_limit_max: config.grader_rate_limit,
+                rate_limit_window_seconds: config.grader_rate_window_seconds,
+                cache_ttl_seconds: config.grader_cache_ttl_seconds,
+                max_body_size: config.grader_max_body_size as u32,
+                ..Default::default()
+            };
+            let blocklist = DomainBlocklist::new(1000);
+            match GraderEngine::new(grader_cfg.clone(), Some(Arc::new(blocklist))) {
+                Ok(engine) => match GraderState::new(Arc::new(engine), grader_cfg, db.clone()) {
+                    Ok(gs) => Some(Arc::new(gs)),
+                    Err(e) => {
+                        tracing::warn!("GraderState init failed (grader disabled): {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("GraderEngine init failed (grader disabled): {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let placement_state = if config.placement_enabled {
+            let placement_cfg = inbox_placement::PlacementConfig {
+                enabled: config.placement_enabled,
+                polling_interval_secs: config.placement_polling_interval_secs,
+                max_polling_attempts: config.placement_max_polling_attempts,
+                max_seeds_per_test: config.placement_max_seeds_per_test as usize,
+                max_tests_per_hour: config.placement_max_tests_per_hour,
+                imap_connection_timeout_secs: config.placement_imap_timeout_secs,
+                encrypt_stored_passwords: config.placement_encrypt_passwords,
+                encryption_secret: if config.placement_encrypt_passwords
+                    && !config.placement_encryption_secret.is_empty()
+                {
+                    Some(config.placement_encryption_secret.clone())
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+
+            let analytics_client = None; // analytics can be wired in separately
+
+            let engine = inbox_placement::PlacementEngine::with_analytics(
+                placement_cfg,
+                db.clone(),
+                analytics_client,
+            );
+            let placement_state = inbox_placement::PlacementState {
+                engine: Arc::new(engine),
+                db: db.clone(),
+            };
+            Some(Arc::new(placement_state))
+        } else {
+            None
+        };
+
         Ok(Self::with_ddos_protector(
             db,
             redis,
@@ -46,6 +115,8 @@ impl AppStateInner {
             ses_provider,
             ip_provider,
             ddos_protector,
+            grader_state,
+            placement_state,
         ))
     }
 
@@ -57,6 +128,8 @@ impl AppStateInner {
         ses_provider: SesIpProvider,
         ip_provider: Option<DedicatedIpProvider>,
         ddos_protector: Arc<DdosProtector>,
+        grader_state: Option<Arc<GraderState>>,
+        placement_state: Option<Arc<PlacementState>>,
     ) -> AppState {
         Arc::new(Self {
             db,
@@ -66,6 +139,8 @@ impl AppStateInner {
             ses_provider,
             ip_provider,
             ddos_protector,
+            grader_state,
+            placement_state,
         })
     }
 }

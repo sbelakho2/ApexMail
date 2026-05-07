@@ -10,6 +10,7 @@ pub mod id;
 pub mod mfa;
 pub mod pii;
 pub mod result;
+pub mod secret_at_rest;
 pub mod time;
 pub mod validation;
 

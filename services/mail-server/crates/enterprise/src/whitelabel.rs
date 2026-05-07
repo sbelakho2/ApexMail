@@ -1,44 +1,243 @@
 use regex::Regex;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::types::*;
 
-/// Sanitize CSS to prevent XSS attacks
-/// #254:Removes dangerous patterns that could execute JavaScript
+/// Normalize a CSS property name for allowlist comparison:
+/// lowercases and removes hyphens so kebab-case and camelCase both match.
+fn normalize_prop(name: &str) -> String {
+    name.to_lowercase().replace('-', "")
+}
+
+/// Known CSS property allowlist (both kebab-case and camelCase variants).
+/// Properties not in this list are stripped from user-supplied CSS.
+/// Comparison uses [`normalize_prop`] so `backgroundColor`, `background-color`,
+/// `BackgroundColor`, etc. all resolve to the same canonical entry.
+static ALLOWED_CSS_PROPERTIES: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    [
+        // Layout & display
+        "display",
+        "position",
+        "visibility",
+        "overflow",
+        "overflow-x",
+        "overflow-y",
+        "float",
+        "clear",
+        "z-index",
+        // Box model
+        "width",
+        "min-width",
+        "max-width",
+        "height",
+        "min-height",
+        "max-height",
+        "margin",
+        "margin-top",
+        "margin-right",
+        "margin-bottom",
+        "margin-left",
+        "padding",
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left",
+        "border",
+        "border-top",
+        "border-right",
+        "border-bottom",
+        "border-left",
+        "border-width",
+        "border-style",
+        "border-color",
+        "border-radius",
+        "box-sizing",
+        "box-shadow",
+        // Typography
+        "font",
+        "font-family",
+        "font-size",
+        "font-weight",
+        "font-style",
+        "font-variant",
+        "line-height",
+        "letter-spacing",
+        "word-spacing",
+        "white-space",
+        "word-break",
+        "text-align",
+        "text-decoration",
+        "text-transform",
+        "text-indent",
+        "text-shadow",
+        "vertical-align",
+        "color",
+        "direction",
+        "list-style",
+        "list-style-type",
+        // Background
+        "background",
+        "background-color",
+        "background-image",
+        "background-repeat",
+        "background-position",
+        "background-size",
+        "background-attachment",
+        // Flexbox
+        "flex",
+        "flex-direction",
+        "flex-wrap",
+        "flex-flow",
+        "flex-grow",
+        "flex-shrink",
+        "flex-basis",
+        "justify-content",
+        "align-items",
+        "align-content",
+        "align-self",
+        "order",
+        "gap",
+        "row-gap",
+        "column-gap",
+        // Grid
+        "grid",
+        "grid-template",
+        "grid-template-columns",
+        "grid-template-rows",
+        "grid-template-areas",
+        "grid-column",
+        "grid-row",
+        "grid-area",
+        "grid-column-start",
+        "grid-column-end",
+        "grid-row-start",
+        "grid-row-end",
+        "grid-auto-flow",
+        "grid-auto-columns",
+        "grid-auto-rows",
+        // Transitions & transforms
+        "transition",
+        "transition-property",
+        "transition-duration",
+        "transition-timing-function",
+        "transition-delay",
+        "transform",
+        "transform-origin",
+        "opacity",
+        // Cursor & outline
+        "cursor",
+        "outline",
+        "outline-width",
+        "outline-style",
+        "outline-color",
+        "outline-offset",
+        "resize",
+        // Table
+        "border-collapse",
+        "border-spacing",
+        "caption-side",
+        "empty-cells",
+        "table-layout",
+    ]
+    .into_iter()
+    .map(normalize_prop)
+    .collect()
+});
+
+/// Dangerous CSS pattern prefixes — case-insensitive match, full substring removed.
+static DANGEROUS_CSS_PATTERNS: LazyLock<[&'static str; 9]> = LazyLock::new(|| {
+    [
+        "expression(",       // IE CSS expressions
+        "javascript:",       // JavaScript URLs
+        "behavior:",         // IE behaviors
+        "-moz-binding:",     // Firefox XBL bindings
+        "@import",           // External CSS imports
+        "url(data:",         // Inline data URIs in url()
+        "position:fixed",    // Fixed positioning (covering/fixed overlay attacks)
+        "position:absolute", // Absolute positioning (covering/layer attacks)
+        "position:sticky",   // Sticky positioning
+    ]
+});
+
+/// Sanitize CSS to prevent XSS attacks while preserving allowed properties
+/// including camelCase variants used by CSS-in-JS.
 fn sanitize_css(css: &str) -> String {
-    // Remove dangerous patterns that could enable XSS via CSS
-    let dangerous_patterns = [
-        "expression(",   // IE CSS expressions
-        "javascript:",   // JavaScript URLs         "behavior:", // IE behaviors
-        "-moz-binding:", // Firefox XBL bindings
-        "@import",       // External CSS imports
-    ];
+    // Step 1: Remove dangerous patterns that could enable XSS via CSS.
+    // We match case-insensitively but remove the exact matched substring
+    // from the original (preserving case) so surrounding text survives.
+    let mut sanitized = strip_dangerous_patterns(css);
 
-    let mut sanitized = css.to_string();
-    let lower = css.to_lowercase();
-
-    for pattern in dangerous_patterns {
-        if lower.contains(&pattern.to_lowercase()) {
-            // Log warning and remove pattern
-            tracing::warn!(pattern = pattern, "Removed dangerous CSS pattern");
-            sanitized = sanitized.replace(pattern, "");
-            // Also handle case variations
-            sanitized = sanitized
-                .to_lowercase()
-                .replace(&pattern.to_lowercase(), "");
-        }
-    }
-
-    // Remove HTML tags embedded in CSS
+    // Step 2: Remove HTML tags embedded in CSS
     static TAG_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"<[^>]*>").ok());
     if let Some(tag_regex) = TAG_REGEX.as_ref() {
         sanitized = tag_regex.replace_all(&sanitized, "").to_string();
     }
 
+    // Step 3: Strip declarations whose property is not in the allowlist.
+    // This rejects unknown/misspelled/invented properties while preserving
+    // both kebab-case and camelCase variants of allowed properties.
+    sanitized = filter_allowed_properties(&sanitized);
+
     sanitized
+}
+
+/// Case-insensitive removal of dangerous substrings from CSS.
+fn strip_dangerous_patterns(css: &str) -> String {
+    let mut sanitized = css.to_string();
+    for &pattern in DANGEROUS_CSS_PATTERNS.iter() {
+        let lower = sanitized.to_lowercase();
+        if !lower.contains(&pattern.to_lowercase()) {
+            continue;
+        }
+        tracing::warn!(pattern = pattern, "Removed dangerous CSS pattern");
+        let mut result = String::with_capacity(sanitized.len());
+        let mut cursor = 0;
+        let pattern_lower = pattern.to_lowercase();
+        while let Some(pos) = sanitized[cursor..].to_lowercase().find(&pattern_lower) {
+            let absolute_pos = cursor + pos;
+            result.push_str(&sanitized[cursor..absolute_pos]);
+            cursor = absolute_pos + pattern.len();
+        }
+        result.push_str(&sanitized[cursor..]);
+        sanitized = result;
+    }
+    sanitized
+}
+
+/// Regex matching a CSS declaration: `property: value;`
+/// Captures the property name (group 1) and the full declaration (group 0).
+static CSS_DECLARATION_REGEX: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*[^;]+;").ok());
+
+/// Remove CSS declarations whose property name is not in the allowlist.
+/// Parses `property: value;` declarations and keeps only those with allowed properties.
+/// Preserves selectors, braces, at-rules, and structure — only strips individual declarations.
+fn filter_allowed_properties(css: &str) -> String {
+    if css.trim().is_empty() {
+        return css.to_string();
+    }
+
+    let Some(decl_regex) = CSS_DECLARATION_REGEX.as_ref() else {
+        return css.to_string();
+    };
+
+    decl_regex
+        .replace_all(css, |caps: &regex::Captures<'_>| {
+            let prop_name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            // Normalize both sides so kebab-case, camelCase, and mixed casing all match
+            if ALLOWED_CSS_PROPERTIES.contains(&normalize_prop(prop_name)) {
+                // Keep the declaration as-is (preserving original casing)
+                caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string()
+            } else {
+                // Strip this declaration entirely
+                String::new()
+            }
+        })
+        .to_string()
 }
 
 /// White-Label Service:custom branding, domain management, DNS / email templates
@@ -580,5 +779,158 @@ mod tests {
         let json = serde_json::to_value(&d).unwrap();
         assert_eq!(json["domain"], "mail.acme.com");
         assert_eq!(json["verification_status"], "pending");
+    }
+
+    // ── CSS sanitization tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_css_preserves_camelcase_properties() {
+        let css = r#"
+            .card {
+                backgroundColor: #fff;
+                fontWeight: 700;
+                borderRadius: 8px;
+                marginLeft: 16px;
+                paddingTop: 24px;
+                fontSize: 14px;
+                lineHeight: 1.5;
+                color: #333;
+                boxShadow: 0 2px 4px rgba(0,0,0,0.1);
+                textTransform: uppercase;
+            }
+        "#;
+        let sanitized = sanitize_css(css);
+        assert!(
+            sanitized.contains("backgroundColor"),
+            "should preserve backgroundColor"
+        );
+        assert!(
+            sanitized.contains("fontWeight"),
+            "should preserve fontWeight"
+        );
+        assert!(
+            sanitized.contains("borderRadius"),
+            "should preserve borderRadius"
+        );
+        assert!(
+            sanitized.contains("marginLeft"),
+            "should preserve marginLeft"
+        );
+        assert!(
+            sanitized.contains("paddingTop"),
+            "should preserve paddingTop"
+        );
+        assert!(sanitized.contains("fontSize"), "should preserve fontSize");
+        assert!(
+            sanitized.contains("lineHeight"),
+            "should preserve lineHeight"
+        );
+        assert!(sanitized.contains("color"), "should preserve color");
+        assert!(sanitized.contains("boxShadow"), "should preserve boxShadow");
+        assert!(
+            sanitized.contains("textTransform"),
+            "should preserve textTransform"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_css_preserves_kebab_case_properties() {
+        let css = r#"
+            .card {
+                background-color: #fff;
+                font-weight: 700;
+                border-radius: 8px;
+                margin-left: 16px;
+                padding-top: 24px;
+                font-size: 14px;
+                line-height: 1.5;
+                color: #333;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                text-transform: uppercase;
+            }
+        "#;
+        let sanitized = sanitize_css(css);
+        assert!(
+            sanitized.contains("background-color"),
+            "should preserve background-color"
+        );
+        assert!(
+            sanitized.contains("font-weight"),
+            "should preserve font-weight"
+        );
+        assert!(
+            sanitized.contains("border-radius"),
+            "should preserve border-radius"
+        );
+        assert!(sanitized.contains("color"), "should preserve color");
+        assert!(
+            sanitized.contains("text-transform"),
+            "should preserve text-transform"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_css_strips_dangerous_patterns() {
+        let cases = [
+            ("div { color: red; expression(alert(1)) }", "expression("),
+            ("a { background: url(javascript:alert(1)) }", "javascript:"),
+            ("div { behavior: url(test.htc) }", "behavior:"),
+            (
+                "div { -moz-binding: url('http://evil.com/xbl.xml') }",
+                "-moz-binding:",
+            ),
+            ("@import url('evil.css');", "@import"),
+            ("div { background: url(data:text/html,...) }", "url(data:"),
+            ("div { position: fixed; top: 0; }", "position:fixed"),
+            ("div { position: absolute; top: 0; }", "position:absolute"),
+            ("div { position: sticky; top: 0; }", "position:sticky"),
+        ];
+        for (css, dangerous_substring) in &cases {
+            let sanitized = sanitize_css(css);
+            let lower = sanitized.to_lowercase();
+            assert!(
+                !lower.contains(&dangerous_substring.to_lowercase()),
+                "should strip dangerous pattern: {dangerous_substring}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_css_strips_unknown_properties() {
+        let css = "div { unknown-property: value; color: red; }";
+        let sanitized = sanitize_css(css);
+        assert!(
+            !sanitized.contains("unknown-property"),
+            "should strip unknown property"
+        );
+        assert!(sanitized.contains("color"), "should keep allowed property");
+    }
+
+    #[test]
+    fn test_sanitize_css_strips_html_tags() {
+        let css = r#"div { color: red; } <script>alert(1)</script>"#;
+        let sanitized = sanitize_css(css);
+        assert!(!sanitized.contains("<script>"), "should strip HTML tags");
+        assert!(sanitized.contains("color"), "should keep CSS content");
+    }
+
+    #[test]
+    fn test_sanitize_css_allows_mixed_casing() {
+        let css = ".card { Color: #333; BACKGROUND-COLOR: #fff; }";
+        let sanitized = sanitize_css(css);
+        assert!(
+            sanitized.contains("Color"),
+            "should preserve case of allowed property 'Color'"
+        );
+        assert!(
+            sanitized.contains("BACKGROUND-COLOR"),
+            "should preserve case of 'BACKGROUND-COLOR'"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_css_empty_input() {
+        assert_eq!(sanitize_css(""), "");
+        assert_eq!(sanitize_css("   "), "   ");
     }
 }

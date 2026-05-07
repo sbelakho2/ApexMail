@@ -14,15 +14,32 @@ use tracing::warn;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Webhook tester — sends test payloads and validates signatures.
+///
+/// # O-20.2 — Signing secret rotation
+/// The tester now holds a list of active signing secrets (`signing_secrets`).
+/// The **first** secret is used for signing new payloads; **all** secrets are
+/// accepted during verification. This enables zero‑downtime key rotation:
+/// 1. Add new secret to `Vec` head — all new signatures use the new key.
+/// 2. Wait for in‑flight payloads signed with the old key to be verified.
+/// 3. Remove old secret from `Vec`.
 #[derive(Debug, Clone)]
 pub struct WebhookTester {
     http: reqwest::Client,
-    signing_secret: String,
+    /// Ordered list of active signing secrets (first = active signing key).
+    signing_secrets: Vec<String>,
 }
 
 impl WebhookTester {
-    /// Create a new tester with the given signing secret.
-    pub fn new(signing_secret: String) -> Result<Self, DevExError> {
+    /// Create a new tester with one or more signing secrets.
+    /// The **first** secret is used for signing; all are accepted for verification.
+    ///
+    /// Returns an error if the list is empty.
+    pub fn new(signing_secrets: Vec<String>) -> Result<Self, DevExError> {
+        if signing_secrets.is_empty() {
+            return Err(DevExError::WebhookError(
+                "At least one webhook signing secret is required".into(),
+            ));
+        }
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -30,7 +47,7 @@ impl WebhookTester {
 
         Ok(Self {
             http,
-            signing_secret,
+            signing_secrets,
         })
     }
 
@@ -54,11 +71,14 @@ impl WebhookTester {
     }
 
     /// Compute HMAC-SHA256 signature for a payload body.
+    /// Uses the **first** active signing secret (`self.signing_secrets[0]`).
     pub fn sign_payload(&self, body: &[u8]) -> String {
         let timestamp = Utc::now().timestamp();
         let signed_content = format!("{}.{}", timestamp, String::from_utf8_lossy(body));
 
-        let mut mac = match HmacSha256::new_from_slice(self.signing_secret.as_bytes()) {
+        // O-20.2: Use the primary (first) secret for signing
+        let active_secret = &self.signing_secrets[0];
+        let mut mac = match HmacSha256::new_from_slice(active_secret.as_bytes()) {
             Ok(mac) => mac,
             Err(e) => {
                 warn!(error = %e, "Failed to initialize webhook HMAC signer");
@@ -72,8 +92,12 @@ impl WebhookTester {
         format!("t={},v1={}", timestamp, sig)
     }
 
-    /// Verify that a signature header is valid for the given body + secret.
-    pub fn verify_signature(secret: &str, body: &[u8], signature_header: &str) -> bool {
+    /// Verify that a signature header is valid for the given body and **any**
+    /// of the configured signing secrets (supports rotation).
+    ///
+    /// O-20.2: Tries each secret in `self.signing_secrets`. Returns `true` if
+    /// any secret produces a matching signature.
+    pub fn verify_signature(&self, body: &[u8], signature_header: &str) -> bool {
         // Parse "t=<ts>,v1=<hex>"
         let parts: Vec<&str> = signature_header.split(',').collect();
         let timestamp = parts
@@ -91,14 +115,15 @@ impl WebhookTester {
 
         let signed_content = format!("{}.{}", timestamp, String::from_utf8_lossy(body));
 
-        let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
-            return false;
-        };
-        mac.update(signed_content.as_bytes());
-        let expected = hex::encode(mac.finalize().into_bytes());
-
-        // Constant-time comparison to prevent timing attacks.
-        constant_time_eq(expected.as_bytes(), provided_sig.as_bytes())
+        // O-20.2: Try every active secret (rotation support)
+        self.signing_secrets.iter().any(|secret| {
+            let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
+                return false;
+            };
+            mac.update(signed_content.as_bytes());
+            let expected = hex::encode(mac.finalize().into_bytes());
+            constant_time_eq(expected.as_bytes(), provided_sig.as_bytes())
+        })
     }
 
     /// Send a test webhook to the given URL.
@@ -214,42 +239,68 @@ mod tests {
 
     #[test]
     fn test_sign_and_verify() {
-        let secret = "whsec_test_secret_12345";
-        let tester = WebhookTester::new(secret.to_string());
+        let secrets = vec!["whsec_test_secret_12345".to_string()];
+        let tester = WebhookTester::new(secrets.clone());
         assert!(tester.is_ok());
+        let tester = tester.unwrap();
         let body = b"{\"type\":\"email.delivered\"}";
-        let sig = tester
-            .as_ref()
-            .map(|t| t.sign_payload(body))
-            .unwrap_or_default();
+        let sig = tester.sign_payload(body);
 
         assert!(sig.starts_with("t="));
         assert!(sig.contains(",v1="));
-        assert!(WebhookTester::verify_signature(secret, body, &sig));
+        assert!(tester.verify_signature(body, &sig));
     }
 
     #[test]
     fn test_verify_wrong_secret_fails() {
-        let tester = WebhookTester::new("correct_secret".to_string());
-        assert!(tester.is_ok());
+        let secrets = vec!["correct_secret".to_string()];
+        let tester = WebhookTester::new(secrets).unwrap();
         let body = b"{}";
-        let sig = tester
-            .as_ref()
-            .map(|t| t.sign_payload(body))
-            .unwrap_or_default();
+        let sig = tester.sign_payload(body);
 
-        assert!(!WebhookTester::verify_signature("wrong_secret", body, &sig));
+        // Create a tester with only a different secret
+        let wrong_tester = WebhookTester::new(vec!["wrong_secret".to_string()]).unwrap();
+        assert!(!wrong_tester.verify_signature(body, &sig));
     }
 
     #[test]
     fn test_verify_malformed_header() {
-        assert!(!WebhookTester::verify_signature(
-            "secret", b"body", "garbage"
-        ));
-        assert!(!WebhookTester::verify_signature("secret", b"body", ""));
-        assert!(!WebhookTester::verify_signature(
-            "secret", b"body", "t=,v1="
-        ));
+        let secrets = vec!["secret".to_string()];
+        let tester = WebhookTester::new(secrets).unwrap();
+        assert!(!tester.verify_signature(b"body", "garbage"));
+        assert!(!tester.verify_signature(b"body", ""));
+        assert!(!tester.verify_signature(b"body", "t=,v1="));
+    }
+
+    #[test]
+    fn test_verify_with_rotated_secret() {
+        // Simulate rotation: old key still works for verification
+        let old_secret = "old_secret_key".to_string();
+        let new_secret = "new_secret_key".to_string();
+        // New key is first (active for signing), old key is second (still accepted)
+        let tester = WebhookTester::new(vec![new_secret.clone(), old_secret.clone()]).unwrap();
+        let body = b"{\"type\":\"email.delivered\"}";
+        let sig = tester.sign_payload(body);
+
+        // Verify with the new primary secret should work
+        assert!(tester.verify_signature(body, &sig));
+
+        // A tester with ONLY the old secret should still verify the signature
+        // (but in reality the signature was created with new_secret, so old_secret alone won't work)
+        // Actually let's test the rotation path: we verify that the WebhookTester
+        // with both secrets can verify payloads signed by either secret.
+        let old_only_tester = WebhookTester::new(vec![old_secret.clone()]).unwrap();
+        let old_sig = old_only_tester.sign_payload(body);
+        assert!(
+            tester.verify_signature(body, &old_sig),
+            "rotated tester must verify payloads signed with old secret"
+        );
+    }
+
+    #[test]
+    fn test_empty_secrets_rejected() {
+        let result = WebhookTester::new(vec![]);
+        assert!(result.is_err());
     }
 
     #[test]

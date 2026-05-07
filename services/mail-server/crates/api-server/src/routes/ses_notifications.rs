@@ -168,6 +168,41 @@ async fn handle_sns_notification(
     let allowed_arns_raw = std::env::var("SNS_ALLOWED_TOPIC_ARNS").unwrap_or_default();
     validate_sns_message(&state.http_client, &sns_msg, &allowed_arns_raw).await?;
 
+    // PP-006: Deduplicate SNS notifications using Redis SET NX with TTL.
+    // `SET key value NX EX ttl` returns OK if the key was newly created
+    // (first time seeing this message_id), and nil if the key already exists
+    // (duplicate).  We map the response to `is_new` — only process if true.
+    //
+    // L-07: The dedup key is composite (message_id + notification_type) to
+    // prevent dedup collisions between different notification types for the
+    // same message (e.g., a delivery notification and a bounce notification
+    // for the same SES message). Previously the key used only message_id,
+    // which could cause a bounce to be incorrectly deduplicated if a delivery
+    // notification with the same SNS message_id arrived first.
+    let notification_type = sns_msg.message_type.as_str();
+    if let Some(msg_id) = &sns_msg.message_id {
+        let dedup_key = format!("apexmail:dedup:sns:{}:{}", msg_id, notification_type);
+        let ttl_secs = 300; // 5 minutes — SNS retries within a few minutes at most.
+        let is_new: bool = redis::cmd("SET")
+            .arg(&dedup_key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl_secs)
+            .query_async(&mut state.redis.get().await.map_err(|e| {
+                warn!(error = %e, "Failed to acquire redis for SNS dedup");
+                ApiError::ServiceUnavailable("Redis unavailable".into())
+            })?)
+            .await
+            .unwrap_or(false);
+        if !is_new {
+            info!(message_id = %msg_id, "Deduplicated duplicate SNS notification");
+            return Ok(StatusCode::OK);
+        }
+    } else {
+        warn!("SNS notification missing message_id — cannot deduplicate");
+    }
+
     match sns_msg.message_type.as_str() {
         "SubscriptionConfirmation" => handle_subscription_confirmation(&state, &sns_msg).await,
         "Notification" => handle_notification(&state, &sns_msg).await,
@@ -506,13 +541,15 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                 // Update message status if we have the internal ID
                 if let Some(ref msg_id) = apexmail_message_id {
                     let status = if is_permanent { "bounced" } else { "deferred" };
+                    // Strip any "msg_" prefix from the message ID before matching
+                    let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
                     if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = $1, bounce_type = $2, updated_at = NOW()
-                         WHERE id = $3::uuid",
+                         WHERE id = $3",
                     )
                     .bind(status)
                     .bind(&reason)
-                    .bind(msg_id)
+                    .bind(db_id)
                     .execute(&state.db)
                     .await
                     {
@@ -589,11 +626,13 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
 
                 // Update message status
                 if let Some(ref msg_id) = apexmail_message_id {
+                    // Strip any "msg_" prefix from the message ID before matching
+                    let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
                     if let Err(e) = sqlx::query(
                         "UPDATE messages SET status = 'complained', updated_at = NOW()
-                         WHERE id = $1::uuid",
+                         WHERE id = $1",
                     )
-                    .bind(msg_id)
+                    .bind(db_id)
                     .execute(&state.db)
                     .await
                     {
@@ -640,11 +679,13 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
 
     // Update message status to 'delivered'
     if let Some(ref msg_id) = apexmail_message_id {
+        // Strip any "msg_" prefix from the message ID before matching
+        let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
         if let Err(e) = sqlx::query(
             "UPDATE messages SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
-             WHERE id = $1::uuid AND status != 'delivered'",
+             WHERE id = $1 AND status != 'delivered'",
         )
-        .bind(msg_id)
+        .bind(db_id)
         .execute(&state.db)
         .await
         {
@@ -879,7 +920,7 @@ mod tests {
 
     #[test]
     fn test_verify_sns_signature_with_generated_key() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rsa::rand_core::OsRng;
         let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let public_key = RsaPublicKey::from(&private_key);
         let mut msg = sample_notification_message();

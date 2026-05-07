@@ -89,6 +89,11 @@ pub struct SpanEvent {
 /// Severity level for a log entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// O-22.4: Explicit integer discriminants assigned for logging severity.
+///
+/// These discriminants match syslog-style severity levels (0 = most severe
+/// in syslog, but here 0 = Trace and 5 = Fatal for ascending severity).
+/// They are used for serialization and comparison in `get_error_rate()`.
 pub enum LogLevel {
     Trace = 0,
     Debug = 1,

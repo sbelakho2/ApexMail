@@ -41,6 +41,13 @@ pub struct SandboxConfig {
 
     /// Analysis timeout in seconds
     pub analysis_timeout_secs: u64,
+
+    /// Risk contribution for encrypted / password‑protected archives (O-15.2).
+    ///
+    /// Legitimate use‑cases (e.g. legal document exchange, encrypted payroll)
+    /// may require sending password‑protected archives.  Lower this value to
+    /// reduce false positives for trusted senders / domains.  Default: `7.0`.
+    pub encrypted_archive_risk: f64,
 }
 
 impl Default for SandboxConfig {
@@ -54,7 +61,8 @@ impl Default for SandboxConfig {
                 "exe", "dll", "scr", "bat", "cmd", "com", "pif", "vbs", "vbe", "js", "jse", "wsf",
                 "wsh", "ps1", "ps2", "psc1", "msi", "msp", "mst", "cpl", "hta", "inf", "ins",
                 "isp", "reg", "rgs", "sct", "shb", "shs", "lnk", "jar", "class", "docm", "dotm",
-                "xlsm", "xltm", "xlam", "pptm", "potm", "ppam", "ppsm", "sldm",
+                "xlsm", "xltm", "xlsb", "xlam", "pptm", "potm", "ppam", "ppsm", "sldm", "mht",
+                "mhtml",
             ]
             .iter()
             .map(|s| (*s).to_string())
@@ -80,6 +88,24 @@ impl Default for SandboxConfig {
             analyze_macros: true,
             analyze_embedded_urls: true,
             analysis_timeout_secs: 30,
+            encrypted_archive_risk: 7.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_dangerous_extensions_include_macro_and_mhtml_formats() {
+        let config = SandboxConfig::default();
+
+        for extension in ["xlsb", "xlam", "mht", "mhtml"] {
+            assert!(
+                config.dangerous_extensions.contains(extension),
+                "expected .{extension} to be treated as dangerous"
+            );
         }
     }
 }

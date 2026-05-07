@@ -16,4 +16,10 @@ spec:
       port: {{ .Values.enterprise.service.port }}
       targetPort: http
       protocol: TCP
+    # Alias on the same backend port so Prometheus ServiceMonitor can scrape
+    # via `port: metrics` (the enterprise app exposes /metrics on the http port).
+    - name: metrics
+      port: {{ .Values.enterprise.service.port }}
+      targetPort: http
+      protocol: TCP
 {{- end }}

@@ -29,6 +29,9 @@ spec:
         app.kubernetes.io/component: mail-server
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.mta.ports.metrics | quote }}
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: {{ include "apexmail.serviceAccountName" . }}
       automountServiceAccountToken: false
@@ -49,9 +52,16 @@ spec:
             - name: smtps
               containerPort: {{ .Values.mta.ports.smtps }}
               protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.mta.ports.metrics }}
+              protocol: TCP
           env:
             - name: RUST_LOG
               value: "info"
+            - name: METRICS_PORT
+              value: {{ .Values.mta.ports.metrics | quote }}
+            - name: METRICS_ENABLED
+              value: "true"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

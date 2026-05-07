@@ -4,8 +4,11 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
 /// Webhook job from queue.
+///
+/// O-16.3 fix: `secret` zeroization is applied at the point of use in
+/// `sign_payload()` rather than in this struct because `sqlx::FromRow`
+/// does not support `Zeroizing<String>` decoding.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct WebhookJob {
     pub id: String,
@@ -17,6 +20,10 @@ pub struct WebhookJob {
     pub event_type: String,
     pub payload: serde_json::Value,
     pub url: String,
+    /// Webhook signing secret.
+    /// Note: `Zeroizing<String>` is not used here because `sqlx::FromRow`
+    /// does not implement decoding for `Zeroizing<String>`. Zeroization
+    /// is applied at the point of use in `sign_payload()` (O-16.3).
     pub secret: String,
     pub headers: Option<serde_json::Value>,
     pub attempt: i32,

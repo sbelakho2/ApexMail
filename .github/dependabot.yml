@@ -24,6 +24,14 @@ updates:
       prefix: deps
       include: scope
 
+  - package-ecosystem: docker
+    directory: "/deploy"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+      include: scope
+
   - package-ecosystem: pip
     directory: "/packages/sdk-python"
     schedule:

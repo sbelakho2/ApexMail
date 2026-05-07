@@ -116,42 +116,84 @@ impl SesMonitor {
         })
     }
 
-    /// Start background monitoring tasks.
+    /// Run a background task loop with exponential backoff and jitter.
+    /// On failure, the task waits `base_delay * 2^attempt` seconds (capped at
+    /// `max_delay`) plus random jitter up to 50 % of the delay, preventing
+    /// thundering-herd retries against the AWS API (O-23.4).
+    async fn run_with_backoff<F, Fut>(base_interval_secs: u64, task_name: &'static str, mut task: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let base = std::time::Duration::from_secs(base_interval_secs);
+        let mut consecutive_failures: u64 = 0;
+
+        loop {
+            tokio::time::sleep(base).await;
+
+            if let Err(e) = task().await {
+                consecutive_failures += 1;
+                error!(
+                    error = %e,
+                    task = task_name,
+                    failures = consecutive_failures,
+                    "Background task failed"
+                );
+
+                // Exponential backoff: 2^failures seconds, capped at 1 hour
+                let backoff_secs =
+                    std::cmp::min(2u64.saturating_pow(consecutive_failures as u32), 3600);
+
+                // Add random jitter of up to 50 % of the backoff duration
+                let jitter_secs = if backoff_secs > 0 {
+                    rand::random::<u64>() % (backoff_secs / 2).max(1)
+                } else {
+                    0
+                };
+
+                let total_delay = backoff_secs + jitter_secs;
+                warn!(
+                    task = task_name,
+                    backoff_secs, jitter_secs, total_delay, "Backing off before retry"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(total_delay)).await;
+            } else {
+                consecutive_failures = 0;
+            }
+        }
+    }
+
+    /// Start background monitoring tasks with rate limiting and exponential
+    /// backoff to prevent aggressive retries on AWS API errors (O-23.4).
     pub fn start(self: Arc<Self>) {
         // Quota sync every 5 minutes
         let monitor = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                interval.tick().await;
-                if let Err(e) = monitor.sync_quota().await {
-                    error!(error = %e, "Failed to sync SES quota");
-                }
-            }
+            Self::run_with_backoff(300, "sync_quota", move || {
+                let m = monitor.clone();
+                async move { m.sync_quota().await.map(|_| ()).map_err(|e| e) }
+            })
+            .await;
         });
 
         // Domain stats every hour
         let monitor = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                if let Err(e) = monitor.sync_domain_stats().await {
-                    error!(error = %e, "Failed to sync domain deliverability stats");
-                }
-            }
+            Self::run_with_backoff(3600, "sync_domain_stats", move || {
+                let m = monitor.clone();
+                async move { m.sync_domain_stats().await.map(|_| ()).map_err(|e| e) }
+            })
+            .await;
         });
 
         // Tenant metrics every 15 minutes
         let monitor = self;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
-            loop {
-                interval.tick().await;
-                if let Err(e) = monitor.compute_tenant_metrics().await {
-                    error!(error = %e, "Failed to compute tenant metrics");
-                }
-            }
+            Self::run_with_backoff(900, "compute_tenant_metrics", move || {
+                let m = monitor.clone();
+                async move { m.compute_tenant_metrics().await.map(|_| ()).map_err(|e| e) }
+            })
+            .await;
         });
     }
 
@@ -554,21 +596,27 @@ impl SesMonitor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::SendQuotaInfo;
 
     #[test]
     fn test_quota_utilization_calculation() {
-        let max = 100_000.0_f64;
-        let sent = 75_000.0_f64;
-        let utilization = (sent / max) * 100.0;
-        assert!((utilization - 75.0).abs() < 0.01);
+        let quota = SendQuotaInfo {
+            max_24_hour_send: 100_000.0,
+            sent_last_24_hours: 75_000.0,
+            max_send_rate: 14.0,
+            utilization_percent: 75.0,
+        };
+        let computed = (quota.sent_last_24_hours / quota.max_24_hour_send) * 100.0;
+        assert!((computed - quota.utilization_percent).abs() < 0.01);
     }
 
     #[test]
     fn test_bounce_rate_calculation() {
-        let sent = 1000;
-        let bounced = 50;
-        let rate = (bounced as f64 / sent as f64) * 100.0;
+        // SES bounce rate is reported as percentage of total sends.
+        let sent = 1000.0_f64;
+        let bounced = 50.0_f64;
+        let rate = (bounced / sent) * 100.0;
+        // SES suspends accounts when bounce rate exceeds 5%; verify our math.
         assert!((rate - 5.0).abs() < 0.01);
     }
 

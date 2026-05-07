@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use uuid::Uuid;
 
 /// Top-level compliance service configuration, loaded from environment.
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +85,9 @@ pub struct GdprConfig {
     pub export_expiration_days: i64,
     pub export_base_url: String,
     pub verify_base_url: String,
+    pub consent_signing_key: String,
+    /// Maximum number of message events to include in access requests (was hardcoded 1000).
+    pub access_request_max_messages: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -106,52 +110,31 @@ impl ComplianceConfig {
 
         if is_production {
             if auth_token.trim().is_empty() {
-                auth_token = format!(
-                    "auto-compliance-token-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                );
-                eprintln!(
-                    "SECURITY: COMPLIANCE_AUTH_TOKEN missing in production; generated an ephemeral runtime token"
+                auth_token = format!("auto-compliance-token-{}", Uuid::new_v4());
+                tracing::warn!(
+                    "SECURITY: COMPLIANCE_AUTH_TOKEN missing in production; generated an ephemeral runtime token (redacted)"
                 );
             }
             if audit_signing_key.trim().is_empty() {
-                audit_signing_key = format!(
-                    "auto-audit-signing-key-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                );
-                eprintln!(
-                    "SECURITY: AUDIT_SIGNING_KEY missing in production; generated an ephemeral runtime key"
+                audit_signing_key = format!("auto-audit-signing-key-{}", Uuid::new_v4());
+                tracing::warn!(
+                    "SECURITY: AUDIT_SIGNING_KEY missing in production; generated an ephemeral runtime key (redacted)"
                 );
             }
             if secrets_encryption_key.trim().is_empty() {
-                secrets_encryption_key = format!(
-                    "auto-secrets-key-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                );
-                eprintln!(
-                    "SECURITY: SECRETS_ENCRYPTION_KEY missing in production; generated an ephemeral runtime key"
+                secrets_encryption_key = format!("auto-secrets-key-{}", Uuid::new_v4());
+                tracing::warn!(
+                    "SECURITY: SECRETS_ENCRYPTION_KEY missing in production; generated an ephemeral runtime key (redacted)"
                 );
             }
         }
 
         Self {
             port: env_or("COMPLIANCE_PORT", "3011").parse().unwrap_or(3011),
-            database_url: env_or(
-                "DATABASE_URL",
-                "postgres://postgres@localhost:5432/apexmail",
-            ),
+            database_url: env_or("DATABASE_URL", "postgres://localhost/apexmail"),
             redis_url: env_or("REDIS_URL", "redis://localhost:6379"),
             auth_token,
-            cors_origin: env_or("CORS_ORIGIN", "*"),
+            cors_origin: env_or("CORS_ORIGIN", ""),
 
             risk: RiskScoringConfig {
                 spam_threshold: env_f64("RISK_SPAM_THRESHOLD", 0.7),
@@ -213,6 +196,8 @@ impl ComplianceConfig {
                 export_expiration_days: env_i64("GDPR_EXPORT_EXPIRATION_DAYS", 7),
                 export_base_url: env_or("GDPR_EXPORT_BASE_URL", "https://exports.apexmail.ee"),
                 verify_base_url: env_or("GDPR_VERIFY_BASE_URL", "https://gdpr.apexmail.ee"),
+                consent_signing_key: env_or("CONSENT_SIGNING_KEY", ""),
+                access_request_max_messages: env_i64("GDPR_ACCESS_MAX_MESSAGES", 10_000),
             },
 
             secrets: SecretsConfig {

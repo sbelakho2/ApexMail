@@ -7,7 +7,7 @@ metadata:
   labels:
     {{- include "apexmail.labels" . | nindent 4 }}
     {{- include "apexmail.selectorLabels" (dict "name" "tracking-service" "context" .) | nindent 4 }}
-    app.kubernetes.io/component: mail-server
+    app.kubernetes.io/component: tracking-service
 spec:
   {{- if not .Values.trackingService.autoscaling.enabled }}
   replicas: {{ .Values.trackingService.replicaCount }}
@@ -26,7 +26,7 @@ spec:
       labels:
         {{- include "apexmail.labels" . | nindent 8 }}
         {{- include "apexmail.selectorLabels" (dict "name" "tracking-service" "context" .) | nindent 8 }}
-        app.kubernetes.io/component: mail-server
+        app.kubernetes.io/component: tracking-service
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"

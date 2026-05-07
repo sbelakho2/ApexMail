@@ -92,7 +92,7 @@ fn credit_card_regex() -> Option<&'static Regex> {
         // Non-backtracking pattern for credit card numbers
         // Matches common formats:4111111111111111, 4111-1111-1111-1111, 4111 1111 1111 1111
         // Fixed from vulnerable pattern `(?:\d[ -]*?){13,19}` which caused ReDoS
-        Regex::new(r"\b(?:\d{4}[- ]?){3}\d{1,7}\b").ok()
+        Regex::new(r"\b(?:\d{4}[- ]?){3}\d{4}\b").ok()
     })
     .as_ref()
 }
@@ -125,7 +125,7 @@ fn email_regex() -> Option<&'static Regex> {
 // ---------------------------------------------------------------------------
 
 /// Size of context window (characters before the match) to examine.
-const CONTEXT_WINDOW: usize = 100;
+const CONTEXT_WINDOW: usize = 512;
 
 /// Negation phrases that reduce PII risk (case-insensitive).
 const NEGATION_PHRASES: &[&str] = &[
@@ -178,8 +178,19 @@ const CONTEXT_RISK_FACTOR: f64 = 0.25;
 
 /// Detect context modifier for a PII match based on preceding text.
 fn detect_context_modifier(text: &str, match_offset: usize) -> Option<ContextModifier> {
-    // Get context window before the match
-    let start = match_offset.saturating_sub(CONTEXT_WINDOW);
+    // Get context before the match, preferring a sentence boundary when one is nearby.
+    let raw_window_start = match_offset.saturating_sub(CONTEXT_WINDOW);
+    let window_start = text
+        .char_indices()
+        .find(|(idx, _)| *idx >= raw_window_start)
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    let sentence_start = text[..match_offset]
+        .rfind(['.', '!', '?', '\n'])
+        .map(|idx| idx + 1)
+        .unwrap_or(window_start)
+        .max(window_start);
+    let start = sentence_start;
     let context = &text[start..match_offset].to_lowercase();
 
     // Check for negation phrases
@@ -616,5 +627,8 @@ mod tests {
         if let Some(ssn) = ssn {
             assert!(ssn.context_modifier.is_some() || ssn.risk == ssn.base_risk);
         }
+        // Credit card must be detected and carry the configured CC base risk.
+        let cc = cc.expect("Credit card PII should be detected in mixed-context input");
+        assert!(cc.base_risk > 0.0, "credit card detection must report a base risk");
     }
 }

@@ -29,7 +29,7 @@ use aes_gcm::{
     AeadCore, Aes256Gcm, Nonce,
 };
 use base64::Engine;
-use rand::RngCore;
+use rand::TryRngCore;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -136,10 +136,11 @@ impl Kek {
 
     /// Generate a new random KEK with a random UUID.
     pub fn generate() -> Self {
+        use aes_gcm::aead::rand_core::RngCore;
         let mut id = [0u8; KEK_ID_LEN];
         let mut key = [0u8; AES_KEY_LEN];
-        rand::thread_rng().fill_bytes(&mut id);
-        rand::thread_rng().fill_bytes(&mut key);
+        OsRng.fill_bytes(&mut id);
+        OsRng.fill_bytes(&mut key);
         Self { id, key }
     }
 }
@@ -241,9 +242,11 @@ impl FieldEncryptor {
 
         let kek = self.primary_kek();
 
-        // 1. Generate a random DEK
+        // 1. Generate a random DEK using cryptographically secure RNG
         let mut dek = [0u8; AES_KEY_LEN];
-        rand::thread_rng().fill_bytes(&mut dek);
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut dek)
+            .expect("OsRng should not fail");
 
         // 2. Encrypt plaintext with DEK
         let cipher = Aes256Gcm::new_from_slice(&dek).map_err(|e| {

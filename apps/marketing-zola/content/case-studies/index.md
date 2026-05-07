@@ -1,6 +1,6 @@
 +++
-title = "Case Studies | Customer Success Stories"
-description = "See how companies use ApexMail to send millions of emails with enterprise-grade reliability and compliance."
+title = "Use Cases | Implementation Proof Points"
+description = "See implementation-backed ApexMail use cases for regulated SaaS, healthcare, payments, commerce, and developer platforms."
 template = "case-studies.html"
 
 [extra]

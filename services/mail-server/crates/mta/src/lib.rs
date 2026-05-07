@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod config;
 pub mod gmail_annotations;
+pub mod postmaster;
 pub mod servers;
 
 pub use config::MtaConfig;

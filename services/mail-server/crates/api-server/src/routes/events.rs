@@ -23,6 +23,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListEventsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -47,6 +48,7 @@ pub struct EventResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatsQuery {
     #[serde(default)]
     pub from: Option<DateTime<Utc>>,

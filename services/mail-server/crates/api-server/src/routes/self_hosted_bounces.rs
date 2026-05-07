@@ -9,9 +9,10 @@
 //! This module processes these events and updates suppressions accordingly.
 
 use chrono::{DateTime, Utc};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::sync::LazyLock;
 use tracing::{debug, info, warn};
 
 // ─── Bounce Types ──────────────────────────────────────────────
@@ -170,53 +171,94 @@ fn parse_enhanced_status_code(code: &str) -> BounceCategory {
 }
 
 /// Fallback parsing from code and text.
+///
+/// # Security (L-08)
+/// Uses word-boundary regex patterns instead of raw `.contains()` substring
+/// matching to prevent false positives (e.g., "mailbox full" matching unrelated
+/// text like "your mailbox is not full, please try again"). The regex patterns
+/// ensure the keywords are matched as whole words, not as substrings of larger
+/// words or phrases.
 fn parse_from_code_and_text(code: u16, text: &str) -> BounceCategory {
     let text_lower = text.to_lowercase();
 
-    // Check for common patterns
-    if text_lower.contains("user unknown")
-        || text_lower.contains("no such user")
-        || text_lower.contains("recipient rejected")
-        || text_lower.contains("mailbox not found")
-        || text_lower.contains("invalid recipient")
-    {
+    // L-08: Use word-boundary patterns to prevent false positives from substring matching.
+    // Each pattern is compiled once and cached via `std::sync::LazyLock` for performance.
+    static RE_INVALID_RECIPIENT: LazyLock<Regex> = LazyLock::new(|| {
+        RegexBuilder::new(
+            r"\b(?:user unknown|no such user|recipient rejected|mailbox not found|invalid recipient|no such mailbox|address rejected|mailbox unavailable|user does not have)\b",
+        )
+        .case_insensitive(true)
+        .build()
+        .expect("Invalid regex")
+    });
+
+    static RE_MAILBOX_FULL: LazyLock<Regex> = LazyLock::new(|| {
+        RegexBuilder::new(
+            r"\b(?:mailbox full|quota exceeded|over quota|mailbox storage|exceeded storage|mailbox quota)\b",
+        )
+        .case_insensitive(true)
+        .build()
+        .expect("Invalid regex")
+    });
+
+    static RE_INVALID_DOMAIN: LazyLock<Regex> = LazyLock::new(|| {
+        RegexBuilder::new(
+            r"\b(?:domain not found|no mx record|bad domain|unknown domain|domain does not exist|invalid domain)\b",
+        )
+        .case_insensitive(true)
+        .build()
+        .expect("Invalid regex")
+    });
+
+    static RE_BLOCKED: LazyLock<Regex> = LazyLock::new(|| {
+        RegexBuilder::new(
+            r"\b(?:blocked|blacklist(?:ed)?|listed|denied|recipient rejected|sender rejected|access denied)\b",
+        )
+        .case_insensitive(true)
+        .build()
+        .expect("Invalid regex")
+    });
+
+    static RE_CONTENT_REJECTED: LazyLock<Regex> = LazyLock::new(|| {
+        RegexBuilder::new(
+            r"\b(?:spam|content rejected|message rejected|message content|attachment rejected|virus detected|suspicious attachment)\b",
+        )
+        .case_insensitive(true)
+        .build()
+        .expect("Invalid regex")
+    });
+
+    static RE_POLICY_REJECTION: LazyLock<Regex> = LazyLock::new(|| {
+        RegexBuilder::new(
+            r"\b(?:spf|dkim|dmarc|authentication(?: required)?|policy rejection|not authorized|not permitted|sender verify|recipient verify)\b",
+        )
+        .case_insensitive(true)
+        .build()
+        .expect("Invalid regex")
+    });
+
+    // Check for common patterns with word-boundary matching (L-08)
+    if RE_INVALID_RECIPIENT.is_match(&text_lower) {
         return BounceCategory::InvalidRecipient;
     }
 
-    if text_lower.contains("mailbox full")
-        || text_lower.contains("quota exceeded")
-        || text_lower.contains("over quota")
-    {
+    if RE_MAILBOX_FULL.is_match(&text_lower) {
         return BounceCategory::MailboxFull;
     }
 
-    if text_lower.contains("domain not found")
-        || text_lower.contains("no mx record")
-        || text_lower.contains("bad domain")
-    {
+    if RE_INVALID_DOMAIN.is_match(&text_lower) {
         return BounceCategory::InvalidDomain;
     }
 
-    if text_lower.contains("blocked")
-        || text_lower.contains("blacklist")
-        || text_lower.contains("rejected")
-        || text_lower.contains("denied")
-    {
+    if RE_BLOCKED.is_match(&text_lower) {
         return BounceCategory::Blocked;
     }
 
-    if text_lower.contains("spam")
-        || text_lower.contains("content rejected")
-        || text_lower.contains("message rejected")
-    {
+    if RE_CONTENT_REJECTED.is_match(&text_lower) {
         return BounceCategory::ContentRejected;
     }
 
-    if text_lower.contains("spf")
-        || text_lower.contains("dkim")
-        || text_lower.contains("dmarc")
-        || text_lower.contains("authentication")
-    {
+    if RE_POLICY_REJECTION.is_match(&text_lower) {
         return BounceCategory::PolicyRejection;
     }
 

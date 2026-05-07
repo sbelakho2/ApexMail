@@ -82,12 +82,20 @@ fn is_url_shortener_in_config(host: &str, shorteners: &[String]) -> bool {
     shorteners.iter().any(|s| s.eq_ignore_ascii_case(host))
 }
 
-/// Extract URLs from text (simple extraction, not a full parser)
+/// Extract URLs from text (simple extraction, not a full parser).
+///
+/// Uses a lowercased copy internally so that scheme prefixes such as
+/// `HTTP://` and `HTTPS://` are not missed — email clients routinely
+/// render mixed-case schemes as clickable links.
 pub fn extract_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
-    // Match http(s):// URLs
-    let mut remaining = text;
+    // Use a lowercased copy for case-insensitive scheme detection while
+    // extracting the original-case URL from `text` so that any
+    // case-based obfuscation is preserved for downstream analysis.
+    let lower = text.to_lowercase();
+    let mut offset = 0;
     loop {
+        let remaining = &lower[offset..];
         let http_pos = remaining.find("http://");
         let https_pos = remaining.find("https://");
         let start = match (http_pos, https_pos) {
@@ -96,17 +104,21 @@ pub fn extract_urls(text: &str) -> Vec<String> {
             (None, Some(b)) => b,
             (None, None) => break,
         };
-        let url_start = &remaining[start..];
-        let end = url_start
+        let abs_start = offset + start;
+        let url_remaining = &lower[abs_start..];
+        let end = url_remaining
             .find(|c: char| {
                 c.is_whitespace() || c == '"' || c == '\'' || c == '>' || c == ')' || c == ']'
             })
-            .unwrap_or(url_start.len());
-        let url = &url_start[..end];
+            .unwrap_or(url_remaining.len());
+        let url = &text[abs_start..abs_start + end];
         if url.len() > 10 {
             urls.push(url.to_string());
         }
-        remaining = &remaining[start + end..];
+        offset = abs_start + end;
+        if offset >= text.len() {
+            break;
+        }
     }
     urls
 }
@@ -252,6 +264,13 @@ fn is_ip_address(host: &str) -> bool {
 }
 
 fn has_mixed_scripts(host: &str) -> bool {
+    // Decode punycode (xn--…) labels to their Unicode form before classifying
+    // scripts; otherwise IDN homograph attacks ("xn--pple-43d.com" containing
+    // a Cyrillic 'а') are scanned as ASCII and pass the mixed-script check.
+    let host_owned = host.split(':').next().unwrap_or(host).to_string();
+    let decoded = idna::domain_to_unicode(&host_owned).0;
+    let host = decoded.as_str();
+
     let mut has_latin = false;
     let mut has_cyrillic = false;
     let mut has_greek = false;

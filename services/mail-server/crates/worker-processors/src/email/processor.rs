@@ -62,9 +62,6 @@ pub struct EmailProcessor {
     // Error rate tracking
     recent_outcomes: Mutex<Vec<(SendOutcome, Instant)>>,
     error_cooldown_until: AtomicI64,
-
-    // Warmup counters (domain_id -> today's send count)
-    warmup_counters: RwLock<HashMap<String, i64>>,
 }
 
 impl EmailProcessor {
@@ -104,7 +101,6 @@ impl EmailProcessor {
             smtp_circuit_breaker,
             recent_outcomes: Mutex::new(Vec::new()),
             error_cooldown_until: AtomicI64::new(0),
-            warmup_counters: RwLock::new(HashMap::new()),
         })
     }
 
@@ -449,6 +445,19 @@ impl EmailProcessor {
     }
 
     /// Check warmup limits for a domain.
+    ///
+    /// # Security (O-16.8)
+    ///
+    /// **Root cause**: Previously used an in-memory `RwLock<HashMap<String, i64>>`
+    /// which is local to each process. Multiple workers would each have their own
+    /// counter, allowing up to N × daily_limit sends per domain (where N is the
+    /// number of workers). This is a bypass of warmup rate limiting.
+    ///
+    /// **Fix**: Replaced the per-process `HashMap` with a Redis `INCR` + `EXPIRE`
+    /// key (`warmup:count:<date>:<domain_id>`). The key has a 24-hour TTL and uses
+    /// atomic `INCR` for cross-worker correctness. The first worker to increment
+    /// (return value == 1) also sets the TTL via `EXPIRE` (race-safe; extra EXPIRE
+    /// calls are harmless). All workers share a single counter per domain per day.
     async fn check_warmup_limit(&self, job: &EmailJob) -> ProcessorResult<bool> {
         let domain = self.get_domain(&job.domain_id, &job.tenant_id).await?;
 
@@ -458,18 +467,47 @@ impl EmailProcessor {
 
         let limits = WarmupLimits::for_day(domain.warmup_day);
 
-        // Get and increment current count
-        let mut counters = self
-            .warmup_counters
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let current = counters.entry(job.domain_id.clone()).or_insert(0);
+        // Use Redis INCR for atomic cross-worker counters with 24h TTL.
+        // Key format: warmup:count:<YYYY-MM-DD>:<domain_id>
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let redis_key = format!("warmup:count:{}:{}", today, job.domain_id);
 
-        if *current >= limits.daily_limit {
+        let mut conn = self.redis.get().await.map_err(|e| {
+            warn!(domain_id = %job.domain_id, error = %e, "Failed to get Redis connection for warmup check");
+            ProcessorError::Job(format!("Redis unavailable for warmup check: {}", e))
+        })?;
+
+        // Atomically increment the counter — shared across all workers
+        let current: i64 = redis::cmd("INCR")
+            .arg(&redis_key)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| {
+                warn!(domain_id = %job.domain_id, error = %e, "Redis INCR failed for warmup check");
+                ProcessorError::Job(format!("Redis INCR failed: {}", e))
+            })?;
+
+        // Set expiry on first increment (return value == 1 means this is a new key).
+        // Race-safe: multiple workers may call EXPIRE concurrently, which is idempotent.
+        if current == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&redis_key)
+                .arg(86400) // 24 hours
+                .query_async(&mut *conn)
+                .await
+                .unwrap_or_default();
+        }
+
+        if current > limits.daily_limit {
+            // We've exceeded the limit. Decrement to keep the counter accurate.
+            let _: () = redis::cmd("DECR")
+                .arg(&redis_key)
+                .query_async(&mut *conn)
+                .await
+                .unwrap_or_default();
             return Ok(false);
         }
 
-        *current += 1;
         Ok(true)
     }
 
@@ -884,3 +922,700 @@ impl EmailProcessor {
 }
 
 use base64::Engine;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    // ---------------------------------------------------------------------------
+    // 1. Initial State
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn test_initial_state_closed() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 10,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 3,
+            window_duration: Duration::from_secs(120),
+        });
+
+        assert_eq!(
+            cb.state(),
+            CircuitState::Closed,
+            "circuit must start Closed"
+        );
+        assert!(cb.is_allowed(), "requests must be allowed in Closed state");
+    }
+
+    #[test]
+    fn test_initial_failure_count_zero() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 10,
+            ..Default::default()
+        });
+        // No failures recorded yet; state is still closed
+        assert_eq!(cb.state(), CircuitState::Closed);
+        // record one failure and check we're still closed (threshold = 10)
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_initial_success_count_zero() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 10,
+            ..Default::default()
+        });
+        // No successes recorded yet; recording success in Closed resets failures
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_initial_last_failure_none() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 10,
+            ..Default::default()
+        });
+        // After reset, no failure should have been recorded
+        cb.reset();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        // Manually verify by recording one failure (1 << 10), so still closed
+        for _ in 0..9 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.state(), CircuitState::Closed);
+        // One more to trigger open
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    // ---------------------------------------------------------------------------
+    // 2. State Transitions: Closed → Open
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn test_closed_to_open_after_threshold() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 5,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 3,
+            window_duration: Duration::from_secs(120),
+        });
+
+        assert_eq!(cb.state(), CircuitState::Closed);
+
+        // Record failures below threshold
+        for _ in 0..4 {
+            cb.record_failure();
+            assert_eq!(cb.state(), CircuitState::Closed);
+        }
+
+        // Fifth failure triggers transition to Open
+        cb.record_failure();
+        assert_eq!(
+            cb.state(),
+            CircuitState::Open,
+            "circuit must transition to Open after failure_threshold failures"
+        );
+        assert!(!cb.is_allowed(), "requests must be rejected in Open state");
+    }
+
+    #[test]
+    fn test_closed_to_open_failure_count_reset() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 3,
+            open_duration: Duration::from_secs(60),
+            ..Default::default()
+        });
+
+        cb.record_failure(); // 1
+        cb.record_failure(); // 2
+        assert_eq!(cb.state(), CircuitState::Closed);
+        cb.record_failure(); // 3 → Open
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Verify that failure count is effectively reset — after open_duration,
+        // the circuit transitions to Half-Open where success count starts at 0
+        // and failures are tracked separately.
+        // We can't directly read failure_count, but we can check state.
+        assert!(!cb.is_allowed());
+    }
+
+    // ---------------------------------------------------------------------------
+    // 3. State Transitions: Open → Half-Open
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn test_open_to_half_open_after_duration() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_millis(10),
+            ..Default::default()
+        });
+
+        // Trigger Open
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(!cb.is_allowed());
+
+        // Wait for open duration to elapse
+        thread::sleep(Duration::from_millis(20));
+
+        // is_allowed() should transition to Half-Open
+        assert!(
+            cb.is_allowed(),
+            "is_allowed() must return true and transition to Half-Open after open_duration"
+        );
+        assert_eq!(
+            cb.state(),
+            CircuitState::HalfOpen,
+            "circuit must transition to Half-Open after open_duration"
+        );
+    }
+
+    #[test]
+    fn test_open_stays_open_before_duration_elapses() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            ..Default::default()
+        });
+
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Immediately check — should still be Open
+        assert!(!cb.is_allowed());
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    // ---------------------------------------------------------------------------
+    // 4. State Transitions: Half-Open → Closed
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn test_half_open_to_closed_after_successes() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_millis(10),
+            success_threshold: 3,
+            ..Default::default()
+        });
+
+        // Trigger Open
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait for open duration
+        thread::sleep(Duration::from_millis(20));
+
+        // Transition to Half-Open
+        assert!(cb.is_allowed());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Record successes below threshold
+        cb.record_success();
+        assert_eq!(
+            cb.state(),
+            CircuitState::HalfOpen,
+            "still Half-Open after 1 success (threshold=3)"
+        );
+        cb.record_success();
+        assert_eq!(
+            cb.state(),
+            CircuitState::HalfOpen,
+            "still Half-Open after 2 successes (threshold=3)"
+        );
+
+        // Third success transitions to Closed
+        cb.record_success();
+        assert_eq!(
+            cb.state(),
+            CircuitState::Closed,
+            "circuit must transition to Closed after success_threshold successes in Half-Open"
+        );
+
+        // Now requests flow normally again
+        assert!(cb.is_allowed());
+    }
+
+    #[test]
+    fn test_half_open_to_closed_success_count_resets() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_millis(10),
+            success_threshold: 2,
+            ..Default::default()
+        });
+
+        cb.record_failure();
+        thread::sleep(Duration::from_millis(20));
+        assert!(cb.is_allowed()); // → Half-Open
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Two successes → Closed
+        cb.record_success();
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+
+        // Now we're back in Closed — a failure should use Closed logic, not Half-Open
+        // Record one failure (threshold=1) → should go to Open
+        cb.record_failure();
+        assert_eq!(
+            cb.state(),
+            CircuitState::Open,
+            "after reset to Closed, one failure should open again"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // 5. State Transitions: Half-Open → Open
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn test_half_open_to_open_on_failure() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 5,
+            open_duration: Duration::from_millis(10),
+            success_threshold: 3,
+            ..Default::default()
+        });
+
+        // Trigger Open
+        for _ in 0..5 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait for open duration
+        thread::sleep(Duration::from_millis(20));
+
+        // Transition to Half-Open
+        assert!(cb.is_allowed());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // A single failure in Half-Open should reopen the circuit
+        cb.record_failure();
+        assert_eq!(
+            cb.state(),
+            CircuitState::Open,
+            "any failure in Half-Open must transition back to Open"
+        );
+        assert!(
+            !cb.is_allowed(),
+            "requests must be rejected after reopening"
+        );
+
+        // Verify the opened_at timestamp was reset — wait again to transition back
+        thread::sleep(Duration::from_millis(20));
+        assert!(cb.is_allowed());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+    }
+
+    // ---------------------------------------------------------------------------
+    // 6. Error Rate Tracking
+    // ---------------------------------------------------------------------------
+
+    /// Replica of the sliding-window error-rate logic from `EmailProcessor::record_outcome`.
+    /// We test the algorithm in isolation since we cannot instantiate `EmailProcessor`
+    /// without a database.
+    fn simulate_error_tracking(
+        outcomes: &mut Vec<(SendOutcome, Instant)>,
+        outcome: SendOutcome,
+        now: Instant,
+    ) -> bool {
+        outcomes.push((outcome, now));
+        // Evict entries older than 60s
+        outcomes.retain(|(_, t)| now.duration_since(*t) < Duration::from_secs(60));
+        // Cap at window size
+        let len = outcomes.len();
+        if len > ERROR_WINDOW_SIZE {
+            outcomes.drain(0..(len - ERROR_WINDOW_SIZE));
+        }
+        // Check if cooldown should be triggered
+        let failures = outcomes
+            .iter()
+            .filter(|(o, _)| !matches!(o, SendOutcome::Success | SendOutcome::Suppressed))
+            .count();
+        failures >= ERROR_THRESHOLD
+    }
+
+    #[test]
+    fn test_error_rate_window_tracks_20_outcomes() {
+        let mut outcomes = Vec::new();
+        let now = Instant::now();
+
+        // Add 25 successes → window should cap at 20
+        for _ in 0..25 {
+            simulate_error_tracking(&mut outcomes, SendOutcome::Success, now);
+        }
+        assert_eq!(
+            outcomes.len(),
+            ERROR_WINDOW_SIZE,
+            "sliding window must be capped at ERROR_WINDOW_SIZE ({})",
+            ERROR_WINDOW_SIZE
+        );
+
+        // After eviction, the oldest entries are removed. Since we pushed 25 items
+        // and the window is 20, the first 5 entries are gone.
+        assert_eq!(outcomes.len(), 20);
+    }
+
+    #[test]
+    fn test_error_rate_triggers_cooldown_at_threshold() {
+        let mut outcomes = Vec::new();
+        let now = Instant::now();
+
+        // Fill window with successes
+        for _ in 0..10 {
+            simulate_error_tracking(&mut outcomes, SendOutcome::Success, now);
+        }
+        // Now add 10 failures → total 20; 10 failures >= ERROR_THRESHOLD (10)
+        for _ in 0..10 {
+            let triggered =
+                simulate_error_tracking(&mut outcomes, SendOutcome::TransportError, now);
+            if outcomes.len() >= ERROR_WINDOW_SIZE {
+                // Once we have a full window of 20 with 10 failures, trigger
+                if outcomes
+                    .iter()
+                    .filter(|(o, _)| !matches!(o, SendOutcome::Success | SendOutcome::Suppressed))
+                    .count()
+                    >= ERROR_THRESHOLD
+                {
+                    assert!(
+                        triggered,
+                        "cooldown must trigger when >=10 failures in window"
+                    );
+                }
+            }
+        }
+
+        // Final verification
+        assert_eq!(outcomes.len(), ERROR_WINDOW_SIZE);
+        let failures = outcomes
+            .iter()
+            .filter(|(o, _)| !matches!(o, SendOutcome::Success | SendOutcome::Suppressed))
+            .count();
+        assert!(
+            failures >= ERROR_THRESHOLD,
+            "expected >= {} failures, got {}",
+            ERROR_THRESHOLD,
+            failures
+        );
+    }
+
+    #[test]
+    fn test_error_rate_no_cooldown_below_threshold() {
+        let mut outcomes = Vec::new();
+        let now = Instant::now();
+
+        // Fill window with 11 successes and 9 failures → 9 < 10 threshold
+        for _ in 0..11 {
+            simulate_error_tracking(&mut outcomes, SendOutcome::Success, now);
+        }
+        for _ in 0..9 {
+            let triggered =
+                simulate_error_tracking(&mut outcomes, SendOutcome::TransportError, now);
+            // Should not trigger since 9 < 10
+            if outcomes.len() >= ERROR_WINDOW_SIZE {
+                let failures = outcomes
+                    .iter()
+                    .filter(|(o, _)| !matches!(o, SendOutcome::Success | SendOutcome::Suppressed))
+                    .count();
+                assert!(
+                    failures < ERROR_THRESHOLD,
+                    "expected < {} failures, got {}",
+                    ERROR_THRESHOLD,
+                    failures
+                );
+                assert!(
+                    !triggered,
+                    "cooldown must NOT trigger when <10 failures in window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_error_rate_window_evicts_old_entries() {
+        let mut outcomes = Vec::new();
+
+        // Add 10 failures with old timestamps
+        let old = Instant::now() - Duration::from_secs(120);
+        for _ in 0..10 {
+            // Use the old timestamp as the "now" so they are all added
+            simulate_error_tracking(&mut outcomes, SendOutcome::TransportError, old);
+        }
+        assert_eq!(outcomes.len(), 10, "10 old entries added");
+
+        // Now simulate a new event at a much later time — this triggers eviction
+        // of entries whose timestamps are >60s behind `new_now`.
+        let new_now = Instant::now();
+        simulate_error_tracking(&mut outcomes, SendOutcome::Success, new_now);
+
+        // The 10 old entries (timestamp = old, ~120s before new_now) should be
+        // evicted by the retain(... < 60s) clause, leaving only the success.
+        assert_eq!(
+            outcomes.len(),
+            1,
+            "old entries must be evicted; only the new success remains"
+        );
+        assert!(
+            matches!(outcomes[0].0, SendOutcome::Success),
+            "remaining entry must be Success"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // 7. Edge Cases
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_zero_failure_threshold() {
+        // failure_threshold = 1 is the minimum; test that even one failure opens
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            ..Default::default()
+        });
+
+        assert_eq!(cb.state(), CircuitState::Closed);
+        cb.record_failure();
+        assert_eq!(
+            cb.state(),
+            CircuitState::Open,
+            "failure_threshold=1 means one failure opens the circuit"
+        );
+        assert!(!cb.is_allowed());
+    }
+
+    #[test]
+    fn test_exponential_backoff_formula() {
+        // The formula used in handle_soft_bounce:
+        //   2_i64.saturating_pow(job.attempt.min(30) as u32)
+        // base_delay * 2^attempt
+
+        let base: i64 = 1; // seconds
+
+        // attempt 0 → 2^0 = 1
+        assert_eq!(
+            base.saturating_mul(2_i64.saturating_pow(0u32.min(30))),
+            1,
+            "attempt 0: 2^0 = 1s"
+        );
+
+        // attempt 1 → 2^1 = 2
+        assert_eq!(
+            base.saturating_mul(2_i64.saturating_pow(1u32.min(30))),
+            2,
+            "attempt 1: 2^1 = 2s"
+        );
+
+        // attempt 5 → 2^5 = 32
+        assert_eq!(
+            base.saturating_mul(2_i64.saturating_pow(5u32.min(30))),
+            32,
+            "attempt 5: 2^5 = 32s"
+        );
+
+        // attempt 29 → 2^29 = 536_870_912
+        assert_eq!(
+            base.saturating_mul(2_i64.saturating_pow(29u32.min(30))),
+            536_870_912,
+            "attempt 29: 2^29 = 536_870_912s"
+        );
+
+        // attempt 30 → capped at 30: 2^30 = 1_073_741_824
+        assert_eq!(
+            base.saturating_mul(2_i64.saturating_pow(30u32.min(30))),
+            1_073_741_824,
+            "attempt 30: 2^30 = 1_073_741_824s (capped)"
+        );
+
+        // attempt 31 → still capped at 30: 2^30 = 1_073_741_824
+        assert_eq!(
+            base.saturating_mul(2_i64.saturating_pow(31u32.min(30))),
+            1_073_741_824,
+            "attempt 31: capped at 2^30 = 1_073_741_824s"
+        );
+
+        // Verify i64::MAX safety: 2^62 fits, 2^63 would overflow
+        // The saturating_pow ensures we don't overflow
+        assert_eq!(
+            2_i64.saturating_pow(62),
+            4_611_686_018_427_387_904_i64,
+            "2^62 fits in i64"
+        );
+        assert_eq!(
+            2_i64.saturating_pow(63),
+            i64::MAX,
+            "2^63 saturates to i64::MAX"
+        );
+    }
+
+    #[test]
+    fn test_exponential_backoff_in_context_of_handle_soft_bounce() {
+        // Simulate the exact expression from handle_soft_bounce:
+        //   let backoff_multiplier = 2_i64.saturating_pow(job.attempt.min(30) as u32);
+        //   let retry_at = Utc::now() + chrono::Duration::seconds(
+        //       (self.config.base.retry_delay.as_secs() as i64).saturating_mul(backoff_multiplier),
+        //   );
+
+        let retry_delay_secs: i64 = 60; // example value
+
+        // attempt 0 → multiplier = 1 → delay = 60 * 1 = 60s
+        let attempt: i32 = 0;
+        let multiplier = 2_i64.saturating_pow(attempt.min(30) as u32);
+        let delay = retry_delay_secs.saturating_mul(multiplier);
+        assert_eq!(delay, 60, "attempt 0: delay = 60 * 1 = 60s");
+
+        // attempt 5 → multiplier = 32 → delay = 60 * 32 = 1920s
+        let attempt: i32 = 5;
+        let multiplier = 2_i64.saturating_pow(attempt.min(30) as u32);
+        let delay = retry_delay_secs.saturating_mul(multiplier);
+        assert_eq!(delay, 1920, "attempt 5: delay = 60 * 32 = 1920s");
+
+        // attempt 30 → capped at 30 → 2^30 = 1_073_741_824 → saturating_mul
+        let attempt: i32 = 30;
+        let multiplier = 2_i64.saturating_pow(attempt.min(30) as u32);
+        let delay = retry_delay_secs.saturating_mul(multiplier);
+        assert_eq!(
+            delay,
+            60_i64.saturating_mul(1_073_741_824),
+            "attempt 30: delay capped at 2^30 * base"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_state_transitions() {
+        let cb = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 5,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 3,
+            window_duration: Duration::from_secs(120),
+        }));
+
+        let mut handles = Vec::new();
+
+        // Spawn 10 concurrent tasks, each recording failures
+        for _ in 0..10 {
+            let cb_clone = Arc::clone(&cb);
+            handles.push(tokio::spawn(async move {
+                cb_clone.record_failure();
+            }));
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.expect("concurrent task panicked");
+        }
+
+        // With 10 failures and threshold=5, circuit should be Open
+        assert_eq!(
+            cb.state(),
+            CircuitState::Open,
+            "concurrent failures should trigger circuit open"
+        );
+        assert!(!cb.is_allowed());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_success_and_failure() {
+        let cb = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 3,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 2,
+            window_duration: Duration::from_secs(120),
+        }));
+
+        // First, open the circuit
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // We need to get to Half-Open first. Use a short duration.
+        let cb2 = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_millis(5),
+            success_threshold: 3,
+            window_duration: Duration::from_secs(120),
+        }));
+
+        cb2.record_failure();
+        assert_eq!(cb2.state(), CircuitState::Open);
+        thread::sleep(Duration::from_millis(10));
+        assert!(cb2.is_allowed()); // → Half-Open
+        assert_eq!(cb2.state(), CircuitState::HalfOpen);
+
+        // Spawn concurrent successes and a failure in Half-Open
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let cb_clone = Arc::clone(&cb2);
+            handles.push(tokio::spawn(async move {
+                cb_clone.record_success();
+            }));
+        }
+        // And one failure
+        let cb_clone = Arc::clone(&cb2);
+        handles.push(tokio::spawn(async move {
+            cb_clone.record_failure();
+        }));
+
+        for handle in handles {
+            handle.await.expect("concurrent task panicked");
+        }
+
+        // The failure in Half-Open should have reopened the circuit
+        // But due to race conditions, if all successes happen first, it might close.
+        // Either way, the circuit is in a valid state.
+        let state = cb2.state();
+        assert!(
+            state == CircuitState::Open || state == CircuitState::Closed,
+            "concurrent operations in Half-Open must result in a valid state: got {:?}",
+            state
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_is_allowed_and_record_failure() {
+        let cb = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 5,
+            open_duration: Duration::from_millis(10),
+            success_threshold: 3,
+            window_duration: Duration::from_secs(120),
+        }));
+
+        // Open the circuit
+        for _ in 0..5 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait for open duration
+        thread::sleep(Duration::from_millis(20));
+
+        // Concurrently call is_allowed (which transitions to Half-Open) and record_failure
+        let cb_clone = Arc::clone(&cb);
+        let h1 = tokio::spawn(async move {
+            cb_clone.is_allowed(); // may transition to Half-Open
+        });
+
+        let cb_clone = Arc::clone(&cb);
+        let h2 = tokio::spawn(async move {
+            cb_clone.record_failure(); // records in Open or Half-Open
+        });
+
+        h1.await.expect("task panicked");
+        h2.await.expect("task panicked");
+
+        // The circuit must be in a valid state
+        let state = cb.state();
+        assert!(
+            state == CircuitState::Open || state == CircuitState::HalfOpen,
+            "concurrent is_allowed + record_failure must produce valid state: got {:?}",
+            state
+        );
+    }
+}

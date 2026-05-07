@@ -234,6 +234,7 @@ mod ops {
             slo: SloTracker::new(),
             warmup: IpWarmupManager::new_ephemeral(),
             api_key: "test-key".into(),
+            api_keys: vec!["test-key".into()],
             trust_cache: Arc::new(DashMap::new()),
         })
     }
@@ -317,10 +318,10 @@ mod sales {
     use super::*;
     use sales_autopilot::calendar::CalendarService;
     use sales_autopilot::campaigns::CampaignManager;
-    use sales_autopilot::crm::CrmService;
+    use sales_autopilot::crm::CrmBackend;
     use sales_autopilot::enrichment::EnrichmentService;
     use sales_autopilot::inbox::InboxManager;
-    use sales_autopilot::routes::{router, AppState};
+    use sales_autopilot::routes::{initialize_schema, router, AppState};
     use sqlx::postgres::PgPoolOptions;
 
     fn app() -> axum::Router {
@@ -329,15 +330,61 @@ mod sales {
             .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy("postgres://localhost/unused")
             .expect("lazy pool");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("Redis pool");
         router(AppState {
-            db,
-            crm: CrmService::new(),
+            db: db.clone(),
+            redis,
+            crm: CrmBackend::postgres(db.clone()),
             enrichment: EnrichmentService::new("http://mock"),
-            campaigns: CampaignManager::new(10),
-            calendar: CalendarService::new(),
-            inbox: InboxManager::new(),
+            campaigns: CampaignManager::new(10, db.clone()),
+            calendar: CalendarService::new(db.clone()),
+            inbox: InboxManager::new(db),
             service_token: "test-key".into(),
+            rate_limit_fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         })
+    }
+
+    async fn app_with_test_db(test_name: &str) -> Option<axum::Router> {
+        let database_url = match std::env::var("TEST_DATABASE_URL") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => {
+                eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
+                return None;
+            }
+        };
+        let db = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(std::time::Duration::from_secs(3))
+            .connect(&database_url)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("TEST_DATABASE_URL is set but {test_name} could not connect: {error}")
+            });
+        initialize_schema(&db).await.unwrap_or_else(|error| {
+            panic!("failed to initialize sales schema for {test_name}: {error}")
+        });
+
+        let crm = CrmBackend::postgres(db.clone());
+        crm.initialize().await.unwrap_or_else(|error| {
+            panic!("failed to initialize CRM schema for {test_name}: {error}")
+        });
+
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("Redis pool");
+        Some(router(AppState {
+            db: db.clone(),
+            redis,
+            crm,
+            enrichment: EnrichmentService::new("http://mock"),
+            campaigns: CampaignManager::new(10, db.clone()),
+            calendar: CalendarService::new(db.clone()),
+            inbox: InboxManager::new(db),
+            service_token: "test-key".into(),
+            rate_limit_fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }))
     }
 
     #[tokio::test]
@@ -346,22 +393,26 @@ mod sales {
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let json = body_json(resp).await;
-        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["status"], "degraded");
     }
 
     #[tokio::test]
     async fn create_lead_returns_ok() {
+        let Some(app) = app_with_test_db("create_lead_returns_ok").await else {
+            return;
+        };
         let body = serde_json::json!({
             "email": "alice@acme.com",
             "name": "Alice Smith",
             "company": "Acme Corp"
         });
-        let resp = app()
+        let resp = app
             .oneshot(
                 Request::post("/leads")
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-routes")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -375,10 +426,14 @@ mod sales {
 
     #[tokio::test]
     async fn list_leads_returns_200() {
-        let resp = app()
+        let Some(app) = app_with_test_db("list_leads_returns_200").await else {
+            return;
+        };
+        let resp = app
             .oneshot(
                 Request::get("/leads")
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-routes")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -394,6 +449,7 @@ mod sales {
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-routes")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),

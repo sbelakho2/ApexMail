@@ -10,8 +10,8 @@ Creates high-quality ChatML training examples based on the patterns found in:
   - industry-knowledge-base.ts (domain knowledge)
 
 All pricing uses canonical schema:
-  Free=$0/3K/50K, Starter=$25/50K/500K, Pro=$65/150K/2M,
-  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$800/5M/∞
+  Free=$0/30K/300K, Starter=$25/50K/500K, Pro=$65/150K/2M,
+  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$3,000/5M/∞
 """
 
 import json
@@ -99,7 +99,7 @@ The more urgent issue is the **0.13% complaint rate** — that's above the 0.1% 
     {
         "context": "free_hitting_limits",
         "q": "I've almost used all my emails, what can I do?",
-        "a": """You're right to be concerned — you've sent **2,850 out of 3,000 emails** this month, which is **95% of your Free plan limit**. You have only **150 emails left**.
+        "a": """You're right to be concerned — you've sent **28,500 out of 30,000 emails** this month, which is **95% of your Free plan limit**. You have only **1,500 emails left**.
 
 Your options:
 

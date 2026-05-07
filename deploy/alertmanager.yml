@@ -2,14 +2,35 @@ global:
   resolve_timeout: 5m
 
 route:
-  receiver: default-notify
+  receiver: warning-notify
   group_by: ['alertname', 'severity', 'instance']
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 3h
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: critical-pager
+      repeat_interval: 30m
+    - matchers:
+        - severity="warning"
+      receiver: warning-notify
+      repeat_interval: 2h
+    - matchers:
+        - severity="info"
+      receiver: info-log
+      repeat_interval: 12h
 
 receivers:
-  - name: default-notify
+  - name: critical-pager
     webhook_configs:
-      - url: 'http://observability:4400/alerts'
+      - url: 'http://observability:4400/alerts/critical'
+        send_resolved: true
+  - name: warning-notify
+    webhook_configs:
+      - url: 'http://observability:4400/alerts/warning'
+        send_resolved: true
+  - name: info-log
+    webhook_configs:
+      - url: 'http://observability:4400/alerts/info'
         send_resolved: true

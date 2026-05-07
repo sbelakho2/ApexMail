@@ -15,6 +15,7 @@ pub fn router() -> Router<AppState> {
 // ─── Request / Response types ──────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TelemetryPayload {
     #[serde(default)]
     pub reason: Option<String>,

@@ -38,12 +38,14 @@ bytes      = { workspace = true }
 aes-gcm    = { workspace = true }
 zeroize    = { workspace = true }
 hex        = { workspace = true }
+quick-xml  = "0.36"
 governor   = { workspace = true }
 mail-common = { path = "../mail-common" }
 nonzero_ext = { workspace = true }
 urlencoding = { workspace = true }
 flate2 = "1.1"
 jsonwebtoken = "9.3"
+xml-sec = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

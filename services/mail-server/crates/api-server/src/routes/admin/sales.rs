@@ -125,6 +125,7 @@ async fn ensure_campaign_tables(db: &sqlx::PgPool) -> Result<(), ApiError> {
 // ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LeadsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -311,7 +312,7 @@ async fn list_leads(
 // ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LeadUpdate {
     pub id: Option<String>,
     pub ids: Option<Vec<String>>,
@@ -679,6 +680,7 @@ async fn list_campaigns(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CampaignUpdate {
     pub id: String,
     pub action: String,
@@ -1075,7 +1077,7 @@ async fn start_outreach(
 // ──────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SalesSettings {
     #[serde(default)]
     pub scoring_weights: serde_json::Value,

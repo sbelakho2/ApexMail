@@ -208,6 +208,9 @@ fn looks_like_secret(token: &str) -> bool {
 
     // Check for known key prefixes
     let has_key_prefix = has_known_key_prefix(token);
+    if !has_key_prefix && looks_like_known_non_secret(token) {
+        return false;
+    }
 
     // Base64-like pattern (letters + digits + /+=)
     let base64_chars = token
@@ -221,6 +224,33 @@ fn looks_like_secret(token: &str) -> bool {
     let is_hex_like = hex_chars == token.len() && token.len() >= 32;
 
     has_key_prefix || (mixed && (is_base64_like || is_hex_like))
+}
+
+fn looks_like_known_non_secret(token: &str) -> bool {
+    if is_uuid(token) {
+        return true;
+    }
+
+    let is_hex = token.chars().all(|c| c.is_ascii_hexdigit());
+    is_hex && matches!(token.len(), 32 | 40 | 64)
+}
+
+fn is_uuid(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+
+    for &idx in &[8, 13, 18, 23] {
+        if bytes[idx] != b'-' {
+            return false;
+        }
+    }
+
+    token
+        .chars()
+        .enumerate()
+        .all(|(idx, ch)| matches!(idx, 8 | 13 | 18 | 23) || ch.is_ascii_hexdigit())
 }
 
 fn is_secret_assignment_key(key: &str) -> bool {

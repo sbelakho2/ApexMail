@@ -1,23 +1,25 @@
 //! Application builder — assembles all middleware and routes into an Axum `Router`.
 
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::{DefaultBodyLimit, Query};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{
     header::{self, ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST},
     HeaderMap, HeaderValue, Method, StatusCode, Uri,
 };
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
+use axum::routing::post;
 use axum::{BoxError, Json, Router};
 use base64::Engine;
-use rand::RngCore;
 use serde::Deserialize;
 use std::time::Duration;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::load_shed::{error::Overloaded, LoadShedLayer};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use ui_foundation::axum_router as ui_router;
@@ -54,6 +56,225 @@ async fn handle_backpressure_error(error: BoxError) -> Response {
         .into_response()
 }
 
+// ── Grader route wrapper handlers ──────────────────────────────
+// These extract GraderState from AppState and delegate to the
+// email-grader crate's transport-agnostic handlers, propagating tenant
+// authentication context and the resolved client IP.
+
+async fn grader_check_domain(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<email_grader::DomainCheckRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let gs = match state.grader_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "GRADER_DISABLED", "message": "Email Grader is disabled" }
+                })),
+            )
+        }
+    };
+    let client_ip_str = crate::middleware::rate_limiter::extract_public_client_ip(
+        &headers,
+        addr.ip(),
+        &state.config.trusted_proxies,
+    );
+    let client_ip: std::net::IpAddr = client_ip_str.parse().unwrap_or(addr.ip());
+    email_grader::routes::check_domain(gs, client_ip, body).await
+}
+
+async fn grader_submit_email(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<auth::AuthUser>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<email_grader::EmailSubmitRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let gs = match state.grader_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "GRADER_DISABLED", "message": "Email Grader is disabled" }
+                })),
+            )
+        }
+    };
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let auth_ctx = email_grader::GraderAuthContext {
+        tenant_id: user.tenant_id.clone(),
+        scopes: user.scopes.clone(),
+        idempotency_key,
+    };
+    email_grader::routes::submit_email(gs, auth_ctx, body).await
+}
+
+async fn grader_get_result(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<auth::AuthUser>,
+    Path(id): Path<uuid::Uuid>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let gs = match state.grader_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "GRADER_DISABLED", "message": "Email Grader is disabled" }
+                })),
+            )
+        }
+    };
+    let auth_ctx = email_grader::GraderAuthContext {
+        tenant_id: user.tenant_id.clone(),
+        scopes: user.scopes.clone(),
+        idempotency_key: None,
+    };
+    email_grader::routes::get_result(gs, auth_ctx, id).await
+}
+
+async fn grader_list_results(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<auth::AuthUser>,
+    Query(params): Query<email_grader::PaginationParams>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let gs = match state.grader_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "GRADER_DISABLED", "message": "Email Grader is disabled" }
+                })),
+            )
+        }
+    };
+    let auth_ctx = email_grader::GraderAuthContext {
+        tenant_id: user.tenant_id.clone(),
+        scopes: user.scopes.clone(),
+        idempotency_key: None,
+    };
+    email_grader::routes::list_results(gs, auth_ctx, params).await
+}
+
+// ── Inbox Placement route wrapper handlers ─────────────────────
+// These extract PlacementState from AppState and delegate to the
+// inbox-placement crate's transport-agnostic handlers.
+
+async fn placement_create_test(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<auth::AuthUser>,
+    Json(body): Json<inbox_placement::CreateTestRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let ps = match state.placement_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "PLACEMENT_DISABLED", "message": "Inbox Placement is disabled" }
+                })),
+            )
+        }
+    };
+    inbox_placement::routes::create_placement_test(ps, user.tenant_id, body).await
+}
+
+async fn placement_list_tests(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<auth::AuthUser>,
+    Query(params): Query<inbox_placement::TestListQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let ps = match state.placement_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "PLACEMENT_DISABLED", "message": "Inbox Placement is disabled" }
+                })),
+            )
+        }
+    };
+    inbox_placement::routes::list_placement_tests(
+        ps,
+        user.tenant_id,
+        params.page,
+        params.per_page,
+        params.status,
+    )
+    .await
+}
+
+async fn placement_get_test(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<auth::AuthUser>,
+    Path(id): Path<uuid::Uuid>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let ps = match state.placement_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "PLACEMENT_DISABLED", "message": "Inbox Placement is disabled" }
+                })),
+            )
+        }
+    };
+    inbox_placement::routes::get_placement_test(ps, user.tenant_id, id).await
+}
+
+async fn placement_get_trends(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<auth::AuthUser>,
+    Query(params): Query<inbox_placement::TrendsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let ps = match state.placement_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "PLACEMENT_DISABLED", "message": "Inbox Placement is disabled" }
+                })),
+            )
+        }
+    };
+    inbox_placement::routes::get_placement_trends(ps, user.tenant_id, params.days, params.provider)
+        .await
+}
+
+async fn placement_list_providers(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let ps = match state.placement_state.clone() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": { "code": "PLACEMENT_DISABLED", "message": "Inbox Placement is disabled" }
+                })),
+            )
+        }
+    };
+    inbox_placement::routes::list_seed_providers(ps).await
+}
+
+/// Helper to produce an error JSON tuple (legacy non-grader call sites).
+#[allow(dead_code)]
+fn err_tuple(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({"error": msg})))
+}
+
 /// Build the complete Axum application with all middleware and routes.
 pub fn build_app(state: AppState) -> Router {
     // ── CORS ────────────────────────────────────────────────
@@ -64,27 +285,16 @@ pub fn build_app(state: AppState) -> Router {
         header::HeaderName::from_static("x-api-key"),
         header::HeaderName::from_static("x-csrf-token"),
     ];
-    let cors = if state.config.cors_origins.iter().any(|o| o == "*") {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::DELETE,
-                Method::PATCH,
-                Method::OPTIONS,
-            ])
-            .allow_headers(allowed_headers.clone())
-            .max_age(Duration::from_secs(86400))
-    } else {
-        let origins: Vec<HeaderValue> = state
-            .config
-            .cors_origins
-            .iter()
-            .filter_map(|o| o.parse::<HeaderValue>().ok())
-            .collect();
-        let cors = CorsLayer::new()
+    let has_wildcard_origin = state.config.cors_origins.iter().any(|origin| origin == "*");
+    let origins: Vec<HeaderValue> = state
+        .config
+        .cors_origins
+        .iter()
+        .filter(|origin| origin.as_str() != "*")
+        .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+        .collect();
+    let cors = if origins.is_empty() {
+        let layer = CorsLayer::new()
             .allow_methods([
                 Method::GET,
                 Method::POST,
@@ -96,11 +306,28 @@ pub fn build_app(state: AppState) -> Router {
             .allow_headers(allowed_headers)
             .max_age(Duration::from_secs(86400));
 
-        if origins.is_empty() {
-            cors
+        if has_wildcard_origin {
+            layer
+                .allow_origin(AllowOrigin::mirror_request())
+                .allow_credentials(true)
         } else {
-            cors.allow_origin(origins).allow_credentials(true)
+            // No configured origins: deny all cross-origin requests
+            layer
         }
+    } else {
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::PATCH,
+                Method::OPTIONS,
+            ])
+            .allow_headers(allowed_headers)
+            .allow_credentials(true)
+            .max_age(Duration::from_secs(86400))
     };
 
     // ── Public routes (no auth) ─────────────────────────────
@@ -122,12 +349,63 @@ pub fn build_app(state: AppState) -> Router {
             rate_limiter::public_rate_limit_middleware,
         ));
 
+    // ── Marketing static assets ──────────────────────────────
+    // Serve the Zola-built marketing public directory (CSS, fonts, images, JS,
+    // manifests, sitemap) for hosts that map to the marketing surface. The
+    // base directory is overridable via MARKETING_PUBLIC_DIR; the default is
+    // resolved relative to the working directory when the api-server binary
+    // is launched from the workspace root.
+    let marketing_public = std::env::var("MARKETING_PUBLIC_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "apps/marketing-zola/public".to_string());
+    let marketing_assets = Router::<AppState>::new()
+        .nest_service("/css", ServeDir::new(format!("{marketing_public}/css")))
+        .nest_service("/fonts", ServeDir::new(format!("{marketing_public}/fonts")))
+        .nest_service(
+            "/images",
+            ServeDir::new(format!("{marketing_public}/images")),
+        )
+        .nest_service("/js", ServeDir::new(format!("{marketing_public}/js")))
+        .route_service(
+            "/manifest.json",
+            ServeFile::new(format!("{marketing_public}/manifest.json")),
+        )
+        .route_service(
+            "/icon.svg",
+            ServeFile::new(format!("{marketing_public}/icon.svg")),
+        )
+        .route_service(
+            "/robots.txt",
+            ServeFile::new(format!("{marketing_public}/robots.txt")),
+        )
+        .route_service(
+            "/sitemap.xml",
+            ServeFile::new(format!("{marketing_public}/sitemap.xml")),
+        );
+
     let public = Router::<AppState>::new()
         .route("/assets/globals.css", get(browser_globals_css))
         .route("/verify-email", get(browser_verify_email_page))
         .nest("/health", routes::health::router())
         .nest("/v1/ses", routes::ses_notifications::router())
+        .merge(marketing_assets)
         .merge(rate_limited_public)
+        // ── Grader public routes (conditionally added) ──────────
+        .merge(if state.grader_state.is_some() {
+            Router::<AppState>::new().route("/v1/grader/check", post(grader_check_domain))
+        } else {
+            Router::<AppState>::new()
+        })
+        // ── Placement public routes (conditionally added) ───────
+        .merge(if state.placement_state.is_some() {
+            Router::<AppState>::new().route(
+                "/v1/inbox-placement/providers",
+                get(placement_list_providers),
+            )
+        } else {
+            Router::<AppState>::new()
+        })
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ddos::ddos_protection_middleware,
@@ -135,6 +413,25 @@ pub fn build_app(state: AppState) -> Router {
 
     // ── Authenticated v1 routes ─────────────────────────────
     let authenticated = Router::new()
+        // ── Grader authenticated routes (conditionally added) ──
+        .merge(if state.grader_state.is_some() {
+            Router::<AppState>::new()
+                .route("/v1/grader/submit", post(grader_submit_email))
+                .route("/v1/grader/results/:id", get(grader_get_result))
+                .route("/v1/grader/history", get(grader_list_results))
+        } else {
+            Router::<AppState>::new()
+        })
+        // ── Placement authenticated routes (conditionally added) ─
+        .merge(if state.placement_state.is_some() {
+            Router::<AppState>::new()
+                .route("/v1/inbox-placement/tests", post(placement_create_test))
+                .route("/v1/inbox-placement/tests", get(placement_list_tests))
+                .route("/v1/inbox-placement/tests/:id", get(placement_get_test))
+                .route("/v1/inbox-placement/trends", get(placement_get_trends))
+        } else {
+            Router::<AppState>::new()
+        })
         .nest("/v1/messages", routes::messages::router())
         .nest("/v1/domains", routes::domains::router())
         .nest("/v1/templates", routes::templates::router())
@@ -198,6 +495,7 @@ pub fn build_app(state: AppState) -> Router {
             "/v1/admin/system/health",
             routes::admin::system_health::router(),
         )
+        .nest("/v1/admin/vat", routes::admin::vat::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ddos::ddos_protection_middleware,
@@ -228,6 +526,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(authenticated)
         .fallback(fallback_handler)
         .layer(axum::middleware::from_fn(null_byte_check))
+        .layer(axum::middleware::from_fn(content_type_check))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn(request_logger::request_logger))
         .layer(overload_protection)
@@ -237,6 +536,9 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(metrics::metrics_middleware))
         .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+        .layer(RequestBodyLimitLayer::new(
+            10 * 1024 * 1024, /* 10 MB general limit */
+        ))
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
@@ -281,13 +583,28 @@ async fn security_headers(
 
 fn generate_csp_nonce() -> String {
     let mut nonce_bytes = [0_u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    use rand::TryRngCore;
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut nonce_bytes)
+        .expect("OsRng should not fail");
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce_bytes)
 }
 
 fn browser_csp_header(nonce: &str) -> HeaderValue {
+    let analytics_img_src = std::env::var("ANALYTICS_IMAGE_SRC").ok();
+    browser_csp_header_with_analytics(nonce, analytics_img_src.as_deref())
+}
+
+fn browser_csp_header_with_analytics(nonce: &str, analytics_img_src: Option<&str>) -> HeaderValue {
+    let analytics_img_src = analytics_img_src
+        .map(str::trim)
+        .filter(|src| !src.is_empty())
+        .filter(|src| src.starts_with("https://"))
+        .map(|src| format!(" {src}"))
+        .unwrap_or_default();
+
     HeaderValue::from_str(&format!(
-        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data: https://plausible.apexmail.ee; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'nonce-{nonce}'; object-src 'none'"
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}'; object-src 'none'"
     ))
     .expect("browser CSP should be valid")
 }
@@ -326,9 +643,44 @@ fn inject_script_nonce(html: &str, nonce: &str) -> String {
     output
 }
 
+fn inject_style_nonce(html: &str, nonce: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut output = String::with_capacity(html.len() + (nonce.len() + 9) * 4);
+    let mut cursor = 0;
+
+    while let Some(relative_start) = lower[cursor..].find("<style") {
+        let start = cursor + relative_start;
+        output.push_str(&html[cursor..start]);
+
+        let Some(relative_end) = lower[start..].find('>') else {
+            output.push_str(&html[start..]);
+            return output;
+        };
+
+        let end = start + relative_end;
+        let tag = &html[start..=end];
+        let lower_tag = &lower[start..=end];
+
+        if lower_tag.starts_with("</style") || lower_tag.contains(" nonce=") {
+            output.push_str(tag);
+        } else {
+            output.push_str(&html[start..end]);
+            output.push_str(" nonce=\"");
+            output.push_str(nonce);
+            output.push_str("\">");
+        }
+
+        cursor = end + 1;
+    }
+
+    output.push_str(&html[cursor..]);
+    output
+}
+
 fn browser_html_response(html: String) -> Response {
     let nonce = generate_csp_nonce();
     let html = inject_script_nonce(&html, &nonce);
+    let html = inject_style_nonce(&html, &nonce);
     let mut response = Html(html).into_response();
     response
         .headers_mut()
@@ -344,6 +696,50 @@ async fn browser_globals_css() -> impl IntoResponse {
         )],
         ui_foundation::GLOBALS_CSS,
     )
+}
+
+// ─── Content-Type validation ──────────────────────────────────────
+
+/// Reject POST/PUT/PATCH requests without a valid Content-Type header.
+/// This prevents unexpected behavior where Axum's `Json` extractor accepts
+/// arbitrary content types and deserializes them as JSON.
+async fn content_type_check(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::response::Response> {
+    let method = req.method();
+    let content_type = req
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // Only validate methods that carry a body
+    if method == Method::POST || method == Method::PUT || method == Method::PATCH {
+        let has_valid_content_type = content_type.starts_with("application/json")
+            || content_type.starts_with("multipart/form-data")
+            || content_type.starts_with("application/x-www-form-urlencoded")
+            || content_type.starts_with("text/plain")
+            || content_type.is_empty();
+
+        if !has_valid_content_type {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "UNSUPPORTED_MEDIA_TYPE",
+                        "message": format!(
+                            "Content-Type '{}' is not supported. Use application/json, multipart/form-data, or application/x-www-form-urlencoded",
+                            content_type
+                        )
+                    }
+                })),
+            )
+                .into_response());
+        }
+    }
+
+    Ok(next.run(req).await)
 }
 
 // ─── Null byte check ───────────────────────────────────────────
@@ -387,6 +783,7 @@ async fn null_byte_check(
 // ─── Fallback ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BrowserVerifyEmailQuery {
     token: Option<String>,
     email: Option<String>,
@@ -595,6 +992,8 @@ mod tests {
             ses_provider,
             None,
             ddos_protector,
+            None, // grader_state
+            None, // placement_state
         ))
     }
 
@@ -658,6 +1057,20 @@ mod tests {
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),
             metrics_port: 9090,
+            grader_enabled: false,
+            grader_rate_limit: 10,
+            grader_rate_window_seconds: 60,
+            grader_cache_ttl_seconds: 300,
+            grader_max_body_size: 1048576,
+
+            placement_enabled: false,
+            placement_polling_interval_secs: 60,
+            placement_max_polling_attempts: 10,
+            placement_max_seeds_per_test: 50,
+            placement_max_tests_per_hour: 5,
+            placement_imap_timeout_secs: 30,
+            placement_encrypt_passwords: true,
+            placement_encryption_secret: "test-placement-encryption-secret".into(),
         }
     }
 
@@ -1051,7 +1464,7 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert!(verify_csp.contains("script-src 'self' 'nonce-"));
-        assert!(verify_csp.contains("style-src 'self' 'unsafe-inline'"));
+        assert!(verify_csp.contains("style-src 'self' 'nonce-"));
         let verify_body = response_body_string(verify_response).await;
         assert!(verify_body.contains("Check your email"));
         assert!(verify_body.contains("Back to sign in"));
@@ -1093,11 +1506,32 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert!(csp.contains("script-src 'self' 'nonce-"));
-        assert!(csp.contains("img-src 'self' data: https://plausible.apexmail.ee"));
+        assert!(csp.contains("img-src 'self' data:"));
+        assert!(!csp.contains("plausible.apexmail.ee"));
 
         let body = response_body_string(response).await;
         assert!(body.contains("<script type=application/ld+json nonce=\""));
         assert!(!body.contains("<script type=application/ld+json>"));
+    }
+
+    #[test]
+    fn browser_csp_accepts_configured_https_analytics_image_source() {
+        let csp =
+            browser_csp_header_with_analytics("test-nonce", Some("https://analytics.example.com"));
+        let csp = csp.to_str().expect("csp header should be utf-8");
+
+        assert!(csp.contains("img-src 'self' data: https://analytics.example.com"));
+        assert!(csp.contains("script-src 'self' 'nonce-test-nonce'"));
+    }
+
+    #[test]
+    fn browser_csp_rejects_non_https_analytics_image_source() {
+        let csp =
+            browser_csp_header_with_analytics("test-nonce", Some("http://analytics.example.com"));
+        let csp = csp.to_str().expect("csp header should be utf-8");
+
+        assert!(csp.contains("img-src 'self' data:"));
+        assert!(!csp.contains("http://analytics.example.com"));
     }
 
     #[tokio::test]

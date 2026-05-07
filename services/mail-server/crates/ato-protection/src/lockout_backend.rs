@@ -64,7 +64,7 @@ impl InMemoryLockoutBackend {
         }
     }
 
-    /// Create a new instance with its own isolated store (not shared globally).
+    /// Create a new instance with an isolated store (e.g., for tests).
     pub fn isolated() -> Self {
         Self {
             store: Arc::new(DashMap::new()),
@@ -80,19 +80,17 @@ impl Default for InMemoryLockoutBackend {
 
 impl LockoutBackend for InMemoryLockoutBackend {
     fn record_lockout(&self, user_id: &str, window_secs: u64) {
-        let now = Utc::now();
-        let cutoff = now - chrono::Duration::seconds(window_secs as i64);
-        let mut entry = self.store.entry(user_id.to_string()).or_default();
-        // Evict stale entries while we're here
-        entry.retain(|ts| *ts > cutoff);
-        entry.push(now);
+        let cutoff = Utc::now() - chrono::Duration::seconds(window_secs as i64);
+        let mut entries = self.store.entry(user_id.to_string()).or_default();
+        entries.retain(|t| *t > cutoff);
+        entries.push(Utc::now());
     }
 
     fn recent_lockouts(&self, user_id: &str, window_secs: u64) -> u32 {
         let cutoff = Utc::now() - chrono::Duration::seconds(window_secs as i64);
         self.store
             .get(user_id)
-            .map(|events| events.iter().filter(|ts| **ts > cutoff).count() as u32)
+            .map(|entries| entries.iter().filter(|t| **t > cutoff).count() as u32)
             .unwrap_or(0)
     }
 
@@ -103,12 +101,16 @@ impl LockoutBackend for InMemoryLockoutBackend {
 
 // ─── Redis Backend ───────────────────────────────────────────────────────────
 
+/// Whether the `redis-lockout` feature is compiled in.
+/// Use this to check at runtime if Redis lockout operations will actually work.
+pub const REDIS_LOCKOUT_AVAILABLE: bool = cfg!(feature = "redis-lockout");
+
 /// Redis-backed lockout backend for multi-node deployments.
 /// Stores lockout events as sorted-set members keyed by
 /// `ato:lockout:{user_id}` with score = Unix timestamp.
 /// **Requires the `redis-lockout` feature flag** which brings in the `redis`
 /// crate dependency. Without it, this struct is available but all operations
-/// are no-ops that log warnings.
+/// are no-ops that log errors.
 /// ## Configuration
 /// ```rust,no_run
 /// use ato_protection::lockout_backend::RedisLockoutBackend;
@@ -117,34 +119,55 @@ impl LockoutBackend for InMemoryLockoutBackend {
 /// ## Known limitations
 /// - **Blocking I/O**:Redis calls currently use synchronous I/O on the calling
 /// thread. For high-throughput deployments, wrap in `tokio::task::spawn_blocking`.
-/// - **No TLS**:The connection string must use `redis://` (not `rediss://`).
-/// TLS support is planned.
 pub struct RedisLockoutBackend {
     /// Redis connection URL (e.g., `redis://127.0.0.1:6379`)
     url: String,
-    /// Key prefix for lockout sorted sets (used when redis-lockout feature is enabled)
-    #[allow(dead_code)]
+    /// Key prefix for lockout sorted sets (used by the Redis backend impl).
+    #[cfg(feature = "redis-lockout")]
     key_prefix: String,
+    /// Redis client (only present when `redis-lockout` feature is enabled)
+    #[cfg(feature = "redis-lockout")]
+    client: redis::Client,
 }
 
 impl RedisLockoutBackend {
     /// Create a new Redis lockout backend.
     pub fn new(url: String) -> Self {
+        #[cfg(feature = "redis-lockout")]
+        let client =
+            redis::Client::open(url.as_str()).expect("Invalid Redis URL for RedisLockoutBackend");
+
         Self {
             url,
+            #[cfg(feature = "redis-lockout")]
             key_prefix: "ato:lockout:".into(),
+            #[cfg(feature = "redis-lockout")]
+            client,
         }
     }
 
     /// Create with a custom key prefix.
     pub fn with_prefix(url: String, prefix: String) -> Self {
+        #[cfg(feature = "redis-lockout")]
+        let client =
+            redis::Client::open(url.as_str()).expect("Invalid Redis URL for RedisLockoutBackend");
+
+        // `prefix` is only consumed by the Redis backend impl; without the
+        // feature we discard it explicitly to keep the constructor uniform.
+        #[cfg(not(feature = "redis-lockout"))]
+        let _ = prefix;
+
         Self {
             url,
+            #[cfg(feature = "redis-lockout")]
             key_prefix: prefix,
+            #[cfg(feature = "redis-lockout")]
+            client,
         }
     }
 
-    fn _key(&self, user_id: &str) -> String {
+    #[cfg(feature = "redis-lockout")]
+    fn key(&self, user_id: &str) -> String {
         format!("{}{}", self.key_prefix, user_id)
     }
 
@@ -154,37 +177,129 @@ impl RedisLockoutBackend {
     }
 }
 
+#[cfg(feature = "redis-lockout")]
+impl LockoutBackend for RedisLockoutBackend {
+    fn record_lockout(&self, user_id: &str, window_secs: u64) {
+        let key = self.key(user_id);
+        let now = Utc::now().timestamp() as f64;
+        let cutoff = now - window_secs as f64;
+        let member = uuid::Uuid::new_v4().to_string();
+
+        match self.client.get_connection() {
+            Ok(mut conn) => {
+                // Remove entries older than the window
+                let _: Result<(), _> = redis::cmd("ZREMRANGEBYSCORE")
+                    .arg(&key)
+                    .arg("-inf")
+                    .arg(cutoff)
+                    .query(&mut conn);
+
+                // Add the new lockout event
+                let _: Result<(), _> = redis::cmd("ZADD")
+                    .arg(&key)
+                    .arg(now)
+                    .arg(&member)
+                    .query(&mut conn);
+
+                // Set TTL on the key
+                let _: Result<(), _> = redis::cmd("EXPIRE")
+                    .arg(&key)
+                    .arg(window_secs)
+                    .query(&mut conn);
+            }
+            Err(e) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    redis_url = %self.url,
+                    error = %e,
+                    "RedisLockoutBackend: failed to get Redis connection for record_lockout"
+                );
+            }
+        }
+    }
+
+    fn recent_lockouts(&self, user_id: &str, window_secs: u64) -> u32 {
+        let key = self.key(user_id);
+        let cutoff = (Utc::now().timestamp() - window_secs as i64) as f64;
+
+        match self.client.get_connection() {
+            Ok(mut conn) => {
+                match redis::cmd("ZCOUNT")
+                    .arg(&key)
+                    .arg(cutoff)
+                    .arg("+inf")
+                    .query::<u32>(&mut conn)
+                {
+                    Ok(count) => count,
+                    Err(e) => {
+                        tracing::error!(
+                            user_id = %user_id,
+                            redis_url = %self.url,
+                            error = %e,
+                            "RedisLockoutBackend: ZCOUNT failed for recent_lockouts"
+                        );
+                        0
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    redis_url = %self.url,
+                    error = %e,
+                    "RedisLockoutBackend: failed to get Redis connection for recent_lockouts"
+                );
+                0
+            }
+        }
+    }
+
+    fn clear(&self, user_id: &str) {
+        let key = self.key(user_id);
+
+        match self.client.get_connection() {
+            Ok(mut conn) => {
+                let _: Result<(), _> = redis::cmd("DEL").arg(&key).query(&mut conn);
+            }
+            Err(e) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    redis_url = %self.url,
+                    error = %e,
+                    "RedisLockoutBackend: failed to get Redis connection for clear"
+                );
+            }
+        }
+    }
+}
+
 /// Without the `redis-lockout` feature, all operations are no-ops.
 /// This allows code to reference `RedisLockoutBackend` unconditionally
 /// while only gaining actual Redis functionality when the feature is enabled.
+#[cfg(not(feature = "redis-lockout"))]
 impl LockoutBackend for RedisLockoutBackend {
     fn record_lockout(&self, user_id: &str, _window_secs: u64) {
-        // When the `redis-lockout` feature is enabled, this would:// ZADD <key> <timestamp> <uuid>
-        // ZREMRANGEBYSCORE <key> -inf <cutoff>
-        // EXPIRE <key> <window_secs>
-        tracing::warn!(
+        tracing::error!(
             user_id = %user_id,
             redis_url = %self.url,
-            "RedisLockoutBackend: record_lockout called but redis-lockout feature is not enabled"
+            "RedisLockoutBackend: record_lockout called but redis-lockout feature is not enabled — ATO protection is DISABLED"
         );
     }
 
     fn recent_lockouts(&self, user_id: &str, _window_secs: u64) -> u32 {
-        // When the `redis-lockout` feature is enabled, this would:// ZRANGEBYSCORE <key> <cutoff> +inf
-        // return count
-        tracing::warn!(
+        tracing::error!(
             user_id = %user_id,
             redis_url = %self.url,
-            "RedisLockoutBackend: recent_lockouts called but redis-lockout feature is not enabled"
+            "RedisLockoutBackend: recent_lockouts called but redis-lockout feature is not enabled — ATO protection is DISABLED"
         );
         0
     }
 
     fn clear(&self, user_id: &str) {
-        tracing::warn!(
+        tracing::error!(
             user_id = %user_id,
             redis_url = %self.url,
-            "RedisLockoutBackend: clear called but redis-lockout feature is not enabled"
+            "RedisLockoutBackend: clear called but redis-lockout feature is not enabled — ATO protection is DISABLED"
         );
     }
 }

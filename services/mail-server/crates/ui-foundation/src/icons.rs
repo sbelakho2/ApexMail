@@ -26,7 +26,7 @@ impl Default for IconRenderOptions<'_> {
     fn default() -> Self {
         Self {
             size: 20,
-            stroke_width: 1.75,
+            stroke_width: 2.0,
             class_name: None,
         }
     }
@@ -102,7 +102,7 @@ mod tests {
                 render_icon(glyph, IconRenderOptions::default()).expect("glyph should render");
             assert!(svg.starts_with("<svg "));
             assert!(svg.contains("viewBox=\"0 0 24 24\""));
-            assert!(svg.contains("stroke-width=\"1.75\""));
+            assert!(svg.contains("stroke-width=\"2\""));
         }
     }
 

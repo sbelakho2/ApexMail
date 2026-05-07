@@ -80,6 +80,7 @@ async fn require_service_token(
 // ─── Request / Response types ──────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RenderRequest {
     source: String,
     #[serde(default)]
@@ -96,6 +97,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ValidateRequest {
     source: String,
 }

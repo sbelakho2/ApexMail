@@ -1,30 +1,39 @@
 {# ── Cookie Consent Banner ────────────────────────────────────── #}
-{# The banner stays visible until the inline base template script #}
+{# The banner stays visible until static/js/apexmail-site.js      #}
 {# stores an explicit configured consent choice and hides it.     #}
 
-<div id="cookie-consent-banner" role="dialog" aria-labelledby="cookie-consent-heading" aria-describedby="cookie-consent-copy" class="fixed inset-x-0 bottom-0 z-50 border-t border-surface-200 bg-surface-50/95 backdrop-blur px-4 py-3">
-  <div class="mx-auto flex max-w-6xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+<div
+  id="cookie-consent-banner"
+  role="dialog"
+  aria-labelledby="cookie-consent-heading"
+  aria-describedby="cookie-consent-copy"
+  data-cookie-consent-cookie-name="{{ config.extra.cookie_consent_cookie_name | default(value='apexmail_cookie_consent') }}"
+  data-analytics-pixel-url="{{ config.extra.analytics_pixel_url | default(value='') }}"
+  class="fixed bottom-4 inset-x-4 md:bottom-12 md:right-12 md:left-auto md:max-w-sm z-[100] bg-white border border-surface-950 p-8"
+>
+  <div class="flex flex-col gap-6">
     <div>
-      <h2 id="cookie-consent-heading" class="sr-only">{{ config.extra.cookie_consent_heading | default(value="Cookie preferences") }}</h2>
-      <p id="cookie-consent-copy" class="text-sm text-surface-600">
+      <div class="flex items-center gap-2 mb-4">
+        <div class="w-2 h-2 bg-brand-500"></div>
+        <h2 id="cookie-consent-heading" class="text-[10px] font-bold text-surface-950 uppercase tracking-[0.2em]">{{ config.extra.cookie_consent_heading | default(value="Cookie Policy") }}</h2>
+      </div>
+      <p id="cookie-consent-copy" class="text-[13px] text-surface-600 leading-[1.6]">
       {{ config.extra.cookie_consent_copy | default(value="We use essential cookies and privacy-friendly analytics to improve ApexMail.") }}
-      See our
-      <a href="{{ config.extra.cookie_consent_policy_path | default(value="/cookies") }}" class="font-semibold text-surface-900 underline">{{ config.extra.cookie_consent_policy_label | default(value="Cookie Policy") }}</a>.
       </p>
     </div>
-    <div class="flex gap-2">
+    <div class="flex flex-col gap-2">
       {% set consent_choices = config.extra.cookie_consent_choices | default(value=[]) %}
       {% if consent_choices | length > 0 %}
         {% for choice in consent_choices %}
-          <button type="button" data-cookie-consent-choice data-cookie-consent-value="{{ choice.value }}" data-cookie-consent-analytics="{{ choice.analytics | default(value=false) }}" class="{% if choice.primary | default(value=false) %}btn-primary{% else %}border border-surface-300 text-surface-700 hover:bg-surface-100 rounded{% endif %} px-4 py-2 text-sm cursor-pointer text-center">
+          <button type="button" data-cookie-consent-choice data-cookie-consent-value="{{ choice.value }}" data-cookie-consent-analytics="{{ choice.analytics | default(value=false) }}" class="{% if choice.primary | default(value=false) %}btn-primary{% else %}btn-secondary{% endif %} px-4 py-2 text-sm w-full">
             {{ choice.label }}
           </button>
         {% endfor %}
       {% else %}
-        <button type="button" data-cookie-consent-choice data-cookie-consent-value="necessary" data-cookie-consent-analytics="false" class="border border-surface-300 text-surface-700 hover:bg-surface-100 px-4 py-2 text-sm cursor-pointer text-center rounded">
-          Necessary Only
+        <button type="button" data-cookie-consent-choice data-cookie-consent-value="reject_all" data-cookie-consent-analytics="false" class="btn-secondary px-4 py-2 text-sm flex-1">
+          Reject
         </button>
-        <button type="button" data-cookie-consent-choice data-cookie-consent-value="all" data-cookie-consent-analytics="true" class="btn-primary px-4 py-2 text-sm cursor-pointer text-center">
+        <button type="button" data-cookie-consent-choice data-cookie-consent-value="all" data-cookie-consent-analytics="true" class="btn-primary px-4 py-2 text-sm flex-1">
           Accept All
         </button>
       {% endif %}

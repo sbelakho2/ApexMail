@@ -15,6 +15,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CrmLeadsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

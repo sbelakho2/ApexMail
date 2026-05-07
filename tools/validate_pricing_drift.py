@@ -73,7 +73,7 @@ def main() -> int:
         require_contains(errors, MARKETING_CALCULATOR, dedicated_ip_price)
 
     require_contains(errors, MARKETING_FAQ, "roughly a 17% discount")
-    require_contains(errors, MARKETING_FAQ, "HIPAA compliance is included with Enterprise")
+    require_contains(errors, MARKETING_FAQ, "Enterprise includes a HIPAA BAA workflow")
 
     if errors:
         for error in errors:

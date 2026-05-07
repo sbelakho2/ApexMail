@@ -51,6 +51,12 @@ reqwest.workspace = true
 aws-config.workspace = true
 aws-sdk-sesv2.workspace = true
 
+# Randomisation (backoff jitter)
+rand.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tower.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

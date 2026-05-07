@@ -29,7 +29,7 @@
 | Business | $165 | 200,000 |
 | Enterprise | Custom | Custom |
 
-- API: `api.apexmail.com/v1`, Auth: `X-API-Key` header
+- API: `api.apexmail.ee/v1`, Auth: `X-API-Key` header
 - Overage: Starter $3/1K, Growth $2/1K, Business $1.50/1K
 - Annual billing: 20% discount
 - SDK: `apexmail` for Python (both schemas)
@@ -286,7 +286,7 @@ Novel pipeline components:
 - **5-point scoring rubric**: relevance, no hallucination, helpfulness, safety, factual accuracy
 - **Grade levels**: A (excellent) → F (failing)
 - **Pass threshold**: A+B rate ≥ 70%
-- **Hallucination blocklist**: sendgrid.com, mailchimp.com, mailgun.com, aws.amazon.com/ses, postmark, sparkpost, api.apexmail.com, apexmail.io, apexmail.org
+- **Hallucination blocklist**: sendgrid.com, mailchimp.com, mailgun.com, aws.amazon.com/ses, postmark, sparkpost, api.apexmail.ee, apexmail.io, apexmail.org
 - **Known facts**: api_url=api.apexmail.ee/v1, company=Bel Consulting, country=Estonia, city=Tallinn, founded=2022, open_rate_benchmark=27%, ROI=$36
 - **Base model**: TinyLlama-1.1B
 

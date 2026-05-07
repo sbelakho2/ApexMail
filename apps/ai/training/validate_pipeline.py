@@ -84,7 +84,7 @@ check("Starter $25 in PRICING_TABLE", "$25/mo" in PRICING_TABLE or "$25" in PRIC
 check("Pro $65 in PRICING_TABLE", "$65/mo" in PRICING_TABLE or "$65" in PRICING_TABLE)
 check("Growth $150 in PRICING_TABLE", "$150/mo" in PRICING_TABLE or "$150" in PRICING_TABLE)
 check("Scale $350 in PRICING_TABLE", "$350/mo" in PRICING_TABLE or "$350" in PRICING_TABLE)
-check("Enterprise $800 in PRICING_TABLE", "$800/mo" in PRICING_TABLE or "$800" in PRICING_TABLE)
+check("Enterprise $3,000 in PRICING_TABLE", "$3,000/mo" in PRICING_TABLE or "$3,000" in PRICING_TABLE)
 # Verify no stale pricing
 for stale in ["$29/mo", "$59/mo", "$129/mo", "$399/mo", "$1,299/mo"]:
     check(f"No stale {stale}", stale not in PRICING_TABLE, f"found {stale}")

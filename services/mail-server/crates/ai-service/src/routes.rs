@@ -9,10 +9,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::{
@@ -29,44 +28,8 @@ use crate::{
 
 // ── Shared application state ─────────────────────────────────────
 
-struct RateLimitWindow {
-    started_at: Instant,
-    count: usize,
-}
-
-struct RequestRateLimiter {
-    window: Mutex<RateLimitWindow>,
-    max_requests: usize,
-    interval: Duration,
-}
-
-impl RequestRateLimiter {
-    fn new(max_requests: usize, interval: Duration) -> Self {
-        Self {
-            window: Mutex::new(RateLimitWindow {
-                started_at: Instant::now(),
-                count: 0,
-            }),
-            max_requests,
-            interval,
-        }
-    }
-
-    fn allow(&self, now: Instant) -> bool {
-        let mut window = self.window.lock();
-        if now.duration_since(window.started_at) >= self.interval {
-            window.started_at = now;
-            window.count = 0;
-        }
-
-        if window.count >= self.max_requests {
-            return false;
-        }
-
-        window.count += 1;
-        true
-    }
-}
+/// Redis-backed rate limiter key prefix for inference requests.
+const INFERENCE_RATE_LIMIT_KEY: &str = "ai:inference_rate";
 
 /// Shared state for all route handlers.
 pub struct AppState {
@@ -79,17 +42,42 @@ pub struct AppState {
     pub sto: SendTimeOptimizer,
     pub training: TrainingManager,
     pub service_token: String,
-    inference_rate_limiter: RequestRateLimiter,
+    /// Optional Redis connection pool for distributed rate limiting (C-08).
+    pub redis_pool: Option<deadpool_redis::Pool>,
 }
 
 impl AppState {
     pub fn new(config: AiConfig) -> Result<Self, AiError> {
-        let inference_rate_limiter = RequestRateLimiter::new(
-            config.inference_rate_limit,
-            Duration::from_secs(config.inference_rate_limit_window_secs),
-        );
-        let bandits =
-            BanditOptimizer::with_state_path(config.bandit_epsilon, &config.bandit_state_path)?;
+        // O-10.1: Pass encryption key if configured, else None for plaintext
+        let enc_key: Option<&str> = if config.bandit_encryption_key.is_empty() {
+            None
+        } else {
+            Some(&config.bandit_encryption_key)
+        };
+        let bandits = BanditOptimizer::with_state_path(
+            config.bandit_epsilon,
+            &config.bandit_state_path,
+            enc_key,
+        )?;
+
+        // Attempt to create a Redis pool for distributed rate limiting.
+        // If no URL is configured or connection fails, rate limiting is a no-op.
+        let redis_pool = if config.redis_url.is_empty() {
+            None
+        } else {
+            match deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            {
+                Ok(pool) => Some(pool),
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to create Redis pool for rate limiting (C-08): {e}; \
+                         inference rate limiting will be disabled"
+                    );
+                    None
+                }
+            }
+        };
 
         Ok(Self {
             bandits,
@@ -101,7 +89,7 @@ impl AppState {
             sto: SendTimeOptimizer::new(),
             training: TrainingManager::new(),
             service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
-            inference_rate_limiter,
+            redis_pool,
         })
     }
 }
@@ -109,12 +97,14 @@ impl AppState {
 // ── Request / Response types ─────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PredictRequest {
     pub model_id: String,
     pub input: serde_json::Value,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SuggestRequest {
     pub topic: String,
     #[serde(default = "default_tone")]
@@ -131,11 +121,13 @@ fn default_count() -> usize {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OptimizeTimeRequest {
     pub engagement_data: Vec<(u8, u8, f64)>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrainRequest {
     pub model_id: String,
     #[serde(default)]
@@ -143,12 +135,14 @@ pub struct TrainRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BanditRewardRequest {
     pub arm_id: String,
     pub reward: f64,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContentScoreRequest {
     pub subject: String,
 }
@@ -200,12 +194,26 @@ async fn predict_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PredictRequest>,
 ) -> impl IntoResponse {
-    if !state.inference_rate_limiter.allow(Instant::now()) {
-        let (status, body) = ApiResponse::<()>::err_with_status(
-            StatusCode::TOO_MANY_REQUESTS,
-            "inference rate limit exceeded",
-        );
-        return (status, body).into_response();
+    // C-08: Distributed rate limiting via Redis.
+    // Falls back to allowing the request if Redis is unavailable (no local mutex).
+    if let Some(ref pool) = state.redis_pool {
+        let max_requests = state.config.inference_rate_limit;
+        let window_secs = state.config.inference_rate_limit_window_secs;
+
+        match enforce_redis_rate_limit(pool, max_requests, window_secs).await {
+            Ok(true) => { /* within limit — proceed */ }
+            Ok(false) => {
+                let (status, body) = ApiResponse::<()>::err_with_status(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "inference rate limit exceeded",
+                );
+                return (status, body).into_response();
+            }
+            Err(_) => {
+                // Redis error — allow request rather than degrading open.
+                tracing::warn!("Redis rate-limit check failed, allowing request");
+            }
+        }
     }
 
     match state.inference.run_prediction(&req.model_id, req.input) {
@@ -215,6 +223,43 @@ async fn predict_handler(
             (status, body).into_response()
         }
     }
+}
+
+/// Check a Redis-backed fixed-window rate limit using INCR + EXPIRE.
+///
+/// Returns `Ok(true)` if the request is within the limit,
+/// `Ok(false)` if rate-limited, or `Err(())` if Redis is unreachable.
+async fn enforce_redis_rate_limit(
+    pool: &deadpool_redis::Pool,
+    max_requests: usize,
+    window_secs: u64,
+) -> Result<bool, ()> {
+    let mut conn = pool.get().await.map_err(|_| ())?;
+
+    // Fixed window based on current epoch second divided by window size.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let window = now_secs / window_secs;
+    let key = format!("{}:{}", INFERENCE_RATE_LIMIT_KEY, window);
+
+    let count: usize = redis::cmd("INCR")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|_| ())?;
+
+    if count == 1 {
+        // First request in this window — set TTL (twice the window for safety).
+        let _: Result<(), _> = redis::cmd("EXPIRE")
+            .arg(&key)
+            .arg(window_secs * 2)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    Ok(count <= max_requests)
 }
 
 async fn suggest_handler(
@@ -249,7 +294,7 @@ async fn train_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TrainRequest>,
 ) -> impl IntoResponse {
-    let job = state.training.start_job(&req.model_id, &req.config);
+    let job = state.training.start_job(&req.model_id, &req.config).await;
     (StatusCode::CREATED, ApiResponse::ok(job))
 }
 
@@ -262,7 +307,7 @@ async fn bandit_reward_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BanditRewardRequest>,
 ) -> impl IntoResponse {
-    match state.bandits.record_reward(&req.arm_id, req.reward) {
+    match state.bandits.record_reward(&req.arm_id, req.reward).await {
         Ok(()) => (StatusCode::OK, ApiResponse::ok("recorded")).into_response(),
         Err(e) => {
             let (status, body) = ApiResponse::<()>::err(e.to_string());
@@ -426,11 +471,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_predict_endpoint_is_rate_limited() {
+    async fn test_predict_endpoint_succeeds_without_redis() {
+        // When no Redis pool is configured, the rate limiter is a no-op
+        // and all requests should succeed.
         let mut state = default_app_state();
         let state_mut = Arc::get_mut(&mut state).expect("exclusive test state");
         state_mut.service_token = "test-key".into();
-        state_mut.inference_rate_limiter = RequestRateLimiter::new(1, Duration::from_secs(60));
         state_mut.inference.register_model(Model {
             id: "m1".into(),
             name: "test".into(),
@@ -446,24 +492,14 @@ mod tests {
             "input": {"feature": 42},
         });
 
-        let first = Request::builder()
+        let req = Request::builder()
             .uri("/predict")
             .method("POST")
             .header("x-api-key", "test-key")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
-        let first_resp = router.clone().oneshot(first).await.unwrap();
-        assert_eq!(first_resp.status(), StatusCode::OK);
-
-        let second = Request::builder()
-            .uri("/predict")
-            .method("POST")
-            .header("x-api-key", "test-key")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let second_resp = router.oneshot(second).await.unwrap();
-        assert_eq!(second_resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

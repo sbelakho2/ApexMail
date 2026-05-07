@@ -1,5 +1,36 @@
 use regex::Regex;
+use std::net::IpAddr;
 use url::Url;
+
+/// Well-known internal hostnames that should never be scraped.
+const INTERNAL_HOSTNAMES: &[&str] = &[
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+    "[::1]",
+    "::1",
+    "169.254.169.254", // AWS/GCP metadata endpoint
+    "metadata.google.internal",
+    "100.100.100.200", // Alibaba cloud metadata
+];
+
+/// Check whether an IP address is in a private or link-local range.
+fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.octets() == [169, 254, 169, 254]
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            let is_site_local = segments[0] & 0xffc0 == 0xfec0;
+            v6.is_loopback() || v6.is_unicast_link_local() || is_site_local || v6.is_multicast()
+        }
+    }
+}
 
 /// Web scraper utilities:email extraction, URL validation, robots.txt
 /// checks.
@@ -53,12 +84,61 @@ impl WebScraper {
         })
     }
 
-    /// Validate that a string is a well-formed HTTP(S) URL.
+    /// Validate that a string is a well-formed HTTP(S) URL pointing to a public
+    /// (non-internal) target.
+    ///
+    /// # Security (O-12.2)
+    ///
+    /// **Root cause**: `validate_url()` only checked for valid URL syntax via
+    /// `Url::parse()`. It accepted any host including `localhost`, private IPs,
+    /// and cloud metadata endpoints, enabling SSRF attacks.
+    ///
+    /// **Fix**: Added blocking of:
+    /// - Well-known internal hostnames (`localhost`, `127.0.0.1`,
+    ///   `169.254.169.254`, etc.)
+    /// - Private IP ranges when the host is an IP literal (RFC 1918, link-local,
+    ///   loopback, multicast, site-local IPv6)
+    /// - Hostnames without a dot (internal network names like `http://internal-app/`)
+    ///
+    /// Full DNS-based SSRF prevention (resolve-then-verify) should be added for
+    /// production use — see [`worker-processors` SSRF validator] for reference.
     pub fn validate_url(input: &str) -> bool {
-        match Url::parse(input) {
-            Ok(u) => u.scheme() == "http" || u.scheme() == "https",
-            Err(_) => false,
+        let url = match Url::parse(input) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+
+        // Only HTTP/HTTPS schemes are allowed
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return false;
         }
+
+        let host = url.host_str().unwrap_or("");
+
+        // Block well-known internal hostnames
+        if INTERNAL_HOSTNAMES.contains(&host) {
+            return false;
+        }
+
+        // Block hostnames without a dot (likely internal network names)
+        // e.g., http://internal-service/admin
+        if !host.contains('.') && host != "[::1]" {
+            return false;
+        }
+
+        // If the host is an IP literal, check that it's not a private IP
+        if let Some(ip) = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .or(Some(host))
+            .and_then(|h| h.parse::<IpAddr>().ok())
+        {
+            if is_private_ip(&ip) {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Simplified robots.txt check:returns `true` if the path is
@@ -156,9 +236,19 @@ mod tests {
     #[test]
     fn test_validate_url_and_company_info() {
         assert!(WebScraper::validate_url("https://example.com/path?q=1"));
-        assert!(WebScraper::validate_url("http://localhost:3000"));
+        assert!(WebScraper::validate_url("http://example.com:3000"));
         assert!(!WebScraper::validate_url("ftp://files.example.com"));
         assert!(!WebScraper::validate_url("not a url"));
+        // SSRF protection: internal hostnames and private IPs are rejected
+        assert!(!WebScraper::validate_url("http://localhost:3000"));
+        assert!(!WebScraper::validate_url("http://127.0.0.1/admin"));
+        assert!(!WebScraper::validate_url(
+            "http://169.254.169.254/latest/meta-data/"
+        ));
+        assert!(!WebScraper::validate_url("http://192.168.1.1"));
+        assert!(!WebScraper::validate_url("http://10.0.0.1"));
+        assert!(!WebScraper::validate_url("http://[::1]:8080"));
+        assert!(!WebScraper::validate_url("http://internal-service/admin"));
 
         let info = WebScraper::extract_company_info("acme.com");
         assert_eq!(info["name"], "Acme");

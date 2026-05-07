@@ -1,23 +1,116 @@
 //! Postgres queue provider with SKIP LOCKED for exactly-once processing.
+//!
+//! # Security
+//! - O‑5.1:HMAC‑SHA256 payload signing for integrity verification.
+//! - O‑5.2:Priority aging to prevent starvation of low‑priority jobs.
 
+use base64::Engine;
 use chrono::{TimeDelta, Utc};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use sqlx::PgPool;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::types::{EnqueueOptions, Job, JobStatus, QueueError, QueueStats};
 
+/// Key used to embed the HMAC signature in the JSON payload.
+const HMAC_FIELD: &str = "__hmac__";
+const MAX_RETRY_BACKOFF_SECS: i64 = 3600;
+
+/// HMAC‑SHA256 signing provider.
+type HmacSha256 = Hmac<Sha256>;
+
 /// Postgres-backed job queue using SELECT ... FOR UPDATE SKIP LOCKED.
+///
+/// O‑5.1:When a `signing_key` is configured, every enqueued payload is signed
+/// with HMAC‑SHA256 and verified on dequeue. Tampered payloads are rejected.
+///
+/// O‑5.2:The dequeue ORDER BY incorporates an "effective priority" that ages
+/// low‑priority jobs over time (+1 per hour waited, capped at +100),
+/// preventing starvation.
 pub struct PostgresQueueProvider {
     db: PgPool,
+    /// Optional HMAC‑SHA256 signing key for payload integrity.
+    signing_key: Option<Vec<u8>>,
 }
 
 impl PostgresQueueProvider {
+    /// Create a new provider without payload signing.
     pub fn new(db: PgPool) -> Self {
-        Self { db }
+        Self {
+            db,
+            signing_key: None,
+        }
+    }
+
+    /// Create a new provider with HMAC‑SHA256 payload signing.
+    pub fn with_signing_key(db: PgPool, signing_key: Vec<u8>) -> Self {
+        Self {
+            db,
+            signing_key: Some(signing_key),
+        }
+    }
+
+    /// Returns `true` if payload signing is enabled.
+    pub fn is_signing_enabled(&self) -> bool {
+        self.signing_key.is_some()
+    }
+
+    /// Compute an HMAC‑SHA256 signature over the canonical payload JSON.
+    fn compute_signature(&self, payload: &serde_json::Value) -> Result<String, QueueError> {
+        let key = self
+            .signing_key
+            .as_ref()
+            .ok_or_else(|| QueueError::InvalidPayload("Signing not configured".into()))?;
+        let mac = HmacSha256::new_from_slice(key)
+            .map_err(|e| QueueError::InvalidPayload(format!("HMAC key error: {e}")))?;
+
+        // Serialize the payload (without __hmac__) to canonical JSON bytes.
+        let canonical = serde_json::to_vec(payload)
+            .map_err(|e| QueueError::InvalidPayload(format!("Payload serialization: {e}")))?;
+
+        // Use hmac_mut to compute the signature
+        let mut mac = mac;
+        mac.update(&canonical);
+        let result = mac.finalize();
+        let code = result.into_bytes();
+        Ok(base64::engine::general_purpose::STANDARD.encode(code))
+    }
+
+    /// Strip the `__hmac__` field from a payload (if present).
+    fn strip_hmac(payload: &mut serde_json::Value) {
+        if let serde_json::Value::Object(map) = payload {
+            map.remove(HMAC_FIELD);
+        }
+    }
+
+    fn prepare_payload_for_storage(
+        &self,
+        mut payload: serde_json::Value,
+    ) -> Result<PreparedPayload, QueueError> {
+        Self::strip_hmac(&mut payload);
+
+        let signature = if self.signing_key.is_some() {
+            let sig = self.compute_signature(&payload)?;
+            if let serde_json::Value::Object(ref mut map) = payload {
+                map.insert(
+                    HMAC_FIELD.to_string(),
+                    serde_json::Value::String(sig.clone()),
+                );
+            }
+            Some(sig)
+        } else {
+            None
+        };
+
+        Ok(PreparedPayload { payload, signature })
     }
 
     /// Enqueue a new job.
+    ///
+    /// O‑5.1:If signing is enabled, the payload is signed with HMAC‑SHA256
+    /// before storage. The signature is embedded as `__hmac__` in the JSON.
     pub async fn enqueue(&self, opts: EnqueueOptions) -> Result<Job, QueueError> {
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -37,6 +130,9 @@ impl PostgresQueueProvider {
             ));
         }
 
+        // O‑5.1:Sign the payload before storing
+        let prepared = self.prepare_payload_for_storage(opts.payload)?;
+
         let row: JobRow = sqlx::query_as::<_, JobRow>(
             r#"
             INSERT INTO queue_jobs (id, tenant_id, queue, payload, status, attempts, max_attempts,
@@ -51,7 +147,7 @@ impl PostgresQueueProvider {
         .bind(id)
         .bind(opts.tenant_id)
         .bind(&opts.queue)
-        .bind(&opts.payload)
+        .bind(&prepared.payload)
         .bind(opts.max_attempts)
         .bind(opts.priority)
         .bind(scheduled_at)
@@ -60,12 +156,22 @@ impl PostgresQueueProvider {
         .fetch_one(&self.db)
         .await?;
 
-        info!(job_id = %id, queue = %opts.queue, "Job enqueued");
+        if let Some(sig) = prepared.signature {
+            info!(job_id = %id, queue = %opts.queue, sig = %sig, "Job enqueued with HMAC");
+        } else {
+            info!(job_id = %id, queue = %opts.queue, "Job enqueued (unsigned)");
+        }
         Ok(row.into_job())
     }
 
     /// Dequeue the next available job using SKIP LOCKED.
-    /// Returns None if no jobs are available.
+    ///
+    /// O‑5.2: Uses an "effective priority" that ages over time:
+    /// `priority + LEAST(age_in_hours, 100)`. This prevents low‑priority
+    /// jobs from starving while maintaining priority ordering for recent jobs.
+    ///
+    /// O‑5.1: If signing is enabled, each payload's HMAC is verified before
+    /// returning. Tampered payloads are logged and skipped.
     pub async fn dequeue(&self, queue: &str, batch_size: i32) -> Result<Vec<Job>, QueueError> {
         let now = Utc::now();
 
@@ -80,8 +186,11 @@ impl PostgresQueueProvider {
                 SELECT id FROM queue_jobs
                 WHERE queue = $1
                   AND status = 'pending'
+                  AND attempts < max_attempts
                   AND scheduled_at <= $3
-                ORDER BY priority DESC, created_at ASC
+                ORDER BY
+                    (priority + LEAST(EXTRACT(EPOCH FROM ($3 - created_at)) / 3600, 100))::int DESC,
+                    created_at ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT $2
             )
@@ -97,11 +206,114 @@ impl PostgresQueueProvider {
         .fetch_all(&self.db)
         .await?;
 
-        let jobs: Vec<Job> = rows.into_iter().map(|r| r.into_job()).collect();
+        // O‑5.1:Verify HMAC signatures and filter out tampered payloads
+        let mut jobs: Vec<Job> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut payload = row.payload.clone();
+            if self.signing_key.is_some() {
+                // Extract and remove the HMAC field
+                let stored_sig = payload
+                    .get(HMAC_FIELD)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Self::strip_hmac(&mut payload);
+
+                if let Some(sig) = stored_sig {
+                    let expected = self.compute_signature(&payload)?;
+                    if sig != expected {
+                        warn!(
+                            job_id = %row.id,
+                            "HMAC verification failed – payload tampered, skipping job"
+                        );
+                        // Revert to pending so it can be inspected via dead letter
+                        let _ = sqlx::query(
+                            r#"
+                            UPDATE queue_jobs
+                            SET status = 'dead_letter',
+                                error_message = 'HMAC verification failed; manual replay requires trusted payload re-signing',
+                                updated_at = $2
+                            WHERE id = $1
+                            "#,
+                        )
+                        .bind(row.id)
+                        .bind(now)
+                        .execute(&self.db)
+                        .await;
+                        continue;
+                    }
+                } else {
+                    warn!(
+                        job_id = %row.id,
+                        "Missing HMAC signature – payload tampered or migration, skipping job"
+                    );
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE queue_jobs
+                        SET status = 'dead_letter',
+                            error_message = 'Missing HMAC signature; manual replay requires trusted payload re-signing',
+                            updated_at = $2
+                        WHERE id = $1
+                        "#,
+                    )
+                    .bind(row.id)
+                    .bind(now)
+                    .execute(&self.db)
+                    .await;
+                    continue;
+                }
+            }
+
+            // Reconstruct the final payload without __hmac__
+            let mut job = row.into_job();
+            job.payload = payload;
+            jobs.push(job);
+        }
+
         if !jobs.is_empty() {
             info!(count = jobs.len(), queue = queue, "Dequeued jobs");
         }
         Ok(jobs)
+    }
+
+    /// Replay a dead-lettered job after manual inspection by replacing its
+    /// payload with caller-provided trusted JSON and re-signing it when HMAC
+    /// protection is enabled.
+    pub async fn replay_dead_letter(
+        &self,
+        job_id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<Job, QueueError> {
+        let now = Utc::now();
+        let prepared = self.prepare_payload_for_storage(payload)?;
+
+        let row = sqlx::query_as::<_, JobRow>(
+            r#"
+            UPDATE queue_jobs
+            SET payload = $2,
+                status = 'pending',
+                attempts = 0,
+                scheduled_at = $3,
+                started_at = NULL,
+                completed_at = NULL,
+                failed_at = NULL,
+                error_message = NULL,
+                updated_at = $3
+            WHERE id = $1 AND status = 'dead_letter'
+            RETURNING id, tenant_id, queue, payload, status,
+                      attempts, max_attempts, priority, scheduled_at,
+                      started_at, completed_at, failed_at, error_message,
+                      visibility_timeout, created_at, updated_at
+            "#,
+        )
+        .bind(job_id)
+        .bind(&prepared.payload)
+        .bind(now)
+        .fetch_optional(&self.db)
+        .await?
+        .ok_or(QueueError::NotFound { id: job_id })?;
+
+        info!(job_id = %job_id, "Dead-lettered job manually replayed");
+        Ok(row.into_job())
     }
 
     /// Mark a job as completed.
@@ -149,7 +361,7 @@ impl PostgresQueueProvider {
             self.dead_letter(job_id, error).await?;
         } else {
             // #228:Exponential backoff with cap at 1 hour to prevent excessive delays
-            let backoff_secs = ((2_i64.pow(job.attempts as u32)) * 30).min(3600);
+            let backoff_secs = retry_backoff_secs(job.attempts);
             let retry_at = now + chrono::Duration::seconds(backoff_secs);
 
             sqlx::query(
@@ -306,6 +518,16 @@ struct StatsRow {
     dead_letter: i64,
 }
 
+struct PreparedPayload {
+    payload: serde_json::Value,
+    signature: Option<String>,
+}
+
+fn retry_backoff_secs(attempts: i32) -> i64 {
+    let exponent = attempts.max(0).min(7) as u32;
+    ((1_i64 << exponent) * 30).min(MAX_RETRY_BACKOFF_SECS)
+}
+
 impl JobRow {
     fn into_job(self) -> Job {
         Job {
@@ -350,20 +572,132 @@ mod tests {
         assert_eq!(opts.priority, 10);
     }
 
-    #[test]
-    fn test_exponential_backoff_calculation() {
-        // Verify backoff formula:2^attempts * 30 seconds
-        let attempt_1 = 2_i64.pow(1) * 30; // 60s
-        let attempt_2 = 2_i64.pow(2) * 30; // 120s
-        let attempt_3 = 2_i64.pow(3) * 30; // 240s
-        assert_eq!(attempt_1, 60);
-        assert_eq!(attempt_2, 120);
-        assert_eq!(attempt_3, 240);
+    #[tokio::test]
+    async fn test_hmac_strip_and_compute() {
+        let mut payload = serde_json::json!({
+            "to": "user@example.com",
+            "__hmac__": "abc123"
+        });
+
+        // Verify strip removes the field
+        PostgresQueueProvider::strip_hmac(&mut payload);
+        assert!(payload.get("__hmac__").is_none());
+        assert_eq!(payload.get("to").unwrap(), "user@example.com");
+
+        // Verify compute works with a provider that has a signing key
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let provider = PostgresQueueProvider::with_signing_key(pool, b"test-key".to_vec());
+        let sig = provider.compute_signature(&payload).unwrap();
+        assert_eq!(sig.len(), 44); // SHA‑256 → 32 bytes → base64 = 44 chars
+        assert!(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &sig).is_ok());
     }
 
     #[tokio::test]
-    async fn test_provider_creation() {
+    async fn test_hmac_verification() {
+        let payload = serde_json::json!({"to": "user@example.com"});
+
         let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
-        let _provider = PostgresQueueProvider::new(pool);
+        let provider = PostgresQueueProvider::with_signing_key(pool, b"test-key".to_vec());
+
+        let sig1 = provider.compute_signature(&payload).unwrap();
+
+        // Same payload should produce same signature
+        let sig2 = provider.compute_signature(&payload).unwrap();
+        assert_eq!(sig1, sig2);
+
+        // Different payload should produce different signature
+        let mutated = serde_json::json!({"to": "attacker@example.com"});
+        let sig3 = provider.compute_signature(&mutated).unwrap();
+        assert_ne!(sig1, sig3);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_payload_for_storage_resigns_manual_replay_payload() {
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let provider = PostgresQueueProvider::with_signing_key(pool, b"test-key".to_vec());
+        let payload = serde_json::json!({
+            "to": "user@example.com",
+            "__hmac__": "stale-or-tampered"
+        });
+
+        let prepared = provider.prepare_payload_for_storage(payload).unwrap();
+        let stored_sig = prepared
+            .payload
+            .get(HMAC_FIELD)
+            .and_then(|value| value.as_str())
+            .expect("payload should be signed");
+
+        assert_ne!(stored_sig, "stale-or-tampered");
+        assert_eq!(prepared.signature.as_deref(), Some(stored_sig));
+
+        let mut verification_payload = prepared.payload.clone();
+        PostgresQueueProvider::strip_hmac(&mut verification_payload);
+        assert_eq!(
+            provider.compute_signature(&verification_payload).unwrap(),
+            stored_sig
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_payload_for_storage_strips_hmac_without_signing() {
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let provider = PostgresQueueProvider::new(pool);
+        let payload = serde_json::json!({
+            "to": "user@example.com",
+            "__hmac__": "stale-or-tampered"
+        });
+
+        let prepared = provider.prepare_payload_for_storage(payload).unwrap();
+        assert!(prepared.signature.is_none());
+        assert!(prepared.payload.get(HMAC_FIELD).is_none());
+    }
+
+    #[test]
+    fn test_exponential_backoff_calculation() {
+        assert_eq!(retry_backoff_secs(1), 60);
+        assert_eq!(retry_backoff_secs(2), 120);
+        assert_eq!(retry_backoff_secs(3), 240);
+        assert_eq!(retry_backoff_secs(30), MAX_RETRY_BACKOFF_SECS);
+        assert_eq!(retry_backoff_secs(i32::MAX), MAX_RETRY_BACKOFF_SECS);
+    }
+
+    #[tokio::test]
+    async fn test_provider_creation_no_signing() {
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let provider = PostgresQueueProvider::new(pool);
+        assert!(!provider.is_signing_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_provider_creation_with_signing() {
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let provider = PostgresQueueProvider::with_signing_key(pool, b"my-secret-key".to_vec());
+        assert!(provider.is_signing_enabled());
+    }
+
+    #[test]
+    fn test_priority_aging_effective_priority() {
+        // Verify the aging formula: priority + LEAST(age_hours, 100)
+        // A job waiting 24 hours with priority 0 should have effective priority ~24
+        let created_at = Utc::now() - chrono::Duration::hours(24);
+        let now = Utc::now();
+        let age_secs = (now - created_at).num_seconds();
+        let age_hours = age_secs as f64 / 3600.0;
+        let effective = (0.0 + age_hours.min(100.0)) as i32;
+        assert!(effective >= 24);
+        assert!(effective <= 100);
+
+        // A high-priority job created recently should still have higher effective priority
+        let recent_high = Utc::now() - chrono::Duration::minutes(5);
+        let recent_age_secs = (now - recent_high).num_seconds();
+        let recent_age_hours = recent_age_secs as f64 / 3600.0;
+        let recent_effective = (50.0 + recent_age_hours.min(100.0)) as i32;
+        // effective priority of new high-priority job > old low-priority job
+        assert!(
+            recent_effective > effective,
+            "New high-priority job ({}) should outrank old low-priority job ({})",
+            recent_effective,
+            effective
+        );
     }
 }

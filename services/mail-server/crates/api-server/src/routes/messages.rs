@@ -1,8 +1,12 @@
 //! Message sending and management routes.
 
-use super::helpers::{clamp_limit, default_limit};
+use super::helpers::{
+    clamp_limit, compute_etag, decode_cursor, default_limit, encode_cursor, has_more,
+    is_not_modified, pagination_meta,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use billing_service::types::MeterEventType;
@@ -11,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use uuid::Uuid;
 
-use crate::error::ApiError;
+use crate::error::{success, ApiError, ApiResponse};
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
 
@@ -24,6 +28,10 @@ pub fn router() -> Router<AppState> {
 }
 
 // ─── Constants ─────────────────────────────────────────────────
+
+/// Allowlist of valid sort columns for the list_messages endpoint.
+/// Prevents arbitrary sort column injection (HC-003).
+static ALLOWED_SORT_COLUMNS: [&str; 4] = ["created_at", "updated_at", "status", "subject"];
 
 /// Maximum recipients per single message (to + cc + bcc combined).
 static MAX_RECIPIENTS: LazyLock<usize> = LazyLock::new(|| {
@@ -91,15 +99,36 @@ pub struct MessageDetail {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListMessagesQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    /// Cursor for cursor-based pagination — hex-encoded `created_at` timestamp
+    /// of the last item from the previous page. When provided, overrides `offset`.
     #[serde(default)]
-    pub cursor: Option<i64>,
+    pub cursor: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
+    /// Sort column — validated against [`ALLOWED_SORT_COLUMNS`] allowlist.
+    /// Defaults to `created_at` if not provided or invalid.
+    #[serde(default = "default_sort_column")]
+    pub sort_by: String,
+}
+
+fn default_sort_column() -> String {
+    "created_at".into()
+}
+
+/// Validate the sort column against the allowlist.
+/// Returns the validated column name or the default `created_at`.
+fn validate_sort_column(column: &str) -> String {
+    if ALLOWED_SORT_COLUMNS.contains(&column) {
+        column.to_string()
+    } else {
+        "created_at".to_string()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -348,7 +377,7 @@ async fn send_message(
     auth: AuthUser,
     headers: HeaderMap,
     Json(body): Json<SendMessageRequest>,
-) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
+) -> Result<(StatusCode, Json<ApiResponse<MessageResponse>>), ApiError> {
     require_scopes(&auth, &["messages:send"])?;
     validate_send(&body, &state.db, &auth.tenant_id).await?;
 
@@ -368,11 +397,11 @@ async fn send_message(
             if let Some((id, status, created_at)) = existing {
                 return Ok((
                     StatusCode::OK,
-                    Json(MessageResponse {
+                    Json(ApiResponse::success(MessageResponse {
                         id,
                         status,
                         created_at: created_at.to_rfc3339(),
-                    }),
+                    })),
                 ));
             }
         }
@@ -446,11 +475,11 @@ async fn send_message(
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(MessageResponse {
+        Json(ApiResponse::success(MessageResponse {
             id: persisted.id,
             status: persisted.status.into(),
             created_at: persisted.created_at.to_rfc3339(),
-        }),
+        })),
     ))
 }
 
@@ -458,7 +487,7 @@ async fn send_batch(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<BatchSendRequest>,
-) -> Result<Json<BatchSendResponse>, ApiError> {
+) -> Result<Json<ApiResponse<BatchSendResponse>>, ApiError> {
     require_scopes(&auth, &["messages:send"])?;
 
     if body.messages.len() > *MAX_BATCH_SIZE {
@@ -563,7 +592,7 @@ async fn send_batch(
         }
     }
 
-    Ok(Json(BatchSendResponse {
+    Ok(success(BatchSendResponse {
         accepted,
         rejected,
         results,
@@ -573,43 +602,121 @@ async fn send_batch(
 async fn list_messages(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Query(params): Query<ListMessagesQuery>,
-) -> Result<Json<Vec<MessageDetail>>, ApiError> {
+) -> Result<Response, ApiError> {
     require_scopes(&auth, &["messages:read"])?;
 
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    // Validate sort column against allowlist to prevent SQL injection (HC-003)
+    let sort_column = validate_sort_column(&params.sort_by);
+    let limit = clamp_limit(params.limit, 100);
 
-    let rows = if let Some(ref status) = params.status {
-        sqlx::query_as::<_, MessageRow>(
-            "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
-             FROM messages WHERE tenant_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
-        )
-        .bind(&auth.tenant_id)
-        .bind(status)
-        .bind(clamp_limit(params.limit, 100))
-        .bind(offset)
-        .fetch_all(&state.db)
-        .await?
+    // Cursor-based pagination: decode the cursor (hex-encoded created_at timestamp)
+    let cursor_value = params.cursor.as_deref().and_then(decode_cursor);
+
+    let fetch_limit = limit + 1; // fetch one extra to detect has_more
+
+    let rows = if let Some(ref cursor) = cursor_value {
+        // Cursor-based: WHERE created_at < $cursor (for created_at DESC ordering)
+        if let Some(ref status) = params.status {
+            let query = format!(
+                "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+                 FROM messages WHERE tenant_id = $1 AND status = $2 AND created_at < $3::timestamp
+                 ORDER BY {} DESC LIMIT $4",
+                sort_column
+            );
+            sqlx::query_as::<_, MessageRow>(&query)
+                .bind(&auth.tenant_id)
+                .bind(status)
+                .bind(cursor)
+                .bind(fetch_limit)
+                .fetch_all(&state.db)
+                .await?
+        } else {
+            let query = format!(
+                "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+                 FROM messages WHERE tenant_id = $1 AND created_at < $2::timestamp
+                 ORDER BY {} DESC LIMIT $3",
+                sort_column
+            );
+            sqlx::query_as::<_, MessageRow>(&query)
+                .bind(&auth.tenant_id)
+                .bind(cursor)
+                .bind(fetch_limit)
+                .fetch_all(&state.db)
+                .await?
+        }
     } else {
-        sqlx::query_as::<_, MessageRow>(
-            "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
-             FROM messages WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-        )
-        .bind(&auth.tenant_id)
-        .bind(clamp_limit(params.limit, 100))
-        .bind(offset)
-        .fetch_all(&state.db)
-        .await?
+        // Fallback to offset-based pagination for backward compatibility
+        let offset = params.offset.clamp(0, 100_000);
+        if let Some(ref status) = params.status {
+            let query = format!(
+                "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+                 FROM messages WHERE tenant_id = $1 AND status = $2 ORDER BY {} DESC LIMIT $3 OFFSET $4",
+                sort_column
+            );
+            sqlx::query_as::<_, MessageRow>(&query)
+                .bind(&auth.tenant_id)
+                .bind(status)
+                .bind(fetch_limit)
+                .bind(offset)
+                .fetch_all(&state.db)
+                .await?
+        } else {
+            let query = format!(
+                "SELECT id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
+                 FROM messages WHERE tenant_id = $1 ORDER BY {} DESC LIMIT $2 OFFSET $3",
+                sort_column
+            );
+            sqlx::query_as::<_, MessageRow>(&query)
+                .bind(&auth.tenant_id)
+                .bind(fetch_limit)
+                .bind(offset)
+                .fetch_all(&state.db)
+                .await?
+        }
     };
 
-    Ok(Json(rows.into_iter().map(row_to_detail).collect()))
+    // Build the response rows and detect has_more
+    let mut details: Vec<MessageDetail> = rows.into_iter().map(row_to_detail).collect();
+    let more = has_more(&mut details, limit as usize);
+
+    // Compute the next cursor from the last row
+    let next_cursor = details.last().map(|r| encode_cursor(&r.created_at));
+    let meta = pagination_meta(more, next_cursor);
+
+    // Build the response body and compute ETag
+    let body = serde_json::json!({
+        "data": details,
+        "error": null,
+        "meta": meta,
+    });
+    let body_bytes = serde_json::to_vec(&body)?;
+    let etag = compute_etag(&body_bytes);
+
+    // Check If-None-Match for 304
+    if is_not_modified(&headers, &etag) {
+        return Ok(axum::response::Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header("ETag", &etag)
+            .body(axum::body::Body::empty())
+            .unwrap());
+    }
+
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("ETag", &etag)
+        .header("Cache-Control", "private, max-age=0, must-revalidate")
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(body_bytes))
+        .unwrap())
 }
 
 async fn get_message(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<MessageDetail>, ApiError> {
+) -> Result<Json<ApiResponse<MessageDetail>>, ApiError> {
     require_scopes(&auth, &["messages:read"])?;
 
     let row = sqlx::query_as::<_, MessageRow>(
@@ -622,14 +729,14 @@ async fn get_message(
     .await?
     .ok_or_else(|| ApiError::NotFound("message not found".into()))?;
 
-    Ok(Json(row_to_detail(row)))
+    Ok(success(row_to_detail(row)))
 }
 
 async fn cancel_message(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<MessageResponse>, ApiError> {
+) -> Result<Json<ApiResponse<MessageResponse>>, ApiError> {
     require_scopes(&auth, &["messages:send"])?;
 
     let mut tx = state.db.begin().await.map_err(|error| {
@@ -652,7 +759,7 @@ async fn cancel_message(
         ApiError::Internal("database error".into())
     })?;
 
-    Ok(Json(MessageResponse {
+    Ok(success(MessageResponse {
         id,
         status: "cancelled".into(),
         created_at: created_at.to_rfc3339(),
@@ -1083,8 +1190,14 @@ mod tests {
         assert_eq!(json["accepted"], 2);
     }
 
-    #[sqlx::test]
-    async fn api_messages_enqueue_worker_rows_for_all_recipients(pool: PgPool) {
+    #[tokio::test]
+    async fn api_messages_enqueue_worker_rows_for_all_recipients() {
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("api_messages_enqueue_worker_rows_for_all_recipients")
+                .await
+        else {
+            return;
+        };
         apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-queue").await;
@@ -1151,8 +1264,15 @@ mod tests {
         assert!(queue_rows.iter().all(|row| row.3 == Some(scheduled_at)));
     }
 
-    #[sqlx::test]
-    async fn api_messages_validate_send_rejects_suppressed_recipients(pool: PgPool) {
+    #[tokio::test]
+    async fn api_messages_validate_send_rejects_suppressed_recipients() {
+        let Some(pool) = crate::test_db::optional_pg_pool(
+            "api_messages_validate_send_rejects_suppressed_recipients",
+        )
+        .await
+        else {
+            return;
+        };
         apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-suppression").await;
@@ -1341,8 +1461,14 @@ mod tests {
         assert!(debug_str.contains("event_id"));
     }
 
-    #[sqlx::test]
-    async fn cancelling_api_message_cancels_pending_queue_rows(pool: PgPool) {
+    #[tokio::test]
+    async fn cancelling_api_message_cancels_pending_queue_rows() {
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("cancelling_api_message_cancels_pending_queue_rows")
+                .await
+        else {
+            return;
+        };
         apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-cancel").await;

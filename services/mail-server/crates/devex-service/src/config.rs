@@ -7,13 +7,22 @@ fn generated_dev_secret(label: &str) -> String {
 }
 
 /// Configuration for the DevEx service.
+///
+/// # O-20.2 — Webhook signing secret rotation
+/// `webhook_signing_secrets` is a list of active HMAC‑SHA256 signing secrets.
+/// The **first** secret is used for signing new payloads; **all** secrets are
+/// accepted during verification. This allows zero‑downtime rotation:
+/// 1. Add the new secret to the front of the list (signing + verification).
+/// 2. Wait for all in‑flight verifications to complete.
+/// 3. Remove the old secret from the list.
 #[derive(Debug, Clone)]
 pub struct DevExConfig {
     pub port: u16,
     pub host: String,
     pub database_url: String,
     pub redis_url: String,
-    pub webhook_signing_secret: String,
+    /// Ordered list of webhook signing secrets (first = active signing key).
+    pub webhook_signing_secrets: Vec<String>,
     pub cors_origins: Vec<String>,
     pub api_base_url: String,
     pub docs_base_url: String,
@@ -32,7 +41,7 @@ impl Default for DevExConfig {
             host: "0.0.0.0".into(),
             database_url: "postgres://127.0.0.1:5432/apexmail".into(),
             redis_url: "redis://127.0.0.1:6379".into(),
-            webhook_signing_secret: generated_dev_secret("devex-webhook-signing-secret"),
+            webhook_signing_secrets: vec![generated_dev_secret("devex-webhook-signing-secret")],
             cors_origins: vec!["*".into()],
             api_base_url: "https://api.apexmail.ee".into(),
             docs_base_url: "https://apexmail.ee/docs".into(),
@@ -75,10 +84,27 @@ impl DevExConfig {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_else(|_| vec!["2023-01".into(), "2022-10".into()]);
 
-        let webhook_signing_secret = env::var("WEBHOOK_SIGNING_SECRET").unwrap_or_default();
-        if node_env != "development" && webhook_signing_secret.trim().is_empty() {
+        // O-20.2: Parse multiple signing secrets for zero-downtime rotation.
+        // Primary env var: WEBHOOK_SIGNING_SECRETS (comma-separated).
+        // Fallback: WEBHOOK_SIGNING_SECRET (single secret, backward compat).
+        let webhook_signing_secrets: Vec<String> =
+            if let Ok(val) = env::var("WEBHOOK_SIGNING_SECRETS") {
+                val.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else {
+                let single = env::var("WEBHOOK_SIGNING_SECRET").unwrap_or_default();
+                if single.trim().is_empty() {
+                    vec![]
+                } else {
+                    vec![single]
+                }
+            };
+
+        if node_env != "development" && webhook_signing_secrets.is_empty() {
             return Err(ConfigError::SecurityViolation(
-                "WEBHOOK_SIGNING_SECRET must be set outside development".into(),
+                "WEBHOOK_SIGNING_SECRETS (or WEBHOOK_SIGNING_SECRET) must be set outside development".into(),
             ));
         }
 
@@ -90,7 +116,7 @@ impl DevExConfig {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
             database_url: env::var("DATABASE_URL").unwrap_or_default(),
             redis_url: env::var("REDIS_URL").unwrap_or_default(),
-            webhook_signing_secret,
+            webhook_signing_secrets,
             cors_origins,
             api_base_url: env::var("API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.apexmail.ee".into()),

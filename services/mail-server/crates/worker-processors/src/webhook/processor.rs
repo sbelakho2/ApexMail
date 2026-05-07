@@ -250,6 +250,25 @@ impl WebhookProcessor {
         result
     }
 
+    /// Derive an HMAC-based dedup key for the webhook job (O-16.2 fix).
+    /// Instead of a deterministic `format!("webhook:dedup:{}:{}", job.id, job.attempt)`
+    /// which is predictable, we use `HMAC-SHA256(job.id, dedup_hmac_key)` to make the
+    /// Redis key unpredictable to an outside observer.
+    fn dedup_key(&self, job: &WebhookJob) -> String {
+        if let Some(ref hmac_key) = self.config.dedup_hmac_key {
+            // HMAC-based key derivation — unpredictable without the key
+            let mut mac =
+                HmacSha256::new_from_slice(hmac_key.as_bytes()).expect("HMAC key should be valid");
+            mac.update(job.id.as_bytes());
+            let result = mac.finalize();
+            let hmac_hex = hex::encode(result.into_bytes());
+            format!("webhook:dedup:v2:{}", hmac_hex)
+        } else {
+            // Fallback when no HMAC key is configured (backward compatibility)
+            format!("webhook:dedup:{}:{}", job.id, job.attempt)
+        }
+    }
+
     async fn process_job_inner(&self, job: &WebhookJob) -> ProcessorResult<()> {
         debug!(
             job_id = %job.id,
@@ -260,7 +279,8 @@ impl WebhookProcessor {
         );
 
         // Check dedup key to prevent double delivery
-        let dedup_key = format!("webhook:dedup:{}:{}", job.id, job.attempt);
+        // O-16.2: Uses HMAC-based key derivation when configured
+        let dedup_key = self.dedup_key(job);
         let mut conn = self.redis.get().await?;
         let previously_delivered: Option<String> = redis::cmd("GET")
             .arg(&dedup_key)
@@ -377,9 +397,16 @@ impl WebhookProcessor {
         Ok(())
     }
 
-    /// Get or create circuit breaker for a webhook.
+    /// Get or create circuit breaker for a webhook (O-16.9 fix).
+    ///
+    /// Previously, eviction evicted *any* closed breaker, destroying failure
+    /// history for recently active webhooks. Now it evicts only breakers whose
+    /// `last_used()` timestamp is older than `STALE_THRESHOLD`, preserving
+    /// history for recently active webhooks.
     fn get_circuit_breaker(&self, webhook_id: &str) -> Arc<CircuitBreaker> {
         const MAX_CIRCUIT_BREAKERS: usize = 10_000;
+        /// Only evict breakers that haven't been used in this duration (O-16.9).
+        const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
         let key = format!("webhook:{}", webhook_id);
         let mut cbs = self
             .circuit_breakers
@@ -390,13 +417,19 @@ impl WebhookProcessor {
             return Arc::clone(cb);
         }
 
-        // Evict closed circuit breakers when map grows too large
+        // Evict only STALE circuit breakers (O-16.9 fix), preserving failure
+        // history for recently active webhooks.
         if cbs.len() >= MAX_CIRCUIT_BREAKERS {
+            let now = std::time::Instant::now();
             let stale_keys: Vec<String> = cbs
                 .iter()
-                .filter(|(_, cb)| cb.state() == crate::common::CircuitState::Closed)
+                .filter(|(_, cb)| {
+                    // Only evict breakers that haven't been used recently
+                    cb.state() == crate::common::CircuitState::Closed
+                        && now.duration_since(cb.last_used()) > STALE_THRESHOLD
+                })
                 .map(|(k, _)| k.clone())
-                .take(cbs.len() / 4) // Evict up to 25% of closed entries
+                .take(cbs.len() / 4) // Evict up to 25% of stale closed entries
                 .collect();
             for k in &stale_keys {
                 cbs.remove(k);
@@ -404,7 +437,7 @@ impl WebhookProcessor {
             if stale_keys.is_empty() {
                 tracing::warn!(
                     size = cbs.len(),
-                    "Circuit breaker map at capacity with no closed entries to evict"
+                    "Circuit breaker map at capacity with no stale entries to evict"
                 );
             }
         }
@@ -429,7 +462,7 @@ impl WebhookProcessor {
         let timestamp = Utc::now().timestamp_millis();
         let delivery_id = format!("dlv_{}", uuid::Uuid::new_v4());
 
-        // Sign payload
+        // Sign payload — secret is zeroized inside sign_payload (O-16.3)
         let signature = self.sign_payload(&job.secret, timestamp, serialized_payload);
 
         // Build headers
@@ -558,9 +591,11 @@ impl WebhookProcessor {
     }
 
     /// Sign payload with HMAC-SHA256.
+    /// The secret is wrapped in `Zeroizing<String>` for zeroization on drop (O-16.3).
     fn sign_payload(&self, secret: &str, timestamp: i64, payload: &str) -> String {
         let message = format!("{}.{}", timestamp, payload);
-        let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        let zeroized_secret = zeroize::Zeroizing::new(secret.to_string());
+        let mut mac = match HmacSha256::new_from_slice(zeroized_secret.as_bytes()) {
             Ok(mac) => mac,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to initialize webhook HMAC signer");

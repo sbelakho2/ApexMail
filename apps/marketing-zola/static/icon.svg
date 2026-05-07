@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">ApexMail icon</title>
+  <desc id="desc">A blue envelope with a sharp apex fold.</desc>
+  <rect width="64" height="64" rx="14" fill="#2563eb"/>
+  <path d="M13 21a5 5 0 0 1 5-5h28a5 5 0 0 1 5 5v22a5 5 0 0 1-5 5H18a5 5 0 0 1-5-5V21Z" fill="#f8fafc"/>
+  <path d="m16 22 16 13 16-13" fill="none" stroke="#1d4ed8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M18 44 29 31a4 4 0 0 1 6 0l11 13" fill="none" stroke="#60a5fa" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

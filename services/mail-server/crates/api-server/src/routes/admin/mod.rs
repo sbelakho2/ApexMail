@@ -25,6 +25,7 @@ pub mod support;
 pub mod support_analytics;
 pub mod system_health;
 pub mod tenants;
+pub mod vat;
 pub mod warmup;
 
 #[cfg(test)]

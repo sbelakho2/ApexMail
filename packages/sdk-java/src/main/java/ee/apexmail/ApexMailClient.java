@@ -269,13 +269,25 @@ public final class ApexMailClient implements AutoCloseable {
 
     // ── Error mapping ─────────────────────────────────────────────────────
 
+    @SuppressWarnings("unchecked")
     private void throwApiException(int status, Map<String, Object> body) {
+        // The ApexMail error envelope is nested: {"error":{"code":"...","message":"..."}}
         Object errorField = body.get("error");
-        String message = errorField == null || String.valueOf(errorField).isBlank()
-            ? "API error"
-            : String.valueOf(errorField);
-        Object codeField = body.get("code");
-        String code = codeField == null ? null : String.valueOf(codeField);
+        String message = "API error";
+        String code = null;
+        if (errorField instanceof Map) {
+            Map<String, Object> errorObj = (Map<String, Object>) errorField;
+            Object msgField = errorObj.get("message");
+            if (msgField != null) {
+                message = String.valueOf(msgField);
+            }
+            Object codeField = errorObj.get("code");
+            if (codeField != null) {
+                code = String.valueOf(codeField);
+            }
+        } else if (errorField != null) {
+            message = String.valueOf(errorField);
+        }
 
         throw switch (status) {
             case 401 -> new AuthenticationException(message, code, status);

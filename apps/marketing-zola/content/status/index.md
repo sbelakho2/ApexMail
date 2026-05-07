@@ -1,6 +1,6 @@
 +++
 title = "System Status | ApexMail"
-description = "Real-time system status for ApexMail services. View current uptime, incident history, and subscribe to updates."
+description = "Service status for ApexMail services. View current uptime, incident history, and subscribe to updates."
 template = "status.html"
 
 [extra]

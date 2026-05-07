@@ -30,6 +30,7 @@ static BIMI_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
 // #128:Maximum logo download size (256 KB) to prevent OOM from malicious URLs
 const MAX_LOGO_SIZE: usize = 256 * 1024;
 const MAX_CERT_SIZE: usize = 512 * 1024;
+const VMC_BRAND_INDICATOR_EKU_OID: &str = "1.3.6.1.5.5.7.3.31";
 
 /// Parsed BIMI DNS record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,7 +203,7 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
 
-            if !content_type.contains("svg") && !content_type.contains("xml") {
+            if !is_bimi_svg_content_type(content_type) {
                 return false;
             }
 
@@ -229,6 +230,61 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
     }
 }
 
+/// Allowed SVG element names (SVG Tiny PS 1.2 subset).
+const ALLOWED_SVG_ELEMENTS: &[&str] = &[
+    "a",
+    "animate",
+    "animatecolor",
+    "animatemotion",
+    "animatetransform",
+    "circle",
+    "clippath",
+    "defs",
+    "desc",
+    "ellipse",
+    "filter",
+    "font",
+    "font-face",
+    "font-face-name",
+    "font-face-src",
+    "font-face-uri",
+    "foreignobject",
+    "g",
+    "glyph",
+    "glyphref",
+    "hkern",
+    "image",
+    "line",
+    "lineargradient",
+    "marker",
+    "mask",
+    "metadata",
+    "missing-glyph",
+    "mpath",
+    "path",
+    "pattern",
+    "polygon",
+    "polyline",
+    "radialgradient",
+    "rect",
+    "script",
+    "set",
+    "solidcolor",
+    "stop",
+    "style",
+    "svg",
+    "switch",
+    "symbol",
+    "text",
+    "textpath",
+    "title",
+    "tref",
+    "tspan",
+    "use",
+    "view",
+    "vkern",
+];
+
 /// Validate SVG content for BIMI compliance (SVG Tiny PS).
 /// #129:Comprehensive validation replacing fragile string matching.
 /// #130:Robust external reference detection.
@@ -237,23 +293,26 @@ pub fn validate_svg_content(svg: &str) -> bool {
     reader.config_mut().trim_text(true);
 
     let mut saw_svg_root = false;
+    let mut has_svg_namespace = false;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(tag)) | Ok(Event::Empty(tag)) => {
                 let name = String::from_utf8_lossy(tag.name().as_ref()).to_lowercase();
+
+                // Check element is in the SVG allowlist
+                if !ALLOWED_SVG_ELEMENTS.contains(&name.as_str()) {
+                    return false;
+                }
+
                 if name == "svg" {
                     saw_svg_root = true;
                 }
 
+                // Reject dangerous elements even if in allowlist
                 if matches!(
                     name.as_str(),
-                    "script"
-                        | "foreignobject"
-                        | "animate"
-                        | "set"
-                        | "animatetransform"
-                        | "animatemotion"
+                    "script" | "foreignobject" | "animate" | "set"
                 ) {
                     return false;
                 }
@@ -266,6 +325,13 @@ pub fn validate_svg_content(svg: &str) -> bool {
 
                     let key = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
                     let value = String::from_utf8_lossy(attr.value.as_ref()).to_lowercase();
+
+                    // Check for SVG namespace on root element
+                    if name == "svg" && key == "xmlns" {
+                        if value == "http://www.w3.org/2000/svg" {
+                            has_svg_namespace = true;
+                        }
+                    }
 
                     if key.starts_with("on") {
                         return false;
@@ -298,7 +364,7 @@ pub fn validate_svg_content(svg: &str) -> bool {
         }
     }
 
-    saw_svg_root
+    saw_svg_root && has_svg_namespace
 }
 
 /// Get BIMI indicator for display in email clients.
@@ -380,6 +446,16 @@ fn parse_bimi_record(txt: &str, selector: &str) -> BimiRecord {
     }
 }
 
+fn is_bimi_svg_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some("image/svg+xml")
+}
+
 async fn validate_vmc_certificate(url: &str) -> bool {
     if !url.starts_with("https://") {
         return false;
@@ -459,6 +535,13 @@ fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
         chain.push(parsed);
     }
 
+    let Some(leaf) = chain.first() else {
+        return false;
+    };
+    if !certificate_has_vmc_purpose(leaf) {
+        return false;
+    }
+
     for idx in 0..(chain.len().saturating_sub(1)) {
         let cert = &chain[idx];
         let issuer = &chain[idx + 1];
@@ -472,6 +555,22 @@ fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
         None => return false,
     };
     root.issuer() == root.subject()
+}
+
+fn certificate_has_vmc_purpose(cert: &X509Certificate<'_>) -> bool {
+    cert.extensions().iter().any(|extension| {
+        if let ParsedExtension::ExtendedKeyUsage(eku) = extension.parsed_extension() {
+            eku.other
+                .iter()
+                .any(|oid| is_vmc_brand_indicator_oid(&oid.to_id_string()))
+        } else {
+            false
+        }
+    })
+}
+
+fn is_vmc_brand_indicator_oid(oid: &str) -> bool {
+    oid == VMC_BRAND_INDICATOR_EKU_OID
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────
@@ -520,6 +619,23 @@ mod tests {
     fn test_validate_svg_content_with_animation() {
         let svg = r#"<svg><animate attributeName="opacity"/></svg>"#;
         assert!(!validate_svg_content(svg));
+    }
+
+    #[test]
+    fn test_bimi_svg_content_type_must_be_image_svg_xml() {
+        assert!(is_bimi_svg_content_type("image/svg+xml"));
+        assert!(is_bimi_svg_content_type("image/svg+xml; charset=utf-8"));
+        assert!(!is_bimi_svg_content_type("application/xml"));
+        assert!(!is_bimi_svg_content_type("text/xml"));
+        assert!(!is_bimi_svg_content_type("image/png"));
+        assert!(!is_bimi_svg_content_type(""));
+    }
+
+    #[test]
+    fn test_vmc_brand_indicator_oid_must_match_exactly() {
+        assert!(is_vmc_brand_indicator_oid("1.3.6.1.5.5.7.3.31"));
+        assert!(!is_vmc_brand_indicator_oid("1.3.6.1.5.5.7.3.1"));
+        assert!(!is_vmc_brand_indicator_oid("2.5.29.37.0"));
     }
 
     #[test]

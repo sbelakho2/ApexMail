@@ -1,0 +1,50 @@
+{% set plan_is_popular = plan_is_popular | default(value=false) %}
+{% set plan_popular_label = plan_popular_label | default(value="Most Popular") %}
+{% set plan_is_enterprise = plan_is_enterprise | default(value=false) %}
+{% set plan_enterprise_label = plan_enterprise_label | default(value="Enterprise") %}
+{% set plan_button_primary = plan_button_primary | default(value=false) %}
+
+{% if plan_is_popular %}
+<div class="apex-card flex flex-col p-8 !border-brand-500 !shadow-[0_20px_50px_rgba(79,70,229,0.15)] relative" role="region" aria-label="{{ plan_name }} plan">
+  <div class="absolute -top-4 left-1/2 -translate-x-1/2">
+    <span class="inline-flex items-center px-4 py-1.5 bg-brand-500 text-white text-xs font-bold uppercase tracking-widest rounded-sm  ">{{ plan_popular_label }}</span>
+  </div>
+{% elif plan_is_enterprise %}
+<div class="apex-card flex flex-col p-8 bg-surface-950 !border-surface-800 shadow-2xl relative group" role="region" aria-label="{{ plan_name }} plan">
+  <div class="absolute top-0 right-0 w-24 h-24 bg-brand-500/10 rounded-sm -mr-12 -mt-12 blur-2xl group-hover:bg-brand-500/20 transition-colors"></div>
+  <div class="mb-4">
+    <span class="inline-block px-3 py-1 bg-brand-500/10 text-brand-400 text-xs font-bold uppercase tracking-widest rounded-sm border border-brand-500/20">{{ plan_enterprise_label }}</span>
+  </div>
+{% else %}
+<div class="apex-card flex flex-col p-8" role="region" aria-label="{{ plan_name }} plan">
+{% endif %}
+  <div class="mb-8">
+    <h3 class="{% if plan_is_enterprise %}text-white{% else %}text-surface-950{% endif %} text-xl font-bold mb-3 uppercase tracking-tight" id="plan-{{ plan_name | lower }}">{{ plan_name }}</h3>
+    <div class="flex items-baseline gap-2">
+      <span class="{% if plan_is_enterprise %}text-white{% else %}text-surface-950{% endif %} text-4xl font-bold tabular-nums tracking-tighter">{{ plan_price }}</span>
+      <span class="{% if plan_is_enterprise %}text-surface-400{% else %}text-surface-500{% endif %} text-xs font-bold uppercase tracking-widest">{{ plan_period }}</span>
+    </div>
+    <p class="{% if plan_is_enterprise %}text-surface-400{% else %}text-surface-500{% endif %} text-sm mt-4 leading-relaxed font-bold uppercase tracking-tight">{{ plan_description }}</p>
+  </div>
+  <ul role="list" class="space-y-4 mb-8 flex-1">
+    {% for feature in plan_features %}
+    <li class="flex items-start gap-3 text-sm {% if plan_is_enterprise %}text-surface-300{% else %}text-surface-600{% endif %}">
+      <svg class="w-5 h-5 text-brand-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+      <span class="font-bold uppercase tracking-tight text-xs">{{ feature }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if plan_button_primary or plan_is_popular %}
+  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-primary w-full text-center py-4">
+    {{ plan_cta_label }}
+  </a>
+  {% elif plan_is_enterprise %}
+  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-primary !bg-white !text-surface-950 !border-white hover:!bg-surface-100 w-full text-center py-4">
+    {{ plan_cta_label }}
+  </a>
+  {% else %}
+  <a href="{{ plan_cta_url }}" aria-label="{{ plan_cta_aria_label }}" class="btn-secondary w-full text-center py-4">
+    {{ plan_cta_label }}
+  </a>
+  {% endif %}
+</div>

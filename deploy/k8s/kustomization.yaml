@@ -33,14 +33,40 @@ resources:
   - tracking-service/hpa.yaml
   - tracking-service/pdb.yaml
   - tracking-service/network-policy.yaml
+  - mta/deployment.yaml
+  - mta/service.yaml
+  - mta/serviceaccount.yaml
+  - mta/hpa.yaml
+  - mta/pdb.yaml
+  - mta/network-policy.yaml
+  - worker/deployment.yaml
+  - worker/service.yaml
+  - worker/serviceaccount.yaml
+  - worker/hpa.yaml
+  - worker/pdb.yaml
+  - worker/network-policy.yaml
+  - enterprise/deployment.yaml
+  - enterprise/service.yaml
+  - enterprise/serviceaccount.yaml
+  - enterprise/hpa.yaml
+  - enterprise/pdb.yaml
+  - enterprise/network-policy.yaml
 
-commonLabels:
-  app.kubernetes.io/part-of: apexmail
-  app.kubernetes.io/managed-by: kustomize
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/part-of: apexmail
+      app.kubernetes.io/managed-by: kustomize
 
 # Image tags — pin to release versions (override via kustomize overlays per environment)
 images:
   - name: apexmail/api-server
     newTag: v1.0.0
   - name: apexmail/tracking-service
+    newTag: v1.0.0
+  - name: apexmail/mail-server
+    newTag: v1.0.0
+  - name: apexmail/worker
+    newTag: v1.0.0
+  - name: apexmail/enterprise-server
     newTag: v1.0.0

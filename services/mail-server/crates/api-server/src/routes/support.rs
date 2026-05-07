@@ -62,6 +62,7 @@ pub struct TicketResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListTicketsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -82,10 +83,22 @@ async fn create_ticket(
 ) -> Result<(StatusCode, Json<TicketResponse>), ApiError> {
     require_scopes(&auth, &["support:write"])?;
 
-    if body.subject.is_empty() || body.description.is_empty() {
+    if body.subject.is_empty() || body.subject.len() > 500 {
         return Err(ApiError::Validation(vec![
-            "subject and description are required".into(),
+            "subject is required and must be 500 characters or fewer".into(),
         ]));
+    }
+    if body.description.is_empty() || body.description.len() > 10000 {
+        return Err(ApiError::Validation(vec![
+            "description is required and must be 10,000 characters or fewer".into(),
+        ]));
+    }
+    const VALID_PRIORITIES: &[&str] = &["low", "normal", "high", "urgent"];
+    if !VALID_PRIORITIES.contains(&body.priority.as_str()) {
+        return Err(ApiError::Validation(vec![format!(
+            "invalid priority '{}'; expected one of: low, normal, high, urgent",
+            body.priority
+        )]));
     }
 
     let id = Uuid::new_v4();
@@ -178,9 +191,37 @@ async fn update_ticket(
     .await?
     .ok_or_else(|| ApiError::NotFound("ticket not found".into()))?;
 
+    const VALID_STATUSES: &[&str] = &[
+        "open",
+        "in_progress",
+        "pending_customer",
+        "resolved",
+        "closed",
+    ];
+    const VALID_PRIORITIES: &[&str] = &["low", "normal", "high", "urgent"];
+
     let status = body.status.unwrap_or(existing.status);
+    if !VALID_STATUSES.contains(&status.as_str()) {
+        return Err(ApiError::Validation(vec![format!(
+            "invalid status '{}'; expected one of: open, in_progress, pending_customer, resolved, closed",
+            status
+        )]));
+    }
     let priority = body.priority.unwrap_or(existing.priority);
+    if !VALID_PRIORITIES.contains(&priority.as_str()) {
+        return Err(ApiError::Validation(vec![format!(
+            "invalid priority '{}'; expected one of: low, normal, high, urgent",
+            priority
+        )]));
+    }
     let assigned_to = body.assigned_to.or(existing.assigned_to);
+    if let Some(ref assignee) = assigned_to {
+        if assignee.len() > 255 {
+            return Err(ApiError::Validation(vec![
+                "assigned_to must be 255 characters or fewer".into(),
+            ]));
+        }
+    }
 
     sqlx::query(
         "UPDATE support_tickets SET status=$1, priority=$2, assigned_to=$3, updated_at=NOW()
@@ -363,8 +404,9 @@ async fn create_ticket_message(
     .await?;
 
     // Update ticket updated_at
-    sqlx::query("UPDATE support_tickets SET updated_at = NOW() WHERE id = $1")
+    sqlx::query("UPDATE support_tickets SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2")
         .bind(&ticket_id)
+        .bind(auth.tenant_id.to_string())
         .execute(&state.db)
         .await?;
 

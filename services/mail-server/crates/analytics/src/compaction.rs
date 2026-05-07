@@ -64,44 +64,69 @@ impl CompactionWorker {
         let mut total_bytes: u64 = 0;
         let mut hasher = Sha256::new();
 
-        loop {
-            let rows = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                sqlx::query_as::<_, EventRow>(
-                    "SELECT id, tenant_id, message_id, event_type, recipient, timestamp, \
-                     metadata, ip_address, user_agent, link_id, bounce_type, bounce_subtype, \
-                     provider, region, campaign_id \
-                     FROM events WHERE timestamp < $1 ORDER BY timestamp LIMIT $2",
+        // Process compaction per-tenant to prevent a single noisy tenant from
+        // blocking compaction for all others (M-36).
+        let tenants: Vec<String> = sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT tenant_id FROM events WHERE timestamp < $1",
+        )
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if tenants.is_empty() {
+            return Ok(CompactionStatus {
+                rows_migrated: 0,
+                rows_deleted: 0,
+                bytes_written: 0,
+                checksum: format!("{:x}", hasher.finalize()),
+                completed: true,
+            });
+        }
+
+        for tenant_id in &tenants {
+            debug!(tenant_id = %tenant_id, "compacting tenant events");
+
+            loop {
+                let rows = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    sqlx::query_as::<_, EventRow>(
+                        "SELECT id, tenant_id, message_id, event_type, recipient, timestamp, \
+                         metadata, ip_address, user_agent, link_id, bounce_type, bounce_subtype, \
+                         provider, region, campaign_id \
+                         FROM events WHERE tenant_id = $1 AND timestamp < $2 \
+                         ORDER BY timestamp LIMIT $3",
+                    )
+                    .bind(tenant_id)
+                    .bind(cutoff)
+                    .bind(batch_size)
+                    .fetch_all(&self.pool),
                 )
-                .bind(cutoff)
-                .bind(batch_size)
-                .fetch_all(&self.pool),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("Timed out fetching compaction batch"))??;
+                .await
+                .map_err(|_| anyhow::anyhow!("Timed out fetching compaction batch for tenant {}", tenant_id))??;
 
-            if rows.is_empty() {
-                break;
-            }
+                if rows.is_empty() {
+                    break;
+                }
 
-            let count = rows.len() as i64;
-            let (bytes, batch_data) = self.write_jsonl_batch(&rows).await?;
-            hasher.update(&batch_data);
-            total_bytes += bytes;
+                let count = rows.len() as i64;
+                let (bytes, batch_data) = self.write_jsonl_batch(&rows).await?;
+                hasher.update(&batch_data);
+                total_bytes += bytes;
 
-            // Delete migrated rows
-            let ids: Vec<uuid::Uuid> = rows.iter().map(|r| r.id).collect();
-            sqlx::query("DELETE FROM events WHERE id = ANY($1)")
-                .bind(&ids)
-                .execute(&self.pool)
-                .await?;
+                // Delete migrated rows
+                let ids: Vec<uuid::Uuid> = rows.iter().map(|r| r.id).collect();
+                sqlx::query("DELETE FROM events WHERE id = ANY($1)")
+                    .bind(&ids)
+                    .execute(&self.pool)
+                    .await?;
 
-            total_migrated += count;
-            total_deleted += count;
-            debug!("Compacted batch of {count} rows");
+                total_migrated += count;
+                total_deleted += count;
+                debug!(tenant_id = %tenant_id, "Compacted batch of {count} rows");
 
-            if count < batch_size {
-                break;
+                if count < batch_size {
+                    break;
+                }
             }
         }
 

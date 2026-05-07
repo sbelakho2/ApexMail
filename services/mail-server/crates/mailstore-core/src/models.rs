@@ -67,6 +67,7 @@ impl EmailAddress {
 }
 
 /// Email attachment
+/// DI-007: Added `checksum` field for SHA-256 content integrity verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: Uuid,
@@ -76,6 +77,9 @@ pub struct Attachment {
     pub content_id: Option<String>,
     pub is_inline: bool,
     pub storage_key: String,
+    /// DI-007: SHA-256 hex digest of the raw attachment bytes.
+    /// Computed at storage time to enable integrity verification on retrieval.
+    pub checksum: Option<String>,
 }
 
 /// Mailbox (folder)

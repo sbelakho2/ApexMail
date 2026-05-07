@@ -10,6 +10,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -30,6 +31,7 @@ pub fn router() -> Router<AppState> {
 // ─── Query params ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SsoInitQuery {
     /// Where to redirect after successful auth
     #[serde(default)]
@@ -44,6 +46,7 @@ pub struct SsoInitQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OAuthCallbackQuery {
     pub code: Option<String>,
     pub state: Option<String>,
@@ -492,6 +495,7 @@ async fn complete_sso_login(
         scopes,
         exp: exp.timestamp(),
         iat: now.timestamp(),
+        jti: Uuid::new_v4().to_string(),
     };
 
     let token = encode(
@@ -633,19 +637,64 @@ fn validate_oauth_state(
 }
 
 fn rand_bytes() -> [u8; 32] {
-    use rand::RngCore;
+    use rand::TryRngCore;
     let mut buf = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut buf)
+        .expect("OsRng should not fail");
     buf
 }
 
 fn sanitize_redirect(next: &str) -> String {
-    // Only allow relative paths starting with /
-    if next.starts_with('/') && !next.starts_with(" //") {
-        next.to_string()
-    } else {
-        "/dashboard".to_string()
+    // Only allow safe relative paths starting with /
+    // Reject:
+    //   - Absolute URLs (//host/path)
+    //   - Protocol-relative URLs (//)
+    //   - Backslash paths (\\)  [escape for display only]
+    //   - URL-encoded path traversal (%2f, %5c, etc.)
+    //   - Paths containing ".." traversal
+    if next.is_empty() {
+        return "/dashboard".to_string();
     }
+
+    if next == "/" {
+        return "/".to_string();
+    }
+
+    let first = next.as_bytes()[0];
+    if first != b'/' {
+        return "/dashboard".to_string();
+    }
+
+    // Check second byte for protocol-relative or backslash
+    let second = next.as_bytes().get(1).copied().unwrap_or(b'\0');
+    if second == b'/' || second == b'\\' {
+        return "/dashboard".to_string();
+    }
+
+    // URL-decode to catch %2f, %5c, etc.
+    let decoded = match urlencoding::decode(next) {
+        Ok(d) => d.to_string(),
+        Err(_) => return "/dashboard".to_string(),
+    };
+
+    // Re-check after decoding (protocol-relative, backslash)
+    if decoded.len() > 1 {
+        let decoded_bytes = decoded.as_bytes();
+        if decoded_bytes[1] == b'/' || decoded_bytes[1] == b'\\' {
+            return "/dashboard".to_string();
+        }
+    }
+
+    // Reject path traversal components
+    let segments: Vec<&str> = decoded.split('/').collect();
+    for segment in &segments {
+        if *segment == ".." || segment.contains('\0') {
+            return "/dashboard".to_string();
+        }
+    }
+
+    next.to_string()
 }
 
 fn set_state_cookie(
@@ -683,8 +732,11 @@ fn clear_state_cookie(response: &mut Response, name: &str, secure: bool) -> Resu
 mod tests {
     use super::*;
 
+    // ── Sanitize redirect tests ───────────────────────────────────
+
     #[test]
     fn test_sanitize_redirect() {
+        // Verify Open Redirect protection rejects external URLs and double-slash paths.
         assert_eq!(sanitize_redirect("/dashboard"), "/dashboard");
         assert_eq!(sanitize_redirect("/settings/billing"), "/settings/billing");
         assert_eq!(sanitize_redirect("https://evil.com"), "/dashboard");
@@ -693,7 +745,29 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_redirect_deep_path() {
+        // Verify deeply nested relative paths are preserved.
+        assert_eq!(sanitize_redirect("/a/b/c/d/e/f/g"), "/a/b/c/d/e/f/g");
+    }
+
+    #[test]
+    fn test_sanitize_redirect_rejects_double_slash_prefix() {
+        // Verify protocol-relative URLs are rejected (open redirect prevention).
+        assert_eq!(sanitize_redirect("//evil.com/path"), "/dashboard");
+        assert_eq!(sanitize_redirect("/%2fevil.com/path"), "/dashboard");
+    }
+
+    #[test]
+    fn test_sanitize_redirect_treats_single_char_as_relative() {
+        // Verify a single `/` is accepted as root.
+        assert_eq!(sanitize_redirect("/"), "/");
+    }
+
+    // ── Redirect from OAuth state tests ───────────────────────────
+
+    #[test]
     fn test_redirect_from_oauth_state() {
+        // Verify the redirect target is extracted from the state token.
         assert_eq!(
             redirect_from_oauth_state("opaque-token:/dashboard"),
             "/dashboard"
@@ -710,14 +784,91 @@ mod tests {
     }
 
     #[test]
+    fn test_redirect_from_oauth_state_multiple_colons() {
+        // Verify state tokens with multiple colons are handled correctly.
+        assert_eq!(
+            redirect_from_oauth_state("token:/path:with:colons"),
+            "/path:with:colons"
+        );
+    }
+
+    #[test]
+    fn test_redirect_from_oauth_state_empty_after_colon() {
+        // Verify that state ending with colon redirects to dashboard.
+        assert_eq!(redirect_from_oauth_state("token:"), "/dashboard");
+    }
+
+    #[test]
+    fn test_redirect_from_oauth_state_no_colon_at_all() {
+        // Verify state without any colon resolves to dashboard.
+        assert_eq!(redirect_from_oauth_state("justatoken"), "/dashboard");
+    }
+
+    // ── Generate OAuth state tests ────────────────────────────────
+
+    #[test]
     fn test_generate_oauth_state() {
+        // Verify the state token contains the redirect path and base64 token.
         let state = generate_oauth_state("/dashboard");
         assert!(state.contains("/dashboard"));
         assert!(state.len() > 10);
     }
 
     #[test]
+    fn test_generate_oauth_state_round_trip() {
+        // Verify that generate_oauth_state → redirect_from_oauth_state round-trips
+        // correctly for various paths.
+        let paths = vec!["/dashboard", "/settings/billing", "/settings/profile", "/"];
+        for path in paths {
+            let state = generate_oauth_state(path);
+            let extracted = redirect_from_oauth_state(&state);
+            assert_eq!(extracted, path, "Round-trip failed for path: {path}");
+        }
+    }
+
+    #[test]
+    fn test_generate_oauth_state_rejects_external_url() {
+        // Verify that an external URL in generate_oauth_state is sanitized
+        // via the round-trip (the path is embedded, then sanitized on extraction).
+        let state = generate_oauth_state("https://evil.com");
+        let extracted = redirect_from_oauth_state(&state);
+        assert_eq!(
+            extracted, "/dashboard",
+            "External URL should be sanitized to /dashboard"
+        );
+    }
+
+    #[test]
+    fn test_generate_oauth_state_has_base64_token() {
+        // Verify the state token contains a base64url-encoded portion before the colon.
+        let state = generate_oauth_state("/dashboard");
+        let (token_part, _) = state.split_once(':').unwrap();
+        assert!(!token_part.is_empty(), "Token portion must not be empty");
+        // Base64url uses A-Z, a-z, 0-9, -, _
+        assert!(
+            token_part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "Token portion must be base64url: {token_part}"
+        );
+    }
+
+    #[test]
+    fn test_generate_oauth_state_produces_unique_tokens() {
+        // Verify two consecutive state generations produce different tokens
+        // (due to random component).
+        let state1 = generate_oauth_state("/dashboard");
+        let state2 = generate_oauth_state("/dashboard");
+        let (token1, _) = state1.split_once(':').unwrap();
+        let (token2, _) = state2.split_once(':').unwrap();
+        assert_ne!(token1, token2, "State tokens must be unique");
+    }
+
+    // ── Google token info validation tests ────────────────────────
+
+    #[test]
     fn validate_google_token_info_accepts_expected_claims() {
+        // Verify valid Google token info is accepted and returns a profile.
         let profile = validate_google_token_info(
             GoogleTokenInfoResponse {
                 aud: "google-client-id".into(),
@@ -743,6 +894,7 @@ mod tests {
 
     #[test]
     fn validate_google_token_info_rejects_wrong_audience() {
+        // Verify token with mismatched client_id (audience) is rejected.
         let error = validate_google_token_info(
             GoogleTokenInfoResponse {
                 aud: "other-client".into(),
@@ -762,6 +914,7 @@ mod tests {
 
     #[test]
     fn validate_google_token_info_rejects_unverified_email() {
+        // Verify token with unverified email is rejected.
         let error = validate_google_token_info(
             GoogleTokenInfoResponse {
                 aud: "google-client-id".into(),
@@ -781,6 +934,7 @@ mod tests {
 
     #[test]
     fn validate_google_token_info_rejects_expired_token() {
+        // Verify token with past expiry is rejected.
         let error = validate_google_token_info(
             GoogleTokenInfoResponse {
                 aud: "google-client-id".into(),
@@ -796,5 +950,397 @@ mod tests {
         .expect_err("expired token should fail");
 
         assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn validate_google_token_info_rejects_wrong_issuer() {
+        // Verify token with non-Google issuer is rejected.
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://evil-idp.com".into(),
+                exp: Some("4102444800".into()),
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: Some("Example User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("wrong issuer should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn validate_google_token_info_accepts_accounts_dot_com_issuer() {
+        // Verify the `accounts.google.com` (non-https) issuer is accepted.
+        let profile = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: Some("User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect("accounts.google.com issuer should be accepted");
+
+        assert_eq!(profile.email, "user@example.com");
+    }
+
+    #[test]
+    fn validate_google_token_info_rejects_missing_expiry() {
+        // Verify token without exp field is rejected.
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: None,
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: Some("User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("missing expiry should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn validate_google_token_info_rejects_missing_email() {
+        // Verify token without email is rejected.
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                email: None,
+                email_verified: Some("true".into()),
+                name: Some("User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("missing email should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn validate_google_token_info_rejects_empty_email() {
+        // Verify token with empty email string is rejected.
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                email: Some("".into()),
+                email_verified: Some("true".into()),
+                name: Some("User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("empty email should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn validate_google_token_info_accepts_name_optional() {
+        // Verify token without name is accepted (name is optional).
+        let profile = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: None,
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect("missing name should be ok");
+
+        assert_eq!(profile.name, "");
+    }
+
+    // ── Google email_verified edge cases ──────────────────────────
+
+    #[test]
+    fn test_google_email_verified_true() {
+        // Verify the string "true" is recognized as verified.
+        assert!(google_email_verified(Some("true")));
+    }
+
+    #[test]
+    fn test_google_email_verified_true_uppercase() {
+        // Verify "True" (mixed case) is recognized as verified.
+        assert!(google_email_verified(Some("True")));
+    }
+
+    #[test]
+    fn test_google_email_verified_numeric_1() {
+        // Verify "1" is recognized as verified.
+        assert!(google_email_verified(Some("1")));
+    }
+
+    #[test]
+    fn test_google_email_verified_false() {
+        // Verify "false" is NOT recognized as verified.
+        assert!(!google_email_verified(Some("false")));
+    }
+
+    #[test]
+    fn test_google_email_verified_numeric_0() {
+        // Verify "0" is NOT recognized as verified.
+        assert!(!google_email_verified(Some("0")));
+    }
+
+    #[test]
+    fn test_google_email_verified_none() {
+        // Verify None is NOT recognized as verified.
+        assert!(!google_email_verified(None));
+    }
+
+    #[test]
+    fn test_google_email_verified_empty() {
+        // Verify empty string is NOT recognized as verified.
+        assert!(!google_email_verified(Some("")));
+    }
+
+    #[test]
+    fn test_google_email_verified_no() {
+        // Verify "no" is NOT recognized as verified.
+        assert!(!google_email_verified(Some("no")));
+    }
+
+    // ── Cookie set/clear tests ────────────────────────────────────
+
+    #[test]
+    fn test_set_state_cookie_includes_name_and_value() {
+        // Verify the state cookie header includes the correct name, value,
+        // and security attributes.
+        let mut response = Redirect::to("/").into_response();
+        set_state_cookie(&mut response, "am_sso_state_test", "test-state-value", true)
+            .expect("should set cookie");
+
+        let cookie = response
+            .headers()
+            .get_all("Set-Cookie")
+            .iter()
+            .find(|v| v.to_str().unwrap_or("").starts_with("am_sso_state_test="))
+            .expect("should find state cookie");
+
+        let cookie_str = cookie.to_str().unwrap();
+        assert!(cookie_str.starts_with("am_sso_state_test=test-state-value"));
+        assert!(cookie_str.contains("HttpOnly"));
+        assert!(cookie_str.contains("Path=/"));
+        assert!(cookie_str.contains("Max-Age=600"));
+        assert!(cookie_str.contains("SameSite=Lax"));
+        assert!(cookie_str.contains("Secure"));
+    }
+
+    #[test]
+    fn test_set_state_cookie_no_secure_in_dev() {
+        // Verify Secure flag is absent in non-production environments.
+        let mut response = Redirect::to("/").into_response();
+        set_state_cookie(&mut response, "am_sso_state_dev", "dev-value", false)
+            .expect("should set cookie");
+
+        let cookie = response
+            .headers()
+            .get_all("Set-Cookie")
+            .iter()
+            .find(|v| v.to_str().unwrap_or("").starts_with("am_sso_state_dev="))
+            .expect("should find state cookie");
+
+        let cookie_str = cookie.to_str().unwrap();
+        assert!(
+            !cookie_str.contains("Secure"),
+            "Dev cookies should not have Secure flag"
+        );
+    }
+
+    #[test]
+    fn test_clear_state_cookie_sets_max_age_zero() {
+        // Verify clearing a state cookie sets Max-Age=0 and has same name.
+        let mut response = Redirect::to("/").into_response();
+        clear_state_cookie(&mut response, "am_sso_state_google", true)
+            .expect("should clear cookie");
+
+        let cookie = response
+            .headers()
+            .get_all("Set-Cookie")
+            .iter()
+            .find(|v| v.to_str().unwrap_or("").starts_with("am_sso_state_google="))
+            .expect("should find cleared cookie");
+
+        let cookie_str = cookie.to_str().unwrap();
+        assert!(cookie_str.starts_with("am_sso_state_google="));
+        assert!(cookie_str.contains("Max-Age=0"));
+        assert!(cookie_str.contains("Secure"));
+    }
+
+    #[test]
+    fn test_clear_state_cookie_no_secure_in_dev() {
+        // Verify cleared cookie omits Secure flag in dev.
+        let mut response = Redirect::to("/").into_response();
+        clear_state_cookie(&mut response, "am_sso_state_github", false)
+            .expect("should clear cookie");
+
+        let cookie = response
+            .headers()
+            .get_all("Set-Cookie")
+            .iter()
+            .find(|v| v.to_str().unwrap_or("").starts_with("am_sso_state_github="))
+            .expect("should find cleared cookie");
+
+        let cookie_str = cookie.to_str().unwrap();
+        assert!(!cookie_str.contains("Secure"));
+    }
+
+    // ── OAuth callback query params tests ─────────────────────────
+
+    #[test]
+    fn test_oauth_callback_query_with_code_and_state() {
+        // Verify OAuthCallbackQuery fields can be set.
+        let query = OAuthCallbackQuery {
+            code: Some("auth_code_123".into()),
+            state: Some("state_token_456".into()),
+            error: None,
+        };
+        assert_eq!(query.code, Some("auth_code_123".into()));
+        assert_eq!(query.state, Some("state_token_456".into()));
+        assert!(query.error.is_none());
+    }
+
+    #[test]
+    fn test_oauth_callback_query_with_error() {
+        // Verify OAuthCallbackQuery with error.
+        let query = OAuthCallbackQuery {
+            code: None,
+            state: Some("token123".into()),
+            error: Some("access_denied".into()),
+        };
+        assert_eq!(query.error, Some("access_denied".into()));
+        assert_eq!(query.state, Some("token123".into()));
+        assert!(query.code.is_none());
+    }
+
+    #[test]
+    fn test_oauth_callback_query_empty() {
+        // Verify OAuthCallbackQuery with all None fields.
+        let query = OAuthCallbackQuery {
+            code: None,
+            state: None,
+            error: None,
+        };
+        assert!(query.code.is_none());
+        assert!(query.state.is_none());
+        assert!(query.error.is_none());
+    }
+
+    // ── SsoInitQuery tests ────────────────────────────────────────
+
+    #[test]
+    fn test_sso_init_query_next() {
+        // Verify SsoInitQuery with `next` parameter set.
+        let query = SsoInitQuery {
+            next: Some("/settings".into()),
+            return_url: None,
+            state: None,
+        };
+        assert_eq!(query.next, Some("/settings".into()));
+        assert!(query.return_url.is_none());
+        assert!(query.state.is_none());
+    }
+
+    #[test]
+    fn test_sso_init_query_return_url() {
+        // Verify SsoInitQuery with returnUrl (camelCase) set.
+        let query = SsoInitQuery {
+            next: None,
+            return_url: Some("/billing".into()),
+            state: None,
+        };
+        assert!(query.next.is_none());
+        assert_eq!(query.return_url, Some("/billing".into()));
+    }
+
+    #[test]
+    fn test_sso_init_query_all_params() {
+        // Verify SsoInitQuery with all parameters set.
+        let query = SsoInitQuery {
+            next: Some("/dashboard".into()),
+            return_url: Some("/settings".into()),
+            state: Some("abc123".into()),
+        };
+        assert_eq!(query.next, Some("/dashboard".into()));
+        assert_eq!(query.return_url, Some("/settings".into()));
+        assert_eq!(query.state, Some("abc123".into()));
+    }
+
+    #[test]
+    fn test_sso_init_query_next_preferred_over_return_url() {
+        // Verify `next` takes precedence over `returnUrl` (matching handler logic).
+        let query = SsoInitQuery {
+            next: Some("/dashboard".into()),
+            return_url: Some("/settings".into()),
+            state: None,
+        };
+        assert_eq!(query.next, Some("/dashboard".into()));
+        assert_eq!(query.return_url, Some("/settings".into()));
+    }
+
+    // ── Encoded URI component tests ───────────────────────────────
+
+    #[test]
+    fn test_encode_uri_component_encodes_special_chars() {
+        // Verify that special characters are percent-encoded.
+        let encoded = encode_uri_component("hello world");
+        assert_eq!(encoded, "hello+world");
+    }
+
+    #[test]
+    fn test_encode_uri_component_preserves_alphanumeric() {
+        // Verify alphanumeric characters are preserved.
+        let encoded = encode_uri_component("abc123DEF");
+        assert_eq!(encoded, "abc123DEF");
+    }
+
+    // ── Token info response serde tests ───────────────────────────
+
+    #[test]
+    fn test_google_token_exchange_response_deserialize() {
+        // Verify GoogleTokenExchangeResponse can be deserialized from JSON.
+        let json = r#"{"id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0"}"#;
+        let parsed: GoogleTokenExchangeResponse = serde_json::from_str(json).unwrap();
+        assert!(parsed.id_token.is_some());
+        assert!(parsed.id_token.unwrap().starts_with("eyJ"));
+    }
+
+    #[test]
+    fn test_google_token_info_response_deserialize() {
+        // Verify GoogleTokenInfoResponse can be deserialized from JSON.
+        let json = r#"{
+            "aud": "my-client-id",
+            "iss": "https://accounts.google.com",
+            "exp": "4102444800",
+            "email": "user@example.com",
+            "email_verified": "true",
+            "name": "Test User"
+        }"#;
+        let parsed: GoogleTokenInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.aud, "my-client-id");
+        assert_eq!(parsed.email, Some("user@example.com".into()));
+        assert_eq!(parsed.email_verified, Some("true".into()));
     }
 }

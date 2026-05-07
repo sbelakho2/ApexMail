@@ -6,6 +6,7 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use billing_common::csv::quote_csv_field;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -17,6 +18,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportQuery {
     #[serde(default = "default_range")]
     pub range: String,
@@ -109,13 +111,7 @@ async fn export_analytics(
         .collect();
 
     if params.format == "csv" {
-        let mut csv = String::from("Date,Sent,Delivered,Opened,Clicked,Bounced,Complaints\n");
-        for r in &data {
-            csv.push_str(&format!(
-                "{},{},{},{},{},{},{}\n",
-                r.date, r.sent, r.delivered, r.opened, r.clicked, r.bounced, r.complaints
-            ));
-        }
+        let csv = build_csv(&data);
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let filename = format!("analytics_export_{ts}.csv");
         Ok((
@@ -137,6 +133,56 @@ async fn export_analytics(
         });
         Ok(axum::Json(payload).into_response())
     }
+}
+
+fn build_csv(data: &[ExportRow]) -> String {
+    let mut csv = String::new();
+    append_csv_row(
+        &mut csv,
+        &[
+            "Date",
+            "Sent",
+            "Delivered",
+            "Opened",
+            "Clicked",
+            "Bounced",
+            "Complaints",
+        ],
+    );
+
+    for row in data {
+        let sent = row.sent.to_string();
+        let delivered = row.delivered.to_string();
+        let opened = row.opened.to_string();
+        let clicked = row.clicked.to_string();
+        let bounced = row.bounced.to_string();
+        let complaints = row.complaints.to_string();
+
+        append_csv_row(
+            &mut csv,
+            &[
+                row.date.as_str(),
+                sent.as_str(),
+                delivered.as_str(),
+                opened.as_str(),
+                clicked.as_str(),
+                bounced.as_str(),
+                complaints.as_str(),
+            ],
+        );
+    }
+
+    csv
+}
+
+fn append_csv_row(csv: &mut String, fields: &[&str]) {
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            csv.push(',');
+        }
+        csv.push_str(&quote_csv_field(field));
+    }
+    csv.push('\n');
 }
 
 #[cfg(test)]
@@ -171,5 +217,38 @@ mod tests {
 
         assert!(sql.contains("WHERE created_at >= NOW() - '30 days'::interval"));
         assert!(!sql.contains("tenant_id = $1"));
+    }
+
+    #[test]
+    fn build_csv_quotes_header_and_values() {
+        let csv = build_csv(&[ExportRow {
+            date: "2024-01-01".into(),
+            sent: 1,
+            delivered: 2,
+            opened: 3,
+            clicked: 4,
+            bounced: 5,
+            complaints: 6,
+        }]);
+
+        assert!(csv.starts_with(
+            "\"Date\",\"Sent\",\"Delivered\",\"Opened\",\"Clicked\",\"Bounced\",\"Complaints\"\n"
+        ));
+        assert!(csv.contains("\"2024-01-01\",\"1\",\"2\",\"3\",\"4\",\"5\",\"6\"\n"));
+    }
+
+    #[test]
+    fn build_csv_sanitizes_formula_like_values() {
+        let csv = build_csv(&[ExportRow {
+            date: "=SUM(A1:A2)".into(),
+            sent: 1,
+            delivered: 0,
+            opened: 0,
+            clicked: 0,
+            bounced: 0,
+            complaints: 0,
+        }]);
+
+        assert!(csv.contains("\"'=SUM(A1:A2)\""));
     }
 }

@@ -73,6 +73,7 @@ pub struct ListResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

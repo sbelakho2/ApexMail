@@ -25,6 +25,10 @@ pub struct MtaConfig {
     #[serde(default)]
     pub dmarc: DmarcConfig,
     #[serde(default)]
+    pub dns: DnsConfig,
+    #[serde(default)]
+    pub bimi: BimiConfig,
+    #[serde(default)]
     pub rate_limit: RateLimitConfig,
     #[serde(default)]
     pub email_auth: EmailAuthConfig,
@@ -94,6 +98,8 @@ pub struct BounceConfig {
     pub hostname: String,
     #[serde(default = "default_verp_domain")]
     pub verp_domain: String,
+    #[serde(default = "default_true")]
+    pub verp_sanitize: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -106,6 +112,8 @@ pub struct FeedbackConfig {
     pub port: u16,
     #[serde(default = "default_hostname")]
     pub hostname: String,
+    #[serde(default = "default_max_arf_size")]
+    pub max_arf_size: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -120,6 +128,8 @@ pub struct DkimConfig {
 pub struct SpfConfig {
     #[serde(default)]
     pub strict_mode: bool,
+    #[serde(default = "default_spf_cache_max_entries")]
+    pub spf_cache_max_entries: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -128,6 +138,20 @@ pub struct DmarcConfig {
     pub report_email: String,
     #[serde(default)]
     pub report_domain: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DnsConfig {
+    #[serde(default)]
+    pub dnssec_enabled: bool,
+    #[serde(default = "default_tlsa_cache_ttl_secs")]
+    pub tlsa_cache_ttl_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BimiConfig {
+    #[serde(default = "default_bimi_svg_max_size")]
+    pub svg_max_size: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -154,6 +178,8 @@ pub struct EmailAuthConfig {
     pub allow_soft_fail: bool,
     #[serde(default)]
     pub trusted_relays: Vec<String>,
+    #[serde(default = "default_spf_cache_max_entries")]
+    pub spf_cache_max_entries: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -185,6 +211,8 @@ impl Default for MtaConfig {
             dkim: DkimConfig::default(),
             spf: SpfConfig::default(),
             dmarc: DmarcConfig::default(),
+            dns: DnsConfig::default(),
+            bimi: BimiConfig::default(),
             rate_limit: RateLimitConfig::default(),
             email_auth: EmailAuthConfig::default(),
             metrics: MetricsConfig::default(),
@@ -226,6 +254,7 @@ impl_default!(
         port: default_bounce_port(),
         hostname: default_hostname(),
         verp_domain: default_verp_domain(),
+        verp_sanitize: true,
     }
 );
 impl_default!(
@@ -235,6 +264,7 @@ impl_default!(
         host: default_host(),
         port: default_fbl_port(),
         hostname: default_hostname(),
+        max_arf_size: default_max_arf_size(),
     }
 );
 impl_default!(
@@ -245,12 +275,31 @@ impl_default!(
         key_directory: None,
     }
 );
-impl_default!(SpfConfig, Self { strict_mode: false });
+impl_default!(
+    SpfConfig,
+    Self {
+        strict_mode: false,
+        spf_cache_max_entries: default_spf_cache_max_entries(),
+    }
+);
 impl_default!(
     DmarcConfig,
     Self {
         report_email: default_report_email(),
         report_domain: default_hostname(),
+    }
+);
+impl_default!(
+    DnsConfig,
+    Self {
+        dnssec_enabled: false,
+        tlsa_cache_ttl_secs: default_tlsa_cache_ttl_secs(),
+    }
+);
+impl_default!(
+    BimiConfig,
+    Self {
+        svg_max_size: default_bimi_svg_max_size(),
     }
 );
 impl_default!(
@@ -270,6 +319,7 @@ impl_default!(
         enforce_dmarc: false,
         allow_soft_fail: true,
         trusted_relays: Vec::new(),
+        spf_cache_max_entries: default_spf_cache_max_entries(),
     }
 );
 impl_default!(
@@ -344,6 +394,21 @@ fn default_true() -> bool {
     true
 }
 
+// ── new security defaults ──────────────────────────────────────────────────────
+
+fn default_spf_cache_max_entries() -> u64 {
+    10_000
+}
+fn default_tlsa_cache_ttl_secs() -> u64 {
+    300
+}
+fn default_bimi_svg_max_size() -> usize {
+    256 * 1024
+}
+fn default_max_arf_size() -> usize {
+    1 * 1024 * 1024
+}
+
 impl MtaConfig {
     /// Load configuration from environment variables.
     pub fn from_env() -> anyhow::Result<Self> {
@@ -385,12 +450,14 @@ impl MtaConfig {
                 port: parse_u16_env("BOUNCE_PORT", default_bounce_port()),
                 hostname: std::env::var("BOUNCE_HOSTNAME").unwrap_or_else(|_| default_hostname()),
                 verp_domain: std::env::var("VERP_DOMAIN").unwrap_or_else(|_| default_verp_domain()),
+                verp_sanitize: parse_bool_env("VERP_SANITIZE", true),
             },
             feedback: FeedbackConfig {
                 enabled: parse_bool_env("FBL_ENABLED", true),
                 host: std::env::var("FBL_HOST").unwrap_or_else(|_| default_host()),
                 port: parse_u16_env("FBL_PORT", default_fbl_port()),
                 hostname: std::env::var("FBL_HOSTNAME").unwrap_or_else(|_| default_hostname()),
+                max_arf_size: parse_usize_env("MAX_ARF_SIZE", default_max_arf_size()),
             },
             dkim: DkimConfig {
                 selector: std::env::var("DKIM_SELECTOR").unwrap_or_else(|_| default_selector()),
@@ -399,11 +466,28 @@ impl MtaConfig {
             },
             spf: SpfConfig {
                 strict_mode: parse_bool_env("SPF_STRICT_MODE", false),
+                spf_cache_max_entries: std::env::var("SPF_CACHE_MAX_ENTRIES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default_spf_cache_max_entries()),
             },
             dmarc: DmarcConfig {
                 report_email: std::env::var("DMARC_REPORT_EMAIL")
                     .unwrap_or_else(|_| default_report_email()),
                 report_domain: std::env::var("DMARC_REPORT_DOMAIN").unwrap_or_default(),
+            },
+            dns: DnsConfig {
+                dnssec_enabled: parse_bool_env("DNSSEC_ENABLED", false),
+                tlsa_cache_ttl_secs: std::env::var("TLSA_CACHE_TTL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default_tlsa_cache_ttl_secs()),
+            },
+            bimi: BimiConfig {
+                svg_max_size: std::env::var("BIMI_SVG_MAX_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default_bimi_svg_max_size()),
             },
             rate_limit: RateLimitConfig::default(),
             email_auth: EmailAuthConfig {
@@ -415,6 +499,10 @@ impl MtaConfig {
                     .ok()
                     .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
                     .unwrap_or_default(),
+                spf_cache_max_entries: std::env::var("SPF_CACHE_MAX_ENTRIES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default_spf_cache_max_entries()),
             },
             metrics: MetricsConfig {
                 enabled: parse_bool_env("METRICS_ENABLED", false),
@@ -508,6 +596,32 @@ impl MtaConfig {
         }
         if self.graceful_shutdown_timeout == 0 {
             errors.push("graceful_shutdown_timeout must be > 0".into());
+        }
+
+        // --- DNS config validation ---
+        if self.dns.tlsa_cache_ttl_secs == 0 {
+            errors.push("dns.tlsa_cache_ttl_secs must be > 0".into());
+        }
+
+        // --- BIMI config validation ---
+        if self.bimi.svg_max_size == 0 || self.bimi.svg_max_size > 5 * 1024 * 1024 {
+            errors.push(format!(
+                "bimi.svg_max_size ({}) must be > 0 and <= 5 MiB",
+                self.bimi.svg_max_size
+            ));
+        }
+
+        // --- ARF size validation ---
+        if self.feedback.max_arf_size == 0 || self.feedback.max_arf_size > 50 * 1024 * 1024 {
+            errors.push(format!(
+                "feedback.max_arf_size ({}) must be > 0 and <= 50 MiB",
+                self.feedback.max_arf_size
+            ));
+        }
+
+        // --- SPF cache validation ---
+        if self.spf.spf_cache_max_entries == 0 {
+            errors.push("spf.spf_cache_max_entries must be > 0".into());
         }
 
         // --- TLS config coherence ---

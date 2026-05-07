@@ -23,6 +23,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListTenantsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

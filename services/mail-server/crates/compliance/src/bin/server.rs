@@ -13,9 +13,12 @@ use compliance::audit_logger::AuditLogger;
 use compliance::config::ComplianceConfig;
 use compliance::content_scanner::ContentScanner;
 use compliance::gdpr_automation::GdprAutomation;
+use compliance::hipaa::HipaaService;
 use compliance::risk_scoring::RiskScoringEngine;
 use compliance::routes::{create_router, AppState};
 use compliance::secret_manager::SecretManager;
+use compliance::soc2::Soc2Service;
+use compliance::trust_portal::TrustPortalService;
 
 #[derive(Parser)]
 #[command(name = "compliance-server")]
@@ -65,6 +68,22 @@ async fn main() -> anyhow::Result<()> {
     let secret_manager =
         SecretManager::new(db.clone(), config.secrets.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let gdpr = GdprAutomation::new(db.clone(), redis.clone(), config.gdpr.clone());
+    let soc2 = Soc2Service::new(db.clone());
+    let hipaa = HipaaService::new(db.clone(), config.auth_token.as_bytes().to_vec());
+    let trust = TrustPortalService::new(db.clone());
+
+    // Seed SOC2 control catalog (idempotent — uses INSERT ... ON CONFLICT).
+    if let Err(e) = soc2.seed_default_controls().await {
+        error!("Failed to seed SOC2 controls: {e}");
+    } else {
+        info!("SOC2 control catalog seeded");
+    }
+
+    let http_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(32)
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("Failed to build HTTP client");
 
     let state = Arc::new(AppState {
         risk_engine,
@@ -72,7 +91,13 @@ async fn main() -> anyhow::Result<()> {
         audit_logger,
         secret_manager,
         gdpr,
+        soc2,
+        hipaa,
+        trust,
         config: config.clone(),
+        db: db.clone(),
+        redis: redis.clone(),
+        http_client,
     });
 
     // Build router with middleware

@@ -34,10 +34,11 @@ RUN zola build
 # =============================================================================
 # Production Stage
 # =============================================================================
-FROM nginx:1.27-alpine AS runtime
+FROM nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 AS runtime
 
 # Create non-root user
-RUN adduser -D -H -u 10001 -s /sbin/nologin apexmail \
+RUN apk add --no-cache curl \
+    && adduser -D -H -u 10001 -s /sbin/nologin apexmail \
     && chown -R apexmail:apexmail /var/cache/nginx /var/log/nginx /etc/nginx/conf.d \
     && chmod -R 755 /var/cache/nginx
 
@@ -63,6 +64,14 @@ server {
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
+    }
+
+    # Canonicalize directory URLs to the trailing-slash form Zola emits.
+    location ~ ^(.+[^/])$ {
+        if (-d /usr/share/nginx/html$uri) {
+            return 301 $uri/;
+        }
+        try_files $uri $uri.html =404;
     }
 
     # Serve files or fallback to index.html
@@ -93,4 +102,4 @@ LABEL org.opencontainers.image.title="apexmail-marketing" \
     org.opencontainers.image.licenses="PROPRIETARY"
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["wget", "-qO-", "http://127.0.0.1:8080/health"]
+    CMD ["curl", "-fsS", "http://127.0.0.1:8080/health"]

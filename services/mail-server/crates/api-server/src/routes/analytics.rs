@@ -9,7 +9,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::ApiError;
+use crate::error::{success, ApiError, ApiResponse};
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
 
@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnalyticsQuery {
     #[serde(default)]
     pub from: Option<DateTime<Utc>>,
@@ -38,7 +39,7 @@ pub struct AnalyticsQuery {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubjectLineAnalyzeRequest {
     pub subject: String,
 }
@@ -181,6 +182,7 @@ pub struct DeliverabilityResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportQuery {
     #[serde(default)]
     pub from: Option<DateTime<Utc>>,
@@ -207,7 +209,7 @@ async fn dashboard(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<DashboardResponse>, ApiError> {
+) -> Result<Json<ApiResponse<DashboardResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
     let from = params
@@ -245,7 +247,7 @@ async fn dashboard(
     let total_sent = row.total_sent;
     let total_delivered = row.total_delivered;
 
-    Ok(Json(DashboardResponse {
+    Ok(success(DashboardResponse {
         total_sent,
         total_delivered,
         total_bounced: row.total_bounced,
@@ -261,7 +263,7 @@ async fn volume(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<Vec<VolumePoint>>, ApiError> {
+) -> Result<Json<ApiResponse<Vec<VolumePoint>>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
     let from = params
@@ -276,7 +278,7 @@ async fn volume(
         .fetch_all(&state.db)
         .await?;
 
-    Ok(Json(
+    Ok(success(
         rows.into_iter()
             .map(|r| VolumePoint {
                 date: r.day.to_rfc3339(),
@@ -292,7 +294,7 @@ async fn engagement(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<EngagementResponse>, ApiError> {
+) -> Result<Json<ApiResponse<EngagementResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
     let from = params
@@ -339,7 +341,7 @@ async fn engagement(
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(EngagementResponse {
+    Ok(success(EngagementResponse {
         open_rate: safe_ratio(totals.opens, total_delivered),
         click_rate: safe_ratio(totals.clicks, total_delivered),
         unsubscribe_rate: safe_ratio(totals.unsubs, total_delivered),
@@ -358,7 +360,7 @@ async fn deliverability(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<DeliverabilityResponse>, ApiError> {
+) -> Result<Json<ApiResponse<DeliverabilityResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
     let from = params
@@ -391,7 +393,7 @@ async fn deliverability(
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Json(build_deliverability_response(
+    Ok(success(build_deliverability_response(
         row.total_sent,
         row.delivered,
         row.bounced,
@@ -402,16 +404,16 @@ async fn deliverability(
 async fn analyze_subject_line(
     auth: AuthUser,
     Json(body): Json<SubjectLineAnalyzeRequest>,
-) -> Result<Json<SubjectLineAnalyzeResponse>, ApiError> {
+) -> Result<Json<ApiResponse<SubjectLineAnalyzeResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
-    Ok(Json(analyze_subject_line_payload(&body.subject)?))
+    Ok(success(analyze_subject_line_payload(&body.subject)?))
 }
 
 async fn export(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<ExportQuery>,
-) -> Result<Json<ExportResponse>, ApiError> {
+) -> Result<Json<ApiResponse<ExportResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
     let from = params
@@ -479,7 +481,7 @@ async fn export(
         }
     });
 
-    Ok(Json(ExportResponse {
+    Ok(success(ExportResponse {
         job_id: Some(job_id.to_string()),
         download_url: None,
         status: "processing".into(),
@@ -661,7 +663,7 @@ async fn get_export_job(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(job_id): Path<Uuid>,
-) -> Result<Json<ExportJobStatus>, ApiError> {
+) -> Result<Json<ApiResponse<ExportJobStatus>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
     let row: Option<ExportJobRow> = sqlx::query_as(
@@ -681,7 +683,7 @@ async fn get_export_job(
         None
     };
 
-    Ok(Json(ExportJobStatus {
+    Ok(success(ExportJobStatus {
         job_id: job.id.to_string(),
         status: job.status,
         total_rows: job.total_rows,

@@ -35,13 +35,13 @@ pub enum EmbeddingError {
     #[error("Vector dimension mismatch: got {got}, expected {expected}")]
     DimensionMismatch { got: usize, expected: usize },
 
-    #[error("Store full: {count}/{max} vectors")]
+    #[error("Store full: {count} / {max} vectors")]
     StoreFull { count: usize, max: usize },
 
     #[error("Vector not found: {id}")]
     NotFound { id: Uuid },
 
-    #[error("Text too long: {len} chars (max {max})")]
+    #[error("Text too long: {len} bytes (max {max})")]
     TextTooLong { len: usize, max: usize },
 
     #[error("Empty text input")]
@@ -61,6 +61,22 @@ pub enum EmbeddingError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// HMAC verification failed on persisted NDJSON data (O-9.2).
+    #[error("NDJSON integrity check failed: persisted data may be tampered")]
+    IntegrityCheckFailed,
+
+    /// HMAC key is empty (O-9.2).
+    #[error("persistence HMAC key is not configured")]
+    MissingHmacKey,
+
+    /// Input exceeds maximum allowed size for chunking (O-9.3).
+    #[error("Input too large for chunking: {size} bytes (max {max})")]
+    InputTooLarge { size: usize, max: usize },
+
+    /// Configuration error (e.g. invalid TLS CA path).
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
 }
 
 // ─── Chunking types ────────────────────────────────────────────
@@ -71,6 +87,20 @@ pub struct ChunkConfig {
     pub chunk_size: usize,
     pub chunk_overlap: usize,
     pub separators: Vec<String>,
+    /// Maximum input size in bytes (O-9.3). Default: 1MB.
+    #[serde(default = "default_max_input_size")]
+    pub max_input_size: usize,
+    /// Maximum single chunk size in bytes (O-9.3). Default: 8192.
+    #[serde(default = "default_max_chunk_size")]
+    pub max_chunk_size: usize,
+}
+
+const fn default_max_input_size() -> usize {
+    1_048_576 // 1MB
+}
+
+const fn default_max_chunk_size() -> usize {
+    8192 // 8KB
 }
 
 impl Default for ChunkConfig {
@@ -84,6 +114,8 @@ impl Default for ChunkConfig {
                 ". ".to_string(),
                 " ".to_string(),
             ],
+            max_input_size: default_max_input_size(),
+            max_chunk_size: default_max_chunk_size(),
         }
     }
 }
@@ -155,6 +187,8 @@ mod tests {
         assert_eq!(cfg.chunk_size, 512);
         assert_eq!(cfg.chunk_overlap, 64);
         assert_eq!(cfg.separators.len(), 4);
+        assert_eq!(cfg.max_input_size, 1_048_576);
+        assert_eq!(cfg.max_chunk_size, 8192);
     }
 
     #[test]
@@ -171,6 +205,15 @@ mod tests {
 
         let err = EmbeddingError::MissingTenantScope;
         assert!(err.to_string().contains("tenant_id"));
+
+        let err = EmbeddingError::IntegrityCheckFailed;
+        assert!(err.to_string().contains("tampered"));
+
+        let err = EmbeddingError::InputTooLarge {
+            size: 2_000_000,
+            max: 1_000_000,
+        };
+        assert!(err.to_string().contains("2,000,000") || err.to_string().contains("2000000"));
     }
 
     #[test]

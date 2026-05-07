@@ -39,6 +39,10 @@ def normalize_metric_name(raw_name):
 def clickhouse_request(scrape_uri, query):
     user = os.environ.get("CLICKHOUSE_USER", "default")
     password = os.environ.get("CLICKHOUSE_PASSWORD", "")
+    parsed_uri = urllib.parse.urlparse(scrape_uri)
+    allow_insecure = os.environ.get("CLICKHOUSE_ALLOW_INSECURE_HTTP", "").lower() in {"1", "true", "yes"}
+    if password and parsed_uri.scheme != "https" and not allow_insecure:
+        raise RuntimeError("refusing to send ClickHouse password over non-TLS HTTP")
     request = urllib.request.Request(scrape_uri, data=query.encode("utf-8"), method="POST")
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     request.add_header("X-ClickHouse-User", user)

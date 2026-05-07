@@ -8,8 +8,8 @@ Extracted from git history:
 - stress_test_extra.py (~80 tests, 12 categories)
 
 All pricing transformed to canonical:
-  Free=$0/3K/50K, Starter=$25/50K/500K, Pro=$65/150K/2M,
-  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$800/5M/∞
+  Free=$0/30K/300K, Starter=$25/50K/500K, Pro=$65/150K/2M,
+  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$3,000/5M/∞
 """
 
 RECOVERED_STRESS_TESTS = {

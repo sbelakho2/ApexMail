@@ -237,7 +237,8 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         let expected = match file_type {
             FileType::Pdf => Some(vec!["pdf"]),
             FileType::Zip => Some(vec![
-                "zip", "docx", "xlsx", "pptx", "jar", "apk", "ods", "odt",
+                "zip", "docx", "xlsx", "pptx", "jar", "apk", "ods", "odt", "docm", "dotm", "xlsm",
+                "xltm", "xlsb", "xlam", "pptm", "potm", "ppam", "ppsm", "sldm",
             ]),
             FileType::Gzip => Some(vec!["gz", "tgz"]),
             FileType::Rar => Some(vec!["rar"]),
@@ -331,7 +332,8 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
     if file_type == FileType::Zip {
         if let Some(ref ext) = extension {
             let macro_exts = [
-                "docm", "dotm", "xlsm", "xltm", "xlam", "pptm", "potm", "ppam",
+                "docm", "dotm", "xlsm", "xltm", "xlsb", "xlam", "pptm", "potm", "ppam", "ppsm",
+                "sldm",
             ];
             if macro_exts.contains(&ext.as_str()) {
                 findings.push(InspectionFinding {
@@ -470,6 +472,15 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         }
     }
 
+    if is_mhtml_attachment(data, extension.as_deref()) {
+        findings.push(InspectionFinding {
+            id: "MHTML_ATTACHMENT",
+            description: "MHTML web archive attachment can embed active web content".into(),
+            risk: 5.0,
+        });
+        risk_score += 5.0;
+    }
+
     // Dangerous extension check (regardless of content)
     if let Some(ref ext) = extension {
         let blocked = [
@@ -550,12 +561,13 @@ fn has_zip_vba_project(data: &[u8]) -> bool {
         b"vbaProject.bin",          // Main VBA project binary
         b"vbaProjectSignature.bin", // VBA project signature
         b"xl/vbaProject",           // Excel VBA project path
-        b"word/vbaProject", // Word VBA project path         b"ppt/vbaProject", // PowerPoint VBA project path
-        b"VBA/",            // VBA directory
-        b"_VBA_PROJECT_CUR", // VBA stream marker
-        b"activeX",         // ActiveX controls (can execute code)
-        b"oleObject",       // OLE objects (can embed executables)
-        b"embeddedHtml",    // Embedded HTML (can contain scripts)
+        b"word/vbaProject",         // Word VBA project path
+        b"ppt/vbaProject",          // PowerPoint VBA project path
+        b"VBA/",                    // VBA directory
+        b"_VBA_PROJECT_CUR",        // VBA stream marker
+        b"activeX",                 // ActiveX controls (can execute code)
+        b"oleObject",               // OLE objects (can embed executables)
+        b"embeddedHtml",            // Embedded HTML (can contain scripts)
     ];
 
     for indicator in VBA_INDICATORS {
@@ -568,6 +580,17 @@ fn has_zip_vba_project(data: &[u8]) -> bool {
     }
 
     false
+}
+
+fn is_mhtml_attachment(data: &[u8], extension: Option<&str>) -> bool {
+    let has_mhtml_extension = matches!(extension, Some("mht" | "mhtml"));
+    let sample = String::from_utf8_lossy(&data[..data.len().min(4096)]).to_lowercase();
+    let has_mhtml_markers = sample.contains("mime-version:")
+        && (sample.contains("multipart/related")
+            || sample.contains("content-location:")
+            || sample.contains("content-type: text/html"));
+
+    has_mhtml_extension || has_mhtml_markers
 }
 
 /// Check for external OLE links in OOXML that may pull remote payloads
@@ -912,6 +935,43 @@ mod tests {
         data.extend_from_slice(b"\x00\x00\x00Attribute VB_Name\x00\x00");
         let result = inspect_file(&data, Some("macro.doc"));
         assert!(result.findings.iter().any(|f| f.id == "OLE2_VBA_MACROS"));
+    }
+
+    #[test]
+    fn test_ooxml_xl_vba_project_indicator() {
+        let mut data = vec![0x50, 0x4B, 0x03, 0x04, 0x00, 0x00];
+        data.extend_from_slice(b"xl/vbaProject.bin");
+
+        let result = inspect_file(&data, Some("workbook.xlsx"));
+
+        assert!(result.findings.iter().any(|f| f.id == "OOXML_VBA_BIN"));
+    }
+
+    #[test]
+    fn test_macro_enabled_xlsb_and_xlam_extensions() {
+        for filename in ["workbook.xlsb", "addin.xlam"] {
+            let data = [0x50, 0x4B, 0x03, 0x04, 0x00, 0x00];
+            let result = inspect_file(&data, Some(filename));
+
+            assert!(
+                result.findings.iter().any(|f| f.id == "OOXML_MACRO"),
+                "expected OOXML_MACRO finding for {filename}: {:?}",
+                result.findings
+            );
+            assert!(
+                !result.extension_mismatch,
+                "macro-enabled ZIP extension should still match ZIP container for {filename}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mhtml_attachment_flagged() {
+        let data = b"MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\nContent-Location: file:///invoice.htm\r\n\r\n<html><script>alert(1)</script>";
+        let result = inspect_file(data, Some("invoice.mht"));
+
+        assert!(result.findings.iter().any(|f| f.id == "MHTML_ATTACHMENT"));
+        assert!(result.risk_score >= 5.0);
     }
 
     #[test]

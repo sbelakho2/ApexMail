@@ -2,12 +2,12 @@
 Extended Customer Profiles — Recovered from deleted files with canonical pricing.
 
 Canonical pricing:
-  Free: $0, 3K emails, 50K API
+  Free: $0, 30K emails, 300K API
   Starter: $25, 50K emails, 500K API  
   Pro: $65, 150K emails, 2M API
   Growth: $150, 500K emails, 5M API
   Scale: $350, 2M emails, 20M API
-  Enterprise: $800, 5M emails, unlimited API
+  Enterprise: $3,000, 5M emails, unlimited API
 """
 
 EXTENDED_PROFILES = {
@@ -25,7 +25,7 @@ EXTENDED_PROFILES = {
         "domain_count": "1",
         "domain_details": "- myshop.com: Verified (SPF: pass, DKIM: pass, DMARC: none)",
         "recent_events": "- 2,850 sent, 2,793 delivered (98.0%), 23 bounced (0.8%), 0 complaints",
-        "open_issues": "- Approaching email limit: 2,850/3,000 (95% used)"
+        "open_issues": "- Approaching email limit: 28,500/30,000 (95% used)"
     },
     "free_spf_broken_v2": {
         "account_id": "acct_sp2f8z",

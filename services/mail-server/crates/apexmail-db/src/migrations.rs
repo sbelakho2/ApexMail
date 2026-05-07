@@ -3,6 +3,36 @@
 //! These can be executed sequentially via `sqlx::query(SQL).execute(pool)` to
 //! bootstrap a fresh database. For production use run proper migrations; these
 //! constants serve as a single-file reference and for integration-test setup.
+//!
+//! # ⚠ O-18.2 — Sequential DDL Lock Risk
+//!
+//! All DDL statements (`CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE`) acquire
+//! `ACCESS EXCLUSIVE` locks on the target table while they execute. When the
+//! full schema is applied inside a **single transaction** (as `run_migrations`
+//! does), every table is locked until the entire transaction commits — which
+//! means concurrent readers and writers queue behind the migration transaction.
+//!
+//! ## Mitigation strategies
+//!
+//! | Strategy | Description |
+//! |----------|-------------|
+//! | **Lock-avoiding DDL** | Use `CREATE INDEX CONCURRENTLY` for indexes and `SET statement_timeout` per statement so a single DDL hang does not stall the entire transaction. |
+//! | **Per-object transactions** | Run each `CREATE TABLE` / `CREATE INDEX` in its own transaction (separate `sqlx::query().execute()` calls) so locks are released after each statement. |
+//! | **Statement timeouts** | Set `lock_timeout` (e.g. `SET lock_timeout = '5s'`) before each DDL statement so a lock-wait does not block the migration indefinitely. |
+//! | **Off-peak migrations** | Schedule schema changes during maintenance windows when write traffic is minimal. |
+//! | **Retry on deadlock** | In production, use a migration framework (e.g. `sqlx::migrate!`) that can retry transactions that fail due to deadlock detection. |
+//!
+//! The current single-transaction approach (`run_migrations`) is suitable for
+//! fresh databases (integration tests, CI). For production schema changes,
+//! break DDL into per-statement transactions and use `CREATE INDEX CONCURRENTLY`.
+//!
+//! ## Example: concurrent index creation
+//! ```ignore
+//! // Each index in its own transaction with non-blocking CREATE INDEX CONCURRENTLY
+//! sqlx::query("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_tenant ON users(tenant_id)")
+//!     .execute(&pool)  // no BEGIN/COMMIT needed — CONCURRENTLY requires its own tx
+//!     .await?;
+//! ```
 
 /// Complete DDL for all tables, executed in dependency order.
 pub const SCHEMA: &str = r#"
@@ -19,15 +49,18 @@ CREATE TABLE IF NOT EXISTS tenants (
 
 -- ── Users ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
-    id              UUID PRIMARY KEY,
-    tenant_id       UUID        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    email           TEXT        NOT NULL UNIQUE,
-    name            TEXT,
-    password_hash   TEXT        NOT NULL,
-    role            TEXT        NOT NULL DEFAULT 'member',
-    status          TEXT        NOT NULL DEFAULT 'active',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                  UUID PRIMARY KEY,
+    tenant_id           UUID        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    email               TEXT        NOT NULL UNIQUE,
+    name                TEXT,
+    password_hash       TEXT        NOT NULL,
+    role                TEXT        NOT NULL DEFAULT 'member',
+    status              TEXT        NOT NULL DEFAULT 'active',
+    mfa_enabled         BOOLEAN     NOT NULL DEFAULT FALSE,
+    mfa_secret          TEXT,
+    mfa_recovery_hashes JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_users_email  ON users(email);
@@ -263,6 +296,8 @@ CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY, tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     email TEXT NOT NULL UNIQUE, name TEXT, password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'member', status TEXT NOT NULL DEFAULT 'active',
+    mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE, mfa_secret TEXT,
+    mfa_recovery_hashes JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 "#;
@@ -379,8 +414,11 @@ CREATE TABLE IF NOT EXISTS support_tickets (
 "#;
 
 /// Run the full schema against a pool (idempotent thanks to IF NOT EXISTS).
+/// DI-002: Wrapped in a transaction so a failure rolls back all changes.
 pub async fn run_migrations(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(SCHEMA).execute(pool).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(SCHEMA).execute(&mut *tx).await?;
+    tx.commit().await?;
     tracing::info!("Database schema applied successfully");
     Ok(())
 }

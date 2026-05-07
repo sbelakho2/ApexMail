@@ -1,9 +1,16 @@
 //! Shared helper functions used across multiple route modules.
+//!
+//! Includes pagination helpers (cursor-based and offset-based),
+//! ETag support, and common utilities.
 
-use axum::http::HeaderMap;
+use axum::http::header::{CACHE_CONTROL, IF_NONE_MATCH};
+use axum::http::{HeaderMap, HeaderValue};
+use base64::Engine;
 use sha2::{Digest, Sha256};
 
 pub const TOKEN_BLACKLIST_PREFIX: &str = "apexmail:token_blacklist:";
+
+// ─── Clamp / default ──────────────────────────────────────────
 
 /// Clamp a pagination `limit` to the range `[1, max]`.
 pub fn clamp_limit(limit: i64, max: i64) -> i64 {
@@ -14,6 +21,179 @@ pub fn clamp_limit(limit: i64, max: i64) -> i64 {
 pub fn default_limit() -> i64 {
     50
 }
+
+// ─── Cursor-based pagination ───────────────────────────────────
+
+/// Encode a cursor value (e.g. a row ID or timestamp) into an opaque
+/// hex string that clients can pass back as the `?cursor=` parameter.
+pub fn encode_cursor(cursor: &str) -> String {
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(cursor.len() * 2);
+    for b in cursor.bytes() {
+        write!(hex, "{b:02x}").ok();
+    }
+    hex
+}
+
+/// Decode a cursor string back to its original value.
+/// Returns `None` if the cursor is malformed.
+pub fn decode_cursor(cursor: &str) -> Option<String> {
+    if cursor.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(cursor.len() / 2);
+    for chunk in cursor.as_bytes().chunks(2) {
+        let hex_str = std::str::from_utf8(chunk).ok()?;
+        let byte = u8::from_str_radix(hex_str, 16).ok()?;
+        bytes.push(byte);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Build the `LIMIT $1` part of a cursor-based pagination query.
+/// Always fetches `limit + 1` rows so we can detect whether there
+/// are more results (the "has_more" flag).
+pub fn cursor_limit_sql(limit: i64) -> String {
+    format!("LIMIT {}", limit + 1)
+}
+
+/// Build a `WHERE` clause for cursor-based pagination on a UUID or
+/// timestamp column. The column name is validated against an allowlist
+/// to prevent SQL injection.
+///
+/// # Example
+/// ```sql
+/// WHERE created_at < $1
+/// ```
+///
+/// # Panics
+/// Panics if the column name is not in the allowlist.
+pub fn cursor_where_sql(column: &str) -> String {
+    const ALLOWED_COLUMNS: &[&str] = &[
+        "id",
+        "created_at",
+        "updated_at",
+        "timestamp",
+        "sent_at",
+        "scheduled_at",
+        "delivered_at",
+        "last_event",
+        "started_at",
+        "completed_at",
+        "verified_at",
+        "last_accessed",
+        "last_rotated",
+        "expires_at",
+        "published_at",
+        "logged_at",
+        "date",
+        "day",
+    ];
+    assert!(
+        ALLOWED_COLUMNS.contains(&column),
+        "column '{}' is not in the allowlist for cursor_where_sql",
+        column
+    );
+    format!("WHERE {column} < $1")
+}
+
+/// Helper to check whether a result batch has a "next page".
+///
+/// If `rows` has `limit + 1` items, the last item is the cursor for
+/// the next page and should be removed before returning.
+pub fn has_more<T>(rows: &mut Vec<T>, limit: usize) -> bool {
+    if rows.len() > limit {
+        rows.truncate(limit);
+        true
+    } else {
+        false
+    }
+}
+
+/// Build a pagination metadata JSON value for cursor-based responses.
+pub fn pagination_meta(has_more: bool, next_cursor: Option<String>) -> serde_json::Value {
+    serde_json::json!({
+        "hasMore": has_more,
+        "nextCursor": next_cursor,
+    })
+}
+
+/// Build a pagination metadata JSON value for offset-based responses (legacy).
+pub fn offset_pagination_meta(total: i64, limit: i64, offset: i64) -> serde_json::Value {
+    serde_json::json!({
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })
+}
+
+// ─── ETag / If-None-Match ──────────────────────────────────────
+
+/// Compute a weak ETag from a content hash.
+/// Weak ETags (`W/"..."`) are preferred for dynamic JSON responses
+/// because content may be semantically equivalent but byte-wise different.
+pub fn compute_etag(body: &[u8]) -> String {
+    let hash = Sha256::digest(body);
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
+    format!("W/\"{b64}\"")
+}
+
+/// Check the `If-None-Match` header against the current ETag.
+/// Returns `true` if the client's cached version is still valid (304).
+pub fn is_not_modified(headers: &HeaderMap, current_etag: &str) -> bool {
+    headers
+        .get_all(IF_NONE_MATCH)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(',').map(|s| s.trim()))
+        .any(|v| v == current_etag || v.trim_matches('"') == current_etag.trim_matches('"'))
+}
+
+/// Apply cache-control headers to a response.
+pub fn with_cache_control(response: &mut axum::response::Response, max_age_secs: u32) {
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_str(&format!("public, max-age={max_age_secs}")).unwrap(),
+    );
+}
+
+/// A simple in-memory response cache keyed by request path.
+/// Used to avoid re-serialising the same response body.
+pub struct ResponseCache {
+    store: std::sync::Mutex<std::collections::HashMap<String, (String, Vec<u8>)>>,
+}
+
+impl ResponseCache {
+    /// Create a new empty cache.
+    pub fn new() -> Self {
+        Self {
+            store: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Look up a cached response by cache key.
+    pub fn get(&self, key: &str) -> Option<(String, Vec<u8>)> {
+        self.store
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(key).cloned())
+    }
+
+    /// Insert a response into the cache.
+    pub fn set(&self, key: &str, etag: String, body: Vec<u8>) {
+        if let Ok(mut cache) = self.store.lock() {
+            cache.insert(key.to_string(), (etag, body));
+        }
+    }
+}
+
+impl Default for ResponseCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─── Cookie extraction ─────────────────────────────────────────
 
 /// Extract a named cookie value from the request headers.
 /// Handles multiple `Cookie` headers correctly (per RFC 6265).

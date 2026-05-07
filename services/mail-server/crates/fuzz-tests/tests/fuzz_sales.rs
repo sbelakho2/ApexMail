@@ -27,7 +27,7 @@ fn fuzz_email_extraction_no_panic() {
     // Random text fed to extract_emails_from_text must never cause a panic.
     let scraper = WebScraper::new();
     for _ in 0..5_000 {
-        let text = random_unicode(rand::thread_rng().gen_range(0..500));
+        let text = random_unicode(rand::rng().random_range(0..500));
         let emails = scraper.extract_emails_from_text(&text);
         // Emails found should all contain '@'
         for email in &emails {
@@ -43,7 +43,7 @@ fn fuzz_email_extraction_no_panic() {
 fn fuzz_url_validation_no_panic() {
     // Random strings fed to validate_url must never panic.
     for _ in 0..5_000 {
-        let input = random_ascii(rand::thread_rng().gen_range(0..300));
+        let input = random_ascii(rand::rng().random_range(0..300));
         let _ = WebScraper::validate_url(&input);
     }
     // Edge cases
@@ -54,15 +54,14 @@ fn fuzz_url_validation_no_panic() {
 
     // Unicode URLs
     for _ in 0..1_000 {
-        let input = random_unicode(rand::thread_rng().gen_range(0..200));
+        let input = random_unicode(rand::rng().random_range(0..200));
         let _ = WebScraper::validate_url(&input);
     }
 }
 
-#[test]
-fn fuzz_categorization_always_returns() {
+#[tokio::test]
+async fn fuzz_categorization_always_returns() {
     // InboxManager::categorize_message must always return a valid category.
-    let inbox = InboxManager::new();
     let valid_categories = [
         MessageCategory::Lead,
         MessageCategory::Customer,
@@ -70,11 +69,11 @@ fn fuzz_categorization_always_returns() {
         MessageCategory::Spam,
         MessageCategory::Other,
     ];
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for _ in 0..5_000 {
         let from = random_email();
-        let subject = random_unicode(rng.gen_range(0..200));
-        let msg = inbox.categorize_message(from, subject);
+        let subject = random_unicode(rng.random_range(0..200));
+        let msg = InboxManager::classify_message("tenant-fuzz".to_string(), from, subject);
         assert!(
             valid_categories.contains(&msg.category),
             "Invalid category: {:?}",
@@ -83,6 +82,6 @@ fn fuzz_categorization_always_returns() {
         assert!(!msg.id.is_nil(), "Message ID should not be nil");
     }
     // Edge cases
-    let msg = inbox.categorize_message(String::new(), String::new());
+    let msg = InboxManager::classify_message(String::new(), String::new(), String::new());
     assert!(valid_categories.contains(&msg.category));
 }

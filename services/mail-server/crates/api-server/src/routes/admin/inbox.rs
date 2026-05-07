@@ -38,6 +38,7 @@ async fn log_inbox_audit(db: &sqlx::PgPool, message_id: &str, metadata: serde_js
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InboxQuery {
     pub classification: Option<String>,
     pub archived: Option<bool>,

@@ -1,18 +1,23 @@
 //! Email Queue
 //!
-//! Persistent queue for outbound emails with retry logic.
+//! Persistent queue for outbound emails with retry logic and per-domain
+//! rate limiting.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
+use governor::{DefaultKeyedRateLimiter, Quota};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::dkim::DkimSigner;
+use crate::provider_throttle::{ProviderThrottle, ThrottleDecision};
 use crate::smtp_sender::SmtpSender;
 
 /// Result of an atomic cancel attempt.
@@ -65,6 +70,8 @@ pub struct QueuedEmail {
     pub sequence_id: Option<Uuid>,
     pub contact_id: Option<Uuid>,
     pub priority: i32,
+    /// Tenant that owns this email, for per-tenant fair queueing.
+    pub tenant_id: Option<String>,
 }
 
 /// Email queue configuration
@@ -75,6 +82,19 @@ pub struct QueueConfig {
     pub batch_size: usize,
     pub poll_interval: Duration,
     pub worker_count: usize,
+    /// Per-tenant fair-queue weights (emails processed per round).
+    /// Keys are tenant plan tiers ("free", "starter", "pro", etc.).
+    /// Default weight for unknown tenants is 10.
+    pub tenant_weights: std::collections::HashMap<String, usize>,
+    /// Maximum outbound messages per second (global).
+    /// 0 = unlimited. Default: 50.
+    pub global_rate_per_second: u64,
+    /// Maximum outbound messages per second per domain.
+    /// 0 = unlimited. Default: 10.
+    pub domain_rate_per_second: u64,
+    /// Maximum outbound messages per second per tenant.
+    /// 0 = unlimited. Default: 20.
+    pub tenant_rate_per_second: u64,
 }
 
 const DEFAULT_QUEUE_MAX_ATTEMPTS: i32 = 5;
@@ -83,9 +103,29 @@ const DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS: u64 = 300;
 const DEFAULT_QUEUE_BATCH_SIZE: usize = 100;
 const DEFAULT_QUEUE_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_QUEUE_WORKER_COUNT: usize = 4;
+const DEFAULT_GLOBAL_RATE_PER_SECOND: u64 = 50;
+const DEFAULT_DOMAIN_RATE_PER_SECOND: u64 = 10;
+const DEFAULT_TENANT_RATE_PER_SECOND: u64 = 20;
 
 impl Default for QueueConfig {
     fn default() -> Self {
+        use std::collections::HashMap;
+        let mut tenant_weights = HashMap::new();
+        tenant_weights.insert("free".to_string(), 10);
+        tenant_weights.insert("starter".to_string(), 50);
+        tenant_weights.insert("pro".to_string(), 200);
+        tenant_weights.insert("growth".to_string(), 500);
+        tenant_weights.insert("scale".to_string(), 1000);
+        tenant_weights.insert("enterprise".to_string(), 2000);
+
+        // MI-003: Read rate limit config from environment variables with defaults.
+        // OUTBOUND_RATE_PER_DOMAIN — max outbound messages per second per recipient domain.
+        // OUTBOUND_RATE_BURST — max burst rate (reserved for future use with burst-capable
+        // rate limiters; the governor crate expresses burst via Quota).
+        let domain_rate = Self::env_u64("OUTBOUND_RATE_PER_DOMAIN", DEFAULT_DOMAIN_RATE_PER_SECOND);
+        let global_rate = Self::env_u64("OUTBOUND_GLOBAL_RATE", DEFAULT_GLOBAL_RATE_PER_SECOND);
+        let tenant_rate = Self::env_u64("OUTBOUND_TENANT_RATE", DEFAULT_TENANT_RATE_PER_SECOND);
+
         Self {
             max_attempts: DEFAULT_QUEUE_MAX_ATTEMPTS,
             retry_delays: DEFAULT_QUEUE_RETRY_DELAY_SECS
@@ -96,7 +136,21 @@ impl Default for QueueConfig {
             batch_size: DEFAULT_QUEUE_BATCH_SIZE,
             poll_interval: Duration::from_secs(DEFAULT_QUEUE_POLL_INTERVAL_SECS),
             worker_count: DEFAULT_QUEUE_WORKER_COUNT,
+            tenant_weights,
+            global_rate_per_second: global_rate,
+            domain_rate_per_second: domain_rate,
+            tenant_rate_per_second: tenant_rate,
         }
+    }
+}
+
+impl QueueConfig {
+    /// Read a u64 value from an environment variable, falling back to a default.
+    fn env_u64(key: &str, default: u64) -> u64 {
+        std::env::var(key)
+            .ok()
+            .and_then(|val| val.parse::<u64>().ok())
+            .unwrap_or(default)
     }
 }
 
@@ -107,16 +161,58 @@ pub struct EmailQueue {
     /// SMTP sender no longer behind Mutex since send is &self (#114/#115)
     smtp_sender: SmtpSender,
     dkim_signer: Option<DkimSigner>,
+    /// Global rate limiter (messages per second across all domains/tenants).
+    global_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
+    /// Per-domain rate limiter (messages per second per recipient domain).
+    domain_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
+    /// Per-tenant rate limiter (messages per second per tenant).
+    tenant_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
+    /// Per-provider reputation-driven throttle.  Optional so tests can omit.
+    provider_throttle: Option<Arc<ProviderThrottle>>,
 }
 
 impl EmailQueue {
     /// Create a new email queue
     pub fn new(pool: PgPool, config: QueueConfig, smtp_sender: SmtpSender) -> Self {
+        let global_limiter = if config.global_rate_per_second > 0 {
+            let quota = Quota::per_second(
+                NonZeroU32::new(config.global_rate_per_second as u32)
+                    .expect("global_rate_per_second > 0 confirmed"),
+            );
+            Some(Arc::new(DefaultKeyedRateLimiter::keyed(quota)))
+        } else {
+            None
+        };
+
+        let domain_limiter = if config.domain_rate_per_second > 0 {
+            let quota = Quota::per_second(
+                NonZeroU32::new(config.domain_rate_per_second as u32)
+                    .expect("domain_rate_per_second > 0 confirmed"),
+            );
+            Some(Arc::new(DefaultKeyedRateLimiter::keyed(quota)))
+        } else {
+            None
+        };
+
+        let tenant_limiter = if config.tenant_rate_per_second > 0 {
+            let quota = Quota::per_second(
+                NonZeroU32::new(config.tenant_rate_per_second as u32)
+                    .expect("tenant_rate_per_second > 0 confirmed"),
+            );
+            Some(Arc::new(DefaultKeyedRateLimiter::keyed(quota)))
+        } else {
+            None
+        };
+
         Self {
             pool,
             config,
             smtp_sender,
             dkim_signer: None,
+            global_limiter,
+            domain_limiter,
+            tenant_limiter,
+            provider_throttle: None,
         }
     }
 
@@ -124,6 +220,70 @@ impl EmailQueue {
     pub fn with_dkim_signer(mut self, signer: DkimSigner) -> Self {
         self.dkim_signer = Some(signer);
         self
+    }
+
+    /// Enable per-provider reputation-driven throttling. The throttle
+    /// reads `postmaster_reputation_summary` (written by the MTA's postmaster
+    /// scheduler) and `outbound_provider_throttle_overrides` (operator pins).
+    pub fn with_provider_throttle(mut self, throttle: ProviderThrottle) -> Self {
+        self.provider_throttle = Some(Arc::new(throttle));
+        self
+    }
+
+    /// Extract the domain part from an email address.
+    /// e.g. "user@example.com" → "example.com"
+    fn extract_domain(addr: &str) -> String {
+        addr.rsplit('@').next().unwrap_or("unknown").to_lowercase()
+    }
+
+    /// Check whether sending to the given recipient domains and tenant
+    /// should be rate-limited. Returns `Ok(())` if allowed, or an error
+    /// with a descriptive message if rate-limited.
+    fn check_rate_limits(&self, to_addresses: &[String], tenant_id: Option<&str>) -> Result<()> {
+        // Collect unique recipient domains
+        let mut domains: Vec<String> = to_addresses
+            .iter()
+            .map(|addr| Self::extract_domain(addr))
+            .collect();
+        domains.sort();
+        domains.dedup();
+
+        // Check global rate limit (keyed by "__global__")
+        if let Some(ref limiter) = self.global_limiter {
+            if limiter.check_key(&"__global__".to_string()).is_err() {
+                return Err(anyhow::anyhow!(
+                    "Global rate limit exceeded (max {} msg/s)",
+                    self.config.global_rate_per_second
+                ));
+            }
+        }
+
+        // Check per-domain rate limits
+        if let Some(ref limiter) = self.domain_limiter {
+            for domain in &domains {
+                if limiter.check_key(domain).is_err() {
+                    return Err(anyhow::anyhow!(
+                        "Domain rate limit exceeded for '{}' (max {} msg/s)",
+                        domain,
+                        self.config.domain_rate_per_second
+                    ));
+                }
+            }
+        }
+
+        // Check per-tenant rate limit
+        if let Some(ref limiter) = self.tenant_limiter {
+            let tenant_key = tenant_id.unwrap_or("__no_tenant__").to_string();
+            if limiter.check_key(&tenant_key).is_err() {
+                return Err(anyhow::anyhow!(
+                    "Tenant rate limit exceeded for '{}' (max {} msg/s)",
+                    tenant_key,
+                    self.config.tenant_rate_per_second
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     /// Initialize queue tables
@@ -149,7 +309,8 @@ impl EmailQueue {
                 campaign_id UUID,
                 sequence_id UUID,
                 contact_id UUID,
-                priority INT NOT NULL DEFAULT 0
+                priority INT NOT NULL DEFAULT 0,
+                tenant_id TEXT
             )
         "#,
         )
@@ -158,7 +319,7 @@ impl EmailQueue {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_email_queue_status 
+            CREATE INDEX IF NOT EXISTS idx_email_queue_status
             ON email_queue(status, next_retry_at, priority DESC)
         "#,
         )
@@ -167,27 +328,89 @@ impl EmailQueue {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_email_queue_campaign 
+            CREATE INDEX IF NOT EXISTS idx_email_queue_campaign
             ON email_queue(campaign_id) WHERE campaign_id IS NOT NULL
         "#,
         )
         .execute(&self.pool)
         .await?;
 
-        info!("Email queue tables initialized");
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_email_queue_tenant_status
+            ON email_queue(tenant_id, status) WHERE tenant_id IS NOT NULL
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // MI-008: Dead-letter queue for permanently failed bounce emails.
+        // When a bounce notification itself cannot be delivered after exhausting
+        // all retries, it is moved here with full headers, error info, and
+        // timestamps for forensic analysis and manual intervention.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS dead_letter_queue (
+                id UUID PRIMARY KEY,
+                original_email_id UUID,
+                from_address TEXT NOT NULL,
+                to_addresses TEXT[] NOT NULL,
+                subject TEXT NOT NULL,
+                text_body TEXT,
+                html_body TEXT,
+                headers JSONB DEFAULT '{}'::jsonb,
+                attempts INT NOT NULL DEFAULT 0,
+                max_attempts INT NOT NULL DEFAULT 5,
+                last_error TEXT NOT NULL,
+                bounce_type TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                dead_lettered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                tenant_id TEXT
+            )
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_dead_letter_created
+            ON dead_letter_queue(dead_lettered_at)
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Add tenant_id column for existing deployments (idempotent)
+        sqlx::query(
+            r#"
+            ALTER TABLE email_queue
+            ADD COLUMN IF NOT EXISTS tenant_id TEXT
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        info!("Email queue tables initialized (including dead-letter queue)");
         Ok(())
     }
 
     /// Enqueue an email
+    ///
+    /// Applies rate limits before accepting the email into the queue.
+    /// If rate-limited, returns an error immediately.
     pub async fn enqueue(&self, email: QueuedEmail) -> Result<Uuid> {
+        // Check rate limits before accepting into queue
+        self.check_rate_limits(&email.to_addresses, email.tenant_id.as_deref())?;
+
         let id = sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO email_queue (
                 id, from_address, to_addresses, subject, text_body, html_body,
-                headers, status, max_attempts, campaign_id, sequence_id, 
-                contact_id, priority
+                headers, status, max_attempts, campaign_id, sequence_id,
+                contact_id, priority, tenant_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13)
             RETURNING id
         "#,
         )
@@ -203,6 +426,7 @@ impl EmailQueue {
         .bind(&email.sequence_id)
         .bind(&email.contact_id)
         .bind(email.priority)
+        .bind(&email.tenant_id)
         .fetch_one(&self.pool)
         .await?;
 
@@ -217,13 +441,13 @@ impl EmailQueue {
             return Ok(Vec::new());
         }
 
-        // Build a single multi-row INSERT:VALUES ($1..$12), ($13..$24), ...
-        let cols = 12; // number of bind params per row
+        // Build a single multi-row INSERT:VALUES ($1..$13), ($14..$26), ...
+        let cols = 13; // number of bind params per row (added tenant_id)
         let mut sql = String::from(
             "INSERT INTO email_queue (
                 id, from_address, to_addresses, subject, text_body, html_body,
                 headers, status, max_attempts, campaign_id, sequence_id,
-                contact_id, priority
+                contact_id, priority, tenant_id
             ) VALUES ",
         );
 
@@ -255,7 +479,8 @@ impl EmailQueue {
                 .bind(&email.campaign_id)
                 .bind(&email.sequence_id)
                 .bind(&email.contact_id)
-                .bind(email.priority);
+                .bind(email.priority)
+                .bind(&email.tenant_id);
         }
 
         let returned_ids = query.fetch_all(&self.pool).await?;
@@ -306,6 +531,7 @@ impl EmailQueue {
                 sequence_id: row.get("sequence_id"),
                 contact_id: row.get("contact_id"),
                 priority: row.get("priority"),
+                tenant_id: row.get("tenant_id"),
             })
             .collect();
 
@@ -370,6 +596,7 @@ impl EmailQueue {
                 sequence_id: row.get("sequence_id"),
                 contact_id: row.get("contact_id"),
                 priority: row.get("priority"),
+                tenant_id: row.get("tenant_id"),
             }
         });
 
@@ -427,11 +654,127 @@ impl EmailQueue {
         }
     }
 
+    /// Check whether an email is a bounce notification by examining its
+    /// from_address for typical bounce indicators (e.g. mailer-daemon, bounce).
+    fn is_bounce_email(from_address: &str) -> bool {
+        let lower = from_address.to_lowercase();
+        lower.contains("mailer-daemon")
+            || lower.contains("maildaemon")
+            || lower.starts_with("bounce@")
+            || lower.starts_with("noreply@")
+            || lower.starts_with("return@")
+    }
+
+    /// Move a permanently failed email to the dead-letter queue (MI-008).
+    ///
+    /// Only bounce notifications are dead-lettered. Regular failed emails are
+    /// simply marked as 'failed'. This prevents legitimate failed deliveries
+    /// from filling the dead-letter queue while preserving forensic data for
+    /// undeliverable bounces.
+    async fn move_to_dead_letter(&self, id: &Uuid, error: &str) -> Result<()> {
+        // Fetch the full email record for dead-letter storage
+        let row = sqlx::query(
+            r#"
+            SELECT
+                from_address, to_addresses, subject, text_body, html_body,
+                headers, attempts, max_attempts, created_at, tenant_id
+            FROM email_queue WHERE id = $1
+        "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let row = match row {
+            Some(r) => r,
+            None => {
+                warn!(email_id = %id, "Cannot move to dead-letter: email not found");
+                return Ok(());
+            }
+        };
+
+        let from_address: String = row.get("from_address");
+        let subject: String = row.get("subject");
+
+        // Only dead-letter bounce notifications, not regular email failures
+        if !Self::is_bounce_email(&from_address) {
+            debug!(email_id = %id, "Not a bounce email; skipping dead-letter");
+            return Ok(());
+        }
+
+        let bounce_type = detect_bounce_type(&from_address, &subject);
+
+        sqlx::query(
+            r#"
+            INSERT INTO dead_letter_queue (
+                id, original_email_id, from_address, to_addresses, subject,
+                text_body, html_body, headers, attempts, max_attempts,
+                last_error, bounce_type, created_at, dead_lettered_at, tenant_id
+            )
+            VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13)
+        "#,
+        )
+        .bind(id)
+        .bind(&from_address)
+        .bind(row.get::<Vec<String>, _>("to_addresses"))
+        .bind(&subject)
+        .bind(row.get::<Option<String>, _>("text_body"))
+        .bind(row.get::<Option<String>, _>("html_body"))
+        .bind(row.get::<serde_json::Value, _>("headers"))
+        .bind(row.get::<i32, _>("attempts"))
+        .bind(row.get::<i32, _>("max_attempts"))
+        .bind(error)
+        .bind(&bounce_type)
+        .bind(row.get::<chrono::DateTime<Utc>, _>("created_at"))
+        .bind(row.get::<Option<String>, _>("tenant_id"))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to insert dead-letter record: {}", e))?;
+
+        metrics::counter!("outbound.dead_letter.bounces", "bounce_type" => bounce_type.clone())
+            .increment(1);
+
+        error!(
+            email_id = %id,
+            from = %from_address,
+            error = error,
+            "Bounce email moved to dead-letter queue — manual intervention may be required"
+        );
+
+        Ok(())
+    }
+
+    /// Mark email as deferred due to provider reputation throttle.
+    /// Unlike `mark_failed(defer=true)`, this does NOT increment `attempts`,
+    /// so reputation-driven backoff cannot cause permanent failures.
+    pub async fn mark_throttled(&self, id: &Uuid, reason: &str) -> Result<()> {
+        // Short-ish retry delay — re-check reputation soon.  60 seconds is
+        // longer than ProviderThrottle's cache TTL so the next look will
+        // hit fresh data.
+        let next_retry = Utc::now() + chrono::Duration::seconds(90);
+        sqlx::query(
+            r#"
+            UPDATE email_queue
+            SET status = 'deferred',
+                last_error = $2,
+                next_retry_at = $3,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(reason)
+        .bind(next_retry)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Mark email as failed
     pub async fn mark_failed(&self, id: &Uuid, error: &str, defer: bool) -> Result<()> {
         let email = sqlx::query(
             r#"
-            SELECT attempts, max_attempts FROM email_queue WHERE id = $1
+            SELECT attempts, max_attempts, from_address FROM email_queue WHERE id = $1
         "#,
         )
         .bind(id)
@@ -440,6 +783,7 @@ impl EmailQueue {
 
         let attempts: i32 = email.get("attempts");
         let max_attempts: i32 = email.get("max_attempts");
+        let from_address: String = email.get("from_address");
         let new_attempts = attempts + 1;
 
         if defer && new_attempts < max_attempts {
@@ -491,6 +835,17 @@ impl EmailQueue {
             .await?;
 
             error!(email_id = %id, error = error, "Email permanently failed");
+
+            // MI-008: Move bounce notifications to the dead-letter queue
+            if Self::is_bounce_email(&from_address) {
+                if let Err(e) = self.move_to_dead_letter(id, error).await {
+                    error!(
+                        email_id = %id,
+                        dead_letter_error = %e,
+                        "Failed to move bounce to dead-letter queue"
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -498,6 +853,31 @@ impl EmailQueue {
 
     /// Process a single email
     async fn process_email(&self, email: &QueuedEmail) -> Result<()> {
+        // Per-provider reputation throttle: if our deliverability signal says
+        // "back off Gmail", roll the dice and possibly defer this message.
+        // Multiple recipients only need one to trigger the throttle (worst case).
+        if let Some(ref throttle) = self.provider_throttle {
+            let sender_domain = Self::extract_domain(&email.from_address);
+            for recipient in &email.to_addresses {
+                let recip_domain = Self::extract_domain(recipient);
+                let decision = throttle
+                    .decide(&sender_domain, &recip_domain, email.tenant_id.as_deref())
+                    .await;
+                if let ThrottleDecision::Defer { reason, throttle_pct } = decision {
+                    info!(
+                        email_id = %email.id,
+                        recipient,
+                        throttle_pct,
+                        reason = %reason,
+                        "Deferring outbound message per provider reputation throttle"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "provider_throttle: {reason}"
+                    ));
+                }
+            }
+        }
+
         // Extract custom headers from JSON
         let headers: Option<std::collections::HashMap<String, String>> =
             email.headers.as_object().map(|obj| {
@@ -544,7 +924,11 @@ impl EmailQueue {
         }
     }
 
-    /// Process a batch of emails concurrently (#115)
+    /// Process a batch of emails concurrently (#115) with per-tenant weighted fair queueing.
+    ///
+    /// Emails are grouped by tenant_id. Each tenant gets up to `tenant_weight` emails
+    /// processed per round before moving to the next tenant (round-robin). This prevents
+    /// a high-volume tenant from starving lower-volume tenants.
     async fn process_batch(&self) -> Result<()> {
         let emails = self.fetch_pending(self.config.batch_size as i64).await?;
 
@@ -554,8 +938,48 @@ impl EmailQueue {
 
         info!(count = emails.len(), "Processing email batch");
 
-        // Process emails concurrently instead of sequentially
-        let futures: Vec<_> = emails
+        // Group emails by tenant_id for weighted fair queueing.
+        // Emails without tenant_id are grouped under a sentinel key.
+        let mut by_tenant: std::collections::HashMap<String, Vec<&QueuedEmail>> =
+            std::collections::HashMap::new();
+        for email in &emails {
+            let key = email.tenant_id.clone().unwrap_or_default();
+            by_tenant.entry(key).or_default().push(email);
+        }
+
+        // Build a round-robin schedule: for each tenant, take up to `weight` emails.
+        let mut scheduled: Vec<&QueuedEmail> = Vec::with_capacity(emails.len());
+        let tenant_keys: Vec<String> = by_tenant.keys().cloned().collect();
+
+        // Continue until we've scheduled all emails
+        let mut total_scheduled = 0;
+        while total_scheduled < emails.len() {
+            let mut any_progress = false;
+            for key in &tenant_keys {
+                let weight = self
+                    .config
+                    .tenant_weights
+                    .get(key.as_str())
+                    .copied()
+                    .unwrap_or(10); // default weight for unknown tenants
+
+                let queue = by_tenant.get_mut(key).unwrap();
+                let to_take = weight.min(queue.len());
+                if to_take > 0 {
+                    any_progress = true;
+                    for email in queue.drain(..to_take) {
+                        scheduled.push(email);
+                        total_scheduled += 1;
+                    }
+                }
+            }
+            if !any_progress {
+                break;
+            }
+        }
+
+        // Process scheduled emails concurrently
+        let futures: Vec<_> = scheduled
             .iter()
             .map(|email| async {
                 let result = self.process_email(email).await;
@@ -572,6 +996,11 @@ impl EmailQueue {
                 }
                 Err(e) => {
                     let error_str = e.to_string();
+                    // Provider-throttle defers do not count against max_attempts.
+                    if error_str.starts_with("provider_throttle:") {
+                        self.mark_throttled(&email_id, &error_str).await?;
+                        continue;
+                    }
                     let is_temporary = error_str.contains("timeout")
                         || error_str.contains("connection refused")
                         || error_str.contains("temporarily");
@@ -659,6 +1088,26 @@ pub struct QueueStats {
 impl QueueStats {
     pub fn total(&self) -> u64 {
         self.pending + self.processing + self.sent + self.failed + self.deferred
+    }
+}
+
+/// Detect the type of bounce based on from_address and subject.
+fn detect_bounce_type(from_address: &str, subject: &str) -> String {
+    let lower_from = from_address.to_lowercase();
+    let lower_subject = subject.to_lowercase();
+
+    if lower_from.contains("mailer-daemon") || lower_from.contains("maildaemon") {
+        "mailer-daemon".to_string()
+    } else if lower_subject.contains("undelivered") || lower_subject.contains("returned mail") {
+        "undelivered".to_string()
+    } else if lower_subject.contains("delivery failure")
+        || lower_subject.contains("delivery status")
+    {
+        "delivery-status".to_string()
+    } else if lower_from.starts_with("bounce@") {
+        "bounce".to_string()
+    } else {
+        "unknown".to_string()
     }
 }
 
@@ -893,6 +1342,7 @@ mod tests {
             sequence_id: None,
             contact_id: None,
             priority: 0,
+            tenant_id: None,
         }
     }
 

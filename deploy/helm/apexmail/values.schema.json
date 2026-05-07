@@ -14,6 +14,22 @@
       "type": "string",
       "minLength": 1
     },
+    "environment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "apiBaseUrl": {
+      "type": "string",
+      "minLength": 1
+    },
+    "oauthRedirectBaseUrl": {
+      "type": "string",
+      "minLength": 1
+    },
+    "corsOrigins": {
+      "type": "string",
+      "minLength": 1
+    },
     "global": {
       "type": "object",
       "additionalProperties": false,
@@ -61,16 +77,6 @@
     },
     "enterprise": {
       "$ref": "#/definitions/enterpriseWorkload"
-    },
-    "tracking": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "baseUrl": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
     },
     "ingress": {
       "type": "object",
@@ -167,64 +173,13 @@
     },
     "postgresql": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": [
-        "enabled",
-        "auth",
-        "primary"
+        "enabled"
       ],
       "properties": {
         "enabled": {
           "type": "boolean"
-        },
-        "auth": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "database",
-            "username",
-            "existingSecret"
-          ],
-          "properties": {
-            "database": {
-              "type": "string",
-              "minLength": 1
-            },
-            "username": {
-              "type": "string",
-              "minLength": 1
-            },
-            "existingSecret": {
-              "type": "string",
-              "minLength": 1
-            }
-          }
-        },
-        "primary": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "persistence",
-            "resources"
-          ],
-          "properties": {
-            "persistence": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "size"
-              ],
-              "properties": {
-                "size": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              }
-            },
-            "resources": {
-              "$ref": "#/definitions/resources"
-            }
-          }
         }
       }
     },
@@ -273,54 +228,13 @@
     },
     "redis": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": [
-        "enabled",
-        "auth",
-        "master"
+        "enabled"
       ],
       "properties": {
         "enabled": {
           "type": "boolean"
-        },
-        "auth": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "existingSecret"
-          ],
-          "properties": {
-            "existingSecret": {
-              "type": "string",
-              "minLength": 1
-            }
-          }
-        },
-        "master": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "persistence",
-            "resources"
-          ],
-          "properties": {
-            "persistence": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "size"
-              ],
-              "properties": {
-                "size": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              }
-            },
-            "resources": {
-              "$ref": "#/definitions/resources"
-            }
-          }
         }
       }
     },
@@ -356,11 +270,33 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "enabled"
+        "enabled",
+        "persistence"
       ],
       "properties": {
         "enabled": {
           "type": "boolean"
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "size",
+            "storageClass"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "size": {
+              "type": "string",
+              "minLength": 1
+            },
+            "storageClass": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -621,6 +557,10 @@
   "required": [
     "global",
     "namespace",
+    "environment",
+    "apiBaseUrl",
+    "oauthRedirectBaseUrl",
+    "corsOrigins",
     "apiServer",
     "trackingService",
     "mta",
@@ -876,6 +816,15 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "metricsPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "baseUrl": {
+          "type": "string",
+          "minLength": 1
+        },
         "service": {
           "$ref": "#/definitions/service"
         },
@@ -894,6 +843,7 @@
       }
     },
     "trackingWorkload": {
+      "description": "Tracking service workload; includes optional baseUrl through serviceWorkload for tracking-base-url ConfigMap rendering.",
       "allOf": [
         {
           "$ref": "#/definitions/serviceWorkload"
@@ -935,7 +885,8 @@
           "required": [
             "smtp",
             "submission",
-            "smtps"
+            "smtps",
+            "metrics"
           ],
           "properties": {
             "smtp": {
@@ -949,6 +900,11 @@
               "maximum": 65535
             },
             "smtps": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "metrics": {
               "type": "integer",
               "minimum": 1,
               "maximum": 65535
@@ -1000,6 +956,7 @@
         "image",
         "resources",
         "healthPort",
+        "autoscaling",
         "podDisruptionBudget",
         "env",
         "envFrom"
@@ -1023,6 +980,9 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "autoscaling": {
+          "$ref": "#/definitions/autoscaling"
+        },
         "podDisruptionBudget": {
           "$ref": "#/definitions/podDisruptionBudget"
         },
@@ -1044,6 +1004,8 @@
         "resources",
         "port",
         "service",
+        "autoscaling",
+        "podDisruptionBudget",
         "env",
         "envFrom"
       ],
@@ -1071,6 +1033,9 @@
         },
         "autoscaling": {
           "$ref": "#/definitions/autoscaling"
+        },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/podDisruptionBudget"
         },
         "env": {
           "$ref": "#/definitions/envMap"

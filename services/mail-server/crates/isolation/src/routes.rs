@@ -168,6 +168,7 @@ async fn health_check() -> Json<serde_json::Value> {
 // ─── Organization Handlers ──────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateOrgRequest {
     name: String,
     slug: String,
@@ -229,6 +230,7 @@ async fn org_get(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateOrgRequest {
     name: Option<String>,
     billing_email: Option<String>,
@@ -265,6 +267,7 @@ async fn org_update(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SuspendRequest {
     reason: Option<String>,
 }
@@ -299,6 +302,7 @@ async fn org_suspend(
 // ─── Workspace Handlers ─────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateWorkspaceRequest {
     name: String,
     slug: String,
@@ -365,6 +369,7 @@ async fn workspace_get(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateWorkspaceRequest {
     name: Option<String>,
     settings: Option<serde_json::Value>,
@@ -413,6 +418,7 @@ async fn workspace_delete(
 // ─── Member Handlers ────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddMemberRequest {
     user_id: String,
     role: String,
@@ -518,6 +524,7 @@ async fn quota_check(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateQuotaRequest {
     emails_per_month: Option<i64>,
     storage_bytes: Option<i64>,
@@ -579,6 +586,7 @@ async fn rate_limit_status(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ResetRateLimitRequest {
     key: String,
 }
@@ -618,6 +626,7 @@ async fn encryption_rotate(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreatePolicyRequest {
     #[allow(unused)]
     organization_id: String,
@@ -662,6 +671,7 @@ async fn encryption_create_policy(
 // ─── Isolation Handlers ─────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CheckAccessRequest {
     query: String,
     organization_id: String,
@@ -712,6 +722,7 @@ async fn isolation_check_access(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MigrateRequest {
     target_level: String,
 }
@@ -769,6 +780,7 @@ async fn isolation_setup_rls(
 // ─── Audit Handlers ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuditQueryParams {
     organization_id: String,
     workspace_id: Option<String>,
@@ -813,6 +825,7 @@ async fn audit_query(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuditStatsParams {
     days: Option<i64>,
 }
@@ -837,6 +850,7 @@ async fn audit_stats(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuditExportParams {
     format: Option<String>,
     start_time: Option<String>,

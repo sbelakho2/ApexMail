@@ -21,6 +21,8 @@ use crate::processor::OpenData;
 use crate::routes::{extract_client_ip, TRANSPARENT_GIF};
 use crate::state::AppState;
 
+const PIXEL_CSP: &str = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'self' data:; script-src 'none'; style-src 'none'; object-src 'none'";
+
 /// Pre-built response headers for the pixel — computed once; cloned per request.
 /// Shared pixel response headers.
 fn pixel_response() -> Response {
@@ -36,6 +38,7 @@ fn pixel_response() -> Response {
         .header("pragma", "no-cache")
         .header("expires", "0")
         .header("vary", "*")
+        .header("content-security-policy", PIXEL_CSP)
         .header("x-content-type-options", "nosniff")
         .header("x-robots-tag", "noindex, nofollow")
         .body(axum::body::Body::from(TRANSPARENT_GIF))

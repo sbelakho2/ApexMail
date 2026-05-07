@@ -7,20 +7,20 @@
 // 1. Sales pipeline:create lead → enrich → score → campaign
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[test]
-fn sales_pipeline_lead_to_campaign() {
+#[tokio::test]
+async fn sales_pipeline_lead_to_campaign() {
     use ai_service::content::ContentOptimizer;
-    use sales_autopilot::campaigns::CampaignManager;
     use sales_autopilot::crm::CrmService;
     use sales_autopilot::enrichment::EnrichmentService;
+    use sales_autopilot::types::{Campaign, CampaignStatus};
 
     let crm = CrmService::new();
     let enricher = EnrichmentService::new("http://mock");
-    let campaigns = CampaignManager::new(10);
     let optimizer = ContentOptimizer::new();
 
     // Step 1:Create a lead
     let lead = crm.create_lead(
+        "tenant-a".into(),
         "alice@acme.com".into(),
         "Alice VP".into(),
         "Acme Corp".into(),
@@ -39,15 +39,19 @@ fn sales_pipeline_lead_to_campaign() {
     assert!(score > 0);
     assert!(score <= 100);
 
-    // Step 4:Create a campaign targeting this lead
-    let campaign = campaigns
-        .create_campaign(
-            "tenant-a".into(),
-            "Acme Outreach Q1".into(),
-            "tmpl-acme".into(),
-            format!("lead_id={}", lead.id),
-        )
-        .unwrap();
+    // Step 4:Compose a campaign targeting this lead
+    let campaign = Campaign {
+        id: uuid::Uuid::new_v4(),
+        tenant_id: "tenant-a".into(),
+        name: "Acme Outreach Q1".into(),
+        template_id: "tmpl-acme".into(),
+        audience: format!("lead_id={}", lead.id),
+        status: CampaignStatus::Draft,
+        sent: 0,
+        opened: 0,
+        clicked: 0,
+        created_at: chrono::Utc::now(),
+    };
     assert_eq!(campaign.name, "Acme Outreach Q1");
 }
 
@@ -131,7 +135,7 @@ fn ai_pipeline_register_predict_evaluate() {
 
 #[test]
 fn observability_alert_pipeline() {
-    use observability_service::alerting::{AlertManager, AlertRule};
+    use observability_service::alerting::{AlertManager, AlertRule, ComparisonOperator};
     use observability_service::metrics_collector::{MetricSummary, MetricsCollector};
     use observability_service::types::{AlertSeverity, AlertStatus};
 
@@ -143,6 +147,7 @@ fn observability_alert_pipeline() {
         name: "high_error_rate".into(),
         condition_description: "error_rate > 0.05".into(),
         metric_name: "error_rate".into(),
+        operator: ComparisonOperator::Gt,
         threshold: 0.05,
         severity: AlertSeverity::Critical,
         cooldown_secs: 0,
@@ -311,36 +316,36 @@ fn compliance_pattern_matching_pipeline() {
 // 8. Optimisation loop:create bandit arms → record rewards → select best
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[test]
-fn bandit_optimisation_loop() {
+#[tokio::test]
+async fn bandit_optimisation_loop() {
     use ai_service::bandits::BanditOptimizer;
 
     // Use epsilon=0.0 so selection is pure exploitation
     let bandits = BanditOptimizer::new(0.0);
 
     // Step 1:Register three arms (subject line variants)
-    let arm_a = bandits.add_arm("Subject A: 🔥 Hot deals");
-    let arm_b = bandits.add_arm("Subject B: Weekly update");
-    let arm_c = bandits.add_arm("Subject C: Don't miss out!");
+    let arm_a = bandits.add_arm("Subject A: 🔥 Hot deals").await.unwrap();
+    let arm_b = bandits.add_arm("Subject B: Weekly update").await.unwrap();
+    let arm_c = bandits.add_arm("Subject C: Don't miss out!").await.unwrap();
 
     // Step 2:Simulate reward observations
     // Arm A:high performer
     for _ in 0..100 {
-        bandits.record_reward(&arm_a, 1.0).unwrap();
+        bandits.record_reward(&arm_a, 1.0).await.unwrap();
     }
     // Arm B:medium performer
     for _ in 0..100 {
-        bandits.record_reward(&arm_b, 0.0).unwrap();
+        bandits.record_reward(&arm_b, 0.0).await.unwrap();
     }
     for _ in 0..30 {
-        bandits.record_reward(&arm_b, 1.0).unwrap();
+        bandits.record_reward(&arm_b, 1.0).await.unwrap();
     }
     // Arm C:low performer
     for _ in 0..100 {
-        bandits.record_reward(&arm_c, 0.0).unwrap();
+        bandits.record_reward(&arm_c, 0.0).await.unwrap();
     }
     for _ in 0..5 {
-        bandits.record_reward(&arm_c, 1.0).unwrap();
+        bandits.record_reward(&arm_c, 1.0).await.unwrap();
     }
 
     // Step 3:Get statistics

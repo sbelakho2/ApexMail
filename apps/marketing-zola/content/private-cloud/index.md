@@ -1,6 +1,6 @@
 +++
-title = "Private Cloud | Your VPC, Your IP, Our Code"
-description = "Deploy ApexMail in your own infrastructure. Dedicated IPs, custom domains, VPC peering, and full data sovereignty."
+title = "Private Cloud | Dedicated Deployment Review"
+description = "Review single-tenant and dedicated ApexMail deployment options for regulated enterprise email programs."
 template = "private-cloud.html"
 
 [extra]

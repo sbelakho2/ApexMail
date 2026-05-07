@@ -187,6 +187,7 @@ async fn failover_status(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FailoverRequest {
     reason: Option<String>,
 }
@@ -219,6 +220,7 @@ async fn failover_failback(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HistoryQuery {
     #[serde(default = "default_limit")]
     limit: i64,
@@ -231,6 +233,7 @@ fn default_offset() -> i64 {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PaginationQuery {
     #[serde(default = "default_limit")]
     limit: i64,
@@ -266,6 +269,7 @@ async fn split_brain_check(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ResolveSplitBrainRequest {
     winner_node: String,
 }
@@ -287,6 +291,7 @@ async fn split_brain_resolve(
 // ── Backup Handlers ────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BackupCreateRequest {
     backup_type: Option<String>,
     tables: Option<Vec<String>>,
@@ -312,6 +317,7 @@ async fn backup_create(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BackupListQuery {
     backup_type: Option<String>,
     status: Option<String>,
@@ -377,6 +383,7 @@ async fn backup_restore(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PitrRequest {
     target_time: chrono::DateTime<chrono::Utc>,
 }
@@ -458,6 +465,7 @@ async fn replication_slots(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateSlotRequest {
     name: String,
     slot_type: Option<String>,
@@ -511,6 +519,7 @@ async fn replication_promote(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SyncModeRequest {
     synchronous: bool,
 }
@@ -530,6 +539,7 @@ async fn replication_sync_mode(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LagHistoryQuery {
     #[serde(default = "default_minutes")]
     minutes: i64,
@@ -571,6 +581,7 @@ async fn regions_list(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RegisterRegionRequest {
     name: String,
     endpoint: String,
@@ -628,6 +639,7 @@ async fn regions_remove(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateHealthRequest {
     health_score: f64,
     latency_ms: f64,
@@ -655,6 +667,7 @@ async fn regions_update_health(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetWeightRequest {
     weight: i32,
 }
@@ -675,6 +688,7 @@ async fn regions_set_weight(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FenceRequest {
     reason: Option<String>,
 }
@@ -710,6 +724,7 @@ async fn regions_unfence(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RouteQuery {
     source_region: Option<String>,
 }
@@ -758,6 +773,7 @@ async fn geo_rules_list(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddGeoRuleRequest {
     name: String,
     source_region: String,
@@ -873,6 +889,7 @@ async fn circuits_remove(
 // ── Chaos Engineering Handlers ─────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChaosListQuery {
     status: Option<String>,
     #[serde(default = "default_limit")]
@@ -894,6 +911,7 @@ async fn chaos_list(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChaosStartRequest {
     name: String,
     #[serde(flatten)]

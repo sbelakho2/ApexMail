@@ -103,7 +103,7 @@ impl ReplyHandler {
         }
     }
 
-    /// Fetch unprocessed inbound messages.
+    /// Fetch unprocessed inbound messages (O-16.5: with size truncation).
     async fn fetch_messages(&self, limit: usize) -> ProcessorResult<Vec<InboundMessage>> {
         let messages = sqlx::query_as::<_, InboundMessage>(
             r#"
@@ -120,12 +120,16 @@ impl ReplyHandler {
             RETURNING
                 id, tenant_id as "tenantId", lead_id as "leadId",
                 from_email as "fromEmail", to_email as "toEmail",
-                subject, body_text as "bodyText", body_html as "bodyHtml",
+                subject,
+                -- O-16.5: Truncate body fields at the SQL level to enforce max_reply_size
+                LEFT(body_text, $2::int) as "bodyText",
+                LEFT(body_html, $2::int) as "bodyHtml",
                 headers, received_at as "receivedAt",
                 processed_at as "processedAt", classification
             "#,
         )
         .bind(limit as i64)
+        .bind(self.config.max_reply_size as i64)
         .fetch_all(&self.db)
         .await?;
 
@@ -152,7 +156,7 @@ impl ReplyHandler {
     }
 
     async fn process_message_inner(&self, msg: &InboundMessage) -> ProcessorResult<()> {
-        // Get text content
+        // Get text content (O-16.5: already truncated at SQL level in fetch_messages)
         let body = msg.body_text.as_deref().unwrap_or("");
 
         // Classify the reply
@@ -165,9 +169,31 @@ impl ReplyHandler {
             "Classified reply"
         );
 
-        // Execute suggested action if auto_execute is set
-        let action_taken = if classification.suggested_action.auto_execute {
+        // O-16.6: Gate auto-execute behind config flag + confidence threshold.
+        // Previously, `auto_execute` from the classification result was followed
+        // unconditionally. Now it respects the admin-configured policy:
+        // - `auto_suppress` must be enabled in config
+        // - confidence must meet the configured threshold
+        let can_auto_execute = self.config.auto_suppress
+            && classification.confidence >= self.config.auto_suppress_confidence_threshold;
+
+        let action_taken = if classification.suggested_action.auto_execute && can_auto_execute {
+            debug!(
+                msg_id = %msg.id,
+                action = ?classification.suggested_action.action,
+                confidence = classification.confidence,
+                "Auto-executing reply action"
+            );
             self.execute_action(msg, &classification).await?
+        } else if classification.suggested_action.auto_execute && !can_auto_execute {
+            info!(
+                msg_id = %msg.id,
+                action = ?classification.suggested_action.action,
+                confidence = classification.confidence,
+                auto_suppress = self.config.auto_suppress,
+                "Reply action blocked by policy — would auto-execute but config disallows it"
+            );
+            None
         } else {
             None
         };

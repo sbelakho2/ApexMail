@@ -12,10 +12,14 @@
 
 use chrono::{Duration, TimeDelta, Utc};
 use deadpool_redis::Pool as RedisPool;
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+/// HMAC-SHA256 type for consent certificate signing.
+type HmacSha256 = Hmac<Sha256>;
 
 use crate::config::GdprConfig;
 use crate::types::*;
@@ -221,14 +225,15 @@ impl GdprAutomation {
             data.insert("profile".into(), sanitize_pii(p));
         }
 
-        // Collect sending history
+        // Collect sending history (M-04: use configurable limit instead of hardcoded 1000)
         let history: Vec<(serde_json::Value,)> = sqlx::query_as(
             "SELECT row_to_json(m) FROM message_events m
              WHERE recipient_email = $1 AND tenant_id = $2
-             ORDER BY created_at DESC LIMIT 1000",
+             ORDER BY created_at DESC LIMIT $3",
         )
         .bind(email)
         .bind(tid)
+        .bind(self.config.access_request_max_messages)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
@@ -580,6 +585,28 @@ impl GdprAutomation {
                 }
             }
 
+            // Generate and store consent certificate (proof document)
+            let certificate_json = build_consent_certificate(
+                &self.config.consent_signing_key,
+                &id,
+                tenant_id,
+                subscriber_id,
+                email,
+                &consent_type.to_string(),
+                granted,
+                granted_at,
+                revoked_at,
+                &source.to_string(),
+                ip_address,
+            )?;
+
+            sqlx::query("UPDATE consent_records SET proof_document = $1 WHERE id = $2")
+                .bind(&certificate_json)
+                .bind(&id)
+                .execute(&self.db)
+                .await
+                .map_err(|e| format!("DB error storing proof document: {e}"))?;
+
             let record = ConsentRecord {
                 id,
                 tenant_id: tenant_id.into(),
@@ -592,7 +619,7 @@ impl GdprAutomation {
                 source,
                 ip_address: ip_address.map(String::from),
                 user_agent: None,
-                proof_document: None,
+                proof_document: Some(certificate_json),
                 expires_at,
                 metadata: serde_json::json!({}),
             };
@@ -733,6 +760,61 @@ impl GdprAutomation {
         .map_err(|e| format!("DB: {e}"))?;
 
         rows.into_iter().map(|r| r.into_record()).collect()
+    }
+
+    /// Get a single consent record by ID.
+    pub async fn get_consent_by_id(
+        &self,
+        consent_id: &str,
+    ) -> Result<Option<ConsentRecord>, String> {
+        let row: Option<ConsentRecordRow> = sqlx::query_as(
+            "SELECT id, tenant_id, subscriber_id, email, consent_type, granted,
+                    granted_at, revoked_at, source, ip_address, user_agent,
+                    proof_document, expires_at, metadata
+             FROM consent_records
+             WHERE id = $1",
+        )
+        .bind(consent_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("DB: {e}"))?;
+
+        match row {
+            Some(r) => Ok(Some(r.into_record()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Generate (or regenerate) a signed consent certificate for an existing consent record.
+    /// Returns the certificate JSON string and updates the `proof_document` field in the DB.
+    pub async fn generate_consent_certificate(&self, consent_id: &str) -> Result<String, String> {
+        let record = self
+            .get_consent_by_id(consent_id)
+            .await?
+            .ok_or_else(|| format!("Consent record not found: {consent_id}"))?;
+
+        let certificate_json = build_consent_certificate(
+            &self.config.consent_signing_key,
+            &record.id,
+            &record.tenant_id,
+            &record.subscriber_id,
+            &record.email,
+            &record.consent_type.to_string(),
+            record.granted,
+            record.granted_at,
+            record.revoked_at,
+            &record.source.to_string(),
+            record.ip_address.as_deref(),
+        )?;
+
+        sqlx::query("UPDATE consent_records SET proof_document = $1 WHERE id = $2")
+            .bind(&certificate_json)
+            .bind(consent_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("DB error updating proof document: {e}"))?;
+
+        Ok(certificate_json)
     }
 
     // ── Queue Processing ──────────────────────────────────
@@ -925,6 +1007,102 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Build a signed consent certificate (proof document).
+///
+/// Creates a JSON receipt that includes all consent details and an HMAC-SHA256
+/// signature over the canonical (sorted-key) JSON representation. The certificate
+/// can be independently verified by any party in possession of the signing key.
+fn build_consent_certificate(
+    signing_key: &str,
+    id: &str,
+    tenant_id: &str,
+    subscriber_id: &str,
+    email: &str,
+    consent_type: &str,
+    granted: bool,
+    granted_at: Option<chrono::DateTime<Utc>>,
+    revoked_at: Option<chrono::DateTime<Utc>>,
+    source: &str,
+    ip_address: Option<&str>,
+) -> Result<String, String> {
+    let certificate_id = Uuid::new_v4().to_string();
+    let generated_at = Utc::now().to_rfc3339();
+
+    // Build canonical data for signing — keys sorted alphabetically
+    let mut canonical = serde_json::Map::new();
+    canonical.insert("consent_id".into(), serde_json::Value::String(id.into()));
+    canonical.insert(
+        "consent_type".into(),
+        serde_json::Value::String(consent_type.into()),
+    );
+    canonical.insert("email".into(), serde_json::Value::String(email.into()));
+    canonical.insert("granted".into(), serde_json::Value::Bool(granted));
+    if let Some(ts) = granted_at {
+        canonical.insert(
+            "granted_at".into(),
+            serde_json::Value::String(ts.to_rfc3339()),
+        );
+    }
+    if let Some(ref ts) = revoked_at {
+        canonical.insert(
+            "revoked_at".into(),
+            serde_json::Value::String(ts.to_rfc3339()),
+        );
+    }
+    if let Some(ip) = ip_address {
+        canonical.insert("ip_address".into(), serde_json::Value::String(ip.into()));
+    }
+    canonical.insert("source".into(), serde_json::Value::String(source.into()));
+    canonical.insert(
+        "subscriber_id".into(),
+        serde_json::Value::String(subscriber_id.into()),
+    );
+    canonical.insert(
+        "tenant_id".into(),
+        serde_json::Value::String(tenant_id.into()),
+    );
+
+    // Serialize canonical data without whitespace for signing
+    let canonical_json =
+        serde_json::to_string(&canonical).map_err(|e| format!("JSON serialization: {e}"))?;
+
+    // Compute HMAC-SHA256 signature
+    if signing_key.is_empty() {
+        return Err(
+            "CONSENT_SIGNING_KEY is not configured — cannot generate consent certificates. "
+                .to_string(),
+        );
+    }
+    let key = signing_key.as_bytes();
+
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|e| format!("HMAC key error: {e}"))?;
+    mac.update(canonical_json.as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    // Build the full certificate
+    let certificate = serde_json::json!({
+        "certificate_id": certificate_id,
+        "consent_id": id,
+        "tenant_id": tenant_id,
+        "subscriber_id": subscriber_id,
+        "email": email,
+        "consent_type": consent_type,
+        "granted": granted,
+        "granted_at": granted_at.map(|t| t.to_rfc3339()),
+        "revoked_at": revoked_at.map(|t| t.to_rfc3339()),
+        "source": source,
+        "ip_address": ip_address,
+        "signature": signature,
+        "signed_fields": [
+            "consent_id", "consent_type", "email", "granted", "granted_at",
+            "ip_address", "revoked_at", "source", "subscriber_id", "tenant_id"
+        ],
+        "generated_at": generated_at,
+    });
+
+    serde_json::to_string_pretty(&certificate).map_err(|e| format!("JSON serialization: {e}"))
 }
 
 /// Remove sensitive internal fields from JSON data.

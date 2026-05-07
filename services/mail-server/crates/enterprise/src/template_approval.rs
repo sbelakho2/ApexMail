@@ -7,7 +7,6 @@ use crate::types::*;
 /// Template Approval Service:multi-stage review with spam scoring
 pub struct TemplateApprovalService {
     db: PgPool,
-    auto_approve_threshold: i32,
     auto_reject_threshold: i32,
 }
 
@@ -57,10 +56,9 @@ fn parse_tenant_id(tenant_id: &str) -> Result<Uuid, String> {
 }
 
 impl TemplateApprovalService {
-    pub fn new(db: PgPool, auto_approve_threshold: i32, auto_reject_threshold: i32) -> Self {
+    pub fn new(db: PgPool, _auto_approve_threshold: i32, auto_reject_threshold: i32) -> Self {
         Self {
             db,
-            auto_approve_threshold,
             auto_reject_threshold,
         }
     }
@@ -79,10 +77,9 @@ impl TemplateApprovalService {
         let id = Uuid::new_v4();
         let spam_result = calculate_spam_score(html_content, subject);
 
-        // Auto-approve or auto-reject based on score thresholds
-        let status = if spam_result.score <= self.auto_approve_threshold as f64 {
-            "approved"
-        } else if spam_result.score >= self.auto_reject_threshold as f64 {
+        // M-01: Never auto-approve — always require human review.
+        // Auto-reject only if spam score exceeds the reject threshold.
+        let status = if spam_result.score >= self.auto_reject_threshold as f64 {
             "rejected"
         } else {
             "pending"

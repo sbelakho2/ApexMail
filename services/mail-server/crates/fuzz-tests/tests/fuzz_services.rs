@@ -16,11 +16,11 @@ fn fuzz_metrics_record_no_panic() {
     let collector = MetricsCollector::new(vec![
         0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
     ]);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for _ in 0..5_000 {
-        let name = random_string(rng.gen_range(1..50));
-        let value: f64 = rng.gen_range(-1e12..1e12);
-        let help = random_ascii(rng.gen_range(0..100));
+        let name = random_string(rng.random_range(1..50));
+        let value: f64 = rng.random_range(-1e12..1e12);
+        let help = random_ascii(rng.random_range(0..100));
 
         // All three metric types
         collector.record_counter(&name, value.abs(), &help);
@@ -41,17 +41,18 @@ fn fuzz_metrics_record_no_panic() {
 #[test]
 fn fuzz_trust_score_bounded() {
     // Any inputs should produce a trust score in [0, 100].
-    let mut rng = rand::thread_rng();
+    let scorer = TrustScorer::new();
+    let mut rng = rand::rng();
     for _ in 0..10_000 {
         let metrics = TenantMetrics {
             tenant_id: Uuid::new_v4(),
             bounce_rate: random_f64_range(-0.5, 2.0),
             complaint_rate: random_f64_range(-0.5, 2.0),
             engagement_rate: random_f64_range(-0.5, 2.0),
-            age_days: rng.gen_range(0..10_000),
-            volume: rng.gen_range(0..10_000_000),
+            age_days: rng.random_range(0..10_000),
+            volume: rng.random_range(0..10_000_000),
         };
-        let result = TrustScorer::compute_score(&metrics);
+        let result = scorer.compute_score(&metrics);
         assert!(
             (0.0..=100.0).contains(&result.score),
             "Trust score {:.2} out of range for bounce={:.2}, complaint={:.2}, engage={:.2}",
@@ -73,11 +74,11 @@ fn fuzz_health_check_states() {
         ServiceStatus::PartialOutage,
         ServiceStatus::MajorOutage,
     ];
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for _ in 0..5_000 {
-        let service = random_string(rng.gen_range(1..30));
-        let status = statuses[rng.gen_range(0..statuses.len())];
-        let latency = rng.gen_range(0..10_000u64);
+        let service = random_string(rng.random_range(1..30));
+        let status = statuses[rng.random_range(0..statuses.len())];
+        let latency = rng.random_range(0..10_000u64);
         let check = ops_service::types::HealthCheck {
             service: service.clone(),
             status,
@@ -93,7 +94,7 @@ fn fuzz_health_check_states() {
 
     // Retrieving history for random services
     for _ in 0..100 {
-        let service = random_string(rng.gen_range(1..30));
+        let service = random_string(rng.random_range(1..30));
         let history = checker.get_history(&service, 10);
         assert!(history.len() <= 10);
     }
@@ -104,15 +105,15 @@ async fn fuzz_warmup_schedule_valid() {
     // Warmup calculations must always produce valid volumes (>= 0).
     let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
     let manager = IpWarmupManager::new(pool);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for _ in 0..5_000 {
         let ip = format!(
             "192.168.{}.{}",
-            rng.gen_range(0..=255u8),
-            rng.gen_range(1..=255u8)
+            rng.random_range(0..=255u8),
+            rng.random_range(1..=255u8)
         );
-        let target: u64 = rng.gen_range(1..10_000_000);
-        let days: u32 = rng.gen_range(1..60);
+        let target: u64 = rng.random_range(1..10_000_000);
+        let days: u32 = rng.random_range(1..60);
 
         let schedule = manager.create_schedule_sync(&ip, target, days);
         assert!(

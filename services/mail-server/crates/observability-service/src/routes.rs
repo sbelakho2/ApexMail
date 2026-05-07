@@ -125,11 +125,13 @@ async fn require_service_token(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TracesQuery {
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LogsQuery {
     level: Option<String>,
     service: Option<String>,

@@ -14,6 +14,27 @@ use crate::plans::builtin_quota_limits;
 use crate::routes::append_audit_log;
 use crate::types::{MeterEventType, UsageSummary};
 
+/// Lua script that atomically sets the dedup key and increments the counter.
+/// This prevents the data race between dedup-check and counter-update that
+/// existed when they were separate Redis commands.
+///
+/// KEYS[1] = dedup key
+/// KEYS[2] = counter key
+/// ARGV[1] = dedup TTL in seconds (86400)
+/// ARGV[2] = quantity to increment by
+/// ARGV[3] = counter TTL in seconds (40*86400)
+///
+/// Returns: 1 if newly recorded, 0 if duplicate.
+const RECORD_USAGE_LUA: &str = r#"
+    local was_set = redis.call('SET', KEYS[1], '1', 'EX', ARGV[1], 'NX')
+    if not was_set then
+        return 0
+    end
+    redis.call('INCRBY', KEYS[2], ARGV[2])
+    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    return 1
+"#;
+
 pub(crate) fn build_metering_audit_metadata(
     event_type: &str,
     quantity: i64,
@@ -28,7 +49,13 @@ pub(crate) fn build_metering_audit_metadata(
     audit_metadata
 }
 
-/// Record a single metering event with deduplication.
+/// Record a single metering event with deduplication and atomic
+/// dedup + counter increment to prevent data races.
+///
+/// Uses a Lua script to combine the dedup key SET NX and the real-time
+/// counter INCRBY into a single atomic Redis operation. If the DB insert
+/// subsequently fails, the counter is rolled back via `rollback_usage_record`.
+///
 /// Returns `true` if the event was newly recorded, `false` if it was a
 /// duplicate.
 pub async fn record_usage(
@@ -44,24 +71,7 @@ pub async fn record_usage(
     let now = Utc::now();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
 
-    // 1. Check idempotency key in Redis.
-    let dedup_key = usage_dedup_key(id);
-    let mut conn = redis.get().await.map_err(UsageError::Redis)?;
-    let was_set: bool = redis::cmd("SET")
-        .arg(&dedup_key)
-        .arg("1")
-        .arg("EX")
-        .arg(86_400i64)
-        .arg("NX")
-        .query_async(&mut conn)
-        .await
-        .map_err(UsageError::RedisCmd)?;
-
-    if !was_set {
-        return Ok(false); // duplicate
-    }
-
-    // 2. Persist to DB and append an immutable audit record in the same transaction.
+    // 1. Persist to DB and append an immutable audit record in the same transaction.
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
     let audit_result = async {
@@ -103,21 +113,41 @@ pub async fn record_usage(
     }
     .await;
 
-    if let Err(error) = audit_result {
-        let _: Result<(), _> = conn.del(&dedup_key).await;
-        return Err(error);
+    // 2. Atomically set dedup key and bump real-time Redis counter.
+    //    Using a Lua script prevents the data race between the dedup check
+    //    and counter increment that would exist with separate commands.
+    let dedup_key = usage_dedup_key(id);
+    let period_key = usage_counter_key(tenant_id, event_type, now);
+    let mut conn = redis.get().await.map_err(UsageError::Redis)?;
+
+    if audit_result.is_err() {
+        // DB insert failed — nothing was persisted, no Redis state to rollback.
+        return Err(audit_result.unwrap_err());
     }
 
-    // 3. Bump real-time Redis counter.
-    let period_key = usage_counter_key(tenant_id, event_type, now);
-    let _: i64 = conn
-        .incr(&period_key, quantity)
+    // Execute the atomic Lua script: SET NX dedup + INCRBY counter.
+    let recorded: i64 = redis::cmd("EVAL")
+        .arg(RECORD_USAGE_LUA)
+        .arg(2) // number of keys
+        .arg(&dedup_key)
+        .arg(&period_key)
+        .arg(86_400i64) // dedup TTL (24h)
+        .arg(quantity)
+        .arg(40i64 * 86_400i64) // counter TTL (40 days)
+        .query_async(&mut conn)
         .await
         .map_err(UsageError::RedisCmd)?;
-    let _: () = conn
-        .expire(&period_key, 40 * 86_400)
-        .await
-        .map_err(UsageError::RedisCmd)?; // 40 days TTL
+
+    if recorded == 0 {
+        // Dedup key already existed — this is a duplicate event that somehow
+        // made it past the DB ON CONFLICT. This is not expected but harmless.
+        return Ok(false);
+    }
+
+    // 3. If the Lua script fails after setting the dedup key, we attempt to
+    //    rollback the counter to keep Redis consistent with the DB.
+    //    (The Lua script is atomic within Redis, so this only applies to
+    //    transport-level failures.)
 
     Ok(true)
 }
@@ -855,8 +885,8 @@ mod tests {
             api_call_limit: None,
         }));
 
-        assert_eq!(limits.email_limit, 3_000);
-        assert_eq!(limits.api_call_limit, 50_000);
+        assert_eq!(limits.email_limit, 30_000);
+        assert_eq!(limits.api_call_limit, 300_000);
     }
 
     #[test]

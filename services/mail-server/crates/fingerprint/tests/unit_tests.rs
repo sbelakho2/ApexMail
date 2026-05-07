@@ -360,6 +360,12 @@ mod database_tests {
             self.last_seen = Instant::now();
             self.request_count += 1;
         }
+
+        /// Time elapsed since the entry was first observed. Used by callers that
+        /// expire long-lived fingerprints from the in-memory cache.
+        fn age(&self) -> Duration {
+            self.last_seen.saturating_duration_since(self.first_seen)
+        }
     }
 
     struct FingerprintDb {
@@ -429,6 +435,17 @@ mod database_tests {
         assert_eq!(db.classify("fp1"), Classification::Legitimate);
         assert_eq!(db.classify("fp2"), Classification::Legitimate);
         assert_eq!(db.classify("fp3"), Classification::Unknown);
+    }
+
+    #[test]
+    fn test_db_entry_age_monotonic() {
+        let mut db = FingerprintDb::new(8);
+        db.insert("aged_fp", Classification::Legitimate);
+        std::thread::sleep(Duration::from_millis(2));
+        db.insert("aged_fp", Classification::Legitimate);
+        let entry = db.entries.get("aged_fp").unwrap();
+        assert!(entry.last_seen >= entry.first_seen);
+        assert!(entry.age() >= Duration::from_millis(1));
     }
 
     #[test]

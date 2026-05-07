@@ -1,34 +1,104 @@
 //! Typst compiler — template + JSON data → PDF bytes.
 //!
-//! This module wraps the Typst compiler pipeline://! 1. Build a `TypstWorld` from template name + JSON data
+//! This module wraps the Typst compiler pipeline:
+//! 1. Build a `TypstWorld` from template name + JSON data
 //! 2. Compile the Typst source to a Typst document
 //! 3. Export the document to PDF bytes via `typst-pdf`
+//!
+//! # Security (O-14.1 / O-14.2)
+//!
+//! - **Rendering timeout** — A configurable timeout (default 10 s) prevents
+//!   runaway Typst compilation from crafted JSON data.
+//! - **Input size limit** — JSON data payload is capped at 1 MB so deeply
+//!   nested / oversized inputs are rejected early.
+//! - **Output size limit** — Generated PDF bytes are checked against a
+//!   configurable maximum (default 50 MB) to prevent OOM from oversized
+//!   output (e.g. a template expanded by huge JSON arrays).
+
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 use tracing::info;
 
 use crate::world::{TypstWorld, WorldError};
+
+// ---------------------------------------------------------------------------
+// Security constants (configurable via env vars)
+// ---------------------------------------------------------------------------
+
+/// Maximum allowed size (in bytes) for the serialised JSON input data.
+/// Prevents deeply‑nested or oversized JSON from causing resource exhaustion.
+const MAX_DATA_JSON_BYTES: usize = 1 * 1024 * 1024; // 1 MB
+
+/// Maximum allowed size (in bytes) for the generated PDF output.
+/// Prevents a template (e.g. with huge data arrays) from producing a
+/// multi‑gigabyte PDF that could cause an OOM.
+const MAX_PDF_OUTPUT_SIZE: usize = 50 * 1024 * 1024; // 50 MB
+
+/// Timeout for the PDF generation (including any eventual Typst compilation).
+/// If generation does not complete within this window the request is aborted.
+const RENDER_TIMEOUT_SECS: u64 = 10;
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Render a named template with JSON data → PDF bytes.
+///
+/// # Security
+///
+/// 1. **Input validation** — The JSON payload is checked against
+///    [`MAX_DATA_JSON_BYTES`] before any processing begins.
+/// 2. **Timeout** — The actual generation runs inside
+///    [`tokio::task::spawn_blocking`] wrapped by [`tokio::time::timeout`]
+///    so a stalled / infinite‑loop template is caught.
+/// 3. **Output limit** — After generation the byte vector is checked against
+///    [`MAX_PDF_OUTPUT_SIZE`]; oversized output is rejected.
+///
 /// # Arguments
 /// * `template` — template name (e.g. `"invoice"`, `"dpa"`)
 /// * `data` — arbitrary JSON value to inject into the template
+///
 /// # Returns
 /// PDF bytes on success.
+///
 /// # Errors
-/// Returns `RenderError` if template not found, compilation fails, or PDF
-/// export fails.
-pub fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<u8>, RenderError> {
+/// Returns `RenderError` if the JSON is too large, the template is not found,
+/// generation times out, the output is too large, or PDF export fails.
+pub async fn render_pdf(template: &str, data: &serde_json::Value) -> Result<Vec<u8>, RenderError> {
+    // ---- 1. Input validation (O-14.1) ------------------------------------
     let data_json = serde_json::to_string_pretty(data)
         .map_err(|e| RenderError::Serialization(e.to_string()))?;
 
+    if data_json.len() > MAX_DATA_JSON_BYTES {
+        return Err(RenderError::Serialization(format!(
+            "JSON data too large: {} bytes (max: {})",
+            data_json.len(),
+            MAX_DATA_JSON_BYTES,
+        )));
+    }
+
     let world = TypstWorld::new(template, data_json).map_err(RenderError::World)?;
 
-    let pdf_bytes = generate_pdf(template, &world)?;
+    // ---- 2. Rendering with timeout (O-14.1) ------------------------------
+    let template_owned = template.to_string();
+    let pdf_bytes = timeout(
+        Duration::from_secs(RENDER_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || generate_pdf(&template_owned, &world)),
+    )
+    .await
+    .map_err(|_| RenderError::Compilation("PDF rendering timed out".to_string()))?
+    .map_err(|e| RenderError::Compilation(format!("rendering task failed: {}", e)))??;
+
+    // ---- 3. Output size limit (O-14.2) -----------------------------------
+    if pdf_bytes.len() > MAX_PDF_OUTPUT_SIZE {
+        return Err(RenderError::PdfExport(format!(
+            "generated PDF too large: {} bytes (max: {})",
+            pdf_bytes.len(),
+            MAX_PDF_OUTPUT_SIZE,
+        )));
+    }
 
     info!(
         template = template,

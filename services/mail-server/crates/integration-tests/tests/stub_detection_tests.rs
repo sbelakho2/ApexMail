@@ -515,6 +515,14 @@ mod audit_log_stub_tests {
 /// Tests that graceful shutdown actually drains connections.
 /// Detects stub:If shutdown is immediate, connections are being dropped.
 #[cfg(test)]
+/// Graceful shutdown stub tests.
+///
+/// # Security note
+/// These tests use `std::sync::atomic::{AtomicBool, AtomicU32}` from the
+/// standard library. All atomic operations (`load`, `store`, `fetch_add`,
+/// `fetch_sub`) are **safe** Rust — they do NOT use `unsafe` blocks or
+/// manual `core::sync::atomic` intrinsics.  The compiler emits the
+/// appropriate atomic instructions with the specified `Ordering` guarantees.
 mod graceful_shutdown_stub_tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 

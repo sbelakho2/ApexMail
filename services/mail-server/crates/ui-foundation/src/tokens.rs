@@ -89,7 +89,7 @@ mod tests {
     fn resolves_known_web_tokens() {
         assert_eq!(
             token_value("web", "colors", " --background").as_deref(),
-            Some("248 246 243")
+            Some("255 255 255")
         );
         assert_eq!(
             token_value("web", "spacing", " --space-4").as_deref(),
@@ -101,7 +101,7 @@ mod tests {
         );
         assert_eq!(
             token_value("web", "radius", " --radius-lg").as_deref(),
-            Some("18px")
+            Some("4px")
         );
     }
 

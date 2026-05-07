@@ -171,6 +171,7 @@ impl RiskTier {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChurnPrediction {
     pub email: String,
+    pub tenant_id: String,
     pub probability: f64,
     pub risk_tier: RiskTier,
     pub signals: Vec<ChurnSignal>,

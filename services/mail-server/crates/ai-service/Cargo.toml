@@ -29,6 +29,18 @@ serde_json.workspace = true
 # Database
 sqlx.workspace = true
 
+# Redis (distributed rate limiting)
+deadpool-redis.workspace = true
+redis.workspace = true
+
+# Crypto
+aes-gcm.workspace = true
+zeroize.workspace = true
+hex.workspace = true
+
+# HTML sanitization (O-10.2)
+ammonia = "4.0"
+
 # Utils
 uuid.workspace = true
 chrono.workspace = true

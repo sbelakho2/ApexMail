@@ -183,6 +183,16 @@ spec:
                 secretKeyRef:
                   name: apexmail-secrets
                   key: csrf-secret
+            - name: RATE_LIMIT_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: rate-limit-enabled
+            - name: RATE_LIMIT_MAX_PER_MINUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: apexmail-config
+                  key: rate-limit-max-per-minute
           resources:
             requests:
               cpu: "250m"
@@ -198,21 +208,21 @@ spec:
                 - ALL
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/live
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
             failureThreshold: 4
           startupProbe:
             httpGet:
-              path: /health
+              path: /health/ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5

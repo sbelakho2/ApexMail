@@ -22,7 +22,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use mail_common::warmup::WarmupSchedule;
 use tokio::net::TcpSocket;
-use tracing::debug;
+use tracing::{debug, warn};
 
 // ─── IP metadata ───────────────────────────────────────────────
 
@@ -142,17 +142,25 @@ impl OutboundIp {
     }
 
     /// Get warmup day number (days since allocation).
+    /// Returns 0 if clock skew produces a negative value (F-013).
     pub fn warmup_day(&self) -> i64 {
-        (Utc::now() - self.allocated_at).num_days()
+        let days = (Utc::now() - self.allocated_at).num_days();
+        days.max(0)
     }
 
     /// Update the daily limit based on current warmup day.
+    ///
+    /// # Safety
+    ///
+    /// `warmup_day()` is clamped to ≥ 0, so the cast `day as u32` is always
+    /// safe and never wraps a negative i64 to a huge u32 (F-013).
     pub fn update_warmup_limit(&mut self) {
         let day = self.warmup_day();
         if day >= WarmupSchedule::FULL_WARMUP_DAYS as i64 {
             self.health = IpHealth::Healthy;
             self.daily_limit = None;
         } else {
+            // Clamped by warmup_day() to >= 0, so this cast is safe.
             self.daily_limit = Some(WarmupSchedule::limit_for_day(day as u32));
         }
     }
@@ -174,6 +182,25 @@ pub struct IpPool {
 
 impl IpPool {
     /// Create an empty IP pool.
+    ///
+    /// # Security
+    ///
+    /// If IP addresses are loaded from a config file, ensure the file
+    /// has restricted permissions (e.g., `chmod 600`) to prevent
+    /// unauthorized access to outbound IP allocation metadata.
+    #[cfg(unix)]
+    pub fn new() -> Self {
+        Self::check_config_file_permissions();
+        Self {
+            ips: HashMap::new(),
+            rotation_order: Vec::new(),
+            next_index: AtomicUsize::new(0),
+            default_ip: None,
+        }
+    }
+
+    /// Create an empty IP pool.
+    #[cfg(not(unix))]
     pub fn new() -> Self {
         Self {
             ips: HashMap::new(),
@@ -184,7 +211,15 @@ impl IpPool {
     }
 
     /// Create an IP pool with a default shared IP.
+    ///
+    /// # Security
+    ///
+    /// If IP addresses are loaded from a config file, ensure the file
+    /// has restricted permissions (e.g., `chmod 600`) to prevent
+    /// unauthorized access to outbound IP allocation metadata.
     pub fn with_default(default_ip: IpAddr) -> Self {
+        #[cfg(unix)]
+        Self::check_config_file_permissions();
         Self {
             ips: HashMap::new(),
             rotation_order: Vec::new(),
@@ -216,7 +251,7 @@ impl IpPool {
 
     /// Select the next IP for sending (round-robin among healthy IPs).
     /// If `tenant_id` is provided, only consider IPs assigned to that tenant.
-    /// Falls back to the default IP if no tenant IPs are available.
+    /// Falls back only to a shared default IP if no tenant IPs are available.
     pub fn select_ip(&self, tenant_id: Option<&str>) -> Option<Arc<OutboundIp>> {
         let candidates: Vec<&IpAddr> = if let Some(tid) = tenant_id {
             self.rotation_order
@@ -235,16 +270,25 @@ impl IpPool {
         };
 
         if candidates.is_empty() {
-            // Fall back to default IP
-            return self
-                .default_ip
-                .and_then(|addr| self.ips.get(&addr).cloned());
+            return self.select_shared_default_ip();
         }
 
         let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % candidates.len();
         candidates
             .get(idx)
             .and_then(|addr| self.ips.get(addr).cloned())
+    }
+
+    fn select_shared_default_ip(&self) -> Option<Arc<OutboundIp>> {
+        self.default_ip.and_then(|addr| {
+            self.ips.get(&addr).and_then(|ip| {
+                if ip.tenant_id.is_none() && ip.can_send() {
+                    Some(ip.clone())
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     /// Create a TCP socket bound to the selected outbound IP and connect to
@@ -303,6 +347,92 @@ impl IpPool {
     /// Get an IP by its address.
     pub fn get(&self, addr: &IpAddr) -> Option<&Arc<OutboundIp>> {
         self.ips.get(addr)
+    }
+
+    /// Load IP pool addresses from the `OUTBOUND_IPS` environment variable.
+    ///
+    /// The variable must contain a JSON array of objects with fields:
+    /// - `"addr"`: IP address (required)
+    /// - `"tenant_id"`: optional tenant owner
+    /// - `"healthy"`: optional boolean, `true` for pre-warmed IPs (default: `false` for warming)
+    ///
+    /// # Example
+    ///
+    /// ```json
+    /// [
+    ///   {"addr": "203.0.113.1", "tenant_id": "tenant-abc", "healthy": true},
+    ///   {"addr": "203.0.113.2"}
+    /// ]
+    /// ```
+    ///
+    /// # Security
+    ///
+    /// This method reads from an environment variable, which is more secure
+    /// than reading from a world-readable config file. Ensure the process
+    /// environment is not leaked via `/proc` or debugging endpoints.
+    pub fn from_env() -> Result<Self, String> {
+        let raw = std::env::var("OUTBOUND_IPS")
+            .map_err(|_| "OUTBOUND_IPS environment variable is not set".to_string())?;
+
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&raw).map_err(|e| format!("OUTBOUND_IPS parse error: {}", e))?;
+
+        let mut pool = IpPool::new();
+
+        for entry in &entries {
+            let addr_str = entry.get("addr").and_then(|v| v.as_str()).ok_or_else(|| {
+                "Each OUTBOUND_IPS entry must have a string 'addr' field".to_string()
+            })?;
+            let addr: IpAddr = addr_str
+                .parse()
+                .map_err(|e| format!("Invalid IP address '{}': {}", addr_str, e))?;
+            let tenant_id = entry
+                .get("tenant_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let healthy = entry
+                .get("healthy")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let ip = if healthy {
+                OutboundIp::new_healthy(addr, tenant_id)
+            } else {
+                OutboundIp::new_warming(addr, tenant_id)
+            };
+
+            pool.add_ip(ip);
+        }
+
+        Ok(pool)
+    }
+
+    /// Check if any config files used for IP pool are world-readable.
+    /// Logs a warning if so.
+    #[cfg(unix)]
+    fn check_config_file_permissions() {
+        // Check common config paths for world-readable permissions
+        let config_paths = [
+            std::path::Path::new("/etc/apexmail/outbound-ips.json"),
+            std::path::Path::new("config/outbound-ips.json"),
+            std::path::Path::new("outbound-ips.json"),
+        ];
+
+        for path in &config_paths {
+            if path.exists() {
+                use std::os::unix::fs::MetadataExt;
+                if let Ok(meta) = path.metadata() {
+                    let mode = meta.mode();
+                    if mode & 0o004 != 0 {
+                        warn!(
+                            path = %path.display(),
+                            "Outbound IP config file is world-readable; \
+                             recommend `chmod 600` to restrict access to IP allocation metadata"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -429,6 +559,30 @@ mod tests {
     }
 
     #[test]
+    fn test_ip_pool_default_fallback_rejects_tenant_owned_ip() {
+        let default_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
+        let mut pool = IpPool::with_default(default_addr);
+
+        pool.add_ip(OutboundIp::new_healthy(
+            default_addr,
+            Some("tenant-b".into()),
+        ));
+
+        assert!(pool.select_ip(Some("tenant-a")).is_none());
+    }
+
+    #[test]
+    fn test_ip_pool_default_fallback_requires_sendable_ip() {
+        let default_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
+        let mut pool = IpPool::with_default(default_addr);
+        let mut default_ip = OutboundIp::new_healthy(default_addr, None);
+        default_ip.health = IpHealth::Disabled;
+        pool.add_ip(default_ip);
+
+        assert!(pool.select_ip(Some("unknown-tenant")).is_none());
+    }
+
+    #[test]
     fn test_ip_pool_remove() {
         let mut pool = IpPool::new();
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -449,6 +603,32 @@ mod tests {
         // 51st send should exceed limit
         assert!(!ip.record_send());
         assert!(!ip.can_send());
+    }
+
+    #[test]
+    fn test_warmup_day_negative_clock_skew() {
+        // Simulate clock skew: allocation in the future → negative warmup day.
+        // This would previously wrap a negative i64 to a huge u32, producing
+        // u64::MAX limit (F-013). After the fix, warmup_day() clamps to 0.
+        let ip = OutboundIp {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6)),
+            health: IpHealth::Warming,
+            tenant_id: None,
+            allocated_at: Utc::now() + chrono::Duration::days(5),
+            daily_limit: Some(50),
+            counters: IpDailyCounters::new(),
+        };
+        let day = ip.warmup_day();
+        assert_eq!(day, 0, "warmup_day must clamp to 0 for clock skew");
+        // update_warmup_limit should produce day-0 limit (50), not u64::MAX
+        let mut ip_mut = ip;
+        ip_mut.update_warmup_limit();
+        assert_eq!(
+            ip_mut.daily_limit,
+            Some(50),
+            "clock-skewed IP must get day-0 limit, not u64::MAX"
+        );
+        assert_eq!(ip_mut.health, IpHealth::Warming, "still warming");
     }
 
     #[test]

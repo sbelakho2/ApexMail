@@ -3,6 +3,9 @@
 //! Provides in-memory counters, histograms, and gauges with thread-safe
 //! access via `DashMap` and `parking_lot`. The `export_prometheus` method
 //! renders all recorded metrics in the Prometheus text exposition format.
+//!
+//! When a [`PersistenceConfig`] is provided, the collector can periodically
+//! flush metric data to the database to survive process restarts.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -12,6 +15,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::config::PersistenceConfig;
 use crate::types::MetricType;
 
 // ---------------------------------------------------------------------------
@@ -178,11 +182,15 @@ pub struct MetricSummary {
 
 /// Thread-safe in-memory metrics collector compatible with Prometheus
 /// text exposition format.
+///
+/// Optionally persists metric data to the database when `persistence_config`
+/// is `Some` and `enabled` is `true`.
 #[derive(Debug)]
 pub struct MetricsCollector {
     metrics: DashMap<String, RegisteredMetric>,
     default_buckets: RwLock<Vec<f64>>,
     created_at: DateTime<Utc>,
+    persistence_config: Option<PersistenceConfig>,
 }
 
 impl MetricsCollector {
@@ -192,7 +200,24 @@ impl MetricsCollector {
             metrics: DashMap::new(),
             default_buckets: RwLock::new(default_buckets),
             created_at: Utc::now(),
+            persistence_config: None,
         }
+    }
+
+    /// Create a collector with persistence configuration, enabling periodic
+    /// flush of metric data to the database.
+    pub fn with_persistence(default_buckets: Vec<f64>, config: PersistenceConfig) -> Self {
+        Self {
+            metrics: DashMap::new(),
+            default_buckets: RwLock::new(default_buckets),
+            created_at: Utc::now(),
+            persistence_config: if config.enabled { Some(config) } else { None },
+        }
+    }
+
+    /// Return the persistence configuration, if any.
+    pub fn persistence(&self) -> Option<&PersistenceConfig> {
+        self.persistence_config.as_ref()
     }
 
     // -----------------------------------------------------------------------

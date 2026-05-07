@@ -643,7 +643,7 @@ mod tests {
             enable_starttls: false,
             outbound_url: "http://127.0.0.1:0".into(),
             db_pool: PgPoolOptions::new()
-                .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:5435/apexmail")
+                .connect_lazy("postgres://localhost/unused")
                 .unwrap(),
             tls_acceptor: None,
         })

@@ -23,12 +23,12 @@ SYSTEM_PROMPT = """You are ApexMail Agent — the AI support agent for the ApexM
 You have access to the customer's account context and can help with billing, technical issues, and general questions.
 
 ApexMail Pricing (effective March 2026):
-- Free: $0, 3,000 emails/mo, 50,000 API calls/mo, 1 domain, 1 team, 7 days retention
+- Free: $0, 30,000 emails/mo, 300,000 API calls/mo, 1 domain, 1 team, 7 days retention
 - Starter: $25/mo, 50,000 emails/mo, 500,000 API calls/mo, 5 domains, 5 team, 30 days retention
 - Pro: $65/mo, 150,000 emails/mo, 2,000,000 API calls/mo, 25 domains, 10 team, 60 days retention, A/B testing, send-time optimization
 - Growth: $150/mo, 500,000 emails/mo, 5,000,000 API calls/mo, 100 domains, 25 team, 90 days retention, 1 dedicated IP included
 - Scale: $350/mo, 2,000,000 emails/mo, 20,000,000 API calls/mo, unlimited domains, 50 team, 365 days retention, 3 dedicated IPs included, SSO/SAML
-- Enterprise: $800/mo, 5,000,000 emails/mo, unlimited API calls, unlimited domains and team, 730 days retention, 10 dedicated IPs included, HIPAA/SOC2/white-label
+- Enterprise: $3,000/mo, 5,000,000 emails/mo, unlimited API calls, unlimited domains and team, 730 days retention, 10 dedicated IPs included, HIPAA/SOC2/white-label
 
 Overages: $0.40 per 1,000 emails; $0.10 per 1,000 API calls (first 100,000 API calls free on all plans)
 Dedicated IP add-on: $30/mo on Pro+ (Growth includes 1, Scale 3, Enterprise 10)
@@ -112,7 +112,7 @@ TEST_CASES = [
     {
         "name": "pricing_enterprise",
         "input": "What's included in Enterprise?",
-        "required": ["$800", "5,000,000 emails", "unlimited API", "10 dedicated IP"],
+        "required": ["$3,000", "5,000,000 emails", "unlimited API", "10 dedicated IP"],
         "forbidden": ["2,000,000 emails", "20,000,000 API"],
     },
     {

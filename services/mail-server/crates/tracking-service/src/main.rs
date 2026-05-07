@@ -70,12 +70,18 @@ async fn main() -> Result<()> {
     );
 
     // ── Redis ─────────────────────────────────────────────────────────
+    // PP-002: Configure pool timeouts so Redis outages don't hang indefinitely.
+    // `create_timeout` limits how long we wait for a new Redis connection to be
+    // established (TCP connect).  `wait_timeout` limits how long we wait for a
+    // pooled connection to become available (acquire).
     let redis_cfg = RedisPoolConfig::from_url(&cfg.redis.url);
     let redis_pool = redis_cfg
         .builder()
         .context("Failed to create Redis pool builder")?
         .max_size(cfg.redis.pool_size)
         .runtime(Runtime::Tokio1)
+        .create_timeout(Some(std::time::Duration::from_secs(10)))
+        .wait_timeout(Some(std::time::Duration::from_secs(5)))
         .build()
         .context("Failed to build Redis pool")?;
 

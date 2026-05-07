@@ -3,269 +3,101 @@
 {# Pricing plans render statically in this Tera partial.       #}
 {#       static Tera since no runtime interactivity is needed.    #}
 
-<section class="py-20 lg:py-32 bg-white">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    {# Plans Grid #}
-    <div class="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 lg:gap-5">
-      {# Free Plan #}
-      <div class="relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200 border-surface-200 hover:border-surface-300">
-        <div class="mb-5">
-          <h3 class="text-base font-semibold text-surface-900 mb-2">Free</h3>
-          <div class="flex items-baseline gap-1">
-            <span class="text-3xl font-semibold text-surface-900 tabular-nums">$0</span>
-            <span class="text-sm text-surface-500">forever</span>
-          </div>
-          <p class="text-sm text-surface-500 mt-2 leading-relaxed">Perfect for development and testing.</p>
-        </div>
-        <ul role="list" class="space-y-2 mb-6 flex-1">
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>3,000 emails/month</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>RESTful API access</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>1 sending domain</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>7-day data retention</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Community support</span>
-          </li>
-        </ul>
-        <a href="{{ config.extra.app_url }}/signup" aria-label="Start Free - Free plan at $0 forever" class="block w-full py-2.5 rounded-md text-sm font-medium text-center transition-colors bg-surface-100 text-surface-900 hover:bg-surface-200">
-          Start Free
-        </a>
+    <div class="mb-16 py-10 border-y border-surface-200">
+      <div class="flex flex-wrap justify-center items-center gap-10">
+        <div class="text-[10px] font-bold text-surface-400 uppercase tracking-[0.2em]">Operational Controls:</div>
+        <span class="text-[10px] font-bold text-surface-950 uppercase tracking-widest flex items-center gap-2">
+          <div class="w-1.5 h-1.5 bg-brand-500"></div> SOC 2 control evidence
+        </span>
+        <span class="text-[10px] font-bold text-surface-950 uppercase tracking-widest flex items-center gap-2">
+          <div class="w-1.5 h-1.5 bg-brand-500"></div> GDPR workflows
+        </span>
+        <span class="text-[10px] font-bold text-surface-950 uppercase tracking-widest flex items-center gap-2">
+          <div class="w-1.5 h-1.5 bg-brand-500"></div> SIG / CAIQ / HECVAT
+        </span>
+        <span class="text-[10px] font-bold text-surface-950 uppercase tracking-widest flex items-center gap-2">
+          <div class="w-1.5 h-1.5 bg-brand-500"></div> HIPAA BAA workflow
+        </span>
       </div>
-      {# Starter Plan #}
-      <div class="relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200 border-surface-200 hover:border-surface-300">
-        <div class="mb-5">
-          <h3 class="text-base font-semibold text-surface-900 mb-2">Starter</h3>
-          <div class="flex items-baseline gap-1">
-            <span class="text-3xl font-semibold text-surface-900 tabular-nums">$25</span>
-            <span class="text-sm text-surface-500">/month</span>
-          </div>
-          <p class="text-sm text-surface-500 mt-2 leading-relaxed">For growing apps with moderate needs.</p>
-        </div>
-        <ul role="list" class="space-y-2 mb-6 flex-1">
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>50,000 emails/month</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Webhooks &amp; advanced analytics</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Custom templates</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>5 sending domains</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>5 team members</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Email support</span>
-          </li>
-        </ul>
-        <a href="{{ config.extra.app_url }}/signup?plan=starter" aria-label="Start Trial - Starter plan at $25/month" class="block w-full py-2.5 rounded-md text-sm font-medium text-center transition-colors bg-surface-100 text-surface-900 hover:bg-surface-200">
-          Start Trial
-        </a>
-      </div>
-      {# Pro Plan #}
-      <div class="relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200 border-surface-200 hover:border-surface-300">
-        <div class="mb-5">
-          <h3 class="text-base font-semibold text-surface-900 mb-2">Pro</h3>
-          <div class="flex items-baseline gap-1">
-            <span class="text-3xl font-semibold text-surface-900 tabular-nums">$65</span>
-            <span class="text-sm text-surface-500">/month</span>
-          </div>
-          <p class="text-sm text-surface-500 mt-2 leading-relaxed">For scaling teams needing more power.</p>
-        </div>
-        <ul role="list" class="space-y-2 mb-6 flex-1">
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>150,000 emails/month</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Send-time AI optimization</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Custom tracking domain</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>25 sending domains</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>10 team members</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Dedicated IP add-on ($30/mo)</span>
-          </li>
-        </ul>
-        <a href="{{ config.extra.app_url }}/signup?plan=pro" aria-label="Start Trial - Pro plan at $65/month" class="block w-full py-2.5 rounded-md text-sm font-medium text-center transition-colors bg-surface-100 text-surface-900 hover:bg-surface-200">
-          Start Trial
-        </a>
-      </div>
-      {# Growth Plan (Popular) #}
-      <div class="relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200 border-primary-600 ring-1 ring-primary-600">
-        <div class="mb-4">
-          <span class="inline-block px-2 py-0.5 bg-primary-50 text-primary-700 text-xs font-medium rounded border border-primary-100">Most Popular</span>
-        </div>
-        <div class="mb-5">
-          <h3 class="text-base font-semibold text-surface-900 mb-2">Growth</h3>
-          <div class="flex items-baseline gap-1">
-            <span class="text-3xl font-semibold text-surface-900 tabular-nums">$150</span>
-            <span class="text-sm text-surface-500">/month</span>
-          </div>
-          <p class="text-sm text-surface-500 mt-2 leading-relaxed">For teams serious about deliverability.</p>
-        </div>
-        <ul role="list" class="space-y-2 mb-6 flex-1">
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>500,000 emails/month</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>1 dedicated IP included</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Audit logs &amp; priority support</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>100 sending domains</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>25 team members</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>90-day data retention</span>
-          </li>
-        </ul>
-        <a href="{{ config.extra.app_url }}/signup?plan=growth" aria-label="Start Trial - Growth plan at $150/month" class="block w-full py-2.5 rounded-md text-sm font-medium text-center transition-colors bg-primary-600 text-white hover:bg-primary-700">
-          Start Trial
-        </a>
-      </div>
-      {# Scale Plan #}
-      <div class="relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200 border-surface-200 hover:border-surface-300">
-        <div class="mb-5">
-          <h3 class="text-base font-semibold text-surface-900 mb-2">Scale</h3>
-          <div class="flex items-baseline gap-1">
-            <span class="text-3xl font-semibold text-surface-900 tabular-nums">$350</span>
-            <span class="text-sm text-surface-500">/month</span>
-          </div>
-          <p class="text-sm text-surface-500 mt-2 leading-relaxed">For high-volume enterprise senders.</p>
-        </div>
-        <ul role="list" class="space-y-2 mb-6 flex-1">
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>2,000,000 emails/month</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>3 dedicated IPs</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Unlimited domains</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>SSO/SAML &amp; 10 subaccounts</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>SLA guarantee (99.9%, 10% credit cap)</span>
-          </li>
-          <li class="flex items-start gap-2 text-sm text-surface-600">
-            <svg class="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <span>Phone support &amp; dedicated CSM</span>
-          </li>
-        </ul>
-        <a href="/private-cloud" aria-label="Contact Sales - Scale plan at $350/month" class="block w-full py-2.5 rounded-md text-sm font-medium text-center transition-colors bg-surface-100 text-surface-900 hover:bg-surface-200">
-          Contact Sales
-        </a>
-      </div>
+    </div>
+
+    {# Plans Grid — max 3 columns for readability #}
+    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+      {% set plan_name = "Free" %}{% set plan_price = "$0" %}{% set plan_period = "forever" %}{% set plan_description = "Perfect for development and testing." %}{% set plan_features = ["30,000 emails/month", "RESTful API access", "1 sending domain", "7-day data retention", "Community support"] %}{% set plan_cta_label = "Start Free" %}{% set plan_cta_url = config.extra.app_url ~ "/signup" %}{% set plan_cta_aria_label = "Start Free - Free plan at $0 forever" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% include "partials/pricing/card.html" %}
+
+      {% set plan_name = "Starter" %}{% set plan_price = "$25" %}{% set plan_period = "/month" %}{% set plan_description = "For growing apps with moderate needs." %}{% set plan_features = ["50,000 emails/month", "Webhooks & advanced analytics", "Custom templates", "5 sending domains", "5 team members", "Email support"] %}{% set plan_cta_label = "Start Trial" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=starter" %}{% set plan_cta_aria_label = "Start Trial - Starter plan at $25/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% include "partials/pricing/card.html" %}
+
+      {% set plan_name = "Pro" %}{% set plan_price = "$65" %}{% set plan_period = "/month" %}{% set plan_description = "For scaling teams needing more power." %}{% set plan_features = ["150,000 emails/month", "Send-time optimization", "Custom tracking domain", "25 sending domains", "10 team members", "Dedicated IP add-on ($30/mo)"] %}{% set plan_cta_label = "Start Trial" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=pro" %}{% set plan_cta_aria_label = "Start Trial - Pro plan at $65/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% include "partials/pricing/card.html" %}
+
+      {% set plan_name = "Growth" %}{% set plan_price = "$150" %}{% set plan_period = "/month" %}{% set plan_description = "For teams serious about deliverability." %}{% set plan_features = ["500,000 emails/month", "1 dedicated IP included", "A/B testing & audit logs", "100 sending domains", "25 team members", "90-day data retention"] %}{% set plan_cta_label = "Start Trial" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=growth" %}{% set plan_cta_aria_label = "Start Trial - Growth plan at $150/month" %}{% set plan_is_popular = true %}{% set plan_popular_label = "Most Popular" %}{% set plan_is_enterprise = false %}{% set plan_button_primary = true %}
+      {% include "partials/pricing/card.html" %}
+
+      {% set plan_name = "Scale" %}{% set plan_price = "$350" %}{% set plan_period = "/month" %}{% set plan_description = "For high-volume enterprise senders." %}{% set plan_features = ["2,000,000 emails/month", "3 dedicated IPs", "Unlimited domains", "SSO/SAML & 10 subaccounts", "Send-time, A/B & SLA", "Priority async support & shared Slack hub"] %}{% set plan_cta_label = "Start Trial" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=scale" %}{% set plan_cta_aria_label = "Start Trial - Scale plan at $350/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% include "partials/pricing/card.html" %}
+
+      {% set plan_name = "Enterprise" %}{% set plan_price = "$3,000" %}{% set plan_period = "/month" %}{% set plan_description = "Annual-contract platform plan for regulated senders." %}{% set plan_features = ["5,000,000 emails/month", "10 dedicated IPs included", "Private cloud & BYOIP lifecycle", "HIPAA BAA workflow", "SIG/CAIQ/HECVAT packs", "Dedicated CSM & contractual SLA"] %}{% set plan_cta_label = "Contact Sales" %}{% set plan_cta_url = "/contact-sales" %}{% set plan_cta_aria_label = "Contact Sales - Enterprise plan from $3,000/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = true %}{% set plan_enterprise_label = "Enterprise" %}{% set plan_button_primary = false %}
+      {% include "partials/pricing/card.html" %}
     </div>
 
     {# Pay As You Go #}
-    <div class="animate-in delay-500 mt-10 rounded-lg border border-amber-200 bg-amber-50/50 overflow-hidden">
-      <div class="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
-        <div class="flex-1">
-          <div class="inline-flex items-center gap-1.5 text-amber-700 mb-3">
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            <span class="text-xs font-semibold">Pay As You Go</span>
-          </div>
-          <p class="text-surface-600 text-sm mb-4 max-w-lg">
-            No monthly commitment. Volume discounts from $0.001 to $0.0003 per email.
-          </p>
-          <div class="flex flex-wrap gap-2">
-            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white rounded-md border border-amber-200 text-xs">
-              <span class="text-surface-500">0-10k:</span>
-              <span class="font-medium text-amber-700">$0.001</span>
-            </span>
-            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white rounded-md border border-amber-200 text-xs">
-              <span class="text-surface-500">10k-100k:</span>
-              <span class="font-medium text-amber-700">$0.0008</span>
-            </span>
-            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white rounded-md border border-amber-200 text-xs">
-              <span class="text-surface-500">100k-1M:</span>
-              <span class="font-medium text-amber-700">$0.0005</span>
-            </span>
-            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white rounded-md border border-amber-200 text-xs">
-              <span class="text-surface-500">1M+:</span>
-              <span class="font-medium text-amber-700">$0.0003</span>
-            </span>
-          </div>
+    <div class="mt-20 border border-surface-200 bg-surface-100 p-8 flex flex-col md:flex-row items-center justify-between gap-8">
+      <div class="flex-1">
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-2 h-2 bg-brand-500"></div>
+          <span class="text-[10px] font-bold text-surface-950 uppercase tracking-[0.2em]">Dynamic Allocation (PAYG)</span>
         </div>
-        <a href="{{ config.extra.app_url }}/signup?plan=payg" class="shrink-0 px-5 py-2.5 text-sm font-medium bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors">
-          Get Started
+        <p class="text-surface-600 text-[13px] leading-[1.6] max-w-xl">
+          Zero commitment infrastructure. Automated volume discounts applied deterministically based on consumption.
+        </p>
+      </div>
+      <div class="flex flex-wrap gap-3">
+        {% for tier in ["0-10k: $0.001", "10k-100k: $0.0008", "100k-1M: $0.0005", "1M+: $0.0003"] %}
+          <span class="px-3 py-1 bg-white border border-surface-200 text-[10px] font-bold text-surface-950 uppercase tracking-tight">{{ tier }}</span>
+        {% endfor %}
+      </div>
+      <a href="{{ config.extra.app_url }}/signup?plan=payg" class="btn-secondary">
+        Initialize
+      </a>
+    </div>
+
+    {# ── Product Proof ─────────────────────────────────────────────── #}
+    <div class="animate-in delay-700 mt-16 text-center">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto text-left mb-12">
+        <div class="p-6 bg-white rounded-sm border border-surface-200 flex flex-col">
+          <div class="text-[10px] font-bold text-brand-600 uppercase tracking-widest mb-3">Deliverability</div>
+          <h3 class="text-lg font-bold text-surface-950 mb-2">Isolation where it changes outcomes</h3>
+          <p class="text-sm text-surface-600 leading-relaxed">Dedicated IP pools, warm-up state, provider throttling, send-time optimization, A/B testing, inbox-placement tests, and postmaster polling are packaged into paid tiers instead of sold as vague services.</p>
+        </div>
+        <div class="p-6 bg-white rounded-sm border border-surface-200 flex flex-col">
+          <div class="text-[10px] font-bold text-brand-600 uppercase tracking-widest mb-3">Compliance</div>
+          <h3 class="text-lg font-bold text-surface-950 mb-2">Workflows before certificates</h3>
+          <p class="text-sm text-surface-600 leading-relaxed">Enterprise includes HIPAA BAA lifecycle tooling, SOC 2 control evidence workflows, audit logs, DSR processing, consent records, and generated SIG, CAIQ, and HECVAT answer packs.</p>
+        </div>
+        <div class="p-6 bg-white rounded-sm border border-surface-200 flex flex-col">
+          <div class="text-[10px] font-bold text-brand-600 uppercase tracking-widest mb-3">Enterprise</div>
+          <h3 class="text-lg font-bold text-surface-950 mb-2">Priced for real ownership</h3>
+          <p class="text-sm text-surface-600 leading-relaxed">Enterprise starts at $3,000/month on annual contracts so private deployment lifecycle, BYOIP verification, dedicated onboarding, CSM coverage, and SLA commitments are resourced correctly.</p>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap justify-center items-center gap-x-6 gap-y-2 mb-12">
+        <a href="/sla" class="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-surface-400 hover:text-brand-600 transition-colors">
+          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          View SLA details
+        </a>
+        <a href="/compliance" class="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-surface-400 hover:text-brand-600 transition-colors">
+          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          View compliance documentation
+        </a>
+        <a href="/private-cloud" class="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-surface-400 hover:text-brand-600 transition-colors">
+          <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          Review private deployment options
         </a>
       </div>
     </div>
 
-    {# Enterprise #}
-    <div class="animate-in delay-500 mt-10 rounded-lg bg-surface-900 overflow-hidden">
-      <div class="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
-        <div class="flex-1">
-          <h3 class="text-lg font-semibold text-white mb-2">Enterprise — from $800/mo</h3>
-          <p class="text-surface-400 text-sm mb-4 max-w-lg">
-            5,000,000+ emails/month, custom SLA, HIPAA/SOC 2 compliance, and dedicated support.
-          </p>
-          <div class="flex flex-wrap gap-x-4 gap-y-1">
-            {% set ent_features = ["10 dedicated IPs", "SSO/SAML & SCIM", "HIPAA & SOC 2", "White-label & BYOIP", "Custom SLA (99.9%, 25% credit cap)", "Dedicated account manager"] %}
-            {% for feat in ent_features %}
-            <span class="flex items-center gap-1.5 text-sm text-surface-300">
-              <svg class="w-4 h-4 text-primary-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              {{ feat }}
-            </span>
-            {% endfor %}
-          </div>
-        </div>
-        <a href="/private-cloud" class="shrink-0 px-5 py-2.5 text-sm font-medium bg-white text-surface-900 rounded-md hover:bg-surface-100 transition-colors">
-          Contact Sales
-        </a>
-      </div>
-    </div>
   </div>
-</section>

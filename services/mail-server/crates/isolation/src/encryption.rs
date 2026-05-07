@@ -6,7 +6,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
 use hkdf::Hkdf;
-use rand::RngCore;
+use rand::rngs::OsRng;
+use rand::TryRngCore;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use tracing::{info, warn};
@@ -18,6 +19,12 @@ use crate::types::*;
 const ALGORITHM: &str = "aes-256-gcm";
 const KEY_LENGTH: usize = 32;
 const IV_LENGTH: usize = 12;
+
+fn fill_os_random(bytes: &mut [u8]) -> anyhow::Result<()> {
+    OsRng
+        .try_fill_bytes(bytes)
+        .map_err(|e| anyhow::anyhow!("OsRng failed while generating isolation encryption material: {e}"))
+}
 
 // ── Key Derivation ─────────────────────────────────────────
 
@@ -77,7 +84,7 @@ impl EncryptionService {
 
         let cipher = Aes256Gcm::new_from_slice(&derived)?;
         let mut iv = [0u8; IV_LENGTH];
-        rand::thread_rng().fill_bytes(&mut iv);
+        fill_os_random(&mut iv)?;
         let nonce = Nonce::from_slice(&iv);
 
         let mut buffer = raw_key.to_vec();
@@ -134,7 +141,7 @@ impl EncryptionService {
 
         let cipher = Aes256Gcm::new_from_slice(&raw_key)?;
         let mut iv = [0u8; IV_LENGTH];
-        rand::thread_rng().fill_bytes(&mut iv);
+        fill_os_random(&mut iv)?;
         let nonce = Nonce::from_slice(&iv);
 
         let mut buffer = plaintext.as_bytes().to_vec();
@@ -286,11 +293,19 @@ impl EncryptionService {
     }
 
     /// Generate a cryptographically random hex token.
-    pub fn generate_token(length: usize) -> String {
+    pub fn try_generate_token(length: usize) -> anyhow::Result<String> {
         let byte_len = length / 2;
         let mut bytes = vec![0u8; byte_len];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        hex::encode(&bytes)
+        fill_os_random(&mut bytes)?;
+        Ok(hex::encode(&bytes))
+    }
+
+    /// Generate a cryptographically random hex token.
+    ///
+    /// Prefer [`Self::try_generate_token`] in fallible request paths. This
+    /// compatibility wrapper preserves existing callers and tests.
+    pub fn generate_token(length: usize) -> String {
+        Self::try_generate_token(length).expect("OsRng must be available for token generation")
     }
 
     // ── Private ────────────────────────────────────────────
@@ -470,7 +485,7 @@ impl EncryptionService {
         organization_id: &str,
     ) -> anyhow::Result<EncryptionKey> {
         let mut raw_key = [0u8; KEY_LENGTH];
-        rand::thread_rng().fill_bytes(&mut raw_key);
+        fill_os_random(&mut raw_key)?;
 
         let encrypted_key = self.encrypt_data_key(&raw_key)?;
 
@@ -648,7 +663,7 @@ impl EncryptionService {
 
                     // Re-encrypt with new key
                     let mut new_iv = [0u8; IV_LENGTH];
-                    rand::thread_rng().fill_bytes(&mut new_iv);
+                    fill_os_random(&mut new_iv)?;
                     let new_nonce = Nonce::from_slice(&new_iv);
 
                     let mut buffer = buffer;

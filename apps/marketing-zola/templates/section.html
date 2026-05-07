@@ -16,8 +16,8 @@
   {% if section.pages %}
   <div class="mx-auto max-w-7xl px-6 py-12">
     {% for page in section.pages %}
-    <a href="{{ page.permalink }}" class="block mb-4 p-6 rounded-lg border border-surface-200 hover:border-brand-300 transition-colors">
-      <h2 class="text-xl font-semibold text-surface-900">{{ page.title }}</h2>
+    <a href="{{ page.permalink }}" class="block mb-4 p-6 rounded-sm border border-surface-200 hover:border-brand-300 transition-colors">
+      <h2 class="text-xl font-semibold text-surface-950">{{ page.title }}</h2>
       {% if page.description %}<p class="mt-2 text-surface-600">{{ page.description }}</p>{% endif %}
     </a>
     {% endfor %}

@@ -51,6 +51,8 @@ aho-corasick = { workspace = true }
 moka = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+scraper = "0.20"
+ego-tree = "0.6"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

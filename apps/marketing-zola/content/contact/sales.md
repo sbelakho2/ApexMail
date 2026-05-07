@@ -6,7 +6,7 @@ template = "page.html"
 
 # Talk to Sales
 
-For enterprise buying, security review, or private-cloud planning, email [hello@apexmail.ee](mailto:hello@apexmail.ee) with your use case and expected volume.
+For enterprise buying, security review, or private-cloud planning, email [support@apexmail.ee](mailto:support@apexmail.ee) with your use case and expected volume.
 
 ## Include These Details
 

@@ -267,7 +267,7 @@ mod risk_scoring_edge_cases {
     /// NaN/Infinity handling (if any calculations could produce them)
     #[test]
     fn test_no_nan_risk() {
-        let mut history = UserTlsHistory::new(100);
+        let history = UserTlsHistory::new(100);
 
         let fp = TlsFingerprint::from_client_hello(0x0303, &[], &[], &[], &[]);
 

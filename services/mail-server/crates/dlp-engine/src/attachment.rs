@@ -12,6 +12,14 @@
 //! best-effort text extraction rather than full rendering.
 
 use crate::engine::{DlpAction, DlpEngine, DlpVerdict};
+use flate2::read::DeflateDecoder;
+use std::io::Read;
+
+/// Maximum decompressed size for any single OOXML XML part (anti-zip-bomb).
+/// 50 MB is generous for legitimate documents and tightly bounds memory.
+const MAX_DEFLATED_PART_BYTES: u64 = 50 * 1024 * 1024;
+/// Maximum cumulative decompressed bytes across an entire OOXML container.
+const MAX_OOXML_TOTAL_DECOMPRESSED: u64 = 200 * 1024 * 1024;
 
 /// File extension / MIME classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +141,8 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
     // Scan for PK local file headers and look for .xml entries
     let mut text = String::new();
     let mut parts_found = 0u32;
+    let mut total_decompressed: u64 = 0;
+    let mut bombed = false;
 
     // Simple ZIP scan:find local file headers (PK\x03\x04)
     let mut pos = 0;
@@ -160,16 +170,31 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
             let header_end = pos + 30 + fname_len + extra_len;
             if pos + 30 + fname_len <= data.len() {
                 let fname = String::from_utf8_lossy(&data[pos + 30..pos + 30 + fname_len]);
-                // Only scan uncompressed XML content parts (compression == 0)
-                if compression == 0
-                    && (fname.ends_with(".xml") || fname.contains("sharedStrings"))
+                if (fname.ends_with(".xml") || fname.contains("sharedStrings"))
                     && header_end + compressed_size <= data.len()
                 {
-                    let xml_bytes = &data[header_end..header_end + compressed_size];
-                    if let Ok(xml_str) = std::str::from_utf8(xml_bytes) {
-                        // Extract text between common content tags
-                        extract_xml_text_content(xml_str, &mut text);
-                        parts_found += 1;
+                    let remaining_budget = MAX_OOXML_TOTAL_DECOMPRESSED
+                        .saturating_sub(total_decompressed);
+                    if remaining_budget == 0 {
+                        bombed = true;
+                        break;
+                    }
+                    let part_cap = remaining_budget.min(MAX_DEFLATED_PART_BYTES);
+                    let compressed_bytes = &data[header_end..header_end + compressed_size];
+                    match decode_zip_part(compression, compressed_bytes, part_cap) {
+                        Ok(Some(xml_bytes)) => {
+                            total_decompressed =
+                                total_decompressed.saturating_add(xml_bytes.len() as u64);
+                            let xml_str = String::from_utf8_lossy(&xml_bytes);
+                            extract_xml_text_content(&xml_str, &mut text);
+                            parts_found += 1;
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            // Bomb detected — abort to bound resource use.
+                            bombed = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -180,15 +205,58 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
         }
     }
 
+    if bombed {
+        return (
+            text,
+            true,
+            format!(
+                "OOXML: aborted — decompression exceeded safety cap ({} parts before abort)",
+                parts_found
+            ),
+        );
+    }
+
     if parts_found == 0 {
         (
             String::new(),
             true,
-            "OOXML: no uncompressed XML parts found".into(),
+            "OOXML: no readable XML parts found".into(),
         )
     } else {
         let note = format!("Extracted text from {} OOXML XML parts", parts_found);
         (text, false, note)
+    }
+}
+
+/// Decompress a ZIP entry, refusing to exceed `max_bytes`.
+/// Returns `Ok(None)` for unsupported compression methods, `Err(())` if the
+/// decompressed size would exceed `max_bytes` (decompression bomb).
+fn decode_zip_part(
+    compression: u16,
+    bytes: &[u8],
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, ()> {
+    match compression {
+        0 => {
+            if bytes.len() as u64 > max_bytes {
+                return Err(());
+            }
+            Ok(Some(bytes.to_vec()))
+        }
+        8 => {
+            // Bound the reader so the deflater cannot expand beyond the cap.
+            let limited = std::io::Read::take(bytes, max_bytes.saturating_add(1));
+            let mut decoder = DeflateDecoder::new(limited);
+            let mut decoded = Vec::new();
+            if decoder.read_to_end(&mut decoded).is_err() {
+                return Ok(None);
+            }
+            if decoded.len() as u64 > max_bytes {
+                return Err(());
+            }
+            Ok(Some(decoded))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -570,6 +638,34 @@ mod tests {
         extract_xml_text_content(xml, &mut text);
         assert!(text.contains("Hello World"), "Extracted: {}", text);
         assert!(text.contains("Secret data"), "Extracted: {}", text);
+    }
+
+    #[test]
+    fn test_ooxml_deflated_xml_extraction() {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let xml = br#"<w:document><w:body><w:t>Invoice 4111 1111 1111 1111</w:t></w:body></w:document>"#;
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(xml).expect("deflate encoder accepts XML");
+        let compressed = encoder.finish().expect("deflate encoder finishes");
+        let filename = b"word/document.xml";
+
+        let mut zip = Vec::new();
+        zip.extend_from_slice(b"PK\x03\x04");
+        zip.extend_from_slice(&[20, 0, 0, 0, 8, 0, 0, 0, 0, 0]);
+        zip.extend_from_slice(&[0, 0, 0, 0]);
+        zip.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(xml.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(filename.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(filename);
+        zip.extend_from_slice(&compressed);
+
+        let (text, partial, note) = extract_ooxml_text(&zip);
+        assert!(!partial, "{}", note);
+        assert!(text.contains("4111 1111 1111 1111"), "{}", text);
     }
 
     #[test]

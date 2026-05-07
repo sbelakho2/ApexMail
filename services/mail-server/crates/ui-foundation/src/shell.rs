@@ -84,6 +84,36 @@ fn render_shortcut_contract() -> String {
     format!("<section hidden data-keyboard-shortcuts>{entries}</section>")
 }
 
+/// Content-Security-Policy header value for all shell surfaces.
+///
+/// Restricts script sources to same-origin and inline style hashes,
+/// disables `object-src`, `frame-src`, and `base-uri` to prevent
+/// XSS and data injection. The `strict-dynamic` fallback preserves
+/// existing script execution while blocking arbitrary inline handlers.
+pub fn shell_csp_header() -> &'static str {
+    "default-src 'self'; \
+     script-src 'self' 'strict-dynamic'; \
+     style-src 'self' 'unsafe-inline'; \
+     img-src 'self' data: https:; \
+     font-src 'self' data:; \
+     connect-src 'self'; \
+     frame-src 'none'; \
+     object-src 'none'; \
+     base-uri 'self'; \
+     form-action 'self'; \
+     upgrade-insecure-requests"
+}
+
+/// Render a `<meta http-equiv="Content-Security-Policy">` tag for embedding
+/// in shell HTML output. This provides defense-in-depth alongside HTTP
+/// response headers set by the Axum server layer.
+pub fn render_csp_meta_tag() -> String {
+    format!(
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\">",
+        shell_csp_header()
+    )
+}
+
 pub fn shell_source_catalog() -> [(&'static str, &'static str); 7] {
     [
         ("web_layout", WEB_LAYOUT_SOURCE),
@@ -107,7 +137,7 @@ pub struct ShellHeader<'a> {
 impl<'a> ShellHeader<'a> {
     pub fn render_html(&self) -> String {
         let badge = if self.unread_count > 0 {
-            format!("<span class=\"inline-flex items-center rounded-sm border font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 max-w-fit border-transparent bg-destructive text-destructive-foreground shadow hover:bg-destructive/80 h-5 min-w-5 px-1.5 text-[12px]\">{}</span>", self.unread_count)
+            format!("<span class=\"inline-flex items-center rounded-sm border font-bold border-transparent bg-brand-600 text-white h-5 min-w-5 px-1.5 text-[10px] uppercase tracking-widest\">{}</span>", self.unread_count)
         } else {
             String::new()
         };
@@ -115,7 +145,7 @@ impl<'a> ShellHeader<'a> {
         let safe_query = html_escape(self.search_query);
         let safe_avatar = html_escape(self.avatar_fallback);
         format!(
-            "<header class=\"sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-background via-background to-brand-50/50 backdrop-blur-2xl px-6\"><div class=\"flex items-center gap-4\"><button class=\"md:hidden min-h-[44px] min-w-[44px]\" aria-label=\"{} menu\" aria-expanded=\"{}\" aria-controls=\"mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" data-shortcut=\"mod+b\"><span class=\"h-5 w-5\">≡</span></button><div class=\"relative hidden md:block\"><input type=\"search\" role=\"searchbox\" aria-label=\"Search campaigns and contacts\" value=\"{}\" data-debounce-ms=\"300\" data-search-scope=\"campaigns,contacts\" data-shortcut=\"mod+k\" class=\"w-64 pl-9 lg:w-80\" /><kbd class=\"pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border\">{}</kbd></div></div><div class=\"flex items-center gap-2\"><button aria-label=\"Notifications\">{}</button>{}<button type=\"button\" aria-label=\"Toggle dark mode\" aria-pressed=\"false\" data-theme-toggle=\"true\" data-theme-storage-key=\"{}\" data-shortcut=\"mod+shift+d\" class=\"inline-flex h-10 w-10 items-center justify-center rounded-lg border border-surface-200 bg-background text-surface-700\"><span aria-hidden=\"true\">◐</span></button><div class=\"relative flex shrink-0 overflow-hidden rounded-lg border border-surface-200 shadow-sm h-10 w-10 rounded-lg\"><span class=\"flex h-full w-full items-center justify-center bg-surface-100 text-surface-600 font-bold text-xs uppercase tracking-wide\">{}</span></div></div></header>",
+            "<header class=\"sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200 bg-white px-6\"><div class=\"flex items-center gap-4\"><button class=\"md:hidden min-h-[44px] min-w-[44px]\" aria-label=\"{} menu\" aria-expanded=\"{}\" aria-controls=\"mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" data-shortcut=\"mod+b\"><span class=\"h-5 w-5\">≡</span></button><div class=\"relative hidden md:block\"><div class=\"absolute left-3 top-1/2 -translate-y-1/2 text-surface-400\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg></div><input type=\"search\" role=\"searchbox\" aria-label=\"Search campaigns and contacts\" value=\"{}\" data-debounce-ms=\"300\" data-search-scope=\"campaigns,contacts\" data-shortcut=\"mod+k\" class=\"w-64 pl-10 h-10 bg-surface-50 border border-surface-200 rounded-sm text-[13px] focus:outline-none focus:border-surface-950 transition-colors lg:w-80\" /><kbd class=\"pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border border-surface-200 px-1.5 py-0.5 text-[10px] font-bold text-surface-400 bg-white\">{}</kbd></div></div><div class=\"flex items-center gap-4\"><button aria-label=\"Notifications\" class=\"text-surface-500 hover:text-surface-950 transition-colors\">{}</button>{}<button type=\"button\" aria-label=\"Toggle dark mode\" aria-pressed=\"false\" data-theme-toggle=\"true\" data-theme-storage-key=\"{}\" data-shortcut=\"mod+shift+d\" class=\"inline-flex h-10 w-10 items-center justify-center rounded-sm border border-surface-200 bg-white text-surface-700 hover:border-surface-950 transition-colors\"><span aria-hidden=\"true\" class=\"text-xs\">◐</span></button><div class=\"relative flex shrink-0 h-10 w-10 rounded-sm border border-surface-200 bg-surface-100 items-center justify-center\"><span class=\"text-surface-600 font-bold text-[11px] uppercase tracking-widest\">{}</span></div></div></header>",
             if self.mobile_menu_open { "Close" } else { "Open" },
             if self.mobile_menu_open { "true" } else { "false" },
             safe_query,
@@ -143,7 +173,7 @@ impl<'a> ImpersonationBanner<'a> {
             .end_session_error
             .map(|value| {
                 format!(
-                    "<span class=\"text-xs font-medium text-white/95\">{}</span>",
+                    "<span class=\"text-[11px] font-bold text-white uppercase tracking-tight\">{}</span>",
                     html_escape(value)
                 )
             })
@@ -152,12 +182,12 @@ impl<'a> ImpersonationBanner<'a> {
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
         format!(
-            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-warning text-white shadow-lg\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-4 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-3\"><div class=\"flex items-center gap-2 bg-white/20 rounded-full px-3 py-1\"><span class=\"w-4 h-4\">◉</span><span class=\"text-xs font-bold uppercase tracking-wide\">Impersonation Mode</span></div><div class=\"flex items-center gap-2 text-sm\"><span class=\"opacity-80\">Viewing as tenant:</span><span class=\"font-semibold bg-white/10 px-2 py-0.5 rounded\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-sm\"><span class=\"opacity-80\">Operator:</span><span class=\"font-medium\">{}</span></div></div><div class=\"flex items-center gap-4\">{}<div class=\"flex items-center gap-2 text-sm\"><span class=\"w-4 h-4\">!</span><span class=\"hidden sm:inline opacity-80\">Expires in:</span><span class=\"font-mono font-bold bg-white/20 px-2 py-0.5 rounded\">{}</span></div><button class=\"flex items-center gap-1.5 px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold transition-colors\">{}</button></div></div></div></div>",
+            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-brand-600 text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-sm\"><span class=\"text-[10px] font-bold uppercase tracking-[0.2em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-bold uppercase tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-sm\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-bold uppercase tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-bold uppercase tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-sm\">{}</span></div><button class=\"px-3 py-1 bg-white text-brand-600 rounded-sm text-[11px] font-bold uppercase tracking-widest hover:bg-surface-50 transition-colors\">{}</button></div></div></div></div>",
             safe_tenant,
             safe_operator,
             error,
             safe_time,
-            if self.ending_session { "Ending…" } else { "End Session" },
+            if self.ending_session { "Ending…" } else { "Terminate" },
         )
     }
 }
@@ -196,7 +226,7 @@ impl<'a> WebDashboardShell<'a> {
             "w-64"
         };
         let mobile_overlay = if self.mobile_menu_open {
-            "<div class=\"fixed inset-0 z-40 bg-black/50 md:hidden\" aria-hidden=\"true\"></div><div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden shadow-2xl\"></div>".to_string()
+            "<div class=\"fixed inset-0 z-40 bg-black/50 md:hidden\" aria-hidden=\"true\"></div><div id=\"mobile-sidebar\" role=\"navigation\" aria-label=\"Mobile navigation\" data-mobile-menu-breakpoint=\"md\" class=\"fixed inset-y-0 left-0 z-50 w-[min(20rem,calc(100vw-2rem))] md:hidden \"></div>".to_string()
         } else {
             String::new()
         };
@@ -260,7 +290,7 @@ impl<'a> ControlPlaneShell<'a> {
             "-translate-x-full"
         };
         format!(
-            "<div class=\"min-h-screen bg-background\" data-theme-mode=\"system\" data-theme-storage-key=\"{}\">{}{}<div class=\"md:hidden fixed left-0 right-0 top-0 z-40 flex items-center justify-between p-4 bg-card border-b border-border\"><div class=\"flex items-center gap-3\"><div class=\"w-8 h-8 bg-primary rounded-lg flex items-center justify-center text-primary-foreground font-bold text-sm\">A</div><span class=\"text-sm font-semibold text-foreground\">Control Plane</span></div><button aria-expanded=\"{}\" aria-label=\"{} navigation menu\" aria-controls=\"control-plane-mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" class=\"p-2 min-h-[44px] min-w-[44px]\">≡</button></div><div class=\"hidden md:block\"><aside class=\"fixed left-0 top-0 h-screen w-64\" data-user-role=\"{}\"></aside></div><div id=\"control-plane-mobile-sidebar\" role=\"navigation\" aria-label=\"Control plane mobile navigation\" data-mobile-menu-breakpoint=\"md\" class=\"md:hidden fixed left-0 top-0 h-screen z-50 transition-transform duration-300 {}\"><aside class=\"h-full w-[min(20rem,calc(100vw-2rem))]\"></aside></div><main class=\"ml-0 md:ml-64 p-4 md:p-8 pt-4 md:pt-8\"><div class=\"cp-page-frame\">{}</div></main></div>",
+            "<div class=\"min-h-screen bg-background\" data-theme-mode=\"system\" data-theme-storage-key=\"{}\">{}{}<div class=\"md:hidden fixed left-0 right-0 top-0 z-40 flex items-center justify-between p-4 bg-card border-b border-border\"><div class=\"flex items-center gap-3\"><div class=\"w-8 h-8 bg-brand-600 rounded-sm flex items-center justify-center text-white font-bold text-sm\">A</div><span class=\"text-sm font-bold text-foreground\">Control Plane</span></div><button aria-expanded=\"{}\" aria-label=\"{} navigation menu\" aria-controls=\"control-plane-mobile-sidebar\" data-mobile-menu-breakpoint=\"md\" class=\"p-2 min-h-[44px] min-w-[44px]\">≡</button></div><div class=\"hidden md:block\"><aside class=\"fixed left-0 top-0 h-screen w-64\" data-user-role=\"{}\"></aside></div><div id=\"control-plane-mobile-sidebar\" role=\"navigation\" aria-label=\"Control plane mobile navigation\" data-mobile-menu-breakpoint=\"md\" class=\"md:hidden fixed left-0 top-0 h-screen z-50 transition-transform duration-300 {}\"><aside class=\"h-full w-[min(20rem,calc(100vw-2rem))]\"></aside></div><main class=\"ml-0 md:ml-64 p-4 md:p-8 pt-4 md:pt-8\"><div class=\"cp-page-frame\">{}</div></main></div>",
             theme_storage_key(),
             banner_markup,
             render_shortcut_contract(),
@@ -291,7 +321,7 @@ fn control_plane_banner_class(tone: &str) -> &'static str {
     match tone {
         "critical" => "bg-destructive/10 text-destructive border-destructive/20",
         "warning" => "border-warning/20 bg-warning/10 text-warning",
-        _ => "bg-primary/10 text-primary border-primary/20",
+        _ => "bg-brand-600/10 text-brand-600 border-brand-600/20",
     }
 }
 
@@ -358,9 +388,9 @@ mod tests {
         assert!(header.contains("data-mobile-menu-breakpoint=\"md\""));
         assert!(header.contains("3 unread notifications"));
         assert!(header.contains("aria-label=\"Open menu\""));
-        assert!(banner.contains("Impersonation Mode"));
+        assert!(banner.contains("Impersonation Active"));
         assert!(banner.contains("tenant_123"));
-        assert!(banner.contains("End Session"));
+        assert!(banner.contains("Terminate"));
         assert!(toast_surface.contains("aria-label=\"Notifications\""));
         assert!(toast_surface.contains("data-toast-store=\"__apexmailToastStore__\""));
         assert!(toast_surface.contains("data-remove-delay=\"5000\""));

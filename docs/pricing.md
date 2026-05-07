@@ -4,15 +4,29 @@
 > Every document, marketing page, AI training file, support playbook, and backend
 > constant MUST agree with this file. When in doubt, this file wins.
 
+## Honest Framing
+
+ApexMail's path to $100k MRR is enterprise-led. We win when a regulated SaaS
+company needs deliverability isolation, audit logs, GDPR workflows, HIPAA BAA
+lifecycle support, SOC 2 control evidence workflows, SIG/CAIQ/HECVAT answer-pack
+automation, and high-touch account ownership as part of the email platform. The
+Free, Starter, and Pro tiers exist to make adoption frictionless during the
+trial; the value capture lives in Growth, Scale, and Enterprise.
+
+We charge less per message than Resend at every paid tier; we charge
+**more** at Enterprise because annual contracts fund dedicated onboarding,
+CSM coverage, SLA commitments, compliance review, and custom architecture work.
+
 ---
 
 ## Competitive Context
 
 ApexMail competes directly with **Resend** (and indirectly with SendGrid, Postmark,
 Mailgun, Amazon SES). Our pricing is designed to be **competitive on per-email
-cost** while justifying a moderate premium through **features Resend does not
-offer**: contact management, A/B testing, send-time optimisation, long data
-retention, SSO/HIPAA/SOC2 compliance, and white-label.
+cost** while justifying a premium through **features Resend does not offer**:
+contact management, long data retention, SSO, SCIM, send-time optimization,
+A/B testing, HIPAA BAA lifecycle tooling, SOC 2 control evidence workflows,
+generated security questionnaires, audit logs, and white-label.
 
 ### Resend pricing (Feb 2026)
 
@@ -30,10 +44,8 @@ retention, SSO/HIPAA/SOC2 compliance, and white-label.
 | Data retention (Free)      | **7 days**        | 1 day            |
 | Data retention (paid)      | **30–730 days**   | 3–7 days         |
 | Contact management         | **Built-in**      | Basic "Audiences" |
-| A/B testing                | **Yes (Pro+)**    | No               |
-| Send-time optimisation     | **AI-powered**    | No               |
 | SSO / SAML                 | **Scale+**        | No               |
-| HIPAA / SOC2               | **Enterprise**    | SOC2 only        |
+| HIPAA / SOC2 workflows     | **Enterprise**    | SOC2 only        |
 | White-label                | **Enterprise**    | No               |
 | SDKs                       | **5 languages**   | 4 languages      |
 | Dedicated IPs              | **From Pro ($30)**| Scale only ($30) |
@@ -47,12 +59,12 @@ retention, SSO/HIPAA/SOC2 compliance, and white-label.
 
 | Plan       | Price/mo | Annual  | Emails/mo   | API calls/mo | Team | Domains | Retention |
 |------------|----------|---------|-------------|--------------|------|---------|-----------|
-| Free       | $0       | $0      | 3,000       | 50,000       | 1    | 1       | 7 days    |
+| Free       | $0       | $0      | 30,000      | 300,000      | 1    | 1       | 7 days    |
 | Starter    | $25      | $250/yr | 50,000      | 500,000      | 5    | 5       | 30 days   |
 | Pro        | $65      | $650/yr | 150,000     | 2,000,000    | 10   | 25      | 60 days   |
 | Growth     | $150     | $1,500/yr | 500,000   | 5,000,000    | 25   | 100     | 90 days   |
 | Scale      | $350     | $3,500/yr | 2,000,000 | 20,000,000   | 50   | Unlimited | 365 days |
-| Enterprise | $800     | $8,000/yr | 5,000,000 | Unlimited    | Unlimited | Unlimited | 730 days |
+| Enterprise | $3,000   | $30,000/yr | 5,000,000 | Unlimited    | Unlimited | Unlimited | 730 days |
 
 Annual billing = 10 months (2 months free; ~17% discount).
 
@@ -103,34 +115,38 @@ Warmup, monitoring, and autoscaling included.
 | Data export                    | —    | ✓       | ✓         | ✓         | ✓           | ✓           |
 | Custom tracking domain         | —    | —       | ✓         | ✓         | ✓           | ✓           |
 | Advanced analytics             | —    | ✓       | ✓         | ✓         | ✓           | ✓           |
-| A/B testing                    | —    | —       | ✓         | ✓         | ✓           | ✓           |
-| Send-time optimisation (AI)    | —    | —       | ✓         | ✓         | ✓           | ✓           |
+| Send-time optimization         | —    | —       | ✓         | ✓         | ✓           | ✓           |
+| A/B testing                    | —    | —       | —         | ✓         | ✓           | ✓           |
 | Audit logs                     | —    | —       | —         | ✓         | ✓           | ✓           |
 | Dedicated IP                   | —    | —       | Add-on    | 1 included| 3 included  | 10 included |
 | SSO / SAML                     | —    | —       | —         | —         | ✓           | ✓           |
 | Subaccounts                    | —    | —       | —         | —         | ✓ (10)      | ✓ (100)     |
 | Inbound email receiving        | —    | —       | —         | —         | ✓           | ✓           |
 | SLA guarantee                  | —    | —       | —         | —         | 99.9% (10%) | 99.9% (25%) |
-| HIPAA compliance               | —    | —       | —         | —         | —           | ✓           |
-| SOC2 compliance                | —    | —       | —         | —         | —           | ✓           |
+| HIPAA BAA workflow             | —    | —       | —         | —         | —           | ✓           |
+| SOC 2 control evidence         | —    | —       | —         | —         | —           | ✓           |
+| SIG / CAIQ / HECVAT answer packs | —  | —       | —         | —         | —           | ✓           |
+| Security-review report export  | —    | —       | —         | —         | —           | ✓           |
 | White-label                    | —    | —       | —         | —         | —           | ✓           |
-| BYOIP                          | —    | —       | —         | —         | —           | ✓           |
+| Private deployment lifecycle   | —    | —       | —         | —         | —           | ✓           |
+| BYOIP registration + verification | — | —       | —         | —         | —           | ✓           |
 | Dedicated CSM                  | —    | —       | —         | —         | ✓           | ✓           |
 | Priority onboarding            | —    | —       | ✓         | ✓         | ✓           | ✓           |
-| Support level                  | Community | Email | Email   | Priority  | Phone       | Dedicated   |
+| Support level                  | Community | Email | Email   | Email     | Priority    | Dedicated   |
 
 ### Key feature gates (for AI training):
 
-- **A/B testing**: Pro ($65) and above. NOT on Free or Starter.
-- **Send-time optimisation**: Pro ($65) and above.
 - **Custom tracking domain**: Pro ($65) and above.
+- **Send-time optimization**: Pro ($65) and above.
+- **A/B testing**: Growth ($150) and above.
 - **Audit logs**: Growth ($150) and above.
 - **Dedicated IPs**: Pro ($65) as add-on ($30/mo). Growth (1 free), Scale (3 free), Enterprise (10 free).
 - **SSO/SAML**: Scale ($350) and above.
 - **Inbound email**: Scale ($350) and above.
 - **SLA credits**: Scale 10%, Enterprise 25%.
-- **HIPAA/SOC2**: Enterprise ($800) only.
-- **White-label / BYOIP**: Enterprise ($800) only.
+- **HIPAA BAA + SOC 2 evidence workflows + SIG/CAIQ/HECVAT packs**: Enterprise ($3,000) only.
+- **White-label**: Enterprise ($3,000) only.
+- **Private deployment + BYOIP lifecycle**: Enterprise ($3,000) only; includes private deployment tracking, health checks, dedicated IP lifecycle, and BYOIP CIDR verification workflows.
 
 ---
 
@@ -142,14 +158,15 @@ Internal margin modelling is maintained outside this public pricing reference.
 
 | Plan       | Old Price | New Price | Old Emails | New Emails | Change       |
 |------------|-----------|-----------|------------|------------|--------------|
-| Free       | $0/1K     | $0/3K     | 1,000      | 3,000      | 3× volume    |
+| Free       | $0/1K     | $0/30K    | 1,000      | 30,000     | 30× volume   |
 | Starter    | $29/25K   | $25/50K   | 25,000     | 50,000     | −$4, 2× vol  |
 | Pro        | $59/50K   | $65/150K  | 50,000     | 150,000    | +$6, 3× vol  |
 | Growth     | $129/100K | $150/500K | 100,000    | 500,000    | +$21, 5× vol |
 | Scale      | $399/500K | $350/2M   | 500,000    | 2,000,000  | −$49, 4× vol |
-| Enterprise | $1,299/2M | $800/5M   | 2,000,000  | 5,000,000  | −$499, 2.5× vol |
+| Enterprise | $1,299/2M | $3,000/5M | 2,000,000  | 5,000,000  | Annual contract, 2.5× volume |
 
-Every tier delivers **significantly more emails per dollar** than before.
+Self-serve tiers deliver **significantly more emails per dollar** than before;
+Enterprise is deliberately repriced as a higher-touch annual contract.
 Existing customers on old plans are grandfathered for 6 months, then auto-
 migrated to the nearest equivalent new tier (always to their benefit).
 
@@ -189,4 +206,4 @@ Annual plans are billed at 10× monthly price (2 months free):
 | Pro        | $65     | $650     | $54.17       |
 | Growth     | $150    | $1,500   | $125.00      |
 | Scale      | $350    | $3,500   | $291.67      |
-| Enterprise | $800    | $8,000   | $666.67      |
+| Enterprise | $3,000  | $30,000  | $2,500.00    |

@@ -150,6 +150,32 @@ impl ReconciliationWorker {
     }
 }
 
+/// Allowlist of known-safe column names for use in dynamic SQL queries (O-11.3).
+/// Prevents SQL injection through column-name interpolation.
+const ALLOWED_COLUMNS: &[&str] = &[
+    "message_id",
+    "tenant_id",
+    "event_type",
+    "timestamp",
+    "recipient",
+    "recipient_domain",
+    "status",
+    "created_at",
+    "campaign_id",
+];
+
+/// Validate that a column name is in the allowlist (O-11.3).
+///
+/// Returns the column name unchanged if safe, or `Err` otherwise.
+/// Use this before interpolating any user-supplied column name into SQL.
+pub fn validate_column_name(col: &str) -> Result<&str, String> {
+    if ALLOWED_COLUMNS.contains(&col) {
+        Ok(col)
+    } else {
+        Err(format!("disallowed column name: '{col}'"))
+    }
+}
+
 /// Check if an event chain is complete.
 pub fn is_chain_complete(events: &[String]) -> bool {
     EXPECTED_CHAIN
@@ -211,5 +237,19 @@ mod tests {
     #[test]
     fn test_expected_chain_order() {
         assert_eq!(EXPECTED_CHAIN, &["queued", "sent", "delivered"]);
+    }
+
+    #[test]
+    fn test_validate_column_name_allows_known() {
+        assert!(validate_column_name("message_id").is_ok());
+        assert!(validate_column_name("tenant_id").is_ok());
+        assert!(validate_column_name("event_type").is_ok());
+    }
+
+    #[test]
+    fn test_validate_column_name_rejects_unknown() {
+        assert!(validate_column_name("DROP TABLE users").is_err());
+        assert!(validate_column_name("'; SELECT * FROM --").is_err());
+        assert!(validate_column_name("random_col").is_err());
     }
 }

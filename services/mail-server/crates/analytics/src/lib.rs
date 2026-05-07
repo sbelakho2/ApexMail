@@ -4,6 +4,7 @@ pub mod churn_prediction;
 pub mod clickhouse_engine;
 pub mod compaction;
 pub mod config;
+pub mod email_hash;
 pub mod engagement_trust;
 pub mod inbox_placement;
 pub mod query_engine;

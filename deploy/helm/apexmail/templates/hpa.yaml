@@ -34,6 +34,16 @@ spec:
           averageUtilization: {{ .Values.apiServer.autoscaling.targetMemoryUtilizationPercentage }}
     {{- end }}
   behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
     scaleDown:
       stabilizationWindowSeconds: 300
 {{- end }}
@@ -61,7 +71,25 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.trackingService.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if .Values.trackingService.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.trackingService.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
   behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
     scaleDown:
       stabilizationWindowSeconds: 300
 {{- end }}
@@ -98,6 +126,16 @@ spec:
           averageUtilization: {{ .Values.enterprise.autoscaling.targetMemoryUtilizationPercentage }}
     {{- end }}
   behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
     scaleDown:
       stabilizationWindowSeconds: 300
 {{- end }}
@@ -126,6 +164,62 @@ spec:
           type: Utilization
           averageUtilization: {{ .Values.mta.autoscaling.targetCPUUtilizationPercentage }}
   behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+{{- end }}
+---
+{{- if and .Values.worker.enabled .Values.worker.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "apexmail.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "worker" "context" .) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "apexmail.fullname" . }}-worker
+  minReplicas: {{ .Values.worker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.worker.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if .Values.worker.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.worker.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
     scaleDown:
       stabilizationWindowSeconds: 300
 {{- end }}

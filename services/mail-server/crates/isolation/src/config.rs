@@ -174,30 +174,26 @@ impl Config {
         let internal_api_key_env = std::env::var("ISOLATION_INTERNAL_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        if is_production && encryption_key_env.is_none() {
+            tracing::error!(
+                "SECURITY: TENANT_ENCRYPTION_KEY is required in production. \
+                 Refusing to start with an ephemeral generated key — set the env \
+                 variable to a 32-byte hex value and restart."
+            );
+            std::process::exit(78); // EX_CONFIG
+        }
+        if is_production && internal_api_key_env.is_none() {
+            tracing::error!(
+                "SECURITY: ISOLATION_INTERNAL_API_KEY is required in production. \
+                 Refusing to start with an ephemeral generated key — set the env \
+                 variable and restart."
+            );
+            std::process::exit(78); // EX_CONFIG
+        }
         let encryption_key =
             encryption_key_env.unwrap_or_else(|| generated_runtime_secret("tenant-encryption-key"));
         let internal_api_key = internal_api_key_env
             .unwrap_or_else(|| generated_runtime_secret("isolation-internal-api-key"));
-        if is_production
-            && std::env::var("TENANT_ENCRYPTION_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .is_none()
-        {
-            eprintln!(
-                "SECURITY: TENANT_ENCRYPTION_KEY missing in production; generated an ephemeral runtime key"
-            );
-        }
-        if is_production
-            && std::env::var("ISOLATION_INTERNAL_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .is_none()
-        {
-            eprintln!(
-                "SECURITY: ISOLATION_INTERNAL_API_KEY missing in production; generated an ephemeral runtime key"
-            );
-        }
 
         Self {
             port: env_or_u16("ISOLATION_PORT", 4500),

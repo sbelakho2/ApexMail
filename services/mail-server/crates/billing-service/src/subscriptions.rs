@@ -117,7 +117,7 @@ pub async fn update_plan(
 
     let current_subscription: Option<ActiveSubscriptionRow> = sqlx::query_as(
         r#"
-                SELECT current_period_start, current_period_end
+                SELECT status, current_period_start, current_period_end
         FROM subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
@@ -133,6 +133,25 @@ pub async fn update_plan(
     let Some(current_subscription) = current_subscription else {
         return Err(SubscriptionError::NotFound);
     };
+
+    // Validate the subscription status allows a plan switch (BS-006).
+    // Past-due subscriptions cannot be switched until the outstanding
+    // balance is resolved.
+    match current_subscription.status.as_str() {
+        "active" | "trialing" => { /* allowed */ }
+        "past_due" => {
+            return Err(SubscriptionError::InvalidStatus(
+                "Cannot switch plan: subscription is past due. \
+                 Outstanding payments must be resolved first."
+                    .to_string(),
+            ));
+        }
+        other => {
+            return Err(SubscriptionError::InvalidStatus(format!(
+                "Cannot switch plan: subscription has status '{other}'.",
+            )));
+        }
+    }
 
     let usage = crate::usage::get_usage(
         pool,
@@ -314,6 +333,7 @@ struct PlanLimitRow {
 
 #[derive(sqlx::FromRow)]
 struct ActiveSubscriptionRow {
+    status: String,
     current_period_start: DateTime<Utc>,
     current_period_end: DateTime<Utc>,
 }

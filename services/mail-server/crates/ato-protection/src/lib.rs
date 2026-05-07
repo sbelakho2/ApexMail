@@ -22,6 +22,7 @@
 //! timestamp:chrono::Utc::now(),
 //! success:true,
 //! tls_fingerprint:None,
+//! device_fingerprint:None,
 //! };
 //! let risk = engine.evaluate(&event);
 //! ```

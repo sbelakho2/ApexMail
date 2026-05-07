@@ -177,15 +177,22 @@ spec:
   ingress:
     # SMTP ports are exposed externally via LoadBalancer
     - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+        - ipBlock:
+            cidr: 0.0.0.0/0
       ports:
         - port: {{ .Values.mta.ports.smtp }}
           protocol: TCP
         - port: {{ .Values.mta.ports.submission }}
           protocol: TCP
         - port: {{ .Values.mta.ports.smtps }}
+          protocol: TCP
+    # Allow Prometheus scraping on metrics port
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: {{ .Values.mta.ports.metrics }}
           protocol: TCP
 ---
 # ── Worker — egress only (DB, Redis, DNS); health-check ingress ──────────────

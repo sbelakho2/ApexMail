@@ -6,13 +6,30 @@ metadata:
   labels:
     {{- include "apexmail.labels" . | nindent 4 }}
 data:
+  # ── Shared runtime ────────────────────────────────────────────────────────
+  environment: {{ .Values.environment | quote }}
+  api-base-url: {{ .Values.apiBaseUrl | quote }}
+  oauth-redirect-base-url: {{ .Values.oauthRedirectBaseUrl | quote }}
+  cors-origins: {{ .Values.corsOrigins | quote }}
+
+  # ── Database ──────────────────────────────────────────────────────────────
+  db-host: {{ include "apexmail.databaseHost" . | quote }}
+  db-port: {{ include "apexmail.databasePort" . | quote }}
+  {{- if .Values.postgresql.enabled }}
+  db-name: {{ .Values.postgresql.auth.database | quote }}
+  db-user: {{ .Values.postgresql.auth.username | quote }}
+  {{- else }}
+  db-name: {{ .Values.externalDatabase.database | quote }}
+  db-user: {{ .Values.externalDatabase.user | quote }}
+  {{- end }}
+
   # ── Redis ──────────────────────────────────────────────────────────────────
   redis-host: {{ include "apexmail.redisHost" . | quote }}
   redis-port: {{ include "apexmail.redisPort" . | quote }}
 
   # ── ClickHouse ─────────────────────────────────────────────────────────────
   {{- if .Values.clickhouse.enabled }}
-  clickhouse-url: "http://{{ include "apexmail.fullname" . }}-clickhouse:8123"
+  clickhouse-url: {{ printf "http://%s-clickhouse:8123" (include "apexmail.fullname" .) | quote }}
   clickhouse-database: "apexmail"
   clickhouse-user: "apexmail"
   {{- end }}

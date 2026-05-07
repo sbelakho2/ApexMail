@@ -48,12 +48,19 @@ pub struct AutoResponderConfig {
     pub subject_patterns: Vec<String>,
 }
 
+/// O-21.1: Configurable ClamAV chunk size for virus scanning.
+/// The default chunk size (8 192 bytes) matches ClamAV's recommended
+/// INSTREAM chunk limit. Override via env var `CLAMAV_CHUNK_SIZE`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClamAVConfig {
     pub host: String,
     pub port: u16,
     pub timeout_secs: u64,
     pub enabled: bool,
+    /// Maximum chunk size (in bytes) sent to ClamAV per INSTREAM command.
+    /// Default: 8 192 (8 KB). Larger values reduce overhead but increase
+    /// memory pressure per scan.
+    pub chunk_size: usize,
 }
 
 // ── constants ──────────────────────────────────────────────────────────────────
@@ -147,6 +154,7 @@ impl Default for ClamAVConfig {
             port: 3310,
             timeout_secs: 30,
             enabled: true,
+            chunk_size: 8192, // 8 KB — ClamAV recommended default
         }
     }
 }
@@ -202,6 +210,11 @@ impl EdgeCasesConfig {
                 enabled: std::env::var("CLAMAV_ENABLED")
                     .map(|v| v != "false" && v != "0")
                     .unwrap_or(true),
+                // O-21.1: Configurable chunk size for ClamAV INSTREAM scanning
+                chunk_size: std::env::var("CLAMAV_CHUNK_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(8192),
             },
         })
     }

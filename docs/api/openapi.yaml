@@ -82,6 +82,8 @@ tags:
     description: Manage campaigns and campaign delivery lifecycle actions
   - name: Dedicated IPs
     description: Allocate, list, warm, and release dedicated sending IPs
+  - name: Enterprise Private Cloud
+    description: Manage Enterprise private deployments, dedicated IP inventory, and BYOIP verification
   - name: Automations
     description: Manage tenant automation workflows and enable or disable them
   - name: Support
@@ -1473,6 +1475,399 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DedicatedIpWarmupResponse'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/deployments:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    post:
+      operationId: createEnterprisePrivateDeployment
+      summary: Create an Enterprise private deployment
+      description: Create a tenant-scoped private deployment record for dedicated tenancy, region scoping, or private cloud onboarding.
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnterprisePrivateDeploymentCreateRequest'
+      responses:
+        '200':
+          description: Deployment created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterprisePrivateDeploymentResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/deployments/{id}:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    get:
+      operationId: getEnterprisePrivateDeployment
+      summary: Get an Enterprise private deployment
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Deployment record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterprisePrivateDeploymentResult'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/deployments/tenant/{tenant_id}:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    get:
+      operationId: listEnterprisePrivateDeployments
+      summary: List Enterprise private deployments for a tenant
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tenant deployment records.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterprisePrivateDeploymentListResult'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/deployments/{id}/provision:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    post:
+      operationId: provisionEnterprisePrivateDeployment
+      summary: Start private deployment provisioning
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Deployment moved into provisioning.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterprisePrivateDeploymentResult'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/deployments/{id}/health:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    get:
+      operationId: checkEnterprisePrivateDeploymentHealth
+      summary: Check private deployment health
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Deployment health status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseDeploymentHealthResult'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/ips/allocate:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    post:
+      operationId: allocateEnterpriseDedicatedIp
+      summary: Allocate an Enterprise dedicated IP
+      description: Create a tenant-scoped dedicated IP record, optionally attached to a private deployment.
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnterpriseDedicatedIpAllocateRequest'
+      responses:
+        '200':
+          description: Dedicated IP allocated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseDedicatedIpResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/ips/{id}:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    get:
+      operationId: getEnterpriseDedicatedIp
+      summary: Get an Enterprise dedicated IP
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Dedicated IP record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseDedicatedIpResult'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/ips/tenant/{tenant_id}:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    get:
+      operationId: listEnterpriseDedicatedIps
+      summary: List Enterprise dedicated IPs for a tenant
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Tenant dedicated IP records.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseDedicatedIpListResult'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/ips/reputation/{ip_address}:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    get:
+      operationId: getEnterpriseDedicatedIpReputation
+      summary: Get Enterprise dedicated IP reputation
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      parameters:
+        - name: ip_address
+          in: path
+          required: true
+          schema:
+            type: string
+            format: ipv4
+      responses:
+        '200':
+          description: Dedicated IP reputation metrics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseIpReputationResult'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/ips/byoip:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    post:
+      operationId: registerEnterpriseByoipRange
+      summary: Register a BYOIP range
+      description: Register a customer-owned CIDR range and return a verification token before import or routing work begins.
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnterpriseByoipRegisterRequest'
+      responses:
+        '200':
+          description: BYOIP range registered for verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseByoipRangeResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /enterprise/v1/ips/byoip/{id}/verify:
+    servers:
+      - url: https://api.apexmail.ee
+        description: Enterprise production API
+      - url: https://sandbox.api.apexmail.ee
+        description: Enterprise sandbox API
+    post:
+      operationId: verifyEnterpriseByoipRange
+      summary: Verify BYOIP ownership
+      tags:
+        - Enterprise Private Cloud
+      security:
+        - BearerSessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnterpriseByoipVerifyRequest'
+      responses:
+        '200':
+          description: BYOIP range verified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseByoipRangeResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/AuthenticationError'
         '404':
@@ -10669,6 +11064,417 @@ components:
         estimatedCompletion:
           type: string
           format: date-time
+
+    EnterprisePrivateDeploymentCreateRequest:
+      type: object
+      required:
+        - tenant_id
+        - name
+        - deployment_type
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        deployment_type:
+          type: string
+          description: Deployment model such as dedicated, private_cloud, or byoip.
+        region:
+          oneOf:
+            - type: string
+            - type: 'null'
+        config:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+
+    EnterpriseDedicatedIpAllocateRequest:
+      type: object
+      required:
+        - tenant_id
+        - ip_address
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        deployment_id:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: 'null'
+        ip_address:
+          type: string
+          format: ipv4
+
+    EnterpriseByoipRegisterRequest:
+      type: object
+      required:
+        - tenant_id
+        - cidr_block
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        cidr_block:
+          type: string
+          description: Customer-owned CIDR range to verify.
+          example: 203.0.113.0/24
+
+    EnterpriseByoipVerifyRequest:
+      type: object
+      required:
+        - verification_token
+      properties:
+        verification_token:
+          type: string
+          example: apexmail-byoip-example-token
+
+    EnterprisePrivateDeployment:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - name
+        - deployment_type
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        deployment_type:
+          type: string
+        status:
+          type: string
+        region:
+          oneOf:
+            - type: string
+            - type: 'null'
+        availability_zones:
+          oneOf:
+            - type: array
+              items:
+                type: string
+            - type: 'null'
+        vpc_id:
+          oneOf:
+            - type: string
+            - type: 'null'
+        instance_type:
+          oneOf:
+            - type: string
+            - type: 'null'
+        instance_count:
+          oneOf:
+            - type: integer
+            - type: 'null'
+        storage_gb:
+          oneOf:
+            - type: integer
+            - type: 'null'
+        config:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        custom_domain:
+          oneOf:
+            - type: string
+            - type: 'null'
+        health_check_url:
+          oneOf:
+            - type: string
+              format: uri
+            - type: 'null'
+        health_status:
+          oneOf:
+            - type: string
+            - type: 'null'
+        last_health_check_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        created_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        updated_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+
+    EnterpriseDedicatedIp:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - ip_address
+        - status
+        - emails_sent_total
+        - bounces_total
+        - complaints_total
+        - blocklisted
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        deployment_id:
+          oneOf:
+            - type: string
+              format: uuid
+            - type: 'null'
+        ip_address:
+          type: string
+        ptr_record:
+          oneOf:
+            - type: string
+            - type: 'null'
+        status:
+          type: string
+        warming_started_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        warming_progress_percent:
+          oneOf:
+            - type: integer
+            - type: 'null'
+        warming_plan:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        current_daily_limit:
+          oneOf:
+            - type: integer
+            - type: 'null'
+        reputation_score:
+          oneOf:
+            - type: number
+              format: double
+            - type: 'null'
+        reputation_history:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        emails_sent_total:
+          type: integer
+          format: int64
+        bounces_total:
+          type: integer
+        complaints_total:
+          type: integer
+        blocklisted:
+          type: boolean
+        blocklist_details:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        created_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+
+    EnterpriseIpReputation:
+      type: object
+      required:
+        - ip_address
+        - reputation_score
+        - bounce_rate
+        - complaint_rate
+        - blocklisted
+        - emails_sent_total
+      properties:
+        ip_address:
+          type: string
+        reputation_score:
+          type: number
+          format: double
+        bounce_rate:
+          type: number
+          format: double
+        complaint_rate:
+          type: number
+          format: double
+        blocklisted:
+          type: boolean
+        emails_sent_total:
+          type: integer
+          format: int64
+
+    EnterpriseByoipRange:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - cidr_block
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        cidr_block:
+          type: string
+        status:
+          type: string
+        verification_token:
+          oneOf:
+            - type: string
+            - type: 'null'
+        verification_method:
+          oneOf:
+            - type: string
+            - type: 'null'
+        verified_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        created_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+
+    EnterpriseDeploymentHealth:
+      type: object
+      required:
+        - deployment_id
+        - status
+        - health_status
+        - last_check
+      properties:
+        deployment_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        health_status:
+          type: string
+        last_check:
+          type: string
+          format: date-time
+
+    EnterprisePrivateDeploymentResult:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/EnterprisePrivateDeployment'
+        error:
+          type: string
+        code:
+          type: string
+
+    EnterprisePrivateDeploymentListResult:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/EnterprisePrivateDeployment'
+        error:
+          type: string
+        code:
+          type: string
+
+    EnterpriseDedicatedIpResult:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/EnterpriseDedicatedIp'
+        error:
+          type: string
+        code:
+          type: string
+
+    EnterpriseDedicatedIpListResult:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/EnterpriseDedicatedIp'
+        error:
+          type: string
+        code:
+          type: string
+
+    EnterpriseIpReputationResult:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/EnterpriseIpReputation'
+        error:
+          type: string
+        code:
+          type: string
+
+    EnterpriseByoipRangeResult:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/EnterpriseByoipRange'
+        error:
+          type: string
+        code:
+          type: string
+
+    EnterpriseDeploymentHealthResult:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/EnterpriseDeploymentHealth'
+        error:
+          type: string
+        code:
+          type: string
 
     AdminFeatureFlag:
       type: object

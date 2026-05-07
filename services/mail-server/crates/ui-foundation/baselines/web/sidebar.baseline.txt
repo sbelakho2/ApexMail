@@ -10,6 +10,7 @@
     "/templates",
     "/reports",
     "/analytics",
+    "/inbox-placement",
     "/events",
     "/domains",
     "/settings"

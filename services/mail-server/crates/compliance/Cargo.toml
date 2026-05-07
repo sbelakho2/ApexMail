@@ -41,6 +41,8 @@ dotenvy    = { workspace = true }
 thiserror  = { workspace = true }
 url        = { workspace = true }
 anyhow     = { workspace = true }
+reqwest    = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

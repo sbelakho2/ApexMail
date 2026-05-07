@@ -3,63 +3,105 @@
 {# content. The interactive search/filter from JS is replaced     #}
 {# with a pre-rendered sample view.                                #}
 
-<section class="py-20 lg:py-32 bg-surface-50 relative" id="compliance-demo">
+<section class="py-20 lg:py-32 bg-surface-100 relative" id="compliance-demo">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-16">
-      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
+      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-sm bg-surface-100 border border-surface-200 text-xs font-medium text-surface-950 mb-6">
         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         Built-In Compliance
       </div>
-      <h2 class="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">Enterprise Compliance, Zero Configuration</h2>
-      <p class="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">Every action is logged, every deletion is verifiable, every consent is tracked. Audit-ready from day one.</p>
+      <h2 class="text-3xl lg:text-4xl font-bold text-surface-950 mb-6 tracking-tight">Enterprise Compliance Workflows</h2>
+      <p class="text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">Track audit events, manage DSR requests, record consent, and generate security-review answer packs from live evidence.</p>
     </div>
 
-    {# ── Audit Trail ──────────────────────────── #}
+    {# ── Questionnaire Automation ──────────────────────────── #}
     <div class="mb-16">
-      <h3 class="text-lg font-bold text-surface-900 mb-6 flex items-center gap-2">
-        <svg class="w-5 h-5 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-        Immutable Audit Trail
+      <h3 class="text-lg font-bold text-surface-950 mb-6 flex items-center gap-2">
+        <svg class="w-5 h-5 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+        Questionnaire Automation
       </h3>
-      <div class="bg-white rounded-2xl border border-surface-200 shadow-sm overflow-hidden">
+      <div class="bg-white rounded-sm border border-surface-200 overflow-hidden">
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
-              <tr class="border-b border-surface-200 bg-surface-50">
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Timestamp</th>
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Actor</th>
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Action</th>
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Resource</th>
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">IP Address</th>
+              <tr class="border-b border-surface-200 bg-surface-100">
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Framework</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Generated Output</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Evidence Sources</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Audit Artifact</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-surface-100">
               <tr>
-                <td class="px-5 py-3 text-surface-600 tabular-nums">2025-01-15 14:23:01 UTC</td>
-                <td class="px-5 py-3 text-surface-900 font-medium">admin@acme.com</td>
-                <td class="px-5 py-3"><span class="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">api_key.create</span></td>
-                <td class="px-5 py-3 text-surface-600">key_prod_****7f2a</td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">203.0.113.42</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">SIG</td>
+                <td class="px-6 py-3 text-surface-600">Normalized answer pack</td>
+                <td class="px-6 py-3 text-surface-600">SOC 2 controls, Trust Portal docs, incidents</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-success-50 px-2 py-0.5 text-xs font-medium text-success-700">SHA-256 hash</span></td>
               </tr>
               <tr>
-                <td class="px-5 py-3 text-surface-600 tabular-nums">2025-01-15 14:18:33 UTC</td>
-                <td class="px-5 py-3 text-surface-900 font-medium">ops@acme.com</td>
-                <td class="px-5 py-3"><span class="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">domain.verify</span></td>
-                <td class="px-5 py-3 text-surface-600">mail.acme.com</td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">198.51.100.8</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">CAIQ</td>
+                <td class="px-6 py-3 text-surface-600">Cloud-control mapped answers</td>
+                <td class="px-6 py-3 text-surface-600">Access, encryption, logging, subprocessors</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-info-50 px-2 py-0.5 text-xs font-medium text-info-700">Evidence manifest</span></td>
               </tr>
               <tr>
-                <td class="px-5 py-3 text-surface-600 tabular-nums">2025-01-15 13:55:12 UTC</td>
-                <td class="px-5 py-3 text-surface-900 font-medium">dpo@acme.com</td>
-                <td class="px-5 py-3"><span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">rtbf.execute</span></td>
-                <td class="px-5 py-3 text-surface-600">user_****3e9f</td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">192.0.2.17</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">HECVAT</td>
+                <td class="px-6 py-3 text-surface-600">Higher-ed security review pack</td>
+                <td class="px-6 py-3 text-surface-600">HIPAA BAA state, privacy, consent, continuity</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700">Markdown report</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    {# ── Audit Trail ──────────────────────────── #}
+    <div class="mb-16">
+      <h3 class="text-lg font-bold text-surface-950 mb-6 flex items-center gap-2">
+        <svg class="w-5 h-5 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        Audit Trail
+      </h3>
+      <div class="bg-white rounded-sm border border-surface-200   overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-surface-200 bg-surface-100">
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Timestamp</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Actor</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Action</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Resource</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">IP Address</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-surface-100">
+              <tr>
+                <td class="px-6 py-3 text-surface-600 tabular-nums">2025-01-15 14:23:01 UTC</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">admin@acme.com</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-info-50 px-2 py-0.5 text-xs font-medium text-info-700">api_key.create</span></td>
+                <td class="px-6 py-3 text-surface-600">key_prod_****7f2a</td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">203.0.113.42</td>
               </tr>
               <tr>
-                <td class="px-5 py-3 text-surface-600 tabular-nums">2025-01-15 13:41:07 UTC</td>
-                <td class="px-5 py-3 text-surface-900 font-medium">system</td>
-                <td class="px-5 py-3"><span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">webhook.deliver</span></td>
-                <td class="px-5 py-3 text-surface-600">wh_****a1b2</td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">—</td>
+                <td class="px-6 py-3 text-surface-600 tabular-nums">2025-01-15 14:18:33 UTC</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">ops@acme.com</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-warning-50 px-2 py-0.5 text-xs font-medium text-warning-700">domain.verify</span></td>
+                <td class="px-6 py-3 text-surface-600">mail.acme.com</td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">198.51.100.8</td>
+              </tr>
+              <tr>
+                <td class="px-6 py-3 text-surface-600 tabular-nums">2025-01-15 13:55:12 UTC</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">dpo@acme.com</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700">rtbf.execute</span></td>
+                <td class="px-6 py-3 text-surface-600">user_****3e9f</td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">192.0.2.17</td>
+              </tr>
+              <tr>
+                <td class="px-6 py-3 text-surface-600 tabular-nums">2025-01-15 13:41:07 UTC</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">system</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-success-50 px-2 py-0.5 text-xs font-medium text-success-700">webhook.deliver</span></td>
+                <td class="px-6 py-3 text-surface-600">wh_****a1b2</td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">—</td>
               </tr>
             </tbody>
           </table>
@@ -69,31 +111,31 @@
 
     {# ── RTBF (Right to Be Forgotten) ─────────── #}
     <div class="mb-16">
-      <h3 class="text-lg font-bold text-surface-900 mb-6 flex items-center gap-2">
+      <h3 class="text-lg font-bold text-surface-950 mb-6 flex items-center gap-2">
         <svg class="w-5 h-5 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
         Right to Be Forgotten (RTBF)
       </h3>
-      <div class="bg-white rounded-2xl border border-surface-200 shadow-sm p-8">
+      <div class="bg-white rounded-sm border border-surface-200   p-8">
         <div class="grid md:grid-cols-4 gap-6">
           <div class="text-center">
-            <div class="w-10 h-10 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-sm font-bold mx-auto mb-3">1</div>
-            <div class="text-sm font-semibold text-surface-900">Request</div>
+            <div class="w-10 h-10 rounded-sm bg-brand-100 text-brand-600 flex items-center justify-center text-sm font-bold mx-auto mb-3">1</div>
+            <div class="text-sm font-semibold text-surface-950">Request</div>
             <p class="text-xs text-surface-500 mt-1">Data subject submits erasure request via API or dashboard</p>
           </div>
           <div class="text-center">
-            <div class="w-10 h-10 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-sm font-bold mx-auto mb-3">2</div>
-            <div class="text-sm font-semibold text-surface-900">Verify</div>
+            <div class="w-10 h-10 rounded-sm bg-brand-100 text-brand-600 flex items-center justify-center text-sm font-bold mx-auto mb-3">2</div>
+            <div class="text-sm font-semibold text-surface-950">Verify</div>
             <p class="text-xs text-surface-500 mt-1">Identity verification and scope confirmation</p>
           </div>
           <div class="text-center">
-            <div class="w-10 h-10 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-sm font-bold mx-auto mb-3">3</div>
-            <div class="text-sm font-semibold text-surface-900">Execute</div>
-            <p class="text-xs text-surface-500 mt-1">Cryptographic erasure across all storage layers</p>
+            <div class="w-10 h-10 rounded-sm bg-brand-100 text-brand-600 flex items-center justify-center text-sm font-bold mx-auto mb-3">3</div>
+            <div class="text-sm font-semibold text-surface-950">Execute</div>
+            <p class="text-xs text-surface-500 mt-1">Execute scoped erasure across configured data stores</p>
           </div>
           <div class="text-center">
-            <div class="w-10 h-10 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-sm font-bold mx-auto mb-3">4</div>
-            <div class="text-sm font-semibold text-surface-900">Certify</div>
-            <p class="text-xs text-surface-500 mt-1">Signed certificate of erasure with tamper-proof hash</p>
+            <div class="w-10 h-10 rounded-sm bg-brand-100 text-brand-600 flex items-center justify-center text-sm font-bold mx-auto mb-3">4</div>
+            <div class="text-sm font-semibold text-surface-950">Record</div>
+            <p class="text-xs text-surface-500 mt-1">Log completion evidence for compliance review</p>
           </div>
         </div>
       </div>
@@ -101,43 +143,43 @@
 
     {# ── Consent Ledger ───────────────────────── #}
     <div>
-      <h3 class="text-lg font-bold text-surface-900 mb-6 flex items-center gap-2">
+      <h3 class="text-lg font-bold text-surface-950 mb-6 flex items-center gap-2">
         <svg class="w-5 h-5 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         Consent Ledger
       </h3>
-      <div class="bg-white rounded-2xl border border-surface-200 shadow-sm overflow-hidden">
+      <div class="bg-white rounded-sm border border-surface-200   overflow-hidden">
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
-              <tr class="border-b border-surface-200 bg-surface-50">
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Subject</th>
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Purpose</th>
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Status</th>
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Granted</th>
-                <th class="text-left px-5 py-3 font-semibold text-surface-900">Expires</th>
+              <tr class="border-b border-surface-200 bg-surface-100">
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Subject</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Purpose</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Status</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Granted</th>
+                <th class="text-left px-6 py-3 font-semibold text-surface-950">Expires</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-surface-100">
               <tr>
-                <td class="px-5 py-3 text-surface-900 font-medium">user_****3e9f</td>
-                <td class="px-5 py-3 text-surface-600">Transactional email</td>
-                <td class="px-5 py-3"><span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">Active</span></td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">2024-06-01</td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">2025-06-01</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">user_****3e9f</td>
+                <td class="px-6 py-3 text-surface-600">Transactional email</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-success-50 px-2 py-0.5 text-xs font-medium text-success-700">Active</span></td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">2024-06-01</td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">2025-06-01</td>
               </tr>
               <tr>
-                <td class="px-5 py-3 text-surface-900 font-medium">user_****a1b2</td>
-                <td class="px-5 py-3 text-surface-600">Marketing email</td>
-                <td class="px-5 py-3"><span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">Revoked</span></td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">2024-03-15</td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">—</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">user_****a1b2</td>
+                <td class="px-6 py-3 text-surface-600">Marketing email</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700">Revoked</span></td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">2024-03-15</td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">—</td>
               </tr>
               <tr>
-                <td class="px-5 py-3 text-surface-900 font-medium">user_****7f2a</td>
-                <td class="px-5 py-3 text-surface-600">Analytics tracking</td>
-                <td class="px-5 py-3"><span class="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">Active</span></td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">2024-09-20</td>
-                <td class="px-5 py-3 text-surface-500 tabular-nums">2025-09-20</td>
+                <td class="px-6 py-3 text-surface-950 font-medium">user_****7f2a</td>
+                <td class="px-6 py-3 text-surface-600">Analytics tracking</td>
+                <td class="px-6 py-3"><span class="inline-flex items-center rounded-sm bg-success-50 px-2 py-0.5 text-xs font-medium text-success-700">Active</span></td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">2024-09-20</td>
+                <td class="px-6 py-3 text-surface-500 tabular-nums">2025-09-20</td>
               </tr>
             </tbody>
           </table>

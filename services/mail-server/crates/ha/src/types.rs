@@ -245,6 +245,7 @@ pub struct BackupSchedule {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RestoreOptions {
     pub backup_id: Uuid,
     pub target_time: Option<DateTime<Utc>>,
@@ -525,6 +526,7 @@ impl CircuitState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CircuitConfig {
     pub name: String,
     pub failure_threshold: u32,
@@ -642,6 +644,7 @@ impl ExperimentStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExperimentTarget {
     pub service: String,
     pub instances: Vec<String>,
@@ -649,6 +652,7 @@ pub struct ExperimentTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExperimentParameters {
     pub duration_ms: u64,
     pub intensity: f64,
@@ -659,6 +663,7 @@ pub struct ExperimentParameters {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SafetyCheck {
     pub name: String,
     pub check_type: String,
@@ -668,6 +673,7 @@ pub struct SafetyCheck {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExperimentConfig {
     pub experiment_type: String,
     pub target: ExperimentTarget,

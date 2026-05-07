@@ -1,21 +1,41 @@
-# Premium Support & Success Services
+# Support & Success Services
 
-ApexMail offers comprehensive support tiers designed to meet the needs of organizations from startups to large enterprises.
+ApexMail support is **async-first**. Most questions are answered by the docs and the in-app self-debug diagnostics (`GET /v1/domains/{id}/auth-score`, `GET /v1/domains/{id}/dns-records`). Human support exists for things automation can't solve — billing exceptions, security incidents, capacity planning, and architectural reviews.
 
-## Support Tiers
+We deliberately do **not** offer:
 
-| Feature | Standard | Premium | Enterprise |
-|---------|----------|---------|------------|
-| **Response Time** | 24 hours | 4 hours | 15 minutes |
-| **Channels** | Email | Email, Chat | Email, Chat, Phone |
-| **Hours** | Business hours | Extended hours | 24/7/365 |
-| **Dedicated CSM** | ❌ | ✅ | ✅ |
-| **Technical Account Manager** | ❌ | ❌ | ✅ |
-| **Slack Channel** | ❌ | ❌ | ✅ |
+- 24/7 live chat
+- Per-customer Discord servers
+- White-glove real-time everything
+- On-demand phone calls
+
+We do offer scheduled async-first support with hard tier boundaries.
+
+## Support Tiers (Hard Boundaries)
+
+| Feature | Starter / Growth | Scale | Enterprise |
+|---------|------------------|-------|------------|
+| **Channel** | Email only | Priority email + shared Slack hub | Dedicated async channel |
+| **First-response SLA** | 24–48h business hours | 8h business hours | 4h business hours, contractual |
+| **Live calls** | None | Scheduled, monthly cap | Scheduled, weekly cap |
+| **Hours** | Business hours (Europe/Tallinn) | Business hours | Business hours + on-call for P0 incidents |
+| **Dedicated CSM** | ❌ | ❌ | ✅ |
+| **Technical Account Manager** | ❌ | ❌ | ✅ (optional) |
+| **Shared Slack hub** | ❌ | ✅ (one shared channel for all Scale tenants) | n/a (dedicated channel) |
+| **Dedicated channel** | ❌ | ❌ | ✅ |
 | **Priority Escalation** | ❌ | ✅ | ✅ |
 | **Quarterly Business Reviews** | ❌ | ❌ | ✅ |
 | **Architecture Review** | ❌ | Annually | Quarterly |
-| **Training Sessions** | Self-serve | 2/year | Unlimited |
+| **Training Sessions** | Self-serve only | 2/year async | Unlimited async + 4 live/year |
+
+> **Why hard boundaries?** Real-time everything does not scale. We invest the saved hours in better docs, in-app diagnostics, and an AI support assistant trained on the system — so you usually do not need to contact us at all.
+
+### Before opening a ticket
+
+1. **Run self-debug.** Most domain/deliverability/auth issues are solved by `auth-score` + `dns-records` in under a minute.
+2. **Search the [community forum](https://github.com/sbelakho2/ApexMail/discussions).** Public, searchable, single hub.
+3. **Ask the in-app AI assistant.** It is trained on this exact system and answers most setup, API, billing-readonly, and troubleshooting questions instantly.
+4. **Then open a ticket** if and only if the above three did not resolve it.
 
 ## Creating Support Tickets
 
@@ -70,12 +90,14 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets \
 
 ### Priority Levels
 
-| Priority | Description | First Response | Resolution Target |
-|----------|-------------|----------------|-------------------|
-| **Critical** | Service outage, security incident | 15 min | 4 hours |
-| **High** | Major feature broken, significant impact | 1 hour | 8 hours |
-| **Medium** | Feature degradation, workaround available | 4 hours | 24 hours |
-| **Low** | General questions, feature requests | 24 hours | 5 days |
+| Priority | Description | First Response (business hours) | Resolution Target |
+|----------|-------------|--------------------------------|-------------------|
+| **P0 / Critical** | Service outage, active security incident | 1h (Enterprise), 4h (Scale), 24h (Starter/Growth) | Best-effort, continuous async until resolved |
+| **P1 / High** | Major feature broken, significant business impact | 4h (Enterprise), 8h (Scale), 24–48h (Starter/Growth) | 1 business day |
+| **P2 / Medium** | Feature degradation, workaround available | 1 business day | 3 business days |
+| **P3 / Low** | General questions, feature requests | 2 business days | Best-effort |
+
+> **No 24/7 live chat.** P0 outage acknowledgement happens via the [status page](https://status.apexmail.ee) and email. Live calls are scheduled within the SLA window, not on demand.
 
 ### Ticket Categories
 
@@ -411,8 +433,8 @@ Response:
       "met": true
     },
     "uptime": {
-      "target": "99.99%",
-      "actual": "99.995%",
+      "target": "99.9%",
+      "actual": "99.95%",
       "met": true
     }
   },

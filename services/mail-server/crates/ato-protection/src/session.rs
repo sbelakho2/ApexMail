@@ -31,6 +31,10 @@ pub struct LoginEvent {
     pub success: bool,
     /// TLS client fingerprint (JA4-style), if extracted from the TLS handshake
     pub tls_fingerprint: Option<TlsFingerprint>,
+    /// SA2-008: Device fingerprint computed from user-agent, IP prefix, and TLS
+    /// hash. This enables the ATO engine to perform cross-event device correlation
+    /// and detect credential sharing, session hijacking, and advanced proxy rotations.
+    pub device_fingerprint: Option<DeviceFingerprint>,
 }
 
 /// Derived device fingerprint
@@ -45,7 +49,8 @@ pub struct DeviceFingerprint {
 impl DeviceFingerprint {
     /// Create a fingerprint from login attributes
     /// The fingerprint is a SHA-256 hash of multiple device characteristics:/// - User-Agent header
-    /// - IP prefix (first 2 octets for IPv4 /16, making it network-aware but not too specific)
+    /// - IP prefix (first 3 octets for IPv4 /24, balancing precision against
+    ///   legitimate user IP rotation within a small subnet)
     /// - TLS fingerprint hash (JA4-style, if available)
     /// TLS fingerprints are much harder to spoof than User-Agent and help
     /// detect credential stuffing from automated tools even when they
@@ -56,12 +61,13 @@ impl DeviceFingerprint {
         // User-Agent (primary identifier, easily spoofed but indicative)
         hasher.update(event.user_agent.as_bytes());
 
-        // IP prefix (/16 instead of /24 to be more permissive for legitimate users
-        // on dynamic IPs, while still catching cross-network attacks)
+        // IP prefix (/24): tightened from /16 to defeat credential-stuffing
+        // attacks pivoting across cloud-provider /16 ranges (e.g. AWS) which
+        // could otherwise share the same fingerprint as a legitimate user.
         let ip_prefix = event
             .ip_address
             .splitn(4, '.')
-            .take(2) // Changed from 3 to 2 (/16 instead of /24)
+            .take(3)
             .collect::<Vec<_>>()
             .join(".");
         hasher.update(ip_prefix.as_bytes());
@@ -86,7 +92,7 @@ impl DeviceFingerprint {
         hasher.update(user_agent.as_bytes());
         let ip_prefix = ip_address
             .splitn(4, '.')
-            .take(2)
+            .take(3)
             .collect::<Vec<_>>()
             .join(".");
         hasher.update(ip_prefix.as_bytes());
@@ -123,7 +129,7 @@ impl UserLoginHistory {
     }
 
     /// Record a login event, returns whether the device is new
-    pub fn record(&mut self, event: LoginEvent) -> bool {
+    pub fn record(&mut self, mut event: LoginEvent) -> bool {
         let fingerprint = DeviceFingerprint::from_event(&event);
         let is_new_device = !self
             .known_devices
@@ -131,12 +137,16 @@ impl UserLoginHistory {
             .any(|d| d.hash == fingerprint.hash);
 
         if is_new_device {
-            self.known_devices.push(fingerprint);
+            self.known_devices.push(fingerprint.clone());
             // Cap known devices at a reasonable limit
             if self.known_devices.len() > 20 {
                 self.known_devices.remove(0);
             }
         }
+
+        // SA2-008: Attach device fingerprint to the event so the ATO engine
+        // and downstream consumers can perform cross-event device correlation.
+        event.device_fingerprint = Some(fingerprint);
 
         self.events.insert(0, event);
         if self.events.len() > self.max_entries {
@@ -251,6 +261,7 @@ mod tests {
             timestamp: Utc::now(),
             success,
             tls_fingerprint: None,
+            device_fingerprint: None,
         }
     }
 

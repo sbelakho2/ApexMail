@@ -30,6 +30,27 @@ scrape_configs:
     # Tracking request and latency signals are high-churn and back 1m availability alerts.
     scrape_interval: 10s
 
+  # MTA metrics
+  - job_name: 'apexmail-mta'
+    static_configs:
+      - targets: ['mta:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Worker metrics
+  - job_name: 'apexmail-worker'
+    static_configs:
+      - targets: ['worker:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Enterprise metrics
+  - job_name: 'apexmail-enterprise'
+    static_configs:
+      - targets: ['enterprise:3002']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
   - job_name: 'postgres'
     static_configs:
       - targets: ['postgres-exporter:9187']
@@ -63,6 +84,34 @@ scrape_configs:
       - targets:
           - https://api.apexmail.ee/health
           - https://track.apexmail.ee/
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  - job_name: 'blackbox-smtp'
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets:
+          - smtp.apexmail.ee:25
+          - smtp.apexmail.ee:587
+          - smtp.apexmail.ee:465
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  - job_name: 'blackbox-dns'
+    metrics_path: /probe
+    params:
+      module: [dns_apexmail_mx]
+    static_configs:
+      - targets:
+          - apexmail.ee
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

@@ -284,6 +284,89 @@ services:
       - redis_password
 
   # ==========================================================================
+  # API SERVER
+  # ==========================================================================
+  api-server:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: api-server
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "--", "/usr/bin/tini", "--", "/usr/local/bin/api-server"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # ── Required ──────────────────────────────────────────────────────────
+      APEXMAIL_API_KEY: ${APEXMAIL_API_KEY:-dev-api-key-change-me}
+      # ── Database ──────────────────────────────────────────────────────────
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-50}
+      # ── Redis ─────────────────────────────────────────────────────────────
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_POOL_SIZE: ${REDIS_POOL_SIZE:-16}
+      # ── Server bind ───────────────────────────────────────────────────────
+      API_HOST: 0.0.0.0
+      API_PORT: 8080
+      # ── Observability ─────────────────────────────────────────────────────
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_PORT: 9090
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: api-server
+      RUST_LOG: ${RUST_LOG:-info,api_server=debug}
+      RUST_BACKTRACE: ${RUST_BACKTRACE:-0}
+      # ── Email Grader ──────────────────────────────────────────────────────
+      GRADER_ENABLED: ${GRADER_ENABLED:-true}
+      GRADER_RATE_LIMIT: ${GRADER_RATE_LIMIT:-10}
+      GRADER_RATE_WINDOW: ${GRADER_RATE_WINDOW:-3600}
+      # ── Rate limiting ─────────────────────────────────────────────────────
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_MAX_PER_MINUTE: ${RATE_LIMIT_MAX_PER_MINUTE:-1000}
+    volumes:
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+      - "127.0.0.1:${API_METRICS_PORT:-9090}:9090"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8080"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - apexmail_frontend
+      - apexmail_backend
+      - apexmail_data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
+
+  # ==========================================================================
   # ENTERPRISE SERVER
   # ==========================================================================
   enterprise:
@@ -634,6 +717,15 @@ services:
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
       CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+      CLICKHOUSE_ALLOW_INSECURE_HTTP: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
@@ -701,8 +793,17 @@ services:
     environment:
       SYNTHETIC_LISTEN_ADDRESS: 0.0.0.0:9128
       SYNTHETIC_TARGETS: ${SYNTHETIC_TARGETS:-https://api.apexmail.ee/health,https://track.apexmail.ee/}
+      SYNTHETIC_SMTP_TARGETS: ${SYNTHETIC_SMTP_TARGETS:-smtp.apexmail.ee:25,smtp.apexmail.ee:587,smtp.apexmail.ee:465}
       SYNTHETIC_INTERVAL_SECONDS: ${SYNTHETIC_INTERVAL_SECONDS:-60}
       SYNTHETIC_TIMEOUT_SECONDS: ${SYNTHETIC_TIMEOUT_SECONDS:-10}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
     read_only: true
     security_opt:
       - no-new-privileges:true

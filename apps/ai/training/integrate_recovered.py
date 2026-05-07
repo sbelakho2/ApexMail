@@ -14,8 +14,8 @@ Schema A (stale):
   Growth=$129/100K/1M, Scale=$399/500K/5M, Enterprise=$1,299/2M/20M
 
 Canonical:
-  Free=$0/3K emails/50K API, Starter=$25/50K/500K, Pro=$65/150K/2M,
-  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$800/5M/Unlimited
+  Free=$0/30K emails/300K API, Starter=$25/50K/500K, Pro=$65/150K/2M,
+  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$3,000/5M/Unlimited
 """
 
 import re
@@ -39,15 +39,15 @@ PRICE_MAP = {
     "$129/mo": "$150/mo",
     "$399": "$350",
     "$399/mo": "$350/mo",
-    "$1,299": "$800",
-    "$1,299/mo": "$800/mo",
-    "$1299": "$800",
+    "$1,299": "$3,000",
+    "$1,299/mo": "$3,000/mo",
+    "$1299": "$3,000",
 }
 
 LIMIT_MAP = {
     # Schema A → Canonical (emails/mo)
     "1,000 email": "3,000 email",
-    "1K email": "3K email",
+    "1K email": "30K email",
     "25,000 email": "50,000 email",
     "25K email": "50K email",
     "50,000 email": "150,000 email",  # Pro
@@ -58,8 +58,8 @@ LIMIT_MAP = {
     "2,000,000 email": "5,000,000 email",  # Enterprise
     "2M email": "5M email",
     # API limits
-    "10,000 API": "50,000 API",  # Free
-    "10K API": "50K API",
+    "10,000 API": "300,000 API",  # Free
+    "10K API": "300K API",
     "250,000 API": "500,000 API",  # Starter
     "250K API": "500K API",
     "500,000 API": "2,000,000 API",  # Pro (was Starter's in Schema A)
@@ -289,8 +289,8 @@ NEW_STRESS_CATEGORIES = {
         {"q": "If I switch from Scale ($350) to PAYG and send 1,500,000 emails, am I saving money?",
          "checks": {"must_contain_any": ["PAYG", "tier", "$0.0005", "$0.0003", "Scale"]}},
         
-        {"q": "Enterprise is $800. If I send 5M emails, what's the per-email cost?",
-         "checks": {"must_contain_any": ["$800", "0.00016", "custom", "support@apexmail.ee"]}},
+        {"q": "Enterprise is $3,000. If I send 5M emails, what's the per-email cost?",
+         "checks": {"must_contain_any": ["$3,000", "0.0006", "custom", "support@apexmail.ee"]}},
     ],
 
     "growth_limits_clarity": [
@@ -502,8 +502,8 @@ NEW_STRESS_CATEGORIES = {
         {"q": "We're in healthcare. Is ApexMail HIPAA compliant?",
          "checks": {"must_contain_any": ["Enterprise", "BAA", "HIPAA", "contact"]}},
         
-        {"q": "We send 3,000 emails/month but need API access. Free plan enough?",
-         "checks": {"must_contain_any": ["yes", "Free", "3,000", "50,000 API"]}},
+        {"q": "We send 30,000 emails/month but need API access. Free plan enough?",
+         "checks": {"must_contain_any": ["yes", "Free", "30,000", "300,000 API"]}},
         
         {"q": "Non-profit with limited budget. Any discounts?",
          "checks": {"must_contain_any": ["contact", "sales", "non-profit", "discount"]}},
@@ -583,7 +583,7 @@ Extracted from:
 - stress_test_r34.py (171 tests)
 
 All pricing updated from Schema A to canonical:
-  Starter=$25, Pro=$65, Growth=$150, Scale=$350, Enterprise=$800
+  Starter=$25, Pro=$65, Growth=$150, Scale=$350, Enterprise=$3,000
   Plus corrected email/API limits
 """
 

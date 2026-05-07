@@ -38,28 +38,60 @@ impl EngagementTrustService {
     }
 
     /// Get campaign-level trust metrics.
+    /// Maximum number of recipients to fetch per page when computing campaign trust.
+    const CAMPAIGN_TRUST_PAGE_SIZE: i64 = 1000;
+
     pub async fn campaign_trust(
         &self,
         tenant_id: &str,
         campaign_id: &str,
     ) -> anyhow::Result<CampaignTrustMetrics> {
-        let rows = sqlx::query_as::<_, (String,)>(
-            "SELECT DISTINCT recipient FROM events \
-             WHERE tenant_id = $1 AND campaign_id = $2",
-        )
-        .bind(tenant_id)
-        .bind(campaign_id)
-        .fetch_all(&self.pool)
-        .await?;
-
         let mut scores: Vec<f64> = Vec::new();
         let mut grades: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut total_subscribers: i64 = 0;
+        let mut cursor: Option<String> = None;
 
-        for (email,) in &rows {
-            if let Ok(trust) = self.calculate_trust(tenant_id, email).await {
-                scores.push(trust.score);
-                *grades.entry(trust.grade.clone()).or_insert(0) += 1;
+        // Process recipients in pages using cursor-based pagination to avoid OOM
+        // for campaigns with millions of subscribers.
+        loop {
+            let rows = if let Some(ref c) = cursor {
+                sqlx::query_as::<_, (String,)>(
+                    "SELECT DISTINCT recipient FROM events \
+                     WHERE tenant_id = $1 AND campaign_id = $2 AND recipient > $3 \
+                     ORDER BY recipient ASC LIMIT $4",
+                )
+                .bind(tenant_id)
+                .bind(campaign_id)
+                .bind(c)
+                .bind(Self::CAMPAIGN_TRUST_PAGE_SIZE)
+                .fetch_all(&self.pool)
+                .await?
+            } else {
+                sqlx::query_as::<_, (String,)>(
+                    "SELECT DISTINCT recipient FROM events \
+                     WHERE tenant_id = $1 AND campaign_id = $2 \
+                     ORDER BY recipient ASC LIMIT $3",
+                )
+                .bind(tenant_id)
+                .bind(campaign_id)
+                .bind(Self::CAMPAIGN_TRUST_PAGE_SIZE)
+                .fetch_all(&self.pool)
+                .await?
+            };
+
+            if rows.is_empty() {
+                break;
             }
+
+            for (email,) in &rows {
+                if let Ok(trust) = self.calculate_trust(tenant_id, email).await {
+                    scores.push(trust.score);
+                    *grades.entry(trust.grade.clone()).or_insert(0) += 1;
+                }
+            }
+
+            total_subscribers += rows.len() as i64;
+            cursor = rows.last().map(|(e,)| e.clone());
         }
 
         let avg_score = if scores.is_empty() {
@@ -76,7 +108,7 @@ impl EngagementTrustService {
             average_trust_score: avg_score,
             grade: overall_grade,
             risk_level: risk,
-            subscriber_count: rows.len() as i64,
+            subscriber_count: total_subscribers,
             grade_distribution: grades,
         })
     }

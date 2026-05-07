@@ -248,10 +248,11 @@ We follow [Semantic Versioning](https://semver.org/):
 
 ## Getting Help
 
-- **Documentation**: Read the docs first
-- **Discussions**: [GitHub Discussions](https://github.com/sbelakho2/ApexMail/discussions)
-- **Discord**: Join our community server
+- **Documentation**: Read the docs first — almost every contributor question is already answered there
+- **Discussions**: [GitHub Discussions](https://github.com/sbelakho2/ApexMail/discussions) — single shared community hub
 - **Issues**: For bugs and features
+
+> Contributor support is async-first. We do not run a per-contributor or per-enterprise Discord.
 
 ### Response Times
 

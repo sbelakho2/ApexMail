@@ -57,6 +57,24 @@ The API server mounts these authenticated route families under `/v1`:
 
 Public and auth-related route families are mounted separately under `/health`, `/v1/auth`, `/v1/auth/session`, `/v1/auth/forgot-password`, `/v1/auth/sso`, `/v1/auth/csrf`, `/api/auth`, `/api/auth/session`, `/api/csrf`, and `/v1/ses`.
 
+## Enterprise Service Routes
+
+The Enterprise service is built from `services/mail-server/crates/enterprise/src/routes.rs`. Private deployment and BYOIP lifecycle routes are documented in `docs/api/openapi.yaml` under `/enterprise/v1/*` and in `docs/enterprise/private-cloud.md` for operator/customer workflows.
+
+| Resource | Prefix | Backing service |
+|----------|--------|-----------------|
+| Private deployments | `/enterprise/v1/deployments` | `PrivateDeployService::create` |
+| Private deployment detail | `/enterprise/v1/deployments/:id` | `PrivateDeployService::get` |
+| Tenant deployment list | `/enterprise/v1/deployments/tenant/:tenant_id` | `PrivateDeployService::list` |
+| Provisioning lifecycle | `/enterprise/v1/deployments/:id/provision` | `PrivateDeployService::provision` |
+| Deployment health | `/enterprise/v1/deployments/:id/health` | `PrivateDeployService::health_check` |
+| Enterprise dedicated IP allocation | `/enterprise/v1/ips/allocate` | `PrivateDeployService::allocate_dedicated_ip` |
+| Enterprise dedicated IP detail | `/enterprise/v1/ips/:id` | `PrivateDeployService::get_dedicated_ip` |
+| Tenant dedicated IP list | `/enterprise/v1/ips/tenant/:tenant_id` | `PrivateDeployService::list_dedicated_ips` |
+| Dedicated IP reputation | `/enterprise/v1/ips/reputation/:ip_address` | `PrivateDeployService::get_ip_reputation` |
+| BYOIP registration | `/enterprise/v1/ips/byoip` | `PrivateDeployService::register_byoip` |
+| BYOIP verification | `/enterprise/v1/ips/byoip/:id/verify` | `PrivateDeployService::verify_byoip` |
+
 ## Admin And Control-Plane Routes
 
 The control-plane API surface is implemented as authenticated admin route modules under `/v1/admin`:

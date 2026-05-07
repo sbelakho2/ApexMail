@@ -28,12 +28,13 @@ fn plan_lookup_by_name() {
         .find(|p| p.name == "free")
         .expect("free plan must exist");
     assert_eq!(free.price_monthly, 0);
-    assert_eq!(free.email_limit, 3_000);
+    assert_eq!(free.email_limit, 30_000);
 
     let ent = plans
         .iter()
         .find(|p| p.name == "enterprise")
         .expect("enterprise plan must exist");
+    assert_eq!(ent.price_monthly, 300_000);
     assert!(ent.features.hipaa_compliance);
     assert!(ent.features.sso_enabled);
 }
@@ -78,10 +79,10 @@ fn overage_above_limit() {
 // ── VAT calculation ────────────────────────────────────────────
 
 #[test]
-fn vat_estonian_customer_22_percent() {
+fn vat_estonian_customer_24_percent() {
     let (rate, amt) = calculate_vat(10_000, "EE", None);
-    assert_eq!(rate, 22);
-    assert_eq!(amt, 2200);
+    assert_eq!(rate, 24);
+    assert_eq!(amt, 2400);
 }
 
 #[test]
@@ -94,8 +95,8 @@ fn vat_eu_b2b_with_vat_number_reverse_charge() {
 #[test]
 fn vat_eu_b2c_without_vat_number() {
     let (rate, amt) = calculate_vat(10_000, "FR", None);
-    assert_eq!(rate, 22, "EU B2C uses Estonian rate");
-    assert_eq!(amt, 2200);
+    assert_eq!(rate, 20, "EU B2C uses destination-country rate");
+    assert_eq!(amt, 2000);
 }
 
 #[test]
@@ -106,6 +107,37 @@ fn vat_non_eu_is_zero() {
     let (rate2, amt2) = calculate_vat(10_000, "JP", None);
     assert_eq!(rate2, 0);
     assert_eq!(amt2, 0);
+}
+
+#[test]
+fn vat_negative_amount_returns_zero() {
+    let (rate, amt) = calculate_vat(-1_000, "EE", None);
+    assert_eq!(rate, 0, "VAT rate should be 0 for negative amounts");
+    assert_eq!(amt, 0, "VAT amount should be 0 for negative amounts");
+}
+
+#[test]
+fn vat_zero_amount_returns_zero() {
+    let (rate, amt) = calculate_vat(0, "DE", None);
+    assert_eq!(rate, 0, "VAT rate should be 0 for zero amount");
+    assert_eq!(amt, 0, "VAT amount should be 0 for zero amount");
+}
+
+#[test]
+fn vat_overflow_safe_maximum() {
+    // Test with a very large amount that could overflow when computing 24 %
+    let large = 10_000_000_000i64;
+    let (rate, amt) = calculate_vat(large, "EE", None);
+    assert_eq!(rate, 24);
+    // The calculated amount should be strictly positive and less than `large`
+    assert!(
+        amt > 0,
+        "VAT amount should be positive for large base: {amt}"
+    );
+    assert!(
+        amt < large,
+        "VAT amount ({amt}) should not exceed base amount ({large})"
+    );
 }
 
 // ── Types ──────────────────────────────────────────────────────

@@ -1,17 +1,16 @@
 # Redirect rules for the marketing-zola static export
 # Compatible with Netlify, Cloudflare Pages, and similar hosting platforms.
 # For nginx, convert these to rewrite rules in the server block.
+# SECURITY: All external redirect targets use HTTPS (verified 2026-05-06).
 
 # App shortcuts (temporary 302)
 /app                 https://app.apexmail.ee            302
 /signup              https://app.apexmail.ee/signup     302
 
-# Contact → Pricing (temporary 302)
-/contact             /pricing                           302
-/contact/*           /pricing                           302
+# Status is served by the live incident-management surface.
+/status              https://status.apexmail.ee         302
+/status/*            https://status.apexmail.ee         302
 
 # Compare index → default comparison page (temporary 302)
 /compare             /compare/sendgrid                  302
 
-# Pricing FAQ anchor (temporary 302)
-/pricing/faq         /pricing#faq                       302

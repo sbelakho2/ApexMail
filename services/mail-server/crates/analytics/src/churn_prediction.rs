@@ -1,7 +1,9 @@
 //! Churn prediction – RFM signals, sigmoid mapping, engagement velocity.
 
+use anyhow::Context as _;
 use chrono::{Duration, Utc};
 
+use crate::email_hash::hash_email;
 use crate::types::*;
 
 /// Signal weights.
@@ -25,23 +27,31 @@ impl ChurnPredictionEngine {
     }
 
     /// Predict churn probability for a subscriber.
-    pub async fn predict(&self, email: &str) -> anyhow::Result<ChurnPrediction> {
-        let cache_key = format!("churn:{}", crate::send_time_optimizer::hash_email(email));
+    /// `tenant_id` is required to scope all queries to the correct tenant,
+    /// preventing cross-tenant data leakage.
+    pub async fn predict(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> anyhow::Result<ChurnPrediction> {
+        // Include tenant_id in cache key to prevent cross-tenant cache poisoning
+        let cache_key = format!("churn:{}:{}", tenant_id, hash_email(email, ""));
 
         // Check cache (6h TTL)
         if let Ok(cached) = self.get_cached(&cache_key).await {
             return Ok(cached);
         }
 
-        let signals = self.compute_signals(email).await?;
+        let signals = self.compute_signals(tenant_id, email).await?;
         let raw_score = compute_raw_score(&signals);
         let probability = sigmoid(raw_score);
         let risk_tier = RiskTier::from_score(probability);
 
-        let velocity = self.engagement_velocity(email).await?;
+        let velocity = self.engagement_velocity(tenant_id, email).await?;
 
         let prediction = ChurnPrediction {
             email: email.to_string(),
+            tenant_id: tenant_id.to_string(),
             probability,
             risk_tier,
             signals: signals.clone(),
@@ -53,18 +63,23 @@ impl ChurnPredictionEngine {
         Ok(prediction)
     }
 
-    /// Compute individual churn signals for a subscriber.
-    async fn compute_signals(&self, email: &str) -> anyhow::Result<Vec<ChurnSignal>> {
+    /// Compute individual churn signals for a subscriber, scoped to `tenant_id`.
+    async fn compute_signals(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> anyhow::Result<Vec<ChurnSignal>> {
         let mut signals = Vec::new();
 
-        // Complaint signal
+        // Complaint signal — scoped to tenant
         let (complaint_count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type = 'complained' AND timestamp >= NOW() - INTERVAL '90 days'",
+            "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type = 'complained' AND timestamp >= NOW() - INTERVAL '90 days'",
         )
+        .bind(tenant_id)
         .bind(email)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %mail_common::pii::redact_email(email), "complaint count query failed"); (0,) });
+        .with_context(|| churn_query_context("complaint count", email))?;
         let complaint_score = (complaint_count as f64).min(3.0) / 3.0;
         signals.push(ChurnSignal {
             name: "complaint".into(),
@@ -72,14 +87,15 @@ impl ChurnPredictionEngine {
             weight: COMPLAINT_WEIGHT,
         });
 
-        // Bounce signal
+        // Bounce signal — scoped to tenant
         let (bounce_count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type = 'bounced' AND timestamp >= NOW() - INTERVAL '90 days'",
+            "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type = 'bounced' AND timestamp >= NOW() - INTERVAL '90 days'",
         )
+        .bind(tenant_id)
         .bind(email)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %mail_common::pii::redact_email(email), "bounce count query failed"); (0,) });
+        .with_context(|| churn_query_context("bounce count", email))?;
         let bounce_score = (bounce_count as f64).min(5.0) / 5.0;
         signals.push(ChurnSignal {
             name: "bounce".into(),
@@ -87,10 +103,11 @@ impl ChurnPredictionEngine {
             weight: BOUNCE_WEIGHT,
         });
 
-        // Inactivity signal
+        // Inactivity signal — scoped to tenant
         let last_engagement: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
-            "SELECT MAX(timestamp) FROM events WHERE recipient = $1 AND event_type IN ('opened', 'clicked')",
+            "SELECT MAX(timestamp) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type IN ('opened', 'clicked')",
         )
+        .bind(tenant_id)
         .bind(email)
         .fetch_optional(&self.pool)
         .await?;
@@ -105,8 +122,8 @@ impl ChurnPredictionEngine {
             weight: INACTIVITY_WEIGHT,
         });
 
-        // Decay signal:how quickly engagement is declining
-        let decay_score = self.compute_decay(email).await?;
+        // Decay signal — scoped to tenant
+        let decay_score = self.compute_decay(tenant_id, email).await?;
         signals.push(ChurnSignal {
             name: "decay".into(),
             value: decay_score,
@@ -116,30 +133,36 @@ impl ChurnPredictionEngine {
         Ok(signals)
     }
 
-    /// Compute engagement decay rate.
-    async fn compute_decay(&self, email: &str) -> anyhow::Result<f64> {
+    /// Compute engagement decay rate, scoped to `tenant_id`.
+    async fn compute_decay(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> anyhow::Result<f64> {
         let now = Utc::now();
         let thirty_ago = now - Duration::days(30);
         let sixty_ago = now - Duration::days(60);
 
         let (recent_count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type IN ('opened','clicked') AND timestamp >= $2",
+            "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type IN ('opened','clicked') AND timestamp >= $3",
         )
+        .bind(tenant_id)
         .bind(email)
         .bind(thirty_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %mail_common::pii::redact_email(email), "compute_decay recent_count query failed"); (0,) });
+        .with_context(|| churn_query_context("compute_decay recent count", email))?;
 
         let (prev_count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type IN ('opened','clicked') AND timestamp >= $2 AND timestamp < $3",
+            "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type IN ('opened','clicked') AND timestamp >= $3 AND timestamp < $4",
         )
+        .bind(tenant_id)
         .bind(email)
         .bind(sixty_ago)
         .bind(thirty_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %mail_common::pii::redact_email(email), "compute_decay prev_count query failed"); (0,) });
+        .with_context(|| churn_query_context("compute_decay previous count", email))?;
 
         if prev_count == 0 {
             return Ok(if recent_count > 0 { 0.0 } else { 0.5 });
@@ -149,30 +172,36 @@ impl ChurnPredictionEngine {
         Ok(decline.max(0.0).min(1.0))
     }
 
-    /// Engagement velocity:(current − previous) / previous.
-    async fn engagement_velocity(&self, email: &str) -> anyhow::Result<f64> {
+    /// Engagement velocity:(current − previous) / previous, scoped to `tenant_id`.
+    async fn engagement_velocity(
+        &self,
+        tenant_id: &str,
+        email: &str,
+    ) -> anyhow::Result<f64> {
         let now = Utc::now();
         let thirty_ago = now - Duration::days(30);
         let sixty_ago = now - Duration::days(60);
 
         let (current,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type IN ('opened','clicked') AND timestamp >= $2",
+            "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type IN ('opened','clicked') AND timestamp >= $3",
         )
+        .bind(tenant_id)
         .bind(email)
         .bind(thirty_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %mail_common::pii::redact_email(email), "engagement_velocity current query failed"); (0,) });
+        .with_context(|| churn_query_context("engagement_velocity current count", email))?;
 
         let (previous,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type IN ('opened','clicked') AND timestamp >= $2 AND timestamp < $3",
+            "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type IN ('opened','clicked') AND timestamp >= $3 AND timestamp < $4",
         )
+        .bind(tenant_id)
         .bind(email)
         .bind(sixty_ago)
         .bind(thirty_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %mail_common::pii::redact_email(email), "engagement_velocity previous query failed"); (0,) });
+        .with_context(|| churn_query_context("engagement_velocity previous count", email))?;
 
         if previous == 0 {
             return Ok(if current > 0 { 1.0 } else { 0.0 });
@@ -198,6 +227,13 @@ impl ChurnPredictionEngine {
             .await?;
         Ok(())
     }
+}
+
+fn churn_query_context(operation: &str, email: &str) -> String {
+    format!(
+        "{operation} query failed for {}",
+        mail_common::pii::redact_email(email)
+    )
 }
 
 /// Compute raw churn score from weighted signals.

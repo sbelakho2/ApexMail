@@ -76,7 +76,7 @@ impl From<SecretRow> for SecretResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SecretListQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -291,6 +291,7 @@ async fn update_secret(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteSecretQuery {
     pub id: Option<String>,
 }

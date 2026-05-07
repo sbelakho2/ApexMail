@@ -40,7 +40,7 @@ class Templates
         $query = http_build_query(array_filter([
             'limit'  => $options['limit']  ?? 20,
             'offset' => $options['offset'] ?? 0,
-        ]));
+        ], static fn ($v) => $v !== null && $v !== ''));
 
         return $this->client->request('GET', '/v1/templates' . ($query ? '?' . $query : ''));
     }

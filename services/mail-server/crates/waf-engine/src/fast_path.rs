@@ -6,6 +6,7 @@
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use std::sync::OnceLock;
+use tracing::warn;
 
 /// Keywords that suggest potential SQL injection
 static SQLI_PATTERNS: OnceLock<Option<AhoCorasick>> = OnceLock::new();
@@ -74,6 +75,9 @@ fn sqli_matcher() -> Option<&'static AhoCorasick> {
                 .ascii_case_insensitive(true)
                 .match_kind(MatchKind::LeftmostFirst)
                 .build(patterns)
+                .inspect_err(|e| {
+                    warn!(error = %e, pattern_count = %patterns.len(), "WAF: Failed to build SQLi Aho-Corasick automaton; fast-path SQLi detection degraded");
+                })
                 .ok()
         })
         .as_ref()
@@ -141,6 +145,9 @@ fn xss_matcher() -> Option<&'static AhoCorasick> {
                 .ascii_case_insensitive(true)
                 .match_kind(MatchKind::LeftmostFirst)
                 .build(patterns)
+                .inspect_err(|e| {
+                    warn!(error = %e, pattern_count = %patterns.len(), "WAF: Failed to build XSS Aho-Corasick automaton; fast-path XSS detection degraded");
+                })
                 .ok()
         })
         .as_ref()
@@ -218,6 +225,9 @@ fn cmdi_matcher() -> Option<&'static AhoCorasick> {
                 .ascii_case_insensitive(true)
                 .match_kind(MatchKind::LeftmostFirst)
                 .build(patterns)
+                .inspect_err(|e| {
+                    warn!(error = %e, pattern_count = %patterns.len(), "WAF: Failed to build CMDI Aho-Corasick automaton; fast-path CMDI detection degraded");
+                })
                 .ok()
         })
         .as_ref()
@@ -249,12 +259,10 @@ impl FastPathResult {
 /// Perform a fast pre-scan of the input to check for suspicious patterns.
 /// Returns false if none of the attack-indicative keywords are found.
 pub fn fast_path_check(input: &str) -> FastPathResult {
-    let lower = input.to_lowercase();
-
     FastPathResult {
-        has_sqli_patterns: sqli_matcher().map(|m| m.is_match(&lower)).unwrap_or(false),
-        has_xss_patterns: xss_matcher().map(|m| m.is_match(&lower)).unwrap_or(false),
-        has_cmdi_patterns: cmdi_matcher().map(|m| m.is_match(&lower)).unwrap_or(false),
+        has_sqli_patterns: sqli_matcher().map(|m| m.is_match(input)).unwrap_or(false),
+        has_xss_patterns: xss_matcher().map(|m| m.is_match(input)).unwrap_or(false),
+        has_cmdi_patterns: cmdi_matcher().map(|m| m.is_match(input)).unwrap_or(false),
     }
 }
 

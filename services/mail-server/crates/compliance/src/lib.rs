@@ -1,8 +1,13 @@
+pub mod admin_routes;
 pub mod audit_logger;
 pub mod config;
 pub mod content_scanner;
 pub mod gdpr_automation;
+pub mod hipaa;
 pub mod risk_scoring;
 pub mod routes;
 pub mod secret_manager;
+pub mod security_questionnaires;
+pub mod soc2;
+pub mod trust_portal;
 pub mod types;

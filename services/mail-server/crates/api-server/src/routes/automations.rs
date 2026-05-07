@@ -64,6 +64,7 @@ pub struct AutomationResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListAutomationsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

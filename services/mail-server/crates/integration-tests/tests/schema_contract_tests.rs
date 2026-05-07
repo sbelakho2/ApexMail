@@ -9,6 +9,8 @@
 
 use std::{fs, path::PathBuf};
 
+use serial_test::serial;
+
 use api_server::{
     app::build_app,
     config::{Config, Environment},
@@ -22,7 +24,7 @@ use axum::{
     Router,
 };
 use deadpool_redis::Config as RedisConfig;
-use sqlx::{migrate::Migrator, PgPool};
+use sqlx::{migrate::Migrator, postgres::PgPoolOptions, PgPool};
 use std::time::Duration;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -31,6 +33,11 @@ fn tool_migrations_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../tools/migrations")
 }
 
+/// Apply tool/utility migrations against the test database.
+///
+/// # Security note
+/// This function receives an existing `PgPool` connected to a test-only database.
+/// Do **not** reuse this function against a production database.
 async fn apply_tool_migrations(pool: &PgPool) {
     let source_dir = tool_migrations_dir();
     let temp_dir =
@@ -73,6 +80,27 @@ async fn apply_tool_migrations(pool: &PgPool) {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
+    let database_url = match std::env::var("TEST_DATABASE_URL") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
+            return None;
+        }
+    };
+
+    Some(
+        PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(&database_url)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("TEST_DATABASE_URL is set but {test_name} could not connect: {error}")
+            }),
+    )
+}
+
 fn bounded_id(prefix: &str) -> String {
     let suffix_len = 26usize.saturating_sub(prefix.len() + 1);
     apexmail_lib::id::generate_id(prefix, suffix_len)
@@ -102,6 +130,8 @@ fn test_config() -> Config {
         rate_limit_window_ms: 60_000,
         rate_limit_max_requests: 1_000,
         max_inflight_requests: 80,
+        // Test-only: wildcard CORS origin is acceptable for local/CI testing.
+        // In production the Config::default() path provides a specific origin.
         cors_origins: vec!["*".into()],
         trusted_proxies: vec![],
         ui_web_hosts: vec!["app.apexmail.ee".into(), "localhost".into()],
@@ -132,9 +162,28 @@ fn test_config() -> Config {
         internal_service_token: None,
         tracking_secret_key: "test-tracking-secret-123456789012".into(),
         metrics_port: 9090,
+        grader_enabled: false,
+        grader_rate_limit: 10,
+        grader_rate_window_seconds: 60,
+        grader_cache_ttl_seconds: 300,
+        grader_max_body_size: 1_048_576,
+        placement_enabled: false,
+        placement_polling_interval_secs: 60,
+        placement_max_polling_attempts: 60,
+        placement_max_seeds_per_test: 50,
+        placement_max_tests_per_hour: 10,
+        placement_imap_timeout_secs: 30,
+        placement_encrypt_passwords: false,
+        placement_encryption_secret: "test-placement-encryption-secret-32b".into(),
     }
 }
 
+/// Create a test router wrapping the real registration endpoints.
+///
+/// # Thread-safety note
+/// This helper calls `std::env::set_var` which is **not** thread-safe.
+/// Every test that calls `registration_test_app` MUST be annotated with
+/// `#[serial]` to prevent concurrent env-var manipulation races.
 async fn registration_test_app(pool: PgPool) -> Router {
     std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
     std::env::set_var("AWS_ACCESS_KEY_ID", "test");
@@ -237,8 +286,11 @@ async fn tenant_scoped_tables(pool: &PgPool) -> Vec<String> {
 // messages table column contract
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn messages_table_has_to_emails_column(pool: PgPool) {
+#[tokio::test]
+async fn messages_table_has_to_emails_column() {
+    let Some(pool) = optional_pg_pool("messages_table_has_to_emails_column").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     // The messages.rs send_message handler INSERTs into (to_emails, cc_emails, bcc_emails).
@@ -270,8 +322,12 @@ async fn messages_table_has_to_emails_column(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn messages_table_has_html_body_and_text_body_columns(pool: PgPool) {
+#[tokio::test]
+async fn messages_table_has_html_body_and_text_body_columns() {
+    let Some(pool) = optional_pg_pool("messages_table_has_html_body_and_text_body_columns").await
+    else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     // messages.rs uses html_body/text_body but initial schema has html_body/text_body
@@ -303,8 +359,11 @@ async fn messages_table_has_html_body_and_text_body_columns(pool: PgPool) {
 // sessions table existence
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn sessions_table_exists_for_password_reset(pool: PgPool) {
+#[tokio::test]
+async fn sessions_table_exists_for_password_reset() {
+    let Some(pool) = optional_pg_pool("sessions_table_exists_for_password_reset").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "sessions").await;
@@ -324,8 +383,11 @@ async fn sessions_table_exists_for_password_reset(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn sessions_table_accepts_insert(pool: PgPool) {
+#[tokio::test]
+async fn sessions_table_accepts_insert() {
+    let Some(pool) = optional_pg_pool("sessions_table_accepts_insert").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "sessinsert").await;
@@ -353,8 +415,11 @@ async fn sessions_table_accepts_insert(pool: PgPool) {
 // metering_events table existence
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn metering_events_table_exists(pool: PgPool) {
+#[tokio::test]
+async fn metering_events_table_exists() {
+    let Some(pool) = optional_pg_pool("metering_events_table_exists").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "metering").await;
@@ -383,8 +448,11 @@ async fn metering_events_table_exists(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn metering_events_aggregation_works(pool: PgPool) {
+#[tokio::test]
+async fn metering_events_aggregation_works() {
+    let Some(pool) = optional_pg_pool("metering_events_aggregation_works").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     // usage.rs:88-103 aggregates from metering_events
@@ -409,8 +477,11 @@ async fn metering_events_aggregation_works(pool: PgPool) {
 // plans table has email_limit and api_call_limit
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn plans_table_has_email_limit_column(pool: PgPool) {
+#[tokio::test]
+async fn plans_table_has_email_limit_column() {
+    let Some(pool) = optional_pg_pool("plans_table_has_email_limit_column").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     // usage.rs:120-132 queries p.email_limit and p.api_call_limit
@@ -432,8 +503,11 @@ async fn plans_table_has_email_limit_column(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn plans_table_accepts_limits(pool: PgPool) {
+#[tokio::test]
+async fn plans_table_accepts_limits() {
+    let Some(pool) = optional_pg_pool("plans_table_accepts_limits").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let plan_name = apexmail_lib::id::generate_id("plan", 16);
@@ -472,8 +546,11 @@ async fn plans_table_accepts_limits(pool: PgPool) {
 // domains table column names
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn domains_table_uses_correct_column_names(pool: PgPool) {
+#[tokio::test]
+async fn domains_table_uses_correct_column_names() {
+    let Some(pool) = optional_pg_pool("domains_table_uses_correct_column_names").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "domcols").await;
@@ -496,8 +573,12 @@ async fn domains_table_uses_correct_column_names(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn domains_table_allows_insert_with_domain_column(pool: PgPool) {
+#[tokio::test]
+async fn domains_table_allows_insert_with_domain_column() {
+    let Some(pool) = optional_pg_pool("domains_table_allows_insert_with_domain_column").await
+    else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "dominsert").await;
@@ -526,8 +607,11 @@ async fn domains_table_allows_insert_with_domain_column(pool: PgPool) {
 // api_keys table column names
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn api_keys_table_uses_prefix_not_key_prefix(pool: PgPool) {
+#[tokio::test]
+async fn api_keys_table_uses_prefix_not_key_prefix() {
+    let Some(pool) = optional_pg_pool("api_keys_table_uses_prefix_not_key_prefix").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     // After migration 003, the column is 'prefix' not 'key_prefix'
@@ -545,8 +629,11 @@ async fn api_keys_table_uses_prefix_not_key_prefix(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn api_keys_insert_with_prefix_column(pool: PgPool) {
+#[tokio::test]
+async fn api_keys_insert_with_prefix_column() {
+    let Some(pool) = optional_pg_pool("api_keys_insert_with_prefix_column").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "apikeys").await;
@@ -575,8 +662,11 @@ async fn api_keys_insert_with_prefix_column(pool: PgPool) {
 // invoices table existence
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn invoices_table_exists(pool: PgPool) {
+#[tokio::test]
+async fn invoices_table_exists() {
+    let Some(pool) = optional_pg_pool("invoices_table_exists").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let result = sqlx::query(
@@ -597,8 +687,11 @@ async fn invoices_table_exists(pool: PgPool) {
 // subscriptions tenant_id type compatibility
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn subscriptions_tenant_id_is_varchar_compatible(pool: PgPool) {
+#[tokio::test]
+async fn subscriptions_tenant_id_is_varchar_compatible() {
+    let Some(pool) = optional_pg_pool("subscriptions_tenant_id_is_varchar_compatible").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     // subscriptions.tenant_id is UUID but tenants.id is VARCHAR(26)
@@ -621,8 +714,11 @@ async fn subscriptions_tenant_id_is_varchar_compatible(pool: PgPool) {
 // users table has enough columns for UserRow struct
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn users_table_has_all_user_row_columns(pool: PgPool) {
+#[tokio::test]
+async fn users_table_has_all_user_row_columns() {
+    let Some(pool) = optional_pg_pool("users_table_has_all_user_row_columns").await else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "usercols").await;
@@ -663,8 +759,14 @@ async fn users_table_has_all_user_row_columns(pool: PgPool) {
 // Registration atomicity — concurrent same-email registrations
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn concurrent_registration_same_email_no_orphaned_tenant(pool: PgPool) {
+#[tokio::test]
+#[serial]
+async fn concurrent_registration_same_email_no_orphaned_tenant() {
+    let Some(pool) =
+        optional_pg_pool("concurrent_registration_same_email_no_orphaned_tenant").await
+    else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let app = registration_test_app(pool.clone()).await;
@@ -689,11 +791,18 @@ async fn concurrent_registration_same_email_no_orphaned_tenant(pool: PgPool) {
         .body(Body::from(request_body))
         .unwrap();
 
-    let (response_a, response_b) = tokio::join!(
-        app.clone().oneshot(request_a),
-        app.clone().oneshot(request_b),
-    );
+    // Wrap the concurrent requests in a timeout to prevent test hangs
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        let (response_a, response_b) = tokio::join!(
+            app.clone().oneshot(request_a),
+            app.clone().oneshot(request_b),
+        );
+        (response_a, response_b)
+    })
+    .await
+    .expect("concurrent registration timed out after 30s — possible deadlock or hang");
 
+    let (response_a, response_b) = result;
     let response_a = response_a.expect("first registration request failed");
     let response_b = response_b.expect("second registration request failed");
     assert_eq!(response_a.status(), StatusCode::ACCEPTED);
@@ -725,8 +834,13 @@ async fn concurrent_registration_same_email_no_orphaned_tenant(pool: PgPool) {
 // tenant deletion coverage
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[sqlx::test]
-async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables(pool: PgPool) {
+#[tokio::test]
+async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
+    let Some(pool) =
+        optional_pg_pool("tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables").await
+    else {
+        return;
+    };
     apply_tool_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "delete-coverage").await;

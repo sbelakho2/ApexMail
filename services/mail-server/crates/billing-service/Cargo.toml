@@ -14,6 +14,7 @@ path = "src/bin/server.rs"
 apexmail-lib = { path = "../apexmail-lib" }
 apexmail-db = { path = "../apexmail-db" }
 mail-common = { path = "../mail-common" }
+billing-common = { path = "../billing-common" }
 
 # Async runtime
 tokio.workspace = true
@@ -47,6 +48,7 @@ redis.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+chrono-tz = "0.10"
 uuid.workspace = true
 
 # Crypto (S3 Signature V4 signing)

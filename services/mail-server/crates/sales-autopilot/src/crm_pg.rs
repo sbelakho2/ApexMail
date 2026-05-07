@@ -30,6 +30,7 @@ impl SqlxCrmService {
             r#"
             CREATE TABLE IF NOT EXISTS sales_leads (
                 id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id   TEXT NOT NULL,
                 email       TEXT NOT NULL,
                 name        TEXT NOT NULL,
                 company     TEXT NOT NULL DEFAULT '',
@@ -55,12 +56,31 @@ impl SqlxCrmService {
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_tenant ON sales_leads(tenant_id)")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        // GIN index for full-text search across name, email, and company columns.
+        // Supports the to_tsvector @@ plainto_tsquery query used in search_leads().
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_sales_leads_fts_gin
+               ON sales_leads
+               USING GIN (
+                   to_tsvector('english', COALESCE(name, '') || ' ' || COALESCE(email, '') || ' ' || COALESCE(company, ''))
+               )"#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
         Ok(())
     }
 
     /// Insert a new lead.
     pub async fn create_lead(
         &self,
+        tenant_id: &str,
         email: String,
         name: String,
         company: String,
@@ -71,10 +91,11 @@ impl SqlxCrmService {
         let now = Utc::now();
 
         sqlx::query(r#"
-            INSERT INTO sales_leads (id, email, name, company, title, score, source, status, created_at)
-            VALUES ($1, $2, $3, $4, $5, 0, $6, 'new', $7)
+            INSERT INTO sales_leads (id, tenant_id, email, name, company, title, score, source, status, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, 0, $7, 'new', $8)
         "#)
         .bind(id)
+        .bind(tenant_id)
         .bind(&email)
         .bind(&name)
         .bind(&company)
@@ -87,6 +108,7 @@ impl SqlxCrmService {
 
         Ok(Lead {
             id,
+            tenant_id: tenant_id.to_string(),
             email,
             name,
             company,
@@ -98,10 +120,11 @@ impl SqlxCrmService {
         })
     }
 
-    /// Retrieve a lead by id.
-    pub async fn get_lead(&self, id: Uuid) -> Result<Lead, SalesError> {
-        let row = sqlx::query("SELECT * FROM sales_leads WHERE id = $1")
+    /// Retrieve a lead by id, scoped to tenant.
+    pub async fn get_lead(&self, id: Uuid, tenant_id: &str) -> Result<Lead, SalesError> {
+        let row = sqlx::query("SELECT * FROM sales_leads WHERE id = $1 AND tenant_id = $2")
             .bind(id)
+            .bind(tenant_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -110,15 +133,17 @@ impl SqlxCrmService {
             .ok_or(SalesError::LeadNotFound(id))
     }
 
-    /// List leads, optionally filtering by status and/or source.
+    /// List leads, scoped to tenant, optionally filtering by status and/or source.
     pub async fn list_leads(
         &self,
+        tenant_id: &str,
         status: Option<LeadStatus>,
         source: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Lead>, SalesError> {
-        let mut query = QueryBuilder::new("SELECT * FROM sales_leads WHERE 1=1");
+        let mut query = QueryBuilder::new("SELECT * FROM sales_leads WHERE tenant_id = ");
+        query.push_bind(tenant_id);
 
         if let Some(status) = status {
             query.push(" AND status = ").push_bind(status.to_string());
@@ -142,19 +167,21 @@ impl SqlxCrmService {
         Ok(rows.iter().map(row_to_lead).collect())
     }
 
-    /// Transition a lead to a new status.
+    /// Transition a lead to a new status, scoped to tenant.
     pub async fn update_lead_status(
         &self,
         id: Uuid,
         new_status: LeadStatus,
+        tenant_id: &str,
     ) -> Result<Lead, SalesError> {
         let result = sqlx::query(
             r#"
-            UPDATE sales_leads SET status = $2 WHERE id = $1 RETURNING *
+            UPDATE sales_leads SET status = $2 WHERE id = $1 AND tenant_id = $3 RETURNING *
         "#,
         )
         .bind(id)
         .bind(new_status.to_string())
+        .bind(tenant_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -164,26 +191,46 @@ impl SqlxCrmService {
             .ok_or(SalesError::LeadNotFound(id))
     }
 
-    /// Full-text search over lead name, email, and company.
+    /// Full-text search over lead name, email, and company, scoped to tenant.
+    ///
+    /// # Security (O-12.1)
+    ///
+    /// **Root cause**: Previously used `LIKE '%query%'` with leading wildcard,
+    /// which prevents index usage and forces full table scans. On large datasets
+    /// this enables timing side-channel extraction of data.
+    ///
+    /// **Fix**: Replaced `LOWER(col) LIKE $2` with PostgreSQL full-text search
+    /// (`to_tsvector` / `plainto_tsquery`), which can use a GIN index on the
+    /// concatenated tsvector column. The search is scoped to tenant_id.
     pub async fn search_leads(
         &self,
+        tenant_id: &str,
         query: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Lead>, SalesError> {
-        let pattern = format!("%{}%", query.to_lowercase());
-
         let rows = sqlx::query(
             r#"
             SELECT * FROM sales_leads
-            WHERE LOWER(name) LIKE $1
-               OR LOWER(email) LIKE $1
-               OR LOWER(company) LIKE $1
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
+            WHERE tenant_id = $1
+              AND (
+                  to_tsvector('english', COALESCE(name, ''))
+                  || to_tsvector('english', COALESCE(email, ''))
+                  || to_tsvector('english', COALESCE(company, ''))
+              ) @@ plainto_tsquery('english', $2)
+            ORDER BY
+                  ts_rank(
+                      to_tsvector('english', COALESCE(name, ''))
+                      || to_tsvector('english', COALESCE(email, ''))
+                      || to_tsvector('english', COALESCE(company, '')),
+                      plainto_tsquery('english', $2)
+                  ) DESC,
+                  created_at DESC
+            LIMIT $3 OFFSET $4
         "#,
         )
-        .bind(&pattern)
+        .bind(tenant_id)
+        .bind(query)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -198,14 +245,21 @@ impl SqlxCrmService {
         InMemoryCrmService::score_lead(engagement, company_size, recency)
     }
 
-    /// Update a lead's score in the database.
-    pub async fn set_lead_score(&self, id: Uuid, score: u8) -> Result<(), SalesError> {
-        let result = sqlx::query("UPDATE sales_leads SET score = $2 WHERE id = $1")
-            .bind(id)
-            .bind(score as i16)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
+    /// Update a lead's score in the database, scoped to tenant.
+    pub async fn set_lead_score(
+        &self,
+        id: Uuid,
+        score: u8,
+        tenant_id: &str,
+    ) -> Result<(), SalesError> {
+        let result =
+            sqlx::query("UPDATE sales_leads SET score = $2 WHERE id = $1 AND tenant_id = $3")
+                .bind(id)
+                .bind(score as i16)
+                .bind(tenant_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| SalesError::Database(e.to_string()))?;
 
         if result.rows_affected() == 0 {
             return Err(SalesError::LeadNotFound(id));
@@ -213,10 +267,11 @@ impl SqlxCrmService {
         Ok(())
     }
 
-    /// Delete a lead.
-    pub async fn delete_lead(&self, id: Uuid) -> Result<(), SalesError> {
-        let result = sqlx::query("DELETE FROM sales_leads WHERE id = $1")
+    /// Delete a lead, scoped to tenant.
+    pub async fn delete_lead(&self, id: Uuid, tenant_id: &str) -> Result<(), SalesError> {
+        let result = sqlx::query("DELETE FROM sales_leads WHERE id = $1 AND tenant_id = $2")
             .bind(id)
+            .bind(tenant_id)
             .execute(&self.pool)
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -241,6 +296,7 @@ fn parse_lead_status(s: &str) -> LeadStatus {
 fn row_to_lead(row: &sqlx::postgres::PgRow) -> Lead {
     Lead {
         id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
         email: row.get("email"),
         name: row.get("name"),
         company: row.get("company"),

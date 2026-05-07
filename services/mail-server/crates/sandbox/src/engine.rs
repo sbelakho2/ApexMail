@@ -10,6 +10,8 @@ use crate::SandboxError;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
+use tracing::warn;
 
 /// Final verdict for an attachment
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,13 +63,17 @@ pub struct DynamicAnalysisFinding {
 }
 
 /// Decision returned by dynamic analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DynamicDecision {
     /// Dynamic analysis observed no blocking behavior.
+    #[default]
+    #[serde(rename = "Allow")]
     Allow,
     /// Dynamic analysis recommends escalating to quarantine.
+    #[serde(rename = "Flag")]
     Flag,
     /// Dynamic analysis recommends outright rejection.
+    #[serde(rename = "Reject")]
     Reject,
 }
 
@@ -149,7 +155,28 @@ impl SandboxEngine {
         }
 
         // Step 1:File inspection (static analysis)
-        let inspection: FileInspection = file_inspector::inspect_file(data, filename);
+        let mut inspection: FileInspection = file_inspector::inspect_file(data, filename);
+
+        // ---- Apply configurable encrypted-archive risk (O-15.2) -----------
+        // The built-in `inspect_file` hard-codes 7.0 for ARCHIVE_ENCRYPTED.
+        // If the operator has configured a different value, adjust here so
+        // legitimate encrypted archives (legal docs, payroll, …) can be
+        // tuned per trust-domain.
+        let default_encrypted_risk = 7.0;
+        if (self.config.encrypted_archive_risk - default_encrypted_risk).abs() > 0.001 {
+            let delta = self.config.encrypted_archive_risk - default_encrypted_risk;
+            let mut encrypted_count: f64 = 0.0;
+            for finding in &mut inspection.findings {
+                if finding.id == "ARCHIVE_ENCRYPTED" {
+                    finding.risk = self.config.encrypted_archive_risk;
+                    encrypted_count += 1.0;
+                }
+            }
+            // Total risk was already incremented by 7.0 for each encrypted
+            // finding; apply the delta so the effective contribution becomes
+            // `encrypted_archive_risk` per finding.
+            inspection.risk_score = (inspection.risk_score + delta * encrypted_count).max(0.0);
+        }
 
         // Step 2:Policy evaluation
         let policy_result: PolicyResult = policy::evaluate_policy(&inspection, &self.config);
@@ -177,30 +204,88 @@ impl SandboxEngine {
         };
 
         if let Some(analyzer) = &self.dynamic_analyzer {
-            if let Some(dynamic_finding) = analyzer.analyze(data, filename) {
-                verdict.risk_score += dynamic_finding.risk;
-                verdict.reasons.push(dynamic_finding.description.clone());
-                verdict.findings.push(VerdictFinding {
-                    id: dynamic_finding.id,
-                    description: dynamic_finding.description,
-                    risk: dynamic_finding.risk,
-                });
-
-                match dynamic_finding.decision {
-                    DynamicDecision::Allow => {}
-                    DynamicDecision::Flag => {
-                        if verdict.decision == PolicyDecision::Allow.to_string() {
-                            verdict.decision = PolicyDecision::Quarantine.to_string();
-                        }
-                    }
-                    DynamicDecision::Reject => {
-                        verdict.decision = PolicyDecision::Reject.to_string();
-                    }
-                }
+            if let Some(dynamic_finding) = self.run_dynamic_analyzer(data, filename, analyzer)? {
+                Self::apply_dynamic_finding(&mut verdict, dynamic_finding);
             }
         }
 
         Ok(verdict)
+    }
+
+    fn run_dynamic_analyzer(
+        &self,
+        data: &[u8],
+        filename: Option<&str>,
+        analyzer: &Arc<dyn DynamicAnalyzer>,
+    ) -> Result<Option<DynamicAnalysisFinding>, SandboxError> {
+        let timeout_duration = Duration::from_secs(self.config.analysis_timeout_secs);
+        let analyzer = Arc::clone(analyzer);
+        let data = data.to_vec();
+        let filename = filename.map(str::to_string);
+
+        let worker =
+            std::thread::spawn(move || -> Result<Option<DynamicAnalysisFinding>, String> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .map_err(|error| {
+                        format!("failed to create dynamic analyzer runtime: {error}")
+                    })?;
+
+                let result = runtime.block_on(async move {
+                    let analysis_task = tokio::task::spawn_blocking(move || {
+                        analyzer.analyze(&data, filename.as_deref())
+                    });
+
+                    match tokio::time::timeout(timeout_duration, analysis_task).await {
+                        Ok(Ok(finding)) => Ok(finding),
+                        Ok(Err(error)) => Err(format!("dynamic analyzer task failed: {error}")),
+                        Err(_) => Err(format!(
+                            "dynamic analyzer timed out after {} seconds",
+                            timeout_duration.as_secs()
+                        )),
+                    }
+                });
+
+                runtime.shutdown_timeout(Duration::from_millis(100));
+                result
+            });
+
+        match worker.join() {
+            Ok(Ok(finding)) => Ok(finding),
+            Ok(Err(message)) => {
+                warn!(error = %message, "dynamic analyzer failed");
+                Err(SandboxError::AnalysisError(message))
+            }
+            Err(_) => Err(SandboxError::AnalysisError(
+                "dynamic analyzer worker panicked".into(),
+            )),
+        }
+    }
+
+    fn apply_dynamic_finding(
+        verdict: &mut SandboxVerdict,
+        dynamic_finding: DynamicAnalysisFinding,
+    ) {
+        verdict.risk_score += dynamic_finding.risk;
+        verdict.reasons.push(dynamic_finding.description.clone());
+        verdict.findings.push(VerdictFinding {
+            id: dynamic_finding.id,
+            description: dynamic_finding.description,
+            risk: dynamic_finding.risk,
+        });
+
+        match dynamic_finding.decision {
+            DynamicDecision::Allow => {}
+            DynamicDecision::Flag => {
+                if verdict.decision == PolicyDecision::Allow.to_string() {
+                    verdict.decision = PolicyDecision::Quarantine.to_string();
+                }
+            }
+            DynamicDecision::Reject => {
+                verdict.decision = PolicyDecision::Reject.to_string();
+            }
+        }
     }
 
     /// Analyze multiple attachments in batch
@@ -318,12 +403,25 @@ mod tests {
     use super::*;
 
     struct MockDynamicReject;
+    struct MockDynamicSlow;
 
     impl DynamicAnalyzer for MockDynamicReject {
         fn analyze(&self, _data: &[u8], _filename: Option<&str>) -> Option<DynamicAnalysisFinding> {
             Some(DynamicAnalysisFinding {
                 id: "DYNAMIC_BEHAVIOR".into(),
                 description: "Process-spawn behavior observed in detonation".into(),
+                risk: 8.0,
+                decision: DynamicDecision::Reject,
+            })
+        }
+    }
+
+    impl DynamicAnalyzer for MockDynamicSlow {
+        fn analyze(&self, _data: &[u8], _filename: Option<&str>) -> Option<DynamicAnalysisFinding> {
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            Some(DynamicAnalysisFinding {
+                id: "DYNAMIC_SLOW".into(),
+                description: "Slow dynamic analyzer completed after timeout".into(),
                 risk: 8.0,
                 decision: DynamicDecision::Reject,
             })
@@ -418,5 +516,21 @@ mod tests {
             assert_eq!(verdict.decision, "REJECT");
             assert!(verdict.findings.iter().any(|f| f.id == "DYNAMIC_BEHAVIOR"));
         }
+    }
+
+    #[test]
+    fn test_dynamic_analysis_timeout_fails_closed() {
+        let config = SandboxConfig {
+            analysis_timeout_secs: 1,
+            ..Default::default()
+        };
+        let engine = SandboxEngine::with_dynamic_analyzer(config, Arc::new(MockDynamicSlow));
+
+        let result = engine.analyze(b"hello", Some("readme.txt"));
+
+        assert!(matches!(
+            result,
+            Err(SandboxError::AnalysisError(message)) if message.contains("timed out")
+        ));
     }
 }

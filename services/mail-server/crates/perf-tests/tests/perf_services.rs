@@ -90,6 +90,7 @@ fn test_health_check_throughput() {
 
 #[test]
 fn test_trust_score_throughput() {
+    let scorer = TrustScorer::new();
     let iterations = 100_000;
 
     let start = Instant::now();
@@ -102,7 +103,7 @@ fn test_trust_score_throughput() {
             age_days: 30 + (i % 400) as u64,
             volume: 1_000 + (i % 100_000) as u64,
         };
-        let _ = TrustScorer::compute_score(&metrics);
+        let _ = scorer.compute_score(&metrics);
     }
     let elapsed = start.elapsed();
 

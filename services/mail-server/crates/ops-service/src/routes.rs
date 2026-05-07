@@ -1,5 +1,6 @@
 //! Axum HTTP routes for the operations service.
 
+use apexmail_lib::crypto::timing_safe_compare;
 use axum::middleware::Next;
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -34,6 +35,8 @@ pub struct AppState {
     pub slo: SloTracker,
     pub warmup: IpWarmupManager,
     pub api_key: String,
+    /// All valid API keys including the legacy single key and rotation keys (O-23.5).
+    pub api_keys: Vec<String>,
     pub trust_cache: Arc<DashMap<Uuid, TrustCacheEntry>>,
 }
 
@@ -71,6 +74,7 @@ async fn get_health_checks(State(state): State<Arc<AppState>>) -> Json<serde_jso
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListQuery {
     limit: Option<usize>,
     offset: Option<usize>,
@@ -87,6 +91,7 @@ async fn get_incidents(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateIncidentPayload {
     title: String,
     severity: IncidentSeverity,
@@ -202,7 +207,8 @@ async fn get_trust(
         }
     };
 
-    let score = TrustScorer::compute_score(&metrics);
+    // O-23.6: Use default weights for scoring.
+    let score = TrustScorer::compute_score_default(&metrics);
 
     // Store the computed score in trust_metrics table for historical tracking
     if let Err(error) = sqlx::query(
@@ -238,16 +244,22 @@ async fn require_api_key(
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if state.api_key.is_empty() {
-        return Err(StatusCode::UNAUTHORIZED);
+    let provided = extract_api_key(req.headers());
+
+    // Fast-path: if the legacy single key is set, check it first with timing-safe comparison.
+    if let Some(ref key) = provided {
+        if !state.api_key.is_empty() && timing_safe_compare(key, &state.api_key) {
+            return Ok(next.run(req).await);
+        }
+        // O-23.5: Also check rotation keys via timing-safe comparison.
+        for rotation_key in &state.api_keys {
+            if timing_safe_compare(key, rotation_key) {
+                return Ok(next.run(req).await);
+            }
+        }
     }
 
-    let provided = extract_api_key(req.headers());
-    if provided.as_deref() == Some(state.api_key.as_str()) {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
-    }
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 fn extract_api_key(headers: &HeaderMap) -> Option<String> {
@@ -292,6 +304,7 @@ mod tests {
             slo: SloTracker::new(),
             warmup: IpWarmupManager::new_in_memory(),
             api_key: "test-key".into(),
+            api_keys: vec!["rotation-key-1".into(), "rotation-key-2".into()],
             trust_cache: Arc::new(DashMap::new()),
         })
     }

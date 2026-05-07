@@ -423,6 +423,7 @@ mod ato_protection_wiring {
             timestamp: Utc::now(),
             success: true,
             tls_fingerprint: None,
+            device_fingerprint: None,
         };
 
         let verdict = engine.evaluate(&event);
@@ -449,6 +450,7 @@ mod ato_protection_wiring {
                 timestamp: Utc::now(),
                 success: false,
                 tls_fingerprint: None,
+                device_fingerprint: None,
             };
             engine.evaluate(&event);
         }
@@ -463,6 +465,7 @@ mod ato_protection_wiring {
             timestamp: Utc::now(),
             success: false,
             tls_fingerprint: None,
+            device_fingerprint: None,
         };
 
         let verdict = engine.evaluate(&event);

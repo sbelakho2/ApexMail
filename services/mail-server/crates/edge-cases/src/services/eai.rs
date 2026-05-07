@@ -328,6 +328,11 @@ impl EAIService {
         Ok(())
     }
 
+    /// O-21.3: Reject punycode-encoded domain labels exceeding 63 characters
+    /// (RFC 5891 §4.2.3.1). The `punycode` parameter is the ACE-encoded form
+    /// (`xn--...`). Its labels are checked for length ≤ 63 ASCII characters,
+    /// which catches cases where a long Unicode label expands beyond the limit
+    /// during Punycode encoding.
     fn validate_domain(&self, domain: &str, punycode: &str) -> anyhow::Result<()> {
         if domain.is_empty() {
             anyhow::bail!("Domain is empty");
@@ -342,7 +347,7 @@ impl EAIService {
         }
         for label in &labels {
             if label.len() > 63 {
-                anyhow::bail!("Domain label exceeds 63 characters: {label}");
+                anyhow::bail!("Domain punycode label exceeds 63 ASCII characters: {label}");
             }
             if label.is_empty() {
                 anyhow::bail!("Domain contains empty label");

@@ -40,6 +40,12 @@ impl Default for CircuitBreakerConfig {
 }
 
 /// Circuit breaker for protecting against cascading failures.
+///
+/// O-16.9 fix: Added `last_used_at` timestamp that is updated on every access
+/// (`is_allowed`, `record_success`, `record_failure`). This allows the eviction
+/// logic in `WebhookProcessor::get_circuit_breaker()` to evict only truly stale
+/// breakers instead of any closed breaker, preserving failure history for
+/// recently active webhooks.
 pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
     state: RwLock<CircuitState>,
@@ -47,6 +53,9 @@ pub struct CircuitBreaker {
     success_count: AtomicU64,
     last_failure_time: RwLock<Option<Instant>>,
     opened_at: RwLock<Option<Instant>>,
+    /// Timestamp of last access (O-16.9). Updated on every call to
+    /// `is_allowed()`, `record_success()`, `record_failure()`.
+    last_used_at: RwLock<Instant>,
 }
 
 impl CircuitBreaker {
@@ -59,11 +68,22 @@ impl CircuitBreaker {
             success_count: AtomicU64::new(0),
             last_failure_time: RwLock::new(None),
             opened_at: RwLock::new(None),
+            last_used_at: RwLock::new(Instant::now()),
         }
+    }
+
+    /// Get the last time this circuit breaker was accessed (O-16.9).
+    pub fn last_used(&self) -> Instant {
+        *self.last_used_at.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Check if a request is allowed through the circuit.
     pub fn is_allowed(&self) -> bool {
+        // O-16.9: Update last used timestamp
+        {
+            let mut last = self.last_used_at.write().unwrap_or_else(|e| e.into_inner());
+            *last = Instant::now();
+        }
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         match *state {
             CircuitState::Closed => true,
@@ -85,6 +105,11 @@ impl CircuitBreaker {
 
     /// Record a successful operation.
     pub fn record_success(&self) {
+        // O-16.9: Update last used timestamp
+        {
+            let mut last = self.last_used_at.write().unwrap_or_else(|e| e.into_inner());
+            *last = Instant::now();
+        }
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         match *state {
             CircuitState::Closed => {
@@ -109,6 +134,11 @@ impl CircuitBreaker {
 
     /// Record a failed operation.
     pub fn record_failure(&self) {
+        // O-16.9: Update last used timestamp
+        {
+            let mut last = self.last_used_at.write().unwrap_or_else(|e| e.into_inner());
+            *last = Instant::now();
+        }
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         match *state {
             CircuitState::Closed => {
@@ -173,6 +203,8 @@ impl CircuitBreaker {
         *last_failure = None;
         let mut opened_at = self.opened_at.write().unwrap_or_else(|e| e.into_inner());
         *opened_at = None;
+        let mut last_used = self.last_used_at.write().unwrap_or_else(|e| e.into_inner());
+        *last_used = Instant::now();
     }
 }
 

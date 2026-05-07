@@ -17,6 +17,8 @@ parking_lot = { workspace = true }
 tracing = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 mail-common = { path = "../mail-common", optional = true }
+redis = { workspace = true, optional = true, features = ["tokio-comp"] }
 
 [features]
 events = ["mail-common"]
+redis-lockout = ["redis"]

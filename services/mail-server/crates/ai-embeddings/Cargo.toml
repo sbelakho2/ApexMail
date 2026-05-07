@@ -47,5 +47,20 @@ dotenvy = { workspace = true }
 # Caching
 moka = { workspace = true }
 
+# Concurrent data structures (O-9.4)
+dashmap = { workspace = true }
+
+# HMAC-SHA256 for NDJSON persistence integrity (O-9.2)
+hmac = { workspace = true }
+sha2 = { workspace = true }
+
+# TLS for sidecar HTTPS (O-9.1)
+rustls = { workspace = true }
+rustls-pki-types = "1.10"
+webpki-roots = "0.26"
+
+# Hex encoding for HMAC signatures (O-9.2)
+hex = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

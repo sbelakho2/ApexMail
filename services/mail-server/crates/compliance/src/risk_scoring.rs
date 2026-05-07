@@ -554,6 +554,7 @@ impl RiskScoringEngine {
 
 // ─── Scoring Functions (pure, unit-testable) ───────────────────
 
+#[tracing::instrument(level = "trace")]
 fn weighted_average(factors: &[RiskFactor]) -> f64 {
     let (sum_sw, sum_w) = factors.iter().fold((0.0_f64, 0.0_f64), |(sw, w), f| {
         (sw + f.score * f.weight, w + f.weight)
@@ -567,6 +568,7 @@ fn weighted_average(factors: &[RiskFactor]) -> f64 {
 
 /// Spam complaint rate → 0-100. Rate ≥1% → 100, 0% → 0, linear in between-ish
 /// with extra penalty above threshold.
+#[tracing::instrument(level = "trace")]
 fn spam_score(rate: f64) -> f64 {
     if rate <= 0.0 {
         0.0
@@ -578,6 +580,7 @@ fn spam_score(rate: f64) -> f64 {
 }
 
 /// Bounce rate → 0-100. >10% → 100, linear otherwise.
+#[tracing::instrument(level = "trace")]
 fn bounce_score(rate: f64) -> f64 {
     if rate <= 0.0 {
         0.0
@@ -589,8 +592,9 @@ fn bounce_score(rate: f64) -> f64 {
 }
 
 /// Phishing detections → 0-100. Any detection is immediately severe.
+#[tracing::instrument(level = "trace")]
 fn phishing_score(count: i64) -> f64 {
-    if count == 0 {
+    if count <= 0 {
         0.0
     } else {
         (count as f64 * 25.0).min(100.0)
@@ -598,11 +602,17 @@ fn phishing_score(count: i64) -> f64 {
 }
 
 /// Content violations → 0-100.
+#[tracing::instrument(level = "trace")]
 fn violation_score(count: i64) -> f64 {
-    (count as f64 * 10.0).min(100.0)
+    if count <= 0 {
+        0.0
+    } else {
+        (count as f64 * 10.0).min(100.0)
+    }
 }
 
 /// Sending spike ratio. 3x average in 24h → suspicious.
+#[tracing::instrument(level = "trace")]
 fn sending_pattern_score(messages_24h: i64, avg_daily: f64) -> f64 {
     if avg_daily <= 0.0 || messages_24h == 0 {
         return 0.0;
@@ -618,6 +628,7 @@ fn sending_pattern_score(messages_24h: i64, avg_daily: f64) -> f64 {
 }
 
 /// Newer accounts are riskier (higher score for <30 days).
+#[tracing::instrument(level = "trace")]
 fn account_age_score(age_days: i64) -> f64 {
     if age_days >= 365 {
         0.0
@@ -630,6 +641,7 @@ fn account_age_score(age_days: i64) -> f64 {
 }
 
 /// Zero verified domains → high risk.
+#[tracing::instrument(level = "trace")]
 fn verification_score(verified: i64) -> f64 {
     match verified {
         0 => 80.0,
@@ -640,17 +652,24 @@ fn verification_score(verified: i64) -> f64 {
 }
 
 /// Payment failures → risk.
+#[tracing::instrument(level = "trace")]
 fn payment_score(failures: i64) -> f64 {
-    (failures as f64 * 20.0).min(100.0)
+    if failures <= 0 {
+        0.0
+    } else {
+        (failures as f64 * 20.0).min(100.0)
+    }
 }
 
 /// Combined bounce + spam rates.
+#[tracing::instrument(level = "trace")]
 fn list_quality_score(bounce_rate: f64, spam_rate: f64) -> f64 {
     let combined = bounce_rate + spam_rate * 10.0;
     combined.clamp(0.0, 100.0)
 }
 
 /// Low engagement → higher risk (inverted:high engagement = low risk).
+#[tracing::instrument(level = "trace")]
 fn engagement_score(open_rate: f64, click_rate: f64) -> f64 {
     if open_rate <= 0.0 && click_rate <= 0.0 {
         50.0 // no data = moderate risk
@@ -899,5 +918,787 @@ mod tests {
             .max_connections(1)
             .connect_lazy("postgres://fake:fake@localhost:1/fake")
             .unwrap()
+    }
+
+    // ── Helper ─────────────────────────────────────────────────
+
+    fn make_engine() -> RiskScoringEngine {
+        let cfg = ComplianceConfig::from_env();
+        RiskScoringEngine::new(unsafe_dummy_pool(), cfg)
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 1. Risk Factor Weight Verification (11 factors)
+    // ══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_factor_weight_spam_complaints() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.total_messages = 100;
+        m.spam_rate = 1.0; // spam_score(1.0) = 100.0
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::SpamComplaints))
+            .expect("SpamComplaints factor should be present");
+        let expected = 1.5;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "SpamComplaints weight: expected {expected}, got {}",
+            f.weight
+        );
+        assert!(
+            (f.score - 100.0).abs() < f64::EPSILON,
+            "score expected 100, got {}",
+            f.score
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_bounce_rate() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.total_messages = 100;
+        m.bounce_rate = 10.0; // bounce_score(10.0) = 100.0
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::BounceRate))
+            .expect("BounceRate factor should be present");
+        let expected = 1.2;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "BounceRate weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_phishing_detection() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.phishing_detections = 1; // phishing_score(1) = 25.0
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::PhishingDetection))
+            .expect("PhishingDetection factor should be present");
+        let expected = 2.0;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "PhishingDetection weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_content_violation() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.content_violations = 5; // violation_score(5) = 50.0
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::ContentViolation))
+            .expect("ContentViolation factor should be present");
+        let expected = 1.5;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "ContentViolation weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_sending_pattern() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.messages_24h = 500;
+        m.avg_daily_7d = 100.0; // ratio=5.0 → score=100.0
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::SendingPattern))
+            .expect("SendingPattern factor should be present");
+        let expected = 1.0;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "SendingPattern weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_account_age() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.account_age_days = 1; // account_age_score(1) = 80.0
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::AccountAge))
+            .expect("AccountAge factor should be present");
+        let expected = 0.8;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "AccountAge weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_verification_status() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.verified_domains = 0; // verification_score(0) = 80.0
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::VerificationStatus))
+            .expect("VerificationStatus factor should be present");
+        let expected = 0.7;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "VerificationStatus weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_payment_history() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.payment_failures = 1; // payment_score(1) = 20.0
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::PaymentHistory))
+            .expect("PaymentHistory factor should be present");
+        let expected = 0.9;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "PaymentHistory weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_list_quality() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.bounce_rate = 5.0;
+        m.spam_rate = 0.5;
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::ListQuality))
+            .expect("ListQuality factor should be present");
+        let expected = 1.1;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "ListQuality weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_engagement_rate() {
+        let engine = make_engine();
+        let m = TenantMetrics::default();
+        // Both rates zero → engagement_score = 50.0 (moderate risk)
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::EngagementRate))
+            .expect("EngagementRate factor should be present");
+        let expected = 0.6;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "EngagementRate weight: expected {expected}, got {}",
+            f.weight
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_blocklist_listing() {
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.blocklisted = true;
+        let factors = engine.compute_factors(&m);
+        let f = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::BlocklistListing))
+            .expect("BlocklistListing factor should be present (blocklisted=true)");
+        // BlocklistListing uses hardcoded weight 2.0
+        let expected = 2.0;
+        assert!(
+            (f.weight - expected).abs() < f64::EPSILON,
+            "BlocklistListing weight: expected {expected}, got {}",
+            f.weight
+        );
+        assert!(
+            (f.score - 80.0).abs() < f64::EPSILON,
+            "BlocklistListing score expected 80, got {}",
+            f.score
+        );
+    }
+
+    #[test]
+    fn test_factor_weight_blocklist_not_present_when_not_blocklisted() {
+        let engine = make_engine();
+        let m = TenantMetrics::default();
+        let factors = engine.compute_factors(&m);
+        let has_blocklist = factors
+            .iter()
+            .any(|f| matches!(f.factor_type, RiskFactorType::BlocklistListing));
+        assert!(
+            !has_blocklist,
+            "BlocklistListing should NOT be present when tenant is not blocklisted"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 2. Risk Level Classification (4 levels, boundary values)
+    // ══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_risk_level_low_boundary() {
+        assert_eq!(RiskLevel::from_score(0.0), RiskLevel::Low);
+        assert_eq!(RiskLevel::from_score(24.0), RiskLevel::Low);
+        assert_eq!(RiskLevel::from_score(24.9), RiskLevel::Low);
+        // 25.0 is the boundary → Medium
+        assert_ne!(RiskLevel::from_score(25.0), RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_risk_level_medium_boundary() {
+        assert_eq!(RiskLevel::from_score(25.0), RiskLevel::Medium);
+        assert_eq!(RiskLevel::from_score(30.0), RiskLevel::Medium);
+        assert_eq!(RiskLevel::from_score(49.0), RiskLevel::Medium);
+        assert_eq!(RiskLevel::from_score(49.9), RiskLevel::Medium);
+        // 50.0 is the boundary → High
+        assert_ne!(RiskLevel::from_score(50.0), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_risk_level_high_boundary() {
+        assert_eq!(RiskLevel::from_score(50.0), RiskLevel::High);
+        assert_eq!(RiskLevel::from_score(60.0), RiskLevel::High);
+        assert_eq!(RiskLevel::from_score(74.0), RiskLevel::High);
+        assert_eq!(RiskLevel::from_score(74.9), RiskLevel::High);
+        // 75.0 is the boundary → Critical
+        assert_ne!(RiskLevel::from_score(75.0), RiskLevel::High);
+    }
+
+    #[test]
+    fn test_risk_level_critical_boundary() {
+        assert_eq!(RiskLevel::from_score(75.0), RiskLevel::Critical);
+        assert_eq!(RiskLevel::from_score(80.0), RiskLevel::Critical);
+        assert_eq!(RiskLevel::from_score(99.0), RiskLevel::Critical);
+        assert_eq!(RiskLevel::from_score(100.0), RiskLevel::Critical);
+        // above 100 is clamped by weighted_average but from_score handles it
+        assert_eq!(RiskLevel::from_score(150.0), RiskLevel::Critical);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 3. Risk Level Properties (multiplier + check interval)
+    // ══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_risk_level_properties_low() {
+        assert_eq!(
+            RiskLevel::Low.limit_multiplier(),
+            1.0,
+            "Low multiplier should be 1.0x"
+        );
+        assert_eq!(
+            RiskLevel::Low.reassessment_secs(),
+            86_400,
+            "Low check interval should be 86400s (24h)"
+        );
+    }
+
+    #[test]
+    fn test_risk_level_properties_medium() {
+        assert_eq!(
+            RiskLevel::Medium.limit_multiplier(),
+            0.75,
+            "Medium multiplier should be 0.75x"
+        );
+        assert_eq!(
+            RiskLevel::Medium.reassessment_secs(),
+            21_600,
+            "Medium check interval should be 21600s (6h)"
+        );
+    }
+
+    #[test]
+    fn test_risk_level_properties_high() {
+        assert_eq!(
+            RiskLevel::High.limit_multiplier(),
+            0.5,
+            "High multiplier should be 0.5x"
+        );
+        assert_eq!(
+            RiskLevel::High.reassessment_secs(),
+            3_600,
+            "High check interval should be 3600s (1h)"
+        );
+    }
+
+    #[test]
+    fn test_risk_level_properties_critical() {
+        assert_eq!(
+            RiskLevel::Critical.limit_multiplier(),
+            0.1,
+            "Critical multiplier should be 0.1x"
+        );
+        assert_eq!(
+            RiskLevel::Critical.reassessment_secs(),
+            900,
+            "Critical check interval should be 900s (15min)"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 4. Score Calculation
+    // ══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_score_zero_inputs() {
+        // All metrics at default (zero) → all scores zero → weighted average = 0
+        let engine = make_engine();
+        let m = TenantMetrics::default();
+        let factors = engine.compute_factors(&m);
+        // Without blocklist, there are 10 factors; all should have score 0
+        // except engagement (no data → 50.0) and account_age (<=1 day → 80.0)
+        // Actually: account_age_days=0 → 1 day → 80.0, verification 0 domains → 80.0
+        // Let's verify specific ones:
+        let spam = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::SpamComplaints))
+            .unwrap();
+        assert!(
+            (spam.score - 0.0).abs() < f64::EPSILON,
+            "Spam score expected 0, got {}",
+            spam.score
+        );
+        let bounce = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::BounceRate))
+            .unwrap();
+        assert!(
+            (bounce.score - 0.0).abs() < f64::EPSILON,
+            "Bounce score expected 0, got {}",
+            bounce.score
+        );
+        let phishing = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::PhishingDetection))
+            .unwrap();
+        assert!(
+            (phishing.score - 0.0).abs() < f64::EPSILON,
+            "Phishing score expected 0, got {}",
+            phishing.score
+        );
+        let cv = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::ContentViolation))
+            .unwrap();
+        assert!(
+            (cv.score - 0.0).abs() < f64::EPSILON,
+            "ContentViolation score expected 0, got {}",
+            cv.score
+        );
+        let payment = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::PaymentHistory))
+            .unwrap();
+        assert!(
+            (payment.score - 0.0).abs() < f64::EPSILON,
+            "Payment score expected 0, got {}",
+            payment.score
+        );
+
+        // weighted_average with zero-weighted factors still works
+        let score = weighted_average(&factors);
+        // Zero-input scenario: account_age=80, verification=80, engagement=50 contribute
+        // (80*0.8 + 80*0.7 + 50*0.6) / (0.8+0.7+0.6) = (64+56+30)/2.1 = 150/2.1 ≈ 71.4 → 71
+        // So the score is NOT zero because age/verification/engagement have non-zero defaults
+        assert!(
+            score > 0.0,
+            "Default metrics produce score > 0 due to age/verification defaults"
+        );
+    }
+
+    #[test]
+    fn test_score_zero_inputs_all_scores_zero() {
+        // Construct factors where every score is explicitly zero
+        let factors = vec![
+            factor(RiskFactorType::SpamComplaints, 0.0, 1.5, String::new()),
+            factor(RiskFactorType::BounceRate, 0.0, 1.2, String::new()),
+            factor(RiskFactorType::PhishingDetection, 0.0, 2.0, String::new()),
+            factor(RiskFactorType::ContentViolation, 0.0, 1.5, String::new()),
+            factor(RiskFactorType::SendingPattern, 0.0, 1.0, String::new()),
+            factor(RiskFactorType::AccountAge, 0.0, 0.8, String::new()),
+            factor(RiskFactorType::VerificationStatus, 0.0, 0.7, String::new()),
+            factor(RiskFactorType::PaymentHistory, 0.0, 0.9, String::new()),
+            factor(RiskFactorType::ListQuality, 0.0, 1.1, String::new()),
+            factor(RiskFactorType::EngagementRate, 0.0, 0.6, String::new()),
+        ];
+        let score = weighted_average(&factors);
+        assert!(
+            (score - 0.0).abs() < f64::EPSILON,
+            "All-zero factors should produce score 0, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_score_maximum_inputs() {
+        // All scores at 100 should produce a weighted average of 100
+        let factors = vec![
+            factor(RiskFactorType::SpamComplaints, 100.0, 1.5, String::new()),
+            factor(RiskFactorType::BounceRate, 100.0, 1.2, String::new()),
+            factor(RiskFactorType::PhishingDetection, 100.0, 2.0, String::new()),
+            factor(RiskFactorType::ContentViolation, 100.0, 1.5, String::new()),
+            factor(RiskFactorType::SendingPattern, 100.0, 1.0, String::new()),
+            factor(RiskFactorType::AccountAge, 100.0, 0.8, String::new()),
+            factor(
+                RiskFactorType::VerificationStatus,
+                100.0,
+                0.7,
+                String::new(),
+            ),
+            factor(RiskFactorType::PaymentHistory, 100.0, 0.9, String::new()),
+            factor(RiskFactorType::ListQuality, 100.0, 1.1, String::new()),
+            factor(RiskFactorType::EngagementRate, 100.0, 0.6, String::new()),
+        ];
+        let score = weighted_average(&factors);
+        assert!(
+            (score - 100.0).abs() < f64::EPSILON,
+            "All-max factors should produce score 100, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_score_partial_inputs() {
+        // Single non-zero factor at 50 with weight 1.0
+        // weighted_average = Σ(score×weight) / Σ(weight)
+        // = (50*1.0) / 1.0 = 50.0
+        let factors = vec![factor(
+            RiskFactorType::SpamComplaints,
+            50.0,
+            1.0,
+            String::new(),
+        )];
+        let score = weighted_average(&factors);
+        assert!(
+            (score - 50.0).abs() < f64::EPSILON,
+            "Single 50-score factor with weight 1 should produce 50, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_score_weighted_sum_formula() {
+        // Verify the weighted average formula: Σ(score×weight) / Σ(weight)
+        let factors = vec![
+            factor(RiskFactorType::SpamComplaints, 80.0, 2.0, String::new()),
+            factor(RiskFactorType::BounceRate, 40.0, 3.0, String::new()),
+            factor(RiskFactorType::PhishingDetection, 60.0, 5.0, String::new()),
+        ];
+        // (80*2 + 40*3 + 60*5) / (2+3+5) = (160+120+300)/10 = 580/10 = 58.0
+        let expected = 58.0_f64;
+        let score = weighted_average(&factors);
+        assert!(
+            (score - expected).abs() < f64::EPSILON,
+            "Weighted sum: expected {expected}, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_score_weighted_sum_with_blocklist() {
+        // Include BlocklistListing factor in the weighted average
+        let factors = vec![
+            factor(RiskFactorType::SpamComplaints, 100.0, 1.5, String::new()),
+            factor(RiskFactorType::BlocklistListing, 80.0, 2.0, String::new()),
+        ];
+        // (100*1.5 + 80*2.0) / (1.5+2.0) = (150+160)/3.5 = 310/3.5 ≈ 88.57 → 89
+        let expected = 89.0_f64;
+        let score = weighted_average(&factors);
+        assert!(
+            (score - expected).abs() < f64::EPSILON,
+            "With blocklist: expected {expected}, got {score}"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 5. Edge Cases
+    // ══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_empty_tenants_default_risk() {
+        // Empty metrics (no sending history at all) — default/zero risk factors
+        let engine = make_engine();
+        let m = TenantMetrics::default();
+        let factors = engine.compute_factors(&m);
+
+        // Factors that should have score=0 with default metrics:
+        assert!(
+            factors
+                .iter()
+                .find(|f| matches!(f.factor_type, RiskFactorType::SpamComplaints))
+                .map(|f| f.score)
+                .unwrap()
+                < f64::EPSILON
+        );
+        assert!(
+            factors
+                .iter()
+                .find(|f| matches!(f.factor_type, RiskFactorType::BounceRate))
+                .map(|f| f.score)
+                .unwrap()
+                < f64::EPSILON
+        );
+        assert!(
+            factors
+                .iter()
+                .find(|f| matches!(f.factor_type, RiskFactorType::PhishingDetection))
+                .map(|f| f.score)
+                .unwrap()
+                < f64::EPSILON
+        );
+        assert!(
+            factors
+                .iter()
+                .find(|f| matches!(f.factor_type, RiskFactorType::ContentViolation))
+                .map(|f| f.score)
+                .unwrap()
+                < f64::EPSILON
+        );
+        assert!(
+            factors
+                .iter()
+                .find(|f| matches!(f.factor_type, RiskFactorType::SendingPattern))
+                .map(|f| f.score)
+                .unwrap()
+                < f64::EPSILON
+        );
+        assert!(
+            factors
+                .iter()
+                .find(|f| matches!(f.factor_type, RiskFactorType::PaymentHistory))
+                .map(|f| f.score)
+                .unwrap()
+                < f64::EPSILON
+        );
+        assert!(
+            factors
+                .iter()
+                .find(|f| matches!(f.factor_type, RiskFactorType::ListQuality))
+                .map(|f| f.score)
+                .unwrap()
+                < f64::EPSILON
+        );
+
+        // No blocklist listing for empty tenant
+        let has_blocklist = factors
+            .iter()
+            .any(|f| matches!(f.factor_type, RiskFactorType::BlocklistListing));
+        assert!(
+            !has_blocklist,
+            "Empty tenant should not have blocklist factor"
+        );
+    }
+
+    #[test]
+    fn test_negative_inputs_clamped_spam_score() {
+        // spam_score protects against negative rates
+        assert_eq!(
+            spam_score(-1.0),
+            0.0,
+            "Negative spam rate should clamp to 0"
+        );
+        assert_eq!(
+            spam_score(-0.5),
+            0.0,
+            "Negative spam rate should clamp to 0"
+        );
+        assert_eq!(
+            spam_score(f64::NEG_INFINITY),
+            0.0,
+            "-inf spam rate should clamp to 0"
+        );
+    }
+
+    #[test]
+    fn test_negative_inputs_clamped_bounce_score() {
+        assert_eq!(
+            bounce_score(-5.0),
+            0.0,
+            "Negative bounce rate should clamp to 0"
+        );
+        assert_eq!(
+            bounce_score(-100.0),
+            0.0,
+            "Negative bounce rate should clamp to 0"
+        );
+    }
+
+    #[test]
+    fn test_negative_inputs_clamped_phishing_score() {
+        // phishing_score clamps negatives to 0.0 (count <= 0 guard).
+        // DB values from collect_metrics are always non-negative, but the
+        // function protects against unexpected negative inputs defensively.
+        assert_eq!(
+            phishing_score(-1),
+            0.0,
+            "phishing_score(-1) should clamp to 0"
+        );
+        assert_eq!(
+            phishing_score(-5),
+            0.0,
+            "phishing_score(-5) should clamp to 0"
+        );
+    }
+
+    #[test]
+    fn test_negative_inputs_clamped_violation_score() {
+        // violation_score: negative count produces negative score, .min(100) doesn't help
+        let s = violation_score(-5);
+        assert!(
+            s <= 0.0,
+            "Negative violation count should not produce positive score, got {s}"
+        );
+    }
+
+    #[test]
+    fn test_negative_inputs_clamped_payment_score() {
+        // payment_score: negative failures produces negative score
+        let s = payment_score(-3);
+        assert!(
+            s <= 0.0,
+            "Negative payment failures should not produce positive score, got {s}"
+        );
+    }
+
+    #[test]
+    fn test_negative_inputs_clamped_account_age() {
+        // account_age_score: negative age_days would give factor > 1.0
+        let s = account_age_score(-1);
+        // account_age_score(-1): -1 < 365, -1 <= 1 → 80.0
+        assert_eq!(
+            s, 80.0,
+            "Negative account age defaults to 80 (new account risk)"
+        );
+    }
+
+    #[test]
+    fn test_negative_inputs_clamped_sending_pattern() {
+        // Negative messages should be treated like zero
+        assert_eq!(
+            sending_pattern_score(0, 100.0),
+            0.0,
+            "Zero messages = no sending pattern risk"
+        );
+        assert_eq!(
+            sending_pattern_score(-10, 100.0),
+            0.0,
+            "Negative messages = no sending pattern risk"
+        );
+    }
+
+    #[test]
+    fn test_large_inputs_capped_spam_score() {
+        assert_eq!(
+            spam_score(100.0),
+            100.0,
+            "Very high spam rate should cap at 100"
+        );
+        assert_eq!(
+            spam_score(1e6),
+            100.0,
+            "Extreme spam rate should cap at 100"
+        );
+    }
+
+    #[test]
+    fn test_large_inputs_capped_bounce_score() {
+        assert_eq!(
+            bounce_score(1000.0),
+            100.0,
+            "Very high bounce rate should cap at 100"
+        );
+    }
+
+    #[test]
+    fn test_large_inputs_capped_phishing_score() {
+        assert_eq!(
+            phishing_score(100),
+            100.0,
+            "High phishing count should cap at 100"
+        );
+        assert_eq!(
+            phishing_score(i64::MAX),
+            100.0,
+            "Max phishing count should cap at 100"
+        );
+    }
+
+    #[test]
+    fn test_large_inputs_capped_violation_score() {
+        assert_eq!(
+            violation_score(100),
+            100.0,
+            "High violation count should cap at 100"
+        );
+        assert_eq!(
+            violation_score(i64::MAX),
+            100.0,
+            "Max violation count should cap at 100"
+        );
+    }
+
+    #[test]
+    fn test_large_inputs_capped_payment_score() {
+        assert_eq!(
+            payment_score(100),
+            100.0,
+            "High payment failures should cap at 100"
+        );
+        assert_eq!(
+            payment_score(i64::MAX),
+            100.0,
+            "Max payment failures should cap at 100"
+        );
+    }
+
+    #[test]
+    fn test_large_inputs_capped_sending_pattern() {
+        // Ratio >= 5.0 → 100.0
+        assert_eq!(
+            sending_pattern_score(500_000, 100.0),
+            100.0,
+            "Very high sending spike should cap at 100"
+        );
+        assert_eq!(
+            sending_pattern_score(i64::MAX, 1.0),
+            100.0,
+            "Extreme sending spike should cap at 100"
+        );
+    }
+
+    #[test]
+    fn test_large_inputs_capped_list_quality() {
+        assert_eq!(
+            list_quality_score(1e6, 1e6),
+            100.0,
+            "Extreme list quality scores should cap at 100"
+        );
+        assert_eq!(
+            list_quality_score(0.0, 20.0),
+            100.0,
+            "Spam_rate=20% -> combined=200 -> capped at 100"
+        );
     }
 }

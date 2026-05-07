@@ -23,6 +23,7 @@ storage:
   trace:
     backend: local
     local:
+      # Mount this path on a PersistentVolumeClaim in Kubernetes deployments.
       path: /var/tempo/traces
     wal:
       path: /var/tempo/wal

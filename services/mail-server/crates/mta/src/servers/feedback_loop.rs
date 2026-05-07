@@ -319,6 +319,21 @@ impl FeedbackLoopServer {
 
     async fn process_complaint(&self, source_ip: IpAddr, raw: &[u8]) -> anyhow::Result<String> {
         let complaint_id = Uuid::new_v4().to_string();
+
+        // O-1.5:Reject oversized ARF payloads before parsing
+        if raw.len() > self.config.max_arf_size {
+            warn!(
+                size = raw.len(),
+                max = self.config.max_arf_size,
+                "Complaint payload exceeds max_arf_size, rejecting"
+            );
+            return Err(anyhow::anyhow!(
+                "Complaint payload too large: {} bytes exceeds limit of {} bytes",
+                raw.len(),
+                self.config.max_arf_size,
+            ));
+        }
+
         let message = String::from_utf8_lossy(raw);
 
         // Parse ARF report
@@ -604,9 +619,7 @@ pub fn parse_arf_report(message: &str) -> ComplaintInfo {
             info.reported_uris.push(extract_value(trimmed));
         } else if lower.starts_with("authentication-results:") {
             info.authentication_results = Some(extract_value(trimmed));
-        } else if (lower.starts_with("original-message-id:") || lower.starts_with("message-id:"))
-            && info.original_message_id.is_none()
-        {
+        } else if lower.starts_with("original-message-id:") && info.original_message_id.is_none() {
             let mid = extract_value(trimmed);
             info.original_message_id = Some(mid.trim_matches(|c| c == '<' || c == '>').to_string());
         }
@@ -684,6 +697,30 @@ Reported-URI: http://bad.com/malware\r\n";
         let info = parse_arf_report(report);
         assert_eq!(info.reported_uris.len(), 2);
         assert_eq!(info.reported_uris[0], "http://bad.com/phish");
+    }
+
+    #[test]
+    fn test_parse_arf_report_ignores_generic_message_id_linkage() {
+        let report = "\
+Feedback-Type: abuse\r\n\
+Message-ID: <bounce-report@example.net>\r\n";
+
+        let info = parse_arf_report(report);
+        assert!(info.original_message_id.is_none());
+    }
+
+    #[test]
+    fn test_parse_arf_report_keeps_explicit_original_message_id() {
+        let report = "\
+Feedback-Type: abuse\r\n\
+Message-ID: <bounce-report@example.net>\r\n\
+Original-Message-ID: <original@example.com>\r\n";
+
+        let info = parse_arf_report(report);
+        assert_eq!(
+            info.original_message_id,
+            Some("original@example.com".into())
+        );
     }
 
     #[test]

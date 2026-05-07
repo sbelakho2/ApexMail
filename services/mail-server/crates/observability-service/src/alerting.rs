@@ -13,6 +13,53 @@ use crate::types::{Alert, AlertSeverity, AlertStatus};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// ComparisonOperator
+// ---------------------------------------------------------------------------
+
+/// Comparison operator used when evaluating an [`AlertRule`] expression.
+///
+/// This replaces the hardcoded "greater-than" logic so rules can specify
+/// `gt`, `lt`, `gte`, `lte`, or `eq` comparisons against a threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ComparisonOperator {
+    /// Greater than (`>`)
+    Gt,
+    /// Less than (`<`)
+    Lt,
+    /// Greater than or equal (`>=`)
+    Gte,
+    /// Less than or equal (`<=`)
+    Lte,
+    /// Equal (`==`)
+    Eq,
+}
+
+impl ComparisonOperator {
+    /// Evaluate `value` against `threshold` using this operator.
+    pub fn evaluate(&self, value: f64, threshold: f64) -> bool {
+        match self {
+            Self::Gt => value > threshold,
+            Self::Lt => value < threshold,
+            Self::Gte => value >= threshold,
+            Self::Lte => value <= threshold,
+            Self::Eq => (value - threshold).abs() < f64::EPSILON,
+        }
+    }
+}
+
+impl std::fmt::Display for ComparisonOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gt => write!(f, ">"),
+            Self::Lt => write!(f, "<"),
+            Self::Gte => write!(f, ">="),
+            Self::Lte => write!(f, "<="),
+            Self::Eq => write!(f, "=="),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AlertRule (lightweight, evaluable)
 // ---------------------------------------------------------------------------
 
@@ -24,7 +71,9 @@ pub struct AlertRule {
     pub condition_description: String,
     /// The metric name this rule monitors.
     pub metric_name: String,
-    /// Threshold above which the rule fires.
+    /// Comparison operator used against `threshold`.
+    pub operator: ComparisonOperator,
+    /// Threshold value compared against the metric using `operator`.
     pub threshold: f64,
     pub severity: AlertSeverity,
     /// Minimum seconds between consecutive firings for the same rule.
@@ -86,8 +135,8 @@ impl AlertManager {
                 None => continue,
             };
 
-            // Check threshold
-            if value <= rule.threshold {
+            // Check condition using the rule's comparison operator
+            if !rule.operator.evaluate(value, rule.threshold) {
                 continue;
             }
 
@@ -108,8 +157,8 @@ impl AlertManager {
                 severity: rule.severity,
                 summary: rule.condition_description.clone(),
                 description: format!(
-                    "{}: current value {:.4} exceeds threshold {:.4}",
-                    rule.name, value, rule.threshold
+                    "{}: current value {:.4} {} threshold {:.4}",
+                    rule.name, value, rule.operator, rule.threshold
                 ),
                 labels: HashMap::new(),
                 annotations: HashMap::new(),
@@ -225,6 +274,7 @@ mod tests {
             name: "high_error_rate".to_string(),
             condition_description: "error_rate > threshold".to_string(),
             metric_name: "error_rate".to_string(),
+            operator: ComparisonOperator::Gt,
             threshold,
             severity: AlertSeverity::Critical,
             cooldown_secs: 0,
@@ -239,6 +289,7 @@ mod tests {
             name: "high_latency".to_string(),
             condition_description: "p99_latency > 2000".to_string(),
             metric_name: "p99_latency".to_string(),
+            operator: ComparisonOperator::Gt,
             threshold: 2000.0,
             severity: AlertSeverity::Warning,
             cooldown_secs: 60,

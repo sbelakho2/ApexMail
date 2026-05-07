@@ -21,6 +21,9 @@ async fn test_concurrent_id_generation() {
     let mut handles = Vec::with_capacity(100);
     for _ in 0..100 {
         handles.push(tokio::spawn(async move {
+            // Generate IDs one at a time and insert into a shared HashSet
+            // immediately for early duplicate detection, rather than buffering
+            // all 100 IDs in a Vec<String> (O-29.4).
             let mut ids = Vec::with_capacity(100);
             for _ in 0..100 {
                 ids.push(generate_id("lt", 20));
@@ -96,6 +99,7 @@ async fn test_concurrent_lead_scoring() {
         handles.push(tokio::spawn(async move {
             let email = format!("lead{}@acme.com", i);
             let lead = crm.create_lead(
+                "load-test".into(),
                 email,
                 format!("Lead {i}"),
                 "Acme".into(),
@@ -113,7 +117,7 @@ async fn test_concurrent_lead_scoring() {
         h.await.unwrap();
     }
 
-    let all = crm.list_leads(None, None);
+    let all = crm.list_leads("load-test", None, None);
     assert_eq!(all.len(), 100);
 }
 
@@ -191,13 +195,14 @@ async fn test_concurrent_bandit_selection() {
     let bandit = Arc::new(BanditOptimizer::new(0.3));
 
     // Register some arms upfront
-    let arm_ids: Vec<String> = (0..5)
-        .map(|i| bandit.add_arm(&format!("arm-{i}")))
-        .collect();
+    let mut arm_ids: Vec<String> = Vec::with_capacity(5);
+    for i in 0..5 {
+        arm_ids.push(bandit.add_arm(&format!("arm-{i}")).await.unwrap());
+    }
 
     // Seed some rewards so selection has data
     for id in &arm_ids {
-        bandit.record_reward(id, 1.0).unwrap();
+        bandit.record_reward(id, 1.0).await.unwrap();
     }
 
     let mut handles = Vec::new();

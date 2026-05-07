@@ -1,28 +1,52 @@
 //! Recursive text chunker with configurable separators and overlap.
+//!
+//! # Security: Input size limits (O-9.3)
+//! Chunking operations enforce `max_input_size` (default 1MB) and
+//! `max_chunk_size` (default 8KB) limits to prevent resource exhaustion
+//! from oversized inputs.
 
-use crate::types::{ChunkConfig, TextChunk};
+use crate::types::{ChunkConfig, EmbeddingError, TextChunk};
 
 /// Split text into overlapping chunks using recursive separator strategy.
+///
+/// Rejects inputs larger than `config.max_input_size` bytes to prevent
+/// resource exhaustion (O-9.3).
+///
 /// Tries separators in order (paragraph → line → sentence → word),
 /// falling back to character-level splitting if needed.
-pub fn chunk_text(text: &str, config: &ChunkConfig) -> Vec<TextChunk> {
+pub fn chunk_text(text: &str, config: &ChunkConfig) -> Result<Vec<TextChunk>, EmbeddingError> {
     if text.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
 
-    if text.len() <= config.chunk_size {
-        return vec![TextChunk {
+    // O-9.3: Validate input size
+    if text.len() > config.max_input_size {
+        return Err(EmbeddingError::InputTooLarge {
+            size: text.len(),
+            max: config.max_input_size,
+        });
+    }
+
+    // Validate chunk_size doesn't exceed max_chunk_size
+    let effective_chunk_size = config.chunk_size.min(config.max_chunk_size);
+
+    if text.len() <= effective_chunk_size {
+        return Ok(vec![TextChunk {
             text: text.to_string(),
             start_offset: 0,
             end_offset: text.len(),
             index: 0,
-        }];
+        }]);
     }
 
-    let chunks = recursive_split(text, &config.separators, config.chunk_size);
+    let chunks = recursive_split(text, &config.separators, effective_chunk_size);
 
     // Apply overlap
-    merge_with_overlap(&chunks, config.chunk_overlap, config.chunk_size)
+    Ok(merge_with_overlap(
+        &chunks,
+        config.chunk_overlap,
+        effective_chunk_size,
+    ))
 }
 
 fn floor_char_boundary(text: &str, index: usize) -> usize {
@@ -158,7 +182,7 @@ mod tests {
     #[test]
     fn test_empty_text() {
         let config = ChunkConfig::default();
-        let chunks = chunk_text("", &config);
+        let chunks = chunk_text("", &config).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -168,8 +192,9 @@ mod tests {
             chunk_size: 100,
             chunk_overlap: 10,
             separators: vec!["\n\n".into(), "\n".into(), ". ".into()],
+            ..Default::default()
         };
-        let chunks = chunk_text("Short text", &config);
+        let chunks = chunk_text("Short text", &config).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "Short text");
         assert_eq!(chunks[0].start_offset, 0);
@@ -182,8 +207,9 @@ mod tests {
             chunk_size: 30,
             chunk_overlap: 0,
             separators: vec!["\n\n".into(), "\n".into(), ". ".into()],
+            ..Default::default()
         };
-        let chunks = chunk_text(text, &config);
+        let chunks = chunk_text(text, &config).unwrap();
         assert!(chunks.len() >= 2);
         assert!(chunks[0].text.contains("First"));
     }
@@ -195,8 +221,9 @@ mod tests {
             chunk_size: 40,
             chunk_overlap: 0,
             separators: vec!["\n\n".into(), "\n".into(), ". ".into()],
+            ..Default::default()
         };
-        let chunks = chunk_text(text, &config);
+        let chunks = chunk_text(text, &config).unwrap();
         assert!(chunks.len() >= 2);
     }
 
@@ -207,13 +234,14 @@ mod tests {
             chunk_size: 20,
             chunk_overlap: 5,
             separators: vec![" ".into()],
+            ..Default::default()
         };
-        let chunks = chunk_text(text, &config);
+        let chunks = chunk_text(text, &config).unwrap();
         assert!(chunks.len() >= 2);
         // Second chunk should start with overlap from first
         if chunks.len() > 1 {
             // overlap creates some shared content
-            assert!(chunks[1].text.len() > 0);
+            assert!(!chunks[1].text.is_empty());
         }
     }
 
@@ -224,8 +252,9 @@ mod tests {
             chunk_size: 15,
             chunk_overlap: 0,
             separators: vec![" ".into()],
+            ..Default::default()
         };
-        let chunks = chunk_text(text, &config);
+        let chunks = chunk_text(text, &config).unwrap();
         for i in 1..chunks.len() {
             assert!(
                 chunks[i].start_offset >= chunks[i - 1].start_offset,
@@ -241,8 +270,9 @@ mod tests {
             chunk_size: 10,
             chunk_overlap: 0,
             separators: vec![" ".into()],
+            ..Default::default()
         };
-        let chunks = chunk_text(text, &config);
+        let chunks = chunk_text(text, &config).unwrap();
         for (i, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.index, i);
         }
@@ -255,8 +285,9 @@ mod tests {
             chunk_size: 30,
             chunk_overlap: 0,
             separators: vec![" ".into()],
+            ..Default::default()
         };
-        let chunks = chunk_text(&text, &config);
+        let chunks = chunk_text(&text, &config).unwrap();
         assert!(!chunks.is_empty());
         // Should fall back to character-level splitting
     }
@@ -275,12 +306,38 @@ mod tests {
             chunk_size: 13,
             chunk_overlap: 2,
             separators: vec![" ".into()],
+            ..Default::default()
         };
 
-        let chunks = chunk_text(text, &config);
+        let chunks = chunk_text(text, &config).unwrap();
 
         assert!(chunks.len() >= 2);
         assert!(chunks[1].text.starts_with('好'));
         assert!(chunks.iter().all(|chunk| !chunk.text.is_empty()));
+    }
+
+    #[test]
+    fn test_rejects_oversized_input() {
+        let config = ChunkConfig {
+            max_input_size: 100,
+            ..Default::default()
+        };
+        let large = "x".repeat(200);
+        let result = chunk_text(&large, &config);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(EmbeddingError::InputTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_respects_max_chunk_size() {
+        let config = ChunkConfig {
+            chunk_size: 500,
+            max_chunk_size: 100,
+            ..Default::default()
+        };
+        let text = "hello world";
+        let chunks = chunk_text(text, &config).unwrap();
+        // Should use min(chunk_size, max_chunk_size) = 100
+        assert_eq!(chunks.len(), 1);
     }
 }

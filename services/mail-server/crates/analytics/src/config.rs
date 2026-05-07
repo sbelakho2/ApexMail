@@ -10,6 +10,9 @@ pub struct AnalyticsConfig {
     pub compaction: CompactionConfig,
     pub reconciliation: ReconciliationConfig,
     pub clickhouse: ClickHouseConfig,
+    /// HMAC-SHA256 key for salted email hashing in send-time optimizer (O-11.5).
+    /// Leave empty to fall back to bare SHA-256.
+    pub sto_hmac_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +38,10 @@ pub struct ClickHouseConfig {
     pub password: String,
     pub max_connections: u32,
     pub query_timeout_secs: u64,
+    /// Enable TLS for ClickHouse connection (O-11.2).
+    pub tls_enabled: bool,
+    /// Path to CA certificate file for ClickHouse TLS verification (O-11.2).
+    pub ca_cert_path: String,
 }
 
 // ── defaults ───────────────────────────────────────────────────────────────────
@@ -69,6 +76,8 @@ impl Default for ClickHouseConfig {
             password: "".into(),
             max_connections: 20,
             query_timeout_secs: 30,
+            tls_enabled: false,
+            ca_cert_path: String::new(),
         }
     }
 }
@@ -82,6 +91,7 @@ impl Default for AnalyticsConfig {
             compaction: CompactionConfig::default(),
             reconciliation: ReconciliationConfig::default(),
             clickhouse: ClickHouseConfig::default(),
+            sto_hmac_key: String::new(),
         }
     }
 }
@@ -91,7 +101,7 @@ impl AnalyticsConfig {
         if let Err(error) = dotenvy::dotenv() {
             if !matches!(error, dotenvy::Error::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound)
             {
-                eprintln!("failed to load .env: {error}");
+                tracing::warn!("failed to load .env: {error}");
             }
         }
         let mut config = Self {
@@ -131,7 +141,13 @@ impl AnalyticsConfig {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(20),
                 query_timeout_secs: 30,
+                tls_enabled: std::env::var("CLICKHOUSE_TLS_ENABLED")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(false),
+                ca_cert_path: std::env::var("CLICKHOUSE_CA_CERT_PATH").unwrap_or_default(),
             },
+            sto_hmac_key: std::env::var("ANALYTICS_STO_HMAC_KEY").unwrap_or_default(),
         };
         if let Err(err) = config.validate() {
             tracing::error!(error = %err, "Invalid analytics config; applying safe defaults");

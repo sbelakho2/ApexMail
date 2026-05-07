@@ -2,7 +2,13 @@
 //!
 //! Implements the MailstoreService for email storage matching the proto definition.
 
-use mail_parser::{Address, MessageParser};
+use governor::clock::DefaultClock;
+use governor::state::{InMemoryState, NotKeyed};
+use governor::{Quota as GovQuota, RateLimiter as GovRateLimiter};
+use mail_parser::{Address, Message, MessageParser};
+use nonzero_ext::nonzero;
+use rand::rngs::OsRng;
+use rand::TryRngCore;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,10 +24,8 @@ use crate::models::{
     MessageFlags as StoredMessageFlags, MessageQuery, StoredMessage,
 };
 use crate::storage::MessageStorage;
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
-    Argon2, PasswordHash, PasswordVerifier,
-};
+use argon2::password_hash::SaltString;
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use mail_proto::generated::{
     mailbox_event, mailstore_service_server::MailstoreService, AuthenticateRequest,
     AuthenticateResponse, CopyMessageRequest, CopyMessageResponse, CreateAccountRequest,
@@ -39,6 +43,8 @@ use mail_proto::generated::{
 /// Mailstore gRPC service
 pub struct MailstoreServiceImpl {
     storage: Arc<MessageStorage>,
+    /// O-4.2:Global rate limiter — 1000 requests per second burst
+    rate_limiter: GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>,
 }
 
 #[derive(Debug)]
@@ -56,26 +62,36 @@ struct ParsedMessageMetadata {
 }
 
 fn parse_message_metadata(raw_message: &[u8]) -> ParsedMessageMetadata {
-    let raw_message_text = String::from_utf8_lossy(raw_message).into_owned();
-    let (raw_headers, raw_body) = split_raw_message(&raw_message_text);
-    let headers = extract_headers_json(raw_headers);
+    let Some(message) = MessageParser::new().parse(raw_message) else {
+        return ParsedMessageMetadata {
+            message_id: Uuid::new_v4().to_string(),
+            from_address: "unknown@localhost".to_string(),
+            from_name: None,
+            to_addresses: vec![],
+            cc_addresses: vec![],
+            bcc_addresses: vec![],
+            subject: String::new(),
+            text_body: None,
+            html_body: None,
+            headers: serde_json::Value::Object(serde_json::Map::new()),
+        };
+    };
+
+    let headers = extract_headers_json(&message);
 
     let mut metadata = ParsedMessageMetadata {
         message_id: header_value(&headers, "Message-ID")
+            .or_else(|| message.message_id().map(str::to_string))
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
         from_address: "unknown@localhost".to_string(),
         from_name: None,
         to_addresses: vec![],
         cc_addresses: vec![],
         bcc_addresses: vec![],
-        subject: header_value(&headers, "Subject").unwrap_or_default(),
-        text_body: (!raw_body.is_empty()).then(|| raw_body.to_string()),
-        html_body: None,
+        subject: message.subject().unwrap_or_default().to_string(),
+        text_body: message.body_text(0).map(|value| value.into_owned()),
+        html_body: message.body_html(0).map(|value| value.into_owned()),
         headers,
-    };
-
-    let Some(message) = MessageParser::new().parse(raw_message) else {
-        return metadata;
     };
 
     let collect_addresses = |field| -> Vec<StoredEmailAddress> {
@@ -123,63 +139,28 @@ fn parse_message_metadata(raw_message: &[u8]) -> ParsedMessageMetadata {
     metadata.cc_addresses = collect_addresses(message.cc().cloned());
     metadata.bcc_addresses = collect_addresses(message.bcc().cloned());
 
-    if let Some(subject) = message.subject().map(|value| value.to_string()) {
-        if !subject.trim().is_empty() {
-            metadata.subject = subject;
-        }
-    }
-
     metadata
 }
 
-fn split_raw_message(raw_message: &str) -> (&str, &str) {
-    if let Some((headers, body)) = raw_message.split_once("\r\n\r\n") {
-        return (headers, body);
-    }
-    if let Some((headers, body)) = raw_message.split_once("\n\n") {
-        return (headers, body);
-    }
-    (raw_message, "")
-}
-
-fn extract_headers_json(raw_headers: &str) -> serde_json::Value {
+fn extract_headers_json(message: &Message<'_>) -> serde_json::Value {
     let mut headers = serde_json::Map::new();
-    let mut current_name: Option<String> = None;
-    let mut current_value = String::new();
-
-    for line in raw_headers.lines() {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() {
-            break;
-        }
-
-        if line.starts_with(' ') || line.starts_with('\t') {
-            if !current_value.is_empty() {
-                current_value.push(' ');
-            }
-            current_value.push_str(line.trim());
-            continue;
-        }
-
-        if let Some(name) = current_name.replace(String::new()) {
-            insert_header_value(&mut headers, &name, &current_value);
-            current_value.clear();
-        }
-
-        if let Some((name, value)) = line.split_once(':') {
-            current_name = Some(name.trim().to_string());
-            current_value = value.trim().to_string();
-        } else {
-            current_name = None;
-            current_value.clear();
-        }
-    }
-
-    if let Some(name) = current_name {
-        insert_header_value(&mut headers, &name, &current_value);
+    for (name, value) in message.headers_raw() {
+        insert_header_value(&mut headers, name, &normalize_header_value(value));
     }
 
     serde_json::Value::Object(headers)
+}
+
+fn normalize_header_value(value: &str) -> String {
+    let mut normalized = String::new();
+    for line in value.lines() {
+        let line = line.trim_end_matches('\r');
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(line.trim());
+    }
+    normalized
 }
 
 fn insert_header_value(
@@ -229,7 +210,22 @@ fn header_value(headers: &serde_json::Value, name: &str) -> Option<String> {
 
 impl MailstoreServiceImpl {
     pub fn new(storage: Arc<MessageStorage>) -> Self {
-        Self { storage }
+        // O-4.2:Global rate limiter at 1000 requests/second with burst of 2000
+        let rate_limiter = GovRateLimiter::direct(GovQuota::per_second(nonzero!(1000u32)));
+        Self {
+            storage,
+            rate_limiter,
+        }
+    }
+
+    /// O-4.2:Check if the request should be rate-limited.
+    fn check_rate_limit<T>(&self, _request: &Request<T>) -> Result<(), Status> {
+        if self.rate_limiter.check().is_err() {
+            return Err(Status::resource_exhausted(
+                "Rate limit exceeded. Please reduce request frequency.",
+            ));
+        }
+        Ok(())
     }
 
     fn message_uid(message: &StoredMessage) -> u64 {
@@ -418,6 +414,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<StoreMessageRequest>,
     ) -> Result<Response<StoreMessageResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -485,6 +482,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetMessageRequest>,
     ) -> Result<Response<GetMessageResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -516,6 +514,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<ListMessagesRequest>,
     ) -> Result<Response<ListMessagesResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -563,6 +562,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<SearchMessagesRequest>,
     ) -> Result<Response<SearchMessagesResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -601,6 +601,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<SetFlagsRequest>,
     ) -> Result<Response<SetFlagsResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -667,6 +668,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetFlagsRequest>,
     ) -> Result<Response<GetFlagsResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -703,6 +705,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<MoveMessageRequest>,
     ) -> Result<Response<MoveMessageResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, source_mailbox) = self
@@ -758,6 +761,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<CopyMessageRequest>,
     ) -> Result<Response<CopyMessageResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, source_mailbox) = self
@@ -815,6 +819,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<CreateMailboxRequest>,
     ) -> Result<Response<CreateMailboxResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let account_id = Uuid::parse_str(req.account_id.trim())
@@ -867,6 +872,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<DeleteMailboxRequest>,
     ) -> Result<Response<DeleteMailboxResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let account_id = Uuid::parse_str(req.account_id.trim())
@@ -913,6 +919,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<ListMailboxesRequest>,
     ) -> Result<Response<ListMailboxesResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let account_id = Uuid::parse_str(req.account_id.trim())
@@ -950,6 +957,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetMailboxStatusRequest>,
     ) -> Result<Response<GetMailboxStatusResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (_account_id, mailbox) = self
@@ -969,6 +977,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<ExpungeRequest>,
     ) -> Result<Response<ExpungeResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self
@@ -998,15 +1007,22 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<CreateAccountRequest>,
     ) -> Result<Response<CreateAccountResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         if req.email.trim().is_empty() || req.password.is_empty() {
             return Err(Status::invalid_argument("email and password are required"));
         }
 
-        let salt = SaltString::generate(&mut OsRng);
+        let mut salt_bytes = [0u8; 16];
+        OsRng
+            .try_fill_bytes(&mut salt_bytes)
+            .map_err(|e| Status::internal(format!("Failed to generate password salt: {e}")))?;
+        let salt = SaltString::encode_b64(&salt_bytes)
+            .map_err(|e| Status::internal(format!("Failed to encode password salt: {e}")))?;
+
         let password_hash = Argon2::default()
-            .hash_password(req.password.as_bytes(), &salt)
+            .hash_password(req.password.as_bytes(), salt.as_salt())
             .map_err(|e| Status::internal(format!("Failed to hash password: {}", e)))?
             .to_string();
 
@@ -1038,6 +1054,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetAccountRequest>,
     ) -> Result<Response<GetAccountResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let account = if !req.account_id.trim().is_empty() {
@@ -1072,6 +1089,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<AuthenticateRequest>,
     ) -> Result<Response<AuthenticateResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
         debug!(email = %mail_common::pii::redact_email(&req.email), "Authentication attempt");
 
@@ -1135,6 +1153,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetQuotaRequest>,
     ) -> Result<Response<GetQuotaResponse>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let account_id = Uuid::parse_str(req.account_id.trim())
@@ -1171,6 +1190,7 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<SubscribeMailboxRequest>,
     ) -> Result<Response<Self::SubscribeMailboxStream>, Status> {
+        self.check_rate_limit(&request)?;
         let req = request.into_inner();
 
         let (account_id, mailbox) = self

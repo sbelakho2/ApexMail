@@ -21,6 +21,12 @@ pub enum AiError {
     ArmNotFound(String),
     #[error("job not found: {0}")]
     JobNotFound(String),
+    /// AES-256-GCM encryption or decryption of bandit state failed (O-10.1).
+    #[error("encryption/decryption failed: {0}")]
+    EncryptionFailed(String),
+    /// Periodic checkpoint persistence failed (O-10.3).
+    #[error("checkpoint error: {0}")]
+    CheckpointError(String),
     #[error("internal: {0}")]
     Internal(String),
 }

@@ -20,6 +20,7 @@ fn make_event(user: &str, ip: &str, lat: f64, lon: f64) -> LoginEvent {
         timestamp: Utc::now(),
         success: true,
         tls_fingerprint: None,
+        device_fingerprint: None,
     }
 }
 

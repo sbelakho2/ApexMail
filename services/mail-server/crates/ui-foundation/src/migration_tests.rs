@@ -132,7 +132,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
                 route.pattern
             );
             assert!(
-                html.contains("<body class=\"antialiased bg-slate-900 text-slate-100\">"),
+                html.contains("<body class=\"antialiased bg-surface-950 text-surface-100\">"),
                 "[control-plane] {} missing control-plane body classes",
                 route.pattern
             );
@@ -149,7 +149,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
         }
         "marketing" | "marketing-zola" => {
             assert!(
-                html.contains("css/styles.css?h="),
+                html.contains("css/styles.css"),
                 "[{}] {} missing marketing stylesheet",
                 route.surface,
                 route.pattern
@@ -494,7 +494,7 @@ fn migration_marketing_pages_have_content() {
         ("/features", "Features"),
         ("/compliance", "Compliance"),
         ("/private-cloud", "Private Cloud"),
-        ("/case-studies", "Case Studies"),
+        ("/case-studies", "Use Cases"),
         ("/status", "System Status"),
     ];
 
@@ -551,7 +551,7 @@ fn migration_web_and_cp_share_primitives() {
     );
 
     // Both should use input class pattern
-    let input_class = "flex h-10 w-full rounded-md border border-input";
+    let input_class = "flex h-12 w-full rounded-sm border border-surface-200";
     assert!(
         web_login.contains(input_class),
         "web login missing common input class"
@@ -619,7 +619,7 @@ fn migration_pixel_parity_detects_adversarial_mutations() {
     let cases = [
         ("web", "/login", "Welcome back", "Welcome later"),
         ("control-plane", "/dashboard", "Dashboard", "DashboardX"),
-        ("marketing", "/pricing", "Simple Pricing", "Complex Pricing"),
+        ("marketing", "/pricing", "Start Free", "Start Paid"),
     ];
 
     for (surface, path, original, mutated) in cases {
@@ -654,7 +654,7 @@ fn migration_critical_css_classes_preserved() {
     let flat: Vec<&String> = classes.iter().flat_map(|c| c.iter()).collect();
 
     // Essential Tailwind classes that must be preserved
-    let required = ["min-h-screen", "text-4xl", "font-bold", "bg-gray-50"];
+    let required = ["min-h-screen", "text-5xl", "font-bold", "bg-surface-50"];
     for cls in &required {
         assert!(
             flat.iter().any(|c| c.as_str() == *cls),
@@ -848,4 +848,30 @@ fn migration_total_route_count() {
         routing::total_route_count(),
         "total route count drifted"
     );
+}
+
+#[test]
+fn dump_html_for_visual_parity() {
+    let out_dir = "/Users/sabelakhoua/IdeaProjects/ApexMail/reports/visual-parity/current_html";
+    std::fs::create_dir_all(out_dir).ok();
+
+    println!(
+        "Writing to: {:?}",
+        std::env::current_dir().unwrap().join(out_dir)
+    );
+
+    let surfaces_and_paths = vec![
+        ("web", "/login"),
+        ("web", "/dashboard"),
+        ("control-plane", "/login"),
+        ("control-plane", "/dashboard"),
+    ];
+
+    for (surface, path) in surfaces_and_paths {
+        if let Some(html) = crate::axum_router::render_route(surface, path) {
+            let filename = format!("{}_{}.html", surface, path.replace('/', "_"));
+            let path = std::path::Path::new(out_dir).join(filename);
+            std::fs::write(path, html).expect("failed to write html");
+        }
+    }
 }

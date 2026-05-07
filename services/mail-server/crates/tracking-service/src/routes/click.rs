@@ -6,8 +6,8 @@
 //! param (-041) — query params can be tampered with, token content cannot.
 //! - Only allows redirects to http/https URLs whose hostname is explicitly
 //! authorised for the tenant (blocks open-redirect attacks).
-//! - Adds `Content-Security-Policy:frame-ancestors 'none'` to prevent
-//! click-jacking (-500-455).
+//! - Adds a locked-down `Content-Security-Policy` to prevent click-jacking and
+//! script/style execution around redirect responses (-500-455).
 
 use std::net::SocketAddr;
 
@@ -22,6 +22,8 @@ use tracing::{debug, error, warn};
 use crate::processor::ClickData;
 use crate::routes::extract_client_ip;
 use crate::state::AppState;
+
+const TRACKING_CSP: &str = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'self' data:; script-src 'none'; style-src 'none'; object-src 'none'";
 
 #[derive(Deserialize)]
 pub struct ClickQuery {
@@ -145,6 +147,17 @@ async fn validate_redirect_url(
     data: Option<&crate::codec::TrackingData>,
     state: &AppState,
 ) -> Result<String, ()> {
+    // O-6.2: Enforce max redirect URL length
+    let max_len = state.config.tracking.max_redirect_url_len;
+    if url.len() > max_len {
+        warn!(
+            url_len = url.len(),
+            max_len = max_len,
+            "Click: redirect URL exceeds max length"
+        );
+        return Err(());
+    }
+
     let parsed = parse_allowed_redirect_url(url)?;
 
     if let Some(d) = data {
@@ -275,14 +288,14 @@ fn match_domain_pattern(domain: &str, pattern: &str) -> bool {
     false
 }
 
-/// Return a redirect response with `Content-Security-Policy:frame-ancestors 'none'`
-/// and the exact status code from config (typically 302).
+/// Return a redirect response with a locked-down CSP and the exact status code
+/// from config (typically 302).
 fn csp_redirect(url: &str, status: u16) -> Response {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::FOUND);
     axum::http::Response::builder()
         .status(code)
         .header("location", url)
-        .header("content-security-policy", "frame-ancestors 'none'")
+        .header("content-security-policy", TRACKING_CSP)
         .body(axum::body::Body::empty())
         .unwrap_or_default()
 }
@@ -342,5 +355,19 @@ mod tests {
 
         assert_eq!(parsed.scheme(), "https");
         assert_eq!(parsed.host_str(), Some("app.example.com"));
+    }
+
+    #[test]
+    fn csp_redirect_uses_locked_down_policy() {
+        let response = csp_redirect("https://app.example.com/path", 302);
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("script-src 'none'"));
     }
 }

@@ -13,7 +13,15 @@ use ops_service::trust::{TenantMetrics, TrustScorer};
 use pattern_matcher::matcher::build_matcher;
 
 /// Run `op` continuously for `duration` and return the count of iterations.
+///
+/// A brief warm-up phase (1 000 iterations) is performed before timing begins
+/// to prime CPU caches, branch predictors, and any JIT-like optimisations, so
+/// the measured throughput reflects steady-state performance (O-29.2).
 fn run_for<F: FnMut()>(duration: Duration, mut op: F) -> u64 {
+    // Warm-up: 1 000 iterations to reach steady state
+    for _ in 0..1_000 {
+        op();
+    }
     let start = Instant::now();
     let mut count: u64 = 0;
     while start.elapsed() < duration {
@@ -145,6 +153,7 @@ fn test_sustained_billing_calculations() {
 
 #[test]
 fn test_sustained_trust_scoring() {
+    let scorer = TrustScorer::new();
     let metrics = TenantMetrics {
         tenant_id: uuid::Uuid::new_v4(),
         bounce_rate: 0.02,
@@ -156,7 +165,7 @@ fn test_sustained_trust_scoring() {
 
     let dur = Duration::from_secs(2);
     let count = run_for(dur, || {
-        let _ = TrustScorer::compute_score(&metrics);
+        let _ = scorer.compute_score(&metrics);
     });
     let throughput = count as f64 / dur.as_secs_f64();
     eprintln!("Trust scoring throughput: {throughput:.0} ops/sec ({count} total)");

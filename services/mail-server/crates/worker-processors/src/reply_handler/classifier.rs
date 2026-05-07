@@ -1,10 +1,31 @@
 //! Pattern-based reply classification using Aho-Corasick.
+//!
+//! # ReDoS Protection (O-16.11)
+//!
+//! This module mitigates regex denial-of-service (ReDoS) through:
+//!
+//! 1. **Input length capping** — The combined `subject + body` text is truncated
+//!    to `MAX_CLASSIFIER_INPUT_BYTES` before any pattern matching, preventing
+//!    attackers from submitting multi-megabyte payloads that trigger pathological
+//!    backtracking.
+//! 2. **Aho-Corasick pre-filter** — Quick patterns use `aho_corasick::AhoCorasick`
+//!    which guarantees O(n) matching (no backtracking). The slower `regex::Regex`
+//!    patterns only execute if at least one quick pattern matched, providing a
+//!    natural rate limit on expensive matching.
+//! 3. **Synchronous timeout note** — If called from an async context, the caller
+//!    should wrap `classify()` in `tokio::task::spawn_blocking` with a timeout.
+//!    The function itself remains synchronous to maintain API compatibility,
+//!    but the input length cap prevents the worst-case ReDoS scenarios.
 
 use std::sync::LazyLock;
 
 use aho_corasick::AhoCorasick;
 use regex::Regex;
 use tracing::warn;
+
+/// Maximum combined (subject + body) input size for the classifier (O-16.11).
+/// Prevents ReDoS attacks via pathological inputs > 100 KB.
+const MAX_CLASSIFIER_INPUT_BYTES: usize = 1024 * 100; // 100 KB
 
 use super::types::{
     ActionType, ClassificationResult, ExtractedData, ReplyClassification, Sentiment,
@@ -170,8 +191,28 @@ fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
 }
 
 /// Classify a reply based on pattern matching.
+///
+/// O-16.11: Input is truncated to `MAX_CLASSIFIER_INPUT_BYTES` before any
+/// pattern matching to prevent ReDoS via pathological inputs.
 pub fn classify(subject: &str, body: &str) -> ClassificationResult {
+    // O-16.11: Cap input length to prevent ReDoS attacks. The Aho-Corasick
+    // quick patterns (O(n) guaranteed) run first; regex patterns only execute
+    // if quick patterns match, which provides a natural rate limit.
     let combined = format!("{} {}", subject, body);
+    let combined = if combined.len() > MAX_CLASSIFIER_INPUT_BYTES {
+        let truncated: String = combined
+            .chars()
+            .take(MAX_CLASSIFIER_INPUT_BYTES / 2)
+            .collect();
+        warn!(
+            input_len = combined.len(),
+            max = MAX_CLASSIFIER_INPUT_BYTES,
+            "Classifier input truncated for ReDoS protection"
+        );
+        truncated
+    } else {
+        combined
+    };
     let text = combined.to_lowercase();
 
     if let Some(quick_patterns) = QUICK_PATTERNS.as_ref() {

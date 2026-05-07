@@ -18,7 +18,7 @@
   {% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}
 {% endblock og_description %}
 
-{% block canonical %}{{ page.permalink }}{% endblock canonical %}
+{% block canonical_tag %}<link rel="canonical" href="{{ page.permalink }}" />{% endblock canonical_tag %}
 
 {% block head %}
   {# Page-specific JSON-LD if provided in extra #}
@@ -28,5 +28,8 @@
 {% endblock head %}
 
 {% block content %}
+  {# Content is rendered from trusted Markdown source files only. #}
+  {# |safe is acceptable because content authors are site owners, not end users. #}
+  {# All user-generated content is sanitized before being stored. #}
   {{ page.content | safe }}
 {% endblock content %}

@@ -1,111 +1,111 @@
 {# ── Security Isolation ────────────────────────────────────────── #}
 {# Converted from private-cloud/SecurityIsolation.tsx             #}
 
-<section class="py-20 lg:py-32 relative bg-surface-50">
+<section class="py-20 lg:py-32 relative bg-surface-100">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-16">
-      <h2 class="animate-in text-3xl lg:text-4xl font-bold text-surface-900 tracking-tight mb-4">
-        Enterprise-Grade <span class="text-primary-600">Security Isolation</span>
+      <h2 class="animate-in text-3xl lg:text-4xl font-bold text-surface-950 tracking-tight mb-4">
+        Enterprise-Grade <span class="text-surface-950">Security Isolation</span>
       </h2>
       <p class="animate-in delay-100 text-lg text-surface-600 max-w-2xl mx-auto leading-relaxed">
-        Every layer of your email infrastructure is isolated, encrypted,
-        and monitored. No shared resources, no cross-tenant risk.
+        Dedicated deployment options can isolate email infrastructure,
+        encryption boundaries, and monitoring paths based on a scoped architecture review.
       </p>
     </div>
 
     <div class="animate-in delay-200 grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-20">
-      <div class="bg-white border border-surface-200 rounded-xl p-6 hover:shadow-md transition-shadow">
-        <div class="w-12 h-12 rounded-xl bg-primary-100 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <div class="bg-white border border-surface-200 rounded-sm p-6 hover:  transition-shadow">
+        <div class="w-12 h-12 rounded-sm bg-brand-100 flex items-center justify-center mb-4">
+          <svg class="w-6 h-6 text-surface-950" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         </div>
-        <h3 class="text-lg font-bold text-surface-900 mb-2">Network Isolation</h3>
-        <p class="text-sm text-surface-600 leading-relaxed">Dedicated VPC with private subnets, NACLs, and security groups. No shared network paths with other tenants.</p>
+        <h3 class="text-lg font-bold text-surface-950 mb-2">Network Isolation</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">Dedicated VPC, private subnet, NACL, and security group patterns can be included when required by the deployment design.</p>
       </div>
-      <div class="bg-white border border-surface-200 rounded-xl p-6 hover:shadow-md transition-shadow">
-        <div class="w-12 h-12 rounded-xl bg-emerald-100 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      <div class="bg-white border border-surface-200 rounded-sm p-6 hover:  transition-shadow">
+        <div class="w-12 h-12 rounded-sm bg-success-100 flex items-center justify-center mb-4">
+          <svg class="w-6 h-6 text-success-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         </div>
-        <h3 class="text-lg font-bold text-surface-900 mb-2">Encryption at Rest</h3>
-        <p class="text-sm text-surface-600 leading-relaxed">AES-256 encryption for all stored data with customer-managed KMS keys. You control the keys, we never access them.</p>
+        <h3 class="text-lg font-bold text-surface-950 mb-2">Encryption at Rest</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">AES-256 encryption for stored data, with customer-managed key options reviewed for dedicated deployments.</p>
       </div>
-      <div class="bg-white border border-surface-200 rounded-xl p-6 hover:shadow-md transition-shadow">
-        <div class="w-12 h-12 rounded-xl bg-amber-100 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      <div class="bg-white border border-surface-200 rounded-sm p-6 hover:  transition-shadow">
+        <div class="w-12 h-12 rounded-sm bg-warning-100 flex items-center justify-center mb-4">
+          <svg class="w-6 h-6 text-warning-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
-        <h3 class="text-lg font-bold text-surface-900 mb-2">Encryption in Transit</h3>
+        <h3 class="text-lg font-bold text-surface-950 mb-2">Encryption in Transit</h3>
         <p class="text-sm text-surface-600 leading-relaxed">TLS 1.3 enforced on all connections. Opportunistic DANE and MTA-STS for outbound delivery.</p>
       </div>
-      <div class="bg-white border border-surface-200 rounded-xl p-6 hover:shadow-md transition-shadow">
-        <div class="w-12 h-12 rounded-xl bg-violet-100 flex items-center justify-center mb-4">
+      <div class="bg-white border border-surface-200 rounded-sm p-6 hover:  transition-shadow">
+        <div class="w-12 h-12 rounded-sm bg-violet-100 flex items-center justify-center mb-4">
           <svg class="w-6 h-6 text-violet-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         </div>
-        <h3 class="text-lg font-bold text-surface-900 mb-2">Access Control</h3>
+        <h3 class="text-lg font-bold text-surface-950 mb-2">Access Control</h3>
         <p class="text-sm text-surface-600 leading-relaxed">SSO/SAML integration, role-based access, IP allowlisting, and mandatory 2FA for all admin operations.</p>
       </div>
-      <div class="bg-white border border-surface-200 rounded-xl p-6 hover:shadow-md transition-shadow">
-        <div class="w-12 h-12 rounded-xl bg-cyan-100 flex items-center justify-center mb-4">
+      <div class="bg-white border border-surface-200 rounded-sm p-6 hover:  transition-shadow">
+        <div class="w-12 h-12 rounded-sm bg-cyan-100 flex items-center justify-center mb-4">
           <svg class="w-6 h-6 text-cyan-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg>
         </div>
-        <h3 class="text-lg font-bold text-surface-900 mb-2">Audit Logging</h3>
-        <p class="text-sm text-surface-600 leading-relaxed">Immutable audit trail for every API call, configuration change, and admin action. Export to your SIEM.</p>
+        <h3 class="text-lg font-bold text-surface-950 mb-2">Audit Logging</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">Audit logs for API, configuration, and admin events with export workflows for security review.</p>
       </div>
-      <div class="bg-white border border-surface-200 rounded-xl p-6 hover:shadow-md transition-shadow">
-        <div class="w-12 h-12 rounded-xl bg-red-100 flex items-center justify-center mb-4">
-          <svg class="w-6 h-6 text-red-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      <div class="bg-white border border-surface-200 rounded-sm p-6 hover:  transition-shadow">
+        <div class="w-12 h-12 rounded-sm bg-brand-100 flex items-center justify-center mb-4">
+          <svg class="w-6 h-6 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         </div>
-        <h3 class="text-lg font-bold text-surface-900 mb-2">Compliance Controls</h3>
-        <p class="text-sm text-surface-600 leading-relaxed">Built-in controls for GDPR and HIPAA compliance. SOC 2-aligned security practices available on Enterprise plans.</p>
+        <h3 class="text-lg font-bold text-surface-950 mb-2">Compliance Controls</h3>
+        <p class="text-sm text-surface-600 leading-relaxed">GDPR workflows, HIPAA BAA lifecycle, and SOC 2 control evidence workflows available on Enterprise plans.</p>
       </div>
     </div>
 
     {# Shared vs Private Cloud Comparison #}
     <div class="animate-in delay-300 max-w-4xl mx-auto">
-      <h3 class="text-xl font-bold text-surface-900 text-center mb-8">Shared Cloud vs Private Cloud</h3>
-      <div class="bg-white border border-surface-200 rounded-xl overflow-hidden">
+      <h3 class="text-xl font-bold text-surface-950 text-center mb-8">Shared Cloud vs Private Cloud</h3>
+      <div class="bg-white border border-surface-200 rounded-sm overflow-hidden">
         <div class="overflow-x-auto">
           <table class="w-full">
             <thead>
-              <tr class="bg-surface-50 border-b border-surface-200">
+              <tr class="bg-surface-100 border-b border-surface-200">
                 <th class="text-left py-3 px-6 text-xs font-semibold text-surface-500 uppercase tracking-wider">Feature</th>
                 <th class="text-center py-3 px-6 text-xs font-semibold text-surface-500 uppercase tracking-wider">Shared Cloud</th>
-                <th class="text-center py-3 px-6 text-xs font-semibold text-primary-700 uppercase tracking-wider bg-primary-50/50">Private Cloud</th>
+                <th class="text-center py-3 px-6 text-xs font-semibold text-brand-700 uppercase tracking-wider bg-brand-50/50">Private Cloud</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-surface-100">
-              <tr class="hover:bg-surface-50/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-900">Infrastructure</td>
+              <tr class="hover:bg-surface-100/50 transition-colors">
+                <td class="py-3 px-6 text-sm font-medium text-surface-950">Infrastructure</td>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Multi-tenant</td>
-                <td class="py-3 px-6 text-center text-sm font-medium text-primary-700 bg-primary-50/20">Single-tenant</td>
+                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Single-tenant</td>
               </tr>
-              <tr class="hover:bg-surface-50/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-900">IP Addresses</td>
+              <tr class="hover:bg-surface-100/50 transition-colors">
+                <td class="py-3 px-6 text-sm font-medium text-surface-950">IP Addresses</td>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Shared pool</td>
-                <td class="py-3 px-6 text-center text-sm font-medium text-primary-700 bg-primary-50/20">Dedicated pool</td>
+                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Dedicated pool</td>
               </tr>
-              <tr class="hover:bg-surface-50/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-900">Data Location</td>
+              <tr class="hover:bg-surface-100/50 transition-colors">
+                <td class="py-3 px-6 text-sm font-medium text-surface-950">Data Location</td>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Provider region</td>
-                <td class="py-3 px-6 text-center text-sm font-medium text-primary-700 bg-primary-50/20">Your chosen region</td>
+                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Scoped region</td>
               </tr>
-              <tr class="hover:bg-surface-50/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-900">Encryption Keys</td>
+              <tr class="hover:bg-surface-100/50 transition-colors">
+                <td class="py-3 px-6 text-sm font-medium text-surface-950">Encryption Keys</td>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Provider-managed</td>
-                <td class="py-3 px-6 text-center text-sm font-medium text-primary-700 bg-primary-50/20">Customer-managed (KMS)</td>
+                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Customer-managed option</td>
               </tr>
-              <tr class="hover:bg-surface-50/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-900">Network Access</td>
+              <tr class="hover:bg-surface-100/50 transition-colors">
+                <td class="py-3 px-6 text-sm font-medium text-surface-950">Network Access</td>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">Public endpoints</td>
-                <td class="py-3 px-6 text-center text-sm font-medium text-primary-700 bg-primary-50/20">VPC peering / PrivateLink</td>
+                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Private network options</td>
               </tr>
-              <tr class="hover:bg-surface-50/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-900">Compliance</td>
+              <tr class="hover:bg-surface-100/50 transition-colors">
+                <td class="py-3 px-6 text-sm font-medium text-surface-950">Compliance</td>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">GDPR</td>
-                <td class="py-3 px-6 text-center text-sm font-medium text-primary-700 bg-primary-50/20">GDPR, HIPAA (Enterprise)</td>
+                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">GDPR workflows, HIPAA BAA</td>
               </tr>
-              <tr class="hover:bg-surface-50/50 transition-colors">
-                <td class="py-3 px-6 text-sm font-medium text-surface-900">SLA</td>
+              <tr class="hover:bg-surface-100/50 transition-colors">
+                <td class="py-3 px-6 text-sm font-medium text-surface-950">SLA</td>
                 <td class="py-3 px-6 text-center text-sm text-surface-500">99.9% uptime</td>
-                <td class="py-3 px-6 text-center text-sm font-medium text-primary-700 bg-primary-50/20">Custom SLA available</td>
+                <td class="py-3 px-6 text-center text-sm font-medium text-brand-700 bg-brand-50/20">Custom SLA available</td>
               </tr>
             </tbody>
           </table>

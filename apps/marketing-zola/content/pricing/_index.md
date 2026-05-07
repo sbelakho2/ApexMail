@@ -1,6 +1,6 @@
 +++
 title = "Pricing | Simple, Transparent Pricing"
-description = "No hidden fees. Pay for what you send. Enterprise plans with dedicated IPs and SLA guarantees."
+description = "Published plan limits, overage math, and enterprise pricing. Scale and Enterprise plans include SLA guarantees, with dedicated IPs on higher tiers."
 template = "pricing.html"
 
 [extra]

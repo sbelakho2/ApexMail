@@ -10,8 +10,8 @@ Extracts and transforms all content from:
 - /tmp/apexmail_scenarios/expand_dataset.py (training patterns)
 
 All pricing transformed: Schema A → Canonical
-  $29→$25, $59→$65, $129→$150, $399→$350, $1,299→$800
-  Free: 1K→3K emails, 10K→50K API
+  $29→$25, $59→$65, $129→$150, $399→$350, $1,299→$3,000
+  Free: 1K→30K emails, 10K→300K API
   Starter: 25K→50K emails, 250K→500K API
   Pro: 50K→150K emails, 500K→2M API
   Growth: 100K→500K emails, 1M→5M API
@@ -42,14 +42,14 @@ def transform_text(text: str) -> str:
         (r'\$59/mo', '$65/mo'), (r'\$59', '$65'),
         (r'\$129/mo', '$150/mo'), (r'\$129', '$150'),
         (r'\$399/mo', '$350/mo'), (r'\$399', '$350'),
-        (r'\$1,299/mo', '$800/mo'), (r'\$1,299', '$800'),
-        (r'\$1299', '$800'),
+        (r'\$1,299/mo', '$3,000/mo'), (r'\$1,299', '$3,000'),
+        (r'\$1299', '$3,000'),
         
         # Free plan
         (r'1,000 email', '3,000 email'),
-        (r'1K email', '3K email'),
-        (r'10,000 API', '50,000 API'),
-        (r'10K API', '50K API'),
+        (r'1K email', '30K email'),
+        (r'10,000 API', '300,000 API'),
+        (r'10K API', '300K API'),
         
         # Starter plan
         (r'25,000 email', '50,000 email'),
@@ -521,8 +521,8 @@ Extracted from git history:
 - stress_test_extra.py (~80 tests, 12 categories)
 
 All pricing transformed to canonical:
-  Free=$0/3K/50K, Starter=$25/50K/500K, Pro=$65/150K/2M,
-  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$800/5M/∞
+  Free=$0/30K/300K, Starter=$25/50K/500K, Pro=$65/150K/2M,
+  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$3,000/5M/∞
 """
 
 '''

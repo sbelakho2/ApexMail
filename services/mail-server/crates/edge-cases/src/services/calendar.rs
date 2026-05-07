@@ -32,6 +32,16 @@ impl CalendarMethod {
             Self::Publish => "PUBLISH",
         }
     }
+    /// Parse a calendar METHOD string (RFC 5546 §3.2).
+    ///
+    /// # O-21.4 — Allowlist enforcement
+    /// Only the eight IANA-registered iCalendar methods are accepted:
+    /// `PUBLISH`, `REQUEST`, `REPLY`, `ADD`, `CANCEL`, `REFRESH`,
+    /// `COUNTER`, `DECLINECOUNTER`.
+    ///
+    /// Any unrecognised or malformed method string is rejected with an
+    /// error, preventing injection of arbitrary method values into
+    /// downstream iCal processing.
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_uppercase().as_str() {
             "REQUEST" => Ok(Self::Request),

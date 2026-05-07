@@ -16,16 +16,25 @@ use crate::config::EmailAuthConfig;
 
 // ── result types ───────────────────────────────────────────────────────────────
 
+/// Whether the SPF result was served from cache or freshly evaluated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpfStatus {
+    #[default]
+    Cached,
+    Fresh,
+}
+
 /// Outcome of an individual SPF check.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpfOutcome {
     pub result: SpfVerdict,
     pub domain: String,
     pub explanation: Option<String>,
+    pub status: SpfStatus,
 }
 
 /// Outcome of an individual DKIM check.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DkimOutcome {
     pub result: DkimVerdict,
     pub domain: String,
@@ -34,7 +43,7 @@ pub struct DkimOutcome {
 }
 
 /// Outcome of DMARC evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DmarcOutcome {
     pub result: DmarcVerdict,
     pub domain: String,
@@ -43,7 +52,7 @@ pub struct DmarcOutcome {
 }
 
 /// Combined results for a single message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthenticationResults {
     pub spf: SpfOutcome,
     pub dkim: Vec<DkimOutcome>,
@@ -61,8 +70,9 @@ pub enum MessageDisposition {
 
 // ── verdict enums ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpfVerdict {
+    #[default]
     Pass,
     Fail,
     SoftFail,
@@ -72,8 +82,9 @@ pub enum SpfVerdict {
     PermError,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DkimVerdict {
+    #[default]
     Pass,
     Fail,
     Neutral,
@@ -82,8 +93,9 @@ pub enum DkimVerdict {
     PermError,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DmarcVerdict {
+    #[default]
     Pass,
     Fail,
     None,
@@ -91,14 +103,15 @@ pub enum DmarcVerdict {
     PermError,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DmarcPolicy {
+    #[default]
     None,
     Quarantine,
     Reject,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DmarcAlignment {
     pub spf: bool,
     pub dkim: bool,
@@ -128,8 +141,9 @@ impl EmailAuthenticator {
         let dns_resolver =
             TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
 
+        // Default SPF cache: 10K entries, 5 min TTL
         let spf_cache = Cache::builder()
-            .max_capacity(10_000)
+            .max_capacity(config.spf_cache_max_entries)
             .time_to_live(Duration::from_secs(300))
             .build();
 
@@ -240,23 +254,30 @@ impl EmailAuthenticator {
         // are correct for empty MAIL FROM (HELO identity) and per-sender subdomains
         let cache_key = format!("{client_ip}:{helo}:{mail_from}");
         if let Some(cached) = self.spf_cache.get(&cache_key) {
+            // O-1.2:Increment SPF cache hit counter for observability
+            metrics::counter!("mta.spf_cache.hit").increment(1);
             return SpfOutcome {
                 result: cached,
                 domain: from_domain.to_string(),
                 explanation: Some("cached".into()),
+                status: SpfStatus::Cached,
             };
         }
+
+        // O-1.2:Increment SPF cache miss counter
+        metrics::counter!("mta.spf_cache.miss").increment(1);
 
         let output = self
             .resolver
             .verify_spf_sender(client_ip, helo, from_domain, mail_from)
             .await;
         let verdict = map_spf_result(&output.result());
-        self.spf_cache.insert(cache_key, verdict);
+        self.spf_cache.insert(cache_key.clone(), verdict);
         SpfOutcome {
             result: verdict,
             domain: from_domain.to_string(),
             explanation: None,
+            status: SpfStatus::Fresh,
         }
     }
 
@@ -534,6 +555,7 @@ mod tests {
             enforce_dmarc: true,
             allow_soft_fail: true,
             trusted_relays: vec![],
+            spf_cache_max_entries: 1000,
         };
         let Some(auth) = test_authenticator(config, "mx.test") else {
             return;
@@ -544,6 +566,7 @@ mod tests {
                 result: SpfVerdict::Pass,
                 domain: "example.com".into(),
                 explanation: None,
+                status: SpfStatus::Fresh,
             },
             dkim: vec![DkimOutcome {
                 result: DkimVerdict::Pass,
@@ -574,6 +597,7 @@ mod tests {
             enforce_dmarc: false,
             allow_soft_fail: false,
             trusted_relays: vec![],
+            spf_cache_max_entries: 1000,
         };
         let Some(auth) = test_authenticator(config, "mx.test") else {
             return;
@@ -584,6 +608,7 @@ mod tests {
                 result: SpfVerdict::Fail,
                 domain: "bad.com".into(),
                 explanation: None,
+                status: SpfStatus::Fresh,
             },
             dkim: vec![],
             dmarc: DmarcOutcome {
@@ -609,6 +634,7 @@ mod tests {
             enforce_dmarc: true,
             allow_soft_fail: false,
             trusted_relays: vec![],
+            spf_cache_max_entries: 1000,
         };
         let Some(auth) = test_authenticator(config, "mx.test") else {
             return;
@@ -619,6 +645,7 @@ mod tests {
                 result: SpfVerdict::Fail,
                 domain: "spoofed.com".into(),
                 explanation: None,
+                status: SpfStatus::Fresh,
             },
             dkim: vec![],
             dmarc: DmarcOutcome {
@@ -647,6 +674,7 @@ mod tests {
             result: SpfVerdict::Pass,
             domain: "example.com".into(),
             explanation: None,
+            status: SpfStatus::Fresh,
         };
         let dkim = vec![DkimOutcome {
             result: DkimVerdict::Pass,

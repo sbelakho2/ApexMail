@@ -62,6 +62,9 @@ ipnetwork.workspace = true
 # URL parsing
 url.workspace = true
 
+# HTML DOM parsing (tracking pixel/link rewriting)
+scraper = "0.20"
+
 # Pattern matching (reply classification)
 aho-corasick.workspace = true
 regex.workspace = true

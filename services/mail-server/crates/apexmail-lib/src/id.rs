@@ -1,11 +1,15 @@
 //! ID generation — nanoid, API key prefixes.
 
 use nanoid::nanoid;
+use rand::rngs::OsRng;
+use rand::TryRngCore;
 
 const DEFAULT_ALPHABET: [char; 36] = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i',
     'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
 ];
+
+const API_KEY_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// Generate a nano ID with an optional prefix.
 pub fn generate_id(prefix: &str, length: usize) -> String {
@@ -18,9 +22,25 @@ pub fn generate_id(prefix: &str, length: usize) -> String {
 }
 
 /// Generate an API key with the `am_live_` or `am_test_` prefix.
+///
+/// Uses `OsRng` (cryptographically secure) for key generation, not the
+/// non-crypto PRNG used by nanoid. The generated key is 32 characters
+/// of alphanumeric characters (upper + lower + digits) for high entropy.
 pub fn generate_api_key(is_test: bool) -> String {
     let prefix = if is_test { "am_test" } else { "am_live" };
-    generate_id(prefix, 32)
+
+    // Generate 32 alphanumeric characters using OsRng (cryptographically secure)
+    let mut key_bytes = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut key_bytes)
+        .expect("OsRng should not fail");
+
+    let random_part: String = key_bytes
+        .iter()
+        .map(|&b| API_KEY_ALPHABET[(b as usize) % API_KEY_ALPHABET.len()] as char)
+        .collect();
+
+    format!("{}_{}", prefix, random_part)
 }
 
 /// Generate a request ID.

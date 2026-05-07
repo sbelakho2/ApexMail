@@ -100,7 +100,9 @@ async fn health() -> impl IntoResponse {
 async fn render_pdf_stream(Json(req): Json<RenderRequest>) -> Result<Response, PdfApiError> {
     info!(template = %req.template, "PDF render request (stream)");
 
-    let pdf_bytes = compiler::render_pdf(&req.template, &req.data).map_err(PdfApiError::Render)?;
+    let pdf_bytes = compiler::render_pdf(&req.template, &req.data)
+        .await
+        .map_err(PdfApiError::Render)?;
 
     let filename = format!(
         "{}-{}.pdf",
@@ -130,7 +132,9 @@ async fn render_pdf_json(
 ) -> Result<Json<RenderResponse>, PdfApiError> {
     info!(template = %req.template, "PDF render request (JSON)");
 
-    let pdf_bytes = compiler::render_pdf(&req.template, &req.data).map_err(PdfApiError::Render)?;
+    let pdf_bytes = compiler::render_pdf(&req.template, &req.data)
+        .await
+        .map_err(PdfApiError::Render)?;
 
     use base64::Engine;
     let pdf_base64 = base64::engine::general_purpose::STANDARD.encode(&pdf_bytes);

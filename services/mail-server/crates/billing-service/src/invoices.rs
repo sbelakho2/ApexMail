@@ -1,7 +1,6 @@
 //! Invoice management – create, list, get by ID.
-//!
-//! VAT logic follows Estonian rules (22 % local, reverse-charge for EU B2B,
-//! 0 % for non-EU).
+
+use std::sync::LazyLock;
 
 use chrono::{DateTime, Datelike, Utc};
 use hmac::{Hmac, Mac};
@@ -10,8 +9,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::types::{Invoice, InvoiceLineItem, InvoiceStatus};
-use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -50,66 +47,18 @@ static S3_PUBLIC_URL: LazyLock<Option<String>> =
 // Constants
 // ---------------------------------------------------------------------------
 
-const ESTONIA_VAT_RATE: i32 = 22;
+/// Schema version for invoice line items JSON.
 const INVOICE_LINE_ITEMS_SCHEMA_VERSION: u32 = 1;
 
-static EU_COUNTRIES: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    let default = vec![
-        "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT",
-        "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
-    ];
-    let raw = std::env::var("EU_COUNTRIES").unwrap_or_else(|_| default.join(","));
-    raw.split(',')
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().to_uppercase())
-        .collect()
-});
-
-static EU_VAT_RATES: LazyLock<HashMap<String, i32>> = LazyLock::new(|| {
-    let mut map = HashMap::new();
-    if let Ok(raw) = std::env::var("EU_VAT_RATES") {
-        for pair in raw.split(',') {
-            let mut parts = pair.split('=');
-            if let (Some(country), Some(rate)) = (parts.next(), parts.next()) {
-                if let Ok(rate) = rate.trim().parse::<i32>() {
-                    map.insert(country.trim().to_uppercase(), rate);
-                }
-            }
-        }
-    }
-    map
-});
-
 // ---------------------------------------------------------------------------
-// Public API
+// Re-exports from billing-common
 // ---------------------------------------------------------------------------
 
-/// Calculate the VAT rate and amount for a given subtotal, customer country and
-/// optional VAT number.
-pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> (i32, i64) {
-    let country = country.to_uppercase();
-    if country == "EE" {
-        let amt = ((subtotal * ESTONIA_VAT_RATE as i64) + 50) / 100;
-        return (ESTONIA_VAT_RATE, amt);
-    }
-
-    if EU_COUNTRIES.contains(&country) {
-        if vat_number.is_some() {
-            // EU B2B reverse charge
-            return (0, 0);
-        }
-        // EU B2C – charge destination VAT rate when known
-        let rate = EU_VAT_RATES
-            .get(&country)
-            .copied()
-            .unwrap_or(ESTONIA_VAT_RATE);
-        let amt = ((subtotal * rate as i64) + 50) / 100;
-        return (rate, amt);
-    }
-
-    // Non-EU
-    (0, 0)
-}
+/// Calculate the VAT rate and amount for a given subtotal, customer country
+/// and optional VAT number.
+///
+/// Delegates to [`billing_common::vat_rates::calculate_vat`].
+pub use billing_common::vat_rates::calculate_vat;
 
 /// Generate the next invoice number in `YYYY-NNNNNN` format.
 pub async fn generate_invoice_number(pool: &PgPool) -> Result<String, InvoiceError> {
@@ -124,6 +73,57 @@ pub async fn generate_invoice_number(pool: &PgPool) -> Result<String, InvoiceErr
 }
 
 /// Input for creating an invoice.
+/// Escape HTML-special characters in a user-supplied string to prevent
+/// XSS injection into the PDF invoice template (BS-005).
+///
+/// The pdf-renderer service uses the Typst typesetting system which
+/// interprets HTML/XML-like syntax.  Without escaping, a malicious
+/// `description` field containing `<`, `>`, `&`, `"`, or `'` could
+/// inject arbitrary content into the generated PDF.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => {
+                out.push('&');
+                out.push('a');
+                out.push('m');
+                out.push('p');
+                out.push(';');
+            }
+            '<' => {
+                out.push('&');
+                out.push('l');
+                out.push('t');
+                out.push(';');
+            }
+            '>' => {
+                out.push('&');
+                out.push('g');
+                out.push('t');
+                out.push(';');
+            }
+            '"' => {
+                out.push('&');
+                out.push('q');
+                out.push('u');
+                out.push('o');
+                out.push('t');
+                out.push(';');
+            }
+            '\'' => {
+                out.push('&');
+                out.push('#');
+                out.push('3');
+                out.push('9');
+                out.push(';');
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub struct CreateInvoiceInput {
     pub tenant_id: String,
     pub stripe_invoice_id: Option<String>,
@@ -248,9 +248,28 @@ pub async fn generate_invoice_pdf(
     http_client: &reqwest::Client,
     invoice: &Invoice,
 ) -> Result<String, InvoiceError> {
+    // Sanitize user-supplied fields to prevent XSS injection into the PDF
+    // template (BS-005).  The pdf-renderer service uses Typst which can
+    // interpret HTML/XML-like syntax, so we escape the description and
+    // invoice_number fields.
+    let sanitized_line_items: Vec<serde_json::Value> = invoice
+        .line_items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "description": escape_html(&item.description),
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "amount": item.amount,
+                "vat_rate": item.vat_rate,
+                "vat_amount": item.vat_amount,
+            })
+        })
+        .collect();
+
     // Build the JSON payload expected by the invoice.typ template
     let pdf_data = serde_json::json!({
-        "invoice_number": invoice.invoice_number,
+        "invoice_number": escape_html(&invoice.invoice_number),
         "status": format!("{:?}", invoice.status).to_lowercase(),
         "currency": invoice.currency.to_uppercase(),
         "issued_at": invoice.issued_at.format("%Y-%m-%d").to_string(),
@@ -261,7 +280,7 @@ pub async fn generate_invoice_pdf(
         "subtotal": invoice.subtotal,
         "vat_total": invoice.vat_total,
         "total": invoice.total,
-        "line_items": invoice.line_items,
+        "line_items": sanitized_line_items,
     });
 
     let render_request = serde_json::json!({
@@ -639,6 +658,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use billing_common::vat_rates;
 
     #[test]
     fn missing_required_config_returns_typed_error() {
@@ -667,8 +687,8 @@ mod tests {
     #[test]
     fn vat_estonia_always_charged() {
         let (rate, amt) = calculate_vat(10_000, "EE", None);
-        assert_eq!(rate, 22);
-        assert_eq!(amt, 2_200); // 22 % of 10 000
+        assert_eq!(rate, 24);
+        assert_eq!(amt, 2_400); // 24 % of 10 000
     }
 
     #[test]
@@ -681,8 +701,9 @@ mod tests {
     #[test]
     fn vat_eu_b2c_charged() {
         let (rate, amt) = calculate_vat(10_000, "FR", None);
-        assert_eq!(rate, 22);
-        assert_eq!(amt, 2_200);
+        // France standard VAT rate is 20% (destination-based)
+        assert_eq!(rate, 20);
+        assert_eq!(amt, 2_000);
     }
 
     #[test]
@@ -702,8 +723,8 @@ mod tests {
             status: "paid".into(),
             currency: "eur".into(),
             subtotal: 1000,
-            vat_total: 220,
-            total: 1220,
+            vat_total: 240,
+            total: 1240,
             line_items: Some(serde_json::json!([])),
             issued_at: Utc::now(),
             due_at: Utc::now(),
@@ -724,8 +745,8 @@ mod tests {
             quantity: 1,
             unit_price: 1000,
             amount: 1000,
-            vat_rate: 22,
-            vat_amount: 220,
+            vat_rate: 24,
+            vat_amount: 240,
         }];
 
         let decoded = decode_invoice_line_items(serde_json::to_value(&line_items).unwrap());
@@ -771,5 +792,60 @@ mod tests {
         assert_eq!(hex_encode(&[0x00, 0xff, 0xab]), "00ffab");
         assert_eq!(hex_encode(&[]), "");
         assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    /// Verify that all 27 EU member states have a defined VAT rate in
+    /// EU_VAT_RATES and are listed in EU_COUNTRIES.
+    #[test]
+    fn test_all_eu_countries_have_vat_rates() {
+        let expected: [(&str, i32); 27] = [
+            ("AT", 20),
+            ("BE", 21),
+            ("BG", 20),
+            ("HR", 25),
+            ("CY", 19),
+            ("CZ", 21),
+            ("DK", 25),
+            ("EE", 24),
+            ("FI", 26),
+            ("FR", 20),
+            ("DE", 19),
+            ("GR", 24),
+            ("HU", 27),
+            ("IE", 23),
+            ("IT", 22),
+            ("LV", 21),
+            ("LT", 21),
+            ("LU", 17),
+            ("MT", 18),
+            ("NL", 21),
+            ("PL", 23),
+            ("PT", 23),
+            ("RO", 19),
+            ("SK", 23),
+            ("SI", 22),
+            ("ES", 21),
+            ("SE", 25),
+        ];
+
+        // Initially EU_VAT_RATES is empty by default (env var not set),
+        // so force-load defaults by dropping and re-initialising.
+        // We check the static directly in the default-loaded state.
+        for (code, _expected_rate) in &expected {
+            assert!(
+                vat_rates::EU_COUNTRIES.contains(&code.to_string()),
+                "Country {code} missing from EU_COUNTRIES"
+            );
+        }
+
+        // Verify EU_VAT_RATES has all 27 countries with correct rates
+        // by testing calculate_vat which reads from EU_VAT_RATES.
+        for (code, expected_rate) in &expected {
+            let (rate, _) = calculate_vat(10000, code, None);
+            assert_eq!(
+                rate, *expected_rate,
+                "Country {code} should have VAT rate {expected_rate}"
+            );
+        }
     }
 }

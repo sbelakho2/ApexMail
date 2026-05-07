@@ -25,9 +25,13 @@ use opentelemetry_sdk::{
     Resource,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use zeroize::Zeroizing;
 
 /// OTLP exporter configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+/// O-22.2: Added `auth_token` for OTLP exporter authentication.
+/// When set, the token is included as a bearer token in the `Authorization`
+/// header of every OTLP export request.
 pub struct OtlpConfig {
     /// OTLP collector endpoint (e.g., "http://localhost:4317")
     pub endpoint: String,
@@ -45,10 +49,54 @@ pub struct OtlpConfig {
     pub max_queue_size: usize,
     /// Batch config:scheduled delay in milliseconds
     pub scheduled_delay_ms: u64,
+    /// Optional bearer token for authenticating with the OTLP collector.
+    /// Reads from `OTEL_EXPORTER_OTLP_HEADERS` or `OTLP_AUTH_TOKEN` env var.
+    pub auth_token: Option<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for OtlpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpConfig")
+            .field("endpoint", &self.endpoint)
+            .field("service_name", &self.service_name)
+            .field("service_version", &self.service_version)
+            .field("environment", &self.environment)
+            .field("sample_rate", &self.sample_rate)
+            .field("batch_size", &self.batch_size)
+            .field("max_queue_size", &self.max_queue_size)
+            .field("scheduled_delay_ms", &self.scheduled_delay_ms)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for OtlpConfig {
     fn default() -> Self {
+        // O-22.2: Parse auth token from OTEL_EXPORTER_OTLP_HEADERS (standard)
+        // or OTLP_AUTH_TOKEN (ApexMail env var). The headers format is
+        // "key1=value1,key2=value2" per the OpenTelemetry spec.
+        let auth_token = std::env::var("OTEL_EXPORTER_OTLP_HEADERS")
+            .ok()
+            .and_then(|h| {
+                h.split(',').find_map(|pair| {
+                    let mut parts = pair.splitn(2, '=');
+                    let key = parts.next()?.trim();
+                    let value = parts.next()?;
+                    if key.eq_ignore_ascii_case("authorization") {
+                        value
+                            .strip_prefix("Bearer ")
+                            .map(|token| Zeroizing::new(token.to_string()))
+                            .or_else(|| Some(Zeroizing::new(value.to_string())))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| std::env::var("OTLP_AUTH_TOKEN").ok().map(Zeroizing::new));
+
         Self {
             endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:4317".into()),
@@ -62,6 +110,7 @@ impl Default for OtlpConfig {
             batch_size: 512,
             max_queue_size: 2048,
             scheduled_delay_ms: 5000,
+            auth_token,
         }
     }
 }
@@ -74,7 +123,7 @@ pub struct TracingGuard {
 impl Drop for TracingGuard {
     fn drop(&mut self) {
         if let Err(e) = self.provider.shutdown() {
-            eprintln!("Error shutting down OTLP tracer: {e:?}");
+            tracing::error!("Error shutting down OTLP tracer: {e:?}");
         }
     }
 }
@@ -199,11 +248,14 @@ mod tests {
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         std::env::remove_var("OTEL_SERVICE_NAME");
         std::env::remove_var("OTEL_SAMPLE_RATE");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+        std::env::remove_var("OTLP_AUTH_TOKEN");
 
         let config = OtlpConfig::default();
         assert_eq!(config.endpoint, "http://localhost:4317");
         assert_eq!(config.service_name, "apexmail");
         assert_eq!(config.sample_rate, 1.0);
+        assert!(config.auth_token.is_none());
     }
 
     #[test]
@@ -213,6 +265,8 @@ mod tests {
         std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4317");
         std::env::set_var("OTEL_SERVICE_NAME", "test-service");
         std::env::set_var("OTEL_SAMPLE_RATE", "0.5");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+        std::env::remove_var("OTLP_AUTH_TOKEN");
 
         let config = OtlpConfig::default();
         assert_eq!(config.endpoint, "http://collector:4317");
@@ -223,6 +277,42 @@ mod tests {
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         std::env::remove_var("OTEL_SERVICE_NAME");
         std::env::remove_var("OTEL_SAMPLE_RATE");
+    }
+
+    #[test]
+    fn test_auth_token_from_standard_headers_is_zeroizing() {
+        let _guard = env_lock();
+
+        std::env::set_var(
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "x-tenant=alpha,authorization=Bearer standard-secret",
+        );
+        std::env::remove_var("OTLP_AUTH_TOKEN");
+
+        let config = OtlpConfig::default();
+        assert_eq!(
+            config.auth_token.as_ref().map(|token| token.as_str()),
+            Some("standard-secret")
+        );
+        assert!(!format!("{config:?}").contains("standard-secret"));
+
+        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+    }
+
+    #[test]
+    fn test_auth_token_falls_back_to_apexmail_env() {
+        let _guard = env_lock();
+
+        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+        std::env::set_var("OTLP_AUTH_TOKEN", "fallback-secret");
+
+        let config = OtlpConfig::default();
+        assert_eq!(
+            config.auth_token.as_ref().map(|token| token.as_str()),
+            Some("fallback-secret")
+        );
+
+        std::env::remove_var("OTLP_AUTH_TOKEN");
     }
 
     #[test]

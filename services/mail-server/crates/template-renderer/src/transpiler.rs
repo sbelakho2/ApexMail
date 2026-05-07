@@ -2,13 +2,24 @@
 //!
 //! Validates template source, checks for forbidden imports,
 //! and resolves `{{ variable }}` placeholders against props.
+//!
+//! # Security
+//!
+//! Validation is performed at two levels:
+//! 1. **Regex level** — catches forbidden module imports and dangerous patterns
+//!    (e.g. `eval()`, `Function()`, `process`).
+//! 2. **AST level** — parses HTML into nodes and validates every element tag and
+//!    attribute against the allowlists defined in [`types`] (O-7.1, O-7.2).
+//!    Event-handler attributes (on*) are always rejected.
 
+use ego_tree::NodeRef;
 use regex::Regex;
+use scraper::{Html, Node};
 use std::sync::LazyLock;
 
 use crate::types::{
-    AttributeValue, NodeKind, TemplateError, TemplateNode, TranspiledTemplate, ValidationError,
-    ValidationResult, ALLOWED_MODULES,
+    is_allowed_attribute, is_allowed_element, AttributeValue, NodeKind, TemplateError,
+    TemplateNode, TranspiledTemplate, ValidationError, ValidationResult, ALLOWED_MODULES,
 };
 
 // ─── Regex patterns ────────────────────────────────────────────
@@ -22,26 +33,6 @@ static IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
 static PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}")
         .expect("PLACEHOLDER_RE: invalid regex pattern - this is a bug")
-});
-
-static TAG_OPEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>")
-        .expect("TAG_OPEN_RE: invalid regex pattern - this is a bug")
-});
-
-static TAG_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"</([a-zA-Z][a-zA-Z0-9]*)>")
-        .expect("TAG_CLOSE_RE: invalid regex pattern - this is a bug")
-});
-
-static SELF_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)\s*/>")
-        .expect("SELF_CLOSE_RE: invalid regex pattern - this is a bug")
-});
-
-static ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})"#)
-        .expect("ATTR_RE: invalid regex pattern - this is a bug")
 });
 
 static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -117,16 +108,11 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         });
     }
 
-    // HTML tag balance check
-    let open_tags: Vec<&str> = TAG_OPEN_RE
-        .captures_iter(source)
-        .filter_map(|c| c.get(1).map(|m| m.as_str()))
-        .collect();
-    let self_closing: usize = SELF_CLOSE_RE.captures_iter(source).count();
-    let close_tags: usize = TAG_CLOSE_RE.captures_iter(source).count();
-
-    if open_tags.len().saturating_sub(self_closing) != close_tags {
-        warnings.push("HTML tags may be unbalanced".to_string());
+    // O-7.1 / O-7.2: AST-level validation — parse HTML into nodes and check
+    // every element tag and attribute against the allowlists.
+    if let Ok(nodes) = parse_html_to_nodes(source) {
+        let ast_errors = validate_ast(&nodes, source);
+        errors.extend(ast_errors);
     }
 
     ValidationResult {
@@ -172,6 +158,17 @@ pub fn transpile(
     // Parse into nodes
     let nodes = parse_html_to_nodes(&stripped)?;
 
+    // O-7.1 / O-7.2: AST-level validation — check every element and attribute
+    // against the allowlists. This catches disallowed tags, blocked event
+    // handlers, and attributes not permitted on specific elements.
+    let ast_errors = validate_ast(&nodes, source);
+    if !ast_errors.is_empty() {
+        let msgs: Vec<String> = ast_errors.iter().map(|e| e.message.clone()).collect();
+        return Err(TemplateError::InvalidSyntax {
+            message: msgs.join("; "),
+        });
+    }
+
     // Collect unique imports
     let imports_used: Vec<String> = IMPORT_RE
         .captures_iter(source)
@@ -212,133 +209,153 @@ fn resolve_prop(props: &serde_json::Value, path: &str) -> String {
     }
 }
 
-fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError> {
-    let mut nodes = Vec::new();
-    let mut pos = 0;
-    let bytes = source.as_bytes();
-
-    while pos < source.len() {
-        // Try self-closing tag first
-        if let Some(cap) = SELF_CLOSE_RE.captures(&source[pos..]) {
-            if let Some(full) = cap.get(0) {
-                if full.start() == 0 {
-                    let tag = cap[1].to_string();
-                    let attrs_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-                    let attributes = parse_attributes(attrs_str);
-                    nodes.push(TemplateNode {
-                        kind: NodeKind::Element { tag },
-                        attributes,
-                        children: vec![],
+/// Validate every node in the AST against the element and attribute allowlists.
+/// Returns a list of validation errors for disallowed elements, blocked
+/// attributes, or attributes not permitted on a given element.
+fn validate_ast(nodes: &[TemplateNode], source: &str) -> Vec<ValidationError> {
+    let mut errors = Vec::new();
+    for node in nodes {
+        match &node.kind {
+            NodeKind::Element { tag } => {
+                // O-7.2: Check element against allowlist
+                if !is_allowed_element(tag) {
+                    errors.push(ValidationError {
+                        message: format!("Disallowed HTML element: <{}>", tag),
+                        line: None,
+                        column: None,
                     });
-                    pos += full.end();
-                    continue;
                 }
-            }
-        }
 
-        // Try opening tag
-        if bytes[pos] == b'<' && pos + 1 < source.len() && bytes[pos + 1] != b'/' {
-            if let Some(cap) = TAG_OPEN_RE.captures(&source[pos..]) {
-                if let Some(full) = cap.get(0) {
-                    if full.start() == 0 {
-                        let tag = cap[1].to_string();
-                        let attrs_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-                        let attributes = parse_attributes(attrs_str);
-
-                        // Find matching close tag (simplified:doesn't handle nesting of same tag)
-                        let inner_start = pos + full.end();
-                        let close_pattern = format!("</{}>", tag);
-                        if let Some(close_pos) = source[inner_start..].find(&close_pattern) {
-                            let inner = &source[inner_start..inner_start + close_pos];
-                            let children = parse_html_to_nodes(inner)?;
-                            nodes.push(TemplateNode {
-                                kind: NodeKind::Element { tag },
-                                attributes,
-                                children,
-                            });
-                            pos = inner_start + close_pos + close_pattern.len();
-                            continue;
+                // O-7.2: Check each attribute against the per-element allowlist
+                for (attr_name, _) in &node.attributes {
+                    if !is_allowed_attribute(tag, attr_name) {
+                        let msg = if attr_name.to_lowercase().starts_with("on") {
+                            format!(
+                                "Blocked event-handler attribute '{0}' on <{1}>",
+                                attr_name, tag
+                            )
                         } else {
-                            // Self-contained or unclosed — treat as leaf
-                            nodes.push(TemplateNode {
-                                kind: NodeKind::Element { tag },
-                                attributes,
-                                children: vec![],
-                            });
-                            pos += full.end();
-                            continue;
-                        }
+                            format!(
+                                "Attribute '{0}' is not allowed on element <{1}>",
+                                attr_name, tag
+                            )
+                        };
+                        errors.push(ValidationError {
+                            message: msg,
+                            line: None,
+                            column: None,
+                        });
                     }
                 }
-            }
-        }
 
-        // Text node — consume until next '<'
-        let text_end = source[pos..]
-            .find('<')
-            .map(|i| pos + i)
-            .unwrap_or(source.len());
-        let text = source[pos..text_end].trim();
-        if !text.is_empty() {
-            // Check for {{ expression }} placeholders
-            if PLACEHOLDER_RE.is_match(text) {
-                nodes.push(TemplateNode {
-                    kind: NodeKind::Expression(text.to_string()),
-                    attributes: vec![],
-                    children: vec![],
-                });
-            } else {
-                nodes.push(TemplateNode {
-                    kind: NodeKind::Text(text.to_string()),
-                    attributes: vec![],
-                    children: vec![],
-                });
+                // Recurse into children
+                errors.extend(validate_ast(&node.children, source));
             }
-        }
-        pos = text_end;
-
-        // Skip close tags at current position
-        if pos < source.len() {
-            if let Some(cap) = TAG_CLOSE_RE.captures(&source[pos..]) {
-                if let Some(full) = cap.get(0) {
-                    if full.start() == 0 {
-                        pos += full.end();
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // Safety:advance at least 1 char
-        if pos < source.len()
-            && bytes[pos] == b'<'
-            && TAG_OPEN_RE.captures(&source[pos..]).is_none()
-            && TAG_CLOSE_RE.captures(&source[pos..]).is_none()
-        {
-            pos += 1;
+            NodeKind::Text(_) | NodeKind::Expression(_) | NodeKind::Fragment => {}
         }
     }
-
-    Ok(nodes)
+    errors
 }
 
-fn parse_attributes(attrs_str: &str) -> Vec<(String, AttributeValue)> {
-    let mut attrs = Vec::new();
-    for cap in ATTR_RE.captures_iter(attrs_str) {
-        let name = cap[1].to_string();
-        let value = if let Some(v) = cap.get(4) {
-            AttributeValue::Dynamic(v.as_str().to_string())
-        } else {
-            let v = cap
-                .get(2)
-                .or_else(|| cap.get(3))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default();
-            AttributeValue::Static(v)
-        };
-        attrs.push((name, value));
+fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError> {
+    let parse_as_document = should_parse_as_document(source);
+    let document = if parse_as_document {
+        Html::parse_document(source)
+    } else {
+        Html::parse_fragment(source)
+    };
+    let root = if parse_as_document {
+        document.tree.root()
+    } else {
+        fragment_body_node(&document).unwrap_or_else(|| document.tree.root())
+    };
+
+    Ok(root
+        .children()
+        .filter_map(html_node_to_template_node)
+        .collect())
+}
+
+fn should_parse_as_document(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    lower.contains("<!doctype")
+        || lower.contains("<html")
+        || lower.contains("<head")
+        || lower.contains("<body")
+}
+
+fn fragment_body_node(document: &Html) -> Option<NodeRef<'_, Node>> {
+    document
+        .tree
+        .root()
+        .children()
+        .find(|node| is_element_named(*node, "html"))
+        .map(|html| {
+            html.children()
+                .find(|node| is_element_named(*node, "body"))
+                .unwrap_or(html)
+        })
+}
+
+fn is_element_named(node: NodeRef<'_, Node>, expected: &str) -> bool {
+    matches!(node.value(), Node::Element(element) if element.name().eq_ignore_ascii_case(expected))
+}
+
+fn html_node_to_template_node(node: NodeRef<'_, Node>) -> Option<TemplateNode> {
+    match node.value() {
+        Node::Element(element) => {
+            let tag = element.name().to_string();
+            let attributes = element
+                .attrs()
+                .map(|(name, value)| (name.to_string(), parse_html_attribute_value(value)))
+                .collect();
+            let children = node
+                .children()
+                .filter_map(html_node_to_template_node)
+                .collect();
+
+            Some(TemplateNode {
+                kind: NodeKind::Element { tag },
+                attributes,
+                children,
+            })
+        }
+        Node::Text(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+
+            let kind = if PLACEHOLDER_RE.is_match(text) {
+                NodeKind::Expression(text.to_string())
+            } else {
+                NodeKind::Text(text.to_string())
+            };
+
+            Some(TemplateNode {
+                kind,
+                attributes: vec![],
+                children: vec![],
+            })
+        }
+        Node::Document
+        | Node::Fragment
+        | Node::Doctype(_)
+        | Node::Comment(_)
+        | Node::ProcessingInstruction(_) => None,
     }
-    attrs
+}
+
+fn parse_html_attribute_value(value: &str) -> AttributeValue {
+    let trimmed = value.trim();
+    if let Some(expression) = trimmed
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+    {
+        AttributeValue::Dynamic(expression.trim().to_string())
+    } else {
+        AttributeValue::Static(value.to_string())
+    }
 }
 
 fn find_line_number(source: &str, byte_offset: usize) -> Option<u32> {
@@ -382,6 +399,29 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_disallowed_element() {
+        let result = validate_source(r#"<script>alert('x')</script>"#, 4096);
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.message.contains("Disallowed HTML element")));
+    }
+
+    #[test]
+    fn test_validate_rejects_event_handler_attribute() {
+        let result = validate_source(
+            r#"<a href="https://example.com" onclick="alert(1)">x</a>"#,
+            4096,
+        );
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.message.contains("Blocked event-handler attribute")));
+    }
+
+    #[test]
     fn test_transpile_simple_html() {
         let source = "<div><p>Hello World</p></div>";
         let result = transpile(source, 4096).unwrap();
@@ -408,6 +448,14 @@ mod tests {
         let source = "<div>eval('alert(1)')</div>";
         let err = transpile(source, 4096).unwrap_err();
         assert!(matches!(err, TemplateError::InvalidSyntax { .. }));
+    }
+
+    #[test]
+    fn test_transpile_rejects_attribute_not_allowed_on_element() {
+        let source = r#"<img href="https://example.com/logo.png" alt="Logo">"#;
+        let err = transpile(source, 4096).unwrap_err();
+        assert!(matches!(err, TemplateError::InvalidSyntax { .. }));
+        assert!(err.to_string().contains("not allowed on element"));
     }
 
     #[test]
@@ -443,17 +491,35 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_attributes_static() {
-        let attrs = parse_attributes(r#"class="btn" id="main""#);
-        assert_eq!(attrs.len(), 2);
-        assert!(matches!(&attrs[0].1, AttributeValue::Static(v) if v == "btn"));
+    fn test_html5_parser_preserves_attributes() {
+        let nodes = parse_html_to_nodes(r#"<img src="{logo_url}" alt="Logo">"#).unwrap();
+        let attrs = &nodes[0].attributes;
+
+        assert!(attrs.iter().any(|(name, value)| name == "src"
+            && matches!(value, AttributeValue::Dynamic(v) if v == "logo_url")));
+        assert!(attrs.iter().any(|(name, value)| name == "alt"
+            && matches!(value, AttributeValue::Static(v) if v == "Logo")));
     }
 
     #[test]
-    fn test_parse_attributes_dynamic() {
-        let attrs = parse_attributes(r#"onClick={handleClick} class="btn""#);
-        assert_eq!(attrs.len(), 2);
-        assert!(matches!(&attrs[0].1, AttributeValue::Dynamic(v) if v == "handleClick"));
+    fn test_html5_parser_handles_nested_same_tag() {
+        let source = "<div><div><p>Inner</p></div><p>Outer</p></div>";
+        let result = transpile(source, 4096).unwrap();
+
+        assert_eq!(result.nodes.len(), 1);
+        assert!(matches!(
+            &result.nodes[0].kind,
+            NodeKind::Element { tag } if tag == "div"
+        ));
+        assert_eq!(result.nodes[0].children.len(), 2);
+        assert!(matches!(
+            &result.nodes[0].children[0].kind,
+            NodeKind::Element { tag } if tag == "div"
+        ));
+        assert!(matches!(
+            &result.nodes[0].children[1].kind,
+            NodeKind::Element { tag } if tag == "p"
+        ));
     }
 
     #[test]

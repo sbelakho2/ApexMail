@@ -126,13 +126,52 @@ impl AnalyticsPredictor {
             ));
         }
 
-        // Initialise centroids evenly spaced
-        let mut centroids: Vec<f64> = (0..k)
-            .map(|i| {
-                let idx = i * n / k;
-                engagement_scores[idx]
-            })
-            .collect();
+        // K-means++ initialisation: select centroids probabilistically, with
+        // probability proportional to squared distance from nearest existing
+        // centroid. This avoids empty clusters common with naive first-k-points
+        // or evenly-spaced initialization (M-37).
+        use rand::Rng;
+        let mut rng = rand::rng();
+        let mut centroids: Vec<f64> = Vec::with_capacity(k);
+
+        // Pick the first centroid uniformly at random
+        let first_idx = rng.random_range(0..n);
+        centroids.push(engagement_scores[first_idx]);
+
+        for _ in 1..k {
+            // Compute squared distance from each point to its nearest centroid
+            let mut distances: Vec<f64> = engagement_scores
+                .iter()
+                .map(|&score| {
+                    centroids
+                        .iter()
+                        .map(|&c| (score - c).abs().powi(2))
+                        .fold(f64::INFINITY, f64::min)
+                })
+                .collect();
+
+            // Total of all distances for normalisation
+            let total: f64 = distances.iter().sum();
+            if total <= 0.0 {
+                // All remaining points are identical to existing centroids;
+                // pick remaining centroids uniformly as fallback
+                let fallback_idx = rng.random_range(0..n);
+                centroids.push(engagement_scores[fallback_idx]);
+                continue;
+            }
+
+            // Normalise to probabilities
+            let mut cumulative = 0.0_f64;
+            for d in distances.iter_mut() {
+                cumulative += *d / total;
+                *d = cumulative;
+            }
+
+            // Sample next centroid according to weighted distribution
+            let r: f64 = rng.random();
+            let chosen = distances.iter().position(|&d| r <= d).unwrap_or(n - 1);
+            centroids.push(engagement_scores[chosen]);
+        }
 
         let mut assignments = vec![0usize; n];
         let max_iters = 100;

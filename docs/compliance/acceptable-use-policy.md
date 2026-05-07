@@ -202,7 +202,7 @@ The following triggers result in **automatic** action without manual review:
 
 Suspended or terminated users may appeal by:
 
-1. Submitting an appeal via email to trust@apexmail.com within **14 days** of
+1. Submitting an appeal via email to trust@apexmail.ee within **14 days** of
    the enforcement action.
 2. Including: account identifier, description of the situation, evidence of
    corrective action taken, and a plan to prevent recurrence.
@@ -231,9 +231,9 @@ If an appeal is successful:
 
 Recipients or third parties may report AUP violations via:
 
-- **Abuse email:** abuse@apexmail.com
+- **Abuse email:** abuse@apexmail.ee
 - **Unsubscribe complaints:** Processed automatically via feedback loops.
-- **Postmaster reports:** Via postmaster@apexmail.com.
+- **Postmaster reports:** Via postmaster@apexmail.ee.
 
 ### 9.2 Response SLA
 

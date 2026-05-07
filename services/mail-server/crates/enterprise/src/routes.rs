@@ -27,7 +27,9 @@ use crate::sso::SSOService;
 use crate::sub_accounts::SubAccountService;
 use crate::support::SupportService;
 use crate::template_approval::TemplateApprovalService;
-use crate::types::{ApiResult, ContractAdditionalFee, ContractRenewalTerms, SSOConfigureRequest};
+use crate::types::{
+    ApiResult, ContractAdditionalFee, ContractRenewalTerms, SSOConfigureRequest, SubAccount,
+};
 use crate::whitelabel::WhiteLabelService;
 
 // ── Shared state ───────────────────────────────────────────────────────
@@ -45,10 +47,18 @@ pub struct AppState {
     pub templates: TemplateApprovalService,
     pub whitelabel: WhiteLabelService,
     pub qbr: QBRService,
+    /// Shared HTTP client with connection pooling — avoids creating a new
+    /// reqwest::Client per request (H-04).
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
     pub fn new(db: PgPool, config: Config) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("Failed to build HTTP client");
         Self {
             config: config.clone(),
             contracts: ContractService::new(db.clone()),
@@ -70,6 +80,7 @@ impl AppState {
             whitelabel: WhiteLabelService::new(db.clone()),
             qbr: QBRService::new(db.clone()),
             db,
+            http_client,
         }
     }
 }
@@ -117,14 +128,22 @@ async fn auth_middleware(
         return err_json(StatusCode::UNAUTHORIZED, "Missing bearer token").into_response();
     };
 
-    let mut validation = Validation::new(Algorithm::HS256);
+    let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
+    validation.validate_nbf = true;
 
-    let claims = match jsonwebtoken::decode::<JwtClaims>(
-        token,
-        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
-        &validation,
-    ) {
+    let decoding_key = match DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes()) {
+        Ok(key) => key,
+        Err(_) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Server configuration error: invalid JWT public key",
+            )
+            .into_response()
+        }
+    };
+
+    let claims = match jsonwebtoken::decode::<JwtClaims>(token, &decoding_key, &validation) {
         Ok(token) => token.claims,
         Err(_) => {
             return err_json(StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response()
@@ -143,11 +162,13 @@ async fn auth_middleware(
 // ── Request body types ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PaginationParams {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatusFilterParams {
     pub status: Option<String>,
     pub priority: Option<String>,
@@ -155,6 +176,7 @@ pub struct StatusFilterParams {
     pub offset: Option<i64>,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditFilterParams {
     pub action: Option<String>,
     pub resource_type: Option<String>,
@@ -162,16 +184,18 @@ pub struct AuditFilterParams {
     pub offset: Option<i64>,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DomainQuery {
     pub domain: Option<String>,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IndustryQuery {
     pub industry: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractCommittedVolumeBody {
     pub emails: i64,
     pub api_calls: i64,
@@ -179,7 +203,7 @@ pub struct ContractCommittedVolumeBody {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractOverageRatesBody {
     pub emails_per_thousand: i64,
     pub api_calls_per_thousand: i64,
@@ -187,7 +211,7 @@ pub struct ContractOverageRatesBody {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractCreateBody {
     pub start_date: chrono::DateTime<chrono::Utc>,
     pub end_date: chrono::DateTime<chrono::Utc>,
@@ -202,7 +226,7 @@ pub struct ContractCreateBody {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractSignBody {
     pub signature_data: String,
     pub signer_name: String,
@@ -211,7 +235,7 @@ pub struct ContractSignBody {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractAmendmentChangesBody {
     pub base_fee: Option<i64>,
     pub committed_volume: Option<ContractCommittedVolumeOptionalBody>,
@@ -220,7 +244,7 @@ pub struct ContractAmendmentChangesBody {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractCommittedVolumeOptionalBody {
     pub emails: Option<i64>,
     pub api_calls: Option<i64>,
@@ -228,7 +252,7 @@ pub struct ContractCommittedVolumeOptionalBody {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractOverageRatesOptionalBody {
     pub emails_per_thousand: Option<i64>,
     pub api_calls_per_thousand: Option<i64>,
@@ -236,21 +260,21 @@ pub struct ContractOverageRatesOptionalBody {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractAmendmentBody {
     pub reason: String,
     pub proposed_changes: ContractAmendmentChangesBody,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractCancelBody {
     pub reason: String,
     pub effective_date: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractRenewTermsBody {
     pub base_fee: Option<i64>,
     pub committed_volume: Option<ContractCommittedVolumeOptionalBody>,
@@ -258,14 +282,14 @@ pub struct ContractRenewTermsBody {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractRenewBody {
     pub new_end_date: chrono::DateTime<chrono::Utc>,
     pub new_terms: Option<ContractRenewTermsBody>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PurchaseOrderBody {
     pub po_number: String,
     pub amount: i64,
@@ -275,6 +299,7 @@ pub struct PurchaseOrderBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComplianceEnableBody {
     pub tenant_id: String,
     pub frameworks: Vec<String>,
@@ -282,6 +307,7 @@ pub struct ComplianceEnableBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BAABody {
     pub tenant_id: String,
     pub signatory_name: String,
@@ -290,6 +316,7 @@ pub struct BAABody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditLogBody {
     pub tenant_id: String,
     pub user_id: Option<String>,
@@ -302,9 +329,11 @@ pub struct AuditLogBody {
     pub user_agent: Option<String>,
     pub session_id: Option<String>,
     pub request_id: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DataAccessBody {
     pub tenant_id: String,
     pub requester_id: String,
@@ -316,12 +345,14 @@ pub struct DataAccessBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DataAccessApproveBody {
     pub approved_by: String,
     pub duration_minutes: i32,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DataDeletionBody {
     pub tenant_id: String,
     pub requester_id: String,
@@ -330,6 +361,7 @@ pub struct DataDeletionBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogStreamCreateBody {
     pub tenant_id: String,
     pub name: String,
@@ -343,6 +375,7 @@ pub struct LogStreamCreateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogStreamUpdateBody {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -351,6 +384,7 @@ pub struct LogStreamUpdateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeployCreateBody {
     pub tenant_id: String,
     pub name: String,
@@ -360,6 +394,7 @@ pub struct DeployCreateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DedicatedIPBody {
     pub tenant_id: String,
     pub deployment_id: Option<Uuid>,
@@ -367,17 +402,20 @@ pub struct DedicatedIPBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BYOIPBody {
     pub tenant_id: String,
     pub cidr_block: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BYOIPVerifyBody {
     pub verification_token: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubAccountCreateBody {
     pub parent_id: Uuid,
     pub name: String,
@@ -389,6 +427,7 @@ pub struct SubAccountCreateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubAccountUpdateBody {
     pub name: Option<String>,
     pub email: Option<String>,
@@ -397,11 +436,13 @@ pub struct SubAccountUpdateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubAccountSuspendBody {
     pub reason: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApiKeyCreateBody {
     pub name: String,
     pub permissions: Option<Vec<String>>,
@@ -409,6 +450,7 @@ pub struct ApiKeyCreateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketCreateBody {
     pub tenant_id: String,
     pub subject: String,
@@ -419,6 +461,7 @@ pub struct TicketCreateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketUpdateBody {
     pub status: Option<String>,
     pub priority: Option<String>,
@@ -426,6 +469,7 @@ pub struct TicketUpdateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommentBody {
     pub author_id: String,
     pub author_name: String,
@@ -435,23 +479,27 @@ pub struct CommentBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommentFilterParams {
     pub include_internal: Option<bool>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EscalateBody {
     pub reason: String,
     pub escalated_by: Uuid,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SatisfactionBody {
     pub rating: i32,
     pub feedback: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateSubmitBody {
     pub tenant_id: String,
     pub name: String,
@@ -462,18 +510,21 @@ pub struct TemplateSubmitBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateReviewBody {
     pub reviewed_by: String,
     pub notes: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateRejectBody {
     pub reviewed_by: String,
     pub reason: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WhiteLabelConfigBody {
     pub tenant_id: String,
     pub company_name: Option<String>,
@@ -488,6 +539,7 @@ pub struct WhiteLabelConfigBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DomainAddBody {
     pub tenant_id: String,
     pub domain: String,
@@ -495,6 +547,7 @@ pub struct DomainAddBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmailTemplateBody {
     pub tenant_id: String,
     pub template_type: String,
@@ -504,6 +557,7 @@ pub struct EmailTemplateBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QBRScheduleBody {
     pub tenant_id: String,
     pub quarter: i32,
@@ -513,12 +567,14 @@ pub struct QBRScheduleBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QBRFeedbackBody {
     pub rating: i32,
     pub feedback_text: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QBRGoalUpdateBody {
     pub goal_id: Uuid,
     pub current_value: f64,
@@ -754,6 +810,18 @@ fn resolve_tenant_id(
             "Tenant override requires admin access",
         )),
         None => Ok(auth.tenant_id.clone()),
+    }
+}
+
+/// Verify that the authenticated user owns (or is an admin of) the given tenant.
+fn verify_tenant_access(
+    auth: &AuthContext,
+    tenant_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if auth.is_admin || auth.tenant_id == tenant_id {
+        Ok(())
+    } else {
+        Err(err_json(StatusCode::FORBIDDEN, "Tenant access denied"))
     }
 }
 
@@ -1312,8 +1380,12 @@ async fn sso_cleanup_sessions(State(state): State<S>) -> impl IntoResponse {
 
 async fn compliance_enable(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<ComplianceEnableBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .compliance
@@ -1328,15 +1400,23 @@ async fn compliance_enable(
 
 async fn compliance_get_config(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.compliance.get_config(tenant_id).await)
 }
 
 async fn compliance_sign_baa(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<BAABody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .compliance
@@ -1352,15 +1432,23 @@ async fn compliance_sign_baa(
 
 async fn compliance_zero_retention(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.compliance.enable_zero_retention(tenant_id).await)
 }
 
 async fn compliance_log_audit(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<AuditLogBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     match state
         .compliance
         .log_audit(
@@ -1375,6 +1463,7 @@ async fn compliance_log_audit(
             body.user_agent.as_deref(),
             body.session_id.as_deref(),
             body.request_id.as_deref(),
+            body.metadata,
         )
         .await
     {
@@ -1385,9 +1474,13 @@ async fn compliance_log_audit(
 
 async fn compliance_get_audit_logs(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
     Query(q): Query<AuditFilterParams>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(
@@ -1406,8 +1499,12 @@ async fn compliance_get_audit_logs(
 
 async fn compliance_data_access(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<DataAccessBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .compliance
@@ -1439,8 +1536,12 @@ async fn compliance_approve_access(
 
 async fn compliance_data_deletion(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<DataDeletionBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .compliance
@@ -1456,15 +1557,23 @@ async fn compliance_data_deletion(
 
 async fn compliance_report(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.compliance.generate_report(tenant_id).await)
 }
 
 async fn compliance_status(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.compliance.get_status(tenant_id).await)
 }
 
@@ -1473,8 +1582,12 @@ async fn compliance_status(
 /// Get encryption status for a tenant (key info without revealing key material).
 async fn encryption_status(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     // Check if HIPAA compliance is configured with encryption_at_rest
     let config = match state.compliance.get_config(tenant_id.clone()).await {
         Ok(r) => r,
@@ -1484,8 +1597,7 @@ async fn encryption_status(
                 Json(serde_json::json!({
                     "error": { "code": "INTERNAL_ERROR", "message": e }
                 })),
-            )
-                .into_response()
+            );
         }
     };
 
@@ -1499,10 +1611,11 @@ async fn encryption_status(
         "key_wrapping": "AES-256-GCM (envelope encryption)",
     });
 
-    (StatusCode::OK, Json(status)).into_response()
+    (StatusCode::OK, Json(status))
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EncryptFieldBody {
     pub tenant_id: String,
     pub field_name: String,
@@ -1527,8 +1640,12 @@ fn managed_field_encryptor(
 /// - Batch migration of existing unencrypted PHI data.
 async fn encrypt_field(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<EncryptFieldBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     let encryptor = match managed_field_encryptor(&state.config) {
         Ok(encryptor) => encryptor,
         Err(error) => {
@@ -1537,8 +1654,7 @@ async fn encrypt_field(
                 Json(serde_json::json!({
                     "error": { "code": "ENCRYPTION_CONFIG_ERROR", "message": error }
                 })),
-            )
-                .into_response()
+            );
         }
     };
 
@@ -1553,19 +1669,18 @@ async fn encrypt_field(
                 "is_phi": crate::field_encryption::PHI_FIELDS.contains(&body.field_name.as_str()),
                 "key_reference": "server-managed"
             })),
-        )
-            .into_response(),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "error": { "code": "ENCRYPTION_FAILED", "message": format!("{e}") }
             })),
-        )
-            .into_response(),
+        ),
     }
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DecryptFieldBody {
     #[allow(unused)]
     pub tenant_id: String,
@@ -1577,8 +1692,12 @@ struct DecryptFieldBody {
 /// Decrypt a single field value (for testing/migration tooling).
 async fn decrypt_field(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<DecryptFieldBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     let encryptor = match managed_field_encryptor(&state.config) {
         Ok(encryptor) => encryptor,
         Err(error) => {
@@ -1587,8 +1706,7 @@ async fn decrypt_field(
                 Json(serde_json::json!({
                     "error": { "code": "ENCRYPTION_CONFIG_ERROR", "message": error }
                 })),
-            )
-                .into_response()
+            );
         }
     };
 
@@ -1599,15 +1717,13 @@ async fn decrypt_field(
                 "decrypted": true,
                 "value": decrypted,
             })),
-        )
-            .into_response(),
+        ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": { "code": "DECRYPTION_FAILED", "message": format!("{e}") }
             })),
-        )
-            .into_response(),
+        ),
     }
 }
 
@@ -1615,8 +1731,12 @@ async fn decrypt_field(
 
 async fn log_stream_create(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<LogStreamCreateBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .log_streaming
@@ -1664,8 +1784,12 @@ async fn log_stream_delete(State(state): State<S>, Path(id): Path<Uuid>) -> impl
 
 async fn log_stream_list(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.log_streaming.list(tenant_id).await)
 }
 
@@ -1689,8 +1813,12 @@ async fn log_stream_stats(State(state): State<S>, Path(id): Path<Uuid>) -> impl 
 
 async fn deploy_create(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<DeployCreateBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .private_deploy
@@ -1709,7 +1837,14 @@ async fn deploy_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoRe
     service_result(state.private_deploy.get(id).await)
 }
 
-async fn deploy_list(State(state): State<S>, Path(tenant_id): Path<String>) -> impl IntoResponse {
+async fn deploy_list(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(tenant_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.private_deploy.list(tenant_id).await)
 }
 
@@ -1723,8 +1858,12 @@ async fn deploy_health(State(state): State<S>, Path(id): Path<Uuid>) -> impl Int
 
 async fn ip_allocate(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<DedicatedIPBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .private_deploy
@@ -1739,9 +1878,13 @@ async fn ip_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoRespon
 
 async fn ip_list(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
     Query(q): Query<PaginationParams>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(
@@ -1759,7 +1902,14 @@ async fn ip_reputation(
     service_result(state.private_deploy.get_ip_reputation(&ip_address).await)
 }
 
-async fn byoip_register(State(state): State<S>, Json(body): Json<BYOIPBody>) -> impl IntoResponse {
+async fn byoip_register(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<BYOIPBody>,
+) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .private_deploy
@@ -1785,8 +1935,12 @@ async fn byoip_verify(
 
 async fn sub_account_create(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<SubAccountCreateBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.parent_id.to_string()) {
+        return e;
+    }
     service_result(
         state
             .sub_accounts
@@ -1803,15 +1957,42 @@ async fn sub_account_create(
     )
 }
 
-async fn sub_account_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.sub_accounts.get(id).await)
+async fn sub_account_get(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    // Fetch sub-account first to verify parent tenant ownership
+    let result = state.sub_accounts.get(id).await;
+    if let Ok(ref api_result) = result {
+        if let Some(ref sub) = api_result.data {
+            if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                return e;
+            }
+        }
+    }
+    service_result(result)
 }
 
 async fn sub_account_update(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<SubAccountUpdateBody>,
 ) -> impl IntoResponse {
+    // Verify parent tenant ownership first by looking up the sub-account
+    match state.sub_accounts.get(id).await {
+        Ok(api_result) => {
+            if let Some(ref sub) = api_result.data {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                    return e;
+                }
+            } else {
+                return service_result::<SubAccount>(Ok(api_result));
+            }
+        }
+        Err(e) => return service_result::<SubAccount>(Err(e)),
+    }
     service_result(
         state
             .sub_accounts
@@ -1826,15 +2007,36 @@ async fn sub_account_update(
     )
 }
 
-async fn sub_account_delete(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
+async fn sub_account_delete(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    // Verify parent tenant ownership first by looking up the sub-account
+    match state.sub_accounts.get(id).await {
+        Ok(api_result) => {
+            if let Some(ref sub) = api_result.data {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                    return e;
+                }
+            } else {
+                return service_result::<SubAccount>(Ok(api_result));
+            }
+        }
+        Err(e) => return service_result::<SubAccount>(Err(e)),
+    }
     service_result(state.sub_accounts.delete(id).await)
 }
 
 async fn sub_account_list(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(parent_id): Path<Uuid>,
     Query(q): Query<StatusFilterParams>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &parent_id.to_string()) {
+        return e;
+    }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(
@@ -1847,24 +2049,56 @@ async fn sub_account_list(
 
 async fn sub_account_suspend(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<SubAccountSuspendBody>,
 ) -> impl IntoResponse {
+    // Verify parent tenant ownership first by looking up the sub-account
+    match state.sub_accounts.get(id).await {
+        Ok(api_result) => {
+            if let Some(ref sub) = api_result.data {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                    return e;
+                }
+            } else {
+                return service_result::<SubAccount>(Ok(api_result));
+            }
+        }
+        Err(e) => return service_result::<SubAccount>(Err(e)),
+    }
     service_result(state.sub_accounts.suspend(id, body.reason.as_deref()).await)
 }
 
 async fn sub_account_stats(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(parent_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &parent_id.to_string()) {
+        return e;
+    }
     service_result(state.sub_accounts.get_stats(parent_id).await)
 }
 
 async fn sub_account_api_key(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<ApiKeyCreateBody>,
 ) -> impl IntoResponse {
+    // Verify parent tenant ownership first by looking up the sub-account
+    match state.sub_accounts.get(id).await {
+        Ok(api_result) => {
+            if let Some(ref sub) = api_result.data {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id.to_string()) {
+                    return e;
+                }
+            } else {
+                return service_result::<SubAccount>(Ok(api_result));
+            }
+        }
+        Err(e) => return service_result::<SubAccount>(Err(e)),
+    }
     service_result(
         state
             .sub_accounts
@@ -1877,8 +2111,12 @@ async fn sub_account_api_key(
 
 async fn ticket_create(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<TicketCreateBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .support
@@ -1918,9 +2156,13 @@ async fn ticket_update(
 
 async fn ticket_list(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
     Query(q): Query<StatusFilterParams>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(
@@ -1998,8 +2240,12 @@ async fn ticket_satisfaction(
 
 async fn support_metrics(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.support.get_metrics(&tenant_id).await)
 }
 
@@ -2007,8 +2253,12 @@ async fn support_metrics(
 
 async fn template_submit(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<TemplateSubmitBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .templates
@@ -2030,9 +2280,13 @@ async fn template_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl Into
 
 async fn template_list(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
     Query(q): Query<StatusFilterParams>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(
@@ -2090,8 +2344,12 @@ async fn template_request_changes(
 
 async fn template_stats(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.templates.get_stats(tenant_id).await)
 }
 
@@ -2099,8 +2357,12 @@ async fn template_stats(
 
 async fn whitelabel_update_config(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<WhiteLabelConfigBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .whitelabel
@@ -2122,15 +2384,23 @@ async fn whitelabel_update_config(
 
 async fn whitelabel_get_config(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.whitelabel.get_config(tenant_id).await)
 }
 
 async fn whitelabel_add_domain(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<DomainAddBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .whitelabel
@@ -2148,9 +2418,13 @@ async fn whitelabel_verify_domain(
 
 async fn whitelabel_list_domains(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
     Query(q): Query<PaginationParams>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(
@@ -2163,16 +2437,24 @@ async fn whitelabel_list_domains(
 
 async fn whitelabel_remove_domain(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path((tenant_id, id)): Path<(String, Uuid)>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     // #250:Now requires tenant_id for ownership verification
     service_result(state.whitelabel.remove_domain(id, tenant_id).await)
 }
 
 async fn whitelabel_update_templates(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<EmailTemplateBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .whitelabel
@@ -2189,8 +2471,12 @@ async fn whitelabel_update_templates(
 
 async fn whitelabel_get_templates(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     service_result(state.whitelabel.get_email_templates(tenant_id).await)
 }
 
@@ -2198,8 +2484,12 @@ async fn whitelabel_get_templates(
 
 async fn qbr_schedule(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<QBRScheduleBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
+        return e;
+    }
     service_result(
         state
             .qbr
@@ -2220,9 +2510,13 @@ async fn qbr_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoRespo
 
 async fn qbr_list(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
     Query(q): Query<PaginationParams>,
 ) -> impl IntoResponse {
+    if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
+        return e;
+    }
     let limit = clamp_limit(q.limit.unwrap_or(50), 200);
     let offset = clamp_offset(q.offset.unwrap_or(0));
     service_result(state.qbr.list(tenant_id, limit, offset).await)
@@ -2279,9 +2573,13 @@ static PDF_RENDERER_URL: std::sync::LazyLock<String> = std::sync::LazyLock::new(
 /// POST /dpa/:tenant_id/pdf — Generate a GDPR Data Processing Agreement PDF
 async fn dpa_generate_pdf(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if auth.tenant_id != tenant_id && !auth.is_admin {
+        return Err((StatusCode::FORBIDDEN, "Tenant access denied".to_string()));
+    }
     // Fetch compliance config for this tenant
     let status = match state.compliance.get_status(tenant_id.clone()).await {
         Ok(s) => s,
@@ -2311,16 +2609,8 @@ async fn dpa_generate_pdf(
         "data": data,
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("http client error: {e}"),
-            )
-        })?;
-    let resp = client
+    let resp = state
+        .http_client
         .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
         .json(&payload)
         .send()
@@ -2386,16 +2676,8 @@ async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl 
         "data": qbr_json,
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("http client error: {e}"),
-            )
-        })?;
-    let resp = client
+    let resp = state
+        .http_client
         .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
         .json(&payload)
         .send()
@@ -2444,8 +2726,12 @@ async fn qbr_generate_pdf(State(state): State<S>, Path(id): Path<Uuid>) -> impl 
 /// GET /compliance/report/:tenant_id/pdf — Generate a compliance report PDF
 async fn compliance_report_pdf(
     State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    if auth.tenant_id != tenant_id && !auth.is_admin {
+        return Err((StatusCode::FORBIDDEN, "Tenant access denied".to_string()));
+    }
     // Fetch compliance report and status
     let report = match state.compliance.generate_report(tenant_id).await {
         Ok(r) => r,
@@ -2469,16 +2755,8 @@ async fn compliance_report_pdf(
         "data": report_json,
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("http client error: {e}"),
-            )
-        })?;
-    let resp = client
+    let resp = state
+        .http_client
         .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
         .json(&payload)
         .send()
@@ -2536,7 +2814,7 @@ mod tests {
     #[tokio::test]
     async fn contract_routes_exist_at_root_and_legacy_prefix() {
         let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://apexmail:devpass123@localhost:5432/apexmail")
+            .connect_lazy("postgres://localhost/unused")
             .unwrap();
         let config = Config::from_env().unwrap();
         let app = router(Arc::new(AppState::new(pool, config)));

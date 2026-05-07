@@ -36,6 +36,8 @@ async fn main() -> anyhow::Result<()> {
         slo: SloTracker::new(),
         warmup: IpWarmupManager::new(db),
         api_key: config.ops_api_key.clone(),
+        // O-23.5: Pass all valid API keys (legacy single key + rotation keys).
+        api_keys: config.all_api_keys(),
         trust_cache: Arc::new(DashMap::new()),
     };
 

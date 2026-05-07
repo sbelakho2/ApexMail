@@ -1,9 +1,12 @@
-//! Bot detection – 5-signal scoring, UA matching, velocity tracking.
+//! Bot detection – 5-signal scoring, UA matching, velocity tracking (O-11.1).
+//!
+//! # Bounded cache
+//! The IP-velocity cache uses [`moka::sync::Cache`] with a fixed maximum
+//! capacity and TTL-based eviction, preventing unbounded memory growth.
 
-use dashmap::DashMap;
-use parking_lot::RwLock;
+use moka::sync::Cache;
 use regex::Regex;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tracing::warn;
 
@@ -63,13 +66,14 @@ static KNOWN_BOT_PREFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 static SUSPICIOUS_HEADERS: LazyLock<Vec<&'static str>> =
     LazyLock::new(|| vec!["x-forwarded-for", "x-scanner", "x-check", "x-probe"]);
 
+/// Bounded TTL cache for IP velocity tracking (O-11.1).
+///
+/// Uses moka with:
+/// - `max_capacity`: [`VELOCITY_CACHE_MAX`] entries
+/// - `time_to_live`: 10 minute idle expiry
+/// - Automatic eviction of least-recently-used entries when full
 pub struct BotDetectionService {
-    /// #198:In-memory velocity cache is per-process only.
-    /// For multi-replica deployments, consider using Redis with a sliding-window
-    /// counter (e.g., `bot:velocity:{ip}:{minute}`) for shared state.
-    /// Current in-memory approach is acceptable for single-replica or when
-    /// per-replica velocity detection is sufficient (bots typically target all replicas).
-    velocity_cache: Arc<DashMap<String, Arc<RwLock<Vec<Instant>>>>>,
+    velocity_cache: Cache<String, Vec<Instant>>,
 }
 
 impl Default for BotDetectionService {
@@ -81,7 +85,10 @@ impl Default for BotDetectionService {
 impl BotDetectionService {
     pub fn new() -> Self {
         Self {
-            velocity_cache: Arc::new(DashMap::new()),
+            velocity_cache: Cache::builder()
+                .max_capacity(VELOCITY_CACHE_MAX as u64)
+                .time_to_live(Duration::from_secs(600)) // 10 min TTL
+                .build(),
         }
     }
 
@@ -152,29 +159,15 @@ impl BotDetectionService {
         let now = Instant::now();
         let window = Duration::from_secs(VELOCITY_WINDOW_SECS);
 
-        // Cleanup old entries if cache is too large
-        if self.velocity_cache.len() > VELOCITY_CACHE_MAX {
-            self.cleanup_velocity_cache();
-        }
+        // moka handles bounded capacity + TTL eviction automatically (O-11.1)
+        let mut timestamps = self.velocity_cache.get(ip).unwrap_or_default();
 
-        let entry = self
-            .velocity_cache
-            .entry(ip.to_string())
-            .or_insert_with(|| Arc::new(RwLock::new(Vec::new())))
-            .clone();
-        let mut timestamps = entry.write();
         timestamps.retain(|t| now.duration_since(*t) < window);
         timestamps.push(now);
-        timestamps.len()
-    }
+        let count = timestamps.len();
 
-    fn cleanup_velocity_cache(&self) {
-        let cutoff = Instant::now() - Duration::from_secs(600);
-        self.velocity_cache.retain(|_, v| {
-            let mut timestamps = v.write();
-            timestamps.retain(|t| *t > cutoff);
-            !timestamps.is_empty()
-        });
+        self.velocity_cache.insert(ip.to_string(), timestamps);
+        count
     }
 
     /// Generate honeypot link for invisible injection.

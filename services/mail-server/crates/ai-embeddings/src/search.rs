@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn test_search_by_vector() {
-        let store = VectorStore::new(3, 1000, 900);
+        let store = VectorStore::new(3, 1000, 900, vec![]);
         store
             .add(
                 "similar".into(),
@@ -111,6 +111,8 @@ mod tests {
             max_concurrency: 4,
             timeout_ms: 5000,
             pooling: crate::config::PoolingStrategy::Mean,
+            sidecar_tls_enabled: false,
+            sidecar_tls_ca_path: String::new(),
         };
         let svc = EmbeddingService::new(config).unwrap();
         let engine = SearchEngine::new(&svc, &store);
@@ -123,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_search_with_min_score() {
-        let store = VectorStore::new(3, 1000, 900);
+        let store = VectorStore::new(3, 1000, 900, vec![]);
         store
             .add(
                 "close".into(),
@@ -146,6 +148,8 @@ mod tests {
             max_concurrency: 4,
             timeout_ms: 5000,
             pooling: crate::config::PoolingStrategy::Mean,
+            sidecar_tls_enabled: false,
+            sidecar_tls_ca_path: String::new(),
         };
         let svc = EmbeddingService::new(config).unwrap();
         let engine = SearchEngine::new(&svc, &store);
@@ -159,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_search_empty_results() {
-        let store = VectorStore::new(3, 1000, 900);
+        let store = VectorStore::new(3, 1000, 900, vec![]);
 
         let config = crate::config::InferenceConfig {
             url: "http://localhost:8080".into(),
@@ -168,6 +172,8 @@ mod tests {
             max_concurrency: 4,
             timeout_ms: 5000,
             pooling: crate::config::PoolingStrategy::Mean,
+            sidecar_tls_enabled: false,
+            sidecar_tls_ca_path: String::new(),
         };
         let svc = EmbeddingService::new(config).unwrap();
         let engine = SearchEngine::new(&svc, &store);
@@ -179,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_search_by_vector_filters_other_tenants() {
-        let store = VectorStore::new(3, 1000, 900);
+        let store = VectorStore::new(3, 1000, 900, vec![]);
         store
             .add(
                 "tenant-a".into(),
@@ -202,6 +208,8 @@ mod tests {
             max_concurrency: 4,
             timeout_ms: 5000,
             pooling: crate::config::PoolingStrategy::Mean,
+            sidecar_tls_enabled: false,
+            sidecar_tls_ca_path: String::new(),
         };
         let svc = EmbeddingService::new(config).unwrap();
         let engine = SearchEngine::new(&svc, &store);

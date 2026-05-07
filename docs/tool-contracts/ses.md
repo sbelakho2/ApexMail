@@ -109,9 +109,9 @@ The SES IAM user has minimal permissions for primary operation:
 
 ### Sending Identity
 
-- Verified domain: `apexmail.com` (domain-level verification via DNS TXT record).
+- Verified domain: `apexmail.ee` (domain-level verification via DNS TXT record).
 - DKIM: Easy DKIM with 2048-bit RSA keys, auto-provisioned on domain verification via `CreateEmailIdentity`.
-- Custom MAIL FROM domain: `bounce.apexmail.com` → enables SPF alignment for SES-sent mail.
+- Custom MAIL FROM domain: `bounce.apexmail.ee` -> enables SPF alignment for SES-sent mail.
 - SPF record includes `include:amazonses.com` for SES path.
 - The ApexMail API auto-creates SES domain identities when tenants verify domains, and deletes them when tenants remove domains.
 
@@ -160,7 +160,7 @@ Auto-provisioning occurs on plan change via `autoProvisionDedicatedIps()` in `st
 SES sends email
   → Bounce or complaint occurs
   → SES publishes to SNS via Configuration Set event destination
-  → SNS delivers to HTTPS endpoint: https://api.apexmail.com/v1/ses/notifications
+  -> SNS delivers to HTTPS endpoint: https://api.apexmail.ee/v1/ses/notifications
   → API processes bounce/complaint/delivery
 ```
 

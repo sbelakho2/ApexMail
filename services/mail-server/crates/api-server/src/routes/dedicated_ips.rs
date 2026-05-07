@@ -124,6 +124,7 @@ pub struct WarmupResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListIpsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::routes::append_audit_log;
 use crate::usage::build_metering_audit_metadata;
+use crate::vat_emta::{EmtaClient, EmtaConfig};
 use crate::AppState;
 
 const HOURLY_TASK_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -32,6 +33,8 @@ const USAGE_ALERT_COOLDOWN_SECONDS: u64 = 60 * 60;
 const COST_MARGIN_WARNING_THRESHOLD: f64 = 20.0;
 const COST_MARGIN_CRITICAL_THRESHOLD: f64 = 10.0;
 const SLA_AVAILABILITY_TARGET: f64 = 99.9;
+const KMD_GENERATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // Every 6 hours
+const INVOICE_ARCHIVE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60); // Daily
 
 static DEDICATED_IP_TABLE_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -81,20 +84,12 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
     let metering_state = state.clone();
     tokio::spawn(async move {
-        match drain_pending_metering_events(metering_state.as_ref(), METERING_RECOVERY_LIMIT).await
-        {
-            Ok(result) if result.processed_count > 0 || result.discarded_count > 0 => {
-                info!(
-                    processed_count = result.processed_count,
-                    discarded_count = result.discarded_count,
-                    "recovered pending metering events on startup"
-                );
-            }
-            Ok(_) => {}
-            Err(error_message) => {
-                error!(error = %error_message, "failed to recover pending metering events on startup");
-            }
-        }
+        // Startup drain with monitoring (metrics + alerting)
+        let _ = crate::metering_monitor::monitored_drain_pending_events(
+            metering_state.as_ref(),
+            METERING_RECOVERY_LIMIT,
+        )
+        .await;
 
         let mut interval = interval_at(
             Instant::now() + METERING_TASK_INTERVAL,
@@ -105,21 +100,17 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         loop {
             interval.tick().await;
 
-            match drain_pending_metering_events(metering_state.as_ref(), METERING_RECOVERY_LIMIT)
-                .await
-            {
-                Ok(result) if result.processed_count > 0 || result.discarded_count > 0 => {
-                    info!(
-                        processed_count = result.processed_count,
-                        discarded_count = result.discarded_count,
-                        "drained pending metering events"
-                    );
-                }
-                Ok(_) => {}
-                Err(error_message) => {
-                    error!(error = %error_message, "failed to drain pending metering events");
-                }
-            }
+            // Monitored drain — records histograms, counters, and
+            // triggers consecutive-error alert if threshold is exceeded.
+            let _ = crate::metering_monitor::monitored_drain_pending_events(
+                metering_state.as_ref(),
+                METERING_RECOVERY_LIMIT,
+            )
+            .await;
+
+            // Stale-event check — updates pending-event gauge and
+            // warns if events remain undrained past the age limit.
+            crate::metering_monitor::check_stale_pending_events(metering_state.as_ref()).await;
         }
     });
 
@@ -244,6 +235,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         }
     });
 
+    let grace_state = state.clone();
     tokio::spawn(async move {
         let client = Client::new();
         let mut interval = interval_at(Instant::now() + HOURLY_TASK_INTERVAL, HOURLY_TASK_INTERVAL);
@@ -252,7 +244,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         loop {
             interval.tick().await;
 
-            match process_grace_period_expirations(state.as_ref(), 100).await {
+            match process_grace_period_expirations(grace_state.as_ref(), 100).await {
                 Ok(result) if result.processed_count > 0 || result.purged_messages_count > 0 => {
                     info!(
                         processed_count = result.processed_count,
@@ -266,7 +258,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 }
             }
 
-            match process_scheduled_retries(state.as_ref(), &client).await {
+            match process_scheduled_retries(grace_state.as_ref(), &client).await {
                 Ok(result) if result.attempted > 0 => {
                     info!(
                         attempted = result.attempted,
@@ -280,7 +272,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 }
             }
 
-            match cleanup_stuck_subscription_sagas(state.as_ref()).await {
+            match cleanup_stuck_subscription_sagas(grace_state.as_ref()).await {
                 Ok(cleaned) if cleaned > 0 => {
                     info!(cleaned, "cleaned stuck subscription sagas");
                 }
@@ -291,6 +283,535 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             }
         }
     });
+
+    // ── KMD VAT return generation (every 6 hours) ──────────────
+    let kmd_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = interval_at(
+            Instant::now() + KMD_GENERATION_INTERVAL,
+            KMD_GENERATION_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        // Build EMTA client once (loads config from environment variables).
+        // Enabled clients validate mTLS paths immediately; invalid EMTA setup
+        // is logged and filing is skipped until configuration is fixed.
+        let emta_config = EmtaConfig::from_env();
+        let emta_client = match EmtaClient::from_config(emta_config.clone()) {
+            Ok(client) => client,
+            Err(error) => {
+                error!(error = %error, "invalid EMTA configuration; electronic KMD filing disabled");
+                EmtaClient::new(
+                    EmtaConfig {
+                        enabled: false,
+                        ..emta_config
+                    },
+                    reqwest::Client::new(),
+                )
+            }
+        };
+
+        loop {
+            interval.tick().await;
+
+            match generate_kmd_if_due(kmd_state.as_ref()).await {
+                Ok(Some(result)) => {
+                    info!(
+                        tax_year = result.tax_year,
+                        tax_month = result.tax_month,
+                        invoice_count = result.invoice_count,
+                        total_vat_cents = result.total_vat_cents,
+                        "KMD VAT return generated for previous month"
+                    );
+
+                    // Attempt electronic filing via EMTA (e-MTA) if configured.
+                    if emta_client.is_ready() {
+                        match attempt_emta_filing(&kmd_state.db, &emta_client, &result).await {
+                            Ok(Some(filing)) => {
+                                info!(
+                                    tax_year = result.tax_year,
+                                    tax_month = result.tax_month,
+                                    filing_reference = ?filing.filing_reference,
+                                    accepted = filing.accepted,
+                                    "KMD VAT return filed with EMTA"
+                                );
+                            }
+                            Ok(None) => {
+                                info!(
+                                    tax_year = result.tax_year,
+                                    tax_month = result.tax_month,
+                                    "KMD VAT return already filed with EMTA; skipping"
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    error = %e,
+                                    tax_year = result.tax_year,
+                                    tax_month = result.tax_month,
+                                    "EMTA filing failed"
+                                );
+                            }
+                        }
+                    } else {
+                        info!("EMTA client not ready (disabled or misconfigured); skipping electronic filing");
+                    }
+                }
+                Ok(None) => {
+                    // Not yet due or already generated — nothing to do
+                }
+                Err(error_message) => {
+                    error!(error = %error_message, "KMD VAT return generation failed");
+                }
+            }
+        }
+    });
+
+    // ── Invoice archival (daily) ──────────────────────────────
+    let archive_state = state.clone();
+    tokio::spawn(async move {
+        // Run once on startup
+        match archive_paid_invoices(archive_state.as_ref()).await {
+            Ok(n) if n > 0 => info!(archived = n, "archived invoices on startup"),
+            Ok(_) => {}
+            Err(e) => error!(error = %e, "invoice archival on startup failed"),
+        }
+
+        let mut interval = interval_at(
+            Instant::now() + INVOICE_ARCHIVE_INTERVAL,
+            INVOICE_ARCHIVE_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            match archive_paid_invoices(archive_state.as_ref()).await {
+                Ok(n) if n > 0 => info!(archived = n, "archived paid invoices"),
+                Ok(_) => {}
+                Err(e) => error!(error = %e, "invoice archival failed"),
+            }
+        }
+    });
+
+    // ── Month-end closing (daily) ──────────────────────────────
+    let close_state = state.clone();
+    tokio::spawn(async move {
+        // Run once on startup (staggered by 1 hour to let other services initialise)
+        let mut interval = interval_at(
+            Instant::now() + Duration::from_secs(3600),
+            DAILY_TASK_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            match perform_month_end_closing(close_state.as_ref()).await {
+                Ok(true) => info!("Month-end closing completed"),
+                Ok(false) => {} // Not yet due or already closed
+                Err(e) => error!(error = %e, "Month-end closing failed"),
+            }
+        }
+    });
+}
+
+/// Archive paid invoices that are older than 90 days and have a PDF URL set.
+async fn archive_paid_invoices(state: &AppState) -> Result<i64, String> {
+    let cutoff = Utc::now() - chrono::Duration::days(90);
+
+    // Find paid invoices older than 90 days that have a PDF URL but no archive entry
+    let candidates: Vec<(uuid::Uuid, String, String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT i.id, i.tenant_id, i.invoice_number, i.pdf_url
+        FROM invoices i
+        LEFT JOIN invoice_archives ia ON ia.invoice_id = i.id
+        WHERE ia.id IS NULL
+          AND i.status = 'paid'
+          AND i.paid_at IS NOT NULL
+          AND i.paid_at < $1
+          AND i.pdf_url IS NOT NULL
+        LIMIT 500
+        "#,
+    )
+    .bind(cutoff)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| format!("Failed to query invoice archive candidates: {e}"))?;
+
+    let count = candidates.len() as i64;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let batch_id = uuid::Uuid::new_v4();
+
+    for (invoice_id, tenant_id, invoice_number, pdf_url) in &candidates {
+        if let Err(e) = sqlx::query(
+            r#"
+            INSERT INTO invoice_archives (invoice_id, tenant_id, invoice_number, pdf_url, batch_id, archived_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (invoice_id) DO NOTHING
+            "#,
+        )
+        .bind(invoice_id)
+        .bind(tenant_id)
+        .bind(invoice_number)
+        .bind(pdf_url)
+        .bind(batch_id)
+        .execute(&state.db)
+        .await
+        {
+            warn!(
+                invoice_id = %invoice_id,
+                error = %e,
+                "Failed to archive invoice"
+            );
+        }
+    }
+
+    info!(
+        batch_id = %batch_id,
+        count = count,
+        "Invoice archival batch completed"
+    );
+
+    Ok(count)
+}
+
+/// Perform month-end closing for the previous month.
+///
+/// Runs daily (via `DAILY_TASK_INTERVAL`), targeting the *previous* calendar
+/// month.  On the first run after month-end it will:
+///
+///  1. Set `closed_at` on every `paid` invoice whose `issued_at` falls in the
+///     target period.
+///  2. Record a [`month_end_closings`] row with summary statistics.
+///  3. Log a system-level audit entry in `billing_audit_log`.
+///
+/// Returns `Ok(true)` when a closing was actually performed, `Ok(false)` when
+/// nothing needed to be done (already closed or no paid invoices).
+async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
+    let now = Utc::now();
+    let current_month = now.month();
+    let current_year = now.year();
+
+    // Target period = previous calendar month.
+    let (target_year, target_month) = if current_month == 1 {
+        (current_year - 1, 12u32)
+    } else {
+        (current_year, current_month - 1)
+    };
+
+    // ------------------------------------------------------------------
+    // 1.  Check if a closing record already exists for this period.
+    // ------------------------------------------------------------------
+    let already_closed: bool = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT 1 FROM month_end_closings WHERE tax_year = $1 AND tax_month = $2 LIMIT 1",
+    )
+    .bind(target_year)
+    .bind(target_month as i32)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| format!("Failed to check existing month-end closing: {e}"))?
+    .is_some();
+
+    if already_closed {
+        return Ok(false);
+    }
+
+    // ------------------------------------------------------------------
+    // 2.  Build period boundaries ([period_start, period_end)).
+    // ------------------------------------------------------------------
+    let period_start = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
+        .ok_or_else(|| format!("Invalid year/month: {target_year}/{target_month}"))?
+        .and_hms_opt(0, 0, 0)
+        .ok_or("Failed to build period start time")?
+        .and_utc();
+
+    let period_end = if target_month == 12 {
+        chrono::NaiveDate::from_ymd_opt(target_year + 1, 1, 1)
+    } else {
+        chrono::NaiveDate::from_ymd_opt(target_year, target_month + 1, 1)
+    }
+    .ok_or_else(|| format!("Invalid period end for {target_year}/{target_month}"))?
+    .and_hms_opt(0, 0, 0)
+    .ok_or("Failed to build period end time")?
+    .and_utc();
+
+    // ------------------------------------------------------------------
+    // 3.  Count invoices that would be affected (dry-run check).
+    // ------------------------------------------------------------------
+    let pending_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM invoices
+        WHERE issued_at >= $1 AND issued_at < $2
+          AND status = 'paid'
+          AND closed_at IS NULL
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| format!("Failed to count pending invoices: {e}"))?;
+
+    if pending_count == 0 {
+        // Still record a closing marker so we don't re-check every day.
+        let closing_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO month_end_closings
+                (id, tax_year, tax_month, total_invoices, total_revenue_cents,
+                 total_vat_cents, status)
+            VALUES ($1, $2, $3, 0, 0, 0, 'completed')
+            "#,
+        )
+        .bind(closing_id)
+        .bind(target_year)
+        .bind(target_month as i32)
+        .execute(&state.db)
+        .await
+        .map_err(|e| format!("Failed to record empty month-end closing: {e}"))?;
+
+        info!(
+            tax_year = target_year,
+            tax_month = target_month,
+            "Month-end closing recorded (no paid invoices to close)"
+        );
+        return Ok(true);
+    }
+
+    // ------------------------------------------------------------------
+    // 4.  Transaction: update invoices + insert closing record + audit.
+    // ------------------------------------------------------------------
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
+    // 4a. Mark all paid invoices in the target period as closed.
+    let updated = sqlx::query(
+        r#"
+        UPDATE invoices
+        SET closed_at = NOW()
+        WHERE issued_at >= $1 AND issued_at < $2
+          AND status = 'paid'
+          AND closed_at IS NULL
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to close invoices: {e}"))?
+    .rows_affected();
+
+    // 4b. Compute summary statistics.
+    let summary: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*)::bigint,
+            COALESCE(SUM(total), 0)::bigint,
+            COALESCE(SUM(vat_total), 0)::bigint
+        FROM invoices
+        WHERE issued_at >= $1 AND issued_at < $2
+          AND status = 'paid'
+          AND closed_at IS NOT NULL
+        "#,
+    )
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to compute month-end summary: {e}"))?;
+
+    // 4c. Insert the month_end_closings record.
+    let closing_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO month_end_closings
+            (id, tax_year, tax_month, total_invoices, total_revenue_cents,
+             total_vat_cents, status)
+        VALUES ($1, $2, $3, $4, $5, $6, 'completed')
+        "#,
+    )
+    .bind(closing_id)
+    .bind(target_year)
+    .bind(target_month as i32)
+    .bind(summary.0)
+    .bind(summary.1)
+    .bind(summary.2)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to insert month-end closing record: {e}"))?;
+
+    // 4d. System-level audit trail (nullable tenant_id for global operations).
+    sqlx::query(
+        r#"
+        INSERT INTO billing_audit_log
+            (tenant_id, action, actor_type, details)
+        VALUES (NULL, 'month_end_closing', 'system', $1)
+        "#,
+    )
+    .bind(serde_json::json!({
+        "tax_year": target_year,
+        "tax_month": target_month,
+        "closed_invoices": summary.0,
+        "total_revenue_cents": summary.1,
+        "total_vat_cents": summary.2,
+        "closing_id": closing_id.to_string(),
+        "rows_updated": updated,
+    }))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to insert billing audit log: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit month-end closing transaction: {e}"))?;
+
+    info!(
+        tax_year = target_year,
+        tax_month = target_month,
+        closed_invoices = summary.0,
+        total_revenue_cents = summary.1,
+        total_vat_cents = summary.2,
+        rows_updated = updated,
+        "Month-end closing completed"
+    );
+
+    Ok(true)
+}
+
+/// Check if the previous month's KMD return is due (past the 20th)
+/// and generate it if it hasn't been generated yet.
+async fn generate_kmd_if_due(
+    state: &AppState,
+) -> Result<Option<crate::vat_kmd::VatKmdResult>, String> {
+    let now = Utc::now();
+    let current_day = now.day();
+    let current_month = now.month();
+
+    // KMD for previous month is due on the 20th of the current month
+    if current_day < 20 {
+        return Ok(None);
+    }
+
+    // Determine the target period (previous month)
+    let (target_year, target_month) = if current_month == 1 {
+        (now.year() - 1, 12u32)
+    } else {
+        (now.year(), current_month - 1)
+    };
+
+    // Check if already generated
+    let existing = crate::vat_kmd::get_latest_kmd_return(&state.db).await?;
+    if let Some(kmd) = existing {
+        if kmd.tax_year == target_year && kmd.tax_month == target_month as i32 {
+            info!(
+                tax_year = target_year,
+                tax_month = target_month,
+                "KMD return already generated for this period"
+            );
+            return Ok(None);
+        }
+    }
+
+    // Generate the KMD return
+    let result = crate::vat_kmd::generate_kmd_return(&state.db, target_year, target_month).await?;
+    Ok(Some(result))
+}
+
+/// Attempt to file the generated KMD VAT return with the EMTA (e-MTA) API.
+///
+/// Performs idempotency check — if the KMD return record already has a
+/// `filing_reference` and `filed_at` set, the filing is skipped.
+///
+/// Returns:
+/// * `Ok(Some(...))` — filing was attempted and acknowledged.
+/// * `Ok(None)` — already filed, skipped.
+/// * `Err(...)` — filing failed (HTTP error, parse error, DB error).
+async fn attempt_emta_filing(
+    db: &sqlx::PgPool,
+    emta_client: &EmtaClient,
+    kmd: &crate::vat_kmd::VatKmdResult,
+) -> Result<Option<crate::vat_emta::EmtaSubmissionResult>, String> {
+    use crate::vat_kmd::VatKmdReturn;
+
+    // ── 1. Load the stored KMD return row ──────────────────────────
+    let stored = sqlx::query_as::<_, VatKmdReturn>(
+        r#"
+        SELECT id, tax_year, tax_month, status, breakdown,
+               invoice_count, total_taxable_cents, total_vat_cents,
+               generated_at, filed_at, filing_reference, filing_error,
+               created_at, updated_at
+        FROM vat_kmd_returns
+        WHERE id = $1
+        "#,
+    )
+    .bind(kmd.kmd_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("Failed to query KMD return for EMTA filing: {e}"))?
+    .ok_or_else(|| format!("KMD return {} not found in database", kmd.kmd_id))?;
+
+    // ── 2. Idempotency check — skip if already filed ──────────────
+    if stored.filed_at.is_some() && stored.filing_reference.is_some() {
+        info!(
+            kmd_id = %kmd.kmd_id,
+            filing_reference = ?stored.filing_reference,
+            "KMD return already filed with EMTA; skipping"
+        );
+        return Ok(None);
+    }
+
+    // ── 3. Submit to EMTA ─────────────────────────────────────────
+    let filing_result = emta_client
+        .submit_kmd_return(kmd, &stored.breakdown, kmd.kmd_id)
+        .await
+        .map_err(|e| format!("EMTA filing failed: {e}"))?;
+
+    // ── 4. Update the stored record with filing outcome ───────────
+    let new_status = if filing_result.accepted {
+        "filed"
+    } else {
+        "failed"
+    };
+    let filing_error: Option<String> = if filing_result.accepted {
+        None
+    } else {
+        Some(filing_result.status_message.clone())
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE vat_kmd_returns
+        SET status = $1,
+            filed_at = NOW(),
+            filing_reference = $2,
+            filing_error = $3,
+            updated_at = NOW()
+        WHERE id = $4
+        "#,
+    )
+    .bind(new_status)
+    .bind(&filing_result.filing_reference)
+    .bind(filing_error)
+    .bind(kmd.kmd_id)
+    .execute(db)
+    .await
+    .map_err(|e| format!("Failed to update KMD return filing status: {e}"))?;
+
+    info!(
+        kmd_id = %kmd.kmd_id,
+        accepted = filing_result.accepted,
+        filing_reference = ?filing_result.filing_reference,
+        "KMD return filing status updated"
+    );
+
+    Ok(Some(filing_result))
 }
 
 #[derive(Debug)]
@@ -306,9 +827,9 @@ struct RetryResult {
 }
 
 #[derive(Debug)]
-struct MeteringDrainResult {
-    processed_count: i64,
-    discarded_count: i64,
+pub(crate) struct MeteringDrainResult {
+    pub(crate) processed_count: i64,
+    pub(crate) discarded_count: i64,
 }
 
 #[derive(Debug)]
@@ -512,7 +1033,30 @@ async fn process_grace_period_expirations(
     })
 }
 
-async fn drain_pending_metering_events(
+/// Lua script that atomically deletes the pending key and increments the
+/// real-time counter, guarded by a counter-guard key to prevent double-
+/// counting on re-run after a crash.
+///
+/// KEYS[1] = counter-guard key (e.g. "meter:guard:<normalized_id>")
+/// KEYS[2] = counter key (e.g. "meter:rt:<tenant>:<event_type>:<period>")
+/// KEYS[3] = pending key (e.g. "meter:pending:<raw_id>")
+/// ARGV[1] = quantity
+/// ARGV[2] = counter TTL in seconds
+///
+/// The counter-guard key ensures that if the Lua script succeeds but the
+/// DB insert was already committed, a re-run will NOT double-increment
+/// the counter.  The pending key is cleaned up regardless.
+const DRAIN_AND_INCR_LUA: &str = r#"
+    local guarded = redis.call('SET', KEYS[1], '1', 'EX', ARGV[2], 'NX')
+    if guarded then
+        redis.call('INCRBY', KEYS[2], ARGV[1])
+        redis.call('EXPIRE', KEYS[2], ARGV[2])
+    end
+    redis.call('DEL', KEYS[3])
+    return 1
+"#;
+
+pub(crate) async fn drain_pending_metering_events(
     state: &AppState,
     limit: usize,
 ) -> Result<MeteringDrainResult, String> {
@@ -573,30 +1117,70 @@ async fn drain_pending_metering_events(
         });
     }
 
+    // Persist new events to the DB.  ON CONFLICT DO NOTHING makes this safe
+    // for re-runs after a crash.
     let inserted_ids = insert_metering_events(state, &valid_events).await?;
     let inserted_id_set: HashSet<Uuid> = inserted_ids.into_iter().collect();
 
-    let mut pipeline = redis::pipe();
+    // Atomically delete the pending key and increment the counter per event,
+    // guarded by a per-event guard key to prevent double-counting on re-run.
+    let mut cleanup_keys_only = Vec::new();
     for key in &cleanup_keys {
-        pipeline.del(key).ignore();
+        cleanup_keys_only.push(key.clone());
     }
+    // Delete stale cleanup keys (malformed events) in bulk.
+    if !cleanup_keys_only.is_empty() {
+        delete_redis_keys(&mut conn, &cleanup_keys_only)
+            .await
+            .map_err(|error| {
+                format!("Failed to clean malformed pending metering events: {error}")
+            })?;
+    }
+
     for event in &valid_events {
-        pipeline
-            .del(format!("meter:pending:{}", event.raw_id))
-            .ignore();
-        if inserted_id_set.contains(&event.normalized_id) {
-            let counter_key =
-                metering_counter_key(&event.tenant_id, &event.event_type, event.timestamp);
-            pipeline.incr(&counter_key, event.quantity).ignore();
-            pipeline
-                .expire(&counter_key, METERING_PERIOD_TTL_SECONDS)
-                .ignore();
-        }
+        let guard_key = format!("meter:guard:{}", event.normalized_id);
+        let counter_key =
+            metering_counter_key(&event.tenant_id, &event.event_type, event.timestamp);
+        let pending_key = format!("meter:pending:{}", event.raw_id);
+
+        // Only increment the counter if this event was newly inserted into
+        // the DB.  Events that were already there (re-run after crash) will
+        // have their counter guard already set, so the Lua script is a no-op
+        // for the counter while still cleaning up the pending key.
+        let _: i64 = redis::cmd("EVAL")
+            .arg(DRAIN_AND_INCR_LUA)
+            .arg(3i64) // number of keys
+            .arg(&guard_key)
+            .arg(&counter_key)
+            .arg(&pending_key)
+            .arg(event.quantity)
+            .arg(METERING_PERIOD_TTL_SECONDS)
+            .query_async(&mut conn)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to drain+incr metering event {}: {error}",
+                    event.raw_id
+                )
+            })?;
     }
-    let _: () = pipeline
-        .query_async(&mut conn)
-        .await
-        .map_err(|error| format!("Failed to finalize metering recovery in Redis: {error}"))?;
+
+    // Clean up any remaining pending keys that belong to re-inserted events.
+    // (The Lua script above already DELETEs the pending key for each event,
+    // but this is belt-and-suspenders for events that somehow got missed.)
+    let remaining_pending: Vec<String> = valid_events
+        .iter()
+        .map(|e| format!("meter:pending:{}", e.raw_id))
+        .collect();
+    if !remaining_pending.is_empty() {
+        let _: () = redis::cmd("DEL")
+            .arg(&remaining_pending)
+            .query_async(&mut conn)
+            .await
+            .map_err(|error| {
+                format!("Failed to clean up remaining pending metering events: {error}")
+            })?;
+    }
 
     Ok(MeteringDrainResult {
         processed_count: i64::try_from(inserted_id_set.len()).unwrap_or(i64::MAX),
@@ -1210,6 +1794,29 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
         if credit_amount <= 0 {
             continue;
         }
+
+        // Enforce plan-specific SLA credit cap (e.g. Scale = 10 %, Enterprise = 25 %).
+        // The `sla_credit_percentage` field in `PlanFeatures` defines the maximum
+        // percentage of the monthly invoice that may be credited.
+        let cap_percent = candidate
+            .features
+            .get("slaCreditPercentage")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                candidate
+                    .features
+                    .get("sla_credit_percentage")
+                    .and_then(Value::as_i64)
+            })
+            .unwrap_or(100); // default: no cap below 100 %
+
+        let credit_amount = if cap_percent < 100 {
+            let max_credit =
+                ((invoice_amount_cents as f64) * (cap_percent as f64 / 100.0)).round() as i64;
+            credit_amount.min(max_credit)
+        } else {
+            credit_amount
+        };
 
         let created: bool = sqlx::query_scalar(
             r#"

@@ -26,7 +26,7 @@
   </g>
   <g transform="translate(404 404)">
     <rect width="248" height="88" rx="20" fill="#111827" stroke="#334155" />
-    <text x="28" y="38" fill="#93c5fd" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Real-time</text>
+    <text x="28" y="38" fill="#93c5fd" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Event-backed</text>
     <text x="28" y="66" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Delivery visibility</text>
   </g>
   <g transform="translate(680 404)">

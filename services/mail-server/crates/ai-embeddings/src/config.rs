@@ -34,6 +34,16 @@ pub struct InferenceConfig {
     /// Pooling strategy
     #[serde(default)]
     pub pooling: PoolingStrategy,
+    /// Enable TLS for sidecar HTTP communication.
+    /// Default: true. When enabled, the reqwest client uses rustls with certificate validation.
+    /// For internal-only deployments where the sidecar runs on the same host or a trusted network,
+    /// set to false (a security warning will be logged).
+    #[serde(default = "default_sidecar_tls_enabled")]
+    pub sidecar_tls_enabled: bool,
+    /// Path to custom CA certificate for sidecar TLS verification.
+    /// If empty, uses system CA certificates.
+    #[serde(default)]
+    pub sidecar_tls_ca_path: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -53,6 +63,11 @@ pub struct StoreConfig {
     /// LRU eviction after this many entries
     #[serde(default = "default_eviction_threshold")]
     pub eviction_threshold: usize,
+    /// HMAC-SHA256 key for NDJSON persistence integrity (O-9.2).
+    /// Loaded from environment variable; should be a hex-encoded 32-byte key.
+    /// If empty, HMAC verification is skipped (not recommended for production).
+    #[serde(default)]
+    pub persistence_hmac_key: String,
 }
 
 fn default_host() -> String {
@@ -72,6 +87,9 @@ fn default_concurrency() -> usize {
 }
 fn default_timeout_ms() -> u64 {
     30_000
+}
+fn default_sidecar_tls_enabled() -> bool {
+    true
 }
 fn default_max_vectors() -> usize {
     100_000
@@ -95,6 +113,9 @@ impl EmbeddingsConfig {
             || self.inference.url.starts_with("https://"))
         {
             return Err("INFERENCE_URL must be http/https".into());
+        }
+        if self.inference.sidecar_tls_enabled && !self.inference.url.starts_with("https://") {
+            return Err("INFERENCE_URL must use https:// when sidecar_tls_enabled is true".into());
         }
         if self.inference.dimension == 0 {
             return Err("DIMENSION must be > 0".into());

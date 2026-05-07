@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS mail_messages (
     account_id UUID NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
     mailbox_id UUID NOT NULL REFERENCES mail_mailboxes(id) ON DELETE CASCADE,
     uid BIGINT,
+    -- DI-003: message_id is the RFC5322 Message-Id; dedup scoped per (account_id, mailbox_id, message_id)
     message_id TEXT NOT NULL,
     from_address TEXT NOT NULL,
     from_name TEXT,
@@ -54,11 +55,16 @@ CREATE TABLE IF NOT EXISTS mail_messages (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_mail_messages_account_mailbox 
+CREATE INDEX IF NOT EXISTS idx_mail_messages_account_mailbox
 ON mail_messages(account_id, mailbox_id, date DESC);
 
-CREATE INDEX IF NOT EXISTS idx_mail_messages_search 
+CREATE INDEX IF NOT EXISTS idx_mail_messages_search
 ON mail_messages USING GIN (to_tsvector('english', subject || ' ' || COALESCE(text_body, '')));
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_mailbox_uid
 ON mail_messages(mailbox_id, uid);
+
+-- DI-006: Prevent duplicate messages with same Message-Id within the same mailbox
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_dedup
+ON mail_messages(account_id, mailbox_id, message_id)
+WHERE message_id IS NOT NULL AND message_id != '';

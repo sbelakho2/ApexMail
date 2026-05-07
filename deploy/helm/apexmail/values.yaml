@@ -11,7 +11,7 @@
 global:
   # Container image registry — set to your own registry before deploying.
   # Example: your-registry.example.com/apexmail
-  imageRegistry: ""
+  imageRegistry: "apexmail"
   # Pull policy: Always for production, IfNotPresent for dev
   imagePullPolicy: IfNotPresent
   # Image pull secrets (for private registries)
@@ -37,8 +37,9 @@ apiServer:
       memory: 256Mi
     limits:
       cpu: "1"
-      memory: 512Mi
+      memory: 1Gi
   port: 3000
+  metricsPort: 9090
   service:
     type: ClusterIP
     port: 3000
@@ -77,7 +78,8 @@ trackingService:
     enabled: true
     minReplicas: 2
     maxReplicas: 20
-    targetCPUUtilizationPercentage: 70
+    targetCPUUtilizationPercentage: 65
+    targetMemoryUtilizationPercentage: 80
   podDisruptionBudget:
     minAvailable: 1
   env: {}
@@ -102,6 +104,7 @@ mta:
     smtp: 25
     submission: 587
     smtps: 465
+    metrics: 9090
   service:
     type: LoadBalancer
     # Annotations for cloud provider LB (override per provider)
@@ -132,6 +135,12 @@ worker:
       cpu: "1"
       memory: 512Mi
   healthPort: 9090
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
   podDisruptionBudget:
     minAvailable: 1
   env: {}
@@ -151,7 +160,7 @@ enterprise:
       memory: 128Mi
     limits:
       cpu: 500m
-      memory: 256Mi
+      memory: 512Mi
   port: 3002
   service:
     type: ClusterIP
@@ -162,6 +171,8 @@ enterprise:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
     targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    minAvailable: 1
   env: {}
   envFrom: []
 
@@ -227,6 +238,12 @@ externalDatabase:
   existingSecretPasswordKey: password
   sslMode: require
 
+# Public service URLs and cross-origin settings shared with Kustomize manifests.
+environment: production
+apiBaseUrl: https://api.apexmail.ee
+oauthRedirectBaseUrl: https://app.apexmail.ee
+corsOrigins: https://app.apexmail.ee,https://admin.apexmail.ee
+
 # ── Redis (Bitnami subchart) ────────────────────────────────────────────────
 
 redis:
@@ -256,6 +273,10 @@ externalRedis:
 
 clickhouse:
   enabled: false
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 # All secrets should be provided via Kubernetes Secret resources.
@@ -332,7 +353,15 @@ serviceAccount:
 
 tolerations: []
 nodeSelector: {}
-affinity: {}
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: apexmail
+          topologyKey: kubernetes.io/hostname
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: topology.kubernetes.io/zone

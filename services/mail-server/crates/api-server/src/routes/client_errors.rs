@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientErrorReport {
     /// Error message
     pub message: String,

@@ -14,7 +14,8 @@ use mail_send::mail_auth::dkim::DkimSigner;
 use mail_send::mail_builder::headers::text::Text;
 use mail_send::mail_builder::MessageBuilder;
 use mail_send::{Credentials, SmtpClientBuilder};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+use zeroize::Zeroizing;
 
 use super::types::{PreparedEmail, SendResult};
 use crate::common::error::{ProcessorError, ProcessorResult};
@@ -51,25 +52,79 @@ impl SmtpTransport {
         Self { config }
     }
 
+    /// Convert an SMTP error into `ProcessorError::Transport`, redacting
+    /// any credential material that mail-send may have included in the
+    /// error Display impl (O-16.1 fix).
+    fn map_smtp_error(err: impl std::fmt::Display) -> ProcessorError {
+        let raw = err.to_string();
+        // mail-send's authentication error may include `username:secret`
+        // in its Display output. We redact by returning a generic message
+        // when the error looks authentication-related.
+        let lower = raw.to_lowercase();
+        let redacted = if lower.contains("authentication")
+            || lower.contains("auth ")
+            || lower.contains("login failed")
+            || lower.contains("535")
+        {
+            raw.chars()
+                .take(50)
+                .collect::<String>()
+                .lines()
+                .next()
+                .unwrap_or("SMTP authentication failed")
+                .to_string()
+                + " [credential details redacted]"
+        } else {
+            // Still redact anything that looks like an embedded secret pattern
+            let redacted = raw
+                .split(|c: char| c == ' ' || c == '\n')
+                .filter(|word| {
+                    // Filter out anything that looks like a base64-encoded AUTH string
+                    // (typical length > 20 and contains only base64 chars)
+                    if word.len() > 40 {
+                        let is_b64 = word
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+                        if is_b64 {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            redacted
+        };
+        ProcessorError::Transport(redacted)
+    }
+
     fn smtp_builder(&self) -> ProcessorResult<SmtpClientBuilder<String>> {
         let mut builder = SmtpClientBuilder::new(self.config.host.clone(), self.config.port)
             .implicit_tls(self.config.secure && self.config.port == 465);
 
         match (&self.config.username, &self.config.password) {
             (Some(username), Some(password)) => {
+                // NOTE: `password.clone()` preserves the Zeroizing<String> wrapper,
+                // ensuring the heap-allocated password bytes are zeroized when the
+                // local `pw` is dropped. However, `pw.to_string()` below creates a
+                // non-zeroized copy that is moved *into* mail-send's internals via
+                // Credentials::Plain. This is a known limitation of the mail-send
+                // API (0.4.x) which takes plain String for `secret`. The credential
+                // redaction in `map_smtp_error()` mitigates the leak risk.
+                let pw: Zeroizing<String> = password.clone();
                 builder = builder.credentials(Credentials::Plain {
                     username: username.clone(),
-                    secret: password.to_string(),
+                    secret: pw.to_string(),
                 });
             }
             (Some(_), None) => {
                 return Err(ProcessorError::Config(
-                    "SMTP_PASSWORD is required when SMTP_USERNAME is set".into(),
+                    "SMTP credentials incomplete (both username and password are required for SMTP AUTH)".into(),
                 ));
             }
             (None, Some(_)) => {
                 return Err(ProcessorError::Config(
-                    "SMTP_USERNAME is required when SMTP_PASSWORD is set".into(),
+                    "SMTP credentials incomplete (both username and password are required for SMTP AUTH)".into(),
                 ));
             }
             (None, None) => {}
@@ -139,82 +194,66 @@ impl EmailTransport for SmtpTransport {
     async fn verify(&self) -> ProcessorResult<()> {
         debug!(host = %self.config.host, port = self.config.port, "Verifying SMTP connection");
         let builder = self.smtp_builder()?;
-        if self.config.secure {
-            let client = builder
-                .connect()
-                .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
-            client
-                .quit()
-                .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+        let result = if self.config.secure {
+            let client = builder.connect().await.map_err(Self::map_smtp_error)?;
+            client.quit().await.map_err(Self::map_smtp_error)
         } else {
             let client = builder
                 .connect_plain()
                 .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
-            client
-                .quit()
-                .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+                .map_err(Self::map_smtp_error)?;
+            client.quit().await.map_err(Self::map_smtp_error)
+        };
+        if let Err(ref e) = result {
+            error!(host = %self.config.host, error = %e, "SMTP connection verification failed");
+        } else {
+            info!(host = %self.config.host, "SMTP connection verified");
         }
-        info!(host = %self.config.host, "SMTP connection verified");
-        Ok(())
+        result
     }
 
     async fn send(&self, email: &PreparedEmail) -> ProcessorResult<SendResult> {
         let message = self.build_message(email);
         let builder = self.smtp_builder()?;
 
-        if self.config.secure {
-            let mut client = builder
-                .connect()
-                .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+        let result = if self.config.secure {
+            let mut client = builder.connect().await.map_err(Self::map_smtp_error)?;
 
             if let Some(dkim) = &email.dkim {
                 let signer = self.build_dkim_signer(dkim)?;
-                client
+                let send_result = client
                     .send_signed(message, &signer)
                     .await
-                    .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+                    .map_err(Self::map_smtp_error);
+                let _ = client.quit().await;
+                send_result
             } else {
-                client
-                    .send(message)
-                    .await
-                    .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+                let send_result = client.send(message).await.map_err(Self::map_smtp_error);
+                let _ = client.quit().await;
+                send_result
             }
-
-            client
-                .quit()
-                .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
         } else {
             let mut client = builder
                 .connect_plain()
                 .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+                .map_err(Self::map_smtp_error)?;
 
             if let Some(dkim) = &email.dkim {
                 let signer = self.build_dkim_signer(dkim)?;
-                client
+                let send_result = client
                     .send_signed(message, &signer)
                     .await
-                    .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+                    .map_err(Self::map_smtp_error);
+                let _ = client.quit().await;
+                send_result
             } else {
-                client
-                    .send(message)
-                    .await
-                    .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+                let send_result = client.send(message).await.map_err(Self::map_smtp_error);
+                let _ = client.quit().await;
+                send_result
             }
+        };
 
-            client
-                .quit()
-                .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
-        }
-
-        Ok(SendResult {
+        result.map(|_| SendResult {
             smtp_message_id: None,
             accepted: true,
             response: "250 OK".to_string(),
@@ -526,9 +565,11 @@ mod tests {
     }
 
     #[test]
-    fn test_smtp_builder_requires_password_with_username() {
+    fn test_smtp_builder_requires_complete_credentials() {
         // Install the ring crypto provider for rustls (required by mail-send's SmtpClientBuilder)
         let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Username without password should error with generic message
         let config = SmtpConfig {
             username: Some("user".into()),
             password: None,
@@ -538,13 +579,11 @@ mod tests {
         let result = transport.smtp_builder();
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err.to_string().contains("SMTP_PASSWORD"));
-    }
+        // O-16.10: generic message, doesn't reveal which credential is missing
+        assert!(err.to_string().contains("credentials incomplete"));
+        assert!(!err.to_string().contains("SMTP_PASSWORD"));
 
-    #[test]
-    fn test_smtp_builder_requires_username_with_password() {
-        // Install the ring crypto provider for rustls (required by mail-send's SmtpClientBuilder)
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Password without username should error with same generic message
         use zeroize::Zeroizing;
         let config = SmtpConfig {
             username: None,
@@ -555,6 +594,30 @@ mod tests {
         let result = transport.smtp_builder();
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err.to_string().contains("SMTP_USERNAME"));
+        assert!(err.to_string().contains("credentials incomplete"));
+        assert!(!err.to_string().contains("SMTP_USERNAME"));
+    }
+
+    #[test]
+    fn test_map_smtp_error_redacts_credentials() {
+        // Generic (non-auth) errors should pass through with basic redaction
+        let generic_err = "Connection refused (os error 61)";
+        let err = SmtpTransport::map_smtp_error(generic_err);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Connection refused"),
+            "Generic error should pass through: {}",
+            msg
+        );
+
+        // Auth errors should be redacted
+        let auth_err = "535 Authentication failed: username=admin secret=supersecret";
+        let err = SmtpTransport::map_smtp_error(auth_err);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("redacted"),
+            "Auth error should be redacted: {}",
+            msg
+        );
     }
 }

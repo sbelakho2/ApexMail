@@ -1,0 +1,36 @@
+[package]
+name = "email-grader"
+version.workspace = true
+edition.workspace = true
+description = "Email Grader — scores emails on deliverability, authentication, spam-likelihood, and content quality"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+axum = { workspace = true }
+apexmail-dns-resolver = { path = "../dns-resolver" }
+spam-filter = { path = "../spam-filter" }
+mta = { path = "../mta" }
+threat-intel = { path = "../threat-intel" }
+mail-common = { path = "../mail-common" }
+regex = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+idna = "1"
+sha2 = { workspace = true }
+hex = { workspace = true }
+metrics = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

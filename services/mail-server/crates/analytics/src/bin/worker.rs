@@ -85,7 +85,11 @@ async fn main() -> anyhow::Result<()> {
     let redis_r = redis.clone();
 
     // Compaction task (runs at configured hour, default 2 AM)
+    // Uses exponential backoff on failure to avoid tight retry loops (M-48).
     let compaction_handle = tokio::spawn(async move {
+        const MAX_BACKOFF_SECS: u64 = 3600; // 1 hour cap
+        let mut backoff: u64 = 30; // 30s initial
+
         loop {
             let now = chrono::Utc::now();
             let target_hour = compaction_config.schedule_hour;
@@ -105,19 +109,31 @@ async fn main() -> anyhow::Result<()> {
                     storage_path.clone(),
                 );
                 match worker.run().await {
-                    Ok(result) => info!(
-                        "Compaction complete: migrated={}, bytes={}",
-                        result.rows_migrated, result.bytes_written
-                    ),
-                    Err(e) => error!("Compaction failed: {e}"),
+                    Ok(result) => {
+                        info!(
+                            "Compaction complete: migrated={}, bytes={}",
+                            result.rows_migrated, result.bytes_written
+                        );
+                        backoff = 30; // reset backoff on success
+                    }
+                    Err(e) => {
+                        error!("Compaction failed: {e}, retrying in {backoff}s");
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                        backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
+                        continue; // skip the long sleep, retry sooner
+                    }
                 }
             }
         }
     });
 
     // Reconciliation task (runs at configured hour, default 3 AM)
+    // Uses exponential backoff on failure to avoid tight retry loops (M-48).
     let reconciliation_config = config.reconciliation.clone();
     let reconciliation_handle = tokio::spawn(async move {
+        const MAX_BACKOFF_SECS: u64 = 3600; // 1 hour cap
+        let mut backoff: u64 = 30; // 30s initial
+
         loop {
             let now = chrono::Utc::now();
             let target_hour = reconciliation_config.schedule_hour;
@@ -135,11 +151,19 @@ async fn main() -> anyhow::Result<()> {
                     redis_r.clone(),
                 );
                 match worker.run().await {
-                    Ok(result) => info!(
-                        "Reconciliation: {} discrepancies found",
-                        result.discrepancies_found
-                    ),
-                    Err(e) => error!("Reconciliation failed: {e}"),
+                    Ok(result) => {
+                        info!(
+                            "Reconciliation: {} discrepancies found",
+                            result.discrepancies_found
+                        );
+                        backoff = 30; // reset backoff on success
+                    }
+                    Err(e) => {
+                        error!("Reconciliation failed: {e}, retrying in {backoff}s");
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                        backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
+                        continue; // skip the long sleep, retry sooner
+                    }
                 }
             }
         }

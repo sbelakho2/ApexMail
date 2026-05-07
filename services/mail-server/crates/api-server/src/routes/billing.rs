@@ -5,6 +5,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use billing_common::proration;
 use billing_service::{
     config::{BillingConfig, PaygPricing},
     plans,
@@ -18,12 +19,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::error::ApiError;
+use crate::error::{success, ApiError, ApiResponse};
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 const MINIMUM_MONTHLY_CHARGE_CENTS: i64 = 0;
-const MILLISECONDS_PER_DAY: i64 = 86_400_000;
 const LEGACY_DOWNGRADE_PLAN: &str = "free";
 const DEFAULT_BILLING_CURRENCY: &str = "USD";
 const DEFAULT_NET_DAYS: i64 = 30;
@@ -453,6 +453,7 @@ struct LegacyCancelBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BillingListQuery {
     limit: Option<i64>,
     offset: Option<i64>,
@@ -528,7 +529,7 @@ struct PortalSessionBody {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TenantStripeSettings {
     billing_email: Option<String>,
     default_from_email: Option<String>,
@@ -551,14 +552,14 @@ struct StripePortalSessionResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DateRangeQuery {
     start_date: Option<String>,
     end_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BillingExportQuery {
     #[serde(rename = "type")]
     export_type: Option<String>,
@@ -569,6 +570,7 @@ struct BillingExportQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AdminTenantListQuery {
     limit: Option<i64>,
     offset: Option<i64>,
@@ -903,6 +905,7 @@ impl StripeClient {
         })
     }
 
+    #[allow(dead_code)]
     fn new(
         http: reqwest::Client,
         base_url: String,
@@ -1437,11 +1440,48 @@ async fn get_dunning_state(
     }))
 }
 
+/// Returns `true` if the Postgres error matches one of the given codes.
+///
+/// This is used to detect schema-mismatch errors (e.g. `42703` = undefined
+/// column, `42P01` = undefined table) and fall back to a legacy query during
+/// zero-downtime migrations. **Only** expected migration codes should be passed;
+/// all other errors must be propagated to avoid silently masking real failures.
 fn is_postgres_error_code(error: &sqlx::Error, code: &str) -> bool {
     match error {
         sqlx::Error::Database(db_error) => db_error.code().as_deref() == Some(code),
         _ => false,
     }
+}
+
+/// Returns `true` if the Postgres error matches any of the schema-mismatch
+/// codes that signal a column or table is missing in the current schema.
+///
+/// A warning is emitted so operators can observe fallback events. This should
+/// only be used at the few call sites that explicitly support a legacy schema
+/// path during rolling migrations.
+fn is_expected_schema_fallback_error(error: &sqlx::Error, expected_codes: &[&str]) -> bool {
+    // Extract the error code as an owned String to avoid lifetime issues with
+    // the database error's inner references.
+    let error_code = match error {
+        sqlx::Error::Database(db_error) => db_error.code().map(|c| c.to_string()),
+        _ => None,
+    };
+
+    let matched = match error_code.as_deref() {
+        Some(actual) => expected_codes.contains(&actual),
+        None => false,
+    };
+
+    if matched {
+        if let Some(ref code) = error_code {
+            tracing::warn!(
+                error.code = %code,
+                "schema fallback triggered – column(s) or table(s) missing in current schema",
+            );
+        }
+    }
+
+    matched
 }
 
 fn clamp_limit(limit: i64, max: i64) -> i64 {
@@ -1513,11 +1553,7 @@ fn invoice_payment_terms_days(invoice: &LegacyInvoiceDto) -> i64 {
         .signed_duration_since(invoice.issued_at)
         .num_milliseconds();
 
-    if diff_ms <= 0 {
-        0
-    } else {
-        (diff_ms + MILLISECONDS_PER_DAY - 1) / MILLISECONDS_PER_DAY
-    }
+    proration::ceil_day_count(diff_ms)
 }
 
 fn invoice_vat_label(invoice: &LegacyInvoiceDto) -> String {
@@ -1899,7 +1935,7 @@ async fn query_invoice_list_rows_with_legacy_fallback(
     .await
     {
         Ok(rows) => Ok(rows),
-        Err(error) if is_postgres_error_code(&error, "42703") => {
+        Err(error) if is_expected_schema_fallback_error(&error, &["42703", "42P01"]) => {
             sqlx::query_as::<_, LegacyInvoiceRow>(
                 r#"
                 SELECT
@@ -1982,7 +2018,7 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
     .await
     {
         Ok(rows) => Ok(rows),
-        Err(error) if is_postgres_error_code(&error, "42703") => {
+        Err(error) if is_expected_schema_fallback_error(&error, &["42703", "42P01"]) => {
             sqlx::query_as::<_, LegacyInvoiceRow>(
                 r#"
                 SELECT
@@ -2036,13 +2072,7 @@ fn legacy_billing_interval(interval: BillingInterval) -> &'static str {
     }
 }
 
-fn ceil_day_count(duration_ms: i64) -> i64 {
-    if duration_ms <= 0 {
-        0
-    } else {
-        (duration_ms + MILLISECONDS_PER_DAY - 1) / MILLISECONDS_PER_DAY
-    }
-}
+// Replaced by billing_common::proration::ceil_day_count
 
 fn preview_plan_proration(
     config: &BillingConfig,
@@ -2051,7 +2081,7 @@ fn preview_plan_proration(
     subscription: &RouteSubscription,
 ) -> Result<LegacyProrationDto, String> {
     let now = Utc::now();
-    let days_in_period = ceil_day_count(
+    let days_in_period = proration::ceil_day_count(
         subscription
             .current_period_end
             .signed_duration_since(subscription.current_period_start)
@@ -2061,7 +2091,7 @@ fn preview_plan_proration(
         return Err("Invalid period: daysInPeriod must be greater than 0".into());
     }
 
-    let days_elapsed = ceil_day_count(
+    let days_elapsed = proration::ceil_day_count(
         now.signed_duration_since(subscription.current_period_start)
             .num_milliseconds(),
     );
@@ -2118,9 +2148,9 @@ fn preview_plan_proration(
         current_plan_days_remaining: days_remaining,
         new_plan_days_in_period: days_remaining,
         effective_date: now,
-        explanation: build_proration_explanation(
-            current_plan,
-            new_plan,
+        explanation: proration::build_proration_explanation(
+            &current_plan.display_name,
+            &new_plan.display_name,
             (current_price_numerator as f64 / price_divisor).round() as i64,
             (new_price_numerator as f64 / price_divisor).round() as i64,
             days_remaining,
@@ -2133,69 +2163,7 @@ fn preview_plan_proration(
     })
 }
 
-fn build_proration_explanation(
-    current_plan: &Plan,
-    new_plan: &Plan,
-    current_price: i64,
-    new_price: i64,
-    days_remaining: i64,
-    days_in_period: i64,
-    credit_amount: i64,
-    charge_amount: i64,
-    net_amount: i64,
-) -> String {
-    let format_currency = |cents: i64| format!("${:.2}", cents.abs() as f64 / 100.0);
-
-    let mut lines = vec![
-        format!(
-            "Plan change from {} to {}",
-            current_plan.display_name, new_plan.display_name
-        ),
-        String::new(),
-        format!(
-            "Current period: {} days remaining out of {} days",
-            days_remaining, days_in_period
-        ),
-        String::new(),
-        format!(
-            "Credit for unused {} time: {}",
-            current_plan.display_name,
-            format_currency(credit_amount)
-        ),
-        format!(
-            "({} / {} days × {} days)",
-            format_currency(current_price),
-            days_in_period,
-            days_remaining
-        ),
-        String::new(),
-        format!(
-            "Charge for {} remaining time: {}",
-            new_plan.display_name,
-            format_currency(charge_amount)
-        ),
-        format!(
-            "({} / {} days × {} days)",
-            format_currency(new_price),
-            days_in_period,
-            days_remaining
-        ),
-        String::new(),
-    ];
-
-    if net_amount > 0 {
-        lines.push(format!("Net charge: {}", format_currency(net_amount)));
-    } else if net_amount < 0 {
-        lines.push(format!(
-            "Net credit: {} (applied to next invoice)",
-            format_currency(net_amount)
-        ));
-    } else {
-        lines.push("No additional charge or credit".to_string());
-    }
-
-    lines.join("\n")
-}
+// Replaced by billing_common::proration::build_proration_explanation
 
 fn generate_audit_log_id() -> String {
     Uuid::new_v4()
@@ -2319,6 +2287,14 @@ fn validate_non_negative(value: i64, field_name: &str) -> Result<u64, ApiError> 
     Ok(value as u64)
 }
 
+fn billing_success(data: serde_json::Value) -> Json<ApiResponse<serde_json::Value>> {
+    success(data)
+}
+
+fn billing_success_response(data: serde_json::Value) -> Response {
+    billing_success(data).into_response()
+}
+
 fn payg_pricing_payload(pricing: &PaygPricing) -> serde_json::Value {
     serde_json::json!({
         "emailPricing": pricing
@@ -2357,19 +2333,23 @@ fn payg_cost_payload(
     }))
 }
 
-async fn list_plans(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn list_plans(
+    State(state): State<AppState>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let available_plans = plans::get_active_plans(&state.db).await?;
     let payload: Vec<LegacyPlanDto> = available_plans.into_iter().map(Into::into).collect();
-    Ok(Json(serde_json::json!({ "plans": payload })))
+    Ok(billing_success(serde_json::json!({ "plans": payload })))
 }
 
 async fn get_plan(
     State(state): State<AppState>,
     Path(plan_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let plan = plans::get_plan_by_name(&state.db, &plan_id).await?;
     match plan {
-        Some(plan) => Ok(Json(serde_json::to_value(LegacyPlanDto::from(plan))?)),
+        Some(plan) => Ok(billing_success(serde_json::to_value(LegacyPlanDto::from(
+            plan,
+        ))?)),
         None => Err(ApiError::NotFound("Plan not found".into())),
     }
 }
@@ -2377,13 +2357,13 @@ async fn get_plan(
 async fn get_current_plan(
     State(state): State<AppState>,
     auth: AuthUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let plan = plans::get_plan_for_tenant(&state.db, &auth.tenant_id).await?;
     match plan {
-        Some(plan) => Ok(Json(serde_json::to_value(LegacyPlanLimitsDto::from(
-            &plan,
-        ))?)),
-        None => Ok(Json(serde_json::Value::Null)),
+        Some(plan) => Ok(billing_success(serde_json::to_value(
+            LegacyPlanLimitsDto::from(&plan),
+        )?)),
+        None => Ok(billing_success(serde_json::Value::Null)),
     }
 }
 
@@ -2391,13 +2371,13 @@ async fn get_plan_feature(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(feature): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let plan = plans::get_plan_for_tenant(&state.db, &auth.tenant_id).await?;
     let has_access = plan
         .map(|plan| feature_has_access(&LegacyPlanFeaturesPayload::from(plan.features), &feature))
         .unwrap_or(false);
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success(serde_json::json!({
         "feature": feature,
         "hasAccess": has_access,
     })))
@@ -2406,27 +2386,27 @@ async fn get_plan_feature(
 async fn get_plan_features(
     State(state): State<AppState>,
     auth: AuthUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let plan = plans::get_plan_for_tenant(&state.db, &auth.tenant_id).await?;
     match plan {
-        Some(plan) => Ok(Json(serde_json::to_value(
+        Some(plan) => Ok(billing_success(serde_json::to_value(
             LegacyPlanFeaturesPayload::from(plan.features),
         )?)),
-        None => Ok(Json(serde_json::json!({}))),
+        None => Ok(billing_success(serde_json::json!({}))),
     }
 }
 
 async fn get_plan_limits(
     State(state): State<AppState>,
     auth: AuthUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     get_current_plan(State(state), auth).await
 }
 
 async fn compare_plans(
     State(state): State<AppState>,
     Path((plan_id1, plan_id2)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let plan1 = plans::get_plan_by_name(&state.db, &plan_id1).await?;
     let plan2 = plans::get_plan_by_name(&state.db, &plan_id2).await?;
 
@@ -2434,7 +2414,7 @@ async fn compare_plans(
         (Some(plan1), Some(plan2)) => {
             let plan1_features = LegacyPlanFeaturesPayload::from(plan1.features.clone());
             let plan2_features = LegacyPlanFeaturesPayload::from(plan2.features.clone());
-            Ok(Json(serde_json::json!({
+            Ok(billing_success(serde_json::json!({
                 "plan1": {
                     "id": plan1.id,
                     "name": plan1.name,
@@ -2468,15 +2448,15 @@ async fn compare_plans(
     }
 }
 
-async fn get_payg_pricing() -> Json<serde_json::Value> {
+async fn get_payg_pricing() -> Json<ApiResponse<serde_json::Value>> {
     let pricing = PaygPricing::default();
-    Json(payg_pricing_payload(&pricing))
+    billing_success(payg_pricing_payload(&pricing))
 }
 
 async fn get_usage(
     State(state): State<AppState>,
     auth: AuthUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let now = Utc::now();
     let month_start_date = now.date_naive().with_day(1).unwrap_or(now.date_naive());
     let period_start = month_start_date.and_time(NaiveTime::MIN).and_utc();
@@ -2491,7 +2471,7 @@ async fn get_usage(
     )
     .await?;
 
-    Ok(Json(payload))
+    Ok(billing_success(payload))
 }
 
 async fn get_realtime_usage_counter(
@@ -2513,22 +2493,21 @@ async fn get_realtime_usage_counter(
     let mut conn = state.redis.get().await?;
     let value: Option<i64> = conn.get(&key).await.map_err(ApiError::from)?;
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success_response(serde_json::json!({
         "metric": metric,
         "count": value.unwrap_or(0),
         "period": period,
-    }))
-    .into_response())
+    })))
 }
 
 async fn estimate_payg_cost(
     Json(body): Json<PaygEstimateBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let emails_sent = validate_non_negative(body.emails_sent, "emailsSent")?;
     let api_calls = validate_non_negative(body.api_calls, "apiCalls")?;
     let pricing = PaygPricing::default();
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success(serde_json::json!({
         "usage": {
             "emailsSent": emails_sent,
             "apiCalls": api_calls,
@@ -2541,7 +2520,7 @@ async fn estimate_payg_cost(
 async fn get_payg_usage(
     State(state): State<AppState>,
     auth: AuthUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let now = Utc::now();
     let month_start_date = now.date_naive().with_day(1).unwrap_or(now.date_naive());
     let period_start = month_start_date.and_time(NaiveTime::MIN).and_utc();
@@ -2567,7 +2546,7 @@ async fn get_payg_usage(
         .max(0) as u64;
     let pricing = PaygPricing::default();
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success(serde_json::json!({
         "period": {
             "start": period_start.to_rfc3339(),
             "end": period_end.to_rfc3339(),
@@ -2583,7 +2562,7 @@ async fn get_payg_usage(
 
 async fn estimate_overage_cost(
     Json(body): Json<OverageEstimateBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let emails_sent = validate_non_negative(body.emails_sent, "emailsSent")? as i64;
     if body.email_limit < 0 {
         return Err(ApiError::Validation(vec![
@@ -2593,7 +2572,7 @@ async fn estimate_overage_cost(
 
     let overage_cost_cents = plans::calculate_overage_cost(emails_sent, body.email_limit);
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success(serde_json::json!({
         "usage": {
             "emailsSent": emails_sent,
             "emailLimit": body.email_limit,
@@ -2662,7 +2641,11 @@ async fn configure_usage_alerts(
         created.push(UsageAlertThresholdDto::from(row));
     }
 
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(created)?)).into_response())
+    Ok((
+        StatusCode::CREATED,
+        billing_success(serde_json::to_value(created)?),
+    )
+        .into_response())
 }
 
 async fn create_checkout_session(
@@ -2743,11 +2726,10 @@ async fn create_checkout_session(
         return Ok(billing_operation_failed_response());
     };
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success_response(serde_json::json!({
         "sessionId": session.id,
         "url": url,
-    }))
-    .into_response())
+    })))
 }
 
 async fn create_portal_session(
@@ -2803,7 +2785,9 @@ async fn create_portal_session(
         }
     };
 
-    Ok(Json(serde_json::json!({ "url": session.url })).into_response())
+    Ok(billing_success_response(
+        serde_json::json!({ "url": session.url }),
+    ))
 }
 
 async fn get_proration_preview(
@@ -2849,7 +2833,7 @@ async fn get_proration_preview(
         &new_plan,
         &subscription,
     ) {
-        Ok(proration) => Ok(Json(serde_json::to_value(proration)?).into_response()),
+        Ok(proration) => Ok(billing_success_response(serde_json::to_value(proration)?)),
         Err(error) => Ok((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": error })),
@@ -2926,12 +2910,11 @@ async fn switch_plan(
 
         tx.commit().await?;
 
-        return Ok(Json(serde_json::json!({
+        return Ok(billing_success_response(serde_json::json!({
             "success": true,
             "message": "Switched to Pay As You Go billing",
             "effectiveDate": effective_date,
-        }))
-        .into_response());
+        })));
     }
 
     let subscription = match get_route_subscription(&state.db, &auth.tenant_id).await? {
@@ -3044,13 +3027,12 @@ async fn switch_plan(
 
     tx.commit().await?;
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success_response(serde_json::json!({
         "success": true,
         "proration": proration,
         "newPlan": body.plan_name,
         "billingInterval": legacy_billing_interval(body.billing_interval),
-    }))
-    .into_response())
+    })))
 }
 
 async fn cancel_subscription_request(
@@ -3148,7 +3130,7 @@ async fn cancel_subscription_request(
 
     tx.commit().await?;
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success_response(serde_json::json!({
         "success": true,
         "message": if body.cancel_immediately {
             "Subscription cancelled immediately"
@@ -3157,8 +3139,7 @@ async fn cancel_subscription_request(
         },
         "effectiveDate": effective_date,
         "willDowngradeTo": LEGACY_DOWNGRADE_PLAN,
-    }))
-    .into_response())
+    })))
 }
 
 async fn get_subscription(
@@ -3197,14 +3178,13 @@ async fn get_subscription(
     };
 
     match subscription {
-        Some(subscription) => Ok(Json(serde_json::json!({
+        Some(subscription) => Ok(billing_success_response(serde_json::json!({
             "subscription": LegacyStripeSubscriptionDto::from(subscription),
-        }))
-        .into_response()),
-        None => Ok(Json(
-            serde_json::json!({ "subscription": null, "message": "No active subscription" }),
-        )
-        .into_response()),
+        }))),
+        None => Ok(billing_success_response(serde_json::json!({
+            "subscription": null,
+            "message": "No active subscription"
+        }))),
     }
 }
 
@@ -3228,13 +3208,12 @@ async fn list_invoices(
 
     let invoices: Vec<LegacyInvoiceDto> = rows.into_iter().map(map_invoice_row).collect();
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success_response(serde_json::json!({
         "invoices": invoices,
         "totalCount": total_count,
         "limit": limit,
         "offset": offset,
-    }))
-    .into_response())
+    })))
 }
 
 async fn get_invoice(
@@ -3243,7 +3222,7 @@ async fn get_invoice(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
-        Some(invoice) => Ok(Json(serde_json::to_value(invoice)?).into_response()),
+        Some(invoice) => Ok(billing_success_response(serde_json::to_value(invoice)?)),
         None => Ok((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "Invoice not found" })),
@@ -3316,7 +3295,7 @@ async fn check_quota(State(state): State<AppState>, auth: AuthUser) -> Result<Re
             usage::UsageError::RedisCmd(redis_error) => ApiError::from(redis_error),
         })?;
 
-    Ok(Json(status).into_response())
+    Ok(billing_success_response(serde_json::to_value(status)?))
 }
 
 async fn admin_list_tenants(
@@ -3404,12 +3383,11 @@ async fn admin_list_tenants(
         .await?
     };
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success_response(serde_json::json!({
         "tenants": tenants,
         "limit": limit,
         "offset": offset,
-    }))
-    .into_response())
+    })))
 }
 
 async fn admin_get_tenant_details(
@@ -3471,7 +3449,7 @@ async fn admin_get_tenant_details(
             .map(map_invoice_row)
             .collect();
 
-    Ok(Json(serde_json::json!({
+    Ok(billing_success_response(serde_json::json!({
         "tenantId": tenant_id,
         "subscription": subscription,
         "plan": plan,
@@ -3481,8 +3459,7 @@ async fn admin_get_tenant_details(
             "invoices": recent_invoices,
             "totalCount": total_count,
         },
-    }))
-    .into_response())
+    })))
 }
 
 async fn admin_apply_credit(
@@ -3577,7 +3554,7 @@ async fn admin_apply_credit(
 
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::to_value(LegacyWalletTransactionDto::from(
+        billing_success(serde_json::to_value(LegacyWalletTransactionDto::from(
             transaction,
         ))?),
     )
@@ -3636,10 +3613,10 @@ async fn admin_apply_plan_override(
     .execute(&state.db)
     .await?;
 
-    Ok(
-        Json(serde_json::json!({ "success": true, "message": "Plan override applied" }))
-            .into_response(),
-    )
+    Ok(billing_success_response(serde_json::json!({
+        "success": true,
+        "message": "Plan override applied"
+    })))
 }
 
 async fn admin_force_subscription_status(
@@ -3706,10 +3683,10 @@ async fn admin_force_subscription_status(
 
     tx.commit().await?;
 
-    Ok(
-        Json(serde_json::json!({ "success": true, "message": "Subscription status updated" }))
-            .into_response(),
-    )
+    Ok(billing_success_response(serde_json::json!({
+        "success": true,
+        "message": "Subscription status updated"
+    })))
 }
 
 async fn admin_reset_dunning(
@@ -3796,10 +3773,10 @@ async fn admin_reset_dunning(
     tx.commit().await?;
     invalidate_cache_key(&state, &format!("dunning:status:{tenant_id}")).await;
 
-    Ok(
-        Json(serde_json::json!({ "success": true, "message": "Dunning state reset" }))
-            .into_response(),
-    )
+    Ok(billing_success_response(serde_json::json!({
+        "success": true,
+        "message": "Dunning state reset"
+    })))
 }
 
 async fn admin_create_invoice(
@@ -4003,7 +3980,7 @@ async fn admin_create_invoice(
 
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::to_value(LegacyInvoiceDto {
+        billing_success(serde_json::to_value(LegacyInvoiceDto {
             id: inserted.0,
             tenant_id,
             stripe_invoice_id: None,
@@ -4066,7 +4043,7 @@ async fn admin_get_revenue_report(
         .await
     {
         Ok(report) => report,
-        Err(error) if is_postgres_error_code(&error, "42703") => {
+        Err(error) if is_expected_schema_fallback_error(&error, &["42703", "42P01"]) => {
             sqlx::query_scalar(admin_revenue_report_query(true))
                 .bind(start_date)
                 .bind(end_date)
@@ -4076,7 +4053,9 @@ async fn admin_get_revenue_report(
         Err(error) => return Err(error.into()),
     };
 
-    Ok(Json(serde_json::json!({ "report": report })).into_response())
+    Ok(billing_success_response(
+        serde_json::json!({ "report": report }),
+    ))
 }
 
 async fn admin_get_mrr_report(
@@ -4112,7 +4091,9 @@ async fn admin_get_mrr_report(
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Json(serde_json::json!({ "report": report })).into_response())
+    Ok(billing_success_response(
+        serde_json::json!({ "report": report }),
+    ))
 }
 
 async fn admin_get_churn_report(
@@ -4167,7 +4148,9 @@ async fn admin_get_churn_report(
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Json(serde_json::json!({ "report": report })).into_response())
+    Ok(billing_success_response(
+        serde_json::json!({ "report": report }),
+    ))
 }
 
 async fn admin_get_dunning_report(
@@ -4195,7 +4178,9 @@ async fn admin_get_dunning_report(
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Json(serde_json::json!({ "report": report })).into_response())
+    Ok(billing_success_response(
+        serde_json::json!({ "report": report }),
+    ))
 }
 
 async fn admin_get_cost_report(
@@ -4251,7 +4236,9 @@ async fn admin_get_cost_report(
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Json(serde_json::json!({ "report": report })).into_response())
+    Ok(billing_success_response(
+        serde_json::json!({ "report": report }),
+    ))
 }
 
 async fn admin_export_billing_data(
@@ -4338,7 +4325,10 @@ async fn admin_export_billing_data(
         .await
     {
         Ok(data) => data,
-        Err(error) if export_type == "invoices" && is_postgres_error_code(&error, "42703") => {
+        Err(error)
+            if export_type == "invoices"
+                && is_expected_schema_fallback_error(&error, &["42703", "42P01"]) =>
+        {
             sqlx::query_scalar(admin_invoice_export_query(true))
                 .bind(start_date_parsed)
                 .bind(end_date_parsed)
@@ -4349,7 +4339,7 @@ async fn admin_export_billing_data(
     };
 
     if query.format.eq_ignore_ascii_case("json") {
-        return Ok(Json(serde_json::json!({ "data": data })).into_response());
+        return Ok(billing_success_response(data));
     }
 
     let csv = json_rows_to_csv(&data);
@@ -4444,6 +4434,19 @@ mod tests {
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),
             metrics_port: 9090,
+            grader_enabled: false,
+            grader_rate_limit: 10,
+            grader_rate_window_seconds: 60,
+            grader_cache_ttl_seconds: 300,
+            grader_max_body_size: 1048576,
+            placement_enabled: false,
+            placement_polling_interval_secs: 60,
+            placement_max_polling_attempts: 60,
+            placement_max_seeds_per_test: 50,
+            placement_max_tests_per_hour: 10,
+            placement_imap_timeout_secs: 30,
+            placement_encrypt_passwords: false,
+            placement_encryption_secret: "test-placement-encryption-secret-32b".into(),
         }
     }
 
@@ -4493,6 +4496,7 @@ mod tests {
             tenant_id: tenant_id.to_string(),
             user_id: Some("user_123".into()),
             api_key_id: None,
+            session_id: None,
             scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
         }
     }
@@ -4745,5 +4749,326 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
         }
+    }
+
+    // ── Audit Log Hash Chain Tests ──────────────────────────────
+
+    #[test]
+    fn test_generate_audit_log_id_format() {
+        let id = generate_audit_log_id();
+        // Should be 26 lowercase hex chars (UUID v4 trimmed)
+        assert_eq!(id.len(), 26);
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_is_deterministic() {
+        let ts = Utc::now();
+        let metadata = serde_json::json!({"reason": "test", "source": "unit-test"});
+
+        let hash1 = compute_audit_log_hash(
+            "tenant_001",
+            "user.created",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts,
+        );
+        let hash2 = compute_audit_log_hash(
+            "tenant_001",
+            "user.created",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts,
+        );
+
+        assert_eq!(hash1, hash2, "same inputs must produce same hash");
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_changes_with_tenant_id() {
+        let ts = Utc::now();
+        let metadata = serde_json::json!({});
+
+        let hash_a = compute_audit_log_hash(
+            "tenant_001",
+            "user.created",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts,
+        );
+        let hash_b = compute_audit_log_hash(
+            "tenant_002",
+            "user.created",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts,
+        );
+
+        assert_ne!(
+            hash_a, hash_b,
+            "different tenants must produce different hash"
+        );
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_changes_with_action() {
+        let ts = Utc::now();
+        let metadata = serde_json::json!({});
+
+        let hash_create = compute_audit_log_hash(
+            "tenant_001",
+            "user.created",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts,
+        );
+        let hash_delete = compute_audit_log_hash(
+            "tenant_001",
+            "user.deleted",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts,
+        );
+
+        assert_ne!(
+            hash_create, hash_delete,
+            "different actions must produce different hash"
+        );
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_changes_with_metadata() {
+        let ts = Utc::now();
+
+        let hash1 = compute_audit_log_hash(
+            "tenant_001",
+            "plan.change",
+            "subscription",
+            Some("sub-001"),
+            &serde_json::json!({"newPlan": "pro"}),
+            None,
+            ts,
+        );
+        let hash2 = compute_audit_log_hash(
+            "tenant_001",
+            "plan.change",
+            "subscription",
+            Some("sub-001"),
+            &serde_json::json!({"newPlan": "enterprise"}),
+            None,
+            ts,
+        );
+
+        assert_ne!(
+            hash1, hash2,
+            "different metadata must produce different hash"
+        );
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_chains_with_previous_hash() {
+        let ts = Utc::now();
+        let metadata = serde_json::json!({});
+
+        let first_hash = compute_audit_log_hash(
+            "tenant_001",
+            "user.created",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts,
+        );
+
+        // Second entry in the chain links to the first
+        let second_hash = compute_audit_log_hash(
+            "tenant_001",
+            "user.updated",
+            "user",
+            Some("u-001"),
+            &metadata,
+            Some(&first_hash),
+            ts,
+        );
+
+        assert_ne!(
+            second_hash, first_hash,
+            "second link must differ from first"
+        );
+
+        // If someone tries to insert a fraudulent second entry with no previous_hash, it differs
+        let fraudulent_hash = compute_audit_log_hash(
+            "tenant_001",
+            "user.updated",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts,
+        );
+        assert_ne!(
+            second_hash, fraudulent_hash,
+            "tampered entry (missing prev hash) must differ from legitimate one"
+        );
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_changes_with_timestamp() {
+        let ts1 = Utc::now();
+        let ts2 = ts1 + chrono::Duration::seconds(1);
+        let metadata = serde_json::json!({});
+
+        let hash1 = compute_audit_log_hash(
+            "tenant_001",
+            "user.created",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts1,
+        );
+        let hash2 = compute_audit_log_hash(
+            "tenant_001",
+            "user.created",
+            "user",
+            Some("u-001"),
+            &metadata,
+            None,
+            ts2,
+        );
+
+        assert_ne!(
+            hash1, hash2,
+            "different timestamps must produce different hash"
+        );
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_output_is_sha256_hex() {
+        let ts = Utc::now();
+        let metadata = serde_json::json!({});
+
+        let hash = compute_audit_log_hash(
+            "tenant_001",
+            "action",
+            "resource",
+            None,
+            &metadata,
+            None,
+            ts,
+        );
+
+        // SHA-256 hex output is 64 chars
+        assert_eq!(hash.len(), 64, "SHA-256 hex output must be 64 characters");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash must be hex"
+        );
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_with_none_resource_id() {
+        let ts = Utc::now();
+        let metadata = serde_json::json!({});
+
+        // None resource_id should be handled gracefully (uses empty string)
+        let hash = compute_audit_log_hash(
+            "tenant_001",
+            "system.event",
+            "system",
+            None,
+            &metadata,
+            None,
+            ts,
+        );
+
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_compute_audit_log_hash_long_chain_integrity() {
+        // Build a 5-entry hash chain and verify each link is correctly bound
+        let ts = Utc::now();
+        let _metadata = serde_json::json!({"action_idx": 0});
+
+        let mut prev_hash: Option<String> = None;
+        let mut hashes: Vec<String> = Vec::new();
+
+        for i in 0..5 {
+            let metadata = serde_json::json!({"action_idx": i});
+            let ts_entry = ts + chrono::Duration::seconds(i);
+            let hash = compute_audit_log_hash(
+                "tenant_001",
+                "test.event",
+                "test",
+                Some(&format!("evt-{i:03}")),
+                &metadata,
+                prev_hash.as_deref(),
+                ts_entry,
+            );
+            // Verify chain binding: each new hash must incorporate the previous
+            if let Some(ref prev) = prev_hash {
+                assert_ne!(*prev, hash, "consecutive chain links must differ");
+            }
+            prev_hash = Some(hash.clone());
+            hashes.push(hash);
+        }
+
+        // All 5 hashes must be unique
+        let mut unique = hashes.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            5,
+            "all chain entries must produce unique hashes"
+        );
+
+        // Tamper detection: changing any middle entry breaks forward linkage
+        let tampered_metadata = serde_json::json!({"action_idx": 2, "tampered": true});
+        let tampered_hash = compute_audit_log_hash(
+            "tenant_001",
+            "test.event",
+            "test",
+            Some("evt-002"),
+            &tampered_metadata,
+            Some(&hashes[1]), // correct prev (links to entry 1)
+            ts + chrono::Duration::seconds(2),
+        );
+
+        // The tampered hash differs from the original at the same position
+        assert_ne!(
+            tampered_hash, hashes[2],
+            "tampered entry must differ from original"
+        );
+
+        // Verifying against wrong prev fails
+        let wrong_prev_hash = compute_audit_log_hash(
+            "tenant_001",
+            "test.event",
+            "test",
+            Some("evt-002"),
+            &serde_json::json!({"action_idx": 2}),
+            Some("fake-previous-hash"),
+            ts + chrono::Duration::seconds(2),
+        );
+        assert_ne!(
+            wrong_prev_hash, hashes[2],
+            "wrong previous hash must produce different hash"
+        );
     }
 }

@@ -377,14 +377,14 @@ impl Config {
         if self.environment == "production" {
             if self.internal_api_key.trim().is_empty() {
                 self.internal_api_key = generated_runtime_secret("ha-internal-api-key");
-                eprintln!(
-                    "SECURITY: INTERNAL_API_KEY missing in production; generated an ephemeral runtime key"
+                tracing::warn!(
+                    "SECURITY: INTERNAL_API_KEY missing in production; generated an ephemeral runtime key (redacted)"
                 );
             }
             if self.admin_api_key.trim().is_empty() {
                 self.admin_api_key = generated_runtime_secret("ha-admin-api-key");
-                eprintln!(
-                    "SECURITY: ADMIN_API_KEY missing in production; generated an ephemeral runtime key"
+                tracing::warn!(
+                    "SECURITY: ADMIN_API_KEY missing in production; generated an ephemeral runtime key (redacted)"
                 );
             }
             if self.database.password.is_empty() || self.database.password == "apexmail" {
@@ -395,8 +395,8 @@ impl Config {
                         .unwrap_or_default()
                         .as_nanos()
                 );
-                eprintln!(
-                    "SECURITY: DB_PASSWORD missing/weak in production; generated an ephemeral runtime password"
+                tracing::warn!(
+                    "SECURITY: DB_PASSWORD missing/weak in production; generated an ephemeral runtime password (redacted)"
                 );
             }
         }

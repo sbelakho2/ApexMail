@@ -27,7 +27,7 @@ pub struct BillingConfig {
     /// Internal API base URL used for dedicated IP provisioning.
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
-    /// Estonia VAT rate (percent).
+    /// Estonia VAT rate (percent, 24 % effective since 1 July 2025).
     #[serde(default = "default_vat_rate")]
     pub estonia_vat_rate: u32,
     /// Overage rate per email in cents ($0.40 / 1 000 = 0.04 cents).
@@ -57,7 +57,7 @@ fn default_api_base_url() -> String {
     "http://localhost:3001".into()
 }
 fn default_vat_rate() -> u32 {
-    22
+    24
 }
 fn default_overage_rate_cents() -> i64 {
     40
@@ -206,7 +206,7 @@ mod tests {
         let cfg = BillingConfig::default();
         assert_eq!(cfg.listen_addr, "0.0.0.0:4100");
         assert_eq!(cfg.metering_batch_size, 100);
-        assert_eq!(cfg.estonia_vat_rate, 22);
+        assert_eq!(cfg.estonia_vat_rate, 24);
         assert_eq!(cfg.max_proration_charge_cents, 100_000);
         assert_eq!(cfg.max_proration_credit_cents, 50_000);
         assert_eq!(cfg.warn_proration_charge_cents, 25_000);

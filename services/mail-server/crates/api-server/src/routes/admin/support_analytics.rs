@@ -17,6 +17,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SupportAnalyticsQuery {
     #[serde(default = "default_days")]
     pub days: i64,
@@ -106,8 +107,7 @@ async fn get_support_analytics(
              FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval"
     ))
     .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None)
+    .await?
     .unwrap_or((0, 0, 0, 0, 0, 0, 0));
 
     // Average resolution time

@@ -1,30 +1,26 @@
 <!DOCTYPE html>
-<html lang="en" dir="ltr" id="top">
+<html lang="en" dir="ltr" id="top" data-theme="apex">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
-  <meta name="theme-color" content="#2563EB" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#000000" />
 
-  {% set asset_cdn_base_url = config.extra.asset_cdn_base_url | default(value="") %}
-  {% if asset_cdn_base_url %}
-    {% set inter_font_url = asset_cdn_base_url ~ "/fonts/InterVariable.woff2" %}
-    {% set mono_font_url = asset_cdn_base_url ~ "/fonts/JetBrainsMono-Variable.ttf" %}
-    {% set styles_css_url = asset_cdn_base_url ~ "/css/styles.css" %}
-    {% set no_js_css_url = asset_cdn_base_url ~ "/css/no-js.css" %}
-  {% else %}
-    {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
-    {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.ttf", cachebust=true) %}
-    {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
-    {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
-  {% endif %}
+  {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
+  {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.ttf", cachebust=true) %}
+  {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
+  {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
+  {% set giallo_css_url = get_url(path="giallo.css", cachebust=true) %}
+  {% set site_js_url = get_url(path="js/apexmail-site.js", cachebust=true) %}
 
   <title>{% block title %}{{ config.title }}{% endblock title %}</title>
   <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}" />
 
   {# ── Canonical & SEO ──────────────────────────────── #}
-  <link rel="canonical" href="{% block canonical %}{{ current_url | default(value=config.base_url) }}{% endblock canonical %}" />
-  <link rel="alternate" hreflang="en-US" href="{{ current_url | default(value=config.base_url) }}" />
-  <link rel="alternate" hreflang="x-default" href="{{ current_url | default(value=config.base_url) }}" />
+  {% block canonical_tag %}<link rel="canonical" href="{{ current_url | default(value=config.base_url) }}" />{% endblock canonical_tag %}
+  {# ── Hreflang language alternates ────────────────── #}
+  <link rel="alternate" hreflang="en" href="{{ current_url | default(value=config.base_url) }}" />
+  <link rel="alternate" hreflang="x-default" href="{{ config.base_url }}" />
   <meta name="robots" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="googlebot" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="keywords" content="email API, transactional email, email infrastructure, GDPR compliant email, HIPAA-ready enterprise email, email deliverability, enterprise email, developer email API" />
@@ -38,7 +34,7 @@
   <meta property="og:site_name" content="{{ config.extra.site_name }}" />
   <meta property="og:title" content="{% block og_title %}{{ config.title }}{% endblock og_title %}" />
   <meta property="og:description" content="{% block og_description %}{{ config.description }}{% endblock og_description %}" />
-  <meta property="og:image" content="{{ config.base_url }}{% block og_image %}{{ config.extra.og_image }}{% endblock og_image %}" />
+  <meta property="og:image" content="{{ config.base_url }}{% block og_image %}{{ config.extra.og_image | replace(from='.svg', to='.png') }}{% endblock og_image %}" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta property="og:image:alt" content="{% block og_image_alt %}{{ config.extra.site_name }} — Enterprise Email API{% endblock og_image_alt %}" />
@@ -47,13 +43,11 @@
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="{% block twitter_title %}{{ config.title }}{% endblock twitter_title %}" />
   <meta name="twitter:description" content="{% block twitter_description %}{{ config.description }}{% endblock twitter_description %}" />
-  <meta name="twitter:image" content="{{ config.base_url }}{{ config.extra.og_image }}" />
+  <meta name="twitter:image" content="{{ config.base_url }}{{ config.extra.og_image | replace(from='.svg', to='.png') }}" />
   <meta name="twitter:creator" content="{{ config.extra.twitter_handle }}" />
 
   {# ── Favicons ──────────────────────────────────────── #}
-  <link rel="icon" href="/favicon.ico" sizes="any" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/manifest.json" />
 
   {# ── Font Preloads ────────────────────────────────── #}
@@ -63,6 +57,8 @@
   {# ── CSS ───────────────────────────────────────────── #}
   <link rel="stylesheet" href="{{ styles_css_url }}" />
   <link rel="stylesheet" href="{{ no_js_css_url }}" />
+  {# giallo.css syntax highlighting inlined to reduce HTTP requests #}
+  <style>.z-code{color:#24292E;background-color:#FFFFFF}.z-hl{background-color:#F6F8FA}.giallo-ln{color:#1B1F234D}.z-comment{color:#6A737D}.z-constant{color:#005CC5}.z-entity{color:#6F42C1}.z-keyword{color:#D73A49}.z-storage{color:#D73A49}.z-string{color:#032F62}.z-support{color:#005CC5}.z-variable{color:#E36209}.z-carriage-return{color:#FAFBFC;background-color:#D73A49;font-style:italic;text-decoration:underline}.z-source{color:#032F62}.z-string.z-comment{color:#6A737D}.z-variable.z-language{color:#005CC5}.z-entity.z-name{color:#6F42C1}.z-storage.z-type{color:#D73A49}.z-meta.z-property-name{color:#005CC5}.z-variable.z-other{color:#24292E}.z-invalid.z-broken{color:#B31D28;font-style:italic}.z-invalid.z-deprecated{color:#B31D28;font-style:italic}.z-invalid.z-illegal{color:#B31D28;font-style:italic}.z-invalid.z-unimplemented{color:#B31D28;font-style:italic}.z-message.z-error{color:#B31D28}.z-source.z-regexp{color:#032F62}.z-string.z-regexp{color:#032F62}.z-support.z-constant{color:#005CC5}.z-support.z-variable{color:#005CC5}.z-meta.z-module-reference{color:#005CC5}.z-markup.z-heading{color:#005CC5;font-weight:bold}.z-markup.z-quote{color:#22863A}.z-markup.z-italic{color:#24292E;font-style:italic}.z-markup.z-bold{color:#24292E;font-weight:bold}.z-markup.z-underline{text-decoration:underline}.z-markup.z-strikethrough{text-decoration:line-through}.z-markup.z-deleted{color:#B31D28;background-color:#FFEEF0}.z-markup.z-inserted{color:#22863A;background-color:#F0FFF4}.z-markup.z-changed{color:#E36209;background-color:#FFEBDA}.z-markup.z-ignored{color:#F6F8FA;background-color:#005CC5}.z-markup.z-untracked{color:#F6F8FA;background-color:#005CC5}.z-meta.z-separator{color:#005CC5;font-weight:bold}.z-meta.z-output{color:#005CC5}.z-brackethighlighter.z-tag{color:#586069}.z-brackethighlighter.z-curly{color:#586069}.z-brackethighlighter.z-round{color:#586069}.z-brackethighlighter.z-square{color:#586069}.z-brackethighlighter.z-angle{color:#586069}.z-brackethighlighter.z-quote{color:#586069}.z-brackethighlighter.z-unmatched{color:#B31D28}.z-punctuation.z-definition.z-comment{color:#6A737D}.z-entity.z-name.z-constant{color:#005CC5}.z-variable.z-other.z-constant{color:#005CC5}.z-variable.z-other.z-enummember{color:#005CC5}.z-variable.z-parameter.z-function{color:#24292E}.z-entity.z-name.z-tag{color:#22863A}.z-storage.z-modifier.z-package{color:#24292E}.z-storage.z-modifier.z-import{color:#24292E}.z-storage.z-type.z-java{color:#24292E}.z-punctuation.z-definition.z-string{color:#032F62}.z-string.z-regexp.z-character-class{color:#032F62}.z-markup.z-inline.z-raw{color:#005CC5}.z-punctuation.z-definition.z-deleted{color:#B31D28;background-color:#FFEEF0}.z-punctuation.z-definition.z-inserted{color:#22863A;background-color:#F0FFF4}.z-punctuation.z-definition.z-changed{color:#E36209;background-color:#FFEBDA}.z-meta.z-diff.z-range{color:#6F42C1;font-weight:bold}.z-meta.z-diff.z-header{color:#005CC5}.z-string.z-other.z-link{color:#032F62;text-decoration:underline}.z-constant.z-character.z-escape{color:#032F62}.z-source.z-ruby.z-embedded{color:#032F62}.z-string.z-regexp.z-arbitrary-repitition{color:#032F62}.z-constant.z-character.z-escape{color:#22863A;font-weight:bold}.z-meta.z-diff.z-header.z-from-file{color:#B31D28;background-color:#FFEEF0}.z-meta.z-diff.z-header.z-to-file{color:#22863A;background-color:#F0FFF4}.z-constant.z-other.z-reference.z-link{color:#032F62;text-decoration:underline}.z-punctuation.z-definition.z-list.z-begin.z-markdown{color:#E36209}</style>
 
   {# ── Organization JSON-LD ─────────────────────────── #}
   <script type="application/ld+json">
@@ -74,22 +70,25 @@
     "logo": "{{ config.base_url }}/icon.svg",
     "sameAs": [
       "{{ config.extra.github_url }}",
-      "https://linkedin.com/company/apexmail",
-      "https://twitter.com/apexmail"
+      "{{ config.extra.linkedin_url }}",
+      "{{ config.extra.twitter_url }}"
     ]
   }
   </script>
 
   {# ── Page-Specific Head Blocks ────────────────────── #}
   {% block head %}{% endblock head %}
+
 </head>
-<body class="font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom flex flex-col">
-  <a href="#main-content" id="skip-to-content">Skip to main content</a>
+<body class="antialiased min-h-screen safe-area-inset-bottom flex flex-col">
+  <a href="#main-content" id="skip-to-content" class="skip-to-content" tabindex="1">Skip to main content</a>
 
   {# ── Hidden state inputs for CSS-only interactivity ──── #}
-  <input type="checkbox" id="mobile-menu-state" class="sr-only" aria-hidden="true" />
+  {# The checkbox pattern provides a no-JS fallback for mobile menu. #}
+  {# JS enhancement (in apexmail-site.js) adds keyboard support.     #}
+  <input type="checkbox" id="nav-toggle" class="sr-only" aria-label="Toggle navigation menu" />
 
-  {# ── Header (pure CSS interactivity) ─────────────────── #}
+  {# ── Header ─────────────────────────────────────────── #}
   {% include "partials/header.html" %}
 
   {# ── Main Content ──────────────────────────────────── #}
@@ -100,123 +99,21 @@
   {# ── Footer ────────────────────────────────────────── #}
   {% include "partials/footer.html" %}
 
-  {# ── Cookie Consent (CSS-only dismiss) ──────────────── #}
+  {# ── Cookie Consent ─────────────────────────────────── #}
   {% include "partials/generated/cookie-consent-island.html" %}
 
-  {# ── Back to Top (pure CSS, smooth scroll via anchor) ── #}
+  {# ── Back to Top ─────────────────────────────────────── #}
   <a
     href="#top"
     id="back-to-top"
-    class="fixed bottom-6 right-6 z-50 rounded-full bg-brand-600 p-3 text-white shadow-lg transition-opacity hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500"
+    class="fixed bottom-6 right-6 z-50 rounded-sm bg-surface-950 p-3 text-white border border-surface-800 transition-opacity hover:bg-surface-800 focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
     aria-label="Back to top"
   >
-    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
       <path fill-rule="evenodd" d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z" clip-rule="evenodd" />
     </svg>
   </a>
 
-  <script>
-    (() => {
-      const consentCookie = {{ config.extra.cookie_consent_cookie_name | default(value="apexmail_cookie_consent") | json_encode | safe }};
-      const analyticsUrl = {{ config.extra.analytics_pixel_url | json_encode | safe }};
-      const configuredConsentChoices = {{ config.extra.cookie_consent_choices | default(value=[]) | json_encode | safe }};
-      const consentChoices = Array.isArray(configuredConsentChoices) && configuredConsentChoices.length > 0
-        ? configuredConsentChoices
-        : [
-            { value: "necessary", analytics: false },
-            { value: "all", analytics: true },
-          ];
-
-      function readConsent() {
-        const prefix = consentCookie + "=";
-        const entry = document.cookie
-          .split(";")
-          .map((part) => part.trim())
-          .find((part) => part.startsWith(prefix));
-        return entry ? decodeURIComponent(entry.slice(prefix.length)) : "";
-      }
-
-      function writeConsent(value) {
-        document.cookie = `${consentCookie}=${encodeURIComponent(value)}; Path=/; Max-Age=31536000; SameSite=Lax`;
-      }
-
-      function injectAnalyticsPixel() {
-        if (!analyticsUrl) {
-          return;
-        }
-        if (document.querySelector('[data-analytics-pixel="plausible"]')) {
-          return;
-        }
-        const pixel = document.createElement("img");
-        pixel.src = analyticsUrl;
-        pixel.alt = "";
-        pixel.width = 1;
-        pixel.height = 1;
-        pixel.referrerPolicy = "no-referrer-when-downgrade";
-        pixel.style.position = "absolute";
-        pixel.style.left = "-9999px";
-        pixel.dataset.analyticsPixel = "plausible";
-        document.body.appendChild(pixel);
-      }
-
-      function hideBanner() {
-        const banner = document.getElementById("cookie-consent-banner");
-        if (banner) {
-          banner.hidden = true;
-        }
-      }
-
-      function applyConsent(value) {
-        writeConsent(value);
-        hideBanner();
-        const choice = consentChoices.find((entry) => entry && entry.value === value);
-        if (choice?.analytics === true) {
-          injectAnalyticsPixel();
-        }
-      }
-
-      function syncMobileMenuAria() {
-        const mobileMenuState = document.getElementById("mobile-menu-state");
-        const mobileMenuToggle = document.getElementById("mobile-menu-toggle");
-        if (!mobileMenuState || !mobileMenuToggle) {
-          return;
-        }
-        mobileMenuToggle.setAttribute("aria-expanded", mobileMenuState.checked ? "true" : "false");
-      }
-
-      document.querySelectorAll("[data-cookie-consent-choice]").forEach((button) => {
-        button.addEventListener("click", () => {
-          const value = button.dataset.cookieConsentValue;
-          if (value) {
-            applyConsent(value);
-          }
-        });
-      });
-
-      const mobileMenuState = document.getElementById("mobile-menu-state");
-      const mobileMenuToggle = document.getElementById("mobile-menu-toggle");
-      if (mobileMenuState && mobileMenuToggle) {
-        syncMobileMenuAria();
-        mobileMenuState.addEventListener("change", syncMobileMenuAria);
-        mobileMenuToggle.addEventListener("keydown", (event) => {
-          if (event.key !== "Enter" && event.key !== " ") {
-            return;
-          }
-          event.preventDefault();
-          mobileMenuState.checked = !mobileMenuState.checked;
-          mobileMenuState.dispatchEvent(new Event("change", { bubbles: true }));
-        });
-      }
-
-      const existingConsent = readConsent();
-      const storedChoice = consentChoices.find((entry) => entry && entry.value === existingConsent);
-      if (storedChoice) {
-        hideBanner();
-        if (storedChoice.analytics === true) {
-          injectAnalyticsPixel();
-        }
-      }
-    })();
-  </script>
+  <script src="{{ site_js_url }}" defer></script>
 </body>
 </html>

@@ -280,10 +280,9 @@ Based on internal SLOs, we offer customers:
 
 | Plan | Availability SLA | Credits |
 |------|------------------|---------|
-| Free | Best effort | None |
-| Starter | 99.5% | 10% monthly |
-| Growth | 99.9% | 25% monthly |
-| Enterprise | 99.95% | 50% monthly |
+| Free / Starter / Pro / Growth | Best effort | None |
+| Scale | 99.9% | 10% monthly cap |
+| Enterprise | 99.9% | 25% monthly cap |
 
 ---
 

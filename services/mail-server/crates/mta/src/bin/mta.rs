@@ -170,6 +170,43 @@ async fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Postmaster Tools / SNDS reputation poller (background, never aborts startup).
+    let postmaster_pool = pool.clone();
+    let postmaster_redis = redis_pool.clone();
+    let _postmaster_handle = tokio::spawn(async move {
+        // The resolver pulls plaintext secrets from the compliance secret_manager
+        // via Redis pub/sub if available, falling back to the raw value of the
+        // referenced env var. Failure here is logged but does not stop the poll.
+        let resolver: mta::postmaster::scheduler::SecretResolver =
+            std::sync::Arc::new(move |secret_ref: String| {
+                let r = postmaster_redis.clone();
+                Box::pin(async move {
+                    if let Ok(mut conn) = r.get().await {
+                        let key = format!("compliance:secrets:{}:plaintext", secret_ref);
+                        let v: Result<Option<String>, _> = redis::cmd("GET")
+                            .arg(&key)
+                            .query_async(&mut *conn)
+                            .await;
+                        if let Ok(Some(val)) = v {
+                            return Ok(val);
+                        }
+                    }
+                    // Last-resort fallback: env var with the secret_ref name.
+                    std::env::var(&secret_ref).map_err(|_| {
+                        format!(
+                            "secret_ref '{secret_ref}' not found in Redis or env",
+                        )
+                    })
+                })
+            });
+        let cfg = mta::postmaster::scheduler::ScheduleConfig::default();
+        info!("Postmaster reputation poller starting (interval = {:?})", cfg.interval);
+        let handle = mta::postmaster::scheduler::spawn(postmaster_pool, cfg, resolver);
+        if let Err(e) = handle.await {
+            error!(error = %e, "Postmaster scheduler exited");
+        }
+    });
+
     // Wait for shutdown signal (SIGINT or SIGTERM)
     info!("MTA server running. Waiting for shutdown signal.");
     {

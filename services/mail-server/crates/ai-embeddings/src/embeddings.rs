@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::InferenceConfig;
 use crate::types::{EmbeddingError, InferenceRequest, InferenceResponse};
@@ -19,10 +19,44 @@ pub struct EmbeddingService {
 
 impl EmbeddingService {
     pub fn new(config: InferenceConfig) -> Result<Self, EmbeddingError> {
-        let client = Client::builder()
-            .timeout(Duration::from_millis(config.timeout_ms))
-            .build()
-            .map_err(EmbeddingError::Http)?;
+        let mut client_builder =
+            Client::builder().timeout(Duration::from_millis(config.timeout_ms));
+
+        // Configure TLS for sidecar communication (O-9.1)
+        if config.sidecar_tls_enabled {
+            // reqwest with `rustls-tls` feature already uses rustls with
+            // system certificate verification by default.
+            client_builder = client_builder.https_only(true);
+            if !config.sidecar_tls_ca_path.is_empty() {
+                let pem = std::fs::read(&config.sidecar_tls_ca_path).map_err(|e| {
+                    EmbeddingError::ConfigError(format!(
+                        "failed to read sidecar TLS CA at {}: {e}",
+                        config.sidecar_tls_ca_path
+                    ))
+                })?;
+                let cert = reqwest::Certificate::from_pem(&pem).map_err(|e| {
+                    EmbeddingError::ConfigError(format!(
+                        "invalid PEM CA at {}: {e}",
+                        config.sidecar_tls_ca_path
+                    ))
+                })?;
+                client_builder = client_builder.add_root_certificate(cert);
+                info!(
+                    ca_path = %config.sidecar_tls_ca_path,
+                    "sidecar TLS enabled with custom CA"
+                );
+            } else {
+                info!("sidecar TLS enabled with system CA certificates");
+            }
+        } else {
+            warn!(
+                "sidecar TLS is DISABLED — inference traffic to {} is unencrypted. \
+                 This should only be used for internal/testing deployments on trusted networks.",
+                config.url
+            );
+        }
+
+        let client = client_builder.build().map_err(EmbeddingError::Http)?;
 
         let semaphore = Arc::new(Semaphore::new(config.max_concurrency));
 
@@ -167,6 +201,53 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f64 {
 mod tests {
     use super::*;
     use crate::config::PoolingStrategy;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIDCTCCAfGgAwIBAgIUWXOehNlSPl0jLU50A8nVvzXznmowDQYJKoZIhvcNAQEL\n\
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDUwNTE4MDc0M1oXDTI2MDUw\n\
+NjE4MDc0M1owFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\n\
+AAOCAQ8AMIIBCgKCAQEA1n/5enp9942WCf2XnBQKjnKMA2aTOAEQlPmziypW8uDf\n\
+Ywk/UDwonrgOYzvQA4WGBaFPQGZV/QaM3iJPMFgn2Auav1NzvSE7cgNdmq2OS8tC\n\
+ukx5dwOHIC35zyYXRVvbHFVhmCVaNM0SxcukOZy1Q1KkiYR9JplsyYT2eaqFFD9z\n\
+MIG16sPivK53u4NM9pl1c9ObC+pgM6L1NNybvW8Q1XUXKRD0M6/ae6JuyLcPn2gl\n\
+0C+YT/t7+5F25tW8wO/pVAioCKEdI59el4xJ+DANAGdRo51SVRbn1er7XEEistBW\n\
+wCOVYBNzK1LsaSAFb69oDKq+e9y5YZr27fNWiVQ8sQIDAQABo1MwUTAdBgNVHQ4E\n\
+FgQUIhh+YoNpEczhCN/L5FmcHp15kR4wHwYDVR0jBBgwFoAUIhh+YoNpEczhCN/L\n\
+5FmcHp15kR4wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAmuBs\n\
+2NvoclXnDcM7sHDffFaoUEc5Wu+TiPsHAIsxh7WJdZd1gMqxa21RxzAEyoxsrGI+\n\
+iu6KZyT7qif5dCAzSZ4uHpAi480FhHAYrY81B46Kz6BIMrCWGsxhGqjepCRnyI1z\n\
+YQ2srIs7wxsOaeNekq7WJ/k/zhq+g15Xbr+IfN1Hoo44QTzuQznwW7wuE8BR5kZS\n\
+CcBJ1PGNP6OQsgLDp37cZfB8Qj1AOixfzINHDaam61pU7GGHWL0NRszaAcTb9kc9\n\
+37ukNv8LiR1YsEdKP1abF61LqyAOU5xaluX/SzcUO/Lj/dshL8C3Jo4/irEVeOGi\n\
+PmScTyfBMj4Ej4fcpQ==\n\
+-----END CERTIFICATE-----\n";
+
+    fn test_config(sidecar_tls_enabled: bool, sidecar_tls_ca_path: String) -> InferenceConfig {
+        InferenceConfig {
+            url: "https://localhost:8080".to_string(),
+            model: "test".to_string(),
+            dimension: 384,
+            max_concurrency: 4,
+            timeout_ms: 5000,
+            pooling: PoolingStrategy::Mean,
+            sidecar_tls_enabled,
+            sidecar_tls_ca_path,
+        }
+    }
+
+    fn write_temp_ca(contents: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "apexmail-ai-embeddings-ca-{}-{unique}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).expect("write test CA");
+        path
+    }
 
     #[test]
     fn test_l2_normalize() {
@@ -249,15 +330,33 @@ mod tests {
 
     #[test]
     fn test_embedding_service_dimension() {
-        let config = InferenceConfig {
-            url: "http://localhost:8080".to_string(),
-            model: "test".to_string(),
-            dimension: 384,
-            max_concurrency: 4,
-            timeout_ms: 5000,
-            pooling: PoolingStrategy::Mean,
-        };
+        let mut config = test_config(false, String::new());
+        config.url = "http://localhost:8080".to_string();
         let svc = EmbeddingService::new(config).unwrap();
         assert_eq!(svc.dimension(), 384);
+    }
+
+    #[test]
+    fn test_embedding_service_accepts_custom_sidecar_ca() {
+        let ca_path = write_temp_ca(TEST_CA_PEM);
+        let config = test_config(true, ca_path.display().to_string());
+
+        let svc = EmbeddingService::new(config).expect("custom CA should build HTTPS client");
+
+        assert_eq!(svc.dimension(), 384);
+        let _ = std::fs::remove_file(ca_path);
+    }
+
+    #[test]
+    fn test_embedding_service_rejects_invalid_custom_sidecar_ca() {
+        let ca_path = write_temp_ca(
+            "-----BEGIN CERTIFICATE-----\nnot-valid-base64\n-----END CERTIFICATE-----\n",
+        );
+        let config = test_config(true, ca_path.display().to_string());
+
+        let result = EmbeddingService::new(config);
+
+        let _ = std::fs::remove_file(ca_path);
+        assert!(result.is_err(), "invalid CA must be rejected");
     }
 }

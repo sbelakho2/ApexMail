@@ -25,10 +25,10 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_random_paths() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..5_000 {
-            let path_len = rng.gen_range(0..500);
+            let path_len = rng.random_range(0..500);
             let path = random_ascii(path_len);
             let req = HttpRequest {
                 client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -45,10 +45,10 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_random_queries() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..5_000 {
-            let qs_len = rng.gen_range(0..300);
+            let qs_len = rng.random_range(0..300);
             let qs = random_ascii(qs_len);
             let req = HttpRequest {
                 client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -65,10 +65,10 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_random_bodies() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..3_000 {
-            let body_len = rng.gen_range(0..1_000);
+            let body_len = rng.random_range(0..1_000);
             let body = random_ascii(body_len);
             let req = HttpRequest {
                 client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -85,14 +85,14 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_random_headers() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..3_000 {
-            let num_headers = rng.gen_range(0..20);
+            let num_headers = rng.random_range(0..20);
             let headers: Vec<(String, String)> = (0..num_headers)
                 .map(|_| {
-                    let name_len = rng.gen_range(1..30);
-                    let val_len = rng.gen_range(0..200);
+                    let name_len = rng.random_range(1..30);
+                    let val_len = rng.random_range(0..200);
                     (random_ascii(name_len), random_ascii(val_len))
                 })
                 .collect();
@@ -111,12 +111,12 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_unicode() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..2_000 {
-            let path = random_unicode(rng.gen_range(0..200));
-            let qs = random_unicode(rng.gen_range(0..200));
-            let body = random_unicode(rng.gen_range(0..500));
+            let path = random_unicode(rng.random_range(0..200));
+            let qs = random_unicode(rng.random_range(0..200));
+            let body = random_unicode(rng.random_range(0..500));
             let req = HttpRequest {
                 client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 method: "POST",
@@ -175,14 +175,14 @@ mod ids_fuzz {
     #[test]
     fn fuzz_ids_inspect_random_payloads() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..5_000 {
-            let payload_len = rng.gen_range(0..2_000);
+            let payload_len = rng.random_range(0..2_000);
             let payload = random_bytes(payload_len);
             let (verdict, alerts) = engine.inspect(
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                rng.gen_range(1..65535),
+                rng.random_range(1..65535),
                 "tcp",
                 &payload,
             );
@@ -197,14 +197,14 @@ mod ids_fuzz {
     #[test]
     fn fuzz_ids_inspect_protocol_strings() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let protocols = [
             "tcp", "udp", "smtp", "dns", "tls", "http", "", "UNKNOWN", "💀",
         ];
         for _ in 0..3_000 {
-            let protocol = protocols[rng.gen_range(0..protocols.len())];
-            let payload_len = rng.gen_range(0..500);
+            let protocol = protocols[rng.random_range(0..protocols.len())];
+            let payload_len = rng.random_range(0..500);
             let payload = random_bytes(payload_len);
             let _ = engine.inspect(
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -218,7 +218,10 @@ mod ids_fuzz {
     #[test]
     fn fuzz_ids_large_payload_no_hang() {
         let engine = make_engine();
-        // 1MB payload should complete without hanging or panicking
+        // 1MB payload should complete without hanging or panicking.
+        // A `#[timeout]` attribute is intentionally omitted because the IDS
+        // engine performs bounded linear scans — a 1MB payload is expected to
+        // complete well within the test runner's default timeout (60s).
         let large = vec![0x41u8; 1_024 * 1_024];
         let _ = engine.inspect(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 80, "tcp", &large);
     }
@@ -226,12 +229,12 @@ mod ids_fuzz {
     #[test]
     fn fuzz_ids_binary_payloads() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // All possible byte values
         for _ in 0..1_000 {
-            let len = rng.gen_range(1..200);
-            let payload: Vec<u8> = (0..len).map(|_| rng.gen::<u8>()).collect();
+            let len = rng.random_range(1..200);
+            let payload: Vec<u8> = (0..len).map(|_| rng.random::<u8>()).collect();
             let _ = engine.inspect(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 443, "tls", &payload);
         }
     }
@@ -248,10 +251,10 @@ mod spam_fuzz {
     #[test]
     fn fuzz_spam_analyze_random_bodies() {
         let engine = SpamEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..3_000 {
-            let body_len = rng.gen_range(0..2_000);
+            let body_len = rng.random_range(0..2_000);
             let body = random_ascii(body_len);
             let headers: Vec<(String, String)> = vec![];
             let verdict = engine.analyze(&body, &headers, None);
@@ -263,21 +266,21 @@ mod spam_fuzz {
     #[test]
     fn fuzz_spam_analyze_with_headers() {
         let engine = SpamEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..2_000 {
-            let body = random_ascii(rng.gen_range(0..500));
-            let num_headers = rng.gen_range(0..15);
+            let body = random_ascii(rng.random_range(0..500));
+            let num_headers = rng.random_range(0..15);
             let headers: Vec<(String, String)> = (0..num_headers)
                 .map(|_| {
                     (
-                        random_ascii(rng.gen_range(1..30)),
-                        random_ascii(rng.gen_range(0..200)),
+                        random_ascii(rng.random_range(1..30)),
+                        random_ascii(rng.random_range(0..200)),
                     )
                 })
                 .collect();
-            let auth = if rng.gen_bool(0.5) {
-                Some(random_ascii(rng.gen_range(0..100)))
+            let auth = if rng.random_bool(0.5) {
+                Some(random_ascii(rng.random_range(0..100)))
             } else {
                 None
             };
@@ -289,10 +292,10 @@ mod spam_fuzz {
     #[test]
     fn fuzz_spam_unicode_bodies() {
         let engine = SpamEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..2_000 {
-            let body = random_unicode(rng.gen_range(0..1_000));
+            let body = random_unicode(rng.random_range(0..1_000));
             let verdict = engine.analyze(&body, &[], None);
             assert!(verdict.score.is_finite());
         }
@@ -301,15 +304,17 @@ mod spam_fuzz {
     #[test]
     fn fuzz_spam_training_no_panic() {
         let engine = SpamEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..1_000 {
-            let text_len = rng.gen_range(0..500);
+            let text_len = rng.random_range(0..500);
             let text = random_ascii(text_len);
-            if rng.gen_bool(0.5) {
-                engine.train_spam(&text);
+            if rng.random_bool(0.5) {
+                // Training may legitimately reject inputs (e.g. empty/too-short
+                // text) — we only assert that no panic occurs.
+                let _ = engine.train_spam(&text);
             } else {
-                engine.train_ham(&text);
+                let _ = engine.train_ham(&text);
             }
         }
     }
@@ -333,10 +338,10 @@ mod dlp_fuzz {
     #[test]
     fn fuzz_dlp_scan_random_text() {
         let engine = DlpEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..5_000 {
-            let body_len = rng.gen_range(0..1_000);
+            let body_len = rng.random_range(0..1_000);
             let body = random_ascii(body_len);
             let verdict = engine.scan(&body, None);
             // Findings must be non-negative
@@ -350,12 +355,12 @@ mod dlp_fuzz {
     #[test]
     fn fuzz_dlp_scan_with_domains() {
         let engine = DlpEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let domains = ["example.com", "internal.corp", "gov.us", "partner.io"];
 
         for _ in 0..2_000 {
-            let body = random_ascii(rng.gen_range(0..500));
-            let domain = domains[rng.gen_range(0..domains.len())];
+            let body = random_ascii(rng.random_range(0..500));
+            let domain = domains[rng.random_range(0..domains.len())];
             let _ = engine.scan(&body, Some(domain));
         }
     }
@@ -384,10 +389,10 @@ mod dlp_fuzz {
     #[test]
     fn fuzz_dlp_unicode() {
         let engine = DlpEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..2_000 {
-            let body = random_unicode(rng.gen_range(0..500));
+            let body = random_unicode(rng.random_range(0..500));
             let _ = engine.scan(&body, None);
         }
     }
@@ -404,12 +409,12 @@ mod sandbox_fuzz {
     #[test]
     fn fuzz_sandbox_analyze_random_bytes() {
         let engine = SandboxEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..3_000 {
-            let data_len = rng.gen_range(0..5_000);
+            let data_len = rng.random_range(0..5_000);
             let data = random_bytes(data_len);
-            let filename = if rng.gen_bool(0.5) {
+            let filename = if rng.random_bool(0.5) {
                 Some(format!(
                     "file_{}.{}",
                     random_string(5),
@@ -445,23 +450,23 @@ mod sandbox_fuzz {
 
         // ZIP magic header followed by random data
         let mut data = vec![0x50, 0x4B, 0x03, 0x04];
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..500 {
-            data.push(rng.gen::<u8>());
+            data.push(rng.random::<u8>());
         }
         let _ = engine.analyze(&data, Some("archive.zip"));
 
         // PE magic
         let mut pe_data = vec![0x4D, 0x5A];
         for _ in 0..500 {
-            pe_data.push(rng.gen::<u8>());
+            pe_data.push(rng.random::<u8>());
         }
         let _ = engine.analyze(&pe_data, Some("program.exe"));
 
         // PDF magic
         let mut pdf_data = b"%PDF-1.4\n".to_vec();
         for _ in 0..500 {
-            pdf_data.push(rng.gen::<u8>());
+            pdf_data.push(rng.random::<u8>());
         }
         let _ = engine.analyze(&pdf_data, Some("document.pdf"));
     }
@@ -483,7 +488,7 @@ mod sandbox_fuzz {
         let exts = [
             "txt", "doc", "pdf", "exe", "zip", "png", "html", "js", "py", "csv",
         ];
-        exts[rng.gen_range(0..exts.len())].into()
+        exts[rng.random_range(0..exts.len())].into()
     }
 }
 
@@ -503,32 +508,33 @@ mod ato_fuzz {
     #[test]
     fn fuzz_ato_evaluate_random_logins() {
         let engine = make_engine();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..5_000 {
             let event = LoginEvent {
-                user_id: random_string(rng.gen_range(1..50)),
+                user_id: random_string(rng.random_range(1..50)),
                 ip_address: format!(
                     "{}.{}.{}.{}",
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256)
+                    rng.random_range(0..256),
+                    rng.random_range(0..256),
+                    rng.random_range(0..256),
+                    rng.random_range(0..256)
                 ),
-                user_agent: random_ascii(rng.gen_range(0..200)),
-                latitude: if rng.gen_bool(0.7) {
-                    Some(rng.gen_range(-90.0..90.0))
+                user_agent: random_ascii(rng.random_range(0..200)),
+                latitude: if rng.random_bool(0.7) {
+                    Some(rng.random_range(-90.0..90.0))
                 } else {
                     None
                 },
-                longitude: if rng.gen_bool(0.7) {
-                    Some(rng.gen_range(-180.0..180.0))
+                longitude: if rng.random_bool(0.7) {
+                    Some(rng.random_range(-180.0..180.0))
                 } else {
                     None
                 },
                 timestamp: Utc::now(),
-                success: rng.gen_bool(0.5),
+                success: rng.random_bool(0.5),
                 tls_fingerprint: None, // Skip TLS fingerprint in fuzz tests
+                device_fingerprint: None,
             };
             let verdict = engine.evaluate(&event);
             assert!(verdict.risk_score.is_finite(), "Risk score must be finite");
@@ -561,6 +567,7 @@ mod ato_fuzz {
                 timestamp: Utc::now(),
                 success: true,
                 tls_fingerprint: None,
+                device_fingerprint: None,
             };
             // Must not panic
             let _ = engine.evaluate(&event);
@@ -579,21 +586,21 @@ mod threat_intel_fuzz {
     #[test]
     fn fuzz_threat_intel_check_random_ips() {
         let engine = ThreatIntelEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..5_000 {
-            let ip = if rng.gen_bool(0.5) {
+            let ip = if rng.random_bool(0.5) {
                 // Valid-shaped IP
                 format!(
                     "{}.{}.{}.{}",
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256)
+                    rng.random_range(0..256),
+                    rng.random_range(0..256),
+                    rng.random_range(0..256),
+                    rng.random_range(0..256)
                 )
             } else {
                 // Garbage
-                random_ascii(rng.gen_range(0..50))
+                random_ascii(rng.random_range(0..50))
             };
             let _ = engine.check_ip(&ip);
         }
@@ -602,17 +609,17 @@ mod threat_intel_fuzz {
     #[test]
     fn fuzz_threat_intel_check_random_domains() {
         let engine = ThreatIntelEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..5_000 {
-            let domain = if rng.gen_bool(0.5) {
+            let domain = if rng.random_bool(0.5) {
                 format!(
                     "{}.{}.com",
-                    random_string(rng.gen_range(1..20)),
-                    random_string(rng.gen_range(1..10))
+                    random_string(rng.random_range(1..20)),
+                    random_string(rng.random_range(1..10))
                 )
             } else {
-                random_unicode(rng.gen_range(0..50))
+                random_unicode(rng.random_range(0..50))
             };
             let _ = engine.check_domain(&domain);
         }
@@ -621,24 +628,24 @@ mod threat_intel_fuzz {
     #[test]
     fn fuzz_threat_intel_combined_check() {
         let engine = ThreatIntelEngine::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..3_000 {
-            let ip = if rng.gen_bool(0.7) {
+            let ip = if rng.random_bool(0.7) {
                 Some(format!(
                     "{}.{}.{}.{}",
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256),
-                    rng.gen_range(0..256)
+                    rng.random_range(0..256),
+                    rng.random_range(0..256),
+                    rng.random_range(0..256),
+                    rng.random_range(0..256)
                 ))
             } else {
                 None
             };
-            let domain = if rng.gen_bool(0.7) {
+            let domain = if rng.random_bool(0.7) {
                 Some(format!(
                     "{}.example.com",
-                    random_string(rng.gen_range(1..20))
+                    random_string(rng.random_range(1..20))
                 ))
             } else {
                 None
@@ -658,30 +665,30 @@ mod stix_fuzz {
 
     #[test]
     fn fuzz_stix_extract_indicators_random() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..5_000 {
-            let pattern = random_ascii(rng.gen_range(0..500));
+            let pattern = random_ascii(rng.random_range(0..500));
             let _ = extract_indicators(&pattern);
         }
     }
 
     #[test]
     fn fuzz_stix_extract_indicators_unicode() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..2_000 {
-            let pattern = random_unicode(rng.gen_range(0..300));
+            let pattern = random_unicode(rng.random_range(0..300));
             let _ = extract_indicators(&pattern);
         }
     }
 
     #[test]
     fn fuzz_stix_bundle_parse_random_json() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..2_000 {
-            let json = random_ascii(rng.gen_range(0..500));
+            let json = random_ascii(rng.random_range(0..500));
             let _ = serde_json::from_str::<StixBundle>(&json);
         }
     }
@@ -734,17 +741,17 @@ mod combined_fuzz {
         let dlp = DlpEngine::new();
         let sandbox_eng = SandboxEngine::new();
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..1_000 {
             // 1. WAF
-            let body = random_ascii(rng.gen_range(10..500));
+            let body = random_ascii(rng.random_range(10..500));
             let req = HttpRequest {
                 client_ip: IpAddr::V4(Ipv4Addr::new(
-                    rng.gen_range(1..255),
-                    rng.gen_range(0..255),
-                    rng.gen_range(0..255),
-                    rng.gen_range(1..255),
+                    rng.random_range(1..255),
+                    rng.random_range(0..255),
+                    rng.random_range(0..255),
+                    rng.random_range(1..255),
                 )),
                 method: "POST",
                 path: "/v1/messages",
@@ -757,32 +764,30 @@ mod combined_fuzz {
             // 2. Threat-intel
             let sender_ip = format!(
                 "{}.{}.{}.{}",
-                rng.gen_range(1..255),
-                rng.gen_range(0..255),
-                rng.gen_range(0..255),
-                rng.gen_range(1..255)
+                rng.random_range(1..255),
+                rng.random_range(0..255),
+                rng.random_range(0..255),
+                rng.random_range(1..255)
             );
             let _ = ti.check_ip(&sender_ip);
 
             // 3. Spam
-            let email_body = random_ascii(rng.gen_range(50..500));
+            let email_body = random_ascii(rng.random_range(50..500));
             let _ = spam.analyze(&email_body, &[], None);
 
             // 4. DLP
             let _ = dlp.scan(&email_body, Some("recipient.com"));
 
             // 5. Sandbox
-            let attachment = random_bytes(rng.gen_range(0..1_000));
+            let attachment = random_bytes(rng.random_range(0..1_000));
             let _ = sandbox_eng.analyze(&attachment, Some("attachment.pdf"));
         }
     }
 }
 
 // ===========================================================================
-// Helper:random_bytes (not in main fuzz_tests lib)
+// random_bytes is already exported as `pub fn random_bytes(len: usize)`
+// from fuzz_tests::lib (see src/lib.rs:62).  The private copy below was a
+// duplicate — keeping it would create confusion.  All callers should use the
+// shared `fuzz_tests::random_bytes()` instead.  (O-28.3)
 // ===========================================================================
-
-fn random_bytes(len: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-    (0..len).map(|_| rng.gen::<u8>()).collect()
-}

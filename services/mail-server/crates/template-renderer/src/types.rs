@@ -226,6 +226,185 @@ pub const STARTER_TEMPLATE: &str = r#"<html>
 /// Modules allowed in template imports (for security)
 pub const ALLOWED_MODULES: &[&str] = &[];
 
+// ─── Element & Attribute Allowlist (O-7.1 / O-7.2) ─────────────
+
+/// HTML elements permitted in email templates.
+/// Only these elements may appear in template source; all others are rejected.
+pub const ALLOWED_ELEMENTS: &[&str] = &[
+    "a",
+    "abbr",
+    "address",
+    "area",
+    "article",
+    "aside",
+    "b",
+    "bdo",
+    "blockquote",
+    "body",
+    "br",
+    "caption",
+    "cite",
+    "code",
+    "col",
+    "colgroup",
+    "dd",
+    "del",
+    "dfn",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hgroup",
+    "hr",
+    "html",
+    "i",
+    "img",
+    "ins",
+    "kbd",
+    "li",
+    "link",
+    "main",
+    "map",
+    "mark",
+    "meta",
+    "nav",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "pre",
+    "q",
+    "rp",
+    "rt",
+    "ruby",
+    "s",
+    "samp",
+    "section",
+    "select",
+    "small",
+    "source",
+    "span",
+    "strong",
+    "style",
+    "sub",
+    "summary",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "template",
+    "tfoot",
+    "th",
+    "thead",
+    "time",
+    "title",
+    "tr",
+    "u",
+    "ul",
+    "var",
+    "wbr",
+];
+
+/// Per-element allowed attributes.
+/// Returns the list of additional attributes (beyond global ones) permitted
+/// on the given element.
+pub fn allowed_attributes_for_element(element: &str) -> &[&str] {
+    match element {
+        "a" => &["href", "target", "rel", "name", "hreflang", "type"],
+        "area" => &[
+            "href", "target", "rel", "alt", "coords", "shape", "hreflang", "type",
+        ],
+        "img" => &[
+            "src", "alt", "width", "height", "loading", "align", "border", "hspace", "vspace",
+        ],
+        "source" => &["src", "srcset", "media", "sizes", "type", "width", "height"],
+        "td" | "th" => &[
+            "align", "valign", "colspan", "rowspan", "width", "height", "bgcolor", "scope",
+            "headers", "abbr", "axis",
+        ],
+        "caption" => &["align", "valign"],
+        "table" => &[
+            "width",
+            "cellpadding",
+            "cellspacing",
+            "border",
+            "bgcolor",
+            "align",
+            "summary",
+        ],
+        "tr" => &["align", "valign", "bgcolor"],
+        "col" | "colgroup" => &["span", "width", "align", "valign"],
+        "meta" => &["name", "content", "charset", "http-equiv"],
+        "link" => &["rel", "href", "type", "title", "media", "sizes"],
+        "style" => &["type", "media"],
+        "ol" | "ul" => &["type", "start", "reversed", "compact"],
+        "li" => &["type", "value"],
+        "blockquote" | "q" => &["cite"],
+        "del" | "ins" => &["cite", "datetime"],
+        "time" => &["datetime"],
+        "abbr" | "acronym" => &["title"],
+        _ => &[],
+    }
+}
+
+/// Attribute name prefixes that are ALWAYS blocked (e.g. event handlers).
+pub const BLOCKED_ATTRIBUTE_PREFIXES: &[&str] = &[
+    "on", "onload", "onclick", "onmouse", "onerror", "onfocus", "onblur", "onsubmit", "onreset",
+    "onchange", "onselect", "onscroll",
+];
+
+/// Check whether an attribute name is a blocked event handler.
+pub fn is_blocked_attribute(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    BLOCKED_ATTRIBUTE_PREFIXES
+        .iter()
+        .any(|prefix| lower == *prefix || lower.starts_with(prefix))
+}
+
+/// Validate that an element tag is in the allowlist (case-insensitive).
+pub fn is_allowed_element(tag: &str) -> bool {
+    ALLOWED_ELEMENTS
+        .iter()
+        .any(|&e| e.eq_ignore_ascii_case(tag))
+}
+
+/// Validate that an attribute is allowed on a given element.
+pub fn is_allowed_attribute(element: &str, attr: &str) -> bool {
+    let el_lower = element.to_lowercase();
+    let attr_lower = attr.to_lowercase();
+
+    // Always block event-handler attributes
+    if is_blocked_attribute(&attr_lower) {
+        return false;
+    }
+
+    // Global attributes (id, class, style, lang, dir, hidden, title)
+    let global: &[&str] = &[
+        "id", "class", "style", "title", "lang", "dir", "hidden", "xmlns", "role", "aria-",
+    ];
+    if global
+        .iter()
+        .any(|g| attr_lower == *g || attr_lower.starts_with("aria-"))
+    {
+        return true;
+    }
+
+    // Check element-specific allowlist
+    let allowed = allowed_attributes_for_element(&el_lower);
+    allowed.contains(&attr_lower.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -15,8 +15,11 @@ pub struct OpsConfig {
     pub port: u16,
     /// PostgreSQL connection URL.
     pub database_url: String,
-    /// Ops API key for authenticating requests.
+    /// Ops API key for authenticating requests (legacy, single key).
     pub ops_api_key: String,
+    /// Comma-separated list of valid API keys for rotation support (O-23.5).
+    /// When set, any of these keys are accepted in addition to `ops_api_key`.
+    pub ops_api_keys: Vec<String>,
     /// Environment name (e.g. development, production).
     pub environment: String,
 }
@@ -30,6 +33,7 @@ impl Default for OpsConfig {
             port: 4400,
             database_url: "postgres://localhost/apexmail".to_string(),
             ops_api_key: String::new(),
+            ops_api_keys: Vec::new(),
             environment: "development".to_string(),
         }
     }
@@ -46,6 +50,7 @@ impl OpsConfig {
     /// - `OPS_WARMUP_DEFAULT_DAYS`
     /// - `OPS_PORT`
     /// - `DATABASE_URL`
+    /// - `OPS_API_KEYS` (comma-separated; enables key rotation, O-23.5)
     pub fn from_env() -> Self {
         let default = Self::default();
         let environment = std::env::var("NODE_ENV").unwrap_or_else(|_| default.environment.clone());
@@ -68,10 +73,19 @@ impl OpsConfig {
                 .unwrap_or(default.port),
             database_url: std::env::var("DATABASE_URL").unwrap_or(default.database_url),
             ops_api_key: std::env::var("OPS_API_KEY").unwrap_or_else(|_| generated_ops_api_key()),
+            // O-23.5: Support key rotation via comma-separated OPS_API_KEYS
+            ops_api_keys: std::env::var("OPS_API_KEYS")
+                .map(|s| {
+                    s.split(',')
+                        .map(|k| k.trim().to_string())
+                        .filter(|k| !k.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
             environment,
         };
         if let Err(err) = config.validate() {
-            eprintln!("Invalid ops-service config: {err}; falling back to defaults");
+            tracing::warn!("Invalid ops-service config: {err}; falling back to defaults");
             let mut fallback = Self::default();
             fallback.environment = config.environment;
             fallback.ops_api_key = generated_ops_api_key();
@@ -101,8 +115,8 @@ impl OpsConfig {
         if self.database_url.trim().is_empty() {
             return Err("DATABASE_URL must not be empty".into());
         }
-        if self.ops_api_key.trim().is_empty() {
-            return Err("OPS_API_KEY must not be empty".into());
+        if self.ops_api_key.trim().is_empty() && self.ops_api_keys.is_empty() {
+            return Err("OPS_API_KEY or OPS_API_KEYS must not be empty".into());
         }
         Ok(())
     }
@@ -110,10 +124,20 @@ impl OpsConfig {
     pub fn harden_production(&mut self) {
         if self.environment == "production" && self.ops_api_key.trim().is_empty() {
             self.ops_api_key = generated_ops_api_key();
-            eprintln!(
-                "SECURITY: OPS_API_KEY missing in production; generated an ephemeral runtime key"
+            tracing::warn!(
+                "SECURITY: OPS_API_KEY missing in production; generated an ephemeral runtime key (redacted)"
             );
         }
+    }
+
+    /// Return all valid API keys (legacy single + rotation set).
+    pub fn all_api_keys(&self) -> Vec<String> {
+        let mut keys = Vec::with_capacity(1 + self.ops_api_keys.len());
+        if !self.ops_api_key.is_empty() {
+            keys.push(self.ops_api_key.clone());
+        }
+        keys.extend(self.ops_api_keys.iter().filter(|k| !k.is_empty()).cloned());
+        keys
     }
 }
 

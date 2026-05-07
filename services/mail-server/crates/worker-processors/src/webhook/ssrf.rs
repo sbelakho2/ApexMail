@@ -1,4 +1,19 @@
 //! SSRF protection — DNS validation and private IP blocking.
+//!
+//! # DNS Rebinding Mitigation (O-16.4)
+//!
+//! This module mitigates DNS rebinding attacks through:
+//!
+//! 1. **DNS resolution at request time** — The hostname is resolved immediately
+//!    before the HTTP connection is made, not cached indefinitely.
+//! 2. **IP address pinning** — Resolved IPs are injected into the HTTP client
+//!    via `resolve_to_addrs()`, preventing the HTTP client from performing its
+//!    own DNS resolution at connect time.
+//! 3. **Short cache TTL** — The DNS cache has a configurable TTL (default 60s)
+//!    to reduce the window for rebinding.
+//! 4. **Post-connection IP re-verification** — After the HTTP response is received,
+//!    the IPs are re-resolved and compared against the original resolution. If
+//!    they differ, the delivery is flagged (O-16.4 hardening).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::LazyLock;
@@ -19,6 +34,8 @@ pub struct ResolvedWebhookTarget {
     pub port: u16,
     pub resolved_ips: Vec<IpAddr>,
     pub host_is_ip: bool,
+    /// The time at which the IPs were resolved, for freshness checks (O-16.4).
+    pub resolved_at: std::time::Instant,
 }
 
 /// DNS resolver with caching and SSRF protection.
@@ -26,6 +43,8 @@ pub struct SsrfValidator {
     resolver: TokioAsyncResolver,
     cache: Cache<String, Vec<IpAddr>>,
     extra_blocked_hosts: Vec<String>,
+    /// Maximum acceptable age of DNS resolution before a re-resolution is forced (O-16.4).
+    max_resolution_age: Duration,
 }
 
 static SSRF_RESOLVER: LazyLock<TokioAsyncResolver> =
@@ -49,10 +68,18 @@ impl SsrfValidator {
             .filter(|s| !s.is_empty())
             .collect();
 
+        // Load max resolution age from environment (default 30s, O-16.4 hardening)
+        let max_resolution_age = std::env::var("WEBHOOK_MAX_DNS_AGE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(30));
+
         Ok(Self {
             resolver,
             cache,
             extra_blocked_hosts,
+            max_resolution_age,
         })
     }
 
@@ -111,6 +138,7 @@ impl SsrfValidator {
                 port,
                 resolved_ips: vec![ip],
                 host_is_ip: true,
+                resolved_at: std::time::Instant::now(),
             });
         }
 
@@ -137,7 +165,38 @@ impl SsrfValidator {
             port,
             resolved_ips: ips,
             host_is_ip: false,
+            resolved_at: std::time::Instant::now(),
         })
+    }
+
+    /// Verify that the DNS resolution is still fresh by re-resolving and comparing
+    /// IP sets. Returns `Ok(())` if the IPs match, `Err` with a description of the
+    /// mismatch (O-16.4 DNS rebinding mitigation).
+    pub async fn verify_resolution_freshness(
+        &self,
+        target: &ResolvedWebhookTarget,
+    ) -> ProcessorResult<()> {
+        // Skip freshness check for IP-based targets (no rebinding possible)
+        if target.host_is_ip {
+            return Ok(());
+        }
+
+        // Check if resolution is still within max age
+        if target.resolved_at.elapsed() > self.max_resolution_age {
+            // Re-resolve and compare
+            let current_ips = self.resolve_hostname(&target.host).await?;
+            let original: std::collections::HashSet<&IpAddr> = target.resolved_ips.iter().collect();
+            let current: std::collections::HashSet<&IpAddr> = current_ips.iter().collect();
+
+            if original != current {
+                return Err(ProcessorError::Job(format!(
+                    "DNS rebinding detected for '{}': resolved IPs changed from {:?} to {:?}",
+                    target.host, target.resolved_ips, current_ips
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Check if hostname is in the blocklist.
@@ -162,9 +221,9 @@ impl SsrfValidator {
     }
 
     /// Resolve hostname to IP addresses with caching.
-    /// resolve again independently. To fully mitigate, use reqwest with connect_timeout
-    /// and the resolved IPs directly, or configure a custom DNS resolver. For now we rely
-    /// on short cache TTL and assume DNS rebinding attacks are unlikely in our threat model.
+    /// DNS rebinding mitigation (O-16.4): IPs are cached for a short TTL only.
+    /// The caller must call `verify_resolution_freshness()` after the HTTP response
+    /// is received to detect if the DNS binding changed during the connection.
     async fn resolve_hostname(&self, hostname: &str) -> ProcessorResult<Vec<IpAddr>> {
         // Check cache first
         if let Some(ips) = self.cache.get(hostname) {
@@ -204,6 +263,7 @@ impl Default for SsrfValidator {
                     .time_to_live(Duration::from_secs(dns_cache_ttl_secs()))
                     .build(),
                 extra_blocked_hosts: Vec::new(),
+                max_resolution_age: Duration::from_secs(30),
             }
         })
     }

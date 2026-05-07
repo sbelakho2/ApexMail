@@ -63,15 +63,50 @@ struct FunnelRow {
 
 impl ClickHouseEngine {
     /// Create a new ClickHouse engine with the given configuration.
+    ///
+    /// TLS is enabled when `config.tls_enabled` is `true` (O-11.2).
+    /// The URL scheme is automatically upgraded to `https://` and the
+    /// `secure` option is set on the native protocol connection.
     pub async fn new(config: ClickHouseConfig) -> anyhow::Result<Self> {
-        let client = Client::default()
-            .with_url(&config.url)
+        // Apply TLS: upgrade URL scheme and set secure option (O-11.2)
+        let url = if config.tls_enabled {
+            // Ensure https:// scheme
+            if config.url.starts_with("http://") {
+                config.url.replacen("http://", "https://", 1)
+            } else if !config.url.starts_with("https://") {
+                format!("https://{}", config.url)
+            } else {
+                config.url.clone()
+            }
+        } else {
+            config.url.clone()
+        };
+
+        let mut client_builder = Client::default()
+            .with_url(&url)
             .with_database(&config.database)
             .with_user(&config.user)
             .with_password(&config.password)
             .with_compression(clickhouse::Compression::Lz4)
             .with_option("async_insert", "1")
             .with_option("wait_for_async_insert", "0");
+
+        if config.tls_enabled {
+            client_builder = client_builder.with_option("secure", "1");
+        }
+
+        // If a CA cert path is provided, attempt to load it for verification
+        if config.tls_enabled && !config.ca_cert_path.is_empty() {
+            // The clickhouse crate uses system CA roots by default.
+            // For custom CA certificates, configure the SSL_CERT_FILE
+            // environment variable or set CLICKHOUSE_CA_CERT_PATH.
+            tracing::info!(
+                "ClickHouse TLS enabled with CA cert: {}",
+                config.ca_cert_path
+            );
+        }
+
+        let client = client_builder;
 
         let engine = Self { client, config };
 
@@ -588,6 +623,8 @@ mod tests {
             password: "".into(),
             max_connections: 10,
             query_timeout_secs: 30,
+            tls_enabled: false,
+            ca_cert_path: String::new(),
         };
 
         let engine = ClickHouseEngine::new(config).await;

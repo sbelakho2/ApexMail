@@ -5,6 +5,7 @@
 
 use chrono::Utc;
 use parking_lot::RwLock;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -33,9 +34,28 @@ impl IncidentManager {
     }
 
     /// Create a manager that keeps state in memory without database persistence.
+    /// Create an ephemeral instance for testing.
+    /// Uses lazy connection so it will not block on startup (O-23.2).
+    /// If the connection string is invalid, falls back to a warning log
+    /// instead of panicking.
     pub fn new_ephemeral() -> Self {
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost:5432/unused")
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "Ephemeral pool creation failed; creating fallback pool"
+                );
+                // Fallback: a syntactically valid URL that will fail at
+                // connection time rather than panicking at construction.
+                PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect_lazy("postgres://localhost:5432/postgres")
+                    .expect("hardcoded fallback URL is syntactically valid")
+            });
         Self {
-            db: PgPool::connect_lazy("postgres://localhost/unused").unwrap(),
+            db,
             persist_to_db: false,
             cache: Arc::new(RwLock::new(Vec::new())),
             timelines: Arc::new(RwLock::new(Vec::new())),

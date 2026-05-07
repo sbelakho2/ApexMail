@@ -1,7 +1,7 @@
 //! Plan definitions and quota management.
 //!
-//! Mirrors the plans defined in `apps/billing/src/services/plans.ts` –
-//! free / starter / pro / growth / scale / enterprise / payg.
+//! Canonical plan definitions for free / starter / pro / growth / scale /
+//! enterprise / pay-as-you-go tiers.
 
 use chrono::Utc;
 use sqlx::PgPool;
@@ -39,15 +39,20 @@ pub struct PlanUpsertInput {
 }
 
 /// All default plans shipped with ApexMail.
+///
+/// The Free tier ships **30,000 emails / month**. Rust runtime margins
+/// (Hetzner + Rust per-core throughput) make a 10x competitive Free tier
+/// affordable. This is intentionally an order-of-magnitude above Resend's
+/// 3,000/mo and is the primary acquisition wedge.
 fn free_plan_seed() -> PlanSeed {
     PlanSeed {
         name: "free",
         display_name: "Free",
-        description: "Get started with basic email sending",
+        description: "Generous free tier — 30,000 emails/month forever",
         price_monthly: 0,
         price_yearly: 0,
-        email_limit: 3_000,
-        api_call_limit: 50_000,
+        email_limit: 30_000,
+        api_call_limit: 300_000,
         sort_order: 0,
         features: PlanFeatures {
             api_access: true,
@@ -97,12 +102,11 @@ pub fn default_plans() -> Vec<PlanSeed> {
             sort_order: 2,
             features: PlanFeatures {
                 dedicated_ip: true,
-                dedicated_ip_count: 0,
+                dedicated_ip_count: 1,
                 api_access: true,
                 webhooks_enabled: true,
                 advanced_analytics: true,
                 send_time_optimization: true,
-                ab_testing: true,
                 data_export: true,
                 custom_tracking_domain: true,
                 custom_templates: true,
@@ -141,7 +145,9 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 max_retention_days: 90,
                 max_team_members: 25,
                 priority_onboarding: true,
-                support_level: SupportLevel::Priority,
+                // Growth keeps Email tier per the async-first support policy
+                // (24–48h response, no live chat, no per-customer Discord).
+                support_level: SupportLevel::Email,
                 ..PlanFeatures::default()
             },
         },
@@ -180,16 +186,18 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 priority_onboarding: true,
                 sla_guarantee: true,
                 sla_credit_percentage: 10,
-                support_level: SupportLevel::Phone,
+                // Scale = priority email + shared Slack hub (no per-customer
+                // Discord, no 24/7 phone). Live calls are scheduled, capped.
+                support_level: SupportLevel::Priority,
                 ..PlanFeatures::default()
             },
         },
         PlanSeed {
             name: "enterprise",
             display_name: "Enterprise",
-            description: "Custom solutions for large organizations",
-            price_monthly: 80_000,
-            price_yearly: 800_000,
+            description: "Annual-contract platform plan for large organizations",
+            price_monthly: 300_000,
+            price_yearly: 3_000_000,
             email_limit: 5_000_000,
             api_call_limit: -1,
             sort_order: 5,
@@ -218,12 +226,12 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 max_subaccounts: 100,
                 dedicated_csm: true,
                 priority_onboarding: true,
-                byoip: true,
                 sla_guarantee: true,
                 sla_credit_percentage: 25,
                 hipaa_compliance: true,
                 soc2_compliance: true,
                 private_cloud: true,
+                byoip: true,
                 support_level: SupportLevel::Dedicated,
                 ..PlanFeatures::default()
             },
@@ -467,7 +475,8 @@ pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
     }
     let overage = emails_sent - email_limit;
     // 0.04 cents per email → ceil(overage * 4 / 100)
-    (overage.saturating_mul(4) + 99) / 100
+    // Use i128 intermediate arithmetic to prevent overflow for values near i64::MAX/4.
+    ((overage as i128).saturating_mul(4).saturating_add(99) / 100) as i64
 }
 
 // ---------------------------------------------------------------------------
@@ -543,21 +552,58 @@ mod tests {
     }
 
     #[test]
-    fn pro_plan_matches_legacy_dedicated_ip_count() {
+    fn pro_plan_has_dedicated_ip_with_count() {
         let pro_plan = default_plans()
             .into_iter()
             .find(|plan| plan.name == "pro")
             .expect("pro plan must exist");
 
         assert!(pro_plan.features.dedicated_ip);
-        assert_eq!(pro_plan.features.dedicated_ip_count, 0);
+        assert!(
+            pro_plan.features.dedicated_ip_count > 0,
+            "Pro plan with dedicated_ip=true must have dedicated_ip_count > 0"
+        );
+    }
+
+    #[test]
+    fn analytics_optimization_gates_match_public_pricing() {
+        let plans = default_plans();
+        let starter_features = plans
+            .iter()
+            .find(|plan| plan.name == "starter")
+            .map(|plan| plan.features.clone())
+            .expect("starter plan must exist");
+        let pro_features = plans
+            .iter()
+            .find(|plan| plan.name == "pro")
+            .map(|plan| plan.features.clone())
+            .expect("pro plan must exist");
+        let growth_features = plans
+            .iter()
+            .find(|plan| plan.name == "growth")
+            .map(|plan| plan.features.clone())
+            .expect("growth plan must exist");
+        let enterprise_features = plans
+            .iter()
+            .find(|plan| plan.name == "enterprise")
+            .map(|plan| plan.features.clone())
+            .expect("enterprise plan must exist");
+
+        assert!(!starter_features.send_time_optimization);
+        assert!(!starter_features.ab_testing);
+        assert!(pro_features.send_time_optimization);
+        assert!(!pro_features.ab_testing);
+        assert!(growth_features.send_time_optimization);
+        assert!(growth_features.ab_testing);
+        assert!(enterprise_features.send_time_optimization);
+        assert!(enterprise_features.ab_testing);
     }
 
     #[test]
     fn builtin_quota_limits_fall_back_to_free() {
         assert_eq!(
             builtin_quota_limits(Some("does-not-exist")),
-            (3_000, 50_000)
+            (30_000, 300_000)
         );
     }
 
@@ -568,13 +614,13 @@ mod tests {
 
     #[test]
     fn overage_within_limit() {
-        assert_eq!(calculate_overage_cost(3_000, 3_000), 0);
+        assert_eq!(calculate_overage_cost(30_000, 30_000), 0);
     }
 
     #[test]
     fn overage_above_limit() {
         // 1 000 overage emails * 0.04 cents = 40 cents
-        assert_eq!(calculate_overage_cost(4_000, 3_000), 40);
+        assert_eq!(calculate_overage_cost(31_000, 30_000), 40);
     }
 
     #[test]
@@ -594,8 +640,18 @@ mod tests {
             .unwrap_or(false));
         assert!(ent_features
             .as_ref()
+            .map(|f| f.soc2_compliance)
+            .unwrap_or(false));
+        assert!(ent_features
+            .as_ref()
+            .map(|f| f.send_time_optimization)
+            .unwrap_or(false));
+        assert!(ent_features.as_ref().map(|f| f.ab_testing).unwrap_or(false));
+        assert!(ent_features
+            .as_ref()
             .map(|f| f.private_cloud)
             .unwrap_or(false));
+        assert!(ent_features.as_ref().map(|f| f.byoip).unwrap_or(false));
         assert_eq!(
             ent_features
                 .as_ref()

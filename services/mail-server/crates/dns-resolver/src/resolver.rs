@@ -49,18 +49,19 @@ impl CachedDnsResolver {
             return Err(DnsError::NoRecords(domain.to_string()));
         }
 
-        match self.lookup.lookup_mx(domain).await {
-            Ok(records) if records.is_empty() => {
+        match self.lookup.lookup_mx_with_ttl(domain).await {
+            Ok(result) if result.records.is_empty() => {
                 self.cache.insert_negative(&cache_key);
                 Err(DnsError::NoRecords(domain.to_string()))
             }
-            Ok(records) => {
-                let cached: Vec<String> = records
+            Ok(result) => {
+                let cached: Vec<String> = result
+                    .records
                     .iter()
                     .map(|r| format!("{} {}", r.priority, r.exchange))
                     .collect();
-                self.cache.insert(&cache_key, cached);
-                Ok(records)
+                self.cache.insert_with_ttl(&cache_key, cached, result.ttl);
+                Ok(result.records)
             }
             Err(e) => {
                 self.cache.insert_negative(&cache_key);
@@ -77,10 +78,14 @@ impl CachedDnsResolver {
             return Ok(recs.first().and_then(|r| SpfRecord::parse(r)));
         }
 
-        match self.lookup.lookup_spf(domain).await? {
-            Some(record) => {
-                self.cache.insert(&cache_key, vec![record.raw.clone()]);
-                Ok(Some(record))
+        match self.lookup.lookup_spf_with_ttl(domain).await? {
+            Some(result) => {
+                self.cache.insert_with_ttl(
+                    &cache_key,
+                    vec![result.records.raw.clone()],
+                    result.ttl,
+                );
+                Ok(Some(result.records))
             }
             None => {
                 self.cache.insert_negative(&cache_key);
@@ -97,10 +102,14 @@ impl CachedDnsResolver {
             return Ok(recs.first().and_then(|r| DkimRecord::parse(r)));
         }
 
-        match self.lookup.lookup_dkim(selector, domain).await? {
-            Some(record) => {
-                self.cache.insert(&cache_key, vec![record.raw.clone()]);
-                Ok(Some(record))
+        match self.lookup.lookup_dkim_with_ttl(selector, domain).await? {
+            Some(result) => {
+                self.cache.insert_with_ttl(
+                    &cache_key,
+                    vec![result.records.raw.clone()],
+                    result.ttl,
+                );
+                Ok(Some(result.records))
             }
             None => {
                 self.cache.insert_negative(&cache_key);
@@ -117,10 +126,14 @@ impl CachedDnsResolver {
             return Ok(recs.first().and_then(|r| DmarcPolicy::parse(r)));
         }
 
-        match self.lookup.lookup_dmarc(domain).await? {
-            Some(record) => {
-                self.cache.insert(&cache_key, vec![record.raw.clone()]);
-                Ok(Some(record))
+        match self.lookup.lookup_dmarc_with_ttl(domain).await? {
+            Some(result) => {
+                self.cache.insert_with_ttl(
+                    &cache_key,
+                    vec![result.records.raw.clone()],
+                    result.ttl,
+                );
+                Ok(Some(result.records))
             }
             None => {
                 self.cache.insert_negative(&cache_key);

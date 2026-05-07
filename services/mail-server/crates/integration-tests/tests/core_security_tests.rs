@@ -125,6 +125,7 @@ mod rbac {
             tenant_id: "ten_test".into(),
             user_id: Some("usr_test".into()),
             api_key_id: None,
+            session_id: None,
             scopes: scopes.into_iter().map(String::from).collect(),
         }
     }
@@ -134,6 +135,7 @@ mod rbac {
             tenant_id: "ten_test".into(),
             user_id: None,
             api_key_id: Some("key_test".into()),
+            session_id: None,
             scopes: scopes.into_iter().map(String::from).collect(),
         }
     }
@@ -264,22 +266,23 @@ mod webhook_security {
     #[test]
     fn sign_verify_roundtrip() {
         let secret = "whsec_test_secret_32_chars_long!!";
-        let tester = WebhookTester::new(secret.to_string()).unwrap();
+        let tester = WebhookTester::new(vec![secret.to_string()]).unwrap();
         let body = b"{\"type\":\"email.delivered\",\"data\":{}}";
         let sig = tester.sign_payload(body);
         assert!(
-            WebhookTester::verify_signature(secret, body, &sig),
+            tester.verify_signature(body, &sig),
             "signature must verify with correct secret"
         );
     }
 
     #[test]
     fn wrong_secret_rejects() {
-        let tester = WebhookTester::new("correct_secret".to_string()).unwrap();
+        let tester = WebhookTester::new(vec!["correct_secret".to_string()]).unwrap();
         let body = b"{\"type\":\"test\"}";
         let sig = tester.sign_payload(body);
+        let wrong_tester = WebhookTester::new(vec!["wrong_secret".to_string()]).unwrap();
         assert!(
-            !WebhookTester::verify_signature("wrong_secret", body, &sig),
+            !wrong_tester.verify_signature(body, &sig),
             "wrong secret must fail verification"
         );
     }
@@ -287,12 +290,12 @@ mod webhook_security {
     #[test]
     fn tampered_body_rejects() {
         let secret = "whsec_tamper_test_secret_32chrs!";
-        let tester = WebhookTester::new(secret.to_string()).unwrap();
+        let tester = WebhookTester::new(vec![secret.to_string()]).unwrap();
         let original = b"{\"type\":\"email.delivered\"}";
         let sig = tester.sign_payload(original);
         let tampered = b"{\"type\":\"email.bounced\"}";
         assert!(
-            !WebhookTester::verify_signature(secret, tampered, &sig),
+            !tester.verify_signature(tampered, &sig),
             "tampered body must fail verification"
         );
     }
@@ -300,31 +303,28 @@ mod webhook_security {
     #[test]
     fn empty_body_signs_and_verifies() {
         let secret = "whsec_empty_body_test_32_chars!!";
-        let tester = WebhookTester::new(secret.to_string()).unwrap();
+        let tester = WebhookTester::new(vec![secret.to_string()]).unwrap();
         let body = b"";
         let sig = tester.sign_payload(body);
-        assert!(WebhookTester::verify_signature(secret, body, &sig));
+        assert!(tester.verify_signature(body, &sig));
     }
 
     #[test]
     fn malformed_signature_headers_rejected() {
         let secret = "whsec_malformed_test_secret_32!!";
+        let tester = WebhookTester::new(vec![secret.to_string()]).unwrap();
         let body = b"test";
-        assert!(!WebhookTester::verify_signature(secret, body, ""));
-        assert!(!WebhookTester::verify_signature(secret, body, "garbage"));
-        assert!(!WebhookTester::verify_signature(secret, body, "t=,v1="));
-        assert!(!WebhookTester::verify_signature(secret, body, "v1=abc"));
-        assert!(!WebhookTester::verify_signature(secret, body, "t=123"));
-        assert!(!WebhookTester::verify_signature(
-            secret,
-            body,
-            "t=123,v1=0000000000"
-        ));
+        assert!(!tester.verify_signature(body, ""));
+        assert!(!tester.verify_signature(body, "garbage"));
+        assert!(!tester.verify_signature(body, "t=,v1="));
+        assert!(!tester.verify_signature(body, "v1=abc"));
+        assert!(!tester.verify_signature(body, "t=123"));
+        assert!(!tester.verify_signature(body, "t=123,v1=0000000000"));
     }
 
     #[test]
     fn signature_format_is_correct() {
-        let tester = WebhookTester::new("test_secret".to_string()).unwrap();
+        let tester = WebhookTester::new(vec!["test_secret".to_string()]).unwrap();
         let sig = tester.sign_payload(b"body");
         assert!(sig.starts_with("t="), "signature must start with timestamp");
         assert!(sig.contains(",v1="), "signature must contain v1= component");

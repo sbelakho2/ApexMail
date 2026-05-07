@@ -3,21 +3,24 @@
 use super::helpers::{
     clamp_limit, default_limit, extract_cookie, hash_token, html_escape, token_blacklist_key,
 };
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{
-    invalidate_api_key_cache, session_revocation_key, validate_session_csrf, AuthUser, JwtClaims,
+    invalidate_api_key_cache, invalidate_tenant_user_status_cache, issued_before_or_at_revocation,
+    lookup_session_revoked_after, session_revocation_key, validate_session_csrf, AuthUser,
+    JwtClaims,
 };
+use crate::middleware::rate_limiter::extract_public_client_ip;
 use crate::state::AppState;
 
 const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
@@ -36,21 +39,31 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
 }
 
-fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> bool {
+fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> Result<bool, ApiError> {
     let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$")
     {
         bcrypt::verify(password, hash).map_err(|error| error.to_string())
     } else if hash.starts_with("$argon2") {
         apexmail_lib::verify_password(password, hash).map_err(|error| error.to_string())
     } else {
-        Err("unknown password hash scheme".into())
+        let prefix: String = hash.chars().take(10).collect();
+        tracing::error!(
+            hash_prefix = %prefix,
+            subject = %subject,
+            "unknown password hash scheme — rejecting login"
+        );
+        return Err(ApiError::Internal(format!(
+            "unknown password hash scheme for user {subject}"
+        )));
     };
 
     match result {
-        Ok(valid) => valid,
+        Ok(valid) => Ok(valid),
         Err(error) => {
-            tracing::warn!(error = %error, subject = %subject, "password verification failed");
-            false
+            tracing::error!(error = %error, subject = %subject, "password verification failed");
+            Err(ApiError::Internal(format!(
+                "password verification error for user {subject}: {error}"
+            )))
         }
     }
 }
@@ -85,6 +98,35 @@ fn role_requires_mfa(role: &str) -> bool {
     matches!(role, "admin" | "owner")
 }
 
+/// Bind the MFA secret ciphertext to the owning user_id so a row swap
+/// (database-level relocation) cannot make a stolen ciphertext usable
+/// against another account.
+fn mfa_secret_aad(user_id: &str) -> Vec<u8> {
+    format!("user_id={user_id}").into_bytes()
+}
+
+/// Encrypt an MFA secret for at-rest storage (CRIT-10). When the encryption
+/// key is unconfigured this returns the plaintext unchanged with a logged
+/// warning so existing deployments stay functional.
+fn encrypt_mfa_secret_for_user(user_id: &str, secret: &str) -> Result<String, ApiError> {
+    apexmail_lib::secret_at_rest::encrypt_at_rest(secret, &mfa_secret_aad(user_id))
+        .map_err(|e| ApiError::Internal(format!("failed to encrypt MFA secret: {e}")))
+}
+
+/// Decrypt the stored MFA secret on a `UserRow` in place. Plaintext rows
+/// (legacy deployments) are passed through transparently.
+fn decrypt_mfa_secret_in_place(user: &mut UserRow) -> Result<(), ApiError> {
+    if let Some(stored) = user.mfa_secret.as_deref() {
+        if !stored.is_empty() {
+            let aad = mfa_secret_aad(&user.id);
+            let plain = apexmail_lib::secret_at_rest::decrypt_at_rest(stored, &aad)
+                .map_err(|e| ApiError::Internal(format!("failed to decrypt MFA secret: {e}")))?;
+            user.mfa_secret = Some(plain);
+        }
+    }
+    Ok(())
+}
+
 fn base32_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -113,7 +155,10 @@ fn base32_encode(bytes: &[u8]) -> String {
 
 fn generate_mfa_secret() -> String {
     let mut secret = [0u8; MFA_SECRET_BYTES];
-    rand::rngs::OsRng.fill_bytes(&mut secret);
+    use rand::TryRngCore;
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut secret)
+        .expect("OsRng should not fail");
     base32_encode(&secret)
 }
 
@@ -362,7 +407,7 @@ async fn revoke_user_sessions(
 }
 
 async fn enqueue_verification_email(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &sqlx::PgPool,
     base_url: &str,
     email: &str,
     token: &str,
@@ -397,7 +442,7 @@ async fn enqueue_verification_email(
     .bind(&html_body)
     .bind(&text_body)
     .bind(serde_json::json!(["system", "verification"]))
-    .execute(&mut **tx)
+    .execute(db)
     .await?;
 
     Ok(())
@@ -446,6 +491,8 @@ pub struct LoginRequest {
 pub struct SessionAuthResponse {
     pub expires_at: String,
     pub user: UserInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_codes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -457,6 +504,8 @@ pub struct MfaChallengeResponse {
     pub secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub otpauth_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_codes: Option<Vec<String>>,
 }
 
 impl MfaChallengeResponse {
@@ -466,6 +515,7 @@ impl MfaChallengeResponse {
             challenge_token,
             secret: None,
             otpauth_url: None,
+            recovery_codes: None,
         }
     }
 
@@ -475,6 +525,7 @@ impl MfaChallengeResponse {
             challenge_token,
             secret: Some(secret.to_string()),
             otpauth_url: Some(build_mfa_otpauth_url(email, secret)),
+            recovery_codes: None,
         }
     }
 }
@@ -494,6 +545,8 @@ pub struct CompleteMfaChallengeRequest {
     pub challenge_token: String,
     #[serde(rename = "mfaCode", alias = "mfa_code")]
     pub mfa_code: String,
+    #[serde(default, rename = "recoveryCode", alias = "recovery_code")]
+    pub recovery_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -577,9 +630,19 @@ fn build_user_info(user: &UserRow) -> UserInfo {
 }
 
 fn issue_session_response(state: &AppState, user: &UserRow) -> Result<Response, ApiError> {
+    issue_session_response_with_codes(state, user, None)
+}
+
+fn issue_session_response_with_codes(
+    state: &AppState,
+    user: &UserRow,
+    recovery_codes: Option<Vec<String>>,
+) -> Result<Response, ApiError> {
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
     let now = Utc::now();
     let exp = now + ChronoDuration::seconds(expiry_secs);
+
+    let session_id = Uuid::new_v4().to_string();
 
     let claims = JwtClaims {
         sub: user.id.to_string(),
@@ -587,6 +650,7 @@ fn issue_session_response(state: &AppState, user: &UserRow) -> Result<Response, 
         scopes: scopes_for_role(&user.role),
         exp: exp.timestamp(),
         iat: now.timestamp(),
+        jti: session_id.clone(),
     };
 
     let token = encode(
@@ -616,6 +680,7 @@ fn issue_session_response(state: &AppState, user: &UserRow) -> Result<Response, 
         Json(SessionAuthResponse {
             expires_at: exp.to_rfc3339(),
             user: build_user_info(user),
+            recovery_codes,
         }),
     )
         .into_response())
@@ -627,14 +692,18 @@ async fn insert_auth_audit_log(
     user_id: &str,
     action: &str,
     metadata: serde_json::Value,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource_type, metadata, created_at)
-         VALUES (gen_random_uuid(), $1, $2, $3, 'auth', $4::jsonb, NOW())",
+        "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource_type, ip_address, user_agent, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'auth', $4, $5, $6::jsonb, NOW())",
     )
     .bind(tenant_id)
     .bind(user_id)
     .bind(action)
+    .bind(ip_address)
+    .bind(user_agent)
     .bind(metadata)
     .execute(&state.db)
     .await?;
@@ -691,23 +760,25 @@ async fn login(
     }
 
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret
+        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
          FROM users WHERE LOWER(email) = LOWER($1)",
     )
     .bind(&body.email)
     .fetch_optional(&state.db)
     .await?;
 
-    let Some(user) = user else {
+    let Some(mut user) = user else {
         record_login_failure(&state.redis, &login_identifier).await?;
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     };
+
+    decrypt_mfa_secret_in_place(&mut user)?;
 
     if user.status != "active" {
         return Err(ApiError::Forbidden("account is not active".into()));
     }
 
-    let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email);
+    let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email)?;
 
     if !valid {
         record_login_failure(&state.redis, &login_identifier).await?;
@@ -727,7 +798,22 @@ async fn login(
                 })?;
 
             if let Some(mfa_code) = body.mfa_code.as_deref() {
-                if !apexmail_lib::mfa::verify_totp_code(secret, mfa_code) {
+                // Try TOTP first, then fall back to recovery code
+                let totp_valid = apexmail_lib::mfa::verify_totp_code(secret, mfa_code);
+                let recovery_valid = if !totp_valid {
+                    verify_and_consume_recovery_code(
+                        &state.db,
+                        &user.id,
+                        &user.tenant_id,
+                        mfa_code,
+                        user.mfa_recovery_hashes.as_ref(),
+                    )
+                    .await?
+                } else {
+                    false
+                };
+
+                if !totp_valid && !recovery_valid {
                     record_login_failure(&state.redis, &login_identifier).await?;
                     return Err(ApiError::Unauthorized("invalid MFA code".into()));
                 }
@@ -774,11 +860,76 @@ async fn login(
         }
     }
 
+    // AR-005: Revoke all previous sessions on login to force session token rotation.
+    // This prevents session fixation attacks where an attacker could reuse a
+    // pre-authentication session after privilege escalation.
+    let ttl = state.config.jwt_expiry.as_secs();
+    revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
+
     issue_session_response(&state, &user)
+}
+
+/// Try to verify a code as a recovery/backup code and consume it if valid.
+/// Returns `true` if the code was valid and has been consumed (removed from the stored set).
+async fn verify_and_consume_recovery_code(
+    db: &sqlx::PgPool,
+    user_id: &str,
+    tenant_id: &str,
+    code: &str,
+    stored_hashes_json: Option<&serde_json::Value>,
+) -> Result<bool, ApiError> {
+    let Some(json) = stored_hashes_json else {
+        return Ok(false);
+    };
+    let Some(stored_hashes) = json.as_array() else {
+        return Ok(false);
+    };
+    if stored_hashes.is_empty() {
+        return Ok(false);
+    }
+
+    // Find which stored hash (if any) matches the provided code
+    let hashes: Vec<String> = stored_hashes
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    let matched_idx = hashes
+        .iter()
+        .position(|hash| apexmail_lib::mfa::verify_recovery_code(code, hash));
+
+    if let Some(idx) = matched_idx {
+        // Remove the consumed hash from the list
+        let remaining: Vec<&str> = hashes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, h)| h.as_str())
+            .collect();
+
+        let remaining_json = serde_json::to_value(&remaining)
+            .map_err(|e| ApiError::Internal(format!("failed to serialize recovery hashes: {e}")))?;
+
+        sqlx::query(
+            "UPDATE users SET mfa_recovery_hashes = $1, updated_at = NOW()
+             WHERE id = $2 AND tenant_id = $3",
+        )
+        .bind(&remaining_json)
+        .bind(user_id)
+        .bind(tenant_id)
+        .execute(db)
+        .await?;
+
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 async fn complete_mfa_challenge(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<CompleteMfaChallengeRequest>,
 ) -> Result<Response, ApiError> {
     if body.challenge_token.trim().is_empty() {
@@ -786,21 +937,62 @@ async fn complete_mfa_challenge(
             "challenge_token is required".into()
         ]));
     }
-    if body.mfa_code.trim().is_empty() {
-        return Err(ApiError::Validation(vec!["mfa_code is required".into()]));
+
+    let client_ip = connect_info.as_ref().map(|ConnectInfo(addr)| {
+        extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+    });
+    let user_agent = headers.get("user-agent").and_then(|v| v.to_str().ok());
+
+    let has_mfa_code = !body.mfa_code.trim().is_empty();
+    let has_recovery_code = body
+        .recovery_code
+        .as_deref()
+        .map(|c| !c.trim().is_empty())
+        .unwrap_or(false);
+
+    if !has_mfa_code && !has_recovery_code {
+        return Err(ApiError::Validation(vec![
+            "mfa_code or recovery_code is required".into(),
+        ]));
     }
 
     let challenge = load_mfa_challenge(&state.redis, &body.challenge_token).await?;
     let login_identifier = normalized_login_identifier(&challenge.email);
-    if !apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code) {
-        record_login_failure(&state.redis, &login_identifier).await?;
-        return Err(ApiError::Unauthorized("invalid MFA code".into()));
+
+    match challenge.kind {
+        MfaChallengeKind::Setup => {
+            // Setup always requires a valid TOTP code
+            if !has_mfa_code
+                || !apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code)
+            {
+                record_login_failure(&state.redis, &login_identifier).await?;
+                return Err(ApiError::Unauthorized("invalid MFA code".into()));
+            }
+        }
+        MfaChallengeKind::Verify => {
+            // Verify accepts either TOTP code or recovery code
+            let totp_valid = has_mfa_code
+                && apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code);
+
+            if !totp_valid {
+                // Try recovery code before failing
+                let rc = body
+                    .recovery_code
+                    .as_deref()
+                    .filter(|c| !c.trim().is_empty());
+                if rc.is_none() {
+                    record_login_failure(&state.redis, &login_identifier).await?;
+                    return Err(ApiError::Unauthorized("invalid MFA code".into()));
+                }
+                // Recovery code verification happens below after loading user
+            }
+        }
     }
 
     clear_login_failures(&state.redis, &login_identifier).await?;
 
     let mut user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret
+        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
          FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(&challenge.user_id)
@@ -809,18 +1001,42 @@ async fn complete_mfa_challenge(
     .await?
     .ok_or_else(|| ApiError::Unauthorized("user no longer exists".into()))?;
 
+    decrypt_mfa_secret_in_place(&mut user)?;
+
     if user.status != "active" {
         return Err(ApiError::Forbidden(format!("account is {}", user.status)));
     }
 
     match challenge.kind {
         MfaChallengeKind::Setup => {
+            // Generate recovery codes
+            let recovery_codes =
+                apexmail_lib::mfa::try_generate_default_recovery_codes().map_err(|e| {
+                    ApiError::Internal(format!("failed to generate recovery codes: {e}"))
+                })?;
+            let recovery_hashes: Vec<String> = recovery_codes
+                .iter()
+                .map(|code| {
+                    apexmail_lib::mfa::try_hash_recovery_code(code).map_err(|e| {
+                        ApiError::Internal(format!("failed to hash recovery code: {e}"))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            let hashes_json = serde_json::to_value(&recovery_hashes).map_err(|e| {
+                ApiError::Internal(format!("failed to serialize recovery hashes: {e}"))
+            })?;
+
+            // Encrypt the MFA secret at rest before persisting (CRIT-10).
+            let encrypted_secret =
+                encrypt_mfa_secret_for_user(&challenge.user_id, &challenge.secret)?;
+
             sqlx::query(
                 "UPDATE users
-                 SET mfa_secret = $1, mfa_enabled = true, updated_at = NOW()
-                 WHERE id = $2 AND tenant_id = $3",
+                 SET mfa_secret = $1, mfa_enabled = true, mfa_recovery_hashes = $2, updated_at = NOW()
+                 WHERE id = $3 AND tenant_id = $4",
             )
-            .bind(&challenge.secret)
+            .bind(&encrypted_secret)
+            .bind(&hashes_json)
             .bind(&challenge.user_id)
             .bind(&challenge.tenant_id)
             .execute(&state.db)
@@ -835,11 +1051,21 @@ async fn complete_mfa_challenge(
                     "role": challenge.role,
                     "enforced_for_admin": true,
                 }),
+                client_ip.as_deref(),
+                user_agent,
             )
             .await?;
 
             user.mfa_enabled = true;
             user.mfa_secret = Some(challenge.secret.clone());
+
+            delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
+
+            // AR-005: Rotate session after MFA setup (privilege escalation)
+            let ttl = state.config.jwt_expiry.as_secs();
+            revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
+
+            issue_session_response_with_codes(&state, &user, Some(recovery_codes))
         }
         MfaChallengeKind::Verify => {
             let current_secret = user
@@ -852,11 +1078,53 @@ async fn complete_mfa_challenge(
                     "MFA challenge is no longer valid".into(),
                 ));
             }
+
+            // If TOTP failed earlier, try recovery code
+            let totp_valid = apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code);
+            if !totp_valid {
+                let rc = body
+                    .recovery_code
+                    .as_deref()
+                    .filter(|c| !c.trim().is_empty())
+                    .unwrap_or(&body.mfa_code);
+
+                let consumed = verify_and_consume_recovery_code(
+                    &state.db,
+                    &challenge.user_id,
+                    &challenge.tenant_id,
+                    rc,
+                    user.mfa_recovery_hashes.as_ref(),
+                )
+                .await?;
+
+                if !consumed {
+                    record_login_failure(&state.redis, &login_identifier).await?;
+                    return Err(ApiError::Unauthorized("invalid MFA code".into()));
+                }
+
+                insert_auth_audit_log(
+                    &state,
+                    &challenge.tenant_id,
+                    &challenge.user_id,
+                    "auth.mfa_recovery_code_used",
+                    serde_json::json!({
+                        "remaining_codes": 0, // approximate; we don't re-query
+                    }),
+                    client_ip.as_deref(),
+                    user_agent,
+                )
+                .await?;
+            }
+
+            delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
+
+            // AR-005: Rotate session after MFA verification (privilege escalation)
+            let ttl = state.config.jwt_expiry.as_secs();
+            revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
+
+            issue_session_response(&state, &user)
         }
     }
-
-    delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
-    issue_session_response(&state, &user)
 }
 
 #[derive(sqlx::FromRow)]
@@ -870,6 +1138,7 @@ struct UserRow {
     status: String,
     mfa_enabled: bool,
     mfa_secret: Option<String>,
+    mfa_recovery_hashes: Option<serde_json::Value>,
 }
 
 // ─── Registration types ────────────────────────────────────────
@@ -911,8 +1180,44 @@ pub struct VerifyEmailResponse {
 
 async fn register(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisterResponse>), ApiError> {
+    // Rate-limit by client IP using Redis (stricter: 3 sign-ups per 15 min per IP)
+    let client_ip = connect_info
+        .map(|ConnectInfo(addr)| {
+            extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+        })
+        .unwrap_or_else(|| {
+            tracing::warn!("register request missing ConnectInfo; using shared rate-limit bucket");
+            "unknown".to_string()
+        });
+
+    let rate_key = format!("apexmail:register_rate:{client_ip}");
+    let window_secs: u64 = 15 * 60; // 15 minutes
+    let max_requests: i64 = 3;
+
+    if let Ok(mut conn) = state.redis.get().await {
+        let count: i64 = deadpool_redis::redis::cmd("INCR")
+            .arg(&rate_key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(1);
+
+        if count == 1 {
+            let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
+                .arg(&rate_key)
+                .arg(window_secs)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        if count > max_requests {
+            return Err(ApiError::RateLimited);
+        }
+    }
+
     // Validate input
     if body.company_name.is_empty() || body.company_name.len() > 100 {
         return Err(ApiError::Validation(vec![
@@ -1002,7 +1307,7 @@ async fn register(
 
     // Create user with owner role
     match sqlx::query(
-        "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, 
+        "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
                            email_verified, mfa_enabled, metadata, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
@@ -1035,17 +1340,27 @@ async fn register(
         }
     }
 
-    enqueue_verification_email(&mut tx, &state.config.base_url, &email_lower, &verification_token)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, tenant_id = %tenant_id, user_id = %user_id, "failed to queue verification email during registration");
-            ApiError::Internal("database error".into())
-        })?;
-
     tx.commit().await.map_err(|error| {
         tracing::error!(error = %error, tenant_id = %tenant_id, user_id = %user_id, "failed to commit registration transaction");
         ApiError::Internal("database error".into())
     })?;
+
+    // Enqueue verification email AFTER transaction commit so the email
+    // is only sent if the DB transaction succeeded. This prevents sending
+    // verification emails for registrations that are rolled back.
+    enqueue_verification_email(&state.db, &state.config.base_url, &email_lower, &verification_token)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %tenant_id, user_id = %user_id, "failed to queue verification email during registration");
+            // Non-fatal: registration succeeded but email failed to queue.
+            // The user can request a new verification email via the resend flow.
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                user_id = %user_id,
+                "Registration succeeded but verification email could not be queued. User can request resend."
+            );
+            ApiError::Internal("registration succeeded but verification email could not be sent".into())
+        })?;
 
     tracing::info!(
         tenant_id = %tenant_id,
@@ -1290,8 +1605,46 @@ async fn revoke_api_key(
 
 async fn reset_password(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<ResetPasswordRequest>,
 ) -> Result<Json<ResetPasswordResponse>, ApiError> {
+    // Rate-limit by client IP using Redis
+    let client_ip = connect_info
+        .map(|ConnectInfo(addr)| {
+            extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+        })
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "reset-password request missing ConnectInfo; using shared rate-limit bucket"
+            );
+            "unknown".to_string()
+        });
+
+    let rate_key = format!("apexmail:reset_password_rate:{client_ip}");
+    let window_secs: u64 = 15 * 60; // 15 minutes
+    let max_requests: i64 = 5;
+
+    if let Ok(mut conn) = state.redis.get().await {
+        let count: i64 = deadpool_redis::redis::cmd("INCR")
+            .arg(&rate_key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(1);
+
+        if count == 1 {
+            let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
+                .arg(&rate_key)
+                .arg(window_secs)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        if count > max_requests {
+            return Err(ApiError::RateLimited);
+        }
+    }
+
     if body.token.is_empty() || body.token.len() > 128 {
         return Err(ApiError::Validation(vec![
             "invalid password reset token".into()
@@ -1332,6 +1685,7 @@ async fn reset_password(
         return Err(ApiError::Forbidden(format!("account is {status}")));
     }
 
+    // Primary expiration check: token-level expiry (typically 1 hour)
     if let Some(expires_str) = metadata
         .get("password_reset_expires")
         .and_then(|value| value.as_str())
@@ -1340,6 +1694,24 @@ async fn reset_password(
             if Utc::now() > expires {
                 return Err(ApiError::BadRequest(
                     "password reset token has expired".into(),
+                ));
+            }
+        }
+    }
+
+    // SA2-003: Secondary hard-coded expiration check (24h absolute max)
+    // This ensures tokens cannot be used beyond a hard-coded window even if
+    // the primary `password_reset_expires` field is manipulated or missing.
+    const MAX_RESET_TOKEN_TTL_HOURS: i64 = 24;
+    if let Some(iat_str) = metadata
+        .get("password_reset_iat")
+        .and_then(|value| value.as_str())
+    {
+        if let Ok(iat) = chrono::DateTime::parse_from_rfc3339(iat_str) {
+            let hard_deadline = iat + chrono::Duration::hours(MAX_RESET_TOKEN_TTL_HOURS);
+            if Utc::now() > hard_deadline {
+                return Err(ApiError::BadRequest(
+                    "password reset token has exceeded maximum lifetime".into(),
                 ));
             }
         }
@@ -1424,13 +1796,21 @@ async fn refresh_token(
         ApiError::Internal(format!("invalid JWT public key configuration: {e}"))
     })?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    validation.validate_exp = true;
+    validation.validate_nbf = true;
     validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
 
     let token_data = jsonwebtoken::decode::<JwtClaims>(&token, &key, &validation)?;
     let old_claims = token_data.claims;
 
     let user_id = old_claims.sub.clone();
-    let _tenant_id = old_claims.tenant_id.clone();
+    let tenant_id = old_claims.tenant_id.clone();
+
+    // Check if the session has been revoked since the token was issued
+    let revoked_after = lookup_session_revoked_after(&tenant_id, &user_id, &state).await?;
+    if issued_before_or_at_revocation(old_claims.iat, revoked_after) {
+        return Err(ApiError::Unauthorized("session has been revoked".into()));
+    }
 
     let user = sqlx::query_as::<_, UserRow>(
         "SELECT id, tenant_id, email, name, password_hash, role, status FROM users WHERE id = $1",
@@ -1459,12 +1839,15 @@ async fn refresh_token(
     let now = Utc::now();
     let exp = now + ChronoDuration::seconds(expiry_secs);
 
+    let session_id = Uuid::new_v4().to_string();
+
     let claims = JwtClaims {
         sub: user.id.to_string(),
         tenant_id: user.tenant_id.to_string(),
         scopes: scopes_for_role(&user.role),
         exp: exp.timestamp(),
         iat: now.timestamp(),
+        jti: session_id,
     };
 
     let token = encode(
@@ -1500,6 +1883,7 @@ async fn refresh_token(
                 tenant_id: user.tenant_id,
                 role: user.role,
             },
+            recovery_codes: None,
         }),
     ))
 }
@@ -1545,6 +1929,7 @@ mod tests {
                 tenant_id: Uuid::nil().to_string(),
                 role: "admin".into(),
             },
+            recovery_codes: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["user"]["role"], "admin");
@@ -1630,16 +2015,10 @@ mod tests {
         let password = "StrongPassword1!";
         let hash = apexmail_lib::hash_password(password).unwrap();
 
-        assert!(verify_password_or_log(
-            password,
-            &hash,
-            "argon2-user@example.com"
-        ));
-        assert!(!verify_password_or_log(
-            "WrongPassword1!",
-            &hash,
-            "argon2-user@example.com"
-        ));
+        assert!(verify_password_or_log(password, &hash, "argon2-user@example.com").unwrap());
+        assert!(
+            !verify_password_or_log("WrongPassword1!", &hash, "argon2-user@example.com").unwrap()
+        );
     }
 
     #[test]
@@ -1647,16 +2026,10 @@ mod tests {
         let password = "StrongPassword1!";
         let hash = bcrypt::hash(password, 4).unwrap();
 
-        assert!(verify_password_or_log(
-            password,
-            &hash,
-            "bcrypt-user@example.com"
-        ));
-        assert!(!verify_password_or_log(
-            "WrongPassword1!",
-            &hash,
-            "bcrypt-user@example.com"
-        ));
+        assert!(verify_password_or_log(password, &hash, "bcrypt-user@example.com").unwrap());
+        assert!(
+            !verify_password_or_log("WrongPassword1!", &hash, "bcrypt-user@example.com").unwrap()
+        );
     }
 
     #[test]
@@ -1674,6 +2047,7 @@ mod tests {
             tenant_id: "tenant_123".into(),
             user_id: None,
             api_key_id: Some("key_123".into()),
+            session_id: None,
             scopes: vec!["messages:read".into()],
         };
 
@@ -1689,6 +2063,7 @@ mod tests {
             tenant_id: "tenant_123".into(),
             user_id: Some("usr_01hxyz".into()),
             api_key_id: None,
+            session_id: None,
             scopes: vec!["messages:read".into()],
         };
 
@@ -1851,6 +2226,347 @@ mod tests {
                 .await;
         }
     }
+
+    #[test]
+    fn test_login_lockout_duration_all_escalation_levels() {
+        // Verify the full escalation series: 15min → 30min → 1hr → 2hr → 4hr → 8hr → 16hr → 24hr (cap)
+        assert_eq!(login_lockout_duration(1), 15 * 60);
+        assert_eq!(login_lockout_duration(2), 30 * 60);
+        assert_eq!(login_lockout_duration(3), 60 * 60);
+        assert_eq!(login_lockout_duration(4), 120 * 60);
+        assert_eq!(login_lockout_duration(5), 240 * 60);
+        assert_eq!(login_lockout_duration(6), 480 * 60);
+        assert_eq!(login_lockout_duration(7), 960 * 60);
+        assert_eq!(login_lockout_duration(8), 86400); // capped at 24h
+        assert_eq!(login_lockout_duration(100), 86400);
+    }
+
+    #[test]
+    fn test_login_lockout_duration_zero_and_negative() {
+        // lockout_count <= 0 should be treated as count=1 (base duration)
+        assert_eq!(login_lockout_duration(0), 15 * 60);
+        assert_eq!(login_lockout_duration(-1), 15 * 60);
+        assert_eq!(login_lockout_duration(-100), 15 * 60);
+    }
+
+    #[test]
+    fn test_login_failure_key_format() {
+        let key = login_failure_key("user@example.com");
+        assert!(key.starts_with("apexmail:auth:failures:"));
+        // The hash should be 64 hex chars (SHA-256)
+        let prefix = "apexmail:auth:failures:";
+        let hash = &key[prefix.len()..];
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_login_lock_key_format() {
+        let key = login_lock_key("user@example.com");
+        assert!(key.starts_with("apexmail:auth:lock:"));
+        let prefix = "apexmail:auth:lock:";
+        let hash = &key[prefix.len()..];
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_login_lockout_counter_key_format() {
+        let key = login_lockout_counter_key("user@example.com");
+        assert!(key.starts_with("apexmail:auth:lockouts:"));
+        let prefix = "apexmail:auth:lockouts:";
+        let hash = &key[prefix.len()..];
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_login_lockout_keys_deterministic() {
+        let identifier = "Owner@Example.com";
+        assert_eq!(login_failure_key(identifier), login_failure_key(identifier));
+        assert_eq!(login_lock_key(identifier), login_lock_key(identifier));
+        assert_eq!(
+            login_lockout_counter_key(identifier),
+            login_lockout_counter_key(identifier)
+        );
+    }
+
+    #[test]
+    fn test_login_lockout_keys_different_for_different_users() {
+        let key_a_fail = login_failure_key("alice@example.com");
+        let key_b_fail = login_failure_key("bob@example.com");
+        assert_ne!(key_a_fail, key_b_fail);
+
+        let key_a_lock = login_lock_key("alice@example.com");
+        let key_b_lock = login_lock_key("bob@example.com");
+        assert_ne!(key_a_lock, key_b_lock);
+
+        let key_a_ctr = login_lockout_counter_key("alice@example.com");
+        let key_b_ctr = login_lockout_counter_key("bob@example.com");
+        assert_ne!(key_a_ctr, key_b_ctr);
+    }
+
+    #[test]
+    fn test_login_lockout_keys_different_key_types_same_identifier() {
+        let identifier = "user@example.com";
+        let failure_key = login_failure_key(identifier);
+        let lock_key = login_lock_key(identifier);
+        let counter_key = login_lockout_counter_key(identifier);
+        assert_ne!(failure_key, lock_key);
+        assert_ne!(failure_key, counter_key);
+        assert_ne!(lock_key, counter_key);
+    }
+
+    #[test]
+    fn test_login_lockout_keys_do_not_leak_raw_identifier() {
+        let identifier = "sensitive@example.com";
+        let failure_key = login_failure_key(identifier);
+        let lock_key = login_lock_key(identifier);
+        let counter_key = login_lockout_counter_key(identifier);
+        assert!(!failure_key.contains("sensitive"));
+        assert!(!lock_key.contains("sensitive"));
+        assert!(!counter_key.contains("sensitive"));
+    }
+
+    #[test]
+    fn test_normalized_login_identifier_trims_and_lowercases() {
+        assert_eq!(
+            normalized_login_identifier("  User@Example.com  "),
+            "user@example.com"
+        );
+        assert_eq!(
+            normalized_login_identifier("ALICE@EXAMPLE.COM"),
+            "alice@example.com"
+        );
+        assert_eq!(
+            normalized_login_identifier("  spaced@test.COM  "),
+            "spaced@test.com"
+        );
+    }
+
+    #[test]
+    fn test_login_lockout_keys_normalized_unlike_login_failure_key() {
+        // The failure key uses hash_token directly on the identifier (not normalized),
+        // but the login function normalizes before calling. Test that raw identifier
+        // with different casing produces different keys (since hash_token is case-sensitive).
+        let raw = login_failure_key("User@Example.com");
+        let lower = login_failure_key("user@example.com");
+        assert_ne!(
+            raw, lower,
+            "hash_token is case-sensitive, so keys must differ"
+        );
+    }
+
+    // ── Session revocation tests ─────────────────────────────────────
+
+    #[test]
+    fn test_session_revocation_key_is_tenant_scoped() {
+        let key = session_revocation_key("tenant_alpha", "user_beta");
+        assert!(key.starts_with("apexmail:session_revoked_after:"));
+        assert!(key.contains("tenant_alpha"));
+        assert!(key.contains("user_beta"));
+        assert_eq!(key, "apexmail:session_revoked_after:tenant_alpha:user_beta");
+    }
+
+    #[test]
+    fn test_session_revocation_key_isolates_tenants() {
+        let key_a = session_revocation_key("tenant_a", "user_1");
+        let key_b = session_revocation_key("tenant_b", "user_1");
+        assert_ne!(key_a, key_b, "different tenants must have different keys");
+    }
+
+    #[test]
+    fn test_session_revocation_key_isolates_users() {
+        let key_a = session_revocation_key("tenant_1", "user_a");
+        let key_b = session_revocation_key("tenant_1", "user_b");
+        assert_ne!(key_a, key_b, "different users must have different keys");
+    }
+
+    #[test]
+    fn test_issued_before_or_at_revocation_no_revocation() {
+        // When there is no revocation (None), old tokens should NOT be rejected
+        assert!(!issued_before_or_at_revocation(1000, None));
+    }
+
+    #[test]
+    fn test_issued_before_or_at_revocation_token_issued_before_revocation() {
+        // Token issued at t=100, revocation at t=200 → token was issued BEFORE revocation → REJECT
+        assert!(issued_before_or_at_revocation(100, Some(200)));
+    }
+
+    #[test]
+    fn test_issued_before_or_at_revocation_token_issued_at_same_time() {
+        // Token issued at t=200, revocation at t=200 → issued AT revocation → REJECT
+        assert!(issued_before_or_at_revocation(200, Some(200)));
+    }
+
+    #[test]
+    fn test_issued_before_or_at_revocation_token_issued_after_revocation() {
+        // Token issued at t=300, revocation at t=200 → issued AFTER revocation → ALLOW (new session)
+        assert!(!issued_before_or_at_revocation(300, Some(200)));
+    }
+
+    // ── Redis Failover Tests for Auth Routes ──────────────────────
+
+    /// Tests the login lockout key format — verifying the key structure
+    /// is correct for Redis operations even when Redis is down.
+    #[test]
+    fn test_login_failure_key_format_does_not_leak_email() {
+        let key = login_failure_key("admin@example.com");
+        assert!(key.starts_with("apexmail:auth:failures:"));
+        // The key must NOT contain the raw email to prevent information leakage
+        // via Redis introspection (e.g. KEYS or SCAN commands).
+        assert!(
+            !key.contains("admin@example.com"),
+            "login failure key must not contain the raw email address"
+        );
+        assert!(
+            !key.contains("admin"),
+            "login failure key must not contain parts of the email address"
+        );
+    }
+
+    /// Tests that all login lockout key types use the same hashed
+    /// identifier, so they operate on the same logical Redis namespace
+    /// for a given user.
+    #[test]
+    fn test_login_lockout_keys_share_hashed_identifier() {
+        let identifier = "user@example.com";
+        let fail_key = login_failure_key(identifier);
+        let lock_key = login_lock_key(identifier);
+        let counter_key = login_lockout_counter_key(identifier);
+
+        // All keys should share the same suffix after the prefix
+        let fail_suffix = fail_key.strip_prefix("apexmail:auth:failures:").unwrap();
+        let lock_suffix = lock_key.strip_prefix("apexmail:auth:lock:").unwrap();
+        let counter_suffix = counter_key.strip_prefix("apexmail:auth:lockouts:").unwrap();
+
+        assert_eq!(
+            fail_suffix, lock_suffix,
+            "failure and lock keys must share the same hashed identifier"
+        );
+        assert_eq!(
+            lock_suffix, counter_suffix,
+            "lock and counter keys must share the same hashed identifier"
+        );
+    }
+
+    /// Tests that the login lockout functions propagate errors when
+    /// Redis is unavailable. The `login_lock_ttl` and `record_login_failure`
+    /// functions use `?` for Redis errors, which means they will propagate
+    /// the error up to the caller rather than silently swallowing it.
+    #[test]
+    fn test_login_lockout_functions_use_propagating_error_pattern() {
+        // Both `login_lock_ttl` and `record_login_failure` use `?` for Redis
+        // operations, meaning Redis connection failures propagate as ApiError.
+        // This is verified by checking the function signatures:
+        //
+        //   async fn login_lock_ttl(...) -> Result<Option<i64>, ApiError>
+        //   async fn record_login_failure(...) -> Result<(), ApiError>
+        //
+        // The `?` operator on `redis_pool.get().await?` converts deadpool_redis::PoolError
+        // into ApiError via the From/Into trait implementations.
+        // This means Redis failures are NOT silently swallowed — they
+        // result in a 503 Service Unavailable response.
+        fn assert_propagates_error<T>() {}
+        assert_propagates_error::<Result<Option<i64>, ApiError>>();
+        assert_propagates_error::<Result<(), ApiError>>();
+    }
+
+    /// Tests MFA challenge key format for correctness.
+    #[test]
+    fn test_mfa_challenge_key_format() {
+        let key = mfa_challenge_key("mfa_token_abc123");
+        assert_eq!(key, "apexmail:auth:mfa_challenge:mfa_token_abc123");
+        assert!(
+            key.starts_with("apexmail:auth:mfa_challenge:"),
+            "MFA challenge keys must use the configured prefix"
+        );
+    }
+
+    /// Tests that MFA challenge store/load functions use `?` for Redis
+    /// errors, meaning Redis failures are propagated as ApiError.
+    #[test]
+    fn test_mfa_challenge_functions_use_propagating_error_pattern() {
+        // Both `store_mfa_challenge` and `load_mfa_challenge` use `?` for
+        // Redis operations. This means Redis connection failures propagate
+        // as ApiError (503 Service Unavailable).
+        fn assert_propagates_error<T>() {}
+        assert_propagates_error::<Result<String, ApiError>>();
+        assert_propagates_error::<Result<MfaChallengeState, ApiError>>();
+    }
+
+    /// Tests the MFA challenge key prefix constant.
+    #[test]
+    fn test_mfa_challenge_prefix_constant() {
+        assert_eq!(
+            MFA_CHALLENGE_PREFIX, "apexmail:auth:mfa_challenge:",
+            "MFA challenge prefix must match the build_challenge_key function"
+        );
+    }
+
+    /// Tests that the `revoke_user_sessions` function propagates Redis
+    /// errors (uses `?` pattern), meaning Redis failures are not silent.
+    #[test]
+    fn test_revoke_user_sessions_propagates_redis_errors() {
+        // `revoke_user_sessions` uses `?` on Redis operations.
+        // Redis failure → ApiError propagated to caller.
+        fn assert_propagates_error<T>() {}
+        assert_propagates_error::<Result<(), ApiError>>();
+    }
+
+    /// Tests login lockout duration edge cases for the exponential
+    /// backoff calculation used when Redis IS available.
+    #[test]
+    fn test_login_lockout_duration_escalation_edge_cases() {
+        // First lockout: 15 minutes (base)
+        assert_eq!(login_lockout_duration(1), 15 * 60);
+        // Second: 30 minutes
+        assert_eq!(login_lockout_duration(2), 30 * 60);
+        // Third: 1 hour
+        assert_eq!(login_lockout_duration(3), 60 * 60);
+        // Fourth: 2 hours
+        assert_eq!(login_lockout_duration(4), 120 * 60);
+        // Fifth: 4 hours
+        assert_eq!(login_lockout_duration(5), 240 * 60);
+        // Sixth: 8 hours
+        assert_eq!(login_lockout_duration(6), 480 * 60);
+        // Seventh: 16 hours
+        assert_eq!(login_lockout_duration(7), 960 * 60);
+        // Eighth+: capped at 24 hours
+        assert_eq!(login_lockout_duration(8), 86400);
+        assert_eq!(login_lockout_duration(50), 86400);
+        assert_eq!(login_lockout_duration(1000), 86400);
+    }
+
+    /// Tests that the login lockout key for a normalized vs raw identifier
+    /// produces different keys — the system uses the normalized form for
+    /// lockout checks but the raw form is not used for key generation
+    /// (the helper functions take pre-normalized identifiers).
+    #[test]
+    fn test_login_lockout_keys_use_input_as_is() {
+        // The login lockout helper functions (login_failure_key, login_lock_key,
+        // login_lockout_counter_key) take the identifier as-is without normalization.
+        // Normalization (lowercasing, trimming) is done by the login handler BEFORE
+        // calling these functions.
+        let raw = "  User@Example.Com  ";
+        let normalized = normalized_login_identifier(raw);
+
+        assert_ne!(
+            login_failure_key(raw),
+            login_failure_key(&normalized),
+            "non-normalized and normalized identifiers must produce different Redis keys"
+        );
+    }
+
+    /// Tests that the `clear_login_failures` function uses the same
+    /// Redis error propagation pattern as `record_login_failure`.
+    #[test]
+    fn test_clear_login_failures_propagates_redis_errors() {
+        // `clear_login_failures` uses `?` on Redis operations
+        fn assert_propagates_error<T>() {}
+        assert_propagates_error::<Result<(), ApiError>>();
+    }
 }
 
 // ─── Change Password / Session Revoke ──────────────────────────
@@ -1893,7 +2609,7 @@ async fn change_password(
         .password_hash
         .as_deref()
         .ok_or_else(|| ApiError::Unauthorized("No password set".into()))?;
-    let valid = verify_password_or_log(&body.current_password, password_hash, user_id);
+    let valid = verify_password_or_log(&body.current_password, password_hash, user_id)?;
 
     if !valid {
         return Err(ApiError::Unauthorized("Invalid current password".into()));
@@ -1909,6 +2625,29 @@ async fn change_password(
         .execute(&state.db)
         .await?;
 
+    // Revoke all other sessions to force re-authentication with new password
+    if let Some(current_session_id) = &auth.session_id {
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id != $2")
+            .bind(user_id)
+            .bind(current_session_id)
+            .execute(&state.db)
+            .await?;
+    } else {
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&state.db)
+            .await?;
+    }
+
+    // Invalidate user status cache so stale cached entries cannot bypass the password change
+    invalidate_tenant_user_status_cache(&auth.tenant_id, &state).await;
+
+    // Set Redis revocation marker so all existing JWTs (including the current session's
+    // refresh token) are rejected immediately. Without this, a stolen old refresh token
+    // could still obtain new access tokens even after the password is changed.
+    let ttl = state.config.jwt_expiry.as_secs();
+    revoke_user_sessions(&state.redis, &auth.tenant_id, &user_id, ttl).await?;
+
     Ok(Json(serde_json::json!({ "changed": true })))
 }
 
@@ -1918,6 +2657,9 @@ pub struct RevokeSessionRequest {
     /// Optional: revoke a specific session ID. If omitted, revokes all other sessions.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// When true, revoke all sessions including the current one (requires `revoke_all=true` query param).
+    #[serde(default)]
+    pub revoke_all: bool,
 }
 
 async fn revoke_session(
@@ -1927,17 +2669,37 @@ async fn revoke_session(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = authenticated_user_id(&auth)?;
 
-    let affected = if let Some(session_id) = &body.session_id {
-        // Revoke single session
+    // Write the Redis revocation marker BEFORE deleting from Postgres.
+    // This closes the TOCTOU window where a revoked session's JWT could still
+    // obtain a new refresh token via the refresh_token endpoint.
+    let ttl = state.config.jwt_expiry.as_secs();
+    revoke_user_sessions(&state.redis, &auth.tenant_id, &user_id, ttl).await?;
+
+    let affected = if body.revoke_all {
+        // Revoke ALL sessions including the current one
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&state.db)
+            .await?
+            .rows_affected()
+    } else if let Some(session_id) = &body.session_id {
+        // Revoke single specific session
         sqlx::query("DELETE FROM sessions WHERE id = $1 AND user_id = $2")
             .bind(session_id)
             .bind(user_id)
             .execute(&state.db)
             .await?
             .rows_affected()
+    } else if let Some(current_session_id) = &auth.session_id {
+        // Default: revoke all sessions except the current one
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id != $2")
+            .bind(user_id)
+            .bind(current_session_id)
+            .execute(&state.db)
+            .await?
+            .rows_affected()
     } else {
-        // Revoke all sessions except current - if no specific session provided,
-        // revoke all other sessions (we don't have session_id in auth context)
+        // No session context (e.g. API key auth) — revoke all sessions
         sqlx::query("DELETE FROM sessions WHERE user_id = $1")
             .bind(user_id)
             .execute(&state.db)

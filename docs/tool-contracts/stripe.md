@@ -18,12 +18,12 @@
 
 | Plan | Stripe Product ID | Price (Monthly) | Email Limit | Contacts |
 |------|--------------------|----------------|-------------|----------|
-| Free | `prod_free` | $0 | 3,000/mo | 500 |
+| Free | `prod_free` | $0 | 30,000/mo | 500 |
 | Starter | `prod_starter` | $25/mo | 50,000/mo | 10,000 |
 | Pro | `prod_pro` | $65/mo | 150,000/mo | 50,000 |
 | Growth | `prod_growth` | $150/mo | 500,000/mo | 200,000 |
 | Scale | `prod_scale` | $350/mo | 2,000,000/mo | 500,000 |
-| Enterprise | `prod_enterprise` | $800/mo | 5,000,000/mo | Unlimited |
+| Enterprise | `prod_enterprise` | $3,000/mo | 5,000,000/mo | Unlimited |
 
 ### Add-ons
 

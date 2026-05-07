@@ -124,6 +124,7 @@ mod tests {
                 timestamp: ts,
                 success: true,
                 tls_fingerprint: None,
+                device_fingerprint: None,
             };
             history.record(event);
         }

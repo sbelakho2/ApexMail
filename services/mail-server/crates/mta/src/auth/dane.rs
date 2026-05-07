@@ -3,7 +3,7 @@
 //! TLSA record lookup, generation, and certificate validation.
 
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use moka::sync::Cache;
@@ -15,20 +15,22 @@ use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tracing::warn;
 
+use crate::config::DnsConfig;
+
 // #132:Multiple DoH providers for TLSA lookups – avoids single point of trust
 const DOH_PROVIDERS: &[&str] = &[
     "https://cloudflare-dns.com/dns-query",
     "https://dns.google/resolve",
 ];
 
-// #133:TLSA record cache with 5-minute TTL and bounded capacity
-static TLSA_CACHE: LazyLock<Cache<String, Vec<TlsaRecord>>> = LazyLock::new(|| {
-    Cache::builder()
-        .max_capacity(1_000)
-        .time_to_live(Duration::from_secs(tlsa_cache_ttl_secs()))
-        .build()
-});
+// #133:TLSA record cache with bounded capacity.
+// TTL is enforced at lookup time using the config-provided value so that
+// the cache respects the operator-configured tlsa_cache_ttl_secs.
+// O-1.4:Changed from fixed 300s TTL to runtime-configurable staleness check.
+static TLSA_CACHE: LazyLock<Cache<String, CachedTlsaRecords>> =
+    LazyLock::new(|| Cache::builder().max_capacity(1_000).build());
 
+/// Reusable HTTP client for DoH lookups.
 static DOH_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(10))
@@ -36,12 +38,11 @@ static DOH_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
         .ok()
 });
 
-fn tlsa_cache_ttl_secs() -> u64 {
-    std::env::var("DANE_TLSA_CACHE_TTL_SECS")
-        .ok()
-        .and_then(|val| val.parse::<u64>().ok())
-        .filter(|val| *val > 0)
-        .unwrap_or(300)
+/// Cached TLSA records with a timestamp for configurable TTL enforcement.
+#[derive(Clone)]
+struct CachedTlsaRecords {
+    records: Vec<TlsaRecord>,
+    fetched_at: Instant,
 }
 
 /// Parsed TLSA record.
@@ -87,7 +88,15 @@ pub struct DaneRecordGenerationResult {
 
 /// Verify DANE for a domain + port using DNS‑over‑HTTPS.
 /// #132:Tries multiple DoH providers with fallback. #133:Caches results.
-pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerificationResult {
+///
+/// `dns_config` controls whether DNSSEC validation is enforced (AD flag check)
+/// and provides the TLSA cache TTL for staleness control.
+pub async fn verify_dane(
+    domain: &str,
+    port: u16,
+    protocol: &str,
+    dns_config: &DnsConfig,
+) -> DaneVerificationResult {
     let mut result = DaneVerificationResult {
         supported: false,
         mode: DaneMode::None,
@@ -99,29 +108,34 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
 
     let name = format!("_{port}._{protocol}.{domain}");
 
-    // #133:Check TLSA cache first
+    // O-1.4:Check TLSA cache with configurable TTL enforcement
     if let Some(cached) = TLSA_CACHE.get(&name) {
-        if !cached.is_empty() {
-            result.supported = true;
-            for record in &cached {
-                match record.usage {
-                    3 => {
-                        if result.mode != DaneMode::DaneTa {
-                            result.mode = DaneMode::DaneEe;
+        let ttl = Duration::from_secs(dns_config.tlsa_cache_ttl_secs);
+        if cached.fetched_at.elapsed() < ttl {
+            if !cached.records.is_empty() {
+                result.supported = true;
+                for record in &cached.records {
+                    match record.usage {
+                        3 => {
+                            if result.mode != DaneMode::DaneTa {
+                                result.mode = DaneMode::DaneEe;
+                            }
                         }
-                    }
-                    2 => result.mode = DaneMode::DaneTa,
-                    0 | 1 => {
-                        if result.mode == DaneMode::None {
-                            result.mode = DaneMode::Pkix;
+                        2 => result.mode = DaneMode::DaneTa,
+                        0 | 1 => {
+                            if result.mode == DaneMode::None {
+                                result.mode = DaneMode::Pkix;
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                result.tlsa_records = cached.records.clone();
             }
-            result.tlsa_records = cached;
+            return result;
         }
-        return result;
+        // Stale entry — evict and re-fetch
+        TLSA_CACHE.invalidate(&name);
     }
 
     let Some(client) = DOH_CLIENT.as_ref() else {
@@ -150,8 +164,17 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
             }
         };
 
+        if !resp.status().is_success() {
+            warn!(provider, status = %resp.status(), "DoH provider returned HTTP error, trying next");
+            continue;
+        }
+
         match resp.json::<serde_json::Value>().await {
             Ok(v) => {
+                if doh_response_should_try_next(&v) {
+                    warn!(provider, status = ?v.get("Status"), "DoH provider returned transient DNS status, trying next");
+                    continue;
+                }
                 doh_body = Some(v);
                 break;
             }
@@ -175,16 +198,18 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
         }
     };
 
-    // Check AD flag (DNSSEC authenticated)
-    let ad = body.get("AD").and_then(|v| v.as_bool()).unwrap_or(false);
-    if !ad {
-        result
-            .errors
-            .push("DNSSEC validation not confirmed (AD flag not set)".into());
-        result
-            .recommendations
-            .push("Enable DNSSEC and ensure validated resolver sets AD for TLSA lookups".into());
-        return result;
+    // Check AD flag (DNSSEC authenticated) — only enforced when dnssec_enabled is true
+    if dns_config.dnssec_enabled {
+        let ad = body.get("AD").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !ad {
+            result
+                .errors
+                .push("DNSSEC validation not confirmed (AD flag not set)".into());
+            result.recommendations.push(
+                "Enable DNSSEC and ensure validated resolver sets AD for TLSA lookups".into(),
+            );
+            return result;
+        }
     }
 
     // Parse TLSA answers
@@ -247,8 +272,14 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
         }
     }
 
-    // #133:Cache the result
-    TLSA_CACHE.insert(name, result.tlsa_records.clone());
+    // O-1.4:Cache the result with a timestamp for configurable TTL enforcement
+    TLSA_CACHE.insert(
+        name,
+        CachedTlsaRecords {
+            records: result.tlsa_records.clone(),
+            fetched_at: Instant::now(),
+        },
+    );
 
     result
 }
@@ -378,6 +409,13 @@ fn parse_tlsa_data(data: &str) -> Option<TlsaRecord> {
     })
 }
 
+fn doh_response_should_try_next(body: &serde_json::Value) -> bool {
+    match body.get("Status").and_then(|value| value.as_u64()) {
+        Some(0) | Some(3) | None => false,
+        Some(_) => true,
+    }
+}
+
 fn extract_der_from_pem(pem: &str) -> Option<Vec<u8>> {
     let mut inside_certificate = false;
     let mut found_end = false;
@@ -498,5 +536,22 @@ mod tests {
         let pem = " -----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----";
         let der = extract_der_from_pem(pem).unwrap();
         assert_eq!(der, b"abc");
+    }
+
+    #[test]
+    fn test_doh_response_fallback_only_for_transient_dns_status() {
+        assert!(!doh_response_should_try_next(
+            &serde_json::json!({ "Status": 0 })
+        ));
+        assert!(!doh_response_should_try_next(
+            &serde_json::json!({ "Status": 3 })
+        ));
+        assert!(!doh_response_should_try_next(&serde_json::json!({})));
+        assert!(doh_response_should_try_next(
+            &serde_json::json!({ "Status": 2 })
+        ));
+        assert!(doh_response_should_try_next(
+            &serde_json::json!({ "Status": 5 })
+        ));
     }
 }

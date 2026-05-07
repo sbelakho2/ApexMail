@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use ipnetwork::IpNetwork;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 /// Top-level configuration assembled from env vars.
@@ -38,7 +39,7 @@ pub struct RedisConfig {
     pub pool_size: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TrackingConfig {
     #[allow(unused)] // base_url used for outbound link generation, not yet wired
     pub base_url: String,
@@ -51,6 +52,14 @@ pub struct TrackingConfig {
     pub confirmation_url: String,
     pub redirect_status: u16,
     pub trusted_proxies: Vec<IpNetwork>,
+    /// Max allowed length for a redirect URL (O-6.2). URLs exceeding this
+    /// length are rejected and the fallback is used instead.
+    #[serde(default = "default_max_redirect_url_len")]
+    pub max_redirect_url_len: usize,
+}
+
+fn default_max_redirect_url_len() -> usize {
+    2048
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +182,7 @@ pub fn load() -> Result<Config> {
     let pool_size = var_or_usize("REDIS_POOL_SIZE", 16);
     let max_per_minute = var_or_u32("RATE_LIMIT_MAX_PER_MINUTE", 1000);
     let metrics_port = var_or_u16("METRICS_PORT", 9092);
+    let max_redirect_url_len = var_or_usize("TRACKING_MAX_REDIRECT_URL_LEN", 2048);
 
     // #199:Runtime validation of config values
     if max_connections == 0 || max_connections > 10_000 {
@@ -221,6 +231,7 @@ pub fn load() -> Result<Config> {
             ),
             redirect_status,
             trusted_proxies,
+            max_redirect_url_len,
         },
         rate_limit: RateLimitConfig {
             enabled: var_or_bool("RATE_LIMIT_ENABLED", true),

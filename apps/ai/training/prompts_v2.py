@@ -19,12 +19,12 @@ from __future__ import annotations
 PRICING_TABLE = """\
 | Plan       | Price    | Emails/mo   | API calls/mo | Team      | Domains    |
 |------------|----------|-------------|--------------|-----------|------------|
-| Free       | $0       | 3,000       | 50,000       | 1         | 1          |
+| Free       | $0       | 30,000      | 300,000       | 1         | 1          |
 | Starter    | $25      | 50,000      | 500,000      | 5         | 5          |
 | Pro        | $65      | 150,000     | 2,000,000    | 10        | 25         |
 | Growth     | $150     | 500,000     | 5,000,000    | 25        | 100        |
 | Scale      | $350     | 2,000,000   | 20,000,000   | 50        | Unlimited  |
-| Enterprise | $800     | 5,000,000   | Unlimited    | Unlimited | Unlimited  |"""
+| Enterprise | $3,000     | 5,000,000   | Unlimited    | Unlimited | Unlimited  |"""
 
 PAYG_INFO = """\
 Pay-as-you-go (PAYG): $0 base. Email tiers: $0.001 (0-10k), $0.0008 (10k-100k), \
@@ -38,7 +38,7 @@ FEATURES_BY_PLAN = """\
 - **Pro ($65)**: A/B testing, send-time optimization (AI), custom tracking domain, 25 domains, 10 team members, email support, 60-day retention. Dedicated IP available as add-on ($30/mo). 50,000 contacts.
 - **Growth ($150)**: 1 dedicated IP included, 100 domains, 25 team members, audit logs, priority support, 90-day retention. 200,000 contacts.
 - **Scale ($350)**: 3 dedicated IPs, SSO/SAML, unlimited domains, 50 team members, phone support, subaccounts (10), inbound receiving, SLA 99.9% (10% credit), 365-day retention. 500,000 contacts.
-- **Enterprise ($800)**: 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, unlimited team, dedicated CSM, SLA 99.9% (25% credit), 730-day retention. Unlimited contacts."""
+- **Enterprise ($3,000)**: 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, unlimited team, dedicated CSM, SLA 99.9% (25% credit), 730-day retention. Unlimited contacts."""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TOOL DEFINITIONS (matches training data exactly)
@@ -382,18 +382,18 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
     "free_hitting_limits": {
         "id": "acct_fhl01",
         "plan": "Free", "price": "$0/mo",
-        "emails": "2,980/3,000", "api": "48,900/50,000",
+        "emails": "29,800/30,000", "api": "293,400/300,000",
         "team": "1/1", "created": "2025-10-01", "billing_day": 1,
         "contacts": "312",
         "domains": ["myshop.com: Verified (SPF: pass, DKIM: pass, DMARC: MISSING)"],
         "delivery": "Rate: 97.5%, Bounce rate: 1.5%, Complaint rate: 0.03%",
-        "notes": ["⚠ Email limit nearly reached: 2,980/3,000 (99.3%). 20 remaining."],
+        "notes": ["⚠ Email limit nearly reached: 29,800/30,000 (99.3%). 200 remaining."],
     },
 
     "free_brand_new": {
         "id": "acct_fbn01",
         "plan": "Free", "price": "$0/mo",
-        "emails": "0/3,000", "api": "0/50,000",
+        "emails": "0/30,000", "api": "0/300,000",
         "team": "1/1", "created": "2026-02-22", "billing_day": 22,
         "contacts": "0",
         "domains": [],
@@ -403,7 +403,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
     "free_spf_broken": {
         "id": "acct_fsb01",
         "plan": "Free", "price": "$0/mo",
-        "emails": "1,200/3,000", "api": "15,000/50,000",
+        "emails": "12,000/30,000", "api": "150,000/300,000",
         "team": "1/1", "created": "2025-11-15", "billing_day": 15,
         "contacts": "450",
         "domains": [
@@ -416,7 +416,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
     "free_hobby_blogger": {
         "id": "acct_fhb01",
         "plan": "Free", "price": "$0/mo",
-        "emails": "450/3,000", "api": "5,000/50,000",
+        "emails": "4,500/30,000", "api": "50,000/300,000",
         "team": "1/1", "created": "2025-08-01", "billing_day": 1,
         "contacts": "280",
         "domains": ["craftyblog.net: Verified (SPF: pass, DKIM: pass, DMARC: pass)"],
@@ -756,7 +756,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "contacts": "150,000",
         "domains": ["healthclinic.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)"],
         "delivery": "Rate: 99.2%, Bounce rate: 0.4%, Complaint rate: 0.01%",
-        "notes": ["Customer requires HIPAA compliance for patient communications. HIPAA BAA only available on Enterprise plan ($800/mo)."],
+        "notes": ["Customer requires HIPAA compliance for patient communications. HIPAA BAA only available on Enterprise plan ($3,000/mo)."],
     },
 
     "scale_subaccounts": {
@@ -824,7 +824,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_compliance": {
         "id": "acct_ec01",
-        "plan": "Enterprise", "price": "$800/mo",
+        "plan": "Enterprise", "price": "$3,000/mo",
         "emails": "4,450,000/5,000,000", "api": "Unlimited",
         "team": "45/Unlimited", "created": "2023-09-15", "billing_day": 15,
         "contacts": "1,200,000",
@@ -858,7 +858,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_ecommerce": {
         "id": "acct_eec01",
-        "plan": "Enterprise", "price": "$800/mo",
+        "plan": "Enterprise", "price": "$3,000/mo",
         "emails": "4,550,000/5,000,000", "api": "Unlimited",
         "team": "60/Unlimited", "created": "2023-06-01", "billing_day": 1,
         "contacts": "2,500,000",
@@ -874,7 +874,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_government": {
         "id": "acct_egov01",
-        "plan": "Enterprise", "price": "$800/mo",
+        "plan": "Enterprise", "price": "$3,000/mo",
         "emails": "3,200,000/5,000,000", "api": "Unlimited",
         "team": "80/Unlimited", "created": "2023-03-01", "billing_day": 1,
         "contacts": "1,800,000",
@@ -886,7 +886,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_whitelabel": {
         "id": "acct_ewl01",
-        "plan": "Enterprise", "price": "$800/mo",
+        "plan": "Enterprise", "price": "$3,000/mo",
         "emails": "3,500,000/5,000,000", "api": "Unlimited",
         "team": "40/Unlimited", "created": "2023-08-01", "billing_day": 1,
         "contacts": "900,000",
@@ -901,7 +901,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_dunning": {
         "id": "acct_edn01",
-        "plan": "Enterprise", "price": "$800/mo",
+        "plan": "Enterprise", "price": "$3,000/mo",
         "emails": "2,800,000/5,000,000", "api": "Unlimited",
         "team": "50/Unlimited", "created": "2023-04-01", "billing_day": 15,
         "contacts": "700,000",
@@ -917,7 +917,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_mfa_lockout": {
         "id": "acct_eml01",
-        "plan": "Enterprise", "price": "$800/mo",
+        "plan": "Enterprise", "price": "$3,000/mo",
         "emails": "4,000,000/5,000,000", "api": "Unlimited",
         "team": "55/Unlimited", "created": "2023-01-15", "billing_day": 15,
         "contacts": "1,500,000",
@@ -932,7 +932,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_fintech": {
         "id": "acct_eft01",
-        "plan": "Enterprise", "price": "$800/mo",
+        "plan": "Enterprise", "price": "$3,000/mo",
         "emails": "3,800,000/5,000,000", "api": "Unlimited",
         "team": "70/Unlimited", "created": "2023-05-01", "billing_day": 1,
         "contacts": "2,000,000",
@@ -948,7 +948,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_hipaa": {
         "id": "acct_ehp01",
-        "plan": "Enterprise", "price": "$800/mo",
+        "plan": "Enterprise", "price": "$3,000/mo",
         "emails": "2,500,000/5,000,000", "api": "Unlimited",
         "team": "35/Unlimited", "created": "2023-07-01", "billing_day": 1,
         "contacts": "500,000",

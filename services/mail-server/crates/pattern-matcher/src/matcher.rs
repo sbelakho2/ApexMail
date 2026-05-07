@@ -1,16 +1,45 @@
 //! Core pattern matcher using Aho-Corasick automaton.
+//!
+//! # Security
+//!
+//! - **O-13.1 (Error message sanitization):** `MatchResult` exposes only an
+//!   opaque identifier (`pat-{index}`) instead of the raw pattern text, preventing
+//!   internal rule content from leaking to external consumers.
+//! - **O-13.2 (Unicode NFC normalization):** All input text is normalized to
+//!   Unicode Normalization Form C (NFC) before matching, preventing Unicode
+//!   equivalence attacks where visually identical characters with different
+//!   codepoint sequences bypass pattern detection.
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 /// Result of a pattern match.
+///
+/// Only exposes an opaque identifier (`pat-{index}`) rather than the raw
+/// pattern text, preventing internal rule content from leaking (O-13.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchResult {
     pub pattern_index: usize,
-    pub pattern: String,
+    /// Opaque identifier that replaces the raw pattern text (O-13.1).
+    /// Format: `"pat-{index}"` — does NOT reveal the actual matched pattern.
+    pub opaque_id: String,
     pub start: usize,
     pub end: usize,
     pub label: String,
+}
+
+impl MatchResult {
+    /// Build a sanitized [`MatchResult`] with an opaque pattern identifier.
+    fn new(pattern_index: usize, start: usize, end: usize, label: &str) -> Self {
+        Self {
+            pattern_index,
+            opaque_id: format!("pat-{pattern_index}"),
+            start,
+            end,
+            label: label.to_string(),
+        }
+    }
 }
 
 /// High-performance multi-pattern matcher.
@@ -23,7 +52,6 @@ pub struct PatternMatcher {
 
 #[derive(Debug, Clone)]
 struct PatternEntry {
-    pattern: String,
     label: String,
 }
 
@@ -33,10 +61,7 @@ impl PatternMatcher {
     pub fn new(patterns: Vec<(String, String)>) -> Self {
         let entries: Vec<PatternEntry> = patterns
             .iter()
-            .map(|(p, l)| PatternEntry {
-                pattern: p.clone(),
-                label: l.clone(),
-            })
+            .map(|(_, l)| PatternEntry { label: l.clone() })
             .collect();
 
         let automaton = match AhoCorasickBuilder::new()
@@ -46,6 +71,8 @@ impl PatternMatcher {
         {
             Ok(automaton) => Some(automaton),
             Err(e) => {
+                // O-13.1: Log the error for diagnostics but do NOT expose it
+                // to external callers via return values.
                 tracing::error!(
                     error = %e,
                     "Failed to build Aho-Corasick automaton from config patterns; using empty matcher"
@@ -60,54 +87,64 @@ impl PatternMatcher {
         }
     }
 
+    /// Normalize input text to Unicode NFC form (O-13.2).
+    ///
+    /// This prevents Unicode equivalence attacks where visually identical
+    /// characters (e.g., `é` as U+00E9 vs. U+0065 U+0301) bypass pattern
+    /// matching by using a different normalization form.
+    fn normalize(text: &str) -> String {
+        text.nfc().collect::<String>()
+    }
+
     /// Find all matches in the input text.
+    /// Input is NFC-normalized before matching (O-13.2).
     pub fn find_all(&self, text: &str) -> Vec<MatchResult> {
         let Some(automaton) = self.automaton.as_ref() else {
             return Vec::new();
         };
 
+        let normalized = Self::normalize(text);
+
         automaton
-            .find_iter(text)
+            .find_iter(&normalized)
             .map(|m| {
                 let entry = &self.patterns[m.pattern().as_usize()];
-                MatchResult {
-                    pattern_index: m.pattern().as_usize(),
-                    pattern: entry.pattern.clone(),
-                    start: m.start(),
-                    end: m.end(),
-                    label: entry.label.clone(),
-                }
+                MatchResult::new(m.pattern().as_usize(), m.start(), m.end(), &entry.label)
             })
             .collect()
     }
 
     /// Check if any pattern matches.
+    /// Input is NFC-normalized before matching (O-13.2).
     pub fn is_match(&self, text: &str) -> bool {
         self.automaton
             .as_ref()
-            .map(|a| a.is_match(text))
+            .map(|a| {
+                let normalized = Self::normalize(text);
+                a.is_match(&normalized)
+            })
             .unwrap_or(false)
     }
 
     /// Count total matches.
+    /// Input is NFC-normalized before matching (O-13.2).
     pub fn count_matches(&self, text: &str) -> usize {
         self.automaton
             .as_ref()
-            .map(|a| a.find_iter(text).count())
+            .map(|a| {
+                let normalized = Self::normalize(text);
+                a.find_iter(&normalized).count()
+            })
             .unwrap_or(0)
     }
 
     /// Find first match only.
+    /// Input is NFC-normalized before matching (O-13.2).
     pub fn find_first(&self, text: &str) -> Option<MatchResult> {
-        self.automaton.as_ref()?.find(text).map(|m| {
+        let normalized = Self::normalize(text);
+        self.automaton.as_ref()?.find(&normalized).map(|m| {
             let entry = &self.patterns[m.pattern().as_usize()];
-            MatchResult {
-                pattern_index: m.pattern().as_usize(),
-                pattern: entry.pattern.clone(),
-                start: m.start(),
-                end: m.end(),
-                label: entry.label.clone(),
-            }
+            MatchResult::new(m.pattern().as_usize(), m.start(), m.end(), &entry.label)
         })
     }
 
@@ -148,6 +185,8 @@ mod tests {
         let results = matcher.find_all("Mozilla/5.0 (compatible; Googlebot/2.1)");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].label, "bot:google");
+        // O-13.1: Verify opaque ID does not leak pattern content
+        assert_eq!(results[0].opaque_id, "pat-0");
     }
 
     #[test]
@@ -216,7 +255,7 @@ mod tests {
     fn test_match_result_serialization() {
         let r = MatchResult {
             pattern_index: 0,
-            pattern: "test".into(),
+            opaque_id: "pat-0".into(),
             start: 0,
             end: 4,
             label: "test_label".into(),
@@ -224,5 +263,46 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         let de: MatchResult = serde_json::from_str(&json).unwrap();
         assert_eq!(de.label, "test_label");
+        assert_eq!(de.opaque_id, "pat-0");
+    }
+
+    /// O-13.2: Verify NFC normalization prevents Unicode equivalence bypass.
+    #[test]
+    fn test_nfc_normalization() {
+        // "café" in NFD: 'e' (U+0065) + combining acute accent (U+0301)
+        let nfd: String = "cafe\u{0301}".chars().collect();
+        // Pattern is "café" in NFC: 'é' as single codepoint U+00E9
+        let matcher = build_matcher(vec![("café", "accented")]);
+
+        // Should match NFD input after NFC normalization
+        assert!(matcher.is_match(&nfd));
+        assert_eq!(matcher.count_matches(&nfd), 1);
+
+        // MatchResult positions refer to NFC-normalized text
+        let results = matcher.find_all(&nfd);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].label, "accented");
+    }
+
+    /// O-13.2: Verify mixed normalization forms all match.
+    #[test]
+    fn test_mixed_normalization_forms() {
+        // Pattern in NFC
+        let matcher = build_matcher(vec![("über cool", "umlaut")]);
+
+        // NFD: u\u{0308}ber cool
+        let nfd: String = "u\u{0308}ber cool".chars().collect();
+        assert!(matcher.is_match(&nfd), "NFD input should match NFC pattern");
+
+        // NFC: über cool (single ü codepoint)
+        let nfc: String = "\u{00FC}ber cool".chars().collect();
+        assert!(matcher.is_match(&nfc), "NFC input should match NFC pattern");
+
+        // Mixed: u\u{0308}ber cool + some non-normalized chars
+        let mixed: String = "u\u{0308}ber cool".chars().collect();
+        assert!(
+            matcher.is_match(&mixed),
+            "Mixed input should match NFC pattern"
+        );
     }
 }

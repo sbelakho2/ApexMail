@@ -250,6 +250,10 @@ pub struct WebhookConfig {
     pub request_timeout: Duration,
     /// DNS cache TTL.
     pub dns_cache_ttl: Duration,
+    /// HMAC key for webhook dedup key derivation (O-16.2 fix).
+    /// When set, dedup keys are HMAC(webhook_id || nonce, key) instead of
+    /// plain `format!("webhook:dedup:{}:{}", job.id, job.attempt)`.
+    pub dedup_hmac_key: Option<zeroize::Zeroizing<String>>,
 }
 
 impl Default for WebhookConfig {
@@ -263,6 +267,7 @@ impl Default for WebhookConfig {
             max_concurrent_per_tenant: 5,
             request_timeout: Duration::from_secs(30),
             dns_cache_ttl: Duration::from_secs(60),
+            dedup_hmac_key: None,
         }
     }
 }
@@ -278,6 +283,14 @@ pub struct ReplyHandlerConfig {
     pub llm_endpoint: Option<String>,
     /// LLM API key (zeroized for security -).
     pub llm_api_key: Option<Zeroizing<String>>,
+    /// Maximum inbound reply message body size in bytes (O-16.5 fix).
+    /// Messages larger than this will be truncated before classification.
+    pub max_reply_size: usize,
+    /// Whether to auto-execute suppression/unsubscribe actions (O-16.6 fix).
+    /// When false, actions are queued for admin review instead of executing immediately.
+    pub auto_suppress: bool,
+    /// Confidence threshold for auto-execution when auto_suppress is enabled (0.0–1.0).
+    pub auto_suppress_confidence_threshold: f64,
 }
 
 impl Default for ReplyHandlerConfig {
@@ -290,6 +303,9 @@ impl Default for ReplyHandlerConfig {
             llm_enabled: false,
             llm_endpoint: None,
             llm_api_key: None,
+            max_reply_size: 1024 * 100, // 100 KB default
+            auto_suppress: false,
+            auto_suppress_confidence_threshold: 0.85,
         }
     }
 }

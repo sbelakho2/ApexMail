@@ -101,6 +101,36 @@ pub struct Config {
     /// Port for the dedicated Prometheus metrics HTTP endpoint (default:9090).
     /// Set to 0 to disable the metrics server.
     pub metrics_port: u16,
+
+    // ── Email Grader ─────────────────────────────────────────
+    /// Enable the email grader feature.
+    pub grader_enabled: bool,
+    /// Max grader requests per window per IP.
+    pub grader_rate_limit: u32,
+    /// Rate-limit window in seconds.
+    pub grader_rate_window_seconds: u64,
+    /// Cache TTL for domain checks in seconds.
+    pub grader_cache_ttl_seconds: u64,
+    /// Max body size for grader submissions in bytes.
+    pub grader_max_body_size: usize,
+
+    // ── Inbox Placement ─────────────────────────────────────
+    /// Enable the inbox placement testing feature.
+    pub placement_enabled: bool,
+    /// Polling interval in seconds for the placement scheduler.
+    pub placement_polling_interval_secs: u64,
+    /// Maximum IMAP polling attempts per seed account.
+    pub placement_max_polling_attempts: u32,
+    /// Maximum seed accounts per test.
+    pub placement_max_seeds_per_test: u32,
+    /// Maximum tests per hour per tenant (rate limit).
+    pub placement_max_tests_per_hour: u32,
+    /// IMAP connection timeout in seconds.
+    pub placement_imap_timeout_secs: u64,
+    /// Whether to encrypt stored IMAP passwords.
+    pub placement_encrypt_passwords: bool,
+    /// Secret key used for field encryption of IMAP passwords.
+    pub placement_encryption_secret: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +269,24 @@ fn default_max_inflight_requests(db_max_connections: u32) -> usize {
     std::cmp::max(16usize, db_connections.saturating_mul(3).saturating_div(2))
 }
 
+/// Validate rate limit configuration values at startup.
+///
+/// Checks that:
+/// - `max_requests` is positive (> 0)
+/// - `window_seconds` is in a reasonable range (>= 1, <= 86400)
+pub fn validate_rate_limit_config(max_requests: u32, window_seconds: u64) -> Result<(), String> {
+    if max_requests == 0 {
+        return Err("rate_limit.max_requests must be > 0".to_string());
+    }
+    if window_seconds == 0 {
+        return Err("rate_limit.window_seconds must be > 0".to_string());
+    }
+    if window_seconds > 86400 {
+        return Err("rate_limit.window_seconds must be <= 86400 (24h)".to_string());
+    }
+    Ok(())
+}
+
 fn validate_secret(
     name: &str,
     value: &str,
@@ -353,6 +401,70 @@ impl Config {
             });
         }
 
+        // Validate rate limiting configuration — zero or negative values would
+        // silently disable rate limiting, leaving the API unprotected.
+        let rate_limit_max_requests = parse_u64(
+            "RATE_LIMIT_MAX_REQUESTS",
+            &env_or("RATE_LIMIT_MAX_REQUESTS", "1000"),
+        )?;
+        let rate_limit_window_ms = parse_u64(
+            "RATE_LIMIT_WINDOW_MS",
+            &env_or("RATE_LIMIT_WINDOW_MS", "60000"),
+        )?;
+        if rate_limit_max_requests == 0 {
+            return Err(ConfigError::Invalid {
+                var: "RATE_LIMIT_MAX_REQUESTS".into(),
+                reason: "must be greater than 0; a value of 0 would disable all rate limiting"
+                    .into(),
+            });
+        }
+        if rate_limit_window_ms == 0 {
+            return Err(ConfigError::Invalid {
+                var: "RATE_LIMIT_WINDOW_MS".into(),
+                reason:
+                    "must be greater than 0; a value of 0 would disable the rate limiting window"
+                        .into(),
+            });
+        }
+
+        let grader_enabled = env_or("GRADER_ENABLED", "true").parse().unwrap_or(true);
+        let grader_rate_limit = parse_u32("GRADER_RATE_LIMIT", &env_or("GRADER_RATE_LIMIT", "10"))?;
+        let grader_rate_window_seconds =
+            parse_u64("GRADER_RATE_WINDOW", &env_or("GRADER_RATE_WINDOW", "60"))?;
+        let grader_cache_ttl_seconds =
+            parse_u64("GRADER_CACHE_TTL", &env_or("GRADER_CACHE_TTL", "300"))?;
+        let grader_max_body_size = parse_usize(
+            "GRADER_MAX_BODY_SIZE",
+            &env_or("GRADER_MAX_BODY_SIZE", "1048576"),
+        )?;
+
+        let placement_enabled = env_or("PLACEMENT_ENABLED", "true").parse().unwrap_or(true);
+        let placement_polling_interval_secs = parse_u64(
+            "PLACEMENT_POLLING_INTERVAL",
+            &env_or("PLACEMENT_POLLING_INTERVAL", "60"),
+        )?;
+        let placement_max_polling_attempts = parse_u32(
+            "PLACEMENT_MAX_POLLING_ATTEMPTS",
+            &env_or("PLACEMENT_MAX_POLLING_ATTEMPTS", "10"),
+        )?;
+        let placement_max_seeds_per_test = parse_u32(
+            "PLACEMENT_MAX_SEEDS_PER_TEST",
+            &env_or("PLACEMENT_MAX_SEEDS_PER_TEST", "50"),
+        )?;
+        let placement_max_tests_per_hour = parse_u32(
+            "PLACEMENT_MAX_TESTS_PER_HOUR",
+            &env_or("PLACEMENT_MAX_TESTS_PER_HOUR", "5"),
+        )?;
+        let placement_imap_timeout_secs = parse_u64(
+            "PLACEMENT_IMAP_TIMEOUT",
+            &env_or("PLACEMENT_IMAP_TIMEOUT", "30"),
+        )?;
+        let placement_encrypt_passwords = env_or("PLACEMENT_ENCRYPT_PASSWORDS", "true")
+            .parse()
+            .unwrap_or(true);
+        let placement_encryption_secret =
+            env_or("PLACEMENT_ENCRYPTION_SECRET", "change-me-in-production");
+
         let config = Config {
             port: parse_u16("PORT", &env_or("PORT", "3000"))?,
             host: env_or("HOST", "0.0.0.0"),
@@ -380,14 +492,8 @@ impl Config {
             jwt_expiry: parse_duration_hours("JWT_EXPIRY", &env_or("JWT_EXPIRY", "24h"))?,
             api_key_hash_secret,
 
-            rate_limit_window_ms: parse_u64(
-                "RATE_LIMIT_WINDOW_MS",
-                &env_or("RATE_LIMIT_WINDOW_MS", "60000"),
-            )?,
-            rate_limit_max_requests: parse_u64(
-                "RATE_LIMIT_MAX_REQUESTS",
-                &env_or("RATE_LIMIT_MAX_REQUESTS", "1000"),
-            )?,
+            rate_limit_window_ms,
+            rate_limit_max_requests,
             max_inflight_requests,
 
             cors_origins,
@@ -468,6 +574,21 @@ impl Config {
             billing_company_phone: env_or("BILLING_COMPANY_PHONE", ""),
 
             metrics_port: parse_u16("METRICS_PORT", &env_or("METRICS_PORT", "9090"))?,
+
+            grader_enabled,
+            grader_rate_limit,
+            grader_rate_window_seconds,
+            grader_cache_ttl_seconds,
+            grader_max_body_size,
+
+            placement_enabled,
+            placement_polling_interval_secs,
+            placement_max_polling_attempts,
+            placement_max_seeds_per_test,
+            placement_max_tests_per_hour,
+            placement_imap_timeout_secs,
+            placement_encrypt_passwords,
+            placement_encryption_secret,
         };
 
         // Production security checks
@@ -746,6 +867,20 @@ mod tests {
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),
             metrics_port: 9090,
+            grader_enabled: false,
+            grader_rate_limit: 10,
+            grader_rate_window_seconds: 60,
+            grader_cache_ttl_seconds: 300,
+            grader_max_body_size: 1048576,
+
+            placement_enabled: false,
+            placement_polling_interval_secs: 60,
+            placement_max_polling_attempts: 10,
+            placement_max_seeds_per_test: 50,
+            placement_max_tests_per_hour: 5,
+            placement_imap_timeout_secs: 30,
+            placement_encrypt_passwords: true,
+            placement_encryption_secret: "test-placement-encryption-secret".into(),
         }
     }
 
@@ -837,6 +972,20 @@ mod tests {
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),
             metrics_port: 9090,
+            grader_enabled: false,
+            grader_rate_limit: 10,
+            grader_rate_window_seconds: 60,
+            grader_cache_ttl_seconds: 300,
+            grader_max_body_size: 1048576,
+
+            placement_enabled: false,
+            placement_polling_interval_secs: 60,
+            placement_max_polling_attempts: 10,
+            placement_max_seeds_per_test: 50,
+            placement_max_tests_per_hour: 5,
+            placement_imap_timeout_secs: 30,
+            placement_encrypt_passwords: true,
+            placement_encryption_secret: "test-placement-encryption-secret".into(),
         };
 
         assert_eq!(
@@ -864,5 +1013,22 @@ mod tests {
         assert!(config.is_explicit_web_host(Some("127.0.0.1")));
         assert!(!config.is_explicit_web_host(Some("localhost")));
         assert!(!config.is_explicit_web_host(Some("unknown.example.com")));
+    }
+
+    #[test]
+    fn validate_rate_limit_config_rejects_zero_values() {
+        assert!(validate_rate_limit_config(0, 60).is_err());
+        assert!(validate_rate_limit_config(100, 0).is_err());
+    }
+
+    #[test]
+    fn validate_rate_limit_config_accepts_reasonable_values() {
+        assert!(validate_rate_limit_config(100, 60).is_ok());
+        assert!(validate_rate_limit_config(1, 1).is_ok());
+    }
+
+    #[test]
+    fn validate_rate_limit_config_rejects_excessive_window() {
+        assert!(validate_rate_limit_config(100, 86401).is_err());
     }
 }

@@ -30,7 +30,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
-        prometheus.io/port: {{ .Values.apiServer.port | quote }}
+        prometheus.io/port: {{ .Values.apiServer.metricsPort | quote }}
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: {{ include "apexmail.serviceAccountName" . }}
@@ -46,11 +46,16 @@ spec:
             - name: http
               containerPort: {{ .Values.apiServer.port }}
               protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.apiServer.metricsPort }}
+              protocol: TCP
           env:
             - name: HOST
               value: "0.0.0.0"
             - name: PORT
               value: {{ .Values.apiServer.port | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.apiServer.metricsPort | quote }}
             - name: RUST_LOG
               value: "info"
             - name: DATABASE_URL
@@ -78,6 +83,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.existingSecret }}
                   key: tracking-secret-key
+            - name: RATE_LIMIT_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "apexmail.fullname" . }}-config
+                  key: rate-limit-enabled
+            - name: RATE_LIMIT_MAX_PER_MINUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "apexmail.fullname" . }}-config
+                  key: rate-limit-max-per-minute
             {{- with .Values.apiServer.env }}
             {{- range $key, $value := . }}
             - name: {{ $key }}

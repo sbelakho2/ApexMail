@@ -21,6 +21,7 @@ pub fn router() -> Router<AppState> {
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendTimeQuery {
     #[serde(default)]
     pub recipient: Option<String>,
@@ -38,6 +39,7 @@ pub struct SendTimeResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubjectAnalysisQuery {
     pub subject: String,
 }
@@ -62,6 +64,7 @@ pub struct ChurnPredictionResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BotDetectionQuery {
     #[serde(default)]
     pub event_id: Option<Uuid>,
@@ -94,7 +97,7 @@ async fn send_time_optimization(
         sqlx::query_as(
             "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, COUNT(*) as opens
              FROM events
-             WHERE tenant_id = $1 AND event_type = 'open' AND recipient = $2
+             WHERE tenant_id = $1 AND event_type IN ('opened', 'open') AND recipient = $2
              GROUP BY hour
              ORDER BY opens DESC",
         )
@@ -107,7 +110,7 @@ async fn send_time_optimization(
         sqlx::query_as(
             "SELECT EXTRACT(HOUR FROM timestamp)::int as hour, COUNT(*) as opens
              FROM events
-             WHERE tenant_id = $1 AND event_type = 'open' AND timestamp > NOW() - INTERVAL '90 days'
+             WHERE tenant_id = $1 AND event_type IN ('opened', 'open') AND timestamp > NOW() - INTERVAL '90 days'
              GROUP BY hour
              ORDER BY opens DESC",
         )

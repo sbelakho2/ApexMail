@@ -34,6 +34,7 @@ async fn update_pool_status(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WarmupQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -288,8 +289,14 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
-    #[sqlx::test]
-    async fn warmup_action_returns_not_found_for_missing_pool(pool: PgPool) {
+    #[tokio::test]
+    async fn warmup_action_returns_not_found_for_missing_pool() {
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("warmup_action_returns_not_found_for_missing_pool")
+                .await
+        else {
+            return;
+        };
         apply_tool_migrations(&pool).await;
 
         let error = update_pool_status(&pool, "pool_missing", "active")
@@ -299,8 +306,13 @@ mod tests {
         assert!(matches!(error, ApiError::NotFound(_)));
     }
 
-    #[sqlx::test]
-    async fn warmup_action_updates_existing_pool_status(pool: PgPool) {
+    #[tokio::test]
+    async fn warmup_action_updates_existing_pool_status() {
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("warmup_action_updates_existing_pool_status").await
+        else {
+            return;
+        };
         apply_tool_migrations(&pool).await;
 
         let pool_id = apexmail_lib::id::generate_id("ipp", 22);

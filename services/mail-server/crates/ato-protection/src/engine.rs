@@ -10,18 +10,26 @@
 use crate::behavior;
 use crate::config::AtoConfig;
 use crate::geo::{self, GeoPoint};
-use crate::lockout_backend::{InMemoryLockoutBackend, LockoutBackend, RedisLockoutBackend};
+use crate::lockout_backend::{
+    InMemoryLockoutBackend, LockoutBackend, RedisLockoutBackend, REDIS_LOCKOUT_AVAILABLE,
+};
 use crate::session::{LoginEvent, SessionStore};
 use crate::tls_fingerprint::UserTlsHistory;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing;
 
 type LockoutRegistry = Arc<DashMap<String, Vec<DateTime<Utc>>>>;
+
+#[derive(Debug)]
+struct RateLimitWindow {
+    epoch_sec: u64,
+    count: u64,
+}
 
 fn global_lockout_registry() -> LockoutRegistry {
     static GLOBAL_LOCKOUT_REGISTRY: OnceLock<LockoutRegistry> = OnceLock::new();
@@ -127,8 +135,8 @@ pub struct AtoEngine {
     /// Otherwise it falls back to [`InMemoryLockoutBackend`].
     lockout_backend: Arc<dyn LockoutBackend>,
     /// Per-IP call counter for self-protecting rate limit.
-    /// Maps IP → (epoch_second, count) to enforce `config.rate_limit_rps`.
-    ip_call_counts: Arc<DashMap<String, (u64, AtomicU64)>>,
+    /// Maps IP → mutex-protected `(epoch_second, count)` to enforce `config.rate_limit_rps`.
+    ip_call_counts: Arc<DashMap<String, Arc<Mutex<RateLimitWindow>>>>,
 }
 
 impl AtoEngine {
@@ -142,7 +150,16 @@ impl AtoEngine {
             Arc::new(DashMap::new())
         };
         let lockout_backend: Arc<dyn LockoutBackend> = match &config.redis_lockout_url {
-            Some(url) => Arc::new(RedisLockoutBackend::new(url.clone())),
+            Some(url) if REDIS_LOCKOUT_AVAILABLE => Arc::new(RedisLockoutBackend::new(url.clone())),
+            Some(url) => {
+                tracing::error!(
+                    redis_url = %url,
+                    "redis_lockout_url is configured but redis-lockout feature is not enabled. \
+                     Falling back to in-memory lockout backend — ATO protection will NOT be \
+                     shared across nodes. Enable the `redis-lockout` feature in Cargo.toml."
+                );
+                Arc::new(InMemoryLockoutBackend::new())
+            }
             None => Arc::new(InMemoryLockoutBackend::new()),
         };
         Self {
@@ -164,7 +181,16 @@ impl AtoEngine {
             Arc::new(DashMap::new())
         };
         let lockout_backend: Arc<dyn LockoutBackend> = match &config.redis_lockout_url {
-            Some(url) => Arc::new(RedisLockoutBackend::new(url.clone())),
+            Some(url) if REDIS_LOCKOUT_AVAILABLE => Arc::new(RedisLockoutBackend::new(url.clone())),
+            Some(url) => {
+                tracing::error!(
+                    redis_url = %url,
+                    "redis_lockout_url is configured but redis-lockout feature is not enabled. \
+                     Falling back to in-memory lockout backend — ATO protection will NOT be \
+                     shared across nodes. Enable the `redis-lockout` feature in Cargo.toml."
+                );
+                Arc::new(InMemoryLockoutBackend::new())
+            }
             None => Arc::new(InMemoryLockoutBackend::new()),
         };
         Self {
@@ -186,35 +212,40 @@ impl AtoEngine {
         // 0. Self-protecting rate limit (per-IP, per-second)
         if self.config.rate_limit_rps > 0 {
             let now_epoch = Utc::now().timestamp() as u64;
-            let mut entry = self
+            let window = self
                 .ip_call_counts
                 .entry(event.ip_address.clone())
-                .or_insert_with(|| (now_epoch, AtomicU64::new(0)));
+                .or_insert_with(|| {
+                    Arc::new(Mutex::new(RateLimitWindow {
+                        epoch_sec: now_epoch,
+                        count: 0,
+                    }))
+                })
+                .clone();
 
-            let (ref mut epoch_sec, ref counter) = *entry;
-
-            if *epoch_sec != now_epoch {
-                // New second — reset counter
-                *epoch_sec = now_epoch;
-                counter.store(1, Ordering::Release);
+            let mut state = window.lock();
+            if state.epoch_sec != now_epoch {
+                state.epoch_sec = now_epoch;
+                state.count = 1;
             } else {
-                let prev = counter.fetch_add(1, Ordering::AcqRel);
-                if prev >= self.config.rate_limit_rps as u64 {
-                    return AtoVerdict {
-                        risk_score: 10.0,
-                        action: AtoAction::Block,
-                        new_device: false,
-                        impossible_travel: false,
-                        factors: vec![RiskFactor {
-                            id: "RATE_LIMITED",
-                            description: format!(
-                                "IP {} exceeded {} evaluate calls/sec",
-                                event.ip_address, self.config.rate_limit_rps
-                            ),
-                            risk: 10.0,
-                        }],
-                    };
-                }
+                state.count = state.count.saturating_add(1);
+            }
+
+            if state.count > self.config.rate_limit_rps as u64 {
+                return AtoVerdict {
+                    risk_score: 10.0,
+                    action: AtoAction::Block,
+                    new_device: false,
+                    impossible_travel: false,
+                    factors: vec![RiskFactor {
+                        id: "RATE_LIMITED",
+                        description: format!(
+                            "IP {} exceeded {} evaluate calls/sec",
+                            event.ip_address, self.config.rate_limit_rps
+                        ),
+                        risk: 10.0,
+                    }],
+                };
             }
         }
 
@@ -387,12 +418,16 @@ impl AtoEngine {
 
         // 5. TLS fingerprint anomaly detection
         if let Some(ref tls_fp) = event.tls_fingerprint {
-            let mut entry = self
-                .tls_histories
-                .entry(event.user_id.clone())
-                .or_insert_with(|| UserTlsHistory::new(10));
-            let fp_risk = entry.fingerprint_risk(tls_fp);
-            entry.record(tls_fp);
+            let fp_risk = {
+                let mut entry = self
+                    .tls_histories
+                    .entry(event.user_id.clone())
+                    .or_insert_with(|| UserTlsHistory::new(10));
+                let fp_risk = entry.fingerprint_risk(tls_fp);
+                entry.record(tls_fp);
+                fp_risk
+            };
+            self.evict_tls_histories_over_capacity();
             if fp_risk > 0.0 {
                 factors.push(RiskFactor {
                     id: "TLS_FINGERPRINT",
@@ -442,10 +477,10 @@ impl AtoEngine {
     /// of `ip_call_counts`. Entries whose epoch second is older than `max_age_secs`
     /// seconds ago are removed.
     pub fn evict_stale_rate_limits(&self, max_age_secs: u64) -> usize {
-        let cutoff = Utc::now().timestamp() as u64 - max_age_secs;
+        let cutoff = (Utc::now().timestamp() as u64).saturating_sub(max_age_secs);
         let before = self.ip_call_counts.len();
         self.ip_call_counts
-            .retain(|_, (epoch_sec, _)| *epoch_sec >= cutoff);
+            .retain(|_, window| window.lock().epoch_sec >= cutoff);
         let removed = before - self.ip_call_counts.len();
         if removed > 0 {
             tracing::debug!(
@@ -473,6 +508,43 @@ impl AtoEngine {
                 removed = removed,
                 remaining = self.tls_histories.len(),
                 "Evicted stale tls_histories entries"
+            );
+        }
+        removed
+    }
+
+    /// Evict least-recently-seen TLS history entries until the configured
+    /// in-memory capacity is respected.
+    pub fn evict_tls_histories_over_capacity(&self) -> usize {
+        let max_entries = self.config.max_tls_history_users;
+        let before = self.tls_histories.len();
+        if before <= max_entries {
+            return 0;
+        }
+
+        if max_entries == 0 {
+            self.tls_histories.clear();
+            return before;
+        }
+
+        let mut entries: Vec<(String, DateTime<Utc>)> = self
+            .tls_histories
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().last_seen))
+            .collect();
+        entries.sort_by_key(|(_, last_seen)| *last_seen);
+
+        for (user_id, _) in entries.into_iter().take(before - max_entries) {
+            self.tls_histories.remove(&user_id);
+        }
+
+        let removed = before - self.tls_histories.len();
+        if removed > 0 {
+            tracing::debug!(
+                removed,
+                remaining = self.tls_histories.len(),
+                max_entries,
+                "Evicted over-capacity tls_histories entries"
             );
         }
         removed
@@ -701,6 +773,7 @@ impl Default for AtoEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tls_fingerprint::TlsFingerprint;
     use chrono::Utc;
 
     fn login_event(user: &str, ip: &str, lat: f64, lon: f64) -> LoginEvent {
@@ -713,7 +786,14 @@ mod tests {
             timestamp: Utc::now(),
             success: true,
             tls_fingerprint: None,
+            device_fingerprint: None,
         }
+    }
+
+    fn login_event_with_tls(user: &str, tls_hash: &str) -> LoginEvent {
+        let mut event = login_event(user, "1.2.3.4", 40.7128, -74.006);
+        event.tls_fingerprint = Some(TlsFingerprint::from_ja4_string(tls_hash));
+        event
     }
 
     #[test]
@@ -798,5 +878,61 @@ mod tests {
             verdict.action,
             AtoAction::RequireMfa | AtoAction::Block
         ));
+    }
+
+    #[test]
+    fn test_tls_histories_evict_least_recent_over_capacity() {
+        let config = AtoConfig {
+            max_tls_history_users: 2,
+            ..AtoConfig::development()
+        };
+        let engine = AtoEngine::with_config(config);
+
+        engine.evaluate(&login_event_with_tls("user-a", "ja4-a"));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        engine.evaluate(&login_event_with_tls("user-b", "ja4-b"));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        engine.evaluate(&login_event_with_tls("user-c", "ja4-c"));
+
+        assert_eq!(engine.tls_histories.len(), 2);
+        assert!(!engine.tls_histories.contains_key("user-a"));
+        assert!(engine.tls_histories.contains_key("user-b"));
+        assert!(engine.tls_histories.contains_key("user-c"));
+    }
+
+    #[test]
+    fn test_rate_limit_epoch_reset_updates_count_atomically() {
+        let config = AtoConfig {
+            rate_limit_rps: 1,
+            ..AtoConfig::development()
+        };
+        let engine = AtoEngine::with_config(config);
+        let event = login_event("user1", "1.2.3.4", 40.7128, -74.006);
+
+        let first = engine.evaluate(&event);
+        assert_ne!(first.action, AtoAction::Block);
+
+        let window = engine.ip_call_counts.get("1.2.3.4").unwrap().clone();
+        {
+            let mut state = window.lock();
+            state.epoch_sec = state.epoch_sec.saturating_sub(1);
+            state.count = 100;
+        }
+
+        let reset_window = engine.evaluate(&event);
+        assert!(
+            reset_window
+                .factors
+                .iter()
+                .all(|factor| factor.id != "RATE_LIMITED"),
+            "stale epoch must reset the counter before limit evaluation"
+        );
+
+        let blocked = engine.evaluate(&event);
+        assert_eq!(blocked.action, AtoAction::Block);
+        assert!(blocked
+            .factors
+            .iter()
+            .any(|factor| factor.id == "RATE_LIMITED"));
     }
 }

@@ -155,7 +155,7 @@ Alert rules are defined in `deploy/alerting-rules.yml` and evaluated by Promethe
 ### Alert Routing
 
 - Critical alerts → PagerDuty (or equivalent on-call tool).
-- Warning alerts → `#ops-alerts` Slack/Discord channel.
+- Warning alerts → `#ops-alerts` Slack channel.
 - Resolved notifications are sent for both severities.
 
 ---

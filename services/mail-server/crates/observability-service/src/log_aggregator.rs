@@ -2,6 +2,9 @@
 //!
 //! In-memory log store with level/service filtering, per-level counts, and
 //! error-rate calculation over a sliding window.
+//!
+//! When a [`PersistenceConfig`] is provided, the aggregator can periodically
+//! flush log entries to the database to survive process restarts.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -9,6 +12,7 @@ use std::collections::{BinaryHeap, HashMap};
 use chrono::{Duration, Utc};
 use parking_lot::RwLock;
 
+use crate::config::PersistenceConfig;
 use crate::types::{LogEntry, LogLevel};
 
 // ---------------------------------------------------------------------------
@@ -18,10 +22,14 @@ use crate::types::{LogEntry, LogLevel};
 /// Thread-safe in-memory structured log store.
 /// Caps total stored entries at `max_entries`; when full, the oldest entries
 /// are evicted on each insert to prevent unbounded memory growth.
+///
+/// Optionally persists log entries to the database when `persistence_config`
+/// is `Some` and `enabled` is `true`.
 #[derive(Debug)]
 pub struct LogAggregator {
     entries: RwLock<Vec<LogEntry>>,
     max_entries: usize,
+    persistence_config: Option<PersistenceConfig>,
 }
 
 impl LogAggregator {
@@ -35,7 +43,23 @@ impl LogAggregator {
         Self {
             entries: RwLock::new(Vec::new()),
             max_entries,
+            persistence_config: None,
         }
+    }
+
+    /// Create an aggregator with persistence configuration, enabling periodic
+    /// flush of log entries to the database.
+    pub fn with_persistence(max_entries: usize, config: PersistenceConfig) -> Self {
+        Self {
+            entries: RwLock::new(Vec::new()),
+            max_entries,
+            persistence_config: if config.enabled { Some(config) } else { None },
+        }
+    }
+
+    /// Return the persistence configuration, if any.
+    pub fn persistence(&self) -> Option<&PersistenceConfig> {
+        self.persistence_config.as_ref()
     }
 
     /// Ingest a single log entry.

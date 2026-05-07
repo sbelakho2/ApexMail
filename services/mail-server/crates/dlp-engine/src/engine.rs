@@ -188,11 +188,12 @@ impl DlpEngine {
 
 impl DlpEngine {
     fn risk_multiplier_for_domain(&self, domain: &str) -> f64 {
+        let domain_normalized = canonical_domain(domain);
         if self
             .config
             .trusted_recipient_domains
             .iter()
-            .any(|d| d.eq_ignore_ascii_case(domain))
+            .any(|d| canonical_domain(d) == domain_normalized)
         {
             return self.config.trusted_domain_risk_multiplier.max(0.0);
         }
@@ -201,7 +202,7 @@ impl DlpEngine {
             .config
             .partner_recipient_domains
             .iter()
-            .any(|d| d.eq_ignore_ascii_case(domain))
+            .any(|d| canonical_domain(d) == domain_normalized)
         {
             return self.config.partner_domain_risk_multiplier.max(0.0);
         }
@@ -217,8 +218,16 @@ impl DlpEngine {
         self.config
             .temporary_exceptions
             .iter()
-            .find(|ex| ex.recipient_domain.eq_ignore_ascii_case(domain) && ex.expires_at_unix > now)
+            .find(|ex| {
+                canonical_domain(&ex.recipient_domain) == canonical_domain(domain)
+                    && ex.expires_at_unix > now
+            })
     }
+}
+
+fn canonical_domain(domain: &str) -> String {
+    let trimmed = domain.trim().trim_end_matches('.').to_lowercase();
+    idna::domain_to_ascii(&trimmed).unwrap_or(trimmed)
 }
 
 #[cfg(feature = "events")]

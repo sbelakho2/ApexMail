@@ -1,23 +1,24 @@
 {# ── Compliance CTA ───────────────────────────────────────────── #}
 {# Converted from compliance/ComplianceCTA.tsx                   #}
 
-<section class="py-20 lg:py-32 relative bg-surface-50">
+<section class="py-20 lg:py-32 relative bg-surface-100">
   <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="animate-in bg-white rounded-2xl border border-surface-200 p-8 md:p-12 text-center">
-      <h2 class="text-3xl md:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
+    <div class="animate-in bg-white rounded-sm border border-surface-200 p-8 md:p-12 text-center">
+      <h2 class="text-3xl md:text-4xl font-bold text-surface-950 mb-6 tracking-tight">
         Ready to Sleep Better at Night?
       </h2>
       <p class="text-lg text-surface-600 mb-8 max-w-2xl mx-auto leading-relaxed">
-        ApexMail provides compliance-critical email infrastructure with built-in GDPR automation.
-        Get a personalized compliance assessment from our team.
+        ApexMail provides compliance-critical email infrastructure with GDPR workflows,
+        SOC 2 evidence automation, HIPAA BAA lifecycle tooling, and generated SIG,
+        CAIQ, and HECVAT answer packs.
       </p>
 
       <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-        <a href="{{ config.extra.app_url }}/signup" class="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors">
+        <a href="{{ config.extra.app_url }}/signup" class="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-surface-950 rounded-sm hover:bg-brand-700 transition-colors">
           Start Free Trial
           <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="/compliance" class="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors">
+        <a href="/compliance" class="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-950 bg-white border border-surface-200 rounded-sm hover:bg-surface-100 transition-colors">
           <svg class="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
           Talk to Compliance Team
         </a>
@@ -26,40 +27,40 @@
       {# Trust Signals #}
       <div class="grid grid-cols-2 md:grid-cols-4 gap-6 pt-8 border-t border-surface-100">
         <div class="flex flex-col items-center">
-          <div class="w-10 h-10 rounded-full bg-surface-50 flex items-center justify-center mb-3 border border-surface-200 text-surface-900">
+          <div class="w-10 h-10 rounded-sm bg-surface-100 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
             <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           </div>
-          <div class="text-surface-900 font-medium text-sm mb-0.5">SOC 2 Controls</div>
+          <div class="text-surface-950 font-medium text-sm mb-0.5">SOC 2 Controls</div>
           <div class="text-xs text-surface-500 font-normal">Enterprise plan</div>
         </div>
         <div class="flex flex-col items-center">
-          <div class="w-10 h-10 rounded-full bg-surface-50 flex items-center justify-center mb-3 border border-surface-200 text-surface-900">
+          <div class="w-10 h-10 rounded-sm bg-surface-100 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
             <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           </div>
-          <div class="text-surface-900 font-medium text-sm mb-0.5">GDPR</div>
-          <div class="text-xs text-surface-500 font-normal">Compliant</div>
+          <div class="text-surface-950 font-medium text-sm mb-0.5">GDPR DSR</div>
+          <div class="text-xs text-surface-500 font-normal">Workflow APIs</div>
         </div>
         <div class="flex flex-col items-center">
-          <div class="w-10 h-10 rounded-full bg-surface-50 flex items-center justify-center mb-3 border border-surface-200 text-surface-900">
+          <div class="w-10 h-10 rounded-sm bg-surface-100 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
             <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           </div>
-          <div class="text-surface-900 font-medium text-sm mb-0.5">HIPAA</div>
+          <div class="text-surface-950 font-medium text-sm mb-0.5">HIPAA</div>
           <div class="text-xs text-surface-500 font-normal">BAA (Enterprise)</div>
         </div>
         <div class="flex flex-col items-center">
-          <div class="w-10 h-10 rounded-full bg-surface-50 flex items-center justify-center mb-3 border border-surface-200 text-surface-900">
+          <div class="w-10 h-10 rounded-sm bg-surface-100 flex items-center justify-center mb-3 border border-surface-200 text-surface-950">
             <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           </div>
-          <div class="text-surface-900 font-medium text-sm mb-0.5">ISO 27001</div>
-          <div class="text-xs text-surface-500 font-normal">In progress</div>
+          <div class="text-surface-950 font-medium text-sm mb-0.5">SIG / CAIQ / HECVAT</div>
+          <div class="text-xs text-surface-500 font-normal">Generated packs</div>
         </div>
       </div>
     </div>
 
     <p class="animate-in delay-300 text-center text-sm font-medium text-surface-500 mt-8">
-      All compliance documentation, audit reports, and certifications available upon request.
+      Security documentation, control evidence, and SIG/CAIQ/HECVAT answer packs are available during Enterprise review.
       <br />
-      Contact <a href="mailto:compliance@apexmail.ee" class="text-primary-600 hover:text-primary-700 transition-colors">compliance@apexmail.ee</a> for custom security questionnaires.
+      Contact <a href="mailto:compliance@apexmail.ee" class="text-surface-950 hover:text-brand-700 transition-colors">compliance@apexmail.ee</a> for a hashed security-review report.
     </p>
   </div>
 </section>

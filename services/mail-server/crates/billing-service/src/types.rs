@@ -133,8 +133,54 @@ pub enum SupportLevel {
     Community,
     Email,
     Priority,
+    /// Deprecated: implies on-demand 24/7 phone support which violates the
+    /// async-first support policy. Retained for backwards-compatible
+    /// deserialization of legacy records; new plans should use `Priority`
+    /// (Scale) or `Dedicated` (Enterprise).
     Phone,
     Dedicated,
+}
+
+impl SupportLevel {
+    /// First-response SLA in business hours, per the async-first support
+    /// policy documented in `docs/enterprise/support.md`. Returns `None` for
+    /// `Community` (no SLA, best-effort via the public forum).
+    pub fn response_sla_hours(self) -> Option<u32> {
+        match self {
+            SupportLevel::Community => None,
+            // Starter / Pro / Growth: email-only, 24–48h. Use the upper bound
+            // as the contractual ceiling.
+            SupportLevel::Email => Some(48),
+            // Scale: priority email + shared Slack hub.
+            SupportLevel::Priority => Some(8),
+            // Legacy "Phone" maps to Priority semantics; we no longer offer
+            // on-demand phone, only scheduled calls.
+            SupportLevel::Phone => Some(8),
+            // Enterprise: dedicated async channel + contractual SLA.
+            SupportLevel::Dedicated => Some(4),
+        }
+    }
+
+    /// Short human-readable description of the human-contact policy for this
+    /// tier. Used by the chatbot/mailbot and the in-app help surfaces so
+    /// expectations are set up-front.
+    pub fn human_channel_policy(self) -> &'static str {
+        match self {
+            SupportLevel::Community => "Community forum only. No SLA.",
+            SupportLevel::Email => {
+                "Email only, 24–48h business-hour response. No live chat, \
+                 no per-customer Discord."
+            }
+            SupportLevel::Priority | SupportLevel::Phone => {
+                "Priority email + shared Slack hub (one channel for all Scale \
+                 tenants). Scheduled calls only, monthly cap. No 24/7."
+            }
+            SupportLevel::Dedicated => {
+                "Dedicated async channel + contractual SLA. Scheduled calls \
+                 only, weekly cap. P0 on-call."
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +399,60 @@ mod tests {
         assert_eq!(json, "\"dedicated\"");
         let back: SupportLevel = serde_json::from_str(&json).unwrap();
         assert_eq!(back, level);
+    }
+
+    /// The async-first support policy enforces a strict ordering of SLA
+    /// response times across tiers. If this test ever fails, somebody
+    /// reintroduced 24/7 live chat or weakened the Enterprise SLA — both
+    /// violate `docs/enterprise/support.md` and the chatbot's tier guidance.
+    #[test]
+    fn support_level_response_sla_is_monotonic() {
+        assert_eq!(SupportLevel::Community.response_sla_hours(), None);
+        let email = SupportLevel::Email.response_sla_hours().unwrap();
+        let priority = SupportLevel::Priority.response_sla_hours().unwrap();
+        let dedicated = SupportLevel::Dedicated.response_sla_hours().unwrap();
+        assert!(
+            dedicated < priority && priority < email,
+            "SLA ordering broken: dedicated={dedicated}h priority={priority}h email={email}h"
+        );
+        // No tier is "instant" — async-first means the floor is hours, not
+        // minutes. Anyone trying to ship a 15-minute SLA must update the
+        // policy doc first.
+        assert!(dedicated >= 1, "no instant-response tier allowed");
+    }
+
+    #[test]
+    fn support_level_human_channel_policy_is_explicit() {
+        // The chatbot quotes these strings verbatim when setting expectations
+        // before handing off to a human. They must not promise 24/7 or
+        // per-customer Discord on any tier.
+        for level in [
+            SupportLevel::Community,
+            SupportLevel::Email,
+            SupportLevel::Priority,
+            SupportLevel::Phone,
+            SupportLevel::Dedicated,
+        ] {
+            let policy = level.human_channel_policy();
+            let lower = policy.to_lowercase();
+            // Flag *positive* 24/7 promises only — "No 24/7." is a permitted
+            // explicit denial.
+            let promises_24_7 = lower.contains("available 24/7")
+                || lower.contains("24/7 live")
+                || lower.contains("24/7 phone")
+                || lower.contains("24/7 chat");
+            assert!(!promises_24_7, "{level:?}: {policy}");
+            // Only flag *positive* Discord promises. Phrases like
+            // "no per-customer Discord" are explicit denials and are allowed.
+            let promises_discord = lower.contains("dedicated discord")
+                || lower.contains("private discord")
+                || lower.contains("your own discord")
+                || lower.contains("discord channel for you");
+            assert!(
+                !promises_discord,
+                "{level:?} promises a Discord channel: {policy}"
+            );
+        }
     }
 
     #[test]

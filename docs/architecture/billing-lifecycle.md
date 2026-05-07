@@ -142,7 +142,7 @@ Invoice statuses in the current type model are:
 
 VAT is calculated in `calculate_vat()`:
 
-- Estonia (`EE`): `22%`
+- Estonia (`EE`): `24%`
 - EU B2B with VAT number: reverse charge (`0%`)
 - EU B2C: destination-country VAT when configured, otherwise fallback to Estonia rate
 - non-EU: `0%`

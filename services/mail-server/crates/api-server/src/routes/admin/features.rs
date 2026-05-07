@@ -59,7 +59,7 @@ pub struct FeaturesResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FeatureListQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

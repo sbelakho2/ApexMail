@@ -333,8 +333,9 @@ impl AttachmentService {
             // Send INSTREAM command
             stream.write_all(b"nINSTREAM\n").await?;
 
-            // Send content in chunks with 4-byte BE length prefix
-            for chunk in content.chunks(8192) {
+            // O-21.1: Use configurable chunk size from ClamAVConfig
+            let chunk_size = self.clamav.chunk_size;
+            for chunk in content.chunks(chunk_size) {
                 let len = (chunk.len() as u32).to_be_bytes();
                 stream.write_all(&len).await?;
                 stream.write_all(chunk).await?;

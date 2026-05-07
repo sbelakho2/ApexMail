@@ -15,6 +15,36 @@ use trust_dns_resolver::TokioAsyncResolver;
 
 use crate::config::{LoopDetectionConfig, RetryConfig, AUTO_SUBMITTED_VALUES};
 
+use std::fmt;
+
+/// O-21.2: Typed MX resolution errors instead of raw `anyhow`.
+///
+/// Previously, `resolve_mx` returned `anyhow::Error` with unstructured
+/// messages. Callers could not distinguish "no records" from "DNS timeout"
+/// without string-matching. This enum provides clear variants so callers
+/// can handle each case appropriately.
+#[derive(Debug, Clone)]
+pub enum MxLookupError {
+    /// No MX or A records exist for the domain.
+    NoRecords(String),
+    /// DNS resolution timed out or the resolver returned an error.
+    ResolverError(String),
+    /// The domain is syntactically invalid.
+    InvalidDomain(String),
+}
+
+impl fmt::Display for MxLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoRecords(d) => write!(f, "No MX or A records for {d}"),
+            Self::ResolverError(e) => write!(f, "MX resolver error: {e}"),
+            Self::InvalidDomain(d) => write!(f, "Invalid domain: {d}"),
+        }
+    }
+}
+
+impl std::error::Error for MxLookupError {}
+
 // ── types ──────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,7 +406,8 @@ impl DeliveryService {
     }
 
     /// Resolve MX records for a domain.
-    pub async fn resolve_mx(&self, domain: &str) -> anyhow::Result<Vec<MXRecord>> {
+    /// O-21.2: Returns typed `MxLookupError` instead of raw `anyhow::Error`.
+    pub async fn resolve_mx(&self, domain: &str) -> Result<Vec<MXRecord>, MxLookupError> {
         if let Some(cached) = self.mx_cache.get(domain) {
             return Ok(cached);
         }
@@ -390,7 +421,11 @@ impl DeliveryService {
                     ttl: None,
                 })
                 .collect(),
-            Err(_) => {
+            Err(e) => {
+                // MX lookup failed; attempt implicit-MX fallback to the
+                // domain's A/AAAA record (RFC 5321 §5.1) and log the
+                // underlying error so operators can diagnose flaky resolvers.
+                tracing::debug!(domain = %domain, error = %e, "MX lookup failed; trying A/AAAA fallback");
                 // Fallback to A record
                 if self.resolver.lookup_ip(domain).await.is_ok() {
                     vec![MXRecord {
@@ -399,7 +434,7 @@ impl DeliveryService {
                         ttl: None,
                     }]
                 } else {
-                    return Err(anyhow::anyhow!("No MX or A records for {domain}"));
+                    return Err(MxLookupError::NoRecords(domain.to_string()));
                 }
             }
         };

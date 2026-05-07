@@ -106,20 +106,22 @@ fn template_types_compose_with_api_types() {
 #[test]
 fn ai_content_score_with_sales_campaign() {
     use ai_service::content::ContentOptimizer;
-    use sales_autopilot::campaigns::CampaignManager;
+    use sales_autopilot::types::{Campaign, CampaignStatus};
 
     let optimizer = ContentOptimizer::new();
-    let campaigns = CampaignManager::new(10);
 
-    // Create a campaign
-    let campaign = campaigns
-        .create_campaign(
-            "tenant-a".into(),
-            "Q1 Outreach".into(),
-            "tmpl-001".into(),
-            "all-leads".into(),
-        )
-        .unwrap();
+    let campaign = Campaign {
+        id: uuid::Uuid::new_v4(),
+        tenant_id: "tenant-a".into(),
+        name: "Q1 Outreach".into(),
+        template_id: "tmpl-001".into(),
+        audience: "all-leads".into(),
+        status: CampaignStatus::Draft,
+        sent: 0,
+        opened: 0,
+        clicked: 0,
+        created_at: chrono::Utc::now(),
+    };
     assert_eq!(campaign.name, "Q1 Outreach");
 
     // Score candidate subject lines for the campaign
@@ -300,7 +302,7 @@ fn devex_webhook_signing_verification() {
     use devex_service::webhook_tester::WebhookTester;
 
     let secret = "whsec_test_secret_123";
-    let tester = WebhookTester::new(secret.to_string()).expect("webhook tester");
+    let tester = WebhookTester::new(vec![secret.to_string()]).expect("webhook tester");
 
     // Build a test payload
     let payload = WebhookTester::build_test_payload("email.delivered");
@@ -317,11 +319,12 @@ fn devex_webhook_signing_verification() {
     assert!(signature.contains(",v1="));
 
     // Verify the signature with the same secret
-    let verified = WebhookTester::verify_signature(secret, &body, &signature);
+    let verified = tester.verify_signature(&body, &signature);
     assert!(verified);
 
     // Verify fails with wrong secret
-    let wrong = WebhookTester::verify_signature("wrong_secret", &body, &signature);
+    let wrong_tester = WebhookTester::new(vec!["wrong_secret".to_string()]).expect("wrong tester");
+    let wrong = wrong_tester.verify_signature(&body, &signature);
     assert!(!wrong);
 }
 

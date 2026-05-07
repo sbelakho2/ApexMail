@@ -20,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration, Instant};
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use trust_dns_resolver::config::{
     NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig, ResolverOpts,
 };
@@ -29,7 +29,7 @@ use trust_dns_resolver::config::{
 static EDGE_RESOLVER: LazyLock<Option<Resolver>> = LazyLock::new(|| match build_dns_resolver() {
     Ok(resolver) => Some(resolver),
     Err(e) => {
-        warn!(error = %e, "Failed to initialize DNS resolver at startup; auth checks will degrade");
+        error!(error = %e, "Failed to initialize DNS resolver at startup; DMARC/SPF/DKIM verification will be unavailable");
         None
     }
 });
@@ -957,12 +957,18 @@ async fn handle_command(
         if args.is_empty() {
             return "501 5.5.4 HELO requires domain argument\r\n".to_string();
         }
+        if !args.is_ascii() {
+            return "501 5.5.4 HELO argument must be ASCII\r\n".to_string();
+        }
         state.helo = Some(args.to_string());
         state.needs_helo = false;
         format!("250 {} Hello {}\r\n", config.hostname, args)
     } else if cmd.eq_ignore_ascii_case("EHLO") {
         if args.is_empty() {
             return "501 5.5.4 EHLO requires domain argument\r\n".to_string();
+        }
+        if !args.is_ascii() {
+            return "501 5.5.4 EHLO argument must be ASCII\r\n".to_string();
         }
         state.helo = Some(args.to_string());
         state.needs_helo = false;

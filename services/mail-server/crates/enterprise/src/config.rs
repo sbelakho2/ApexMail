@@ -224,6 +224,7 @@ pub struct OidcConfig {
 pub struct SSOConfig {
     pub saml: SamlConfig,
     pub oidc: OidcConfig,
+    pub encryption_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +277,7 @@ pub struct Config {
     pub cors_origins: Vec<String>,
     pub node_env: String,
     pub jwt_secret: String,
+    pub jwt_public_key_pem: String,
     pub db: DatabaseConfig,
     pub redis: RedisConfig,
     pub sso: SSOConfig,
@@ -307,19 +309,52 @@ impl Config {
             return Err("JWT_SECRET must be at least 32 characters in production".into());
         }
 
+        let jwt_public_key_pem = match env::var("JWT_PUBLIC_KEY_PEM")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(pem) => pem,
+            None if is_production => {
+                return Err(
+                    "JWT_PUBLIC_KEY_PEM environment variable must be set in production".into(),
+                );
+            }
+            None => String::new(),
+        };
+
+        // M-02: Reject SHA-1 SAML signatures in production
+        let allow_sha1 = env::var("SAML_ALLOW_SHA1")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        if is_production && allow_sha1 {
+            return Err(
+                "SAML_ALLOW_SHA1 is enabled which is insecure — SHA-1 signatures are deprecated. "
+                    .into(),
+            );
+        }
+
+        // H-02: In production, CORS_ORIGINS must not be wildcard
+        let cors_origins_raw = env::var("CORS_ORIGINS").unwrap_or_else(|_| "*".into());
+        if is_production && cors_origins_raw == "*" {
+            return Err(
+                "CORS_ORIGINS must be explicitly set to a comma-separated list of allowed origins in production; wildcard '*' is not allowed."
+                    .into(),
+            );
+        }
+
         Ok(Self {
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3000),
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
-            cors_origins: env::var("CORS_ORIGINS")
-                .unwrap_or_else(|_| "*".into())
+            cors_origins: cors_origins_raw
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect(),
             node_env,
             jwt_secret,
+            jwt_public_key_pem,
             db: DatabaseConfig::from_env(),
             redis: RedisConfig::from_env(),
             sso: {
@@ -348,9 +383,7 @@ impl Config {
                         private_key: SecretString::new(
                             env::var("SAML_PRIVATE_KEY").unwrap_or_default(),
                         ),
-                        allow_sha1: env::var("SAML_ALLOW_SHA1")
-                            .map(|v| v == "true")
-                            .unwrap_or(false),
+                        allow_sha1,
                     },
                     oidc: OidcConfig {
                         enabled: env::var("OIDC_ENABLED")
@@ -364,6 +397,7 @@ impl Config {
                         scopes: env::var("OIDC_SCOPES")
                             .unwrap_or_else(|_| "openid profile email".into()),
                     },
+                    encryption_key: env::var("SSO_ENCRYPTION_KEY").unwrap_or_default(),
                 }
             },
             whitelabel: WhiteLabelConfig {
@@ -461,6 +495,11 @@ impl Config {
         }
         if self.cors_origins.is_empty() {
             return Err("CORS_ORIGINS must not be empty".into());
+        }
+
+        // Validate JWT public key PEM in production
+        if self.node_env == "production" && self.jwt_public_key_pem.trim().is_empty() {
+            return Err("JWT_PUBLIC_KEY_PEM must be set in production".into());
         }
 
         // Validate SSO secrets when their features are enabled

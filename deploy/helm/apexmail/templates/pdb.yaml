@@ -65,3 +65,19 @@ spec:
     matchLabels:
       {{- include "apexmail.selectorLabels" (dict "name" "worker" "context" .) | nindent 6 }}
 {{- end }}
+---
+{{- if and .Values.enterprise.enabled .Values.enterprise.podDisruptionBudget }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "apexmail.fullname" . }}-enterprise
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "apexmail.labels" . | nindent 4 }}
+    {{- include "apexmail.selectorLabels" (dict "name" "enterprise" "context" .) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.enterprise.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "apexmail.selectorLabels" (dict "name" "enterprise" "context" .) | nindent 6 }}
+{{- end }}

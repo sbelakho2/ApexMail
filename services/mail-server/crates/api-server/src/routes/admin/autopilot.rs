@@ -44,11 +44,13 @@ async fn log_autopilot_audit(db: &sqlx::PgPool, action: &str, metadata: serde_js
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutopilotQuery {
     pub section: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutopilotAction {
     pub action: String,
     #[serde(default)]

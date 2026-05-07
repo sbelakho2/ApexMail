@@ -1,14 +1,21 @@
 //! Message Storage
 //!
 //! Handles persistence of email messages.
+//! O‑4.3:Supports optional AES‑256‑GCM encryption at rest for message body content.
 
 use anyhow::{anyhow, Result};
+use base64::Engine;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use tracing::{debug, info};
 use uuid::Uuid;
 
+use crate::encryption;
 use crate::models::*;
+
+/// Prefix prepended to encrypted body values stored in the database so that
+/// `row_to_message` can distinguish encrypted content from legacy plaintext.
+const ENCRYPTED_PREFIX: &str = "$AES256GCM$";
 
 const ACCOUNT_COLUMNS: &str = "id, email, domain, password_hash, display_name, quota_bytes, used_bytes, is_active, created_at, updated_at";
 const MAILBOX_COLUMNS: &str = "id, account_id, name, parent_id, mailbox_type, total_messages, unread_messages, uidnext, created_at, updated_at";
@@ -16,14 +23,87 @@ const MESSAGE_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Message storage
+///
+/// O‑4.3:When an `encryption_key` is provided, message body content is transparently
+/// encrypted with AES‑256‑GCM before being written to the database and decrypted
+/// when read back.
 pub struct MessageStorage {
     pool: PgPool,
+    /// Optional master key for AES‑256‑GCM encryption at rest.
+    /// When `None`, message bodies are stored as plaintext (backward compatible).
+    encryption_key: Option<Vec<u8>>,
 }
 
 impl MessageStorage {
-    /// Create a new message storage instance
+    /// Create a new message storage instance.
+    ///
+    /// If `encryption_key` is provided (minimum 32 bytes), all message body
+    /// content (`text_body`, `html_body`) will be encrypted at rest.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            encryption_key: None,
+        }
+    }
+
+    /// Create a new message storage instance with encryption at rest enabled.
+    pub fn with_encryption(pool: PgPool, encryption_key: Vec<u8>) -> Self {
+        Self {
+            pool,
+            encryption_key: Some(encryption_key),
+        }
+    }
+
+    /// Returns `true` if encryption at rest is active.
+    pub fn is_encryption_enabled(&self) -> bool {
+        self.encryption_key.is_some()
+    }
+
+    /// Encrypt a body string (text_body or html_body) if encryption is enabled.
+    /// Returns `$AES256GCM$<base64(ciphertext)>` when encryption is active,
+    /// or the original `None`/`Some(plaintext)` when not.
+    fn encrypt_body(&self, body: Option<String>) -> Result<Option<String>> {
+        let plaintext = match body {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let key = match &self.encryption_key {
+            Some(k) => k,
+            None => return Ok(Some(plaintext)),
+        };
+        let ciphertext = encryption::encrypt(plaintext.as_bytes(), key)?;
+        let encoded = format!(
+            "{}{}",
+            ENCRYPTED_PREFIX,
+            base64::engine::general_purpose::STANDARD.encode(&ciphertext)
+        );
+        Ok(Some(encoded))
+    }
+
+    /// Decrypt a body string previously encrypted by [`encrypt_body`].
+    /// If the value does not start with `$AES256GCM$`, it is returned as-is
+    /// (legacy plaintext backward compatibility).
+    fn decrypt_body(&self, body: Option<String>) -> Result<Option<String>> {
+        let stored = match body {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let key = match &self.encryption_key {
+            Some(k) => k,
+            None => return Ok(Some(stored)),
+        };
+        if let Some(encoded) = stored.strip_prefix(ENCRYPTED_PREFIX) {
+            let ciphertext = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|e| anyhow!("Failed to decode encrypted body: {e}"))?;
+            let plaintext = encryption::decrypt(&ciphertext, key)?;
+            let result = String::from_utf8(plaintext)
+                .map_err(|e| anyhow!("Decrypted body is not valid UTF-8: {e}"))?;
+            Ok(Some(result))
+        } else {
+            // Legacy plaintext value – return as-is
+            Ok(Some(stored))
+        }
     }
 
     /// Initialize database tables
@@ -47,6 +127,9 @@ impl MessageStorage {
             .nth(1)
             .ok_or_else(|| anyhow!("Invalid email address"))?;
 
+        // DI-001: Wrap account insert + default mailbox creation in a single transaction
+        let mut tx = self.pool.begin().await?;
+
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO mail_accounts (email, domain, password_hash, display_name)
@@ -59,7 +142,7 @@ impl MessageStorage {
         .bind(domain)
         .bind(password_hash)
         .bind(display_name)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
         let account = Account {
@@ -75,8 +158,11 @@ impl MessageStorage {
             updated_at: row.get("updated_at"),
         };
 
-        // Create default mailboxes
-        self.create_default_mailboxes(&account.id).await?;
+        // Create default mailboxes within the same transaction
+        self.create_default_mailboxes_tx(&mut tx, &account.id)
+            .await?;
+
+        tx.commit().await?;
 
         info!(account_id = %account.id, email = %mail_common::pii::redact_email(email), "Account created");
         Ok(account)
@@ -132,8 +218,12 @@ impl MessageStorage {
 
     // ========== Mailbox Operations ==========
 
-    /// Create default mailboxes for an account
-    async fn create_default_mailboxes(&self, account_id: &Uuid) -> Result<()> {
+    /// Create default mailboxes within an existing transaction (DI-001)
+    async fn create_default_mailboxes_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        account_id: &Uuid,
+    ) -> Result<()> {
         let defaults = [
             ("Inbox", "inbox"),
             ("Sent", "sent"),
@@ -154,7 +244,7 @@ impl MessageStorage {
             .bind(account_id)
             .bind(name)
             .bind(mailbox_type)
-            .execute(&self.pool)
+            .execute(&mut **tx)
             .await?;
         }
 
@@ -236,6 +326,7 @@ impl MessageStorage {
     }
 
     /// Create a new mailbox for an account
+    /// DI-004: Use transaction + ON CONFLICT to prevent TOCTOU race on concurrent creates
     pub async fn create_mailbox(
         &self,
         account_id: &Uuid,
@@ -247,9 +338,12 @@ impl MessageStorage {
             return Err(anyhow!("Mailbox name is required"));
         }
 
+        // Pre-check for a friendlier error; still relies on ON CONFLICT for correctness
         if self.get_mailbox_by_name(account_id, name).await?.is_some() {
             return Err(anyhow!("Mailbox already exists"));
         }
+
+        let mut tx = self.pool.begin().await?;
 
         let mailbox_type = match special_use.unwrap_or("").to_lowercase().as_str() {
             "\\inbox" => "inbox",
@@ -261,10 +355,16 @@ impl MessageStorage {
             _ => "custom",
         };
 
+        // ON CONFLICT DO UPDATE with FALSE WHERE ensures we don't actually update,
+        // but returns no rows if a concurrent insert beat us. We then fall back to
+        // fetching within the same transaction.
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO mail_mailboxes (account_id, name, mailbox_type)
             VALUES ($1, $2, $3)
+            ON CONFLICT (account_id, name, parent_id) DO UPDATE
+                SET name = EXCLUDED.name
+            WHERE FALSE
             RETURNING {}
         "#,
             MAILBOX_COLUMNS
@@ -272,29 +372,42 @@ impl MessageStorage {
         .bind(account_id)
         .bind(name)
         .bind(mailbox_type)
-        .fetch_one(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
-        Ok(Mailbox {
-            id: row.get("id"),
-            account_id: row.get("account_id"),
-            name: row.get("name"),
-            parent_id: row.get("parent_id"),
-            mailbox_type: match mailbox_type {
-                "inbox" => MailboxType::Inbox,
-                "sent" => MailboxType::Sent,
-                "drafts" => MailboxType::Drafts,
-                "trash" => MailboxType::Trash,
-                "spam" => MailboxType::Spam,
-                "archive" => MailboxType::Archive,
-                _ => MailboxType::Custom,
+        let mailbox = match row {
+            Some(r) => Mailbox {
+                id: r.get("id"),
+                account_id: r.get("account_id"),
+                name: r.get("name"),
+                parent_id: r.get("parent_id"),
+                mailbox_type: match mailbox_type {
+                    "inbox" => MailboxType::Inbox,
+                    "sent" => MailboxType::Sent,
+                    "drafts" => MailboxType::Drafts,
+                    "trash" => MailboxType::Trash,
+                    "spam" => MailboxType::Spam,
+                    "archive" => MailboxType::Archive,
+                    _ => MailboxType::Custom,
+                },
+                total_messages: r.get("total_messages"),
+                unread_messages: r.get("unread_messages"),
+                uidnext: r.get("uidnext"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
             },
-            total_messages: row.get("total_messages"),
-            unread_messages: row.get("unread_messages"),
-            uidnext: row.get("uidnext"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        })
+            // Race: another request inserted between our pre-check and INSERT.
+            None => {
+                let existing = self.get_mailbox_by_name(account_id, name).await?;
+                match existing {
+                    Some(m) => m,
+                    None => return Err(anyhow!("Mailbox creation failed (concurrent race)")),
+                }
+            }
+        };
+
+        tx.commit().await?;
+        Ok(mailbox)
     }
 
     /// Delete a mailbox (custom mailboxes only)
@@ -359,6 +472,8 @@ impl MessageStorage {
     // ========== Message Operations ==========
 
     /// Store a new message
+    /// DI-006: Check for duplicate message_id within the same mailbox before inserting.
+    ///         The UNIQUE index idx_mail_messages_dedup provides DB-level enforcement.
     pub async fn store_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
         let mut tx = self.pool.begin().await?;
 
@@ -374,6 +489,34 @@ impl MessageStorage {
 
         if mailbox_ok.is_none() {
             return Err(anyhow!("Mailbox does not belong to account"));
+        }
+
+        // DI-006: Check for existing message with the same message_id in this mailbox.
+        // This prevents duplicate insertion when the same email is delivered twice.
+        if !message.message_id.is_empty() {
+            let existing: Option<(Uuid, i64)> = sqlx::query_as::<_, (Uuid, i64)>(
+                r#"
+                SELECT id, uid FROM mail_messages
+                WHERE account_id = $1 AND mailbox_id = $2 AND message_id = $3
+                LIMIT 1
+                FOR UPDATE
+            "#,
+            )
+            .bind(message.account_id)
+            .bind(message.mailbox_id)
+            .bind(&message.message_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some((existing_id, existing_uid)) = existing {
+                debug!(
+                    existing_id = %existing_id,
+                    message_id = %message.message_id,
+                    "Duplicate message detected, returning existing"
+                );
+                tx.commit().await?;
+                return Ok((existing_id, existing_uid));
+            }
         }
 
         let uid: i64 = sqlx::query_scalar(
@@ -394,6 +537,10 @@ impl MessageStorage {
         .bind(message.mailbox_id)
         .fetch_one(&mut *tx)
         .await?;
+
+        // O‑4.3:Encrypt body content before storing if encryption is enabled
+        let encrypted_text = self.encrypt_body(message.text_body.clone())?;
+        let encrypted_html = self.encrypt_body(message.html_body.clone())?;
 
         let id = sqlx::query_scalar::<_, Uuid>(r#"
             INSERT INTO mail_messages (
@@ -417,8 +564,8 @@ impl MessageStorage {
         .bind(serde_json::to_value(&message.bcc_addresses)?)
         .bind(&message.subject)
         .bind(message.date)
-        .bind(&message.text_body)
-        .bind(&message.html_body)
+        .bind(&encrypted_text)
+        .bind(&encrypted_html)
         .bind(message.raw_size)
         .bind(message.is_read)
         .bind(message.is_starred)
@@ -442,6 +589,8 @@ impl MessageStorage {
     }
 
     /// Get a message by ID
+    /// DI-009: Standard read — uses a fresh connection from the pool. Returns committed
+    /// data visible at the time of the query (READ COMMITTED isolation).
     pub async fn get_message(&self, message_id: &Uuid) -> Result<Option<StoredMessage>> {
         let row = sqlx::query(&format!(
             "SELECT {} FROM mail_messages WHERE id = $1",
@@ -451,6 +600,30 @@ impl MessageStorage {
         .fetch_optional(&self.pool)
         .await?;
 
+        match row {
+            Some(r) => Ok(Some(self.row_to_message(&r)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Get a message by ID with read-after-write consistency.
+    /// DI-009: Wraps the read in a transaction to guarantee the caller sees its own
+    /// prior writes, even in a future read-replica setup. Use this after a write
+    /// operation when you need to read back the just-written data.
+    pub async fn get_message_consistent(&self, message_id: &Uuid) -> Result<Option<StoredMessage>> {
+        let mut tx = self.pool.begin().await?;
+        // REPEATABLE READ ensures a consistent snapshot including our prior committed writes.
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM mail_messages WHERE id = $1",
+            MESSAGE_COLUMNS
+        ))
+        .bind(message_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
         match row {
             Some(r) => Ok(Some(self.row_to_message(&r)?)),
             None => Ok(None),
@@ -534,6 +707,9 @@ impl MessageStorage {
         rows.iter().map(|r| self.row_to_message(r)).collect()
     }
 
+    // O-4.1:Minimum search term length to prevent expensive short queries
+    const MIN_SEARCH_TERM_LENGTH: usize = 2;
+
     /// Search messages using full-text query.
     pub async fn search_messages(
         &self,
@@ -544,7 +720,8 @@ impl MessageStorage {
         offset: i64,
     ) -> Result<(Vec<StoredMessage>, i64)> {
         let q = query.trim();
-        if q.is_empty() {
+        // O-4.1:Reject empty queries and queries shorter than minimum term length
+        if q.len() < Self::MIN_SEARCH_TERM_LENGTH {
             return Ok((Vec::new(), 0));
         }
 
@@ -863,9 +1040,101 @@ impl MessageStorage {
         Ok((used_bytes, quota_bytes, used_messages))
     }
 
+    /// DI-005: Permanently delete messages soft-deleted longer than `retention_days` ago.
+    /// Returns the number of messages purged. Designed to be called periodically by a
+    /// background scheduler (e.g., every hour via cron or tokio interval).
+    ///
+    /// # Example (background task)
+    ///
+    /// ```ignore
+    /// tokio::spawn({
+    ///     let storage = storage.clone();
+    ///     async move {
+    ///         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+    ///         loop {
+    ///             interval.tick().await;
+    ///             if let Err(e) = storage.purge_soft_deleted_messages(30).await {
+    ///                 tracing::error!(error = %e, "Failed to purge soft-deleted messages");
+    ///             }
+    ///         }
+    ///     }
+    /// });
+    /// ```
+    pub async fn purge_soft_deleted_messages(&self, retention_days: i64) -> Result<i64> {
+        let mut tx = self.pool.begin().await?;
+
+        // First, collect affected account/mailbox stats before deletion
+        let affected: Vec<(Uuid, Uuid, i64)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT account_id, mailbox_id, 0::bigint AS _size
+            FROM mail_messages
+            WHERE is_deleted = true
+              AND updated_at < NOW() - ($1 || ' days')::INTERVAL
+        "#,
+        )
+        .bind(retention_days.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+
+        // Hard-delete the stale soft-deleted records
+        let result = sqlx::query(
+            r#"
+            DELETE FROM mail_messages
+            WHERE is_deleted = true
+              AND updated_at < NOW() - ($1 || ' days')::INTERVAL
+        "#,
+        )
+        .bind(retention_days.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+        let purged = result.rows_affected() as i64;
+
+        // Recalculate counts for every affected mailbox
+        let mut seen_mailboxes = std::collections::HashSet::new();
+        let mut seen_accounts = std::collections::HashSet::new();
+        for (account_id, mailbox_id, _) in &affected {
+            if seen_mailboxes.insert(*mailbox_id) {
+                self.update_mailbox_counts_tx(&mut tx, mailbox_id).await?;
+            }
+            if seen_accounts.insert(*account_id) {
+                // Recalculate account usage from scratch
+                sqlx::query(
+                    r#"
+                    UPDATE mail_accounts
+                    SET used_bytes = COALESCE(
+                        (SELECT SUM(raw_size) FROM mail_messages WHERE account_id = $1 AND is_deleted = false),
+                        0
+                    ),
+                    updated_at = NOW()
+                    WHERE id = $1
+                "#,
+                )
+                .bind(account_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        tx.commit().await?;
+
+        if purged > 0 {
+            info!(purged, retention_days, "Purged soft-deleted messages");
+        }
+
+        Ok(purged)
+    }
+
     // ========== Helper Methods ==========
 
     fn row_to_message(&self, row: &sqlx::postgres::PgRow) -> Result<StoredMessage> {
+        // O‑4.3:Decrypt body content if encryption is enabled.
+        // Backward compatible: plaintext bodies are passed through unchanged.
+        let text_body: Option<String> = row.get("text_body");
+        let html_body: Option<String> = row.get("html_body");
+        let text_body = self.decrypt_body(text_body)?;
+        let html_body = self.decrypt_body(html_body)?;
+
         Ok(StoredMessage {
             id: row.get("id"),
             account_id: row.get("account_id"),
@@ -879,8 +1148,8 @@ impl MessageStorage {
             bcc_addresses: serde_json::from_value(row.get("bcc_addresses"))?,
             subject: row.get("subject"),
             date: row.get("date"),
-            text_body: row.get("text_body"),
-            html_body: row.get("html_body"),
+            text_body,
+            html_body,
             raw_size: row.get("raw_size"),
             is_read: row.get("is_read"),
             is_starred: row.get("is_starred"),

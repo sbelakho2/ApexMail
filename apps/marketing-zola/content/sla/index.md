@@ -4,19 +4,19 @@ description = "ApexMail SLA — our uptime and performance commitments."
 template = "prose.html"
 
 [extra]
-last_updated = "2025-12-01"
+last_updated = "2026-05-07"
 +++
 
 ## 1. Scope
 
-This Service Level Agreement ("SLA") applies to Enterprise plan customers and defines our uptime and performance commitments.
+This Service Level Agreement ("SLA") applies to Scale and Enterprise plan customers and defines our uptime and performance commitments.
 
 ## 2. Uptime Commitment
 
 | Metric | Target |
 |---|---|
-| API availability | 99.99% monthly |
-| SMTP relay availability | 99.99% monthly |
+| API availability | 99.9% monthly |
+| SMTP relay availability | 99.9% monthly |
 | Dashboard availability | 99.9% monthly |
 
 ## 3. Performance Targets
@@ -33,12 +33,12 @@ Uptime is measured by our external monitoring system (Blackbox exporter + Promet
 
 ## 5. Service Credits
 
-| Monthly Uptime | Credit (% of monthly fee) |
-|---|---|
-| 99.9% – 99.99% | 10% |
-| 99.0% – 99.9% | 25% |
-| 95.0% – 99.0% | 50% |
-| Below 95.0% | 100% |
+| Plan | Availability commitment | Monthly credit cap |
+|---|---:|---:|
+| Scale | 99.9% | 10% |
+| Enterprise | 99.9% | 25% |
+
+Credits are calculated from measured monthly uptime below the commitment and capped by the customer's plan.
 
 ## 6. Exclusions
 

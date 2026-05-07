@@ -4,6 +4,16 @@
 groups:
   - name: apexmail-availability
     rules:
+      - alert: ApiServerDown
+        expr: up{job="apexmail-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail API server is down"
+          description: "API server {{ $labels.instance }} has been unreachable for more than 1 minute."
+          runbook_url: "https://apexmail.ee/docs/alerts#api-server-down"
+
       # Tracking service down
       - alert: TrackingServiceDown
         expr: up{job="apexmail-tracking"} == 0
@@ -15,6 +25,36 @@ groups:
           description: "Tracking service {{ $labels.instance }} has been unreachable for more than 1 minute."
           runbook_url: "https://apexmail.ee/docs/alerts#tracking-service-down"
 
+      - alert: MtaDown
+        expr: up{job="apexmail-mta"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail MTA is down"
+          description: "MTA {{ $labels.instance }} has been unreachable for more than 1 minute."
+          runbook_url: "https://apexmail.ee/docs/alerts#mta-down"
+
+      - alert: WorkerDown
+        expr: up{job="apexmail-worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail worker is down"
+          description: "Worker {{ $labels.instance }} has been unreachable for more than 2 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#worker-down"
+
+      - alert: EnterpriseServiceDown
+        expr: up{job="apexmail-enterprise"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail enterprise service is down"
+          description: "Enterprise service {{ $labels.instance }} has been unreachable for more than 2 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#enterprise-service-down"
+
       - alert: SyntheticTransactionFailure
         expr: apexmail_synthetic_transaction_success == 0
         for: 2m
@@ -24,6 +64,26 @@ groups:
           summary: "Synthetic transaction failed for {{ $labels.target }}"
           description: "Synthetic transaction target {{ $labels.target }} has failed for more than 2 minutes. Last error: {{ $labels.error }}."
           runbook_url: "https://apexmail.ee/docs/alerts#synthetic-transaction-failure"
+
+      - alert: SyntheticSmtpFailure
+        expr: apexmail_synthetic_smtp_success == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Synthetic SMTP probe failed for {{ $labels.target }}"
+          description: "Synthetic SMTP target {{ $labels.target }} has failed for more than 2 minutes. Last error: {{ $labels.error }}."
+          runbook_url: "https://apexmail.ee/docs/alerts#synthetic-smtp-failure"
+
+      - alert: BlackboxProbeFailure
+        expr: probe_success{job=~"blackbox|blackbox-smtp|blackbox-dns"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Blackbox probe failed for {{ $labels.instance }}"
+          description: "Blackbox probe {{ $labels.job }} for {{ $labels.instance }} has failed for more than 2 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#blackbox-probe-failure"
 
   - name: apexmail-performance
     rules:
@@ -167,6 +227,12 @@ groups:
 
   - name: apexmail-billing
     rules:
+      - record: apexmail:billing_requests:rate5m
+        expr: sum(rate(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/billing.*"}[5m]))
+
+      - record: apexmail:billing_errors:rate5m
+        expr: sum(rate(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/billing.*",status=~"5.."}[5m]))
+
       # Stripe webhook processing failures
       - alert: StripeWebhookFailures
         expr: increase(apexmail_http_requests_total{job="apexmail-api",path_pattern=~"/v1/billing.*|/webhooks/stripe",status=~"5.."}[1h]) > 10
@@ -209,6 +275,36 @@ groups:
           summary: "ClickHouse is down"
           description: "ClickHouse exporter is reporting down for more than 2 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-down"
+
+      - alert: ClickHouseQueryLatencyHigh
+        expr: histogram_quantile(0.95, rate(clickhouse_query_duration_seconds_bucket{job="clickhouse"}[5m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClickHouse p95 query latency is high"
+          description: "ClickHouse p95 query latency is above 5 seconds for more than 10 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-query-latency-high"
+
+      - alert: ClickHouseMergeBacklog
+        expr: clickhouse_background_merges_and_mutations_pool_task{job="clickhouse"} > 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClickHouse merge backlog is high"
+          description: "ClickHouse has more than 20 pending merge or mutation tasks for 15 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-merge-backlog"
+
+      - alert: ClickHouseReplicasDown
+        expr: clickhouse_replicas_max_absolute_delay{job="clickhouse"} > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClickHouse replica lag is high"
+          description: "ClickHouse replica {{ $labels.replica }} on table {{ $labels.table }} has been lagging by more than 300 seconds for 10 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-replicas-down"
 
       - alert: PostgresHighConnections
         expr: pg_stat_activity_count / pg_settings_max_connections > 0.9

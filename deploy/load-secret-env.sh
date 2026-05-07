@@ -1,5 +1,11 @@
 #!/bin/sh
 set -eu
+umask 077
+
+if [ -u "$0" ] || [ -g "$0" ]; then
+    echo "ERROR: Refusing to run with setuid/setgid permissions: $0" >&2
+    exit 126
+fi
 
 usage() {
     echo "Usage: $0 TARGET_ENV FILE_ENV COMMAND [ARG...]" >&2

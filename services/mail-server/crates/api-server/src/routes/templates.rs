@@ -79,6 +79,7 @@ pub struct RenderResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListTemplatesQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

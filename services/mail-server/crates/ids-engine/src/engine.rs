@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use mail_common::{
@@ -147,6 +148,11 @@ impl IdsEngine {
 
         // 1. Signature scan with payload normalization
         let truncated = if payload.len() > self.config.max_payload_inspect {
+            warn!(
+                original_len = payload.len(),
+                max_inspect = self.config.max_payload_inspect,
+                "IDS: Payload truncated for inspection; content spanning the truncation boundary may evade detection"
+            );
             &payload[..self.config.max_payload_inspect]
         } else {
             payload
@@ -264,6 +270,7 @@ impl IdsEngine {
         }
 
         if !alerts.is_empty() {
+            self.record_alert_count(src_ip, alerts.len() as u32);
             warn!(
                 src_ip = %src_ip,
                 alert_count = alerts.len(),
@@ -348,13 +355,63 @@ impl IdsEngine {
 
     /// Run periodic cleanup
     pub fn cleanup(&self) {
-        let timeout = std::time::Duration::from_secs(self.config.connection_timeout_secs);
+        let timeout = Duration::from_secs(self.config.connection_timeout_secs);
         self.conn_tracker.cleanup(timeout);
 
         // Evict stale alert rate-limit entries (older than 60 seconds)
-        let stale_cutoff = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        let stale_cutoff = Instant::now() - Duration::from_secs(60);
         self.alert_counts
             .retain(|_, (_, instant)| *instant > stale_cutoff);
+        self.evict_alert_counts_over_capacity();
+    }
+
+    fn record_alert_count(&self, src_ip: IpAddr, count: u32) {
+        let now = Instant::now();
+        {
+            let mut entry = self.alert_counts.entry(src_ip).or_insert((0, now));
+            if now.duration_since(entry.1) > Duration::from_secs(60) {
+                *entry = (count, now);
+            } else {
+                entry.0 = entry.0.saturating_add(count);
+                entry.1 = now;
+            }
+        }
+        self.evict_alert_counts_over_capacity();
+    }
+
+    fn evict_alert_counts_over_capacity(&self) -> usize {
+        let max_entries = self.config.max_alert_count_entries;
+        let before = self.alert_counts.len();
+        if before <= max_entries {
+            return 0;
+        }
+
+        if max_entries == 0 {
+            self.alert_counts.clear();
+            return before;
+        }
+
+        let mut entries: Vec<(IpAddr, Instant)> = self
+            .alert_counts
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().1))
+            .collect();
+        entries.sort_by_key(|(_, last_seen)| *last_seen);
+
+        for (ip, _) in entries.into_iter().take(before - max_entries) {
+            self.alert_counts.remove(&ip);
+        }
+
+        let removed = before - self.alert_counts.len();
+        if removed > 0 {
+            tracing::debug!(
+                removed,
+                remaining = self.alert_counts.len(),
+                max_entries,
+                "Evicted over-capacity alert_counts entries"
+            );
+        }
+        removed
     }
 
     /// Spawn a background Tokio task that calls [`Self::cleanup`] every
@@ -856,6 +913,24 @@ mod tests {
         let engine = make_engine();
         engine.cleanup();
         assert_eq!(engine.active_connections(), 0);
+    }
+
+    #[test]
+    fn test_alert_counts_evict_least_recent_over_capacity() {
+        let mut config = IdsConfig::default();
+        config.max_alert_count_entries = 2;
+        let engine = IdsEngine::new(config).expect("init IDS engine");
+
+        engine.record_alert_count(ip("10.0.0.1"), 1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        engine.record_alert_count(ip("10.0.0.2"), 1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        engine.record_alert_count(ip("10.0.0.3"), 1);
+
+        assert_eq!(engine.alert_counts.len(), 2);
+        assert!(!engine.alert_counts.contains_key(&ip("10.0.0.1")));
+        assert!(engine.alert_counts.contains_key(&ip("10.0.0.2")));
+        assert!(engine.alert_counts.contains_key(&ip("10.0.0.3")));
     }
 
     // ── Edge cases ──

@@ -1,6 +1,6 @@
 +++
 title = "ApexMail — Enterprise Email API for Developers"
-description = "The email API for peace of mind. EU-compliant, real-time delivery tracking, enterprise private cloud options, and developer-first experience."
+description = "Email API for regulated teams with GDPR workflows, HIPAA BAA lifecycle support, delivery tracking, and Enterprise private deployment options."
 template = "home.html"
 
 [extra]

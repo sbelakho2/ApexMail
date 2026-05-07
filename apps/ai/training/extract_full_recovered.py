@@ -8,12 +8,12 @@ Sources:
   - /tmp/apexmail_scenarios/adversarial-gym.test.ts (1,100 scenarios → multi-turn training)
 
 Canonical pricing applied:
-  Free: $0, 3K emails, 50K API
+  Free: $0, 30K emails, 300K API
   Starter: $25, 50K emails, 500K API
   Pro: $65, 150K emails, 2M API
   Growth: $150, 500K emails, 5M API
   Scale: $350, 2M emails, 20M API
-  Enterprise: $800, 5M emails, unlimited API
+  Enterprise: $3,000, 5M emails, unlimited API
 """
 
 import json
@@ -42,10 +42,10 @@ PRICE_FIXES = {
     r"\$399 per month": "$350 per month",
     r"\$399/month": "$350/month",
     r"Scale \(\$399\)": "Scale ($350)",
-    r"\$1,299/mo": "$800/mo",
-    r"\$1,299 per month": "$800 per month",
-    r"\$1,299/month": "$800/month",
-    r"Enterprise \(\$1,299\)": "Enterprise ($800)",
+    r"\$1,299/mo": "$3,000/mo",
+    r"\$1,299 per month": "$3,000 per month",
+    r"\$1,299/month": "$3,000/month",
+    r"Enterprise \(\$1,299\)": "Enterprise ($3,000)",
     # Plan price fields
     r'"plan_price": "29"': '"plan_price": "25"',
     r'"plan_price": "59"': '"plan_price": "65"',
@@ -56,12 +56,12 @@ PRICE_FIXES = {
 }
 
 EMAIL_LIMIT_FIXES = {
-    # Free: 1K → 3K
+    # Free: 1K → 30K
     r'"email_limit": "1,000"': '"email_limit": "3,000"',
     r'"api_call_limit": "10,000"': '"api_call_limit": "50,000"',
-    r"1,000 emails/month": "3,000 emails/month",
-    r"1,000 emails per month": "3,000 emails per month",
-    r"out of 1,000 emails": "out of 3,000 emails",
+    r"1,000 emails/month": "30,000 emails/month",
+    r"1,000 emails per month": "30,000 emails per month",
+    r"out of 1,000 emails": "out of 30,000 emails",
     # Starter: 25K → 50K
     r'"email_limit": "25,000"': '"email_limit": "50,000"',
     r'"api_call_limit": "250,000"': '"api_call_limit": "500,000"',
@@ -118,7 +118,7 @@ NEW_PROFILES = {
         "domain_count": "1",
         "domain_details": "- myshop.com: Verified (SPF: pass, DKIM: pass, DMARC: none)",
         "recent_events": "- 2,850 sent, 2,793 delivered (98.0%), 23 bounced (0.8%), 0 complaints",
-        "open_issues": "- Approaching email limit: 2,850/3,000 (95% used)",
+        "open_issues": "- Approaching email limit: 28,500/30,000 (95% used)",
     },
     "free_spf_broken_v2": {
         "account_id": "acct_sp2f8z",
@@ -312,7 +312,7 @@ NEW_PROFILES = {
         "open_issues": "- Greylisting causing 15-30 minute delays on ~8% of sends to Microsoft 365 recipients",
     },
     
-    # === ENTERPRISE TIER PROFILES ($800, 5M emails, unlimited API) ===
+    # === ENTERPRISE TIER PROFILES ($3,000, 5M emails, unlimited API) ===
     "enterprise_compliance_v2": {
         "account_id": "acct_ent800k",
         "plan_name": "Enterprise",
@@ -366,12 +366,12 @@ def generate_profiles_file():
 Extended Customer Profiles — Recovered from deleted files with canonical pricing.
 
 Canonical pricing:
-  Free: $0, 3K emails, 50K API
+  Free: $0, 30K emails, 300K API
   Starter: $25, 50K emails, 500K API  
   Pro: $65, 150K emails, 2M API
   Growth: $150, 500K emails, 5M API
   Scale: $350, 2M emails, 20M API
-  Enterprise: $800, 5M emails, unlimited API
+  Enterprise: $3,000, 5M emails, unlimited API
 """
 
 EXTENDED_PROFILES = '''
@@ -431,11 +431,11 @@ MULTI_TURN_EXAMPLES = [
     },
     # --- Quota upgrade recommendation ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Free plan ($0/mo, 3K emails).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Free plan ($0/mo, 30K emails).",
         "user": "I keep running out of emails. What are my options?",
         "assistant": "Let me check your usage pattern to recommend the best option.\n\n```tool\n{\"action\": \"get_usage_history\", \"params\": {\"months\": 3}}\n```",
-        "tool": '{"usage": [{"month": "Dec 2025", "emails": 2800}, {"month": "Jan 2026", "emails": 2950}, {"month": "Feb 2026", "emails": 2990}], "average": 2913, "trend": "growing", "projected_next_month": 3100}',
-        "assistant_final": "Your usage is growing steadily:\n\n| Month | Emails Sent |\n|-------|-------------|\n| Dec 2025 | 2,800 |\n| Jan 2026 | 2,950 |\n| Feb 2026 | 2,990 |\n\n**Projected next month:** ~3,100 (you'll definitely hit the 3,000 limit)\n\n**Recommendations:**\n\n1. **Starter Plan ($25/mo)** — 50,000 emails\n   - Best value for your growth trajectory\n   - Includes webhooks, 3 domains, 3 team members\n   - 17× more emails for $25\n\n2. **Pay-As-You-Go** — $0 base + $0.40/1,000 emails\n   - At ~3,000 emails/mo, you'd pay ~$1.20/mo\n   - Good if volume is unpredictable\n\nGiven your growth trend, I'd recommend **Starter** — it gives you room to scale without worrying about limits.\n\nReady to upgrade? I can walk you through it."
+        "tool": '{"usage": [{"month": "Dec 2025", "emails": 28000}, {"month": "Jan 2026", "emails": 29500}, {"month": "Feb 2026", "emails": 29900}], "average": 29133, "trend": "growing", "projected_next_month": 31000}',
+        "assistant_final": "Your usage is growing steadily:\n\n| Month | Emails Sent |\n|-------|-------------|\n| Dec 2025 | 28,000 |\n| Jan 2026 | 29,500 |\n| Feb 2026 | 29,900 |\n\n**Projected next month:** ~31,000 (you'll exceed the 30,000 limit)\n\n**Recommendations:**\n\n1. **Starter Plan ($25/mo)** — 50,000 emails\n   - Best value for your growth trajectory\n   - Includes webhooks, 3 domains, 3 team members\n   - about 1.7× more emails for $25\n\n2. **Pay-As-You-Go** — $0 base + $0.40/1,000 emails\n   - At ~30,000 emails/mo, you'd pay about $26/mo\n   - Good if volume is unpredictable\n\nGiven your growth trend, I'd recommend **Starter** — it gives you room to scale without worrying about limits.\n\nReady to upgrade? I can walk you through it."
     },
     # --- Complaint rate warning ---
     {
@@ -447,7 +447,7 @@ MULTI_TURN_EXAMPLES = [
     },
     # --- Escalation scenario ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on Enterprise ($800/mo).",
+        "system": "You are ApexMail's AI assistant. The customer is on Enterprise ($3,000/mo).",
         "user": "We need a custom SLA for our healthcare client. They require 99.99% uptime guarantees and HIPAA BAA.",
         "assistant": "This request requires involvement from our enterprise team. Let me create an escalation.\n\n```tool\n{\"action\": \"create_escalation\", \"params\": {\"type\": \"enterprise_legal\", \"priority\": \"high\", \"subject\": \"Custom SLA + HIPAA BAA request\"}}\n```",
         "tool": '{"ticket_id": "ESC-4521", "assigned_to": "enterprise-team@apexmail.ee", "sla": "24h response", "status": "created"}',

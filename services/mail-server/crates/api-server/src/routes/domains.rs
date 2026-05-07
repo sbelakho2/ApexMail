@@ -82,6 +82,7 @@ pub struct VerifyResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListDomainsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -588,6 +589,12 @@ pub struct AuthCheckResult {
     pub status: String,
     pub value: Option<String>,
     pub expected: Option<String>,
+    /// Human-readable, copy-pasteable remediation hint shown when the check
+    /// fails. Powers the in-app "self-debug" UX (`expected → actual → fix
+    /// here`) so customers do not need to open a support ticket for the
+    /// common misconfigurations. See `docs/user-guide/troubleshooting.md`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -618,14 +625,25 @@ async fn get_auth_status(
     .await?
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
 
-    let check = |verified: bool| AuthCheckResult {
-        status: if verified {
-            "pass".into()
+    // Self-debug helper: populate `expected` + `fix` hints so the response
+    // is actionable without a support ticket. Format mirrors the public
+    // troubleshooting guide: "expected → actual → fix here".
+    let check = |kind: AuthKind, verified: bool| -> AuthCheckResult {
+        if verified {
+            AuthCheckResult {
+                status: "pass".into(),
+                value: None,
+                expected: Some(kind.expected().into()),
+                fix: None,
+            }
         } else {
-            "fail".into()
-        },
-        value: None,
-        expected: None,
+            AuthCheckResult {
+                status: "fail".into(),
+                value: None,
+                expected: Some(kind.expected().into()),
+                fix: Some(kind.fix_hint().into()),
+            }
+        }
     };
 
     let spf = domain.spf_verified.unwrap_or(false);
@@ -639,11 +657,11 @@ async fn get_auth_status(
 
     Ok(Json(DomainAuthStatus {
         domain: domain.name.unwrap_or_else(|| domain.id.clone()),
-        spf: check(spf),
-        dkim: check(dkim),
-        dmarc: check(dmarc),
-        mx: check(mx),
-        return_path: check(return_path),
+        spf: check(AuthKind::Spf, spf),
+        dkim: check(AuthKind::Dkim, dkim),
+        dmarc: check(AuthKind::Dmarc, dmarc),
+        mx: check(AuthKind::Mx, mx),
+        return_path: check(AuthKind::ReturnPath, return_path),
         overall_status: if all_pass {
             "authenticated".into()
         } else if any_pass {
@@ -652,6 +670,65 @@ async fn get_auth_status(
             "unauthenticated".into()
         },
     }))
+}
+
+/// The five domain-authentication checks surfaced by `/auth-status`.
+///
+/// Each variant exposes a canonical `expected` record and a copy-pasteable
+/// `fix_hint`. Centralising these strings here means the in-app dashboard,
+/// the chatbot, the troubleshooting docs, and the API response stay in
+/// lockstep — the chatbot answers SPF questions by quoting the same string
+/// the API returns, so customers never see two different "fixes" for one
+/// misconfiguration.
+#[derive(Debug, Clone, Copy)]
+enum AuthKind {
+    Spf,
+    Dkim,
+    Dmarc,
+    Mx,
+    ReturnPath,
+}
+
+impl AuthKind {
+    fn expected(self) -> &'static str {
+        match self {
+            AuthKind::Spf => "TXT @  v=spf1 include:spf.apexmail.dev ~all",
+            AuthKind::Dkim => "CNAME apexmail._domainkey  dkim.apexmail.dev",
+            AuthKind::Dmarc => "TXT _dmarc  v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.dev",
+            AuthKind::Mx => "MX 10 inbound.apexmail.dev",
+            AuthKind::ReturnPath => "CNAME bounce  bounce.apexmail.dev",
+        }
+    }
+
+    fn fix_hint(self) -> &'static str {
+        match self {
+            AuthKind::Spf => {
+                "SPF misconfigured. At your DNS provider, add a TXT record at the apex \
+                 (host `@`) with value `v=spf1 include:spf.apexmail.dev ~all`. If you \
+                 already have an SPF record, merge it — only one SPF TXT record is allowed \
+                 per domain. Then call POST /v1/domains/{id}/verify."
+            }
+            AuthKind::Dkim => {
+                "DKIM misconfigured. Add a CNAME record at host `apexmail._domainkey` \
+                 pointing to `dkim.apexmail.dev`. Some DNS providers require you to omit \
+                 the trailing dot. Wait up to 15 minutes, then re-verify."
+            }
+            AuthKind::Dmarc => {
+                "DMARC missing. Add a TXT record at host `_dmarc` with value \
+                 `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.dev`. Start with \
+                 `p=none` if you want monitoring before enforcement."
+            }
+            AuthKind::Mx => {
+                "MX missing for inbound mail (only required if you accept replies via \
+                 ApexMail). Add `MX 10 inbound.apexmail.dev` at the apex."
+            }
+            AuthKind::ReturnPath => {
+                "Return-Path / bounce subdomain not configured. Add a CNAME at host \
+                 `bounce` pointing to `bounce.apexmail.dev`. This improves SPF alignment \
+                 and bounce processing."
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -672,5 +749,43 @@ mod tests_auth {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["spf_verified"], true);
+    }
+
+    #[test]
+    fn auth_kind_fix_hints_are_actionable() {
+        // Self-debug contract: every failing check must surface (a) a canonical
+        // `expected` record and (b) a copy-pasteable `fix_hint` so customers can
+        // remediate without contacting support.
+        for kind in [
+            AuthKind::Spf,
+            AuthKind::Dkim,
+            AuthKind::Dmarc,
+            AuthKind::Mx,
+            AuthKind::ReturnPath,
+        ] {
+            let expected = kind.expected();
+            let fix = kind.fix_hint();
+            assert!(!expected.is_empty(), "expected string must not be empty");
+            assert!(fix.len() > 40, "fix hint must be substantive: {fix}");
+        }
+        // SPF hint must actually mention the canonical include token, which is
+        // what the chatbot/mailbot training data quotes verbatim.
+        assert!(AuthKind::Spf
+            .fix_hint()
+            .contains("include:spf.apexmail.dev"));
+        // DMARC hint must reference the policy directive we recommend.
+        assert!(AuthKind::Dmarc.fix_hint().contains("p=quarantine"));
+    }
+
+    #[test]
+    fn auth_check_result_skips_fix_when_passing() {
+        let r = AuthCheckResult {
+            status: "pass".into(),
+            value: None,
+            expected: Some("x".into()),
+            fix: None,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json.get("fix").is_none(), "fix omitted on pass");
     }
 }

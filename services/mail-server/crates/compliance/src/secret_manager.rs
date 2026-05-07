@@ -9,13 +9,12 @@
 //! has admin. Grants have optional expiry and revocation.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
-use rand::RngCore;
 use sha2::Sha256;
 use sqlx::PgPool;
 use tracing::info;
@@ -718,6 +717,14 @@ impl SecretManager {
 }
 
 // ─── Key Derivation ────────────────────────────────────────────
+//
+// M-07: The KDF salt (SECRETS_KDF_SALT) is intentionally loaded via a regular
+// environment variable rather than a secret store, because salts are not
+// confidential — they serve to prevent precomputation attacks on the master key.
+// The master encryption key itself must still be injected via a secure channel
+// (e.g., AWS Secrets Manager, Vault, or Kubernetes Secrets mounted as env vars).
+// In production, ensure SECRETS_KDF_SALT is set to a unique, randomly generated
+// value of at least 16 characters.
 
 fn derive_key(master_key: &str) -> Result<[u8; 32], String> {
     type HmacSha256 = Hmac<Sha256>;

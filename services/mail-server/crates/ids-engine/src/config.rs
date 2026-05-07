@@ -27,6 +27,8 @@ pub struct IdsConfig {
     pub enable_tls_validation: bool,
     /// Alert rate limit (max alerts per IP per minute)
     pub alert_rate_limit: u32,
+    /// Maximum number of per-IP alert counters retained in memory.
+    pub max_alert_count_entries: usize,
 }
 
 impl Default for IdsConfig {
@@ -43,6 +45,7 @@ impl Default for IdsConfig {
             enable_dns_validation: true,
             enable_tls_validation: true,
             alert_rate_limit: 100,
+            max_alert_count_entries: 100_000,
         }
     }
 }

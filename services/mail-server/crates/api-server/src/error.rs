@@ -1,7 +1,14 @@
-//! Unified API error type that serialises to a consistent JSON envelope.
+//! Unified API response envelope and error type.
 //!
+//! All API responses follow the standard envelope:
+//!
+//! **Success:**
 //! ```json
-//! {"error":{"code":"NOT_FOUND", "message":"Resource not found"}}
+//! {"data": {...}, "error": null, "meta": null}
+//! ```
+//! **Error:**
+//! ```json
+//! {"data": null, "error": {"code": "NOT_FOUND", "message": "Resource not found", "details": null}, "meta": null}
 //! ```
 
 use axum::http::StatusCode;
@@ -9,11 +16,58 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
+// ─── Response envelope ─────────────────────────────────────────
+
+/// Standard API response envelope.
+///
+/// Every endpoint returns this shape so clients always know where to
+/// find data, errors, and metadata.
+#[derive(Debug, Serialize)]
+pub struct ApiResponse<T: Serialize> {
+    pub data: Option<T>,
+    pub error: Option<ErrorDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+}
+
+impl<T: Serialize> ApiResponse<T> {
+    /// Build a success response with just data.
+    pub fn success(data: T) -> Self {
+        Self {
+            data: Some(data),
+            error: None,
+            meta: None,
+        }
+    }
+
+    /// Build a success response with data and metadata (e.g. pagination info).
+    pub fn success_with_meta(data: T, meta: serde_json::Value) -> Self {
+        Self {
+            data: Some(data),
+            error: None,
+            meta: Some(meta),
+        }
+    }
+}
+
+/// Shorthand helper so handlers can return `success(data)`.
+pub fn success<T: Serialize>(data: T) -> Json<ApiResponse<T>> {
+    Json(ApiResponse::success(data))
+}
+
+/// Shorthand helper returning data + metadata.
+pub fn success_with_meta<T: Serialize>(data: T, meta: serde_json::Value) -> Json<ApiResponse<T>> {
+    Json(ApiResponse::success_with_meta(data, meta))
+}
+
 // ─── Error body ────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
-    pub error: ErrorDetail,
+    pub data: Option<serde_json::Value>,
+    pub error: Option<ErrorDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,11 +168,13 @@ impl IntoResponse for ApiError {
         };
 
         let body = ErrorBody {
-            error: ErrorDetail {
+            data: None,
+            error: Some(ErrorDetail {
                 code: self.code_str().to_string(),
                 message,
                 details,
-            },
+            }),
+            meta: None,
         };
 
         (status, Json(body)).into_response()
@@ -193,6 +249,7 @@ mod tests {
         assert_eq!(status, HttpStatus::NOT_FOUND);
         assert_eq!(json["error"]["code"], "NOT_FOUND");
         assert_eq!(json["error"]["message"], "user not found");
+        assert!(json["data"].is_null());
     }
 
     #[tokio::test]
@@ -205,6 +262,7 @@ mod tests {
         assert_eq!(json["error"]["code"], "VALIDATION_ERROR");
         let details = json["error"]["details"].as_array().unwrap();
         assert_eq!(details.len(), 2);
+        assert!(json["data"].is_null());
     }
 
     #[tokio::test]
@@ -214,6 +272,7 @@ mod tests {
 
         assert_eq!(status, HttpStatus::TOO_MANY_REQUESTS);
         assert_eq!(json["error"]["code"], "RATE_LIMIT_EXCEEDED");
+        assert!(json["data"].is_null());
     }
 
     #[tokio::test]
@@ -223,6 +282,7 @@ mod tests {
 
         assert_eq!(status, HttpStatus::INTERNAL_SERVER_ERROR);
         assert_eq!(json["error"]["code"], "INTERNAL_ERROR");
+        assert!(json["data"].is_null());
     }
 
     #[tokio::test]
@@ -230,5 +290,23 @@ mod tests {
         let err: ApiError = sqlx::Error::RowNotFound.into();
         let resp = err.into_response();
         assert_eq!(resp.status(), HttpStatus::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_success_envelope() {
+        let resp = success(serde_json::json!({"id": "123"}));
+        let body = serde_json::to_value(resp.0).unwrap();
+        assert_eq!(body["data"]["id"], "123");
+        assert!(body["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_success_envelope_with_meta() {
+        let meta = serde_json::json!({"page": 1, "total": 100});
+        let resp = success_with_meta(serde_json::json!({"items": []}), meta);
+        let body = serde_json::to_value(resp.0).unwrap();
+        assert_eq!(body["meta"]["page"], 1);
+        assert_eq!(body["meta"]["total"], 100);
+        assert!(body["error"].is_null());
     }
 }

@@ -70,7 +70,6 @@ fn test_email_extraction_throughput() {
 #[test]
 fn test_message_categorization_throughput() {
     let iterations = 100_000;
-    let inbox = InboxManager::new();
 
     let messages: Vec<(&str, &str)> = vec![
         ("noreply@spam.com", "Buy viagra now lottery winner"),
@@ -90,7 +89,7 @@ fn test_message_categorization_throughput() {
     let start = Instant::now();
     for i in 0..iterations {
         let (from, subject) = messages[i % messages.len()];
-        let _ = inbox.categorize_message(from.to_string(), subject.to_string());
+        let _ = InboxManager::classify_message("tenant-perf".to_string(), from.to_string(), subject.to_string());
     }
     let elapsed = start.elapsed();
 

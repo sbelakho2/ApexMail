@@ -74,6 +74,7 @@ regex.workspace = true
 aho-corasick.workspace = true
 url.workspace = true
 hex.workspace = true
+urlencoding.workspace = true
 
 # CLI
 clap.workspace = true

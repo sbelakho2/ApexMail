@@ -55,6 +55,22 @@ pub struct AlertConfig {
     pub cooldown_minutes: u64,
 }
 
+/// Persistence configuration for metrics and log data.
+///
+/// Controls whether in-memory metrics and logs are periodically flushed to
+/// the database to survive process restarts. When `enabled`, the background
+/// flush task runs every `flush_interval_ms` milliseconds and retains data
+/// for `retention_days` days.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistenceConfig {
+    /// Whether periodic persistence to the database is enabled.
+    pub enabled: bool,
+    /// Interval (ms) between flush cycles for metrics and log data.
+    pub flush_interval_ms: u64,
+    /// Number of days to retain persisted metric and log records.
+    pub retention_days: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Top-level config
 // ---------------------------------------------------------------------------
@@ -89,6 +105,7 @@ pub struct ObservabilityConfig {
     pub metrics: MetricsConfig,
     pub logging: LoggingConfig,
     pub alerting: AlertConfig,
+    pub persistence: PersistenceConfig,
 
     /// Log retention in days.
     pub log_retention_days: u32,
@@ -162,6 +179,12 @@ impl Default for ObservabilityConfig {
                 opsgenie_key: "disabled".into(),
                 email_recipients: Vec::new(),
                 cooldown_minutes: 15,
+            },
+
+            persistence: PersistenceConfig {
+                enabled: false,
+                flush_interval_ms: 60_000,
+                retention_days: 30,
             },
 
             log_retention_days: 30,
@@ -264,6 +287,22 @@ impl ObservabilityConfig {
                 cooldown_minutes: env_or("ALERT_COOLDOWN", "15").parse().unwrap_or(15),
             },
 
+            persistence: PersistenceConfig {
+                enabled: std::env::var("PERSISTENCE_ENABLED").as_deref() == Ok("true"),
+                flush_interval_ms: env_or(
+                    "PERSISTENCE_FLUSH_INTERVAL_MS",
+                    &default.persistence.flush_interval_ms.to_string(),
+                )
+                .parse()
+                .unwrap_or(default.persistence.flush_interval_ms),
+                retention_days: env_or(
+                    "PERSISTENCE_RETENTION_DAYS",
+                    &default.persistence.retention_days.to_string(),
+                )
+                .parse()
+                .unwrap_or(default.persistence.retention_days),
+            },
+
             log_retention_days: env_or("LOG_RETENTION_DAYS", "30").parse().unwrap_or(30),
         };
         config.validate()?;
@@ -304,6 +343,16 @@ impl ObservabilityConfig {
         if self.log_retention_days == 0 {
             return Err("LOG_RETENTION_DAYS must be > 0".into());
         }
+        if self.persistence.enabled && self.persistence.flush_interval_ms == 0 {
+            return Err(
+                "PERSISTENCE_FLUSH_INTERVAL_MS must be > 0 when persistence is enabled".into(),
+            );
+        }
+        if self.persistence.enabled && self.persistence.retention_days == 0 {
+            return Err(
+                "PERSISTENCE_RETENTION_DAYS must be > 0 when persistence is enabled".into(),
+            );
+        }
         Ok(())
     }
 }
@@ -327,6 +376,9 @@ mod tests {
         assert_eq!(cfg.metrics.histogram_buckets.len(), 11);
         assert_eq!(cfg.log_retention_days, 30);
         assert_eq!(cfg.db_pool_max, 20);
+        assert!(!cfg.persistence.enabled);
+        assert_eq!(cfg.persistence.flush_interval_ms, 60_000);
+        assert_eq!(cfg.persistence.retention_days, 30);
     }
 
     #[test]

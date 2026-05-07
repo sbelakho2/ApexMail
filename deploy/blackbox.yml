@@ -16,3 +16,17 @@ modules:
       preferred_ip_protocol: "ip4"
       tls_config:
         insecure_skip_verify: false
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: "ip4"
+  dns_apexmail_mx:
+    prober: dns
+    timeout: 5s
+    dns:
+      query_name: "apexmail.ee"
+      query_type: "MX"
+      valid_rcodes:
+        - NOERROR
+      preferred_ip_protocol: "ip4"

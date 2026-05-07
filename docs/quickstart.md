@@ -97,11 +97,16 @@ The API enforces a default tenant-wide limit of 1,000 requests/minute. Authentic
 
 ## Need Help?
 
-- 📚 [Full API Documentation](https://apexmail.ee/docs)
+We operate **async-first** support. Most answers live in the docs and the in-app diagnostics — please check those before opening a ticket.
+
+- 📚 [Full API Documentation](https://apexmail.ee/docs) — first stop, includes self-debug walkthroughs
+- 🩺 In-app domain diagnostics: `GET /v1/domains/{id}/auth-score` returns structured `expected → actual → fix` output
+- 💬 [Community Forum](https://github.com/sbelakho2/ApexMail/discussions) — shared, public, searchable
+- 📧 [Email Support](mailto:support@apexmail.ee) — Starter/Growth: 24–48h async response
 - 🛡️ [Login mCaptcha Protection](./security/mcaptcha-login.md)
-- 💬 [Discord Community](https://discord.gg/apexmail)
-- 📧 [Email Support](mailto:support@apexmail.ee)
 - 🐛 [Report a Bug](https://github.com/sbelakho2/ApexMail/issues)
+
+> We do **not** run per-customer Discord servers, 24/7 live chat, or white-glove real-time support. Scale customers get priority email + a shared Slack hub; Enterprise customers get a dedicated async channel + SLA. Calls are scheduled, not on-demand.
 
 ---
 

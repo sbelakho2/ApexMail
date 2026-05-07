@@ -42,7 +42,8 @@ impl AppState {
     /// Build `AppState` from a `DevExConfig`.
     pub fn from_config(cfg: DevExConfig) -> Result<Self, crate::types::DevExError> {
         let openapi = OpenApiGenerator::new(&cfg.current_api_version, &cfg.api_base_url);
-        let webhook_tester = WebhookTester::new(cfg.webhook_signing_secret.clone())?;
+        // O-20.2: Pass all signing secrets for rotation support
+        let webhook_tester = WebhookTester::new(cfg.webhook_signing_secrets.clone())?;
         Ok(Self {
             config: Arc::new(cfg),
             versions: Arc::new(VersionRegistry::new()),
@@ -139,6 +140,7 @@ async fn handle_sdks(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Request body for POST /webhooks/test.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebhookTestRequest {
     pub url: String,
     #[serde(default = "default_event_type")]
@@ -186,6 +188,7 @@ async fn handle_openapi(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /onboarding/checklist — return the onboarding checklist.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OnboardingQuery {
     tenant_id: Option<String>,
 }

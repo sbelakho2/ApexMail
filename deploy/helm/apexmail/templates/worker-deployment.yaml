@@ -9,7 +9,9 @@ metadata:
     {{- include "apexmail.selectorLabels" (dict "name" "worker" "context" .) | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
   replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
   revisionHistoryLimit: 5
   selector:
     matchLabels:
@@ -27,6 +29,9 @@ spec:
         app.kubernetes.io/component: worker
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.worker.healthPort | quote }}
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: {{ include "apexmail.serviceAccountName" . }}
       automountServiceAccountToken: false
@@ -115,5 +120,16 @@ spec:
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range . }}
+        - maxSkew: {{ .maxSkew }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "apexmail.selectorLabels" (dict "name" "worker" "context" $) | nindent 14 }}
+        {{- end }}
       {{- end }}
 {{- end }}

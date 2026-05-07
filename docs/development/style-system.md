@@ -65,6 +65,15 @@ Every Apex surface should rely on these families:
 - Semantics: `success`, `warning`, `error`, `danger`, `info`
 - Shape/space/type: `--radius-*`, `--space-*`, `--font-*`
 
+### Token Surfaces
+
+The system defines two token surface layers:
+
+- **`default`** — used by the Rust dashboard (`services/mail-server/crates/ui-foundation`). Sources: `globals.css`, `icons.rs`.
+- **`marketing`** — used by the Zola marketing site (`apps/marketing-zola`). Sources: `styles.css`, `tailwind.config.js`. Mirrors the indigo brand palette from the dashboard.
+
+Refer to [`docs/development/ui-design-token-baseline.json`](docs/development/ui-design-token-baseline.json) for the canonical token snapshot of both surfaces.
+
 ### Contract Rules
 
 1. Product UI must not hard-code new hex/rgb literals for core component styling.
@@ -117,6 +126,22 @@ Every Apex surface should rely on these families:
 - Secondary/ghost actions rely on border + muted/accent behavior.
 - Disabled states reduce emphasis without dropping below readable contrast.
 
+#### Button Size Contract
+
+| Size      | Height | Tailwind Class | Use Case              |
+|-----------|--------|----------------|-----------------------|
+| `default` | 44px   | `h-11`         | Standard form buttons |
+| `lg`      | 48px   | `h-12`         | Primary CTA / hero    |
+| `xl`      | 56px   | `h-14`         | Landing page buttons  |
+
+All button sizes maintain a minimum touch target of 44×44px on mobile via `min-h-[44px]` when appropriate.
+
+#### Button ARIA Contract
+
+- `aria-label` on icon-only buttons.
+- `aria-pressed` on toggle buttons (theme toggle).
+- `aria-disabled` in addition to `disabled` attribute for server-rendered disabled states.
+
 ### Cards and Panels
 
 - Default to neutral `card` surfaces with border separation.
@@ -128,6 +153,19 @@ Every Apex surface should rely on these families:
 - Use `input` and `ring` token mappings for all states.
 - Placeholder text must remain readable in dark mode.
 - Validation styling uses semantic states only.
+
+### Inputs and Textareas — Sizing Contract
+
+All interactive inputs must enforce a minimum touch target:
+
+```css
+/* Minimum touch target for all inputs */
+input, select, textarea, button {
+  min-height: 44px;
+}
+```
+
+This is applied via `min-h-[44px]` in component classes and ensures WCAG 2.2 target-size compliance.
 
 ### Tables and Data UI
 
@@ -142,6 +180,85 @@ Every Apex surface should rely on these families:
 3. Semantic states remain distinguishable without oversaturation.
 4. Verify shell, cards, buttons, forms, and tables in both themes for every visual change.
 
+### Dark Mode Mechanism
+
+The system uses a dual-selector strategy:
+
+```css
+/* Class-based toggle (default) */
+.dark { ... }
+
+/* OS-level preference fallback */
+@media (prefers-color-scheme: dark) {
+  :root { ... }
+}
+```
+
+The `data-theme-mode` attribute on the root element controls the active mode:
+
+- `data-theme-mode="light"` — forces light mode
+- `data-theme-mode="dark"` — forces dark mode
+- `data-theme-mode="system"` — defers to `prefers-color-scheme` (default)
+
+## Apex Icons Standard
+
+## Reduced Motion
+
+All animations and transitions must be overridable via the user's system preference:
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+```
+
+This block is defined in [`globals.css`](services/mail-server/crates/ui-foundation/assets/globals.css) and applies globally across all surfaces.
+
+## Spacing Token System
+
+The spacing scale is defined as CSS custom properties in `globals.css`:
+
+| Token       | Value | Typical Use           |
+|-------------|-------|-----------------------|
+| `--space-1` | 4px   | Micro spacing         |
+| `--space-2` | 8px   | Tight gaps            |
+| `--space-3` | 12px  | Element spacing       |
+| `--space-4` | 16px  | Standard padding      |
+| `--space-6` | 24px  | Section padding       |
+| `--space-8` | 32px  | Large spacing         |
+| `--space-12`| 48px  | Section margins       |
+| `--space-16`| 64px  | Page-level padding    |
+
+These map to Tailwind's spacing scale so utility classes like `p-4`, `gap-6`, `px-8` resolve to the correct tokens.
+
+## Cross-System ARIA & Keyboard Patterns
+
+### Shared ARIA Attributes
+
+| Attribute              | Applied To              | Purpose                         |
+|------------------------|-------------------------|---------------------------------|
+| `aria-hidden="true"`   | Decorative SVGs, overlays| Hide from assistive technology  |
+| `aria-label`           | Icon buttons, search     | Provide accessible names        |
+| `aria-expanded`        | Menu toggles             | Indicate open/closed state      |
+| `aria-pressed`         | Theme toggle buttons     | Indicate toggle state           |
+| `aria-current="page"`  | Active nav links         | Indicate current page           |
+| `aria-live="polite"`   | Toast, status regions    | Announce dynamic updates        |
+| `aria-busy="true"`     | Loading sections         | Indicate async operation        |
+| `aria-disabled="true"` | Disabled buttons         | Semantically disable elements   |
+| `role="searchbox"`     | Search inputs            | Identify search role            |
+| `role="navigation"`    | Sidebar, nav elements    | Identify navigation landmarks   |
+| `role="alert"`         | Impersonation banner     | Announce critical banner        |
+| `role="region"`        | Toast container          | Identify live region            |
+
+### Keyboard Navigation Patterns
+
+See [`docs/development/interactive-state-matrix.md`](docs/development/interactive-state-matrix.md) for the complete keyboard interaction contract.
+
 ## Apex Icons Standard
 
 ### Canonical Icon Modules
@@ -155,6 +272,8 @@ Every Apex surface should rely on these families:
 2. Keep stable icon names or partial responsibilities aligned with UI usage.
 3. Add a glyph to the shared Rust icon module or the relevant Zola partial before using it in feature templates.
 4. Do not introduce third-party icon imports into browser-surface code.
+5. All decorative SVGs must include `aria-hidden="true"` on the `<svg>` element.
+6. Default `stroke-width="2"` for all icon SVGs in the shared icon module.
 
 ### Example
 

@@ -171,6 +171,21 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 fn normalize_marketing_static_document(document: &str) -> String {
     let mut normalized = document.trim().to_string();
 
+    // Rewrite absolute asset URLs that the Zola build bakes in (using its
+    // configured `base_url`) to host-relative paths so the served HTML works
+    // on any deployment domain (production, staging, local dev, visual-parity
+    // smoke tests). Without this, browsers would fetch CSS/fonts/scripts/
+    // images directly from the canonical apexmail.ee origin which bypasses
+    // the api-server's static-asset routing during development. Only asset
+    // paths are rewritten — canonical/Open-Graph/Schema URLs are left as
+    // absolute references because they are SEO-significant identifiers.
+    for absolute_origin in ["https://apexmail.ee", "https://cdn.apexmail.ee"] {
+        for asset_prefix in ["/css/", "/fonts/", "/images/", "/js/"] {
+            let absolute = format!("{absolute_origin}{asset_prefix}");
+            normalized = normalized.replace(&absolute, asset_prefix);
+        }
+    }
+
     if !contains_ascii_case_insensitive(&normalized, "</body>") {
         if let Some(index) = normalized.to_ascii_lowercase().rfind("</html>") {
             normalized.insert_str(index, "</body>");
@@ -258,6 +273,8 @@ fn render_web(path: &str, query: Option<&str>) -> Option<String> {
         "/reports" => leptos_views::web_reports_page(),
         "/reports/deliverability" => leptos_views::web_reports_deliverability_page(),
         "/analytics" => leptos_views::web_analytics_page(),
+        "/inbox-placement" => leptos_views::web_inbox_placement_page(),
+        "/inbox-placement/new" => leptos_views::web_inbox_placement_new_page(),
         "/events" => leptos_views::web_events_page(),
         "/domains" => leptos_views::web_domains_page(),
         "/domains/new" => leptos_views::web_domains_new_page(),
@@ -272,6 +289,7 @@ fn render_web(path: &str, query: Option<&str>) -> Option<String> {
             leptos_views::web_campaign_edit_page()
         }
         p if p.starts_with("/campaigns/") => leptos_views::web_campaign_detail_page(),
+        p if p.starts_with("/inbox-placement/") => leptos_views::web_inbox_placement_detail_page(),
         _ => return None,
     })
 }
@@ -429,16 +447,16 @@ mod tests {
     #[test]
     fn marketing_routes_include_marketing_shell() {
         let html = render_route("marketing", "/pricing").unwrap();
-        assert!(html.contains("css/styles.css?h="));
+        assert!(html.contains("css/styles.css"));
         assert!(html.contains("<footer class="));
-        assert!(html.contains("href=/pricing/calculator"));
+        assert!(html.contains("/pricing/calculator"));
     }
 
     #[test]
     fn control_plane_routes_use_dark_theme() {
         let html = render_route("control-plane", "/dashboard").unwrap();
-        assert!(html.contains("bg-slate-900"));
-        assert!(html.contains("text-slate-100"));
+        assert!(html.contains("bg-surface-950"));
+        assert!(html.contains("text-surface-100"));
     }
 
     #[test]
@@ -577,18 +595,29 @@ mod tests {
                     route.surface,
                     route.pattern,
                 );
-                assert!(
-                    html.contains("<script type=application/ld+json>"),
-                    "[{}] {} emitted a non-JSON-LD script tag",
-                    route.surface,
-                    route.pattern,
-                );
-                assert!(
-                    !html.contains("<script src="),
-                    "[{}] {} emitted an external script tag",
-                    route.surface,
-                    route.pattern,
-                );
+
+                for script in html.split("<script").skip(1) {
+                    let opening_tag = script.split('>').next().unwrap_or_default();
+                    let is_json_ld = opening_tag.contains("type=application/ld+json")
+                        || opening_tag.contains("type=\"application/ld+json\"");
+                    let is_allowed_marketing_js = opening_tag
+                        .contains("src=\"/js/apexmail-site.js")
+                        && opening_tag.contains("defer");
+                    assert!(
+                        is_json_ld || is_allowed_marketing_js,
+                        "[{}] {} emitted an unexpected script tag: <script{}>",
+                        route.surface,
+                        route.pattern,
+                        opening_tag,
+                    );
+                    if opening_tag.contains("src=") {
+                        assert!(
+                            is_allowed_marketing_js,
+                            "[{}] {} emitted an unexpected external script tag: <script{}>",
+                            route.surface, route.pattern, opening_tag,
+                        );
+                    }
+                }
             }
         }
     }

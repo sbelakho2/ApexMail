@@ -61,6 +61,31 @@ pub enum MessageCategory {
     Other,
 }
 
+impl std::fmt::Display for MessageCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lead => write!(f, "lead"),
+            Self::Customer => write!(f, "customer"),
+            Self::Support => write!(f, "support"),
+            Self::Spam => write!(f, "spam"),
+            Self::Other => write!(f, "other"),
+        }
+    }
+}
+
+impl MessageCategory {
+    /// Parse a message category from its snake_case string representation.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "lead" => Self::Lead,
+            "customer" => Self::Customer,
+            "support" => Self::Support,
+            "spam" => Self::Spam,
+            _ => Self::Other,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core domain structs
 // ---------------------------------------------------------------------------
@@ -69,6 +94,7 @@ pub enum MessageCategory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lead {
     pub id: Uuid,
+    pub tenant_id: String,
     pub email: String,
     pub name: String,
     pub company: String,
@@ -115,6 +141,7 @@ pub struct Campaign {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarEvent {
     pub id: Uuid,
+    pub tenant_id: String,
     pub title: String,
     pub attendees: Vec<String>,
     pub start_at: DateTime<Utc>,
@@ -126,6 +153,7 @@ pub struct CalendarEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxMessage {
     pub id: Uuid,
+    pub tenant_id: String,
     pub from: String,
     pub subject: String,
     pub received_at: DateTime<Utc>,
@@ -176,6 +204,9 @@ pub enum SalesError {
     #[error("time slot unavailable")]
     SlotUnavailable,
 
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -193,6 +224,7 @@ impl axum::response::IntoResponse for SalesError {
             | SalesError::SlotUnavailable => (StatusCode::BAD_REQUEST, self.to_string()),
             SalesError::EnrichmentFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             SalesError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            SalesError::Unauthorized(_) => (StatusCode::FORBIDDEN, self.to_string()),
             SalesError::Database(_) | SalesError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
             }
@@ -236,6 +268,7 @@ mod tests {
     fn test_lead_serialization() {
         let lead = Lead {
             id: Uuid::nil(),
+            tenant_id: "tenant-a".into(),
             email: "alice@example.com".into(),
             name: "Alice".into(),
             company: "Acme".into(),
@@ -350,6 +383,7 @@ mod tests {
     fn lead_score_boundary() {
         let lead = Lead {
             id: Uuid::nil(),
+            tenant_id: "tenant-a".into(),
             email: "x@x.com".into(),
             name: "X".into(),
             company: "".into(),
@@ -377,6 +411,7 @@ mod tests {
     fn lead_clone() {
         let lead = Lead {
             id: Uuid::new_v4(),
+            tenant_id: "tenant-a".into(),
             email: "test@test.com".into(),
             name: "Test".into(),
             company: "TestCo".into(),
@@ -435,6 +470,7 @@ mod tests {
     fn calendar_event_with_and_without_meeting_link() {
         let with_link = CalendarEvent {
             id: Uuid::new_v4(),
+            tenant_id: "tenant-a".into(),
             title: "Demo".into(),
             attendees: vec!["a@a.com".into()],
             start_at: Utc::now(),
@@ -472,6 +508,7 @@ mod tests {
     fn inbox_message_serde() {
         let msg = InboxMessage {
             id: Uuid::new_v4(),
+            tenant_id: "tenant-1".into(),
             from: "sender@test.com".into(),
             subject: "Hello".into(),
             received_at: Utc::now(),
@@ -481,6 +518,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: InboxMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.from, "sender@test.com");
+        assert_eq!(parsed.tenant_id, "tenant-1");
         assert!(!parsed.replied);
     }
 }

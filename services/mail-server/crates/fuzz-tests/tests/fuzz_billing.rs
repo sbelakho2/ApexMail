@@ -9,11 +9,11 @@ use billing_service::types::InvoiceLineItem;
 fn fuzz_payg_cost_never_negative() {
     // Any positive email/API count must produce non-negative cost.
     let pricing = PaygPricing::default();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     use rand::Rng;
     for _ in 0..5_000 {
-        let emails: u64 = rng.gen_range(0..10_000_000);
-        let api_calls: u64 = rng.gen_range(0..50_000_000);
+        let emails: u64 = rng.random_range(0..10_000_000);
+        let api_calls: u64 = rng.random_range(0..50_000_000);
         let (email_cost, api_cost, total) = pricing
             .calculate(emails, api_calls)
             .expect("bounded fuzz inputs should not overflow PAYG pricing");
@@ -38,11 +38,11 @@ fn fuzz_payg_cost_never_negative() {
 
     // Also check overage cost
     for _ in 0..5_000 {
-        let sent: i64 = rng.gen_range(0..10_000_000);
-        let limit: i64 = if rng.gen_bool(0.1) {
+        let sent: i64 = rng.random_range(0..10_000_000);
+        let limit: i64 = if rng.random_bool(0.1) {
             -1
         } else {
-            rng.gen_range(0..5_000_000)
+            rng.random_range(0..5_000_000)
         };
         let cost = calculate_overage_cost(sent, limit);
         assert!(
@@ -95,12 +95,12 @@ fn fuzz_plan_quotas_consistent() {
 fn fuzz_vat_never_exceeds_100_percent() {
     // Any input should produce a reasonable VAT (0-100%).
     let countries = ["EE", "DE", "FR", "US", "JP", "GB", "XX", "", "AU", "BR"];
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     use rand::Rng;
     for _ in 0..2_000 {
-        let subtotal: i64 = rng.gen_range(0..100_000_000);
-        let country = countries[rng.gen_range(0..countries.len())];
-        let vat_number = if rng.gen_bool(0.3) {
+        let subtotal: i64 = rng.random_range(0..100_000_000);
+        let country = countries[rng.random_range(0..countries.len())];
+        let vat_number = if rng.random_bool(0.3) {
             Some("EU123456789")
         } else {
             None
@@ -125,15 +125,15 @@ fn fuzz_vat_never_exceeds_100_percent() {
 #[test]
 fn fuzz_invoice_total_consistent() {
     // Line items sum should be consistent.
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     use rand::Rng;
     for _ in 0..1_000 {
-        let num_items = rng.gen_range(1..10);
+        let num_items = rng.random_range(1..10);
         let mut items = Vec::new();
         let mut expected_subtotal: i64 = 0;
         for _ in 0..num_items {
-            let quantity: i64 = rng.gen_range(1..1000);
-            let unit_price: i64 = rng.gen_range(1..100_000);
+            let quantity: i64 = rng.random_range(1..1000);
+            let unit_price: i64 = rng.random_range(1..100_000);
             let amount = quantity * unit_price;
             expected_subtotal += amount;
             items.push(InvoiceLineItem {

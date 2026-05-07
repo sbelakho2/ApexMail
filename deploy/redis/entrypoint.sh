@@ -22,5 +22,5 @@ fi
 exec redis-server \
     --appendonly yes \
     --maxmemory "${REDIS_MAXMEMORY:-256mb}" \
-    --maxmemory-policy "${REDIS_MAXMEMORY_POLICY:-noeviction}" \
+    --maxmemory-policy "${REDIS_MAXMEMORY_POLICY:-allkeys-lru}" \
     --requirepass "$REDIS_PASSWORD"

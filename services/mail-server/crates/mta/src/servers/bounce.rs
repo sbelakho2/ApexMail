@@ -227,6 +227,15 @@ impl BounceServer {
             }
         }
 
+        // O-1.7:Sanitize VERP-derived recipient data in logs and error messages
+        let log_recipient = original_recipient.as_ref().map(|r| {
+            if self.config.verp_sanitize {
+                mail_common::pii::redact_email(r).to_string()
+            } else {
+                r.clone()
+            }
+        });
+
         // 2. If no VERP match, try to parse DSN
         if original_message_id.is_none() {
             if let Some(mid) = extract_original_message_id(&message) {
@@ -264,16 +273,24 @@ impl BounceServer {
                 .bind(recip)
                 .execute(&self.pool)
                 .await?;
-                info!(email = %mail_common::pii::redact_email(recip), "Added to suppression list (hard bounce)");
+                // O-1.7:Use sanitized recipient in logs when verp_sanitize is enabled
+                let log_recip = log_recipient.as_deref().unwrap_or("redacted");
+                info!(email = %log_recip, "Added to suppression list (hard bounce)");
             }
         }
 
         // 6. Queue webhook
+        // O-1.7:Use sanitized recipient in webhook when verp_sanitize is enabled
+        let webhook_recipient = if self.config.verp_sanitize {
+            log_recipient.clone()
+        } else {
+            original_recipient.clone()
+        };
         let payload = serde_json::json!({
             "event": "bounce",
             "bounce_id": bounce_id,
             "original_message_id": original_message_id,
-            "original_recipient": original_recipient,
+            "original_recipient": webhook_recipient,
             "bounce_type": format!("{:?}", bounce_info.bounce_type),
             "subtype": bounce_info.bounce_subtype,
             "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -442,8 +459,12 @@ fn extract_status_code(message: &str) -> String {
     // #142:Use pre-compiled regex (LazyLock)
     // #143:Only search in DSN header lines (Status:, Diagnostic-Code:) to avoid
     // matching codes from the attached original message
+    let mut saw_dsn_header = false;
     for line in message.lines() {
         let trimmed = line.trim().to_lowercase();
+        if is_dsn_header_line(&trimmed) {
+            saw_dsn_header = true;
+        }
         if trimmed.starts_with("status:") || trimmed.starts_with("diagnostic-code:") {
             if let Some(re) = &*BOUNCE_STATUS_RE {
                 if let Some(m) = re.find(line) {
@@ -451,6 +472,9 @@ fn extract_status_code(message: &str) -> String {
                 }
             }
         }
+    }
+    if saw_dsn_header {
+        return String::new();
     }
     // Fallback:check lines starting with 3-digit SMTP reply codes
     if let Some(re) = &*BOUNCE_STATUS_RE {
@@ -464,6 +488,23 @@ fn extract_status_code(message: &str) -> String {
         }
     }
     String::new()
+}
+
+fn is_dsn_header_line(trimmed_lower: &str) -> bool {
+    matches!(
+        trimmed_lower.split_once(':').map(|(name, _)| name),
+        Some(
+            "action"
+                | "diagnostic-code"
+                | "final-recipient"
+                | "last-attempt-date"
+                | "original-recipient"
+                | "remote-mta"
+                | "reporting-mta"
+                | "status"
+                | "will-retry-until"
+        )
+    )
 }
 
 fn extract_diagnostic_code(message: &str) -> Option<String> {
@@ -595,6 +636,25 @@ mod tests {
         assert_eq!(extract_status_code("Status: 5.1.1 User unknown"), "5.1.1");
         assert_eq!(extract_status_code("4.7.1 rejected"), "4.7.1");
         assert_eq!(extract_status_code("No code here"), "");
+    }
+
+    #[test]
+    fn test_extract_status_code_skips_fallback_when_dsn_headers_exist() {
+        let msg = concat!(
+            "Final-Recipient: rfc822; user@example.com\r\n",
+            "Action: failed\r\n",
+            "\r\n",
+            "Original message follows\r\n",
+            "5.1.1 this line belongs to the attached original message\r\n"
+        );
+
+        assert_eq!(extract_status_code(msg), "");
+    }
+
+    #[test]
+    fn test_extract_status_code_keeps_fallback_without_dsn_headers() {
+        let msg = "Original message follows\r\n5.1.1 recipient rejected\r\n";
+        assert_eq!(extract_status_code(msg), "5.1.1");
     }
 
     #[test]

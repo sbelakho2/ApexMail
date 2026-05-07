@@ -1,5 +1,4 @@
 use anyhow::Context;
-use parking_lot::Mutex;
 use sales_autopilot::{
     calendar::CalendarService,
     campaigns::CampaignManager,
@@ -9,7 +8,6 @@ use sales_autopilot::{
     inbox::InboxManager,
     routes::{self, AppState},
 };
-use std::{collections::HashMap, sync::Arc};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -44,19 +42,24 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to initialize sales-autopilot schema")?;
 
+    // ── Redis pool (used for cross-process rate limiting) ──────────
+    let redis = deadpool_redis::Config::from_url(&cfg.redis_url)
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .context("Failed to create Redis pool")?;
+
     let crm = CrmBackend::postgres(db.clone());
     crm.initialize()
         .await
         .context("Failed to initialize CRM storage")?;
 
     let state = AppState {
-        db,
-        crm,
         enrichment: EnrichmentService::new(&cfg.enrichment_api_url),
-        enrichment_rate_limit: Arc::new(Mutex::new(HashMap::new())),
-        campaigns: CampaignManager::new(cfg.max_campaigns),
-        calendar: CalendarService::new(),
-        inbox: InboxManager::new(),
+        campaigns: CampaignManager::new(cfg.max_campaigns, db.clone()),
+        calendar: CalendarService::new(db.clone()),
+        inbox: InboxManager::new(db.clone()),
+        crm,
+        redis,
+        db,
         service_token: {
             let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
             if token.is_empty() {
@@ -64,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
             }
             token
         },
+        rate_limit_fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let app = routes::router(state);

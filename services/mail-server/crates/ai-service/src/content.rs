@@ -1,5 +1,5 @@
 //! Content optimisation — subject-line scoring, improvement suggestions, A/B test
-//! winner selection, and HTML-to-text preview generation.
+//! winner selection, HTML sanitisation (O-10.2) and HTML-to-text preview generation.
 
 use crate::types::{ContentSuggestion, ImprovementType};
 
@@ -141,6 +141,89 @@ impl ContentOptimizer {
             .map(|(name, val)| (name.as_str(), *val))
     }
 
+    /// Sanitize AI-generated HTML content using ammonia (O-10.2).
+    ///
+    /// Strips dangerous tags (`<script>`, `<iframe>`, event handlers, etc.)
+    /// while preserving safe structural elements like `<p>`, `<a>`, `<b>`,
+    /// `<i>`, `<ul>`, `<ol>`, `<li>`, `<br>`, `<div>`, `<span>`, `<table>`.
+    ///
+    /// Link `href` values are validated to prevent `javascript:` etc.
+    ///
+    /// # Note (ammonia 4.x API)
+    /// `tag_attributes()` accepts a single `HashMap<&str, HashSet<&str>>`
+    /// mapping each tag to its allowed attributes, rather than per-tag calls.
+    pub fn sanitize_html(&self, html: &str) -> String {
+        use std::collections::{HashMap, HashSet};
+
+        let mut tag_attrs = HashMap::new();
+        tag_attrs.insert("a", HashSet::from(["href", "title", "target"]));
+        tag_attrs.insert("img", HashSet::from(["src", "alt", "width", "height"]));
+        tag_attrs.insert("td", HashSet::from(["colspan", "rowspan"]));
+        tag_attrs.insert("th", HashSet::from(["colspan", "rowspan"]));
+
+        ammonia::Builder::new()
+            .tags(HashSet::from([
+                "a",
+                "abbr",
+                "b",
+                "blockquote",
+                "br",
+                "caption",
+                "cite",
+                "code",
+                "col",
+                "colgroup",
+                "dd",
+                "del",
+                "dfn",
+                "div",
+                "dl",
+                "dt",
+                "em",
+                "figcaption",
+                "figure",
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "h6",
+                "hr",
+                "i",
+                "img",
+                "ins",
+                "kbd",
+                "li",
+                "mark",
+                "ol",
+                "p",
+                "pre",
+                "q",
+                "s",
+                "samp",
+                "small",
+                "span",
+                "strong",
+                "sub",
+                "sup",
+                "table",
+                "tbody",
+                "td",
+                "tfoot",
+                "th",
+                "thead",
+                "time",
+                "tr",
+                "ul",
+                "var",
+            ]))
+            .tag_attributes(tag_attrs)
+            // Allow common URL schemes only
+            .link_rel(Some("noopener noreferrer"))
+            .clean(html)
+            .to_string()
+    }
+
     /// Generate a plain-text preview from HTML email content.
     /// Strips tags and collapses whitespace.
     pub fn generate_preview(&self, html: &str) -> String {
@@ -227,5 +310,38 @@ mod tests {
         assert!(preview.contains("Hello"));
         assert!(preview.contains("world"));
         assert!(!preview.contains("<"));
+    }
+
+    #[test]
+    fn test_sanitize_html_strips_scripts() {
+        let c = ContentOptimizer::new();
+        let malicious = "<p>Hello</p><script>alert('xss')</script><p>World</p>";
+        let sanitized = c.sanitize_html(malicious);
+        assert!(sanitized.contains("Hello"));
+        assert!(sanitized.contains("World"));
+        assert!(!sanitized.contains("<script"), "script tag not stripped");
+        assert!(!sanitized.contains("alert"), "JS code present");
+    }
+
+    #[test]
+    fn test_sanitize_html_removes_event_handlers() {
+        let c = ContentOptimizer::new();
+        let malicious = r#"<p onclick="alert(1)">Click me</p>"#;
+        let sanitized = c.sanitize_html(malicious);
+        assert!(sanitized.contains("Click me"));
+        assert!(!sanitized.contains("onclick"), "event handler preserved");
+    }
+
+    #[test]
+    fn test_sanitize_html_validates_links() {
+        let c = ContentOptimizer::new();
+        let malicious_html = r#"<a href="javascript:alert(1)">link</a>"#;
+        let sanitized = c.sanitize_html(malicious_html);
+        // The link text should remain but the href should be stripped
+        assert!(sanitized.contains("link"));
+        assert!(
+            !sanitized.contains("javascript:"),
+            "javascript: href preserved"
+        );
     }
 }

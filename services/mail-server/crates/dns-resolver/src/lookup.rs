@@ -3,6 +3,7 @@
 //! Wraps trust-dns-resolver queries and converts them to our record types.
 
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 
@@ -22,6 +23,19 @@ pub enum DnsError {
     InvalidDomain(String),
     #[error("Invalid config: {0}")]
     InvalidConfig(String),
+}
+
+/// DNS lookup value paired with the resolver-provided validity window.
+#[derive(Debug, Clone)]
+pub struct DnsLookupResult<T> {
+    pub records: T,
+    pub ttl: Duration,
+}
+
+impl<T> DnsLookupResult<T> {
+    fn new(records: T, ttl: Duration) -> Self {
+        Self { records, ttl }
+    }
 }
 
 /// Thin wrapper around trust-dns-resolver for email-specific lookups.
@@ -77,6 +91,14 @@ impl DnsLookup {
 
     /// Lookup MX records for a domain.
     pub async fn lookup_mx(&self, domain: &str) -> Result<Vec<MxRecord>, DnsError> {
+        Ok(self.lookup_mx_with_ttl(domain).await?.records)
+    }
+
+    /// Lookup MX records for a domain, preserving the authoritative TTL.
+    pub async fn lookup_mx_with_ttl(
+        &self,
+        domain: &str,
+    ) -> Result<DnsLookupResult<Vec<MxRecord>>, DnsError> {
         let response = self
             .resolver
             .mx_lookup(domain)
@@ -89,11 +111,22 @@ impl DnsLookup {
             .collect();
 
         records.sort();
-        Ok(records)
+        Ok(DnsLookupResult::new(
+            records,
+            ttl_from_valid_until(response.valid_until()),
+        ))
     }
 
     /// Lookup TXT records for a domain.
     pub async fn lookup_txt(&self, domain: &str) -> Result<Vec<String>, DnsError> {
+        Ok(self.lookup_txt_with_ttl(domain).await?.records)
+    }
+
+    /// Lookup TXT records for a domain, preserving the authoritative TTL.
+    pub async fn lookup_txt_with_ttl(
+        &self,
+        domain: &str,
+    ) -> Result<DnsLookupResult<Vec<String>>, DnsError> {
         let response = self
             .resolver
             .txt_lookup(domain)
@@ -111,13 +144,31 @@ impl DnsLookup {
             })
             .collect();
 
-        Ok(texts)
+        Ok(DnsLookupResult::new(
+            texts,
+            ttl_from_valid_until(response.valid_until()),
+        ))
     }
 
     /// Lookup SPF record for a domain.
     pub async fn lookup_spf(&self, domain: &str) -> Result<Option<SpfRecord>, DnsError> {
-        let txts = self.lookup_txt(domain).await?;
-        Ok(txts.iter().find_map(|txt| SpfRecord::parse(txt)))
+        Ok(self
+            .lookup_spf_with_ttl(domain)
+            .await?
+            .map(|result| result.records))
+    }
+
+    /// Lookup SPF record for a domain, preserving the TXT lookup TTL.
+    pub async fn lookup_spf_with_ttl(
+        &self,
+        domain: &str,
+    ) -> Result<Option<DnsLookupResult<SpfRecord>>, DnsError> {
+        let txts = self.lookup_txt_with_ttl(domain).await?;
+        Ok(txts
+            .records
+            .iter()
+            .find_map(|txt| SpfRecord::parse(txt))
+            .map(|record| DnsLookupResult::new(record, txts.ttl)))
     }
 
     /// Lookup DKIM record for a selector._domainkey.domain.
@@ -126,38 +177,93 @@ impl DnsLookup {
         selector: &str,
         domain: &str,
     ) -> Result<Option<DkimRecord>, DnsError> {
+        Ok(self
+            .lookup_dkim_with_ttl(selector, domain)
+            .await?
+            .map(|result| result.records))
+    }
+
+    /// Lookup DKIM record for a selector._domainkey.domain, preserving the TXT lookup TTL.
+    pub async fn lookup_dkim_with_ttl(
+        &self,
+        selector: &str,
+        domain: &str,
+    ) -> Result<Option<DnsLookupResult<DkimRecord>>, DnsError> {
         let query = format!("{selector}._domainkey.{domain}");
-        let txts = self.lookup_txt(&query).await?;
-        Ok(txts.iter().find_map(|txt| DkimRecord::parse(txt)))
+        let txts = self.lookup_txt_with_ttl(&query).await?;
+        Ok(txts
+            .records
+            .iter()
+            .find_map(|txt| DkimRecord::parse(txt))
+            .map(|record| DnsLookupResult::new(record, txts.ttl)))
     }
 
     /// Lookup DMARC record for _dmarc.domain.
     pub async fn lookup_dmarc(&self, domain: &str) -> Result<Option<DmarcPolicy>, DnsError> {
+        Ok(self
+            .lookup_dmarc_with_ttl(domain)
+            .await?
+            .map(|result| result.records))
+    }
+
+    /// Lookup DMARC record for _dmarc.domain, preserving the TXT lookup TTL.
+    pub async fn lookup_dmarc_with_ttl(
+        &self,
+        domain: &str,
+    ) -> Result<Option<DnsLookupResult<DmarcPolicy>>, DnsError> {
         let query = format!("_dmarc.{domain}");
-        let txts = self.lookup_txt(&query).await?;
-        Ok(txts.iter().find_map(|txt| DmarcPolicy::parse(txt)))
+        let txts = self.lookup_txt_with_ttl(&query).await?;
+        Ok(txts
+            .records
+            .iter()
+            .find_map(|txt| DmarcPolicy::parse(txt))
+            .map(|record| DnsLookupResult::new(record, txts.ttl)))
     }
 
     /// Lookup A records.
     pub async fn lookup_a(&self, domain: &str) -> Result<Vec<String>, DnsError> {
+        Ok(self.lookup_a_with_ttl(domain).await?.records)
+    }
+
+    /// Lookup A records, preserving the authoritative TTL.
+    pub async fn lookup_a_with_ttl(
+        &self,
+        domain: &str,
+    ) -> Result<DnsLookupResult<Vec<String>>, DnsError> {
         let response = self
             .resolver
             .ipv4_lookup(domain)
             .await
             .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
 
-        Ok(response.iter().map(|ip| ip.to_string()).collect())
+        let ttl = ttl_from_valid_until(response.valid_until());
+        Ok(DnsLookupResult::new(
+            response.iter().map(|ip| ip.to_string()).collect(),
+            ttl,
+        ))
     }
 
     /// Lookup AAAA records.
     pub async fn lookup_aaaa(&self, domain: &str) -> Result<Vec<String>, DnsError> {
+        Ok(self.lookup_aaaa_with_ttl(domain).await?.records)
+    }
+
+    /// Lookup AAAA records, preserving the authoritative TTL.
+    pub async fn lookup_aaaa_with_ttl(
+        &self,
+        domain: &str,
+    ) -> Result<DnsLookupResult<Vec<String>>, DnsError> {
         let response = self
             .resolver
             .ipv6_lookup(domain)
             .await
             .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
 
-        Ok(response.iter().map(|ip| ip.to_string()).collect())
+        let ttl = ttl_from_valid_until(response.valid_until());
+        Ok(DnsLookupResult::new(
+            response.iter().map(|ip| ip.to_string()).collect(),
+            ttl,
+        ))
     }
 
     /// Reverse DNS lookup.
@@ -187,6 +293,10 @@ impl DnsLookup {
         }
         Ok(false)
     }
+}
+
+fn ttl_from_valid_until(valid_until: Instant) -> Duration {
+    valid_until.saturating_duration_since(Instant::now())
 }
 
 #[cfg(test)]

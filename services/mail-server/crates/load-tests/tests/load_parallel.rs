@@ -31,8 +31,13 @@ fn test_parallel_crypto_threads() {
         })
         .collect();
 
-    for h in handles {
-        h.join().expect("thread panicked");
+    for (i, h) in handles.into_iter().enumerate() {
+        h.join().unwrap_or_else(|_| {
+            panic!(
+                "crypto thread {} panicked — possible invariant violation",
+                i
+            )
+        });
     }
 }
 
@@ -74,6 +79,7 @@ fn test_parallel_scoring_threads() {
                 for i in 0..1_000 {
                     let email = format!("t{t}-lead{i}@test.com");
                     crm.create_lead(
+                        "parallel".into(),
                         email,
                         format!("Lead {i}"),
                         "TestCo".into(),
@@ -91,7 +97,7 @@ fn test_parallel_scoring_threads() {
         h.join().expect("thread panicked");
     }
 
-    let all = crm.list_leads(None, None);
+    let all = crm.list_leads("parallel", None, None);
     assert_eq!(all.len(), NUM_THREADS * 1_000);
 }
 
@@ -119,7 +125,7 @@ fn test_parallel_billing_threads() {
                     assert!(overage >= 0);
 
                     let (vat_rate, vat_amt) = calculate_vat(10_000, "EE", None);
-                    assert_eq!(vat_rate, 22);
+                    assert_eq!(vat_rate, 24);
                     assert!(vat_amt > 0);
                 }
             })

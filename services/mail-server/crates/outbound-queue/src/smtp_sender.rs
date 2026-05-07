@@ -46,6 +46,15 @@ pub struct SmtpSenderConfig {
     pub require_starttls: bool,
     pub connection_pool_size: usize,
     pub mx_cache_ttl_secs: u64,
+    /// Connection timeout in seconds for TCP connect (MI-001).
+    /// Default: 30s. Prevents indefinite hangs on unreachable relays.
+    pub connection_timeout_seconds: u64,
+    /// Pool acquisition timeout in seconds (MI-001).
+    /// Default: 10s. Prevents indefinite waits for pooled connections.
+    pub pool_acquisition_timeout_seconds: u64,
+    /// Whether to verify TLS certificates for MTA-STS policy fetches (MI-009).
+    /// Default: true.
+    pub mta_sts_tls_verify: bool,
 }
 
 const DEFAULT_SMTP_TIMEOUT_SECONDS: u64 = 60;
@@ -53,7 +62,10 @@ const DEFAULT_SMTP_MAX_RETRIES: u32 = 3;
 const DEFAULT_SMTP_RETRY_DELAY_SECONDS: u64 = 30;
 const DEFAULT_SMTP_CONNECTION_POOL_SIZE: usize = 2;
 const DEFAULT_SMTP_MX_CACHE_TTL_SECS: u64 = 300;
+const DEFAULT_SMTP_CONNECTION_TIMEOUT_SECONDS: u64 = 30;
+const DEFAULT_SMTP_POOL_ACQUISITION_TIMEOUT_SECONDS: u64 = 10;
 const DEFAULT_MAX_SMTP_RESPONSE_LINE: usize = 1_000;
+const PRODUCTION_ENV_VARS: &[&str] = &["NODE_ENV", "APP_ENV", "APEXMAIL_ENV", "ENVIRONMENT"];
 
 impl Default for SmtpSenderConfig {
     fn default() -> Self {
@@ -65,6 +77,9 @@ impl Default for SmtpSenderConfig {
             require_starttls: true,
             connection_pool_size: DEFAULT_SMTP_CONNECTION_POOL_SIZE,
             mx_cache_ttl_secs: default_mx_cache_ttl_secs(),
+            connection_timeout_seconds: DEFAULT_SMTP_CONNECTION_TIMEOUT_SECONDS,
+            pool_acquisition_timeout_seconds: DEFAULT_SMTP_POOL_ACQUISITION_TIMEOUT_SECONDS,
+            mta_sts_tls_verify: true,
         }
     }
 }
@@ -93,6 +108,34 @@ fn default_mx_cache_ttl_secs() -> u64 {
         .and_then(|val| val.parse::<u64>().ok())
         .filter(|val| *val > 0)
         .unwrap_or(DEFAULT_SMTP_MX_CACHE_TTL_SECS)
+}
+
+fn runtime_is_production() -> bool {
+    PRODUCTION_ENV_VARS.iter().any(|key| {
+        env::var(key)
+            .ok()
+            .as_deref()
+            .map(is_production_environment_name)
+            .unwrap_or(false)
+    })
+}
+
+fn is_production_environment_name(environment: &str) -> bool {
+    matches!(
+        environment.trim().to_ascii_lowercase().as_str(),
+        "production" | "prod"
+    )
+}
+
+fn enforce_production_starttls(
+    mut config: SmtpSenderConfig,
+    is_production: bool,
+) -> SmtpSenderConfig {
+    if is_production && !config.require_starttls {
+        warn!("SMTP require_starttls=false ignored in production; enforcing STARTTLS");
+        config.require_starttls = true;
+    }
+    config
 }
 
 /// Direct SMTP Sender - Enterprise-Grade Infrastructure
@@ -124,6 +167,12 @@ struct OutboundMetrics {
     deliveries_failed: AtomicU64,
     recipients_accepted: AtomicU64,
     recipients_rejected: AtomicU64,
+    // MI-004: Auth failure counters for email authentication checks
+    spf_failures: AtomicU64,
+    dkim_failures: AtomicU64,
+    dmarc_failures: AtomicU64,
+    // MI-010: Null MX detection counter
+    null_mx_domains: AtomicU64,
 }
 
 impl OutboundMetrics {
@@ -133,6 +182,10 @@ impl OutboundMetrics {
             deliveries_failed: AtomicU64::new(0),
             recipients_accepted: AtomicU64::new(0),
             recipients_rejected: AtomicU64::new(0),
+            spf_failures: AtomicU64::new(0),
+            dkim_failures: AtomicU64::new(0),
+            dmarc_failures: AtomicU64::new(0),
+            null_mx_domains: AtomicU64::new(0),
         }
     }
 
@@ -148,12 +201,62 @@ impl OutboundMetrics {
             .fetch_add(rejected as u64, Ordering::Relaxed);
     }
 
+    // MI-004: Record SPF authentication failure
+    fn record_spf_failure(&self, domain: &str) {
+        self.spf_failures.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("outbound.auth.spf.failures", "domain" => domain.to_string())
+            .increment(1);
+        error!(
+            domain = %domain,
+            auth = "spf",
+            "SPF authentication failure detected — domain may be spoofing"
+        );
+    }
+
+    // MI-004: Record DKIM authentication failure
+    fn record_dkim_failure(&self, domain: &str) {
+        self.dkim_failures.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("outbound.auth.dkim.failures", "domain" => domain.to_string())
+            .increment(1);
+        error!(
+            domain = %domain,
+            auth = "dkim",
+            "DKIM authentication failure detected — message may be tampered"
+        );
+    }
+
+    // MI-004: Record DMARC authentication failure
+    fn record_dmarc_failure(&self, domain: &str) {
+        self.dmarc_failures.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("outbound.auth.dmarc.failures", "domain" => domain.to_string())
+            .increment(1);
+        error!(
+            domain = %domain,
+            auth = "dmarc",
+            "DMARC authentication failure detected — policy may need review"
+        );
+    }
+
+    // MI-010: Record Null MX domain detection
+    fn record_null_mx(&self, domain: &str) {
+        self.null_mx_domains.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("outbound.null_mx.skipped", "domain" => domain.to_string()).increment(1);
+        warn!(
+            domain = %domain,
+            "Null MX (RFC 7505) detected — domain cannot receive email"
+        );
+    }
+
     fn snapshot(&self) -> OutboundMetricsSnapshot {
         OutboundMetricsSnapshot {
             deliveries_ok: self.deliveries_ok.load(Ordering::Relaxed),
             deliveries_failed: self.deliveries_failed.load(Ordering::Relaxed),
             recipients_accepted: self.recipients_accepted.load(Ordering::Relaxed),
             recipients_rejected: self.recipients_rejected.load(Ordering::Relaxed),
+            spf_failures: self.spf_failures.load(Ordering::Relaxed),
+            dkim_failures: self.dkim_failures.load(Ordering::Relaxed),
+            dmarc_failures: self.dmarc_failures.load(Ordering::Relaxed),
+            null_mx_domains: self.null_mx_domains.load(Ordering::Relaxed),
         }
     }
 }
@@ -164,6 +267,12 @@ pub struct OutboundMetricsSnapshot {
     pub deliveries_failed: u64,
     pub recipients_accepted: u64,
     pub recipients_rejected: u64,
+    // MI-004: Auth failure counters
+    pub spf_failures: u64,
+    pub dkim_failures: u64,
+    pub dmarc_failures: u64,
+    // MI-010: Null MX detection counter
+    pub null_mx_domains: u64,
 }
 
 static OUTBOUND_METRICS: LazyLock<OutboundMetrics> = LazyLock::new(OutboundMetrics::new);
@@ -198,6 +307,7 @@ impl SmtpSender {
         config: SmtpSenderConfig,
         dkim_signer: Option<DkimSigner>,
     ) -> Self {
+        let config = enforce_production_starttls(config, runtime_is_production());
         let resolver =
             TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
         let mx_cache_ttl_secs = config.mx_cache_ttl_secs;
@@ -272,9 +382,32 @@ impl SmtpSender {
         }
 
         let mut deliveries = FuturesUnordered::new();
+        // Sender domain used for outbound auth-failure metrics (SPF/DKIM/DMARC
+        // are sender-domain-scoped enforcement signals).
+        let sender_domain: String = from
+            .rsplit_once('@')
+            .map(|(_, d)| d.to_ascii_lowercase())
+            .unwrap_or_default();
         for (domain, recipients, message) in domain_payloads {
             let message_id = message_id.clone();
+            let sender_domain = sender_domain.clone();
             deliveries.push(async move {
+                // MI-010: Null MX check (RFC 7505) — if the domain has a single
+                // MX record with preference 0 pointing to ".", it cannot receive
+                // email and we should not attempt delivery.
+                if self.is_null_mx_domain(&domain).await? {
+                    warn!(
+                        domain = %domain,
+                        "Null MX (RFC 7505) — domain cannot receive email; skipping delivery"
+                    );
+                    OUTBOUND_METRICS.record_null_mx(&domain);
+                    return Ok::<(Vec<String>, Vec<String>, String), anyhow::Error>((
+                        Vec::new(),
+                        recipients,
+                        String::new(),
+                    ));
+                }
+
                 let mx_servers = self.lookup_mx(&domain).await?;
                 if mx_servers.is_empty() {
                     warn!(domain = %domain, "No MX records found");
@@ -311,6 +444,25 @@ impl SmtpSender {
                     rejected.extend(recipients);
                 }
 
+                // Parse the remote SMTP response for auth-failure markers.
+                // Receiving MTAs commonly include enhanced-status codes 5.7.x
+                // and human-readable phrases when rejecting on SPF/DKIM/DMARC.
+                if !response.is_empty() && !sender_domain.is_empty() {
+                    let lower = response.to_ascii_lowercase();
+                    if lower.contains("5.7.23") || lower.contains("spf") {
+                        OUTBOUND_METRICS.record_spf_failure(&sender_domain);
+                    }
+                    if lower.contains("5.7.20") || lower.contains("5.7.21") || lower.contains("dkim") {
+                        OUTBOUND_METRICS.record_dkim_failure(&sender_domain);
+                    }
+                    if lower.contains("5.7.1 dmarc")
+                        || lower.contains("dmarc")
+                        || lower.contains("5.7.26")
+                    {
+                        OUTBOUND_METRICS.record_dmarc_failure(&sender_domain);
+                    }
+                }
+
                 Ok::<(Vec<String>, Vec<String>, String), anyhow::Error>((
                     accepted, rejected, response,
                 ))
@@ -343,7 +495,7 @@ impl SmtpSender {
         OUTBOUND_METRICS.snapshot()
     }
 
-    /// Look up MX records for a domain
+    /// Look up MX records for a domain with a timeout.
     async fn lookup_mx(&self, domain: &str) -> Result<Vec<String>> {
         // Check cache first (moka handles TTL and eviction)
         if let Some(cached) = self.mx_cache.get(domain).await {
@@ -356,7 +508,10 @@ impl SmtpSender {
 
         debug!(domain = %domain, "Looking up MX records");
 
-        let lookup = self.resolver.mx_lookup(domain).await;
+        // MI-001: Apply a 15-second timeout to DNS MX lookup to prevent hanging
+        let lookup = tokio::time::timeout(Duration::from_secs(15), self.resolver.mx_lookup(domain))
+            .await
+            .map_err(|_| anyhow!("MX lookup timed out for {}", domain))?;
 
         let mx_servers: Vec<String> = match lookup {
             Ok(mx) => {
@@ -453,8 +608,16 @@ impl SmtpSender {
     ) -> Result<SmtpSendResult> {
         let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
         let session_timeout = timeout_duration.saturating_mul(4);
+        let connection_timeout = Duration::from_secs(self.config.connection_timeout_seconds);
+        let pool_acq_timeout = Duration::from_secs(self.config.pool_acquisition_timeout_seconds);
 
-        if let Some(stream) = self.take_pooled_connection(mx_host).await {
+        // MI-001: Add pool acquisition timeout to prevent indefinite waits
+        let pool_future = self.take_pooled_connection(mx_host);
+        let stream_opt = timeout(pool_acq_timeout, pool_future)
+            .await
+            .map_err(|_| anyhow!("Timed out acquiring pooled connection for {}", mx_host))?;
+
+        if let Some(stream) = stream_opt {
             let (result, pooled) = timeout(
                 session_timeout,
                 self.smtp_session_from_pool(stream, mx_host, from, recipients, message, message_id),
@@ -467,8 +630,11 @@ impl SmtpSender {
             return Ok(result);
         }
 
-        // Resolve MX host to IP
-        let addrs = self.resolver.lookup_ip(mx_host).await?;
+        // MI-001: Apply a 15-second timeout to DNS IP lookup to prevent hanging
+        let addrs = tokio::time::timeout(Duration::from_secs(15), self.resolver.lookup_ip(mx_host))
+            .await
+            .map_err(|_| anyhow!("DNS lookup timed out for MX host: {}", mx_host))?
+            .map_err(|e| anyhow!("DNS lookup failed for MX host {}: {}", mx_host, e))?;
         let addr = addrs
             .iter()
             .next()
@@ -478,19 +644,27 @@ impl SmtpSender {
 
         debug!(mx = %mx_host, addr = %socket_addr, "Connecting to MX server");
 
+        // MI-001: Use explicit connection_timeout for TCP connect
         // Connect with timeout — use source-bound socket when IP pool is available
         let stream = if let Some(ref ip_pool) = self.ip_pool {
             let pool = ip_pool.read().await;
+            // MI-001: Add timeout for IP pool lock acquisition
             let (stream, source_ip) = timeout(
-                timeout_duration,
+                connection_timeout,
                 pool.connect_with_source(socket_addr, None),
             )
             .await
-            .map_err(|_| anyhow!("Timed out connecting to {}", mx_host))??;
+            .map_err(|_| {
+                anyhow!(
+                    "Timed out connecting to {} (connection timeout: {}s)",
+                    mx_host,
+                    connection_timeout.as_secs()
+                )
+            })??;
             debug!(source = %source_ip, mx = %mx_host, "Connected with source-bound IP");
             stream
         } else {
-            timeout(timeout_duration, TcpStream::connect(socket_addr)).await??
+            timeout(connection_timeout, TcpStream::connect(socket_addr)).await??
         };
         let (result, pooled) = timeout(
             session_timeout,
@@ -974,6 +1148,119 @@ impl SmtpSender {
         }
         Ok(())
     }
+
+    // ── MI-010: Null MX Check (RFC 7505) ─────────────────────────
+
+    /// Check if a domain uses Null MX (RFC 7505).
+    ///
+    /// A Null MX domain has a single MX record with preference 0 pointing
+    /// to ".". Such domains explicitly signal they cannot receive email.
+    /// Returns `true` if the domain is a Null MX domain.
+    async fn is_null_mx_domain(&self, domain: &str) -> Result<bool> {
+        // Perform MX lookup with a short timeout
+        let lookup =
+            match tokio::time::timeout(Duration::from_secs(10), self.resolver.mx_lookup(domain))
+                .await
+            {
+                Ok(Ok(result)) => result,
+                _ => return Ok(false), // DNS failure — assume not Null MX
+            };
+
+        let records: Vec<_> = lookup.iter().collect();
+
+        // Null MX: exactly one MX record with preference 0, exchange = "."
+        if records.len() == 1 {
+            let rec = records[0];
+            let exchange = rec.exchange().to_string();
+            let exchange_trimmed = exchange.trim_end_matches('.');
+
+            if rec.preference() == 0 && (exchange_trimmed == "." || exchange_trimmed.is_empty()) {
+                info!(
+                    domain = %domain,
+                    "Null MX detected (RFC 7505) — domain explicitly refuses email"
+                );
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    // ── MI-009: MTA-STS Policy Fetch with TLS Verification ───────
+
+    /// Fetch MTA-STS policy for a domain with TLS certificate verification.
+    ///
+    /// MTA-STS (RFC 8461) policies are fetched from `mta-sts.{domain}` over
+    /// HTTPS. This method ensures TLS certificate verification is enabled
+    /// (MI-009) — previously this was missing, allowing man-in-the-middle
+    /// attacks on policy fetches.
+    ///
+    /// Returns the raw policy text, or `None` if no policy is available.
+    pub async fn fetch_mta_sts_policy(&self, domain: &str) -> Result<Option<String>> {
+        let sts_host = format!("mta-sts.{}", domain);
+        let url = format!("https://{}/.well-known/mta-sts.txt", sts_host);
+
+        debug!(
+            domain = %domain,
+            url = %url,
+            "Fetching MTA-STS policy with TLS verification"
+        );
+
+        // MI-009: Build a reqwest client with TLS verification enabled.
+        // The `default-tls` or `rustls-tls` feature ensures certificate
+        // validation. We explicitly do NOT disable verification.
+        let mut client_builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent("ApexMail-MTA-STS/1.0")
+            .https_only(true); // Never downgrade to HTTP
+
+        // Use the configured TLS verification setting (default: verified)
+        if !self.config.mta_sts_tls_verify {
+            // Log a warning if TLS verification is disabled — this should only
+            // happen in development/testing environments.
+            warn!(
+                domain = %domain,
+                "MTA-STS policy fetch TLS verification DISABLED — INSECURE (development only)"
+            );
+            client_builder = client_builder.danger_accept_invalid_certs(true);
+        }
+
+        let client = client_builder
+            .build()
+            .map_err(|e| anyhow!("Failed to build MTA-STS HTTP client: {}", e))?;
+
+        let response = match client.get(&url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                // 404/NXDOMAIN are normal — domain doesn't have MTA-STS
+                debug!(
+                    domain = %domain,
+                    error = %e,
+                    "No MTA-STS policy found (normal)"
+                );
+                return Ok(None);
+            }
+        };
+
+        if !response.status().is_success() {
+            debug!(
+                domain = %domain,
+                status = %response.status(),
+                "MTA-STS policy fetch returned non-success status"
+            );
+            return Ok(None);
+        }
+
+        let policy = response.text().await?;
+
+        info!(
+            domain = %domain,
+            policy_len = policy.len(),
+            "MTA-STS policy fetched with TLS verification"
+        );
+
+        Ok(Some(policy))
+    }
 }
 
 async fn read_smtp_line_limited<R>(reader: &mut R, response: &mut String) -> Result<usize>
@@ -1136,6 +1423,46 @@ mod tests {
             DEFAULT_SMTP_CONNECTION_POOL_SIZE
         );
         assert_eq!(config.mx_cache_ttl_secs, DEFAULT_SMTP_MX_CACHE_TTL_SECS);
+        // MI-001: Verify connection timeout defaults
+        assert_eq!(
+            config.connection_timeout_seconds,
+            DEFAULT_SMTP_CONNECTION_TIMEOUT_SECONDS
+        );
+        assert_eq!(
+            config.pool_acquisition_timeout_seconds,
+            DEFAULT_SMTP_POOL_ACQUISITION_TIMEOUT_SECONDS
+        );
+        // MI-009: Verify MTA-STS TLS verification defaults to true
+        assert!(config.mta_sts_tls_verify);
+    }
+
+    #[test]
+    fn production_starttls_policy_forces_disabled_config() {
+        let mut config = SmtpSenderConfig::default();
+        config.require_starttls = false;
+
+        let config = enforce_production_starttls(config, true);
+
+        assert!(config.require_starttls);
+    }
+
+    #[test]
+    fn non_production_starttls_policy_preserves_disabled_config() {
+        let mut config = SmtpSenderConfig::default();
+        config.require_starttls = false;
+
+        let config = enforce_production_starttls(config, false);
+
+        assert!(!config.require_starttls);
+    }
+
+    #[test]
+    fn production_environment_names_are_detected() {
+        assert!(is_production_environment_name("production"));
+        assert!(is_production_environment_name("prod"));
+        assert!(is_production_environment_name(" PROD "));
+        assert!(!is_production_environment_name("staging"));
+        assert!(!is_production_environment_name("development"));
     }
 
     #[test]

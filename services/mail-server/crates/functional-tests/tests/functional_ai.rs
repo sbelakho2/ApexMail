@@ -63,43 +63,63 @@ fn open_rate_business_hours_boost() {
 
 // ── Subject line scoring ───────────────────────────────────────
 
+/// Optimal subject line length range used by the scoring heuristic.
+const OPTIMAL_SUBJECT_MIN_CHARS: usize = 30;
+/// Upper bound of the subject line length "sweet spot".
+const OPTIMAL_SUBJECT_MAX_CHARS: usize = 60;
+/// A subject line shorter than this is considered "very short" and scores lower.
+const SHORT_SUBJECT_THRESHOLD: usize = OPTIMAL_SUBJECT_MIN_CHARS;
+/// A subject line longer than this is considered "very long" and scores lower.
+const LONG_SUBJECT_LENGTH: usize = 120;
+
 #[test]
 fn subject_line_scoring_length_heuristics() {
     let c = ContentOptimizer::new();
-    // Optimal length (30-60 chars)
-    let optimal = c.score_subject_line("Discover amazing deals waiting for you today");
-    // Very short
-    let short = c.score_subject_line("Hi");
-    // Very long
-    let long = c.score_subject_line(&"a]".repeat(60));
+    // Optimal length (30-60 chars): test both ends of the sweet spot.
+    let optimal_body = "x".repeat(OPTIMAL_SUBJECT_MIN_CHARS);
+    let optimal = c.score_subject_line(&optimal_body);
+    let optimal_upper_body = "x".repeat(OPTIMAL_SUBJECT_MAX_CHARS);
+    let optimal_upper = c.score_subject_line(&optimal_upper_body);
+    // Very short (below optimal threshold)
+    let short_body = "x".repeat(SHORT_SUBJECT_THRESHOLD / 3);
+    let short = c.score_subject_line(&short_body);
+    // Very long (above optimal threshold)
+    let long_body = "x".repeat(LONG_SUBJECT_LENGTH);
+    let long = c.score_subject_line(&long_body);
     assert!(
         optimal > short,
-        "optimal ({}) should beat short ({})",
-        optimal,
-        short
+        "optimal ({optimal}) should beat short ({short}): opt body len {} vs short body len {}",
+        optimal_body.len(),
+        short_body.len(),
     );
     assert!(
         optimal > long,
-        "optimal ({}) should beat long ({})",
-        optimal,
-        long
+        "optimal ({optimal}) should beat long ({long}): opt body len {} vs long body len {}",
+        optimal_body.len(),
+        long_body.len(),
+    );
+    assert!(
+        optimal_upper > long,
+        "upper-optimal ({optimal_upper}) should beat long ({long}): upper body len {} vs long body len {}",
+        optimal_upper_body.len(),
+        long_body.len(),
     );
 }
 
 // ── Bandits ────────────────────────────────────────────────────
 
-#[test]
-fn bandit_epsilon_0_always_exploits() {
+#[tokio::test]
+async fn bandit_epsilon_0_always_exploits() {
     let b = BanditOptimizer::new(0.0);
-    let id_a = b.add_arm("variant-a");
-    let id_b = b.add_arm("variant-b");
+    let id_a = b.add_arm("variant-a").await.unwrap();
+    let id_b = b.add_arm("variant-b").await.unwrap();
 
     // Give arm A a much higher reward rate
     for _ in 0..50 {
-        b.record_reward(&id_a, 1.0).unwrap();
+        b.record_reward(&id_a, 1.0).await.unwrap();
     }
     for _ in 0..50 {
-        b.record_reward(&id_b, 0.0).unwrap();
+        b.record_reward(&id_b, 0.0).await.unwrap();
     }
 
     // epsilon=0 should always pick the best arm
@@ -109,14 +129,14 @@ fn bandit_epsilon_0_always_exploits() {
     }
 }
 
-#[test]
-fn bandit_epsilon_1_explores_both_arms() {
+#[tokio::test]
+async fn bandit_epsilon_1_explores_both_arms() {
     let b = BanditOptimizer::new(1.0);
-    let id_a = b.add_arm("variant-a");
-    let id_b = b.add_arm("variant-b");
+    let id_a = b.add_arm("variant-a").await.unwrap();
+    let id_b = b.add_arm("variant-b").await.unwrap();
     // Record some rewards so arms are initialized
-    b.record_reward(&id_a, 1.0).unwrap();
-    b.record_reward(&id_b, 0.0).unwrap();
+    b.record_reward(&id_a, 1.0).await.unwrap();
+    b.record_reward(&id_b, 0.0).await.unwrap();
 
     let mut saw_a = false;
     let mut saw_b = false;
@@ -132,13 +152,13 @@ fn bandit_epsilon_1_explores_both_arms() {
     assert!(saw_a && saw_b, "epsilon=1 should eventually pick both arms");
 }
 
-#[test]
-fn bandit_record_reward_updates_stats() {
+#[tokio::test]
+async fn bandit_record_reward_updates_stats() {
     let b = BanditOptimizer::new(0.1);
-    let id = b.add_arm("cta-red");
-    b.record_reward(&id, 1.0).unwrap();
-    b.record_reward(&id, 0.0).unwrap();
-    b.record_reward(&id, 1.0).unwrap();
+    let id = b.add_arm("cta-red").await.unwrap();
+    b.record_reward(&id, 1.0).await.unwrap();
+    b.record_reward(&id, 0.0).await.unwrap();
+    b.record_reward(&id, 1.0).await.unwrap();
 
     let stats = b.get_stats();
     assert_eq!(stats.len(), 1);

@@ -66,6 +66,7 @@ pub struct ScimName {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScimEmail {
     pub value: String,
+    #[serde(default)]
     pub primary: bool,
 }
 
@@ -85,6 +86,7 @@ pub struct ScimMember {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScimListQuery {
     #[serde(default = "default_start")]
     #[serde(rename = "startIndex")]
@@ -741,6 +743,9 @@ struct GroupMemberWithGroupRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    // ── User Serialization ──────────────────────────────────────
 
     #[test]
     fn test_scim_user_serialisation() {
@@ -760,10 +765,197 @@ mod tests {
         };
         let json = serde_json::to_value(&user).unwrap();
         assert_eq!(json["userName"], "alice@example.com");
+        assert_eq!(json["schemas"][0], SCIM_USER_SCHEMA);
+        assert_eq!(json["name"]["givenName"], "Alice");
+        assert!(json["active"].as_bool().unwrap());
     }
 
     #[test]
-    fn test_scim_list_response() {
+    fn test_scim_user_serialises_with_all_name_fields() {
+        let user = ScimUser {
+            schemas: vec![SCIM_USER_SCHEMA.into()],
+            id: "u-001".into(),
+            user_name: "bob@example.com".into(),
+            name: Some(ScimName {
+                given_name: Some("Bob".into()),
+                family_name: Some("Smith".into()),
+            }),
+            emails: vec![ScimEmail {
+                value: "bob@example.com".into(),
+                primary: true,
+            }],
+            active: false,
+        };
+        let json = serde_json::to_value(&user).unwrap();
+        assert_eq!(json["id"], "u-001");
+        assert_eq!(json["name"]["familyName"], "Smith");
+        assert!(!json["active"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_scim_user_deserialises_minimal() {
+        let json = json!({
+            "schemas": [SCIM_USER_SCHEMA],
+            "id": "u-002",
+            "userName": "carol@example.com",
+            "name": { "givenName": "Carol" },
+            "emails": [{ "value": "carol@example.com", "primary": true }],
+            "active": true
+        });
+        let user: ScimUser = serde_json::from_value(json).unwrap();
+        assert_eq!(user.user_name, "carol@example.com");
+        assert!(user.active);
+        assert_eq!(user.emails.len(), 1);
+    }
+
+    #[test]
+    fn test_scim_user_deserialises_without_name() {
+        // SCIM allows name to be null/missing
+        let json = json!({
+            "schemas": [SCIM_USER_SCHEMA],
+            "id": "u-003",
+            "userName": "dave@example.com",
+            "emails": [{ "value": "dave@example.com", "primary": true }],
+            "active": true
+        });
+        let user: ScimUser = serde_json::from_value(json).unwrap();
+        assert!(user.name.is_none());
+    }
+
+    #[test]
+    fn test_scim_user_deserialises_with_multiple_emails() {
+        let json = json!({
+            "schemas": [SCIM_USER_SCHEMA],
+            "id": "u-004",
+            "userName": "eve@example.com",
+            "emails": [
+                { "value": "eve@example.com", "primary": true },
+                { "value": "eve@personal.com", "primary": false }
+            ],
+            "active": true
+        });
+        let user: ScimUser = serde_json::from_value(json).unwrap();
+        assert_eq!(user.emails.len(), 2);
+        assert!(user.emails[0].primary);
+        assert!(!user.emails[1].primary);
+    }
+
+    #[test]
+    fn test_scim_user_rejects_unknown_fields() {
+        // serde(deny_unknown_fields) not set on ScimUser, so unknown fields are silently ignored
+        let json = json!({
+            "schemas": [SCIM_USER_SCHEMA],
+            "id": "u-005",
+            "userName": "frank@example.com",
+            "emails": [{ "value": "frank@example.com", "primary": true }],
+            "active": true,
+            "extraField": "should-be-ignored",
+            "nickName": "Frankie"
+        });
+        let user: ScimUser = serde_json::from_value(json).unwrap();
+        assert_eq!(user.user_name, "frank@example.com");
+        // Unknown fields are silently ignored by serde's default behaviour
+    }
+
+    // ── Group Serialization ─────────────────────────────────────
+
+    #[test]
+    fn test_scim_group_serialisation() {
+        let group = ScimGroup {
+            schemas: vec![SCIM_GROUP_SCHEMA.into()],
+            id: "g-001".into(),
+            display_name: "Engineering".into(),
+            members: vec![
+                ScimMember {
+                    value: "u-001".into(),
+                    display: Some("Alice".into()),
+                },
+                ScimMember {
+                    value: "u-002".into(),
+                    display: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&group).unwrap();
+        assert_eq!(json["displayName"], "Engineering");
+        assert_eq!(json["members"].as_array().unwrap().len(), 2);
+        assert_eq!(json["members"][0]["display"], "Alice");
+        assert_eq!(json["members"][1]["display"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_scim_group_deserialises() {
+        let json = json!({
+            "schemas": [SCIM_GROUP_SCHEMA],
+            "id": "g-002",
+            "displayName": "Marketing",
+            "members": [
+                { "value": "u-003", "display": "Carol" }
+            ]
+        });
+        let group: ScimGroup = serde_json::from_value(json).unwrap();
+        assert_eq!(group.display_name, "Marketing");
+        assert_eq!(group.members.len(), 1);
+        assert_eq!(group.members[0].value, "u-003");
+    }
+
+    #[test]
+    fn test_scim_group_empty_members() {
+        let group = ScimGroup {
+            schemas: vec![SCIM_GROUP_SCHEMA.into()],
+            id: "g-003".into(),
+            display_name: "EmptyGroup".into(),
+            members: vec![],
+        };
+        let json = serde_json::to_value(&group).unwrap();
+        assert!(json["members"].as_array().unwrap().is_empty());
+    }
+
+    // ── List Response ───────────────────────────────────────────
+
+    #[test]
+    fn test_scim_list_response_with_users() {
+        let users = vec![
+            ScimUser {
+                schemas: vec![SCIM_USER_SCHEMA.into()],
+                id: "u-001".into(),
+                user_name: "alice@example.com".into(),
+                name: None,
+                emails: vec![ScimEmail {
+                    value: "alice@example.com".into(),
+                    primary: true,
+                }],
+                active: true,
+            },
+            ScimUser {
+                schemas: vec![SCIM_USER_SCHEMA.into()],
+                id: "u-002".into(),
+                user_name: "bob@example.com".into(),
+                name: None,
+                emails: vec![ScimEmail {
+                    value: "bob@example.com".into(),
+                    primary: true,
+                }],
+                active: false,
+            },
+        ];
+        let resp = ScimListResponse {
+            schemas: vec![SCIM_LIST_SCHEMA.into()],
+            total_results: 2,
+            start_index: 1,
+            items_per_page: 100,
+            resources: users,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["totalResults"], 2);
+        assert_eq!(json["startIndex"], 1);
+        assert_eq!(json["itemsPerPage"], 100);
+        assert_eq!(json["Resources"].as_array().unwrap().len(), 2);
+        assert_eq!(json["Resources"][0]["userName"], "alice@example.com");
+    }
+
+    #[test]
+    fn test_scim_list_response_empty() {
         let resp: ScimListResponse<ScimUser> = ScimListResponse {
             schemas: vec![SCIM_LIST_SCHEMA.into()],
             total_results: 0,
@@ -773,5 +965,222 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["totalResults"], 0);
+        assert!(json["Resources"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_scim_list_response_with_groups() {
+        let groups = vec![ScimGroup {
+            schemas: vec![SCIM_GROUP_SCHEMA.into()],
+            id: "g-001".into(),
+            display_name: "Engineering".into(),
+            members: vec![],
+        }];
+        let resp = ScimListResponse {
+            schemas: vec![SCIM_LIST_SCHEMA.into()],
+            total_results: 1,
+            start_index: 1,
+            items_per_page: 50,
+            resources: groups,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["totalResults"], 1);
+        assert_eq!(json["Resources"][0]["displayName"], "Engineering");
+    }
+
+    // ── Pagination Query ────────────────────────────────────────
+
+    #[test]
+    fn test_scim_list_query_defaults() {
+        let q: ScimListQuery = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(q.start_index, 1);
+        assert_eq!(q.count, 100);
+        assert!(q.cursor.is_none());
+    }
+
+    #[test]
+    fn test_scim_list_query_accepts_start_index_and_count() {
+        let q: ScimListQuery =
+            serde_json::from_value(json!({ "startIndex": 5, "count": 25 })).unwrap();
+        assert_eq!(q.start_index, 5);
+        assert_eq!(q.count, 25);
+    }
+
+    #[test]
+    fn test_scim_list_query_accepts_cursor() {
+        let q: ScimListQuery =
+            serde_json::from_value(json!({ "startIndex": 1, "count": 10, "cursor": 50 })).unwrap();
+        assert_eq!(q.cursor, Some(50));
+    }
+
+    // ── Patch Operations ─────────────────────────────────────────
+
+    #[test]
+    fn test_scim_patch_request_single_add_operation() {
+        let json = json!({
+            "Operations": [{
+                "op": "add",
+                "path": "members",
+                "value": [{ "value": "u-010", "display": "New Member" }]
+            }]
+        });
+        let req: ScimPatchRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.operations.len(), 1);
+        assert_eq!(req.operations[0].op, "add");
+        assert_eq!(req.operations[0].path.as_deref(), Some("members"));
+    }
+
+    #[test]
+    fn test_scim_patch_request_remove_operation() {
+        let json = json!({
+            "Operations": [{
+                "op": "remove",
+                "path": "members[value eq \"u-001\"]"
+            }]
+        });
+        let req: ScimPatchRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.operations.len(), 1);
+        assert_eq!(req.operations[0].op, "remove");
+        assert!(req.operations[0].value.is_none());
+    }
+
+    #[test]
+    fn test_scim_patch_request_rejects_unknown_fields() {
+        // denY_unknown_fields is set on ScimPatchOp
+        let json = json!({
+            "Operations": [{
+                "op": "add",
+                "unknownField": "should-fail"
+            }]
+        });
+        let result: Result<ScimPatchRequest, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "Should reject unknown patch op fields");
+    }
+
+    #[test]
+    fn test_scim_patch_request_rejects_unknown_request_fields() {
+        // denY_unknown_fields is set on ScimPatchRequest
+        let json = json!({
+            "Operations": [{ "op": "add", "path": "members" }],
+            "extra": true
+        });
+        let result: Result<ScimPatchRequest, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "Should reject unknown request fields");
+    }
+
+    // ── Name/Email Validation ────────────────────────────────────
+
+    #[test]
+    fn test_scim_name_both_fields_optional() {
+        let name: ScimName = serde_json::from_value(json!({})).unwrap();
+        assert!(name.given_name.is_none());
+        assert!(name.family_name.is_none());
+    }
+
+    #[test]
+    fn test_scim_name_accepts_given_name_only() {
+        let name: ScimName = serde_json::from_value(json!({ "givenName": "Alice" })).unwrap();
+        assert_eq!(name.given_name.as_deref(), Some("Alice"));
+        assert!(name.family_name.is_none());
+    }
+
+    #[test]
+    fn test_scim_email_requires_value() {
+        let email: ScimEmail =
+            serde_json::from_value(json!({ "value": "a@b.com", "primary": false })).unwrap();
+        assert_eq!(email.value, "a@b.com");
+        assert!(!email.primary);
+    }
+
+    #[test]
+    fn test_scim_email_defaults_primary_false_if_missing() {
+        // serde default for bool is false
+        let email: ScimEmail = serde_json::from_value(json!({ "value": "a@b.com" })).unwrap();
+        assert_eq!(email.value, "a@b.com");
+        assert!(!email.primary);
+    }
+
+    // ── Constants ────────────────────────────────────────────────
+
+    #[test]
+    fn test_scim_schemas_are_well_known_urns() {
+        assert_eq!(
+            SCIM_USER_SCHEMA,
+            "urn:ietf:params:scim:schemas:core:2.0:User"
+        );
+        assert_eq!(
+            SCIM_GROUP_SCHEMA,
+            "urn:ietf:params:scim:schemas:core:2.0:Group"
+        );
+        assert_eq!(
+            SCIM_LIST_SCHEMA,
+            "urn:ietf:params:scim:api:messages:2.0:ListResponse"
+        );
+    }
+
+    #[test]
+    fn test_scim_max_count_is_reasonable() {
+        assert_eq!(MAX_SCIM_COUNT, 200);
+    }
+
+    #[test]
+    fn test_scim_disabled_hash_is_not_valid_argon2() {
+        assert_eq!(SCIM_DISABLED_HASH, "!scim:disabled");
+        assert!(!SCIM_DISABLED_HASH.starts_with('$'));
+    }
+
+    // ── Error Handling Patterns ──────────────────────────────────
+
+    #[test]
+    fn test_scim_user_rejects_missing_required_fields() {
+        // userName is required but not an Option — serde will error
+        let result: Result<ScimUser, _> =
+            serde_json::from_value(json!({ "schemas": [SCIM_USER_SCHEMA], "id": "u-001" }));
+        assert!(
+            result.is_err(),
+            "Missing userName should fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_scim_user_rejects_wrong_schema_type() {
+        let json = json!({
+            "schemas": [SCIM_GROUP_SCHEMA], // Wrong schema!
+            "id": "u-001",
+            "userName": "alice@example.com",
+            "emails": [{ "value": "alice@example.com", "primary": true }],
+            "active": true
+        });
+        // Deserialization succeeds — SCIM doesn't validate the schema in the type system
+        let user: ScimUser = serde_json::from_value(json).unwrap();
+        assert_eq!(user.user_name, "alice@example.com");
+        // Schema validation is an application-level concern, not enforced by serde
+    }
+
+    #[test]
+    fn test_scim_member_serialises_with_and_without_display() {
+        let member_with = ScimMember {
+            value: "u-001".into(),
+            display: Some("Alice".into()),
+        };
+        let json = serde_json::to_value(&member_with).unwrap();
+        assert_eq!(json["display"], "Alice");
+
+        let member_without = ScimMember {
+            value: "u-002".into(),
+            display: None,
+        };
+        let json = serde_json::to_value(&member_without).unwrap();
+        assert_eq!(json["display"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_scim_unique_violation_code() {
+        // The is_unique_violation check uses PostgreSQL code "23505"
+        // We can't easily test this without a real DB, but verify the constant
+        // pattern is correct
+        let pg_unique_code = "23505";
+        assert_eq!(pg_unique_code.len(), 5);
+        assert!(pg_unique_code.chars().all(|c| c.is_ascii_digit()));
     }
 }

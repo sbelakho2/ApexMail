@@ -353,8 +353,15 @@ class Client
     /** @throws ApexMailException */
     private function throwApiError(int $statusCode, array $body, ?array $rateLimit = null): void
     {
-        $message = $body['error'] ?? "HTTP {$statusCode}";
-        $code    = $body['code']  ?? null;
+        // The ApexMail error envelope is nested: {"error":{"code":"...","message":"..."}}
+        $message = "HTTP {$statusCode}";
+        $code    = null;
+        if (isset($body['error']) && \is_array($body['error'])) {
+            $message = $body['error']['message'] ?? "HTTP {$statusCode}";
+            $code    = $body['error']['code']    ?? null;
+        } elseif (isset($body['error'])) {
+            $message = $body['error'];
+        }
         $metadata = $rateLimit ?? [];
 
         $exception = match (true) {

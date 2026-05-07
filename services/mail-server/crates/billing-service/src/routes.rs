@@ -19,13 +19,14 @@ use apexmail_lib::{ErrorCode, ErrorEnvelope};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use billing_common::proration;
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -124,7 +125,7 @@ async fn get_plan(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPlanFeaturesPayload {
     dedicated_ip: bool,
     dedicated_ip_count: i32,
@@ -299,21 +300,21 @@ impl From<&Plan> for LegacyPlanLimitsDto {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPlanCreateLimitsInput {
     emails_per_month: i64,
     api_calls_per_minute: i64,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPlanPatchLimitsInput {
     emails_per_month: Option<i64>,
     api_calls_per_minute: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPlanCreateBody {
     name: String,
     display_name: String,
@@ -327,7 +328,7 @@ struct LegacyPlanCreateBody {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPlanPatchBody {
     display_name: Option<String>,
     description: Option<String>,
@@ -650,7 +651,7 @@ struct LegacyPaygCostDto {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPaygEstimateBody {
     emails_sent: i64,
     #[serde(default)]
@@ -658,7 +659,7 @@ struct LegacyPaygEstimateBody {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyOverageEstimateBody {
     emails_sent: i64,
     email_limit: i64,
@@ -802,7 +803,11 @@ async fn estimate_overage_cost(
 async fn get_payg_usage(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantIdQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let now = chrono::Utc::now();
     let month_start_date = now.date_naive().with_day(1).unwrap_or(now.date_naive());
     let period_start = month_start_date.and_time(chrono::NaiveTime::MIN).and_utc();
@@ -832,13 +837,13 @@ async fn get_payg_usage(
     .into_response())
 }
 
-const MILLISECONDS_PER_DAY: i64 = 86_400_000;
 const LEGACY_DOWNGRADE_PLAN: &str = "free";
 
 #[derive(Debug, Clone)]
 struct RouteSubscription {
     plan_name: String,
     billing_interval: BillingInterval,
+    status: String,
     current_period_start: chrono::DateTime<chrono::Utc>,
     current_period_end: chrono::DateTime<chrono::Utc>,
 }
@@ -847,6 +852,7 @@ struct RouteSubscription {
 struct RouteSubscriptionRow {
     plan_name: String,
     billing_interval: String,
+    status: String,
     current_period_start: chrono::DateTime<chrono::Utc>,
     current_period_end: chrono::DateTime<chrono::Utc>,
 }
@@ -856,6 +862,7 @@ impl RouteSubscriptionRow {
         RouteSubscription {
             plan_name: self.plan_name,
             billing_interval: parse_billing_interval(&self.billing_interval),
+            status: self.status,
             current_period_start: self.current_period_start,
             current_period_end: self.current_period_end,
         }
@@ -877,7 +884,7 @@ struct LegacyProrationDto {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacySwitchPlanBody {
     plan_name: String,
     #[serde(default = "default_billing_interval")]
@@ -885,7 +892,7 @@ struct LegacySwitchPlanBody {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyCancelBody {
     reason: Option<String>,
     feedback: Option<String>,
@@ -911,38 +918,7 @@ fn legacy_billing_interval(interval: BillingInterval) -> &'static str {
     }
 }
 
-fn prorated_amount(
-    total_price_cents: i64,
-    days_remaining: i64,
-    days_in_period: i64,
-) -> Result<i64, String> {
-    if days_remaining <= 0 {
-        return Ok(0);
-    }
-    if days_in_period <= 0 {
-        return Err("Invalid period: daysInPeriod must be greater than 0".to_string());
-    }
-
-    let numerator = i128::from(total_price_cents)
-        .checked_mul(i128::from(days_remaining))
-        .ok_or_else(|| "Proration amount overflowed supported billing range".to_string())?;
-    let denominator = i128::from(days_in_period);
-    let rounded = numerator
-        .checked_add(denominator / 2)
-        .ok_or_else(|| "Proration amount overflowed supported billing range".to_string())?
-        / denominator;
-
-    i64::try_from(rounded)
-        .map_err(|_| "Proration amount overflowed supported billing range".to_string())
-}
-
-fn ceil_day_count(duration_ms: i64) -> i64 {
-    if duration_ms <= 0 {
-        0
-    } else {
-        (duration_ms + MILLISECONDS_PER_DAY - 1) / MILLISECONDS_PER_DAY
-    }
-}
+// Replaced by billing_common::proration::{prorated_amount, ceil_day_count}
 
 fn preview_plan_proration(
     config: &BillingConfig,
@@ -951,7 +927,7 @@ fn preview_plan_proration(
     subscription: &RouteSubscription,
 ) -> Result<LegacyProrationDto, String> {
     let now = chrono::Utc::now();
-    let days_in_period = ceil_day_count(
+    let days_in_period = proration::ceil_day_count(
         subscription
             .current_period_end
             .signed_duration_since(subscription.current_period_start)
@@ -961,7 +937,7 @@ fn preview_plan_proration(
         return Err("Invalid period: daysInPeriod must be greater than 0".to_string());
     }
 
-    let days_elapsed = ceil_day_count(
+    let days_elapsed = proration::ceil_day_count(
         now.signed_duration_since(subscription.current_period_start)
             .num_milliseconds(),
     );
@@ -977,8 +953,10 @@ fn preview_plan_proration(
         new_plan.price_monthly
     };
 
-    let credit_amount = prorated_amount(current_period_price, days_remaining, days_in_period)?;
-    let charge_amount = prorated_amount(new_period_price, days_remaining, days_in_period)?;
+    let credit_amount =
+        proration::prorated_amount(current_period_price, days_remaining, days_in_period)?;
+    let charge_amount =
+        proration::prorated_amount(new_period_price, days_remaining, days_in_period)?;
     let net_amount = charge_amount - credit_amount;
 
     if net_amount > config.max_proration_charge_cents {
@@ -1013,9 +991,9 @@ fn preview_plan_proration(
         current_plan_days_remaining: days_remaining,
         new_plan_days_in_period: days_remaining,
         effective_date: now,
-        explanation: build_proration_explanation(
-            current_plan,
-            new_plan,
+        explanation: proration::build_proration_explanation(
+            &current_plan.display_name,
+            &new_plan.display_name,
             current_period_price,
             new_period_price,
             days_remaining,
@@ -1028,69 +1006,7 @@ fn preview_plan_proration(
     })
 }
 
-fn build_proration_explanation(
-    current_plan: &Plan,
-    new_plan: &Plan,
-    current_price: i64,
-    new_price: i64,
-    days_remaining: i64,
-    days_in_period: i64,
-    credit_amount: i64,
-    charge_amount: i64,
-    net_amount: i64,
-) -> String {
-    let format_currency = |cents: i64| format!("${:.2}", cents.abs() as f64 / 100.0);
-
-    let mut lines = vec![
-        format!(
-            "Plan change from {} to {}",
-            current_plan.display_name, new_plan.display_name
-        ),
-        String::new(),
-        format!(
-            "Current period: {} days remaining out of {} days",
-            days_remaining, days_in_period
-        ),
-        String::new(),
-        format!(
-            "Credit for unused {} time: {}",
-            current_plan.display_name,
-            format_currency(credit_amount)
-        ),
-        format!(
-            "({} / {} days × {} days)",
-            format_currency(current_price),
-            days_in_period,
-            days_remaining
-        ),
-        String::new(),
-        format!(
-            "Charge for {} remaining time: {}",
-            new_plan.display_name,
-            format_currency(charge_amount)
-        ),
-        format!(
-            "({} / {} days × {} days)",
-            format_currency(new_price),
-            days_in_period,
-            days_remaining
-        ),
-        String::new(),
-    ];
-
-    if net_amount > 0 {
-        lines.push(format!("Net charge: {}", format_currency(net_amount)));
-    } else if net_amount < 0 {
-        lines.push(format!(
-            "Net credit: {} (applied to next invoice)",
-            format_currency(net_amount)
-        ));
-    } else {
-        lines.push("No additional charge or credit".to_string());
-    }
-
-    lines.join("\n")
-}
+// Replaced by billing_common::proration::build_proration_explanation
 
 fn generate_audit_log_id() -> String {
     Uuid::new_v4()
@@ -1209,7 +1125,7 @@ async fn get_route_subscription(
 ) -> Result<Option<RouteSubscription>, ApiError> {
     let row: Option<RouteSubscriptionRow> = sqlx::query_as(
         r#"
-        SELECT plan_name, billing_interval, current_period_start, current_period_end
+        SELECT plan_name, billing_interval, status, current_period_start, current_period_end
         FROM subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
@@ -1225,15 +1141,59 @@ async fn get_route_subscription(
     Ok(row.map(RouteSubscriptionRow::into_subscription))
 }
 
+/// Validate that the subscription's current status permits the requested
+/// operation, according to the subscription state machine (BS-006).
+///
+/// Rules:
+/// - **Plan switch** is only allowed from `active` or `trialing`.
+///   Subscriptions in `past_due` must settle outstanding payments first.
+/// - **Cancellation** (immediate or end-of-period) is only allowed from
+///   `active` or `trialing`.  Past-due subscriptions cannot be cancelled
+///   without first resolving the outstanding balance.
+fn validate_subscription_transition(
+    subscription: &RouteSubscription,
+    operation: &str,
+) -> Result<(), ApiError> {
+    match subscription.status.as_str() {
+        "active" | "trialing" => Ok(()),
+        "past_due" => {
+            let msg = format!(
+                "Cannot {operation} a subscription with status '{status}'. \
+                 The subscription has outstanding payments that must be \
+                 resolved first.",
+                status = subscription.status
+            );
+            Err(ApiError::InvalidSubscriptionStatus(msg))
+        }
+        other => {
+            let msg = format!(
+                "Cannot {operation} a subscription with status '{other}'.",
+                other = other
+            );
+            Err(ApiError::InvalidSubscriptionStatus(msg))
+        }
+    }
+}
+
 async fn switch_plan(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantIdQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<LegacySwitchPlanBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let now = chrono::Utc::now();
 
     if body.plan_name == "payg" {
         let current_subscription = get_route_subscription(&state.db, &q.tenant_id).await?;
+
+        // Validate the subscription status allows plan switching (BS-006).
+        if let Some(ref subscription) = current_subscription {
+            validate_subscription_transition(subscription, "switch plan")?;
+        }
+
         let effective_date = current_subscription
             .as_ref()
             .map(|subscription| subscription.current_period_end)
@@ -1251,7 +1211,7 @@ async fn switch_plan(
                 UPDATE subscriptions
                 SET cancel_at_period_end = true, updated_at = $1
                 WHERE tenant_id = $2
-                  AND status IN ('active', 'trialing', 'past_due')
+                  AND status IN ('active', 'trialing')
                 "#,
             )
             .bind(now)
@@ -1313,6 +1273,9 @@ async fn switch_plan(
             ))
         }
     };
+
+    // Validate the subscription status allows a plan switch (BS-006).
+    validate_subscription_transition(&subscription, "switch plan")?;
 
     let current_plan = match plans::get_plan_by_name(&state.db, &subscription.plan_name).await? {
         Some(plan) => plan,
@@ -1423,8 +1386,12 @@ async fn switch_plan(
 async fn cancel_subscription_request(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantIdQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<LegacyCancelBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let subscription = match get_route_subscription(&state.db, &q.tenant_id).await? {
         Some(subscription) => subscription,
         None => {
@@ -1435,6 +1402,9 @@ async fn cancel_subscription_request(
             ))
         }
     };
+
+    // Validate the subscription status allows cancellation (BS-006).
+    validate_subscription_transition(&subscription, "cancel")?;
 
     let now = chrono::Utc::now();
     let effective_date = if body.cancel_immediately {
@@ -1532,14 +1502,14 @@ async fn cancel_subscription_request(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DateRangeQuery {
     start_date: Option<String>,
     end_date: Option<String>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BillingExportQuery {
     #[serde(rename = "type")]
     export_type: Option<String>,
@@ -1550,6 +1520,7 @@ struct BillingExportQuery {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TenantIdQuery {
     tenant_id: String,
 }
@@ -1971,6 +1942,7 @@ async fn export_billing_data(
 
 /// Query params shared by usage + invoice endpoints.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TenantQuery {
     tenant_id: String,
 }
@@ -1979,17 +1951,22 @@ struct TenantQuery {
 async fn get_usage(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let now = chrono::Utc::now();
     let month_start_date = now.date_naive().with_day(1).unwrap_or(now.date_naive());
     let period_start = month_start_date.and_time(chrono::NaiveTime::MIN).and_utc();
     let period_end = period_start + chrono::Months::new(1);
     let summary = usage::get_usage(&state.db, &q.tenant_id, period_start, period_end).await?;
-    Ok(Json(summary))
+    Ok(Json(summary).into_response())
 }
 
 /// POST /usage/record
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecordUsageBody {
     tenant_id: String,
     event_type: MeterEventType,
@@ -2005,8 +1982,12 @@ fn default_qty() -> i64 {
 
 async fn record_usage(
     State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<RecordUsageBody>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &body.tenant_id) {
+        return Ok(response);
+    }
     let recorded = usage::record_usage(
         &state.db,
         &state.redis,
@@ -2020,7 +2001,8 @@ async fn record_usage(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({ "recorded": recorded })),
-    ))
+    )
+        .into_response())
 }
 
 /// POST /usage/record-checked
@@ -2028,8 +2010,12 @@ async fn record_usage(
 /// Avoids the TOCTOU window of separate `GET /quota` + `POST /usage/record`.
 async fn record_usage_checked(
     State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
     Json(body): Json<RecordUsageBody>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &body.tenant_id) {
+        return Ok(response);
+    }
     let result = usage::record_with_quota_check(
         &state.db,
         &state.redis,
@@ -2048,11 +2034,13 @@ async fn record_usage_checked(
     Ok((
         status,
         Json(serde_json::to_value(&result).unwrap_or_default()),
-    ))
+    )
+        .into_response())
 }
 
 /// Query params for invoice listing.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InvoiceListQuery {
     tenant_id: String,
     #[serde(default = "default_limit")]
@@ -2077,7 +2065,11 @@ fn clamp_offset(offset: i64, max: i64) -> i64 {
 async fn list_invoices(
     State(state): State<Arc<AppState>>,
     Query(q): Query<InvoiceListQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let invoices = invoices::list_invoices(
         &state.db,
         &q.tenant_id,
@@ -2085,7 +2077,7 @@ async fn list_invoices(
         clamp_offset(q.offset, 100_000),
     )
     .await?;
-    Ok(Json(serde_json::json!({ "invoices": invoices })))
+    Ok(Json(serde_json::json!({ "invoices": invoices })).into_response())
 }
 
 /// GET /invoices/:id?tenant_id=...
@@ -2093,7 +2085,11 @@ async fn get_invoice(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
     Query(q): Query<TenantQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let invoice = invoices::get_invoice_by_id(&state.db, id).await?;
     match invoice {
         Some(inv) if inv.tenant_id == q.tenant_id => {
@@ -2111,7 +2107,11 @@ async fn get_invoice(
 async fn get_subscription(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantQuery>,
+    Extension(scope): Extension<TenantAuthScope>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let sub = subscriptions::get_subscription(&state.db, &q.tenant_id).await?;
     match sub {
         Some(s) => Ok(Json(serde_json::json!({ "subscription": s })).into_response()),
@@ -2126,9 +2126,13 @@ async fn get_subscription(
 async fn check_quota(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TenantQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = check_tenant_access(&scope, &q.tenant_id) {
+        return Ok(response);
+    }
     let status = usage::check_quota(&state.db, &state.redis, &q.tenant_id).await?;
-    Ok(Json(status))
+    Ok(Json(status).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -2142,6 +2146,9 @@ enum ApiError {
     Usage(usage::UsageError),
     Invoice(invoices::InvoiceError),
     Subscription(subscriptions::SubscriptionError),
+    /// The subscription's current status does not permit the requested
+    /// operation under the subscription state machine (BS-006).
+    InvalidSubscriptionStatus(String),
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -2242,6 +2249,9 @@ impl IntoResponse for ApiError {
                 ErrorCode::NotFound,
                 "active subscription not found".to_string(),
             ),
+            ApiError::InvalidSubscriptionStatus(message) => {
+                (StatusCode::CONFLICT, ErrorCode::Conflict, message.clone())
+            }
             ApiError::Subscription(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
@@ -2261,9 +2271,59 @@ fn to_json_value<T: serde::Serialize>(value: T) -> Result<serde_json::Value, Api
     serde_json::to_value(value).map_err(|e| ApiError::Plans(sqlx::Error::Decode(Box::new(e))))
 }
 
+/// Scope of authority granted by a service auth token.
+#[derive(Clone, Debug)]
+enum TenantAuthScope {
+    /// Full access to any tenant's data (backward-compatible with original single-token mode).
+    Any,
+    /// Access restricted to a single named tenant.
+    Scoped(String),
+}
+
+/// Parse a token value against the configured service auth token.
+///
+/// Supports two formats:
+/// - `"<service_token>"` — full access (`TenantAuthScope::Any`)
+/// - `"<tenant_id>:<service_token>"` — tenant-scoped access (`TenantAuthScope::Scoped(...)`)
+fn parse_token_scope(token: &str, service_token: &str) -> Option<TenantAuthScope> {
+    if service_token.is_empty() {
+        return None;
+    }
+    if token == service_token {
+        return Some(TenantAuthScope::Any);
+    }
+    // Check for tenant-scoped token format: "tenant_id:token"
+    if let Some(tenant_id) = token.strip_suffix(&format!(":{}", service_token)) {
+        if !tenant_id.is_empty() && !tenant_id.contains(':') {
+            return Some(TenantAuthScope::Scoped(tenant_id.to_string()));
+        }
+    }
+    None
+}
+
+/// Check that the auth scope allows access to the given tenant_id.
+/// Returns `Ok(())` if the scope is `Any` or matches the requested tenant.
+/// On failure, returns an HTTP 403 Forbidden response.
+fn check_tenant_access(scope: &TenantAuthScope, tenant_id: &str) -> Result<(), Response> {
+    match scope {
+        TenantAuthScope::Any => Ok(()),
+        TenantAuthScope::Scoped(scoped) if scoped == tenant_id => Ok(()),
+        _ => Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "FORBIDDEN",
+                    "message": "not authorized for this tenant"
+                }
+            })),
+        )
+            .into_response()),
+    }
+}
+
 async fn require_service_auth(
     State(state): State<Arc<AppState>>,
-    req: axum::http::Request<axum::body::Body>,
+    mut req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
     if matches!(req.uri().path(), "/health" | "/webhooks/stripe") {
@@ -2271,12 +2331,17 @@ async fn require_service_auth(
     }
 
     let token = extract_token(req.headers());
-    if token.as_deref() == Some(state.config.service_auth_token.as_str())
-        && !state.config.service_auth_token.is_empty()
-    {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    let scope = match token {
+        Some(token) => parse_token_scope(&token, &state.config.service_auth_token),
+        None => None,
+    };
+
+    match scope {
+        Some(scope) => {
+            req.extensions_mut().insert(scope);
+            Ok(next.run(req).await)
+        }
+        None => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
@@ -2465,7 +2530,7 @@ mod tests {
     async fn test_router_with_config(mut config: BillingConfig) -> Router {
         let db = PgPoolOptions::new()
             .max_connections(1)
-            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:5433/apexmail")
+            .connect_lazy("postgres://localhost/unused")
             .expect("failed to create lazy test database pool");
         let redis = RedisConfig::from_url("redis://127.0.0.1:6379")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -2667,6 +2732,7 @@ mod tests {
         let subscription = RouteSubscription {
             plan_name: "starter".into(),
             billing_interval: BillingInterval::Monthly,
+            status: "active".into(),
             current_period_start: now - chrono::TimeDelta::days(15),
             current_period_end: now + chrono::TimeDelta::days(15),
         };
@@ -2733,6 +2799,7 @@ mod tests {
         let subscription = RouteSubscription {
             plan_name: "starter".into(),
             billing_interval: BillingInterval::Yearly,
+            status: "active".into(),
             current_period_start: now - chrono::TimeDelta::days(180),
             current_period_end: now + chrono::TimeDelta::days(180),
         };

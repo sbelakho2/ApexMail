@@ -75,11 +75,13 @@ async fn require_service_token(
 // ─── Request / Response types ──────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EmbedRequest {
     texts: Vec<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddVectorRequest {
     text: String,
     vector: Vec<f32>,
@@ -89,6 +91,7 @@ struct AddVectorRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchRequest {
     vector: Vec<f32>,
     tenant_id: String,
@@ -200,15 +203,18 @@ mod tests {
                 max_concurrency: 4,
                 timeout_ms: 5000,
                 pooling: PoolingStrategy::Mean,
+                sidecar_tls_enabled: false,
+                sidecar_tls_ca_path: String::new(),
             },
             store: StoreConfig {
                 max_vectors: 1000,
                 eviction_threshold: 900,
+                persistence_hmac_key: String::new(),
             },
         };
         let state = Arc::new(AppState {
             embedding_service: EmbeddingService::new(config.inference.clone()).unwrap(),
-            vector_store: VectorStore::new(384, 1000, 900),
+            vector_store: VectorStore::new(384, 1000, 900, vec![]),
             config,
             service_token: "test-key".into(),
         });

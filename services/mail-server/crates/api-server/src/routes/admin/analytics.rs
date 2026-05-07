@@ -15,6 +15,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnalyticsQuery {
     #[serde(default = "default_range")]
     pub range: String,
@@ -237,8 +238,7 @@ async fn get_analytics(
 
     let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(&stats_sql)
         .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None)
+        .await?
         .unwrap_or((0, 0, 0, 0, 0, 0));
 
     let (sent, delivered, opened, clicked, bounced, complaints) = row;

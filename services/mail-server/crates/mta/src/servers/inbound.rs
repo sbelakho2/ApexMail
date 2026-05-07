@@ -22,7 +22,7 @@ use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
-use crate::auth::EmailAuthenticator;
+use crate::auth::{EmailAuthenticator, SpfStatus};
 use crate::config::{InboundConfig, RateLimitConfig};
 
 // Shared resolver to avoid allocating a new DNS client per PTR verification.
@@ -37,12 +37,16 @@ pub struct SessionContext {
     pub id: String,
     pub client_ip: IpAddr,
     pub authenticated: bool,
+    #[serde(default)]
+    pub tls_active: bool,
     pub tenant_id: Option<String>,
     pub message_count: u32,
     pub start_time: chrono::DateTime<chrono::Utc>,
     pub helo_hostname: String,
     pub mail_from: Option<String>,
     pub rcpt_to: Vec<String>,
+    /// Whether SPF result was served from cache or freshly evaluated.
+    pub spf_status: Option<SpfStatus>,
 }
 
 /// Inbound SMTP server.
@@ -189,12 +193,14 @@ impl InboundServer {
             id: Uuid::new_v4().to_string(),
             client_ip: ip,
             authenticated: false,
+            tls_active: false,
             tenant_id: None,
             message_count: 0,
             start_time: chrono::Utc::now(),
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            spf_status: None,
         };
 
         let allow_starttls = tls.is_some();
@@ -209,6 +215,10 @@ impl InboundServer {
                 let inner = stream.into_inner();
                 match acceptor.accept(inner).await {
                     Ok(tls_stream) => {
+                        ctx.tls_active = true;
+                        ctx.helo_hostname.clear();
+                        ctx.mail_from = None;
+                        ctx.rcpt_to.clear();
                         let mut tls_buf = BufStream::new(tls_stream);
                         self.run_session_loop(&mut tls_buf, &mut ctx, false).await;
                     }
@@ -252,17 +262,20 @@ impl InboundServer {
             let cmd = line.trim().to_uppercase();
 
             // #136:Handle STARTTLS before generic command dispatch
-            if cmd.starts_with("STARTTLS") {
-                if allow_starttls {
+            if cmd == "STARTTLS" {
+                if starttls_is_available(allow_starttls, ctx) {
                     let _ = write_line_buf(stream, "220 Ready to start TLS\r\n").await;
                     return true; // Signal caller to upgrade
                 } else {
                     let _ = write_line_buf(stream, "454 TLS not available\r\n").await;
                     continue;
                 }
+            } else if cmd.starts_with("STARTTLS") {
+                let _ = write_line_buf(stream, "501 Syntax: STARTTLS\r\n").await;
+                continue;
             }
 
-            let response = self.handle_command(&cmd, &line, ctx).await;
+            let response = self.handle_command(&cmd, &line, ctx, allow_starttls).await;
 
             if let Err(e) = write_line_buf(stream, &response).await {
                 debug!(error = %e, "Write error");
@@ -361,12 +374,14 @@ impl InboundServer {
             id: Uuid::new_v4().to_string(),
             client_ip: ip,
             authenticated: false,
+            tls_active: true,
             tenant_id: None,
             message_count: 0,
             start_time: chrono::Utc::now(),
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            spf_status: None,
         };
 
         let mut stream = BufStream::new(tls_stream);
@@ -381,6 +396,7 @@ impl InboundServer {
         cmd_upper: &str,
         raw_line: &str,
         ctx: &mut SessionContext,
+        allow_starttls: bool,
     ) -> String {
         if cmd_upper.starts_with("EHLO") || cmd_upper.starts_with("HELO") {
             let Some(host) = parse_helo_hostname(raw_line) else {
@@ -389,7 +405,7 @@ impl InboundServer {
             ctx.helo_hostname = host.to_string();
             let mut caps = format!("250-{} Hello {}\r\n", self.hostname, host);
             caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
-            if self.config.tls.enabled {
+            if should_advertise_starttls(self.config.tls.enabled, allow_starttls, ctx) {
                 caps.push_str("250-STARTTLS\r\n");
             }
             caps.push_str("250-8BITMIME\r\n");
@@ -723,6 +739,18 @@ fn ptr_verification_exempt(ip: IpAddr) -> bool {
     }
 }
 
+fn starttls_is_available(allow_starttls: bool, ctx: &SessionContext) -> bool {
+    allow_starttls && !ctx.tls_active
+}
+
+fn should_advertise_starttls(
+    tls_enabled: bool,
+    allow_starttls: bool,
+    ctx: &SessionContext,
+) -> bool {
+    tls_enabled && starttls_is_available(allow_starttls, ctx)
+}
+
 /// #138:Write all bytes to a raw TcpStream, handling partial writes.
 async fn write_line_tcp(socket: &TcpStream, data: &str) -> std::io::Result<()> {
     let bytes = data.as_bytes();
@@ -814,15 +842,43 @@ mod tests {
             id: "test".into(),
             client_ip: std::net::IpAddr::from([127, 0, 0, 1]),
             authenticated: false,
+            tls_active: false,
             tenant_id: None,
             message_count: 0,
             start_time: chrono::Utc::now(),
             helo_hostname: String::new(),
             mail_from: None,
             rcpt_to: Vec::new(),
+            spf_status: None,
         };
         assert!(!ctx.authenticated);
         assert_eq!(ctx.message_count, 0);
+    }
+
+    #[test]
+    fn test_starttls_available_only_before_tls_activation() {
+        let mut ctx = SessionContext {
+            id: "test".into(),
+            client_ip: std::net::IpAddr::from([127, 0, 0, 1]),
+            authenticated: false,
+            tls_active: false,
+            tenant_id: None,
+            message_count: 0,
+            start_time: chrono::Utc::now(),
+            helo_hostname: String::new(),
+            mail_from: None,
+            rcpt_to: Vec::new(),
+            spf_status: None,
+        };
+
+        assert!(starttls_is_available(true, &ctx));
+        assert!(should_advertise_starttls(true, true, &ctx));
+        assert!(!should_advertise_starttls(false, true, &ctx));
+        assert!(!should_advertise_starttls(true, false, &ctx));
+
+        ctx.tls_active = true;
+        assert!(!starttls_is_available(true, &ctx));
+        assert!(!should_advertise_starttls(true, true, &ctx));
     }
 
     #[test]

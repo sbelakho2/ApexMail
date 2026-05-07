@@ -1,3 +1,11 @@
+// L-01: Missing composite index on ent_compliance_audit_logs for tenant queries.
+// Run the following migration in production:
+//   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ent_audit_logs_tenant_action
+//     ON ent_compliance_audit_logs (tenant_id, action, resource_type, created_at DESC);
+//
+// This index accelerates the filtered queries in get_audit_logs() and prevents
+// sequential scans on large audit tables.
+
 use chrono::Utc;
 use sqlx::PgPool;
 use tracing::info;
@@ -157,8 +165,10 @@ impl ComplianceService {
         Self { db }
     }
 
-    /// Enable compliance frameworks for an account
-    /// When `hipaa_enabled` is true, both `encryption_at_rest` and `encryption_in_transit` /// are enabled. For more granular control, use separate configuration methods.
+    /// Enable compliance frameworks for an account.
+    ///
+    /// When `hipaa_enabled` is true, both `encryption_at_rest` and `encryption_in_transit`
+    /// are enabled. For more granular control, use separate configuration methods.
     pub async fn enable(
         &self,
         tenant_id: String,
@@ -169,21 +179,30 @@ impl ComplianceService {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
-        // #261:HIPAA requires both encryption types. Set them based on HIPAA flag,
-        // but allow separate configuration for non-HIPAA compliance frameworks.
-        let encryption_at_rest =
-            hipaa_enabled || frameworks.iter().any(|f| f == "soc2" || f == "iso27001");
+        // HIPAA + SOC2 + ISO27001 + GDPR all require encryption at rest (HIPAA §164.312,
+        // SOC2 CC6.7, ISO27001 A.10.1, GDPR Article 32).
+        let encryption_at_rest = hipaa_enabled
+            || frameworks
+                .iter()
+                .any(|f| f == "soc2" || f == "iso27001" || f == "gdpr");
         let encryption_in_transit = true; // Always require encryption in transit
 
+        let retention_days = 2555i32; // 7 years — meets HIPAA §164.316(b)(2)(i), SOC2 CC3.1, GDPR Article 5(1)(e)
         let row = sqlx::query_as::<_, ComplianceConfigRow>(
             "INSERT INTO ent_compliance_configs (id, tenant_id, enabled_frameworks, status, zero_retention_mode, encryption_at_rest, encryption_in_transit, audit_log_retention_days, require_mfa, baa_signed, dpa_signed, created_at, updated_at)
              VALUES ($1,$2,$3,'active',false,$4,$5,$6,false,false,false,$7,$7)
              ON CONFLICT (tenant_id) DO UPDATE SET
-               enabled_frameworks=$3, status='active', encryption_at_rest=$4, encryption_in_transit=$5, updated_at=$7
+               enabled_frameworks=EXCLUDED.enabled_frameworks, status='active',
+               encryption_at_rest=EXCLUDED.encryption_at_rest, encryption_in_transit=EXCLUDED.encryption_in_transit,
+               audit_log_retention_days=EXCLUDED.audit_log_retention_days,
+               require_mfa=EXCLUDED.require_mfa, baa_signed=EXCLUDED.baa_signed,
+               dpa_signed=EXCLUDED.dpa_signed, zero_retention_mode=EXCLUDED.zero_retention_mode,
+               data_retention_days=EXCLUDED.data_retention_days,
+               updated_at=$7
              RETURNING *"
         )
         .bind(id).bind(tenant_uuid).bind(&frameworks).bind(encryption_at_rest).bind(encryption_in_transit)
-        .bind(2555i32).bind(now)
+        .bind(retention_days).bind(now)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Enable compliance: {e}"))?;
@@ -278,17 +297,19 @@ impl ComplianceService {
         user_agent: Option<&str>,
         session_id: Option<&str>,
         request_id: Option<&str>,
+        metadata: Option<serde_json::Value>,
     ) -> Result<(), String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
         let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO ent_compliance_audit_logs (id, tenant_id, user_id, action, resource_type, resource_id, old_value, new_value, ip_address, user_agent, session_id, request_id, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::inet,$10,$11,$12,NOW())"
+            "INSERT INTO ent_compliance_audit_logs (id, tenant_id, user_id, action, resource_type, resource_id, old_value, new_value, ip_address, user_agent, session_id, request_id, metadata, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::inet,$10,$11,$12,$13,NOW())"
         )
         .bind(id).bind(tenant_uuid).bind(user_id).bind(action)
         .bind(resource_type).bind(resource_id)
         .bind(&old_value).bind(&new_value)
         .bind(ip_address).bind(user_agent).bind(session_id).bind(request_id)
+        .bind(&metadata)
         .execute(&self.db)
         .await
         .map_err(|e| format!("Log audit: {e}"))?;
@@ -305,33 +326,24 @@ impl ComplianceService {
         offset: i64,
     ) -> Result<ApiResult<Vec<AuditLogEntry>>, String> {
         let tenant_uuid = parse_tenant_id(&tenant_id)?;
-        // Build dynamic query
-        let mut query =
-            String::from("SELECT * FROM ent_compliance_audit_logs WHERE tenant_id = $1");
-        let mut param_idx = 2;
 
-        if action.is_some() {
-            query.push_str(&format!(" AND action = ${param_idx}"));
-            param_idx += 1;
-        }
-        if resource_type.is_some() {
-            query.push_str(&format!(" AND resource_type = ${param_idx}"));
-            param_idx += 1;
-        }
-        query.push_str(&format!(" ORDER BY created_at DESC LIMIT ${param_idx}"));
-        param_idx += 1;
-        query.push_str(&format!(" OFFSET ${param_idx}"));
+        // H-01: Use CASE WHEN / COALESCE patterns instead of dynamic SQL via format!()
+        // to prevent SQL injection. All parameters remain strongly typed and bound via sqlx.
+        let query = sqlx::query_as::<_, AuditLogEntryRow>(
+            "SELECT * FROM ent_compliance_audit_logs
+             WHERE tenant_id = $1
+               AND ($2::text IS NULL OR action = $2)
+               AND ($3::text IS NULL OR resource_type = $3)
+             ORDER BY created_at DESC
+             LIMIT $4 OFFSET $5",
+        )
+        .bind(tenant_uuid)
+        .bind(action)
+        .bind(resource_type)
+        .bind(limit)
+        .bind(offset);
 
-        let mut q = sqlx::query_as::<_, AuditLogEntryRow>(&query).bind(tenant_uuid);
-        if let Some(a) = action {
-            q = q.bind(a);
-        }
-        if let Some(rt) = resource_type {
-            q = q.bind(rt);
-        }
-        q = q.bind(limit).bind(offset);
-
-        let rows = q
+        let rows = query
             .fetch_all(&self.db)
             .await
             .map_err(|e| format!("Get audit logs: {e}"))?;

@@ -68,6 +68,7 @@ pub struct TestWebhookResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListWebhooksQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

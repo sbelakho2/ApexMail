@@ -152,9 +152,9 @@ fn get_signing_key() -> &'static [u8; 32] {
         let mut key = [0u8; 32];
         // Use a CSPRNG (OS-backed) for full 256-bit entropy.
         // UUID v4 has 12–13 fixed bits (version nibble + variant), which would
-        // reduce effective key entropy to ~243 bits. rand::thread_rng draws
+        // reduce effective key entropy to ~243 bits. rand::rng draws
         // directly from the OS CSPRNG with no fixed bit patterns.
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         key
     })
 }
