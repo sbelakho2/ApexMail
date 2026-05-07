@@ -96,7 +96,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -5798,7 +5798,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.6",
  "x509-parser 0.16.0",
 ]
 
@@ -6265,7 +6265,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.6",
  "zeroize",
 ]
 
