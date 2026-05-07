@@ -137,7 +137,7 @@ aws-sdk-sesv2 = "1.50"
 axum = { version = "0.7", features = ["macros"] }
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip", "request-id", "timeout", "limit", "fs", "set-header"] }
-hyper = { version = "1.0", features = ["full"] }
+hyper = { version = "1.9", features = ["full"] }
 hyper-util = { version = "0.1" }
 
 # Leptos UI framework (SSR + islands hydration)
