@@ -290,10 +290,10 @@ def _is_degenerate(text: str) -> bool:
     words = text.split()
     if len(words) < 5:
         return True
-    # If any 4-word phrase repeats more than 3 times, it's degenerate
+    # If any 4-word phrase repeats more than 5 times, it's degenerate
     for i in range(len(words) - 3):
         phrase = " ".join(words[i : i + 4])
-        if text.count(phrase) > 3:
+        if text.count(phrase) > 5:
             return True
     return False
 
@@ -366,7 +366,7 @@ def main(
     training_args = SFTConfig(
         output_dir=paths["output_dir"],
         max_length=train_cfg["max_seq_length"],
-        packing=train_cfg.get("packing", True),
+        packing=train_cfg.get("packing", False),  # F-08: Disabled packing to prevent cross-sample attention leakage
         dataset_text_field="text",
         num_train_epochs=train_cfg["num_train_epochs"],
         per_device_train_batch_size=train_cfg["per_device_train_batch_size"],

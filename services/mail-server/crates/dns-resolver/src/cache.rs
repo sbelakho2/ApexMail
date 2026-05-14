@@ -68,12 +68,12 @@ impl DnsCache {
         let effective_negative_ttl = config.negative_ttl_secs.min(config.max_ttl_ceiling_secs);
 
         let cache = Cache::builder()
-            .max_capacity(config.max_cache_entries)
+            .max_capacity(config.positive_cache_size)
             .expire_after(PositiveRecordExpiry)
             .build();
 
         let negative_cache = Cache::builder()
-            .max_capacity(config.max_cache_entries / 5)
+            .max_capacity(config.negative_cache_size)
             .time_to_live(Duration::from_secs(effective_negative_ttl))
             .build();
 
@@ -243,7 +243,7 @@ mod tests {
         cache.clear();
         // moka might not immediately reflect, but clear should work
         // Just verify it doesn't crash
-        assert!(cache.get("a").is_none() || true);
+        let _ = cache.get("a"); // just verify it doesn't crash
     }
 
     #[test]
@@ -278,5 +278,42 @@ mod tests {
         std::thread::sleep(Duration::from_millis(80));
 
         assert!(cache.get("short").is_none());
+    }
+
+    #[test]
+    fn test_cache_max_capacity_eviction() {
+        // Create a cache with max_capacity=2 for the positive cache.
+        let cache = DnsCache::new(&DnsConfig {
+            positive_cache_size: 2,
+            cache_ttl_secs: 3600, // long enough that TTL won't interfere
+            ..DnsConfig::default()
+        });
+
+        // Insert 3 entries. With max_capacity=2 the cache must
+        // evict one to stay within bounds.
+        cache.insert("key1", vec!["value1".into()]);
+        cache.insert("key2", vec!["value2".into()]);
+        cache.insert("key3", vec!["value3".into()]);
+
+        // Force moka maintenance to process evictions synchronously.
+        cache.cache.run_pending_tasks();
+
+        // Verify the cache size is bounded by max_capacity.
+        let size = cache.len();
+        assert!(
+            size <= 2,
+            "expected cache size <= 2 after LRU eviction, got {size}"
+        );
+
+        // At least one of the three keys should have been evicted.
+        let found: Vec<_> = ["key1", "key2", "key3"]
+            .iter()
+            .filter(|k| cache.get(k).is_some())
+            .collect();
+        assert!(
+            found.len() <= 2,
+            "expected at most 2 entries accessible after LRU eviction, got {}",
+            found.len()
+        );
     }
 }

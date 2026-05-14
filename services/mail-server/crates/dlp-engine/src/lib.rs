@@ -13,6 +13,7 @@
 //! and attachment content. It produces a `DlpVerdict` with findings and a
 //! recommended action.
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 

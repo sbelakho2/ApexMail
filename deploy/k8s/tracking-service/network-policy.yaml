@@ -55,11 +55,13 @@ spec:
       ports:
         - port: 6379
           protocol: TCP
-    # ClickHouse HTTP API
+    # ClickHouse HTTP + HTTPS API
     - to:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: clickhouse
       ports:
         - port: 8123
+          protocol: TCP
+        - port: 8443
           protocol: TCP

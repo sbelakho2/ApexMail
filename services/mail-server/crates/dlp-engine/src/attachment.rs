@@ -173,8 +173,8 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
                 if (fname.ends_with(".xml") || fname.contains("sharedStrings"))
                     && header_end + compressed_size <= data.len()
                 {
-                    let remaining_budget = MAX_OOXML_TOTAL_DECOMPRESSED
-                        .saturating_sub(total_decompressed);
+                    let remaining_budget =
+                        MAX_OOXML_TOTAL_DECOMPRESSED.saturating_sub(total_decompressed);
                     if remaining_budget == 0 {
                         bombed = true;
                         break;
@@ -231,11 +231,7 @@ fn extract_ooxml_text(data: &[u8]) -> (String, bool, String) {
 /// Decompress a ZIP entry, refusing to exceed `max_bytes`.
 /// Returns `Ok(None)` for unsupported compression methods, `Err(())` if the
 /// decompressed size would exceed `max_bytes` (decompression bomb).
-fn decode_zip_part(
-    compression: u16,
-    bytes: &[u8],
-    max_bytes: u64,
-) -> Result<Option<Vec<u8>>, ()> {
+fn decode_zip_part(compression: u16, bytes: &[u8], max_bytes: u64) -> Result<Option<Vec<u8>>, ()> {
     match compression {
         0 => {
             if bytes.len() as u64 > max_bytes {
@@ -646,7 +642,8 @@ mod tests {
         use flate2::Compression;
         use std::io::Write;
 
-        let xml = br#"<w:document><w:body><w:t>Invoice 4111 1111 1111 1111</w:t></w:body></w:document>"#;
+        let xml =
+            br#"<w:document><w:body><w:t>Invoice 4111 1111 1111 1111</w:t></w:body></w:document>"#;
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
         encoder.write_all(xml).expect("deflate encoder accepts XML");
         let compressed = encoder.finish().expect("deflate encoder finishes");

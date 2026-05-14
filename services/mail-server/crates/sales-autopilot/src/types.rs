@@ -75,6 +75,7 @@ impl std::fmt::Display for MessageCategory {
 
 impl MessageCategory {
     /// Parse a message category from its snake_case string representation.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "lead" => Self::Lead,

@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 pub mod calendar;
 pub mod campaigns;
 pub mod config;

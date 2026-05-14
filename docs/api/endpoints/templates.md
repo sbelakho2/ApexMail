@@ -1,7 +1,7 @@
 # Templates API Endpoints
 
 > **Base path:** `/v1/templates`
-> **Required scopes:** `templates:read` (GET), `templates:write` (POST / PATCH / DELETE)
+> **Required scopes:** `templates:read` (GET), `templates:write` (POST / PUT / DELETE)
 > **Rate limit:** 120 requests/minute per API key
 
 Templates are versioned, immutable-on-send email documents that support multiple rendering engines. Every mutation creates a new version internally; the active version is served by default.
@@ -10,10 +10,10 @@ Templates are versioned, immutable-on-send email documents that support multiple
 
 ## Authentication
 
-Include your API key in the `Authorization` header:
+Include your API key in the `X-API-Key` header:
 
 ```
-X-API-Key: ak_live_...
+X-API-Key: am_live_...
 ```
 
 ---
@@ -73,7 +73,7 @@ Create a new template.
 
 ```bash
 curl -X POST "https://api.apexmail.ee/v1/templates" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Order Confirmation",
@@ -101,7 +101,7 @@ curl -X POST "https://api.apexmail.ee/v1/templates" \
 ```json
 {
   "data": {
-    "id": "tpl_a1b2c3d4",
+    "id": "tpl_01HQMXJ5KXMW0NREP0YGCZKNVD",
     "name": "Order Confirmation",
     "slug": "order-confirmation",
     "description": "Sent after a successful purchase",
@@ -136,13 +136,13 @@ Retrieve a single template by ID.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `id` | string | Template ID (`tpl_...`) |
+| `id` | string | Template ID (`tpl_01HQ...`) |
 
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/templates/tpl_01HQMXJ5KXMW0NREP0YGCZKNVD" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -194,7 +194,7 @@ Retrieve the version history of a template, ordered newest-first.
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/versions" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -262,7 +262,7 @@ List templates with filtering, searching, and sorting.
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/templates?category=transactional&active=true&sort=-updated_at" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -303,7 +303,7 @@ curl -X GET "https://api.apexmail.ee/v1/templates?category=transactional&active=
 
 ---
 
-### PATCH `/v1/templates/:id`
+### PUT `/v1/templates/:id`
 
 Partially update a template. Only the supplied fields are changed; a new version is created automatically.
 
@@ -326,8 +326,8 @@ All fields from `POST /v1/templates` are accepted, plus:
 #### Example Request
 
 ```bash
-curl -X PATCH "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
+curl -X PUT "https://api.apexmail.ee/v1/templates/tpl_01HQMXJ5KXMW0NREP0YGCZKNVD" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "subject": "Order #{{order_id}} — Confirmed ✓",
@@ -378,7 +378,7 @@ Create a copy of a template with a new slug.
 
 ```bash
 curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/duplicate" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Order Confirmation (V2 Test)",
@@ -423,7 +423,7 @@ Returns the rendered HTML preview of a template using its `defaultData`.
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/preview" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -459,7 +459,7 @@ Returns usage statistics for a template: send counts, performance metrics, and l
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/stats" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -508,7 +508,7 @@ Set the active version of a template. Only one version can be active at a time.
 
 ```bash
 curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/activate" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{ "version": 2 }'
 ```
@@ -550,7 +550,7 @@ Render a template with custom variables and return the output without sending an
 
 ```bash
 curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/render" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "variables": {
@@ -604,7 +604,7 @@ Same fields as `POST /v1/templates` (except `slug` — inherited from parent). A
 
 ```bash
 curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/versions" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "html": "<h1>Thanks, {{first_name}}!</h1><p>Order #{{order_id}} confirmed. <a href=\"{{tracking_url}}\">Track it</a>.</p>",
@@ -645,7 +645,7 @@ Soft-delete a template. The template is deactivated and hidden from list queries
 
 ```bash
 curl -X DELETE "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`

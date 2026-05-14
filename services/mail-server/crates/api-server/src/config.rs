@@ -21,6 +21,26 @@ pub struct Config {
     pub db_user: String,
     pub db_password: String,
     pub db_max_connections: u32,
+    pub api_replica_count: usize,
+    /// Cluster-wide connection budget for PostgreSQL.
+    ///
+    /// This should be set to approximately `max_connections * expected_replica_count * 1.25`
+    /// to leave ~20% headroom for other services (workers, MTAs, batch jobs).
+    /// For example, if `max_connections=20` and `expected_replica_count=10`,
+    /// a budget of 250 ensures all pods can connect while leaving buffer.
+    pub db_cluster_connection_budget: Option<usize>,
+    /// Expected number of replicas in the cluster (used for connection budget calculation).
+    pub expected_replica_count: u32,
+
+    /// T-304: Prepared statement cache capacity. 0 = disabled. Default: 500.
+    pub statement_cache_capacity: usize,
+
+    /// Global query timeout in seconds. Default: 30.
+    pub query_timeout_seconds: u64,
+
+    /// Optional replica database URL for read-only queries.
+    /// If not set, all queries go to the primary.
+    pub database_replica_url: Option<String>,
 
     // ── Redis ───────────────────────────────────────────────
     pub redis_host: String,
@@ -32,6 +52,7 @@ pub struct Config {
     // ── Auth ────────────────────────────────────────────────
     pub jwt_private_key_pem: String,
     pub jwt_public_key_pem: String,
+    pub jwt_previous_public_keys_pem: Vec<String>,
     pub jwt_expiry: Duration,
     pub api_key_hash_secret: String,
 
@@ -131,6 +152,21 @@ pub struct Config {
     pub placement_encrypt_passwords: bool,
     /// Secret key used for field encryption of IMAP passwords.
     pub placement_encryption_secret: String,
+
+    // ── mCaptcha CAPTCHA ────────────────────────────────────
+    /// mCaptcha is a privacy-preserving, proof-of-work based CAPTCHA system.
+    /// Base URL of the mCaptcha server (e.g. "https://mcaptcha.example.com").
+    pub mcaptcha_base_url: String,
+    /// Site key issued by the mCaptcha server for this deployment.
+    /// In development, set to "dev" to bypass verification.
+    pub mcaptcha_site_key: String,
+    /// Secret key used to verify the mCaptcha token server-side.
+    /// In development, set to "dev" to bypass verification.
+    pub mcaptcha_secret_key: String,
+    /// Enable mCaptcha CAPTCHA verification on auth routes (login, signup).
+    pub mcaptcha_enabled: bool,
+    /// mCaptcha verification endpoint URL.
+    pub mcaptcha_verify_url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +208,15 @@ fn env_required(key: &str) -> Result<String, ConfigError> {
 fn env_required_pem(key: &str) -> Result<String, ConfigError> {
     let raw = env_required(key)?;
     Ok(raw.replace("\\n", "\n"))
+}
+
+fn parse_optional_pem_list(value: Option<String>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split("||")
+        .map(|pem| pem.trim().replace("\\n", "\n"))
+        .filter(|pem| !pem.is_empty())
+        .collect()
 }
 
 fn parse_u16(key: &str, val: &str) -> Result<u16, ConfigError> {
@@ -267,6 +312,61 @@ fn default_max_inflight_requests(db_max_connections: u32) -> usize {
     // small amount of headroom for non-DB routes.
     let db_connections = db_max_connections.max(1) as usize;
     std::cmp::max(16usize, db_connections.saturating_mul(3).saturating_div(2))
+}
+
+/// Default for [`Config::expected_replica_count`].
+fn default_expected_replicas() -> u32 {
+    3
+}
+
+fn default_query_timeout() -> u64 {
+    30
+}
+
+/// Default value for the cluster connection budget when `DB_CLUSTER_CONNECTION_BUDGET`
+/// is not set. Computed as 80% of `max_connections * 3` (3 being the default replica count).
+fn default_db_cluster_connection_budget(max_connections: u32) -> usize {
+    let total = max_connections as usize * default_expected_replicas() as usize;
+    (total as f64 * 0.8) as usize
+}
+
+fn validate_db_connection_budget(
+    db_max_connections: u32,
+    api_replica_count: usize,
+    expected_replica_count: u32,
+    db_cluster_connection_budget: Option<usize>,
+) -> Result<(), ConfigError> {
+    if api_replica_count == 0 {
+        return Err(ConfigError::Invalid {
+            var: "API_REPLICA_COUNT".into(),
+            reason: "must be greater than 0".into(),
+        });
+    }
+    if let Some(budget) = db_cluster_connection_budget {
+        let requested_connections = db_max_connections as usize * api_replica_count;
+        if requested_connections > budget {
+            return Err(ConfigError::Invalid {
+                var: "DB_CLUSTER_CONNECTION_BUDGET".into(),
+                reason: format!(
+                    "DB_MAX_CONNECTIONS ({db_max_connections}) * API_REPLICA_COUNT ({api_replica_count}) exceeds shared DB budget ({budget}). Expected cluster replicas: {expected_replica_count}"
+                ),
+            });
+        }
+    } else {
+        // When no explicit budget is set, compute a sensible default
+        // and emit a warning if the estimated cluster total exceeds it.
+        let budget = default_db_cluster_connection_budget(db_max_connections);
+        let total_potential = db_max_connections as usize * api_replica_count;
+        if total_potential > budget {
+            tracing::warn!(
+                "DB_CLUSTER_CONNECTION_BUDGET is not configured. Default budget is {budget} \
+                 (80% of {db_max_connections} max_connections × 3 default replicas), but \
+                 API_REPLICA_COUNT={api_replica_count} × DB_MAX_CONNECTIONS={db_max_connections} = \
+                 {total_potential} potential connections. Set DB_CLUSTER_CONNECTION_BUDGET explicitly."
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Validate rate limit configuration values at startup.
@@ -374,9 +474,11 @@ impl Config {
 
         let jwt_private_key_pem = env_required_pem("JWT_PRIVATE_KEY_PEM")?;
         let jwt_public_key_pem = env_required_pem("JWT_PUBLIC_KEY_PEM")?;
+        let jwt_previous_public_keys_pem =
+            parse_optional_pem_list(env::var("JWT_PREVIOUS_PUBLIC_KEYS_PEM").ok());
         let api_key_hash_secret = env_required("API_KEY_HASH_SECRET")?;
         let webhook_signing_secret = env_required("WEBHOOK_SIGNING_SECRET")?;
-        let base_url = env_or("BASE_URL", "http://localhost:3000");
+        let base_url = env_or("BASE_URL", "http://0.0.0.0:3000");
         let cors_origins = match env::var("CORS_ORIGINS") {
             Ok(value) => parse_csv(&value),
             Err(_) => default_cors_origins(environment, &base_url),
@@ -387,6 +489,37 @@ impl Config {
             std::cmp::max(32usize, (db_max_connections as usize).saturating_mul(2));
         let redis_pool_default_str = redis_pool_default.to_string();
         let max_inflight_requests_default = default_max_inflight_requests(db_max_connections);
+        let api_replica_count =
+            parse_usize("API_REPLICA_COUNT", &env_or("API_REPLICA_COUNT", "1"))?;
+        let expected_replica_count = parse_u32(
+            "EXPECTED_REPLICA_COUNT",
+            &env_or(
+                "EXPECTED_REPLICA_COUNT",
+                &default_expected_replicas().to_string(),
+            ),
+        )?;
+        let statement_cache_capacity = parse_usize(
+            "STATEMENT_CACHE_CAPACITY",
+            &env_or("STATEMENT_CACHE_CAPACITY", "500"),
+        )?;
+        let query_timeout_seconds = parse_u64(
+            "QUERY_TIMEOUT_SECONDS",
+            &env_or(
+                "QUERY_TIMEOUT_SECONDS",
+                &default_query_timeout().to_string(),
+            ),
+        )?;
+        let db_cluster_connection_budget = env::var("DB_CLUSTER_CONNECTION_BUDGET")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| parse_usize("DB_CLUSTER_CONNECTION_BUDGET", &value))
+            .transpose()?;
+        validate_db_connection_budget(
+            db_max_connections,
+            api_replica_count,
+            expected_replica_count,
+            db_cluster_connection_budget,
+        )?;
         let max_inflight_requests = parse_usize(
             "MAX_INFLIGHT_REQUESTS",
             &env_or(
@@ -465,20 +598,44 @@ impl Config {
         let placement_encryption_secret =
             env_or("PLACEMENT_ENCRYPTION_SECRET", "change-me-in-production");
 
+        let mcaptcha_base_url = env_or("MCAPTCHA_BASE_URL", "https://mcaptcha.example.com");
+        let mcaptcha_site_key = env_or("MCAPTCHA_SITE_KEY", "dev");
+        let mcaptcha_secret_key = env_or("MCAPTCHA_SECRET_KEY", "dev");
+        let mcaptcha_enabled = env_or("MCAPTCHA_ENABLED", "false").parse().unwrap_or(false);
+        let mcaptcha_verify_url = env_or(
+            "MCAPTCHA_VERIFY_URL",
+            "https://demo.mcaptcha.org/api/v1/pow/siteverify",
+        );
+        if !environment.is_production()
+            && (mcaptcha_site_key == "dev" || mcaptcha_secret_key == "dev")
+        {
+            tracing::info!(
+                "mCaptcha configured with dev keys — CAPTCHA verification will be bypassed"
+            );
+        }
+
         let config = Config {
             port: parse_u16("PORT", &env_or("PORT", "3000"))?,
             host: env_or("HOST", "0.0.0.0"),
             base_url,
             environment,
 
-            db_host: env_or("DB_HOST", "localhost"),
+            db_host: env_or("DB_HOST", "127.0.0.1"),
             db_port: parse_u16("DB_PORT", &env_or("DB_PORT", "5432"))?,
             db_name: env_or("DB_NAME", "apexmail"),
             db_user: env_or("DB_USER", "apexmail"),
             db_password: env_or("DB_PASSWORD", ""),
             db_max_connections,
+            api_replica_count,
+            db_cluster_connection_budget,
+            expected_replica_count,
+            statement_cache_capacity,
+            query_timeout_seconds,
+            database_replica_url: env::var("DATABASE_REPLICA_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
 
-            redis_host: env_or("REDIS_HOST", "localhost"),
+            redis_host: env_or("REDIS_HOST", "127.0.0.1"),
             redis_port: parse_u16("REDIS_PORT", &env_or("REDIS_PORT", "6379"))?,
             redis_password: env::var("REDIS_PASSWORD").ok().filter(|s| !s.is_empty()),
             redis_db: parse_u8("REDIS_DB", &env_or("REDIS_DB", "0"))?,
@@ -489,6 +646,7 @@ impl Config {
 
             jwt_private_key_pem,
             jwt_public_key_pem,
+            jwt_previous_public_keys_pem,
             jwt_expiry: parse_duration_hours("JWT_EXPIRY", &env_or("JWT_EXPIRY", "24h"))?,
             api_key_hash_secret,
 
@@ -547,7 +705,7 @@ impl Config {
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
             github_client_id: env::var("GITHUB_CLIENT_ID").ok(),
             github_client_secret: env::var("GITHUB_CLIENT_SECRET").ok(),
-            oauth_redirect_base_url: env_or("OAUTH_REDIRECT_BASE_URL", "http://localhost:3000"),
+            oauth_redirect_base_url: env_or("OAUTH_REDIRECT_BASE_URL", "http://0.0.0.0:3000"),
 
             session_secret: session_secret_env
                 .clone()
@@ -562,7 +720,7 @@ impl Config {
             control_plane_api_key: env::var("CONTROL_PLANE_API_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://localhost:3010"),
+            sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://0.0.0.0:3010"),
             internal_service_token: env::var("INTERNAL_SERVICE_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -589,6 +747,12 @@ impl Config {
             placement_imap_timeout_secs,
             placement_encrypt_passwords,
             placement_encryption_secret,
+
+            mcaptcha_base_url,
+            mcaptcha_site_key,
+            mcaptcha_secret_key,
+            mcaptcha_enabled,
+            mcaptcha_verify_url,
         };
 
         // Production security checks
@@ -636,6 +800,11 @@ impl Config {
                 self.redis_host, self.redis_port, self.redis_db
             ),
         }
+    }
+
+    pub fn jwt_verification_public_keys(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.jwt_public_key_pem.as_str())
+            .chain(self.jwt_previous_public_keys_pem.iter().map(String::as_str))
     }
 
     pub fn ui_surface_for_host<'a>(&'a self, host: Option<&str>) -> Option<&'a str> {
@@ -689,6 +858,13 @@ impl Config {
             return Err(ConfigError::SecurityCheck(
                 "JWT_PUBLIC_KEY_PEM must contain a valid PEM public key in production".into(),
             ));
+        }
+        for (index, public_key) in self.jwt_previous_public_keys_pem.iter().enumerate() {
+            if !public_key.contains("BEGIN") {
+                return Err(ConfigError::SecurityCheck(format!(
+                    "JWT_PREVIOUS_PUBLIC_KEYS_PEM entry {index} must contain a valid PEM public key in production"
+                )));
+            }
         }
         const COMMON_PLACEHOLDERS: &[&str] = &[
             "dev-secret",
@@ -812,6 +988,13 @@ mod tests {
         assert_eq!(default_max_inflight_requests(128), 192);
     }
 
+    #[test]
+    fn db_connection_budget_rejects_oversized_replica_pool() {
+        assert!(validate_db_connection_budget(20, 4, 3, Some(60)).is_err());
+        assert!(validate_db_connection_budget(20, 3, 3, Some(60)).is_ok());
+        assert!(validate_db_connection_budget(20, 0, 3, Some(60)).is_err());
+    }
+
     fn valid_production_config() -> Config {
         Config {
             port: 3000,
@@ -824,6 +1007,12 @@ mod tests {
             db_user: "apexmail".into(),
             db_password: "correct-horse-battery-staple-db-password".into(),
             db_max_connections: 20,
+            api_replica_count: 1,
+            db_cluster_connection_budget: None,
+            expected_replica_count: 3,
+            statement_cache_capacity: 500,
+            query_timeout_seconds: 30,
+            database_replica_url: None,
             redis_host: "localhost".into(),
             redis_port: 6379,
             redis_password: None,
@@ -832,6 +1021,7 @@ mod tests {
             jwt_private_key_pem: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
                 .into(),
             jwt_public_key_pem: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----".into(),
+            jwt_previous_public_keys_pem: vec![],
             jwt_expiry: Duration::from_secs(86400),
             api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
             rate_limit_window_ms: 60000,
@@ -881,6 +1071,12 @@ mod tests {
             placement_imap_timeout_secs: 30,
             placement_encrypt_passwords: true,
             placement_encryption_secret: "test-placement-encryption-secret".into(),
+
+            mcaptcha_base_url: "https://mcaptcha.example.com".into(),
+            mcaptcha_site_key: "prod-site-key-12345".into(),
+            mcaptcha_secret_key: "prod-secret-key-67890".into(),
+            mcaptcha_enabled: true,
+            mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
         }
     }
 
@@ -930,6 +1126,12 @@ mod tests {
             db_user: "apexmail".into(),
             db_password: "password".into(),
             db_max_connections: 20,
+            api_replica_count: 1,
+            db_cluster_connection_budget: None,
+            expected_replica_count: 3,
+            statement_cache_capacity: 500,
+            query_timeout_seconds: 30,
+            database_replica_url: None,
             redis_host: "localhost".into(),
             redis_port: 6379,
             redis_password: None,
@@ -937,6 +1139,7 @@ mod tests {
             redis_pool_max_size: 40,
             jwt_private_key_pem: "BEGIN TEST".into(),
             jwt_public_key_pem: "BEGIN TEST".into(),
+            jwt_previous_public_keys_pem: vec![],
             jwt_expiry: Duration::from_secs(86400),
             api_key_hash_secret: "a-very-long-secret-value-for-tests-1234".into(),
             rate_limit_window_ms: 60000,
@@ -986,6 +1189,12 @@ mod tests {
             placement_imap_timeout_secs: 30,
             placement_encrypt_passwords: true,
             placement_encryption_secret: "test-placement-encryption-secret".into(),
+
+            mcaptcha_base_url: "https://mcaptcha.example.com".into(),
+            mcaptcha_site_key: "dev".into(),
+            mcaptcha_secret_key: "dev".into(),
+            mcaptcha_enabled: false,
+            mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
         };
 
         assert_eq!(

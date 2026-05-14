@@ -18,4 +18,5 @@ idna = "1"
 mail-common = { path = "../mail-common", optional = true }
 
 [features]
+default = ["events"]
 events = ["mail-common"]

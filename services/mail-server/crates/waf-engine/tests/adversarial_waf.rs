@@ -13,14 +13,18 @@ fn engine() -> WafEngine {
 }
 
 fn engine_with_path_allowlist(paths: Vec<String>) -> WafEngine {
-    let mut cfg = WafConfig::default();
-    cfg.allowlist_paths = paths;
+    let cfg = WafConfig {
+        allowlist_paths: paths,
+        ..Default::default()
+    };
     WafEngine::new(cfg)
 }
 
 fn engine_with_ip_allowlist(ips: Vec<String>) -> WafEngine {
-    let mut cfg = WafConfig::default();
-    cfg.allowlist_ips = ips;
+    let cfg = WafConfig {
+        allowlist_ips: ips,
+        ..Default::default()
+    };
     WafEngine::new(cfg)
 }
 

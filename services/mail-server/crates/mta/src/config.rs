@@ -198,11 +198,11 @@ impl Default for MtaConfig {
             node_env: default_env(),
             mta_id: default_mta_id(),
             database: DatabaseConfig {
-                connection_string: "postgres://127.0.0.1:5432/apexmail".into(),
+                connection_string: "postgres://postgres:postgres@localhost:5432/apexmail".into(),
                 max_connections: default_max_connections(),
             },
             redis: RedisConfig {
-                url: "redis://127.0.0.1:6379".into(),
+                url: "redis://localhost:6379".into(),
                 key_prefix: default_key_prefix(),
             },
             inbound: InboundConfig::default(),
@@ -406,7 +406,7 @@ fn default_bimi_svg_max_size() -> usize {
     256 * 1024
 }
 fn default_max_arf_size() -> usize {
-    1 * 1024 * 1024
+    1024 * 1024
 }
 
 impl MtaConfig {
@@ -417,15 +417,16 @@ impl MtaConfig {
             node_env: std::env::var("NODE_ENV").unwrap_or_else(|_| default_env()),
             mta_id: std::env::var("MTA_ID").unwrap_or_else(|_| default_mta_id()),
             database: DatabaseConfig {
-                connection_string: std::env::var("DATABASE_URL")
-                    .unwrap_or_else(|_| "postgres://localhost/apexmail".into()),
+                connection_string: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                    "postgres://postgres:postgres@localhost:5432/apexmail".into()
+                }),
                 max_connections: std::env::var("DB_MAX_CONNECTIONS")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(default_max_connections()),
             },
             redis: RedisConfig {
-                url: std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
+                url: std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into()),
                 key_prefix: std::env::var("REDIS_KEY_PREFIX")
                     .unwrap_or_else(|_| default_key_prefix()),
             },

@@ -10,6 +10,7 @@ pub struct AuditRepo;
 
 impl AuditRepo {
     /// Record an audit event.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,

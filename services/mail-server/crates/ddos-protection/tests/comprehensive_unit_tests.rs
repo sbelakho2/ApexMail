@@ -867,7 +867,7 @@ mod bot_detection_unit_tests {
         let mut behavior = SessionBehavior::new(100);
         let eps: Vec<u64> = (0..10).map(|i| hash_ep(&format!("/api/ep{}", i))).collect();
 
-        for (_i, ep) in eps.iter().cycle().take(50).enumerate() {
+        for ep in eps.iter().cycle().take(50) {
             behavior.record_request(*ep, "GET", false);
         }
 

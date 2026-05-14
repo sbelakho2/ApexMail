@@ -290,7 +290,7 @@ impl VectorStore {
 
             if let Some(ref mut verifier) = hmac_verifier {
                 use std::io::Write;
-                write!(verifier, "{}\n", line).map_err(|_| EmbeddingError::IntegrityCheckFailed)?;
+                writeln!(verifier, "{}", line).map_err(|_| EmbeddingError::IntegrityCheckFailed)?;
             }
             lines.push(line);
         }

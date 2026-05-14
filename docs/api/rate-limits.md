@@ -1,26 +1,35 @@
 # API Rate Limits
 
-ApexMail implements rate limiting to ensure fair usage and protect service stability.
+ApexMail implements rate limiting to ensure fair usage and protect service stability. Limits are **plan-based** — see the [pricing page](../pricing.md) for your plan's rate-limit tier.
 
 ## Rate Limits
 
-The API enforces a default tenant-wide limit of 1,000 requests per minute. Some endpoints, especially public authentication flows, use stricter limits to protect sensitive operations. Enterprise deployments may negotiate higher limits.
+Rate limits are enforced per API key using a **sliding window algorithm**. Your plan determines the throughput tier:
 
-You can check the active limit for your current request via the `X-RateLimit-*` response headers on any API response.
+| Plan tier | Throughput |
+|-----------|------------|
+| Free | 10 requests / second |
+| Starter / Pro / PAYG | 100 requests / second |
+| Growth / Scale | 500 requests / second |
+| Enterprise | 5,000 requests / second |
+
+The sliding window advances continuously — requests near the boundary of a fixed clock window may succeed or fail based on the actual trailing time window rather than a calendar window. Some endpoints, especially public authentication flows, use stricter limits to protect sensitive operations.
+
+You can check the active limit for your current request via the `X-RateLimit-*` response headers on any API response. Enterprise deployments may negotiate higher limits — contact [support@apexmail.ee](mailto:support@apexmail.ee).
 
 ## Rate Limit Headers
 
 Every API response includes rate limit headers:
 
 ```http
-X-RateLimit-Limit: 1000
-X-RateLimit-Remaining: 999
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 87
 X-RateLimit-Reset: 1705312800
 ```
 
 | Header | Description |
 |--------|-------------|
-| `X-RateLimit-Limit` | Maximum requests allowed in window |
+| `X-RateLimit-Limit` | Maximum requests allowed in window (varies by plan tier) |
 | `X-RateLimit-Remaining` | Requests remaining in current window |
 | `X-RateLimit-Reset` | Unix timestamp when window resets |
 | `Retry-After` | Present on `429` responses; seconds until retry |

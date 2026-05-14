@@ -701,6 +701,7 @@ impl Soc2Service {
 
     /// Record an evidence item.  Caller computes the canonical payload; the
     /// SHA-256 is computed here from the JSON-serialised payload.
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_evidence(
         &self,
         control_id: &str,

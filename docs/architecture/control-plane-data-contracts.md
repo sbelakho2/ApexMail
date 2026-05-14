@@ -1,6 +1,6 @@
 # Control Plane API Data Contracts
 
-> Historical migration inventory for the removed control-plane proxy layer.
+> Historical migration inventory for the removed control-plane proxy layer, plus documentation for the current SSRF-safe proxy endpoint.
 >
 > **Status:** Current admin-surface contracts are implemented directly in Rust under `services/mail-server/crates/api-server/src/routes/` with browser-surface wiring in `services/mail-server/crates/ui-foundation/src/`.
 
@@ -13,11 +13,13 @@ During migration, the former `proxyToRust()` layer forwarded control-plane reque
 - Current source of truth for request/response behavior lives in Rust route handlers.
 - Authentication and scope enforcement now live in Rust middleware and route modules.
 - Use this document as historical comparison material, not as the primary runtime contract.
+- A new **SSRF-safe proxy endpoint** (`POST /v1/admin/proxy`) now replaces the removed layer for control-plane proxying needs — see below.
 
 Relevant current implementation files:
 - `services/mail-server/crates/api-server/src/routes/`
 - `services/mail-server/crates/api-server/src/middleware/auth.rs`
 - `services/mail-server/crates/ui-foundation/src/ssr.rs`
+- `services/mail-server/crates/api-server/src/routes/admin/proxy.rs` — current proxy implementation
 
 ---
 
@@ -353,3 +355,81 @@ Routes with dynamic parameters validate IDs before proxying:
 - **Actions:** `SAFE_ACTION = /^(start|pause|resume|reset|day)$/`
 
 Invalid IDs return `400 { error: "Invalid <paramName>" }` without proxying to Rust.
+
+---
+
+## Current SSRF-Safe Proxy Endpoint
+
+The old `proxyToRust()` layer has been replaced by a dedicated SSRF-safe proxy endpoint at `POST /v1/admin/proxy`. This endpoint allows control-plane operators to make HTTP requests to allowed external services through the API server, with strict security controls.
+
+### `POST /v1/admin/proxy`
+
+- **Scope required:** `*` (admin)
+- **Implementation:** [`routes/admin/proxy.rs`](../../services/mail-server/crates/api-server/src/routes/admin/proxy.rs)
+
+#### Request
+
+```json
+{
+  "url": "https://api.example.com/webhook",
+  "method": "POST",
+  "headers": {
+    "Authorization": "Bearer token123",
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "event": "tenant.created",
+    "tenantId": "tnt_abc123"
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `url` | `string` | ✅ Yes | Target URL (must be valid URL) |
+| `method` | `string` | No | HTTP method (default: `"GET"`) |
+| `headers` | `object` | No | Headers to forward (only allowlisted headers accepted) |
+| `body` | `object` | No | JSON body to forward |
+
+#### Response — `200 OK`
+
+```json
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "result": "success"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `integer` | Upstream HTTP response status code |
+| `headers` | `object` | Upstream response headers |
+| `body` | `object` | Upstream response body (parsed JSON) |
+
+#### Security Controls
+
+| Control | Implementation |
+|---------|---------------|
+| **Authentication** | Requires `*` (wildcard) scope |
+| **SSRF Protection** | Blocks private/RFC1918 IPs (10.x, 192.168.x, 172.16-31.x), link-local (169.254.x), loopback (127.0.0.1, ::1), and cloud metadata endpoints |
+| **HTTPS Enforcement** | In production, only HTTPS URLs are allowed |
+| **URL Allowlist** | Controlled via `CONTROL_PLANE_PROXY_ALLOWLIST` env var (comma-separated hostnames). Empty allowlist in production disables the proxy entirely |
+| **Header Allowlist** | Only forward `content-type`, `accept`, `authorization`, `x-api-key`, `x-request-id` |
+| **Audit Logging** | All proxy requests are logged to `audit_logs` table with URL, host, method, forwarded headers, and response status |
+| **GET Disabled** | `GET` requests return `405 Method Not Allowed` — only `POST` is permitted |
+
+#### Error Responses
+
+| HTTP Status | Error Message | Description |
+|-------------|---------------|-------------|
+| `400` | `"Invalid URL"` | URL failed to parse |
+| `400` | `"Only HTTPS URLs are allowed in production"` | Non-HTTPS URL in production |
+| `400` | `"Proxy not configured — set CONTROL_PLANE_PROXY_ALLOWLIST"` | Empty allowlist in production |
+| `400` | `"URL host not in proxy allowlist"` | Host not in allowed list |
+| `400` | SSRF block messages | Private/reserved IP or hostname detected |
+| `405` | `"GET not supported on proxy endpoint"` | GET request attempted |

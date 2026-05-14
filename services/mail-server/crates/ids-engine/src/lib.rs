@@ -1,3 +1,5 @@
+#![allow(clippy::doc_lazy_continuation)]
+
 //! # ApexMail IDS/IPS Engine
 //!
 //! Network-level Intrusion Detection/Prevention System providing://!
@@ -11,6 +13,7 @@
 //! - **Alert & Action Pipeline**:Configurable responses (alert, drop, reject)
 //! with severity-based escalation.
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 

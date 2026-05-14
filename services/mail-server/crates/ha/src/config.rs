@@ -45,6 +45,7 @@ impl std::fmt::Display for RoutingMode {
 // ── Region Config ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegionConfig {
     pub id: String,
     pub name: String,
@@ -55,7 +56,8 @@ pub struct RegionConfig {
 
 // ── Database Config ────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     pub host: String,
     pub port: u16,
@@ -101,7 +103,8 @@ impl DatabaseConfig {
 
 // ── Redis Config ───────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedisConfig {
     pub host: String,
     pub port: u16,
@@ -121,7 +124,8 @@ impl RedisConfig {
 
 // ── Failover Config ────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FailoverConfig {
     pub enabled: bool,
     pub threshold: u32,
@@ -131,7 +135,8 @@ pub struct FailoverConfig {
 
 // ── Health Config ──────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
     pub interval_ms: u64,
     pub timeout_ms: u64,
@@ -139,7 +144,8 @@ pub struct HealthCheckConfig {
 
 // ── Replication Config ─────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplicationConfig {
     pub enabled: bool,
     pub lag_threshold_ms: u64,
@@ -151,7 +157,8 @@ pub struct ReplicationConfig {
 
 // ── Backup Config ──────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackupConfig {
     pub enabled: bool,
     pub bucket: String,
@@ -165,7 +172,8 @@ pub struct BackupConfig {
 
 // ── Circuit Breaker Config ─────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CircuitBreakerConfig {
     pub enabled: bool,
     pub threshold: u32,
@@ -175,7 +183,8 @@ pub struct CircuitBreakerConfig {
 
 // ── Chaos Config ───────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChaosConfig {
     pub enabled: bool,
     pub failure_rate: f64,
@@ -183,7 +192,8 @@ pub struct ChaosConfig {
 
 // ── Multi-Region Config ────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MultiRegionConfig {
     pub cluster_id: String,
     pub node_id: String,
@@ -198,7 +208,8 @@ pub struct MultiRegionConfig {
 
 // ── Top-Level Config ───────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub port: u16,
     pub environment: String,
@@ -265,6 +276,12 @@ fn generated_runtime_secret(label: &str) -> String {
 }
 
 impl Config {
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let data = std::fs::read_to_string(path.as_ref())
+            .map_err(|e| format!("read HA config file: {e}"))?;
+        serde_json::from_str(&data).map_err(|e| format!("parse HA config JSON: {e}"))
+    }
+
     pub fn from_env() -> Self {
         let environment = env_or("NODE_ENV", "development");
         let pid = std::process::id();
@@ -283,7 +300,7 @@ impl Config {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| generated_runtime_secret("ha-admin-api-key")),
             database: DatabaseConfig {
-                host: env_or("DB_HOST", "localhost"),
+                host: env_or("DB_HOST", "127.0.0.1"),
                 port: env_or_u16("DB_PORT", 5432),
                 database: env_or("DB_NAME", "apexmail"),
                 user: env_or("DB_USER", "apexmail"),
@@ -302,7 +319,7 @@ impl Config {
                 standby_port: env_or_u16("DB_STANDBY_PORT", 5432),
             },
             redis: RedisConfig {
-                host: env_or("REDIS_HOST", "localhost"),
+                host: env_or("REDIS_HOST", "127.0.0.1"),
                 port: env_or_u16("REDIS_PORT", 6379),
                 password: std::env::var("REDIS_PASSWORD").ok(),
                 db: env_or_u8("REDIS_DB", 0),
@@ -493,5 +510,41 @@ mod tests {
             sentinel_master: "mymaster".into(),
         };
         assert_eq!(r.url(), "redis://localhost:6379/0");
+    }
+
+    #[test]
+    fn file_config_rejects_unknown_fields() {
+        let json = r#"{
+            "port": 4300,
+            "environment": "development",
+            "service_name": "apexmail-ha",
+            "version": "1.0.0",
+            "internal_api_key": "internal",
+            "admin_api_key": "admin",
+            "database": {
+                "host": "localhost", "port": 5432, "database": "apexmail",
+                "user": "apexmail", "password": "secret", "pool_max": 20,
+                "idle_timeout_ms": 30000, "connection_timeout_ms": 3000,
+                "replica_host": null, "replica_port": 5432, "replica_hosts": [],
+                "standby_host": null, "standby_port": 5432
+            },
+            "redis": {"host": "localhost", "port": 6379, "password": null, "db": 0, "sentinel_master": "mymaster"},
+            "failover": {"enabled": true, "threshold": 3, "failback_enabled": true, "failback_delay_ms": 300000},
+            "health": {"interval_ms": 5000, "timeout_ms": 3000},
+            "replication": {"enabled": true, "lag_threshold_ms": 30000, "sync_replication": false, "max_lag_ms": 30000, "critical_lag_ms": 60000, "warning_lag_ms": 10000},
+            "backup": {"enabled": true, "bucket": "backups", "region": "us-east-1", "retention_days": 90, "encryption_key": null, "full_schedule": "0 2 * * 0", "incremental_schedule": "0 2 * * *", "wal_archive_interval_secs": 300},
+            "circuit_breaker": {"enabled": true, "threshold": 5, "timeout_ms": 30000, "reset_timeout_ms": 60000},
+            "chaos": {"enabled": false, "failure_rate": 0.01},
+            "multi_region": {"cluster_id": "cluster", "node_id": "node", "region": "us-east-1", "availability_zone": "us-east-1a", "regions": ["us-east-1"], "primary_region": "us-east-1", "routing_mode": "latency_based", "health_check_interval_ms": 10000, "sync_interval_ms": 30000},
+            "alerting_webhook": null,
+            "rpo_target_secs": 60,
+            "rto_target_secs": 300,
+            "unexpected": true
+        }"#;
+        let path = std::env::temp_dir().join(format!("ha-config-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, json).unwrap();
+        let err = Config::from_file(&path).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("unknown field"));
     }
 }

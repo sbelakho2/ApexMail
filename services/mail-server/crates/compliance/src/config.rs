@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 /// Top-level compliance service configuration, loaded from environment.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComplianceConfig {
     pub port: u16,
     pub database_url: String,
@@ -15,9 +16,14 @@ pub struct ComplianceConfig {
     pub audit: AuditConfig,
     pub gdpr: GdprConfig,
     pub secrets: SecretsConfig,
+
+    /// DSAR-specific rate limiting configuration.
+    /// SEC-15: Stricter rate limits for Data Subject Access Request endpoints.
+    pub dsar_rate_limit: DsarRateLimitConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskScoringConfig {
     pub spam_threshold: f64,
     pub phishing_threshold: f64,
@@ -32,6 +38,7 @@ pub struct RiskScoringConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskWeights {
     pub spam_complaints: f64,
     pub bounce_rate: f64,
@@ -46,12 +53,14 @@ pub struct RiskWeights {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskThresholds {
     pub spam_complaint_rate: f64,
     pub bounce_rate: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BaseLimits {
     pub max_daily_emails: i64,
     pub max_hourly_emails: i64,
@@ -60,6 +69,7 @@ pub struct BaseLimits {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContentScanningConfig {
     pub enabled: bool,
     pub ocr_enabled: bool,
@@ -70,6 +80,7 @@ pub struct ContentScanningConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditConfig {
     pub retention_days: i64,
     pub hash_chain_enabled: bool,
@@ -77,6 +88,7 @@ pub struct AuditConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GdprConfig {
     pub data_retention_days: i64,
     pub export_format: String,
@@ -91,10 +103,54 @@ pub struct GdprConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecretsConfig {
     pub encryption_key: String,
     pub rotation_days: i64,
     pub max_versions_to_keep: i64,
+}
+
+/// DSAR (Data Subject Access Request) rate limit configuration.
+///
+/// SEC-15: DSAR endpoints require stricter rate limits than normal API routes.
+/// See `docs/compliance/dsar-rate-limiting.md` for details.
+///
+/// | Limit Type            | Env Variable                   | Default |
+/// |-----------------------|--------------------------------|---------|
+/// | Per-user submission   | `DSAR_RATE_LIMIT_PER_USER`     | 1       |
+/// | User window (seconds) | `DSAR_RATE_LIMIT_USER_WINDOW`  | 86400   |
+/// | Per-tenant submission | `DSAR_RATE_LIMIT_PER_TENANT`   | 100     |
+/// | Tenant window (secs)  | `DSAR_RATE_LIMIT_TENANT_WINDOW`| 86400   |
+/// | Verification attempts | `DSAR_VERIFY_RATE_LIMIT`       | 5       |
+/// | Verify window (secs)  | `DSAR_VERIFY_WINDOW_SECS`      | 3600    |
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DsarRateLimitConfig {
+    /// Maximum DSAR submissions per user (email) per window.
+    pub per_user: u32,
+    /// User-level window in seconds.
+    pub user_window_secs: u64,
+    /// Maximum DSAR submissions per tenant per window.
+    pub per_tenant: u32,
+    /// Tenant-level window in seconds.
+    pub tenant_window_secs: u64,
+    /// Maximum verification attempts per token hash per window.
+    pub verify_attempts: u32,
+    /// Verification window in seconds.
+    pub verify_window_secs: u64,
+}
+
+impl Default for DsarRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_user: 1,
+            user_window_secs: 86400,
+            per_tenant: 100,
+            tenant_window_secs: 86400,
+            verify_attempts: 5,
+            verify_window_secs: 3600,
+        }
+    }
 }
 
 impl ComplianceConfig {
@@ -131,7 +187,10 @@ impl ComplianceConfig {
 
         Self {
             port: env_or("COMPLIANCE_PORT", "3011").parse().unwrap_or(3011),
-            database_url: env_or("DATABASE_URL", "postgres://localhost/apexmail"),
+            database_url: env_or(
+                "DATABASE_URL",
+                "postgres://postgres:postgres@localhost:5432/apexmail",
+            ),
             redis_url: env_or("REDIS_URL", "redis://localhost:6379"),
             auth_token,
             cors_origin: env_or("CORS_ORIGIN", ""),
@@ -205,6 +264,23 @@ impl ComplianceConfig {
                 rotation_days: env_i64("SECRETS_ROTATION_DAYS", 90),
                 max_versions_to_keep: env_i64("SECRETS_MAX_VERSIONS", 10),
             },
+
+            dsar_rate_limit: DsarRateLimitConfig {
+                per_user: env_or("DSAR_RATE_LIMIT_PER_USER", "1").parse().unwrap_or(1),
+                user_window_secs: env_or("DSAR_RATE_LIMIT_USER_WINDOW", "86400")
+                    .parse()
+                    .unwrap_or(86400),
+                per_tenant: env_or("DSAR_RATE_LIMIT_PER_TENANT", "100")
+                    .parse()
+                    .unwrap_or(100),
+                tenant_window_secs: env_or("DSAR_RATE_LIMIT_TENANT_WINDOW", "86400")
+                    .parse()
+                    .unwrap_or(86400),
+                verify_attempts: env_or("DSAR_VERIFY_RATE_LIMIT", "5").parse().unwrap_or(5),
+                verify_window_secs: env_or("DSAR_VERIFY_WINDOW_SECS", "3600")
+                    .parse()
+                    .unwrap_or(3600),
+            },
         }
     }
 }
@@ -241,5 +317,12 @@ mod tests {
         assert_eq!(cfg.audit.retention_days, 365);
         assert_eq!(cfg.gdpr.data_retention_days, 730);
         assert_eq!(cfg.secrets.rotation_days, 90);
+        // SEC-15: DSAR rate limit defaults
+        assert_eq!(cfg.dsar_rate_limit.per_user, 1);
+        assert_eq!(cfg.dsar_rate_limit.per_tenant, 100);
+        assert_eq!(cfg.dsar_rate_limit.verify_attempts, 5);
+        assert_eq!(cfg.dsar_rate_limit.user_window_secs, 86400);
+        assert_eq!(cfg.dsar_rate_limit.tenant_window_secs, 86400);
+        assert_eq!(cfg.dsar_rate_limit.verify_window_secs, 3600);
     }
 }

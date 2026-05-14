@@ -6,7 +6,15 @@
 -- =============================================================================
 
 -- Add closed_at column to invoices (NULL = not yet closed through month-end)
-ALTER TABLE invoices ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
+-- C-04: Guard against missing invoices table (created later in migration 052).
+DO $$
+BEGIN
+    IF to_regclass('public.invoices') IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE invoices ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ';
+    ELSE
+        RAISE WARNING 'Migration 028: invoices table does not exist — skipping ALTER TABLE.';
+    END IF;
+END $$;
 
 -- Month-end closing tracking table
 CREATE TABLE IF NOT EXISTS month_end_closings (
@@ -36,11 +44,21 @@ CREATE INDEX IF NOT EXISTS idx_month_end_closings_closed_at
     ON month_end_closings(closed_at DESC);
 
 -- Index for finding invoices by period that need closing
-CREATE INDEX IF NOT EXISTS idx_invoices_month_issued
-    ON invoices(EXTRACT(YEAR FROM issued_at), EXTRACT(MONTH FROM issued_at))
-    WHERE closed_at IS NULL;
+DO $$
+BEGIN
+    IF to_regclass('public.invoices') IS NOT NULL THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_invoices_month_issued
+            ON invoices(EXTRACT(YEAR FROM issued_at), EXTRACT(MONTH FROM issued_at))
+            WHERE closed_at IS NULL';
+    END IF;
+END $$;
 
 -- Index for finding unpaid invoices
-CREATE INDEX IF NOT EXISTS idx_invoices_closed_at
-    ON invoices(closed_at)
-    WHERE closed_at IS NULL;
+DO $$
+BEGIN
+    IF to_regclass('public.invoices') IS NOT NULL THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_invoices_closed_at
+            ON invoices(closed_at)
+            WHERE closed_at IS NULL';
+    END IF;
+END $$;

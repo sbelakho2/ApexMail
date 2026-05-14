@@ -108,19 +108,19 @@ fn extract_domain_from_email() {
     assert_eq!(EnrichmentService::extract_domain(""), None);
 }
 
-#[test]
-fn enrich_known_domain() {
-    let svc = EnrichmentService::new("http://mock");
-    let company = svc.enrich_company("acme.com").unwrap();
+#[tokio::test]
+async fn enrich_known_domain() {
+    let svc = EnrichmentService::mock();
+    let company = svc.enrich_company("acme.com").await.unwrap();
     assert_eq!(company.name, "Acme Corp");
     assert_eq!(company.industry, "SaaS");
     assert_eq!(company.size, "50-200");
 }
 
-#[test]
-fn enrich_unknown_domain_returns_fallback() {
-    let svc = EnrichmentService::new("http://mock");
-    let c = svc.enrich_company("startup.xyz").unwrap();
+#[tokio::test]
+async fn enrich_unknown_domain_returns_fallback() {
+    let svc = EnrichmentService::mock();
+    let c = svc.enrich_company("startup.xyz").await.unwrap();
     assert!(c.name.contains("Startup"));
     assert_eq!(c.industry, "Unknown");
 }
@@ -129,26 +129,41 @@ fn enrich_unknown_domain_returns_fallback() {
 
 #[tokio::test]
 async fn categorize_lead_message() {
-    let msg =
-        InboxManager::classify_message("tenant-test".into(), "prospect@x.com".into(), "Interested in a demo".into());
+    let msg = InboxManager::classify_message(
+        "tenant-test".into(),
+        "prospect@x.com".into(),
+        "Interested in a demo".into(),
+    );
     assert_eq!(msg.category, MessageCategory::Lead);
 }
 
 #[tokio::test]
 async fn categorize_customer_message() {
-    let msg = InboxManager::classify_message("tenant-test".into(), "user@x.com".into(), "Invoice question".into());
+    let msg = InboxManager::classify_message(
+        "tenant-test".into(),
+        "user@x.com".into(),
+        "Invoice question".into(),
+    );
     assert_eq!(msg.category, MessageCategory::Customer);
 }
 
 #[tokio::test]
 async fn categorize_support_message() {
-    let msg = InboxManager::classify_message("tenant-test".into(), "user@x.com".into(), "Need help with ticket".into());
+    let msg = InboxManager::classify_message(
+        "tenant-test".into(),
+        "user@x.com".into(),
+        "Need help with ticket".into(),
+    );
     assert_eq!(msg.category, MessageCategory::Support);
 }
 
 #[tokio::test]
 async fn categorize_spam_message() {
-    let msg = InboxManager::classify_message("tenant-test".into(), "noreply@spam.com".into(), "Buy Viagra now".into());
+    let msg = InboxManager::classify_message(
+        "tenant-test".into(),
+        "noreply@spam.com".into(),
+        "Buy Viagra now".into(),
+    );
     assert_eq!(msg.category, MessageCategory::Spam);
 }
 

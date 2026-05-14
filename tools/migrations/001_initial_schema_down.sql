@@ -43,6 +43,7 @@ DROP TABLE IF EXISTS subscription_preferences CASCADE;
 DROP TABLE IF EXISTS suppressions CASCADE;
 
 -- Drop events
+DROP TABLE IF EXISTS bounce_events CASCADE;
 DROP TABLE IF EXISTS events CASCADE;
 
 -- Drop email queue

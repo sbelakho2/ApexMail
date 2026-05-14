@@ -171,7 +171,7 @@ impl SesMonitor {
         tokio::spawn(async move {
             Self::run_with_backoff(300, "sync_quota", move || {
                 let m = monitor.clone();
-                async move { m.sync_quota().await.map(|_| ()).map_err(|e| e) }
+                async move { m.sync_quota().await.map(|_| ()) }
             })
             .await;
         });
@@ -181,7 +181,7 @@ impl SesMonitor {
         tokio::spawn(async move {
             Self::run_with_backoff(3600, "sync_domain_stats", move || {
                 let m = monitor.clone();
-                async move { m.sync_domain_stats().await.map(|_| ()).map_err(|e| e) }
+                async move { m.sync_domain_stats().await.map(|_| ()) }
             })
             .await;
         });
@@ -191,7 +191,7 @@ impl SesMonitor {
         tokio::spawn(async move {
             Self::run_with_backoff(900, "compute_tenant_metrics", move || {
                 let m = monitor.clone();
-                async move { m.compute_tenant_metrics().await.map(|_| ()).map_err(|e| e) }
+                async move { m.compute_tenant_metrics().await.map(|_| ()) }
             })
             .await;
         });

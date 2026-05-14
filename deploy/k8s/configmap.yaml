@@ -31,7 +31,7 @@ data:
   redis-port: "6379"
 
   # ── ClickHouse ─────────────────────────────────────────────────────────────
-  clickhouse-url: "http://clickhouse.apexmail.svc.cluster.local:8123"
+  clickhouse-url: "https://clickhouse.apexmail.svc.cluster.local:8443"
   clickhouse-database: "apexmail"
   clickhouse-user: "apexmail"
 

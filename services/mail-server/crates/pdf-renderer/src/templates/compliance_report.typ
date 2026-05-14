@@ -46,7 +46,7 @@
   ],
 )
 
-#set text(font: "Helvetica", size: 10pt)
+#set text(font: "Inter", "DejaVu Sans", sans-serif, size: 10pt)
 #set par(justify: true)
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@
 
 #let status-badge(status) = {
   let (color, label) = if status == "pass" {
-    (rgb("#22c55e"), "PASS")
+    (rgb("#16a34a"), "PASS")
   } else if status == "warn" {
     (rgb("#f59e0b"), "WARN")
   } else {
@@ -65,13 +65,13 @@
     fill: color.lighten(80%),
     stroke: 0.5pt + color,
     inset: (x: 6pt, y: 2pt),
-    radius: 3pt,
+    radius: 0pt,
     text(weight: "bold", size: 8pt, fill: color.darken(20%))[#label]
   )
 }
 
 #let score-color(score) = {
-  if score >= 90 { rgb("#22c55e") }
+  if score >= 90 { rgb("#16a34a") }
   else if score >= 70 { rgb("#f59e0b") }
   else { rgb("#ef4444") }
 }
@@ -83,7 +83,7 @@
 #grid(
   columns: (1fr, auto),
   [
-    #text(weight: "bold", size: 20pt, fill: rgb("#2563eb"))[Compliance Report]
+    #text(weight: "bold", size: 20pt, fill: rgb("#dc2626"))[Compliance Report]
     #v(4pt)
     #text(size: 12pt)[#data.tenant_name]
     #v(2pt)
@@ -97,7 +97,7 @@
       fill: score-color(data.overall_score).lighten(85%),
       stroke: 1.5pt + score-color(data.overall_score),
       inset: 16pt,
-      radius: 8pt,
+      radius: 0pt,
     )[
       #text(size: 9pt, fill: luma(100))[Overall Score]
       #v(2pt)
@@ -109,7 +109,7 @@
 )
 
 #v(8pt)
-#line(length: 100%, stroke: 1pt + rgb("#2563eb"))
+#line(length: 100%, stroke: 1pt + rgb("#000000"))
 #v(12pt)
 
 // ---------------------------------------------------------------------------
@@ -132,13 +132,13 @@
         width: 100%,
         height: 8pt,
         fill: luma(230),
-        radius: 4pt,
+        radius: 0pt,
       )[
         #box(
           width: score * 1%,
           height: 8pt,
           fill: score-color(score),
-          radius: 4pt,
+          radius: 0pt,
         )
       ]
     ],
@@ -156,7 +156,7 @@
 #table(
   columns: (auto, 1fr, auto),
   stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
   inset: 8pt,
   align: (left, left, center),
   [*Check*], [*Details*], [*Status*],
@@ -178,7 +178,7 @@
 #table(
   columns: (auto, auto, auto, 1fr, auto),
   stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
   inset: 6pt,
   align: (left, left, left, left, left),
   [*Timestamp*], [*Actor*], [*Action*], [*Resource*], [*IP*],
@@ -208,13 +208,13 @@
   ]
 ] else [
   #block(
-    fill: rgb("#22c55e").lighten(85%),
-    stroke: 1pt + rgb("#22c55e"),
+    fill: rgb("#16a34a").lighten(85%),
+    stroke: 1pt + rgb("#16a34a"),
     inset: 12pt,
-    radius: 4pt,
+    radius: 0pt,
     width: 100%,
   )[
-    #text(fill: rgb("#15803d"))[
+    #text(fill: rgb("#16a34a"))[
       ✓ All configuration checks passed. No immediate action required.
     ]
   ]

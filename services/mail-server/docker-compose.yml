@@ -268,12 +268,284 @@ services:
     secrets:
       - redis_password
 
+  # ── Worker Processors ───────────────────────────────────────────────────
+  # Runs background workers: email delivery, analytics, webhook dispatch,
+  # and reply-handler processing. Defined in Helm but was missing from
+  # docker-compose (OBS-11). Environment mirrors Helm's worker-deployment.yaml.
+  worker:
+    build:
+      context: ../..
+      dockerfile: services/mail-server/Dockerfile
+      target: worker
+    ports:
+      - "127.0.0.1:3006:3006"
+    environment:
+      - RUST_LOG=info
+      - HEALTH_PORT=9090
+      - WORKER_CONCURRENCY=10
+      - WORKER_POLL_INTERVAL=5
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
+        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        export REDIS_PASSWORD="$(cat /run/secrets/redis_password)";
+        export REDIS_URL="redis://default:${REDIS_PASSWORD}@redis:6379";
+        exec /usr/bin/tini -- worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "3006"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+    secrets:
+      - postgres_password
+      - redis_password
+
+  # ── Observability Stack ─────────────────────────────────────────────────
+
+  # Loki — log aggregation (Grafana OSS, ADR 0009)
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: apexmail-loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - loki_data:/loki
+      - ../../deploy/loki:/etc/loki:ro
+    command: -config.file=/etc/loki/loki-config.yaml
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "-O-", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    container_name: apexmail-otel-collector
+    ports:
+      - "127.0.0.1:4317:4317"  # OTLP gRPC
+      - "127.0.0.1:4318:4318"  # OTLP HTTP
+      - "127.0.0.1:8889:8889"  # Prometheus self-metrics
+    volumes:
+      - ../../deploy/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config", "/etc/otelcol-contrib/config.yaml"]
+    networks:
+      - apexmail
+    restart: unless-stopped
+    depends_on:
+      loki:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "-O-", "http://localhost:13133/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+
+  # Prometheus — metrics collection
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: apexmail-prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ../../deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "-O-", "http://localhost:9090/-/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+
+  # Grafana — dashboards & visualization
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: apexmail-grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../../deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    networks:
+      - apexmail
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+      loki:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "-O-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+
+  # Grafana Tempo — distributed tracing backend
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: apexmail-tempo
+    ports:
+      - "127.0.0.1:3200:3200"   # Query frontend
+      - "127.0.0.1:4317:4317"   # OTLP gRPC (duplicate — use otel-collector instead)
+      - "127.0.0.1:9411:9411"   # Zipkin (legacy)
+    volumes:
+      - ../../deploy/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/tmp/tempo
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "-O-", "http://localhost:3200/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+
+  # Alertmanager — alert routing & notification
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: apexmail-alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ../../deploy/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "-O-", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+        reservations:
+          memory: 64M
+
 networks:
   apexmail:
     driver: bridge
 
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:
+  tempo_data:
+  alertmanager_data:
+  loki_data:
 
 secrets:
   postgres_password:

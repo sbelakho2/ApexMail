@@ -38,7 +38,8 @@ spec:
           periodSeconds: 30
       selectPolicy: Min
     scaleDown:
-      stabilizationWindowSeconds: 300     # 5 min cool-down before scale-down
+      # 🟡6: Reduced from 300s to 120s for faster response to traffic drops
+      stabilizationWindowSeconds: 120
       policies:
         - type: Pods
           value: 1

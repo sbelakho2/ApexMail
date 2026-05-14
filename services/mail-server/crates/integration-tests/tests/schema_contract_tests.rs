@@ -39,6 +39,23 @@ fn tool_migrations_dir() -> PathBuf {
 /// This function receives an existing `PgPool` connected to a test-only database.
 /// Do **not** reuse this function against a production database.
 async fn apply_tool_migrations(pool: &PgPool) {
+    // Serialize concurrent migration application across parallel tests using a
+    // transaction-scoped Postgres advisory lock. Without this, multiple tests
+    // racing through `Migrator::run` collide on `pg_class`/`pg_type` catalog
+    // unique indexes during `CREATE TABLE` / `CREATE INDEX`.
+    //
+    // We hold a dedicated connection for the duration of the migration apply
+    // and use a session-scoped advisory lock that auto-releases when the
+    // connection is dropped at function exit.
+    let mut lock_conn = pool
+        .acquire()
+        .await
+        .expect("failed to acquire lock connection for advisory lock");
+    sqlx::query("SELECT pg_advisory_lock(7723691501421983236)")
+        .execute(&mut *lock_conn)
+        .await
+        .expect("failed to take advisory lock for migrations");
+
     let source_dir = tool_migrations_dir();
     let temp_dir =
         std::env::temp_dir().join(format!("apexmail-sqlx-up-migrations-{}", Uuid::new_v4()));
@@ -77,10 +94,25 @@ async fn apply_tool_migrations(pool: &PgPool) {
         .await
         .expect("failed to apply copied up migrations");
 
+    // Release the advisory lock before dropping the lock connection so the
+    // next test can proceed even if connection drop is delayed.
+    let _ = sqlx::query("SELECT pg_advisory_unlock(7723691501421983236)")
+        .execute(&mut *lock_conn)
+        .await;
+    drop(lock_conn);
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+/// Schema-contract tests use a dedicated database (`<base>_schema`) so that
+/// runtime code in OTHER test binaries (e.g. `integration_routes` calling
+/// `crm_pg::initialize` which creates `sales_leads` with a `UUID` primary key)
+/// cannot pollute the schema we are validating against the migration files
+/// (where `sales_leads.id` is `VARCHAR(64)`).
 async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
+    use tokio::sync::OnceCell;
+    static INIT_DB: OnceCell<()> = OnceCell::const_new();
+
     let database_url = match std::env::var("TEST_DATABASE_URL") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
@@ -89,14 +121,55 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
         }
     };
 
+    // Derive an isolated database URL by appending `_schema` to the dbname.
+    let (server_part, db_part) = match database_url.rsplit_once('/') {
+        Some((s, d)) => (s, d),
+        None => {
+            eprintln!("skipping {test_name}: TEST_DATABASE_URL has no database segment");
+            return None;
+        }
+    };
+    let db_only = db_part.split('?').next().unwrap_or(db_part);
+    let isolated_db = format!("{db_only}_schema");
+    let isolated_url = format!("{server_part}/{isolated_db}");
+    let admin_url = format!("{server_part}/postgres");
+
+    INIT_DB
+        .get_or_init(|| async {
+            let admin = match PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(3))
+                .connect(&admin_url)
+                .await
+            {
+                Ok(p) => p,
+                Err(error) => {
+                    eprintln!("schema-contract DB bootstrap: cannot connect to admin URL: {error}");
+                    return;
+                }
+            };
+            let _ = sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"
+            ))
+            .execute(&admin)
+            .await;
+            let _ = sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
+                .execute(&admin)
+                .await;
+        })
+        .await;
+
     Some(
         PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(Duration::from_secs(3))
-            .connect(&database_url)
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&isolated_url)
             .await
             .unwrap_or_else(|error| {
-                panic!("TEST_DATABASE_URL is set but {test_name} could not connect: {error}")
+                panic!(
+                    "schema-contract isolated DB ({isolated_url}) could not connect for \
+                     {test_name}: {error}"
+                )
             }),
     )
 }
@@ -118,6 +191,12 @@ fn test_config() -> Config {
         db_user: "apexmail".into(),
         db_password: "password".into(),
         db_max_connections: 20,
+        api_replica_count: 1,
+        db_cluster_connection_budget: None,
+        expected_replica_count: 3,
+        statement_cache_capacity: 500,
+        query_timeout_seconds: 30,
+        database_replica_url: None,
         redis_host: "localhost".into(),
         redis_port: 6379,
         redis_password: None,
@@ -125,6 +204,7 @@ fn test_config() -> Config {
         redis_pool_max_size: 40,
         jwt_private_key_pem: "BEGIN TEST".into(),
         jwt_public_key_pem: "BEGIN TEST".into(),
+        jwt_previous_public_keys_pem: vec![],
         jwt_expiry: Duration::from_secs(86_400),
         api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
         rate_limit_window_ms: 60_000,
@@ -175,6 +255,11 @@ fn test_config() -> Config {
         placement_imap_timeout_secs: 30,
         placement_encrypt_passwords: false,
         placement_encryption_secret: "test-placement-encryption-secret-32b".into(),
+        mcaptcha_base_url: "https://mcaptcha.example.com".into(),
+        mcaptcha_site_key: "dev".into(),
+        mcaptcha_secret_key: "dev".into(),
+        mcaptcha_enabled: false,
+        mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
     }
 }
 
@@ -188,6 +273,22 @@ async fn registration_test_app(pool: PgPool) -> Router {
     std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
     std::env::set_var("AWS_ACCESS_KEY_ID", "test");
     std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+
+    let raw_database_url =
+        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+    // Mirror `optional_pg_pool`'s isolation: append `_schema` to the dbname so
+    // the app's pool targets the same dedicated database the schema-contract
+    // tests use.
+    let database_url = match raw_database_url.rsplit_once('/') {
+        Some((server_part, db_part)) => {
+            let db_only = db_part.split('?').next().unwrap_or(db_part);
+            format!("{server_part}/{db_only}_schema")
+        }
+        None => raw_database_url,
+    };
+    let pools = apexmail_db::pool::create_pool_pair(&database_url, None, 2, 0)
+        .await
+        .expect("failed to create test pool pair");
 
     let redis = RedisConfig::from_url("redis://127.0.0.1:6379")
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -207,6 +308,7 @@ async fn registration_test_app(pool: PgPool) -> Router {
     build_app(
         AppStateInner::new(
             pool,
+            pools,
             redis,
             test_config(),
             reqwest::Client::new(),
@@ -777,7 +879,7 @@ async fn concurrent_registration_same_email_no_orphaned_tenant() {
         "company_name": company_name,
         "email": email,
         "name": "Owner Example",
-        "password": "StrongPass123!",
+        "password": "Str0ng!P@ssw0rd-Vault",
         "plan": "free"
     })
     .to_string();
@@ -805,8 +907,18 @@ async fn concurrent_registration_same_email_no_orphaned_tenant() {
     let (response_a, response_b) = result;
     let response_a = response_a.expect("first registration request failed");
     let response_b = response_b.expect("second registration request failed");
-    assert_eq!(response_a.status(), StatusCode::ACCEPTED);
-    assert_eq!(response_b.status(), StatusCode::ACCEPTED);
+    let status_a = response_a.status();
+    let status_b = response_b.status();
+    let body_a = axum::body::to_bytes(response_a.into_body(), 65536)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).to_string())
+        .unwrap_or_default();
+    let body_b = axum::body::to_bytes(response_b.into_body(), 65536)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).to_string())
+        .unwrap_or_default();
+    assert_eq!(status_a, StatusCode::ACCEPTED, "body_a: {body_a}");
+    assert_eq!(status_b, StatusCode::ACCEPTED, "body_b: {body_b}");
 
     let user_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)")

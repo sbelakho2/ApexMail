@@ -125,7 +125,7 @@ async fn list_lists(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListsPageResponse>, ApiError> {
     require_scopes(&auth, &["lists:read"])?;
-    let limit = q.limit.min(200).max(1);
+    let limit = q.limit.clamp(1, 200);
     let offset = q.offset.max(0);
 
     let rows = sqlx::query_as::<_, ListRow>(
@@ -313,7 +313,7 @@ async fn list_subscribers(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["lists:read"])?;
-    let limit = q.limit.min(200).max(1);
+    let limit = q.limit.clamp(1, 200);
     let offset = q.offset.max(0);
 
     // Verify list belongs to tenant

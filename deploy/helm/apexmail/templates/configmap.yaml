@@ -29,7 +29,7 @@ data:
 
   # ── ClickHouse ─────────────────────────────────────────────────────────────
   {{- if .Values.clickhouse.enabled }}
-  clickhouse-url: {{ printf "http://%s-clickhouse:8123" (include "apexmail.fullname" .) | quote }}
+  clickhouse-url: {{ printf "https://%s-clickhouse:8443" (include "apexmail.fullname" .) | quote }}
   clickhouse-database: "apexmail"
   clickhouse-user: "apexmail"
   {{- end }}

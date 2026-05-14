@@ -79,6 +79,7 @@ impl LogStreamingService {
     }
 
     /// Create a new log stream
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         tenant_id: String,
@@ -249,6 +250,7 @@ impl LogStreamingService {
     }
 
     /// Record a delivery batch
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_delivery(
         &self,
         stream_id: Uuid,
@@ -304,6 +306,7 @@ impl LogStreamingService {
 
     /// Get delivery statistics for a stream
     pub async fn get_stats(&self, stream_id: Uuid) -> Result<ApiResult<StreamStats>, String> {
+        #[allow(clippy::type_complexity)]
         let row: Option<(i64, Option<i64>, Option<i64>, Option<f64>)> = sqlx::query_as(
             "SELECT COUNT(*), SUM(event_count)::bigint, SUM(bytes_delivered)::bigint, AVG(duration_ms)::float8
              FROM ent_stream_batches WHERE stream_id = $1 AND created_at > NOW() - interval '24 hours'"
@@ -361,8 +364,11 @@ fn http_client() -> &'static reqwest::Client {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "Failed to build log streaming client, using default");
-                reqwest::Client::new()
+                tracing::error!(error = %e, "Failed to build log streaming client, using fallback with timeout");
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .expect("Client::builder with only timeout should never fail")
             })
     })
 }

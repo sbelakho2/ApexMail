@@ -226,6 +226,7 @@ mod boundary_conditions {
 
     /// Test reputation at u8 boundaries
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn reputation_u8_boundaries() {
         let mut rep = ReputationScore::default();
         rep.score = 100;
@@ -440,6 +441,7 @@ mod state_machine_tests {
 
     /// Test reputation level transitions at exact boundaries
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn reputation_level_boundaries() {
         let mut rep = ReputationScore::default();
 

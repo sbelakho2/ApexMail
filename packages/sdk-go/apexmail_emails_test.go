@@ -32,10 +32,13 @@ func TestEmailsCancelUsesCancelEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New("am_live_1234567890abcdef", Config{
+	client, err := New("am_live_1234567890abcdef", Config{
 		BaseURL:    server.URL,
 		HTTPClient: server.Client(),
 	})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
 
 	resp, err := client.Emails.Cancel(context.Background(), "msg_123")
 	if err != nil {
@@ -52,7 +55,10 @@ func TestEmailsCancelUsesCancelEndpoint(t *testing.T) {
 func TestEmailsCancelRequiresID(t *testing.T) {
 	t.Parallel()
 
-	client := New("am_live_1234567890abcdef")
+	client, err := New("am_live_1234567890abcdef")
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
 	resp, err := client.Emails.Cancel(context.Background(), "   ")
 	if err == nil {
 		t.Fatalf("expected error, got response %#v", resp)

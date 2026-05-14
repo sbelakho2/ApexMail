@@ -1,5 +1,7 @@
 //! Configuration for the Isolation service.
 
+use zeroize::Zeroizing;
+
 use serde::{Deserialize, Serialize};
 
 // ── Isolation Level ────────────────────────────────────────
@@ -95,7 +97,7 @@ impl RedisConfig {
 
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
-    pub encryption_key: String,
+    pub encryption_key: Zeroizing<String>,
     pub data_key_rotation_days: i64,
     pub audit_retention_days: i64,
     pub session_timeout_minutes: i64,
@@ -120,6 +122,7 @@ pub struct Config {
     pub port: u16,
     pub environment: String,
     pub internal_api_key: String,
+    pub internal_api_keys: Vec<String>,
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub tenant: TenantConfig,
@@ -174,6 +177,16 @@ impl Config {
         let internal_api_key_env = std::env::var("ISOLATION_INTERNAL_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let internal_api_keys_env: Vec<String> = std::env::var("ISOLATION_INTERNAL_API_KEYS")
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         if is_production && encryption_key_env.is_none() {
             tracing::error!(
                 "SECURITY: TENANT_ENCRYPTION_KEY is required in production. \
@@ -182,7 +195,7 @@ impl Config {
             );
             std::process::exit(78); // EX_CONFIG
         }
-        if is_production && internal_api_key_env.is_none() {
+        if is_production && internal_api_key_env.is_none() && internal_api_keys_env.is_empty() {
             tracing::error!(
                 "SECURITY: ISOLATION_INTERNAL_API_KEY is required in production. \
                  Refusing to start with an ephemeral generated key — set the env \
@@ -192,15 +205,26 @@ impl Config {
         }
         let encryption_key =
             encryption_key_env.unwrap_or_else(|| generated_runtime_secret("tenant-encryption-key"));
-        let internal_api_key = internal_api_key_env
-            .unwrap_or_else(|| generated_runtime_secret("isolation-internal-api-key"));
+        let internal_api_key = internal_api_key_env.unwrap_or_else(|| {
+            internal_api_keys_env
+                .first()
+                .cloned()
+                .unwrap_or_else(|| generated_runtime_secret("isolation-internal-api-key"))
+        });
+        let mut internal_api_keys = internal_api_keys_env;
+        if !internal_api_key.trim().is_empty()
+            && !internal_api_keys.iter().any(|key| key == &internal_api_key)
+        {
+            internal_api_keys.insert(0, internal_api_key.clone());
+        }
 
         Self {
             port: env_or_u16("ISOLATION_PORT", 4500),
             environment,
             internal_api_key,
+            internal_api_keys,
             database: DatabaseConfig {
-                host: env_or("ISOLATION_DB_HOST", "localhost"),
+                host: env_or("ISOLATION_DB_HOST", "127.0.0.1"),
                 port: env_or_u16("ISOLATION_DB_PORT", 5432),
                 database: env_or("ISOLATION_DB_NAME", "apexmail_isolation"),
                 user: env_or("ISOLATION_DB_USER", "apexmail"),
@@ -208,7 +232,7 @@ impl Config {
                 max_connections: env_or_u32("ISOLATION_DB_MAX_CONN", 20),
             },
             redis: RedisConfig {
-                host: env_or("ISOLATION_REDIS_HOST", "localhost"),
+                host: env_or("ISOLATION_REDIS_HOST", "127.0.0.1"),
                 port: env_or_u16("ISOLATION_REDIS_PORT", 6379),
                 password: std::env::var("ISOLATION_REDIS_PASSWORD").ok(),
                 db: std::env::var("ISOLATION_REDIS_DB")
@@ -222,16 +246,19 @@ impl Config {
                 default_quota: QuotaConfig::default(),
             },
             security: SecurityConfig {
-                encryption_key,
+                encryption_key: Zeroizing::new(encryption_key),
                 data_key_rotation_days: env_or_i64("DATA_KEY_ROTATION_DAYS", 90),
                 audit_retention_days: env_or_i64("AUDIT_RETENTION_DAYS", 365),
                 session_timeout_minutes: env_or_i64("SESSION_TIMEOUT_MINUTES", 30),
             },
             cors: CorsConfig {
-                origins: env_or("CORS_ORIGINS", "http://localhost:3000")
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect(),
+                origins: env_or(
+                    "CORS_ORIGINS",
+                    "http://localhost:3000,http://127.0.0.1:3000",
+                )
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect(),
             },
         }
     }

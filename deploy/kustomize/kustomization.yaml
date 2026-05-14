@@ -1,0 +1,42 @@
+# =============================================================================
+# ApexMail Kubernetes Kustomize Base Configuration
+# =============================================================================
+# This is the canonical entry point for Kubernetes deployments.
+# It references the full set of manifests in deploy/k8s/.
+#
+# Apply the full stack:
+#   kubectl apply -k deploy/kustomize/
+#
+# Apply staging overlay:
+#   kubectl apply -k deploy/kustomize/overlays/staging/
+#
+# Apply production overlay:
+#   kubectl apply -k deploy/kustomize/overlays/production/
+#
+# NOTE: All resource manifests live under deploy/k8s/. This directory
+# provides environment overlays and the top-level pointer.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: apexmail
+
+resources:
+  - ../k8s
+
+commonLabels:
+  app.kubernetes.io/part-of: apexmail
+  app.kubernetes.io/managed-by: kustomize
+
+# Default image tags — override in overlays per environment
+images:
+  - name: apexmail/api-server
+    newTag: v1.0.0
+  - name: apexmail/tracking-service
+    newTag: v1.0.0
+  - name: apexmail/mail-server
+    newTag: v1.0.0
+  - name: apexmail/worker
+    newTag: v1.0.0
+  - name: apexmail/enterprise-server
+    newTag: v1.0.0

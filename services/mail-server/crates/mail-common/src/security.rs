@@ -20,6 +20,7 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use tracing::warn;
 use uuid::Uuid;
 
 /// Security subsystem that produced an event.
@@ -278,6 +279,15 @@ pub fn ingest_security_event(event: SecurityEvent) -> Option<CompositeAlert> {
 /// ## Concurrency model
 /// Uses `DashMap` for sharded concurrent access, eliminating the global lock
 /// bottleneck. Supports 500K+ events/sec with minimal contention.
+/// Prometheus: total number of events dropped by the correlator (rate-limited or evicted).
+static CORRELATOR_DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the total number of events the correlator has dropped due to rate
+/// limiting or IP-eviction since process start. Exposed as a Prometheus gauge.
+pub fn correlator_dropped_event_count() -> u64 {
+    CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed)
+}
+
 pub struct SecurityCorrelator {
     /// Per-IP event history:IP string → ring buffer of recent events (sharded)
     ip_events: DashMap<String, Vec<SecurityEvent>>,
@@ -419,6 +429,11 @@ impl SecurityCorrelator {
     pub fn ingest(&self, event: SecurityEvent) -> Option<CompositeAlert> {
         // Atomic rate limiting (no mutex)
         if !self.check_rate_limit() {
+            CORRELATOR_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                counter = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
+                "Security correlator rate cap exceeded — dropping event"
+            );
             return None;
         }
 
@@ -431,9 +446,35 @@ impl SecurityCorrelator {
             return None;
         }
 
-        // Anti-OOM:don't track more IPs than configured
+        // Anti-OOM: don't track more IPs than configured — evict lowest-priority IP first
         if !self.ip_events.contains_key(&ip) && self.ip_events.len() >= self.max_tracked_ips {
-            return None;
+            // Try to evict the IP with the fewest events (lowest threat activity)
+            let evict_ip: Option<String> = self
+                .ip_events
+                .iter()
+                .min_by_key(|entry| entry.value().len())
+                .map(|entry| entry.key().clone());
+
+            if let Some(target) = evict_ip {
+                self.ip_events.remove(&target);
+                self.last_alerts.remove(&target);
+                CORRELATOR_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    ip = %target,
+                    new_ip = %ip,
+                    tracked = self.ip_events.len(),
+                    dropped = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
+                    "Security correlator IP limit reached — evicted lowest-activity IP to make room"
+                );
+            } else {
+                CORRELATOR_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    ip = %ip,
+                    dropped = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
+                    "Security correlator IP limit reached — no evictable IPs found, dropping event"
+                );
+                return None;
+            }
         }
 
         // Scoped entry lock - only this IP is locked

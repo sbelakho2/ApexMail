@@ -28,8 +28,11 @@ impl ScoringWeights {
     /// uniform defaults otherwise. Logs a warning on fallback so operators
     /// can detect misconfigurations during startup or at runtime.
     pub fn validate_or_fallback(&self, label: &str) -> Self {
-        let sum = self.dns_health + self.authentication + self.spam_likelihood
-            + self.content_quality + self.reputation;
+        let sum = self.dns_health
+            + self.authentication
+            + self.spam_likelihood
+            + self.content_quality
+            + self.reputation;
         if sum > 0.0 && sum.is_finite() {
             return self.clone();
         }
@@ -48,8 +51,11 @@ impl ScoringWeights {
     /// Return a normalized copy whose components sum to 1.0. If the sum is
     /// non-positive or non-finite, the default distribution is returned.
     pub fn normalized(&self) -> Self {
-        let sum = self.dns_health + self.authentication + self.spam_likelihood
-            + self.content_quality + self.reputation;
+        let sum = self.dns_health
+            + self.authentication
+            + self.spam_likelihood
+            + self.content_quality
+            + self.reputation;
         if sum <= 0.0 || !sum.is_finite() {
             return Self::default();
         }
@@ -129,12 +135,14 @@ impl GraderConfig {
             default_dkim_selectors: std::env::var("GRADER_DKIM_SELECTORS")
                 .ok()
                 .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-                .unwrap_or_else(|| vec![
-                    "default".into(),
-                    "google".into(),
-                    "dkim".into(),
-                    "selector1".into(),
-                ]),
+                .unwrap_or_else(|| {
+                    vec![
+                        "default".into(),
+                        "google".into(),
+                        "dkim".into(),
+                        "selector1".into(),
+                    ]
+                }),
             max_body_size: env_parse("GRADER_MAX_BODY_SIZE", 256_000),
             encrypt_stored_content: env_parse("GRADER_ENCRYPT_STORED", false),
             encryption_master_key_base64: std::env::var("GRADER_ENCRYPTION_KEY_BASE64").ok(),
@@ -161,5 +169,8 @@ impl GraderConfig {
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }

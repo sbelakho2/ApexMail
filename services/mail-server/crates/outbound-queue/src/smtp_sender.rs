@@ -141,7 +141,10 @@ fn enforce_production_starttls(
 /// Direct SMTP Sender - Enterprise-Grade Infrastructure
 pub struct SmtpSender {
     config: SmtpSenderConfig,
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "from_domain is retained for provider identity and DKIM diagnostics"
+    )]
     from_domain: String,
     resolver: TokioAsyncResolver,
     dkim_signer: Option<DkimSigner>,
@@ -277,6 +280,7 @@ pub struct OutboundMetricsSnapshot {
 
 static OUTBOUND_METRICS: LazyLock<OutboundMetrics> = LazyLock::new(OutboundMetrics::new);
 
+#[allow(clippy::large_enum_variant)]
 enum PooledStream {
     Plain(TcpStream),
     Tls(tokio_rustls::client::TlsStream<TcpStream>),
@@ -452,7 +456,10 @@ impl SmtpSender {
                     if lower.contains("5.7.23") || lower.contains("spf") {
                         OUTBOUND_METRICS.record_spf_failure(&sender_domain);
                     }
-                    if lower.contains("5.7.20") || lower.contains("5.7.21") || lower.contains("dkim") {
+                    if lower.contains("5.7.20")
+                        || lower.contains("5.7.21")
+                        || lower.contains("dkim")
+                    {
                         OUTBOUND_METRICS.record_dkim_failure(&sender_domain);
                     }
                     if lower.contains("5.7.1 dmarc")
@@ -744,7 +751,7 @@ impl SmtpSender {
                 accepted.push(recipient.clone());
             } else {
                 rejected.push(recipient.clone());
-                warn!(recipient = %mail_common::pii::redact_email(&recipient), response = %response.trim(), "Recipient rejected");
+                warn!(recipient = %mail_common::pii::redact_email(recipient), response = %response.trim(), "Recipient rejected");
             }
         }
 
@@ -823,6 +830,7 @@ impl SmtpSender {
     }
 
     /// Build an RFC 5322 compliant email message
+    #[allow(clippy::too_many_arguments)]
     fn build_message(
         &self,
         from: &str,
@@ -991,6 +999,7 @@ impl SmtpSender {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn smtp_session_plain(
         &self,
         stream: TcpStream,
@@ -1047,7 +1056,15 @@ impl SmtpSender {
             let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-            let tls_config = tokio_rustls::rustls::ClientConfig::builder()
+            // F-20: Explicitly restrict TLS to 1.2 and 1.3 (disallow older versions).
+            let provider =
+                std::sync::Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+            let tls_config = tokio_rustls::rustls::ClientConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[
+                    &tokio_rustls::rustls::version::TLS12,
+                    &tokio_rustls::rustls::version::TLS13,
+                ])
+                .map_err(|e| anyhow!("Failed to configure TLS protocol versions: {}", e))?
                 .with_root_certificates(root_store)
                 .with_no_client_auth();
             let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config));
@@ -1437,6 +1454,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn production_starttls_policy_forces_disabled_config() {
         let mut config = SmtpSenderConfig::default();
         config.require_starttls = false;
@@ -1447,6 +1465,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn non_production_starttls_policy_preserves_disabled_config() {
         let mut config = SmtpSenderConfig::default();
         config.require_starttls = false;

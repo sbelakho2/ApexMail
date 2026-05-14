@@ -15,7 +15,7 @@ async fn sales_pipeline_lead_to_campaign() {
     use sales_autopilot::types::{Campaign, CampaignStatus};
 
     let crm = CrmService::new();
-    let enricher = EnrichmentService::new("http://mock");
+    let enricher = EnrichmentService::mock();
     let optimizer = ContentOptimizer::new();
 
     // Step 1:Create a lead
@@ -30,7 +30,7 @@ async fn sales_pipeline_lead_to_campaign() {
     assert_eq!(lead.email, "alice@acme.com");
 
     // Step 2:Enrich the lead
-    let company = enricher.enrich_lead(&lead.email).unwrap();
+    let company = enricher.enrich_lead(&lead.email).await.unwrap();
     assert_eq!(company.domain, "acme.com");
     assert_eq!(company.industry, "SaaS");
 

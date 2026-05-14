@@ -153,7 +153,7 @@ mod tests {
     fn test_all_codes_have_valid_status() {
         for code in ALL_CODES {
             let status = code.http_status();
-            assert!(status >= 400 && status < 600, "{}: {}", code, status);
+            assert!((400..600).contains(&status), "{}: {}", code, status);
         }
     }
 

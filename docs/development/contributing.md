@@ -110,6 +110,8 @@ Include:
 - [ ] Documentation updated
 - [ ] Commit messages follow conventions
 
+> **Style guide:** The project uses an [`.editorconfig`](../../.editorconfig) for machine-readable style rules (indentation, charset, line endings). For detailed design principles and visual style, see the [Style Guide (DOCX)](../style_guide.docx).
+
 ### Code Review Process
 
 1. **Automated checks** run on PR creation

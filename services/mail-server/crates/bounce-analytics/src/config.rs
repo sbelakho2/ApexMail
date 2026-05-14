@@ -38,13 +38,27 @@ pub struct BounceAnalyticsConfig {
     pub batch_size: i64,
 }
 
-fn default_aggregation_interval() -> u64 { 300 }
-fn default_aggregation_window_days() -> i64 { 30 }
-fn default_burst_threshold() -> u32 { 10 }
-fn default_problematic_bounce_rate() -> f64 { 0.15 }
-fn default_min_sends_for_domain() -> i64 { 100 }
-fn default_retention_days() -> i64 { 90 }
-fn default_batch_size() -> i64 { 1000 }
+fn default_aggregation_interval() -> u64 {
+    300
+}
+fn default_aggregation_window_days() -> i64 {
+    30
+}
+fn default_burst_threshold() -> u32 {
+    10
+}
+fn default_problematic_bounce_rate() -> f64 {
+    0.15
+}
+fn default_min_sends_for_domain() -> i64 {
+    100
+}
+fn default_retention_days() -> i64 {
+    90
+}
+fn default_batch_size() -> i64 {
+    1000
+}
 
 impl Default for BounceAnalyticsConfig {
     fn default() -> Self {

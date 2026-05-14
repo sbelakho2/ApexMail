@@ -197,13 +197,20 @@ mod tests {
 
     #[test]
     fn test_request_context_builder() {
-        let ctx = RequestContextBuilder::new("1.2.3.4".parse().unwrap(), "/api/health", "GET")
-            .user_agent("Mozilla/5.0")
-            .tenant_id("tenant-123")
-            .body_size(1024)
-            .build();
+        let ctx = RequestContextBuilder::new(
+            "1.2.3.4".parse().expect("hardcoded test IP"),
+            "/api/health",
+            "GET",
+        )
+        .user_agent("Mozilla/5.0")
+        .tenant_id("tenant-123")
+        .body_size(1024)
+        .build();
 
-        assert_eq!(ctx.ip, "1.2.3.4".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            ctx.ip,
+            "1.2.3.4".parse::<IpAddr>().expect("hardcoded test IP")
+        );
         assert_eq!(ctx.path, "/api/health");
         assert_eq!(ctx.method, "GET");
         assert_eq!(ctx.user_agent.as_deref(), Some("Mozilla/5.0"));
@@ -213,35 +220,47 @@ mod tests {
 
     #[test]
     fn test_extract_client_ip_x_real_ip() {
-        let direct: IpAddr = "127.0.0.1".parse().unwrap();
+        let direct: IpAddr = "127.0.0.1".parse().expect("hardcoded test IP");
         let result = extract_client_ip(Some("10.0.0.1"), None, None, direct);
-        assert_eq!(result, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            result,
+            "10.0.0.1".parse::<IpAddr>().expect("hardcoded test IP")
+        );
     }
 
     #[test]
     fn test_extract_client_ip_xff_first() {
-        let direct: IpAddr = "127.0.0.1".parse().unwrap();
+        let direct: IpAddr = "127.0.0.1".parse().expect("hardcoded test IP");
         let result = extract_client_ip(None, Some("10.0.0.2, 10.0.0.3"), None, direct);
-        assert_eq!(result, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            result,
+            "10.0.0.2".parse::<IpAddr>().expect("hardcoded test IP")
+        );
     }
 
     #[test]
     fn test_extract_client_ip_cf() {
-        let direct: IpAddr = "127.0.0.1".parse().unwrap();
+        let direct: IpAddr = "127.0.0.1".parse().expect("hardcoded test IP");
         let result = extract_client_ip(None, None, Some("10.0.0.4"), direct);
-        assert_eq!(result, "10.0.0.4".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            result,
+            "10.0.0.4".parse::<IpAddr>().expect("hardcoded test IP")
+        );
     }
 
     #[test]
     fn test_extract_client_ip_fallback_to_direct() {
-        let direct: IpAddr = "192.168.1.1".parse().unwrap();
+        let direct: IpAddr = "192.168.1.1".parse().expect("hardcoded test IP");
         let result = extract_client_ip(None, None, None, direct);
-        assert_eq!(result, "192.168.1.1".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            result,
+            "192.168.1.1".parse::<IpAddr>().expect("hardcoded test IP")
+        );
     }
 
     #[test]
     fn test_extract_client_ip_priority_order() {
-        let direct: IpAddr = "127.0.0.1".parse().unwrap();
+        let direct: IpAddr = "127.0.0.1".parse().expect("hardcoded test IP");
         // X-Real-IP takes priority over XFF
         let result = extract_client_ip(
             Some("10.0.0.1"),
@@ -249,21 +268,34 @@ mod tests {
             Some("10.0.0.4"),
             direct,
         );
-        assert_eq!(result, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            result,
+            "10.0.0.1".parse::<IpAddr>().expect("hardcoded test IP")
+        );
     }
 
     #[test]
     fn test_extract_client_ip_invalid_x_real_ip_falls_through() {
-        let direct: IpAddr = "127.0.0.1".parse().unwrap();
+        let direct: IpAddr = "127.0.0.1".parse().expect("hardcoded test IP");
         let result = extract_client_ip(Some("not-an-ip"), Some("10.0.0.2"), None, direct);
-        assert_eq!(result, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            result,
+            "10.0.0.2".parse::<IpAddr>().expect("hardcoded test IP")
+        );
     }
 
     #[tokio::test]
     async fn test_evaluate_request_allow() {
         let config = crate::config::ProtectorConfig::default();
-        let protector = DdosProtector::new(config).await.unwrap();
-        let ctx = RequestContextBuilder::new("1.2.3.4".parse().unwrap(), "/health", "GET").build();
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+        let ctx = RequestContextBuilder::new(
+            "1.2.3.4".parse().expect("hardcoded test IP"),
+            "/health",
+            "GET",
+        )
+        .build();
 
         let action = evaluate_request(&protector, &ctx).await;
         assert!(matches!(action, MiddlewareAction::Allow));
@@ -272,9 +304,11 @@ mod tests {
     #[tokio::test]
     async fn test_evaluate_request_block() {
         let config = crate::config::ProtectorConfig::default();
-        let protector = DdosProtector::new(config).await.unwrap();
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
 
-        let ip: IpAddr = "10.0.0.99".parse().unwrap();
+        let ip: IpAddr = "10.0.0.99".parse().expect("hardcoded test IP");
         protector.block_ip(ip, Duration::from_secs(300), "test".to_string());
 
         let ctx = RequestContextBuilder::new(ip, "/api/data", "GET").build();

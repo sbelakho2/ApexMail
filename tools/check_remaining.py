@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Check specific lines for remaining real errors after v6 fixes."""
-import json, re
+import json
+import re
 
 with open('data/train_agent.jsonl') as f:
     lines = f.readlines()
+
+max_line = len(lines)
 
 # Lines to check for real issues
 check_lines = [60, 224, 241, 244, 299, 304, 312, 318, 321, 324, 348, 354, 357, 
@@ -12,6 +15,9 @@ check_lines = [60, 224, 241, 244, 299, 304, 312, 318, 321, 324, 348, 354, 357,
                929, 932, 937, 948, 949, 964, 987, 1020, 1026]
 
 for ln in check_lines:
+    if ln > max_line:
+        print(f"L{ln}: SKIPPED (file has {max_line} lines)")
+        continue
     data = json.loads(lines[ln-1])
     text = data['text']
     assists = re.findall(r'<\|im_start\|>assistant\n(.*?)(?:<\|im_end\|>|$)', text, re.DOTALL)

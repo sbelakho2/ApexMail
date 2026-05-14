@@ -3,6 +3,7 @@
 //! Handles API versioning, SDK management, CLI tools, webhook testing,
 //! OpenAPI documentation, developer onboarding, and API key management.
 
+#![deny(unsafe_code)]
 pub mod config;
 pub mod onboarding;
 pub mod openapi;

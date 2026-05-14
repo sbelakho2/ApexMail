@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level edge-cases configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EdgeCasesConfig {
     pub port: u16,
     pub database_url: String,
@@ -18,6 +19,7 @@ pub struct EdgeCasesConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttachmentLimits {
     pub max_single_size: usize,
     pub max_total_size: usize,
@@ -27,6 +29,7 @@ pub struct AttachmentLimits {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     pub max_retries: u32,
     pub initial_delay_secs: u64,
@@ -36,12 +39,14 @@ pub struct RetryConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoopDetectionConfig {
     pub max_hops: usize,
     pub max_received_headers: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutoResponderConfig {
     pub patterns: Vec<String>,
     pub header_indicators: Vec<String>,
@@ -52,6 +57,7 @@ pub struct AutoResponderConfig {
 /// The default chunk size (8 192 bytes) matches ClamAV's recommended
 /// INSTREAM chunk limit. Override via env var `CLAMAV_CHUNK_SIZE`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClamAVConfig {
     pub host: String,
     pub port: u16,
@@ -150,7 +156,7 @@ impl Default for AutoResponderConfig {
 impl Default for ClamAVConfig {
     fn default() -> Self {
         Self {
-            host: "localhost".into(),
+            host: "127.0.0.1".into(),
             port: 3310,
             timeout_secs: 30,
             enabled: true,
@@ -164,7 +170,7 @@ impl Default for EdgeCasesConfig {
         Self {
             port: 4600,
             database_url: String::new(),
-            redis_url: "redis://127.0.0.1:6379".into(),
+            redis_url: "redis://localhost:6379".into(),
             api_key: String::new(),
             node_env: "development".into(),
             attachments: AttachmentLimits::default(),

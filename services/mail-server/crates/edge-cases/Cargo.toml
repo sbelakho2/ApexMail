@@ -12,6 +12,7 @@ path = "src/bin/server.rs"
 
 [dependencies]
 mail-common = { path = "../mail-common" }
+apexmail-lib = { path = "../apexmail-lib" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }

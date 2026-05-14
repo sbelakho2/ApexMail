@@ -13,8 +13,8 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialise tracing
-    tracing_subscriber::fmt::init();
+    // Initialise structured JSON logging
+    tracing_subscriber::fmt().json().with_target(true).init();
 
     let config = OpsConfig::from_env();
     info!(?config, "ops-service starting");

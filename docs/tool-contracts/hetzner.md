@@ -150,6 +150,9 @@ The **Robot API** is used exclusively for hardware-level fencing during PostgreS
 | Bandwidth overages | €0 (within 20 TB) |
 | Dedicated IPs (floating) | ~€4 per IP |
 | **Total infrastructure** | **~€132/mo + IPs** |
+| **Cost basis last verified** | **2026-05-10** — Hetzner CAX41 pricing confirmed at ~€24/mo each; floating IPs ~€4/mo |
+
+> **Note:** Prices are as of the verification date above. Hetzner may adjust CAX instance pricing over time. Re-verify costs periodically for budgeting accuracy.
 
 ---
 

@@ -239,7 +239,7 @@ mod pow_perf_tests {
             }
         }
 
-        if required_zeros % 8 > 0 && required_bytes < 32 {
+        if !required_zeros.is_multiple_of(8) && required_bytes < 32 {
             let mask = 0xFF << (8 - (required_zeros % 8));
             if hash[required_bytes] & mask != 0 {
                 return false;
@@ -475,9 +475,9 @@ mod concurrent_perf_tests {
         let iterations_per_shard = 100_000;
 
         // Simulate sharded processing
-        for shard in 0..16 {
+        for counter in &counters {
             for _ in 0..iterations_per_shard {
-                counters[shard].fetch_add(1, Ordering::Relaxed);
+                counter.fetch_add(1, Ordering::Relaxed);
             }
         }
 

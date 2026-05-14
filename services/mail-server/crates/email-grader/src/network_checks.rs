@@ -54,16 +54,22 @@ pub async fn lookup_bimi(dns: &DnsLookup, domain: &str) -> Option<BimiInfo> {
             vmc_url = Some(v.trim().to_string());
         }
     }
-    Some(BimiInfo { raw, logo_url, vmc_url })
+    Some(BimiInfo {
+        raw,
+        logo_url,
+        vmc_url,
+    })
 }
 
 /// Lookup TLS-RPT for `<domain>`.
 pub async fn lookup_tls_rpt(dns: &DnsLookup, domain: &str) -> Option<TlsRptInfo> {
     let qname = format!("_smtp._tls.{domain}");
     let txts = dns.lookup_txt(&qname).await.ok()?;
-    let raw = txts
-        .into_iter()
-        .find(|t| t.trim_start().to_ascii_lowercase().starts_with("v=tlsrptv1"))?;
+    let raw = txts.into_iter().find(|t| {
+        t.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("v=tlsrptv1")
+    })?;
     let rua: Vec<String> = raw
         .split(';')
         .filter_map(|tag| tag.trim().strip_prefix("rua="))
@@ -96,19 +102,23 @@ pub async fn lookup_mta_sts(
         .map(|s| s.trim().to_string())?;
 
     let url = format!("https://mta-sts.{domain}/.well-known/mta-sts.txt");
-    let resp = tokio::time::timeout(
-        timeout,
-        http.get(&url).send(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let resp = tokio::time::timeout(timeout, http.get(&url).send())
+        .await
+        .ok()?
+        .ok()?;
     if !resp.status().is_success() {
         return None;
     }
-    let body = tokio::time::timeout(timeout, resp.bytes()).await.ok()?.ok()?;
+    let body = tokio::time::timeout(timeout, resp.bytes())
+        .await
+        .ok()?
+        .ok()?;
     if body.len() > max_bytes {
-        tracing::warn!(domain, bytes = body.len(), "MTA-STS policy exceeds size cap");
+        tracing::warn!(
+            domain,
+            bytes = body.len(),
+            "MTA-STS policy exceeds size cap"
+        );
         return None;
     }
     let text = std::str::from_utf8(&body).ok()?;
@@ -173,9 +183,12 @@ mod tests {
             .flat_map(|v| v.split(',').map(|s| s.trim().to_string()))
             .filter(|s| !s.is_empty())
             .collect();
-        assert_eq!(rua, vec![
-            "mailto:tls@example.com".to_string(),
-            "https://example.com/tls".to_string(),
-        ]);
+        assert_eq!(
+            rua,
+            vec![
+                "mailto:tls@example.com".to_string(),
+                "https://example.com/tls".to_string(),
+            ]
+        );
     }
 }

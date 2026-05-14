@@ -154,7 +154,11 @@ mod tests {
 
     #[test]
     fn band_round_trip() {
-        for b in [ReputationBand::Green, ReputationBand::Amber, ReputationBand::Red] {
+        for b in [
+            ReputationBand::Green,
+            ReputationBand::Amber,
+            ReputationBand::Red,
+        ] {
             assert_eq!(ReputationBand::parse(b.as_str()), Some(b));
         }
         assert_eq!(ReputationBand::parse("nope"), None);

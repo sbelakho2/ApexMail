@@ -102,7 +102,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
             sort_order: 2,
             features: PlanFeatures {
                 dedicated_ip: true,
-                dedicated_ip_count: 1,
+                dedicated_ip_count: 0,
                 api_access: true,
                 webhooks_enabled: true,
                 advanced_analytics: true,
@@ -552,17 +552,30 @@ mod tests {
     }
 
     #[test]
-    fn pro_plan_has_dedicated_ip_with_count() {
-        let pro_plan = default_plans()
-            .into_iter()
+    fn dedicated_ip_included_counts_match_public_pricing() {
+        let plans = default_plans();
+        let pro_plan = plans
+            .iter()
             .find(|plan| plan.name == "pro")
             .expect("pro plan must exist");
+        let growth_plan = plans
+            .iter()
+            .find(|plan| plan.name == "growth")
+            .expect("growth plan must exist");
+        let scale_plan = plans
+            .iter()
+            .find(|plan| plan.name == "scale")
+            .expect("scale plan must exist");
+        let enterprise_plan = plans
+            .iter()
+            .find(|plan| plan.name == "enterprise")
+            .expect("enterprise plan must exist");
 
         assert!(pro_plan.features.dedicated_ip);
-        assert!(
-            pro_plan.features.dedicated_ip_count > 0,
-            "Pro plan with dedicated_ip=true must have dedicated_ip_count > 0"
-        );
+        assert_eq!(pro_plan.features.dedicated_ip_count, 0);
+        assert_eq!(growth_plan.features.dedicated_ip_count, 1);
+        assert_eq!(scale_plan.features.dedicated_ip_count, 3);
+        assert_eq!(enterprise_plan.features.dedicated_ip_count, 10);
     }
 
     #[test]

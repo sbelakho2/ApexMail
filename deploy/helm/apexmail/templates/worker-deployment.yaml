@@ -87,28 +87,33 @@ spec:
             httpGet:
               path: /health
               port: health
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.worker.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.worker.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.worker.probes.readiness.timeoutSeconds }}
           livenessProbe:
             httpGet:
               path: /health
               port: health
-            initialDelaySeconds: 15
-            periodSeconds: 20
+            initialDelaySeconds: {{ .Values.worker.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.worker.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.worker.probes.liveness.timeoutSeconds }}
           startupProbe:
             httpGet:
               path: /health
               port: health
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 12
+            initialDelaySeconds: {{ .Values.worker.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.worker.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.worker.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.worker.probes.startup.failureThreshold }}
           {{- include "apexmail.containerSecurityContext" . | nindent 10 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: tmp
-          emptyDir: {}
+          # 🟡7: Added size limit to prevent disk exhaustion
+          emptyDir:
+            sizeLimit: {{ .Values.worker.tmpEmptyDirSizeLimit | default "256Mi" }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

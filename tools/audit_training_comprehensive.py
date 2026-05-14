@@ -35,8 +35,8 @@ CANONICAL_PLANS = {
     'Free': {
         'price': 0,
         'annual': 0,
-        'emails': 3000,
-        'api_calls': 50000,
+        'emails': 30000,
+        'api_calls': 300000,
         'team': 1,
         'domains': 1,
         'contacts': 500,
@@ -100,8 +100,8 @@ CANONICAL_PLANS = {
         'sla_credit': 10,
     },
     'Enterprise': {
-        'price': 800,
-        'annual': 8000,
+        'price': 3000,
+        'annual': 30000,
         'emails': 5000000,
         'api_calls': -1,  # Unlimited
         'team': -1,  # Unlimited
@@ -237,10 +237,10 @@ class TrainingDataAuditor:
     def audit_plan_pricing(self, line_num: int, text: str) -> None:
         """Check plan prices are correct."""
         # Pattern: Plan: Growth ($150/mo)
-        plan_match = re.search(r'Plan: (\w+) \(\$(\d+)/mo\)', text)
+        plan_match = re.search(r'Plan: (\w+) \(\$([\d,]+)/mo\)', text)
         if plan_match:
             plan = plan_match.group(1)
-            price = int(plan_match.group(2))
+            price = int(plan_match.group(2).replace(',', ''))
             
             if plan in CANONICAL_PLANS:
                 self.plan_counts[plan] += 1
@@ -254,10 +254,10 @@ class TrainingDataAuditor:
         for plan, config in CANONICAL_PLANS.items():
             price = config['price']
             # Pattern in tables: | Starter | $25 |
-            table_pattern = rf'\|\s*{plan}\s*\|\s*\$(\d+)'
+            table_pattern = rf'\|\s*{plan}\s*\|\s*\$([\d,]+)'
             matches = re.findall(table_pattern, text)
             for match in matches:
-                found_price = int(match)
+                found_price = int(match.replace(',', ''))
                 if found_price != price:
                     self.issues.append(
                         f"Line {line_num}: Table shows {plan} at ${found_price}, should be ${price}"

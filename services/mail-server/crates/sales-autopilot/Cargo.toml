@@ -10,6 +10,7 @@ path = "src/bin/server.rs"
 [dependencies]
 apexmail-lib = { path = "../apexmail-lib" }
 apexmail-db  = { path = "../apexmail-db" }
+async-trait.workspace      = true
 tokio.workspace            = true
 axum.workspace             = true
 serde.workspace            = true

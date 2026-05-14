@@ -161,7 +161,7 @@ impl BounceServer {
                                 break;
                             }
                             if line.starts_with("..") {
-                                message.extend_from_slice(line[1..].as_bytes());
+                                message.extend_from_slice(&line.as_bytes()[1..]);
                             } else {
                                 message.extend_from_slice(line.as_bytes());
                             }

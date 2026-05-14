@@ -33,13 +33,14 @@ class Templates
     /**
      * List templates.
      *
-     * @param array $options { limit, offset }
+     * @param array $options { limit, offset, cursor }
      */
     public function list(array $options = []): array
     {
         $query = http_build_query(array_filter([
             'limit'  => $options['limit']  ?? 20,
             'offset' => $options['offset'] ?? 0,
+            'cursor' => $options['cursor'] ?? null,
         ], static fn ($v) => $v !== null && $v !== ''));
 
         return $this->client->request('GET', '/v1/templates' . ($query ? '?' . $query : ''));
@@ -64,13 +65,31 @@ class Templates
      */
     public function update(string $id, array $params): array
     {
-        return $this->client->request('PATCH', '/v1/templates/' . urlencode($id), $params);
+        return $this->client->request('PUT', '/v1/templates/' . urlencode($id), $params);
     }
 
     /** Delete a template and all its versions. */
     public function delete(string $id): array
     {
         return $this->client->request('DELETE', '/v1/templates/' . urlencode($id));
+    }
+
+    /**
+     * Duplicate a template, creating a copy with a new ID.
+     */
+    public function duplicate(string $id): array
+    {
+        return $this->client->request('POST', '/v1/templates/' . urlencode($id) . '/duplicate');
+    }
+
+    /**
+     * Rollback a template to a previous version.
+     *
+     * @param int $version  The version number to roll back to
+     */
+    public function rollback(string $id, int $version): array
+    {
+        return $this->client->request('POST', '/v1/templates/' . urlencode($id) . '/rollback', ['version' => $version]);
     }
 
     /**

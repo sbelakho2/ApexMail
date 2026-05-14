@@ -3,7 +3,10 @@
 
 BEGIN;
 
+-- H-12: Own the sequence to the number column so it's cleaned up if the
+-- table is dropped.
 CREATE SEQUENCE IF NOT EXISTS ent_support_ticket_number_seq START WITH 1000;
+ALTER SEQUENCE ent_support_ticket_number_seq OWNED BY ent_support_tickets.number;
 
 CREATE TABLE IF NOT EXISTS ent_support_agents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -30,7 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_ent_support_agents_specialties
 
 CREATE TABLE IF NOT EXISTS ent_support_tickets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     number INTEGER NOT NULL UNIQUE DEFAULT nextval('ent_support_ticket_number_seq'),
     subject VARCHAR(500) NOT NULL,
     description TEXT NOT NULL,
@@ -88,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_ent_ticket_comments_ticket_created
 
 CREATE TABLE IF NOT EXISTS ent_sso_configurations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     provider_type VARCHAR(50) NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     domain VARCHAR(255) NOT NULL,
@@ -121,7 +124,7 @@ CREATE INDEX IF NOT EXISTS idx_ent_sso_configurations_enabled_domain
 
 CREATE TABLE IF NOT EXISTS ent_sso_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     user_id VARCHAR(255),
     provider_type VARCHAR(50) NOT NULL,
     external_user_id VARCHAR(255) NOT NULL,
@@ -147,7 +150,7 @@ CREATE TABLE IF NOT EXISTS sso_oidc_state (
     state VARCHAR(255) NOT NULL UNIQUE,
     code_verifier VARCHAR(255) NOT NULL,
     domain VARCHAR(255) NOT NULL,
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '10 minutes'
 );
@@ -165,9 +168,9 @@ BEGIN
           AND column_name = 'tenant_id'
           AND udt_name = 'uuid'
     ) THEN
-        -- Legacy OIDC state rows are short-lived login state; clear them before reshaping
-        -- the table to the Rust-owned contract.
-        TRUNCATE TABLE sso_oidc_state;
+        -- L-05: Only truncate rows older than 5 minutes to avoid disrupting
+        -- active OIDC login sessions during deployment.
+        DELETE FROM sso_oidc_state WHERE created_at < NOW() - INTERVAL '5 minutes';
         ALTER TABLE sso_oidc_state
             ALTER COLUMN tenant_id TYPE VARCHAR(26) USING tenant_id::text;
     END IF;
@@ -189,15 +192,19 @@ ALTER TABLE sso_oidc_state
 
 DO $$
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conname = 'sso_oidc_state_tenant_id_fkey'
-          AND conrelid = 'public.sso_oidc_state'::regclass
-    ) THEN
-        ALTER TABLE sso_oidc_state
-            ADD CONSTRAINT sso_oidc_state_tenant_id_fkey
-            FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE;
+    IF to_regclass('public.tenants') IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'sso_oidc_state_tenant_id_fkey'
+              AND conrelid = 'public.sso_oidc_state'::regclass
+        ) THEN
+            ALTER TABLE sso_oidc_state
+                ADD CONSTRAINT sso_oidc_state_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE;
+        END IF;
+    ELSE
+        RAISE WARNING 'Migration 023: tenants table does not exist — skipping FK on sso_oidc_state.';
     END IF;
 END;
 $$;
@@ -224,5 +231,31 @@ BEGIN
     END LOOP;
 END;
 $$;
+
+-- ─── Additional conditional FK constraints ───────────────────
+-- C-02: Add FK REFERENCES tenants(id) for tables that expected it inline.
+
+DO $$
+BEGIN
+    IF to_regclass('public.tenants') IS NOT NULL THEN
+        -- ent_support_tickets
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ent_support_tickets_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE ent_support_tickets ADD CONSTRAINT ent_support_tickets_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- ent_sso_configurations
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ent_sso_configurations_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE ent_sso_configurations ADD CONSTRAINT ent_sso_configurations_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- ent_sso_sessions
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ent_sso_sessions_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE ent_sso_sessions ADD CONSTRAINT ent_sso_sessions_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+    ELSE
+        RAISE WARNING 'Migration 023: tenants table does not exist — skipping FK constraints.';
+    END IF;
+END $$;
 
 COMMIT;

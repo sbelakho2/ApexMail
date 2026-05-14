@@ -120,10 +120,8 @@ pub async fn record_usage(
     let period_key = usage_counter_key(tenant_id, event_type, now);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
-    if audit_result.is_err() {
-        // DB insert failed — nothing was persisted, no Redis state to rollback.
-        return Err(audit_result.unwrap_err());
-    }
+    // DB insert failed — nothing was persisted, no Redis state to rollback.
+    audit_result?;
 
     // Execute the atomic Lua script: SET NX dedup + INCRBY counter.
     let recorded: i64 = redis::cmd("EVAL")

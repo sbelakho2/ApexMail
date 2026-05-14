@@ -24,6 +24,10 @@ data:
           network:
           load:
     processors:
+      # 🟡5: Head-based probabilistic sampling for traces
+      probabilistic_sampler:
+        hash_seed: 42
+        sampling_percentage: ${env:OTEL_TRACES_SAMPLING_PERCENTAGE:-10}
       memory_limiter:
         check_interval: 1s
         limit_mib: 256
@@ -43,7 +47,8 @@ data:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [memory_limiter, batch]
+          # 🟡5: probabilistic_sampler added to reduce downstream load on Tempo
+          processors: [probabilistic_sampler, memory_limiter, batch]
           exporters: [otlp/tempo, debug]
         metrics:
           receivers: [otlp, hostmetrics]

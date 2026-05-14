@@ -19,6 +19,12 @@ pub fn is_private_or_reserved_host(host: &str) -> bool {
         return is_private_or_reserved_ip(ip);
     }
 
+    // These TLD/suffix patterns are NEVER legitimate for outbound HTTP
+    // in an email platform — they are reserved for mDNS, split-horizon DNS,
+    // or cloud-metadata endpoints. The primary SSRF defence is IP-range-based
+    // (is_private_or_reserved_ip below). This hostname check is a fast-path
+    // pre-filter to avoid unnecessary DNS resolution for well-known internal
+    // naming conventions.
     normalized.ends_with(".local")
         || normalized.ends_with(".internal")
         || normalized.ends_with(".corp")

@@ -42,6 +42,25 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome
 
 CREATE TABLE IF NOT EXISTS audit_logs_archive (LIKE audit_logs INCLUDING ALL);
 
+-- C-15: Remove PK constraint inherited from audit_logs to avoid duplicate PK
+-- violations when archiving rows with the same id.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_constraint pk ON pk.conrelid = c.oid
+        WHERE c.relname = 'audit_logs_archive'
+          AND pk.contype = 'p'
+          AND pk.conname LIKE '%pk%'
+    ) THEN
+        EXECUTE format('ALTER TABLE audit_logs_archive DROP CONSTRAINT %I',
+            (SELECT pk.conname FROM pg_class c
+             JOIN pg_constraint pk ON pk.conrelid = c.oid
+             WHERE c.relname = 'audit_logs_archive' AND pk.contype = 'p' LIMIT 1)
+        );
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS audit_webhooks (
     id          TEXT        PRIMARY KEY,
     tenant_id   TEXT        NOT NULL,
@@ -74,6 +93,21 @@ CREATE INDEX IF NOT EXISTS idx_secrets_next_rotation
     ON secrets (next_rotation_at) WHERE next_rotation_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS secrets_archive (LIKE secrets INCLUDING ALL);
+
+-- C-16: Remove UNIQUE constraint inherited from secrets to allow archiving
+-- multiple historical versions of the same secret (same tenant_id, name).
+DO $$
+DECLARE
+    v_conname TEXT;
+BEGIN
+    FOR v_conname IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'public.secrets_archive'::regclass
+          AND contype = 'u'
+    LOOP
+        EXECUTE format('ALTER TABLE secrets_archive DROP CONSTRAINT %I', v_conname);
+    END LOOP;
+END $$;
 
 CREATE TABLE IF NOT EXISTS secret_versions (
     secret_id       TEXT        NOT NULL,

@@ -13,6 +13,14 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
 
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+        name: Gitleaks secret scanning
+        description: Detect hardcoded secrets, API keys, and credentials
+        args: ["--config", ".gitleaks.toml"]
+
   - repo: local
     hooks:
       - id: cargo-fmt-mail-server
@@ -27,3 +35,10 @@ repos:
         entry: bash tools/check-forbidden-patterns.sh
         language: system
         pass_filenames: false
+
+      - id: cargo-audit-mail-server
+        name: cargo audit (mail-server)
+        entry: bash scripts/security-audit.sh
+        language: system
+        pass_filenames: false
+        files: ^services/mail-server/.*(Cargo\.toml|Cargo\.lock)$

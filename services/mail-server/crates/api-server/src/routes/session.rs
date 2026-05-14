@@ -118,22 +118,18 @@ async fn get_session(
         });
 
         if let Some(token) = user_token {
-            // Validate JWT against our public key
-            let key =
-                jsonwebtoken::DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes());
-            if let Ok(key) = key {
-                let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-                validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
-                if let Ok(token_data) = jsonwebtoken::decode::<crate::middleware::auth::JwtClaims>(
-                    &token,
-                    &key,
-                    &validation,
-                ) {
-                    let claims = token_data.claims;
-                    let user_id = claims.sub.clone();
-                    if !user_id.is_empty() {
-                        // Check user still exists and is active
-                        let user: Option<(String, String, Option<String>, String)> =
+            let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+            validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
+            if let Ok(token_data) = crate::middleware::auth::decode_jwt_with_rotation(
+                &token,
+                &state.config,
+                &validation,
+            ) {
+                let claims = token_data.claims;
+                let user_id = claims.sub.clone();
+                if !user_id.is_empty() {
+                    // Check user still exists and is active
+                    let user: Option<(String, String, Option<String>, String)> =
                             sqlx::query_as(
                                 "SELECT id, email, name, role FROM users WHERE id = $1 AND status = 'active'",
                             )
@@ -141,16 +137,15 @@ async fn get_session(
                             .fetch_optional(&state.db)
                             .await?;
 
-                        if let Some((id, email, name, role)) = user {
-                            response.authenticated = true;
-                            response.session_type = Some("user".into());
-                            response.user = Some(serde_json::json!({
-                                "id": id,
-                                "email": email,
-                                "name": name,
-                                "role": role,
-                            }));
-                        }
+                    if let Some((id, email, name, role)) = user {
+                        response.authenticated = true;
+                        response.session_type = Some("user".into());
+                        response.user = Some(serde_json::json!({
+                            "id": id,
+                            "email": email,
+                            "name": name,
+                            "role": role,
+                        }));
                     }
                 }
             }

@@ -48,6 +48,7 @@ impl GovernorLimiter {
     pub fn check(&self) -> Decision {
         match self.limiter.check() {
             Ok(()) => {
+                metrics::counter!("rate_limiter_requests_total", "strategy" => "governor", "decision" => "allowed").increment(1);
                 // Governor doesn't expose remaining directly; approximate from burst.
                 // For accurate remaining counts, use sliding_window limiter instead.
                 Decision::Allowed {
@@ -55,6 +56,9 @@ impl GovernorLimiter {
                 }
             }
             Err(not_until) => {
+                metrics::counter!("rate_limiter_requests_total", "strategy" => "governor", "decision" => "denied").increment(1);
+                metrics::counter!("rate_limiter_blocked_total", "strategy" => "governor")
+                    .increment(1);
                 let mut wait = not_until.wait_time_from(DefaultClock::default().now());
                 if let Some(jitter) = self.jitter {
                     wait += jitter;
@@ -71,17 +75,30 @@ impl GovernorLimiter {
             None => Decision::Allowed {
                 remaining: self.burst.get() as u64,
             },
-            Some(n) => match self.limiter.check_n(n) {
-                Ok(Ok(())) => Decision::Allowed {
-                    remaining: self.burst.get() as u64,
-                },
-                Ok(Err(_insufficient)) => Decision::Denied {
-                    retry_after: Duration::from_millis(100),
-                },
-                Err(_insufficient) => Decision::Denied {
-                    retry_after: Duration::from_millis(100),
-                },
-            },
+            Some(n) => {
+                match self.limiter.check_n(n) {
+                    Ok(Ok(())) => {
+                        metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "allowed").increment(n.get() as u64);
+                        Decision::Allowed {
+                            remaining: self.burst.get() as u64,
+                        }
+                    }
+                    Ok(Err(_insufficient)) => {
+                        metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "denied").increment(n.get() as u64);
+                        metrics::counter!("rate_limiter_blocked_total", "strategy" => "governor_batch").increment(1);
+                        Decision::Denied {
+                            retry_after: Duration::from_millis(100),
+                        }
+                    }
+                    Err(_insufficient) => {
+                        metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "denied").increment(n.get() as u64);
+                        metrics::counter!("rate_limiter_blocked_total", "strategy" => "governor_batch").increment(1);
+                        Decision::Denied {
+                            retry_after: Duration::from_millis(100),
+                        }
+                    }
+                }
+            }
         }
     }
 

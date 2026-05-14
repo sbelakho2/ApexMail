@@ -6,6 +6,7 @@
 //!
 //! Templates are embedded at compile time from `src/templates/`.
 
+#![deny(unsafe_code)]
 pub mod compiler;
 pub mod routes;
 pub mod world;

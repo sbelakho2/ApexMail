@@ -270,10 +270,13 @@ if (!$valid) {
 ```ruby
 require 'openssl'
 require 'rack/utils'
+require 'base64'
 
 def verify_webhook_signature(payload:, signature:, timestamp:, secret:)
   signed_payload = "#{timestamp}.#{payload}"
-  expected = OpenSSL::HMAC.hexdigest('SHA256', secret, signed_payload)
+  # Webhook secrets are Base64-encoded; decode before use as HMAC key
+  key = Base64.decode64(secret)
+  expected = OpenSSL::HMAC.hexdigest('SHA256', key, signed_payload)
   actual = signature.delete_prefix('sha256=')
 
   Rack::Utils.secure_compare(expected, actual)
@@ -287,11 +290,14 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.HexFormat;
 
+// Webhook secrets are Base64-encoded; decode before use as HMAC key
+byte[] decodedKey = Base64.getDecoder().decode(secret);
 String signedPayload = timestamp + "." + payload;
 Mac mac = Mac.getInstance("HmacSHA256");
-mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+mac.init(new SecretKeySpec(decodedKey, "HmacSHA256"));
 String expected = HexFormat.of().formatHex(mac.doFinal(signedPayload.getBytes(StandardCharsets.UTF_8)));
 String actual = signature.replaceFirst("^sha256=", "");
 
@@ -303,6 +309,7 @@ if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), actual.get
 #### Manual Verification Reference
 
 ```python
+import base64
 import hashlib
 import hmac
 import time
@@ -318,9 +325,11 @@ def verify_webhook_signature(
     if abs((time.time() * 1000) - timestamp_ms) > 5 * 60 * 1000:
         return False
 
+    # Webhook secrets are Base64-encoded; decode before use as HMAC key
+    decoded_key = base64.b64decode(secret)
     signed_payload = f"{timestamp}.{payload}".encode()
     expected = hmac.new(
-        secret.encode(),
+        decoded_key,
         signed_payload,
         hashlib.sha256,
     ).hexdigest()

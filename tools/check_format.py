@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Check chat format structure of training data."""
 import json
+import re
+
+START_RE = re.compile(r"<\|im_start\|>(system|user|assistant|tool)")
+END_RE = re.compile(r"<\|im_end\|>")
 
 issues = []
 with open('data/train_agent.jsonl', 'r') as f:
     for i, line in enumerate(f, 1):
         obj = json.loads(line)
         text = obj['text']
-        sys_count = text.count('<|im_start|>system')
-        user_count = text.count('<|im_start|>user')
-        asst_count = text.count('<|im_start|>assistant')
-        end_count = text.count('<|im_end|>')
-        expected_ends = sys_count + user_count + asst_count
+        starts = START_RE.findall(text)
+        sys_count = sum(1 for role in starts if role == 'system')
+        user_count = sum(1 for role in starts if role == 'user')
+        asst_count = sum(1 for role in starts if role == 'assistant')
+        tool_count = sum(1 for role in starts if role == 'tool')
+        end_count = len(END_RE.findall(text))
+        expected_ends = sys_count + user_count + asst_count + tool_count
         if sys_count != 1:
             issues.append((i, f'sys_count={sys_count}'))
         if user_count < 1:
@@ -26,4 +32,4 @@ if issues:
     for line, issue in issues[:10]:
         print(f'  Line {line}: {issue}')
 else:
-    print('All 1193 examples have proper chat marker structure')
+    print('All examples have proper chat marker structure')

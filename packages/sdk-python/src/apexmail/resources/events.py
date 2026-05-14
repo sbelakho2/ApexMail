@@ -72,6 +72,12 @@ class EventsResource:
         data = self._client._request("GET", "/v1/events", params=params or None)
         return [Event(**item) for item in _extract_list(data, "events")]
 
+    def get_by_message(self, message_id: str) -> list[Event]:
+        """Get all events for a specific sent message (max 100 results)."""
+        params: dict[str, Any] = {"message_id": message_id, "limit": 100}
+        data = self._client._request("GET", "/v1/events", params=params)
+        return [Event(**item) for item in _extract_list(data, "events")]
+
     def get(self, event_id: str) -> Event:
         _validate_id(event_id, "event")
         data = self._client._request("GET", f"/v1/events/{event_id}")
@@ -123,6 +129,12 @@ class AsyncEventsResource:
         if message_id:
             params["message_id"] = message_id
         data = await self._client._request("GET", "/v1/events", params=params or None)
+        return [Event(**item) for item in _extract_list(data, "events")]
+
+    async def get_by_message(self, message_id: str) -> list[Event]:
+        """Get all events for a specific sent message (max 100 results) asynchronously."""
+        params: dict[str, Any] = {"message_id": message_id, "limit": 100}
+        data = await self._client._request("GET", "/v1/events", params=params)
         return [Event(**item) for item in _extract_list(data, "events")]
 
     async def get(self, event_id: str) -> Event:

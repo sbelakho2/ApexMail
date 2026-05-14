@@ -53,7 +53,7 @@
   ],
 )
 
-#set text(font: "Helvetica", size: 10pt)
+#set text(font: "Inter", "DejaVu Sans", sans-serif, size: 10pt)
 #set par(justify: true)
 
 // ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@
 }
 
 #let rate-color(rate, good-threshold: 90, warn-threshold: 70) = {
-  if rate >= good-threshold { rgb("#22c55e") }
+  if rate >= good-threshold { rgb("#16a34a") }
   else if rate >= warn-threshold { rgb("#f59e0b") }
   else { rgb("#ef4444") }
 }
@@ -82,7 +82,7 @@
 // Header
 // ---------------------------------------------------------------------------
 
-#text(weight: "bold", size: 22pt, fill: rgb("#2563eb"))[Analytics Export]
+#text(weight: "bold", size: 22pt, fill: rgb("#dc2626"))[Analytics Export]
 #v(2pt)
 #text(size: 12pt)[#data.tenant_name]
 #v(2pt)
@@ -92,7 +92,7 @@
 ]
 
 #v(6pt)
-#line(length: 100%, stroke: 1pt + rgb("#2563eb"))
+#line(length: 100%, stroke: 1pt + rgb("#000000"))
 #v(12pt)
 
 // ---------------------------------------------------------------------------
@@ -108,37 +108,37 @@
   column-gutter: 12pt,
   row-gutter: 12pt,
   // Row 1
-  block(fill: luma(248), inset: 12pt, radius: 4pt, width: 100%)[
+  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
     #text(size: 8pt, fill: luma(120))[TOTAL SENT]
     #v(2pt)
     #text(weight: "bold", size: 20pt)[#fmt-num(s.total_sent)]
   ],
-  block(fill: luma(248), inset: 12pt, radius: 4pt, width: 100%)[
+  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
     #text(size: 8pt, fill: luma(120))[DELIVERED]
     #v(2pt)
     #text(weight: "bold", size: 20pt, fill: rate-color(s.delivery_rate))[#fmt-num(s.total_delivered)]
     #text(size: 9pt, fill: luma(120))[ (#s.delivery_rate%)]
   ],
-  block(fill: luma(248), inset: 12pt, radius: 4pt, width: 100%)[
+  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
     #text(size: 8pt, fill: luma(120))[BOUNCED]
     #v(2pt)
     #text(weight: "bold", size: 20pt, fill: rate-color(100 - s.bounce_rate))[#fmt-num(s.total_bounced)]
     #text(size: 9pt, fill: luma(120))[ (#s.bounce_rate%)]
   ],
   // Row 2
-  block(fill: luma(248), inset: 12pt, radius: 4pt, width: 100%)[
+  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
     #text(size: 8pt, fill: luma(120))[OPENED]
     #v(2pt)
     #text(weight: "bold", size: 20pt)[#fmt-num(s.total_opened)]
     #text(size: 9pt, fill: luma(120))[ (#s.open_rate%)]
   ],
-  block(fill: luma(248), inset: 12pt, radius: 4pt, width: 100%)[
+  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
     #text(size: 8pt, fill: luma(120))[CLICKED]
     #v(2pt)
     #text(weight: "bold", size: 20pt)[#fmt-num(s.total_clicked)]
     #text(size: 9pt, fill: luma(120))[ (#s.click_rate%)]
   ],
-  block(fill: luma(248), inset: 12pt, radius: 4pt, width: 100%)[
+  block(fill: luma(248), inset: 12pt, radius: 0pt, width: 100%)[
     #text(size: 8pt, fill: luma(120))[COMPLAINTS]
     #v(2pt)
     #text(weight: "bold", size: 20pt, fill: rate-color(100 - s.complaint_rate * 1000, good-threshold: 99, warn-threshold: 95))[#s.total_complaints]
@@ -157,7 +157,7 @@
 #table(
   columns: (auto, auto, auto, auto, auto, auto),
   stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
   inset: 6pt,
   align: (left, right, right, right, right, right),
   [*Date*], [*Sent*], [*Delivered*], [*Opened*], [*Clicked*], [*Bounced*],
@@ -182,7 +182,7 @@
 #table(
   columns: (1fr, auto, auto, auto),
   stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
   inset: 8pt,
   align: (left, right, right, right),
   [*Campaign*], [*Sent*], [*Open Rate*], [*Click Rate*],
@@ -205,7 +205,7 @@
 #table(
   columns: (1fr, auto, auto, auto),
   stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
   inset: 8pt,
   align: (left, right, right, right),
   [*Domain*], [*Volume*], [*Delivery Rate*], [*Open Rate*],

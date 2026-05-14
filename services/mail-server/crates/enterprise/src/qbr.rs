@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn test_estimate_percentile_below_median() {
         let p = estimate_percentile(30.0, 20.0, 40.0, 60.0, 80.0);
-        assert!(p >= 25.0 && p <= 50.0, "Expected 25-50, got {}", p);
+        assert!((25.0..=50.0).contains(&p), "Expected 25-50, got {}", p);
     }
 
     #[test]

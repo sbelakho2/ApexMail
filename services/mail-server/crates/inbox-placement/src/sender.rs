@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use lettre::{
-    transport::smtp::authentication::Credentials,
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    transport::smtp::authentication::Credentials, AsyncSmtpTransport, AsyncTransport, Message,
+    Tokio1Executor,
 };
 use uuid::Uuid;
 
@@ -46,8 +46,8 @@ pub async fn send_test_email(
     password: &str,
     test_id: Uuid,
 ) -> Result<(), String> {
-    let domain =
-        extract_domain(&account.email).ok_or_else(|| format!("invalid email: {}", account.email))?;
+    let domain = extract_domain(&account.email)
+        .ok_or_else(|| format!("invalid email: {}", account.email))?;
     let hostname = smtp_hostname(&domain);
 
     // Build the message (self-delivery: From == To == seed account email).
@@ -67,21 +67,25 @@ pub async fn send_test_email(
     );
 
     let email = Message::builder()
-        .from(account.email.parse().map_err(|e: lettre::address::AddressError| {
-            format!("invalid from address '{}': {}", account.email, e)
-        })?)
-        .to(account.email.parse().map_err(|e: lettre::address::AddressError| {
-            format!("invalid to address '{}': {}", account.email, e)
-        })?)
+        .from(
+            account
+                .email
+                .parse()
+                .map_err(|e: lettre::address::AddressError| {
+                    format!("invalid from address '{}': {}", account.email, e)
+                })?,
+        )
+        .to(account
+            .email
+            .parse()
+            .map_err(|e: lettre::address::AddressError| {
+                format!("invalid to address '{}': {}", account.email, e)
+            })?)
         .subject(&subject)
         .multipart(
             lettre::message::MultiPart::alternative()
-                .singlepart(
-                    lettre::message::SinglePart::plain(body_text.clone()),
-                )
-                .singlepart(
-                    lettre::message::SinglePart::html(body_html.clone()),
-                ),
+                .singlepart(lettre::message::SinglePart::plain(body_text.clone()))
+                .singlepart(lettre::message::SinglePart::html(body_html.clone())),
         )
         .map_err(|e| format!("failed to build message: {}", e))?;
 
@@ -118,12 +122,20 @@ pub async fn send_test_email(
             );
 
             let email_clone = Message::builder()
-                .from(account.email.parse().map_err(|e: lettre::address::AddressError| {
-                    format!("invalid from address '{}': {}", account.email, e)
-                })?)
-                .to(account.email.parse().map_err(|e: lettre::address::AddressError| {
-                    format!("invalid to address '{}': {}", account.email, e)
-                })?)
+                .from(
+                    account
+                        .email
+                        .parse()
+                        .map_err(|e: lettre::address::AddressError| {
+                            format!("invalid from address '{}': {}", account.email, e)
+                        })?,
+                )
+                .to(account
+                    .email
+                    .parse()
+                    .map_err(|e: lettre::address::AddressError| {
+                        format!("invalid to address '{}': {}", account.email, e)
+                    })?)
                 .subject(&subject)
                 .multipart(
                     lettre::message::MultiPart::alternative()

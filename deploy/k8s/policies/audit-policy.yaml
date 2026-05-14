@@ -1,0 +1,143 @@
+# =============================================================================
+# ApexMail Kubernetes API Server Audit Policy
+# =============================================================================
+# H7: Defines audit logging rules for the Kubernetes API server.
+# Apply with: kubectl apply -f deploy/k8s/policies/audit-policy.yaml
+#
+# In production, configure kube-apiserver with:
+#   --audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml
+#   --audit-log-path=/var/log/kubernetes/audit/audit.log
+#   --audit-log-maxage=30
+#   --audit-log-maxbackup=10
+#   --audit-log-maxsize=100
+# =============================================================================
+apiVersion: audit.k8s.io/v1
+kind: Policy
+
+# Don't audit requests that match the following omitStages
+omitStages:
+  - "RequestReceived"
+
+rules:
+  # ── Log all Secret and ConfigMap reads/writes at level RequestResponse ────
+  # Secrets contain credentials; ConfigMaps may contain sensitive data.
+  # Full request/response capture enables forensic analysis of data access.
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources:
+          - secrets
+          - configmaps
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+      - get
+      - list
+      - watch
+
+  # ── Log all RBAC changes at level RequestResponse ─────────────────────────
+  # Role/ClusterRole changes affect the security posture of the cluster.
+  - level: RequestResponse
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources:
+          - roles
+          - clusterroles
+          - rolebindings
+          - clusterrolebindings
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+
+  # ── Log pod exec, attach, port-forward at level RequestResponse ───────────
+  # These operations allow interactive access to running containers.
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources:
+          - pods/exec
+          - pods/attach
+          - pods/portforward
+    verbs:
+      - create
+
+  # ── Log namespace and network policy changes at level RequestResponse ─────
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources:
+          - namespaces
+      - group: "networking.k8s.io"
+        resources:
+          - networkpolicies
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+
+  # ── Log all mutations to apexmail resources at level Request ──────────────
+  # Request-level logging captures the API call without the response body,
+  # reducing log volume while retaining security-relevant metadata.
+  - level: Request
+    userGroups:
+      - "system:serviceaccounts:apexmail"
+      - "system:nodes"
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+
+  # ── Log token review and subject access review at level RequestResponse ───
+  - level: RequestResponse
+    resources:
+      - group: "authentication.k8s.io"
+        resources:
+          - tokenreviews
+      - group: "authorization.k8s.io"
+        resources:
+          - subjectaccessreviews
+          - selfsubjectaccessreviews
+    verbs:
+      - create
+
+  # ── Metadata-level logging for read-only requests to all resources ────────
+  # Captures who accessed what, without the full response body.
+  - level: Metadata
+    resources:
+      - group: "" # core
+      - group: "apps"
+      - group: "batch"
+      - group: "networking.k8s.io"
+      - group: "policy"
+      - group: "autoscaling"
+      - group: "admissionregistration.k8s.io"
+    verbs:
+      - get
+      - list
+      - watch
+
+  # ── Log nothing for system health probes at level None ────────────────────
+  # Kubelet and controller manager health checks are noisy and not useful.
+  - level: None
+    users:
+      - "system:kube-controller-manager"
+      - "system:kube-scheduler"
+      - "system:serviceaccount:kube-system:endpoint-controller"
+    verbs:
+      - get
+      - list
+      - watch
+    resources:
+      - group: "" # core
+      - group: "coordination.k8s.io"
+
+  # ── Default: log everything else at Metadata level ────────────────────────
+  - level: Metadata
+    omitStages:
+      - "RequestReceived"

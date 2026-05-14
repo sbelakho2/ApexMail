@@ -2,12 +2,13 @@
 //!
 //! GET `{click_path}/:tracking_id`
 //!
-//! Security properties://! - Prefers `originalUrl` from inside the encrypted token over `?r=` query
-//! param (-041) — query params can be tampered with, token content cannot.
+//! Security properties:
+//! - Prefers `originalUrl` from inside the encrypted token over `?r=` query
+//!   param (-041) — query params can be tampered with, token content cannot.
 //! - Only allows redirects to http/https URLs whose hostname is explicitly
-//! authorised for the tenant (blocks open-redirect attacks).
+//!   authorised for the tenant (blocks open-redirect attacks).
 //! - Adds a locked-down `Content-Security-Policy` to prevent click-jacking and
-//! script/style execution around redirect responses (-500-455).
+//!   script/style execution around redirect responses (-500-455).
 
 use std::net::SocketAddr;
 

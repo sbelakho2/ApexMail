@@ -445,7 +445,7 @@ async fn update_leads(
     )
     .await;
 
-    crate::routes::admin::dashboard::invalidate_dashboard_cache();
+    crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -728,7 +728,7 @@ async fn update_campaign(
     )
     .await;
 
-    crate::routes::admin::dashboard::invalidate_dashboard_cache();
+    crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -887,7 +887,7 @@ async fn run_discovery(
     )
     .await;
 
-    crate::routes::admin::dashboard::invalidate_dashboard_cache();
+    crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
 
     Ok(Json(serde_json::json!({
         "jobId": job_id,
@@ -1060,7 +1060,7 @@ async fn start_outreach(
     )
     .await;
 
-    crate::routes::admin::dashboard::invalidate_dashboard_cache();
+    crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
     Ok(Json(serde_json::json!({
         "success": true,
         "campaignId": campaign_id,

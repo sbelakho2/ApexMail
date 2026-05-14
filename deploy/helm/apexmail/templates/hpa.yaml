@@ -45,7 +45,8 @@ spec:
           periodSeconds: 60
       selectPolicy: Max
     scaleDown:
-      stabilizationWindowSeconds: 300
+      # 🟡6: Reduced from 300s to 120s for faster response to traffic drops
+      stabilizationWindowSeconds: 120
 {{- end }}
 ---
 {{- if and .Values.trackingService.enabled .Values.trackingService.autoscaling.enabled }}
@@ -91,7 +92,8 @@ spec:
           periodSeconds: 60
       selectPolicy: Max
     scaleDown:
-      stabilizationWindowSeconds: 300
+      # 🟡6: Reduced from 300s to 120s for faster response to traffic drops
+      stabilizationWindowSeconds: 120
 {{- end }}
 ---
 {{- if and .Values.enterprise.enabled .Values.enterprise.autoscaling.enabled }}
@@ -137,7 +139,8 @@ spec:
           periodSeconds: 60
       selectPolicy: Max
     scaleDown:
-      stabilizationWindowSeconds: 300
+      # 🟡6: Reduced from 300s to 120s for faster response to traffic drops
+      stabilizationWindowSeconds: 120
 {{- end }}
 ---
 {{- if and .Values.mta.enabled .Values.mta.autoscaling.enabled }}
@@ -175,7 +178,8 @@ spec:
           periodSeconds: 60
       selectPolicy: Max
     scaleDown:
-      stabilizationWindowSeconds: 300
+      # 🟡6: Reduced from 300s to 120s for faster response to traffic drops
+      stabilizationWindowSeconds: 120
 {{- end }}
 ---
 {{- if and .Values.worker.enabled .Values.worker.autoscaling.enabled }}
@@ -221,5 +225,6 @@ spec:
           periodSeconds: 60
       selectPolicy: Max
     scaleDown:
-      stabilizationWindowSeconds: 300
+      # 🟡6: Reduced from 300s to 120s for faster response to traffic drops
+      stabilizationWindowSeconds: 120
 {{- end }}

@@ -912,7 +912,11 @@ mod tests {
         let first = engine.evaluate(&event);
         assert_ne!(first.action, AtoAction::Block);
 
-        let window = engine.ip_call_counts.get("1.2.3.4").unwrap().clone();
+        let window = engine
+            .ip_call_counts
+            .get("1.2.3.4")
+            .expect("ip_call_counts should contain 1.2.3.4 after evaluate")
+            .clone();
         {
             let mut state = window.lock();
             state.epoch_sec = state.epoch_sec.saturating_sub(1);

@@ -131,17 +131,16 @@ All API errors follow a stable envelope format that will not change within v1:
 ```json
 {
   "error": {
-    "code": "RATE_LIMIT_EXCEEDED",
-    "message": "You have exceeded the rate limit of 1000 requests per minute.",
+    "code": "ERROR_CODE",
+    "message": "Human-readable error message",
     "details": {
-      "limit": 1000,
-      "remaining": 0,
-      "resetAt": "2026-02-09T12:01:00Z"
+      "...": "Additional error context as key-value pairs"
     }
-  },
-  "requestId": "req_abc123def456"
+  }
 }
 ```
+
+The `details` field is an object whose keys vary by error code. For example, a rate limit error includes `limit`, `remaining`, and `resetAt` fields.
 
 | Field              | Type   | Guaranteed | Description                                     |
 | ------------------ | ------ | :--------: | ----------------------------------------------- |

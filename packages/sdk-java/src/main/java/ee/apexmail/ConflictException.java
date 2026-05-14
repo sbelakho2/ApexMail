@@ -5,4 +5,8 @@ public final class ConflictException extends ApexMailException {
     public ConflictException(String message, String code, int statusCode) {
         super(message, code, statusCode);
     }
+
+    public ConflictException(String message, String code, int statusCode, Object details) {
+        super(message, code, statusCode, details);
+    }
 }

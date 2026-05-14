@@ -406,6 +406,45 @@
               "type": "boolean"
             }
           }
+        },
+        "tempo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "persistence"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "string",
+              "minLength": 1
+            },
+            "persistence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "enabled",
+                "size",
+                "storageClass"
+              ],
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "size": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "storageClass": {
+                  "type": "string"
+                }
+              }
+            }
+          }
         }
       }
     },

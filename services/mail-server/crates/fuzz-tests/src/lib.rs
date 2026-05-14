@@ -3,6 +3,7 @@
 //! Generates random inputs of various shapes (strings, emails, ASCII, unicode,
 //! raw bytes, floats) for use in property-based fuzz tests.
 
+#![deny(unsafe_code)]
 use rand::Rng;
 
 /// Generate a random alphanumeric string of the given length.

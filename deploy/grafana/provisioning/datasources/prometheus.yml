@@ -12,13 +12,14 @@ datasources:
     uid: ClickHouse
     type: grafana-clickhouse-datasource
     access: proxy
-    url: http://clickhouse:8123
+    url: https://clickhouse:8443
     jsonData:
       defaultDatabase: apexmail
       username: apexmail
-      protocol: http
-      port: 8123
+      protocol: https
+      port: 8443
       server: clickhouse
+      tlsSkipVerify: false
     secureJsonData:
       password: ${CLICKHOUSE_PASSWORD}
     editable: false

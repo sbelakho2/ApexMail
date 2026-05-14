@@ -212,6 +212,7 @@ fn resolve_prop(props: &serde_json::Value, path: &str) -> String {
 /// Validate every node in the AST against the element and attribute allowlists.
 /// Returns a list of validation errors for disallowed elements, blocked
 /// attributes, or attributes not permitted on a given element.
+#[allow(clippy::only_used_in_recursion)]
 fn validate_ast(nodes: &[TemplateNode], source: &str) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     for node in nodes {

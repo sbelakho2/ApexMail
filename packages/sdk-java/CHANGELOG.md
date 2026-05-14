@@ -10,12 +10,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 - Initial stable release of the ApexMail Java SDK.
 - `ApexMailClient` with configurable base URL, timeout, and retry policy (implements `AutoCloseable`).
-- `emails()` resource — `send`, `batch`, `get`, `list`.
+- `emails()` resource — `send`, `batch`, `get`, `list`, `cancel`.
 - `domains()` resource — `create`, `list`, `get`, `verify`, `delete`, `health`.
-- `webhooks()` resource — `create`, `list`, `get`, `update`, `delete`.
-- `templates()` resource — `create`, `list`, `get`, `getBySlug`, `update`, `delete`, `render`.
+- `webhooks()` resource — `create`, `list`, `get`, `update` (PATCH), `delete`, `test`.
+- `templates()` resource — `create`, `list`, `get`, `getBySlug`, `update` (PUT), `delete`, `duplicate`, `rollback`, `render`.
 - `suppressions()` resource — `add`, `list`, `check`, `delete`.
-- `events()` resource — `list`, `getByMessage`, `get`.
+- `events()` resource — `list`, `getByMessage`, `get`, `stats`, `timeseries`.
+- `analytics()` resource — `get` with date range, grouping, tag, and domain filters.
+- `apiKeys()` resource — `create`, `list`, `revoke`.
 - Type-safe request builders using Java records.
 - HTTP/2 support via `java.net.http.HttpClient`.
 - Automatic retries with exponential backoff (max 3, 500 ms initial, 5 s cap).
@@ -25,3 +27,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Structured exception hierarchy for authentication, validation, and rate-limiting failures.
 - Retry-After header parsing (seconds and HTTP-date).
 - Resource cleanup via `AutoCloseable`.
+- Webhook signature verification (`verifyWebhookSignature`).
+- API key validation on client construction.
+
+### Fixed
+
+- Template update now uses `PUT` (full replacement) instead of `PATCH` (partial update), matching OpenAPI spec.
+- Webhook update now uses `PATCH` to match OpenAPI spec.
+- Suppressions list supports `reason`, `tag`, `cursor`, `limit`, `offset` filters via options map.
+- Events list supports `type`, `messageId`, `domainId`, `start`, `end`, `cursor`, `limit`, `offset` filters.

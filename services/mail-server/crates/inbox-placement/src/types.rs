@@ -252,21 +252,28 @@ impl PlacementScore {
         let spam_pct = (total_spam as f64 / total_accounts as f64) * 100.0;
         let absent_pct = (total_absent as f64 / total_accounts as f64) * 100.0;
 
-        let avg_auth = results.iter().map(|r| (r.spf_pass_rate + r.dkim_pass_rate + r.dmarc_pass_rate) / 3.0).sum::<f64>() / results.len() as f64;
-        let avg_speed_ms = results.iter().map(|r| r.avg_delivery_time_ms).sum::<f64>() / results.len() as f64;
+        let avg_auth = results
+            .iter()
+            .map(|r| (r.spf_pass_rate + r.dkim_pass_rate + r.dmarc_pass_rate) / 3.0)
+            .sum::<f64>()
+            / results.len() as f64;
+        let avg_speed_ms =
+            results.iter().map(|r| r.avg_delivery_time_ms).sum::<f64>() / results.len() as f64;
 
         let inbox_rate_score = (inbox_pct * 0.4) as u16;
         let promotions_score = (promotions_pct * 0.2) as u16;
         let spam_penalty = ((spam_pct * 2.5).min(100.0)) as u16;
         let absent_penalty = ((absent_pct * 1.67).min(100.0)) as u16;
         let auth_score = (avg_auth * 0.2) as u16;
-        let speed_score = ((100.0 - (avg_speed_ms / 100.0) * 2.0).max(0.0).min(100.0) * 0.1) as u16;
+        let speed_score = ((100.0 - (avg_speed_ms / 100.0) * 2.0).clamp(0.0, 100.0) * 0.1) as u16;
 
         let raw = inbox_rate_score as i32 + promotions_score as i32
-            - spam_penalty as i32 - absent_penalty as i32
-            + auth_score as i32 + speed_score as i32;
+            - spam_penalty as i32
+            - absent_penalty as i32
+            + auth_score as i32
+            + speed_score as i32;
 
-        let overall = raw.max(0).min(100) as u16;
+        let overall = raw.clamp(0, 100) as u16;
 
         Self {
             overall,

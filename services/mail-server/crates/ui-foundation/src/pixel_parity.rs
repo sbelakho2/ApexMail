@@ -331,8 +331,8 @@ mod tests {
 
     #[test]
     fn deterministic_rendering_web_login() {
-        let a = leptos_views::web_login_page();
-        let b = leptos_views::web_login_page();
+        let a = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
+        let b = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
         assert_pixel_parity("web_login determinism", &a, &b);
     }
 
@@ -366,7 +366,7 @@ mod tests {
         let html = btn.render_html();
         let html2 = btn.render_html();
         assert_pixel_parity("button_default", &html, &html2);
-        assert!(html.contains("bg-brand-600"));
+        assert!(html.contains("bg-primary"));
         assert!(html.contains("text-white"));
     }
 
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn web_login_page_selectors_match_behavior_baseline() {
-        let html = leptos_views::web_login_page();
+        let html = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
         let data = extract_data_attrs(&html);
         // Check the error-key data attribute
         assert!(
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn web_dashboard_shell_data_attrs_match() {
-        let html = leptos_views::web_dashboard_layout("<div>test</div>");
+        let html = leptos_views::web_dashboard_layout("<div>test</div>", "");
         let data = extract_data_attrs(&html);
         assert!(
             data.iter()
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn web_dashboard_shell_aria_labels_match() {
-        let html = leptos_views::web_dashboard_layout("<div>test</div>");
+        let html = leptos_views::web_dashboard_layout("<div>test</div>", "");
         let aria = extract_aria_attrs(&html);
         assert!(
             aria.iter()
@@ -450,7 +450,8 @@ mod tests {
 
     #[test]
     fn control_plane_login_page_selectors_match_behavior_baseline() {
-        let html = leptos_views::control_plane_login_page();
+        let html =
+            leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com");
         assert!(html.contains("id=\"login-email\""));
         assert!(html.contains("id=\"login-password\""));
         assert!(html.contains("id=\"login-mfa\""));
@@ -542,7 +543,7 @@ mod tests {
 
     #[test]
     fn web_login_full_parity_check() {
-        let html = leptos_views::web_login_page();
+        let html = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
         let result = check_parity(&html, &html);
         assert!(
             result.is_identical,
@@ -564,7 +565,7 @@ mod tests {
 
     #[test]
     fn web_dashboard_full_parity_check() {
-        let html = leptos_views::web_dashboard_layout("<div>content</div>");
+        let html = leptos_views::web_dashboard_layout("<div>content</div>", "");
         let result = check_parity(&html, &html);
         assert!(
             result.is_identical,
@@ -612,8 +613,8 @@ mod tests {
 
     #[test]
     fn parity_detects_class_mutation_on_real_page() {
-        let html = leptos_views::web_login_page();
-        let tampered = html.replacen("rounded-sm", "rounded-lg", 1);
+        let html = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
+        let tampered = html.replacen("rounded-sm", "rounded-none", 1);
         let result = check_parity(&html, &tampered);
         assert!(
             !result.is_identical,
@@ -638,8 +639,14 @@ mod tests {
     fn all_web_pages_deterministic_parity() {
         let pages: Vec<(&str, String)> = vec![
             ("home", leptos_views::web_home_page()),
-            ("login", leptos_views::web_login_page()),
-            ("signup", leptos_views::web_signup_page()),
+            (
+                "login",
+                leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com"),
+            ),
+            (
+                "signup",
+                leptos_views::web_signup_page("", "dev", "https://mcaptcha.example.com"),
+            ),
             ("dashboard", leptos_views::web_dashboard_page()),
             ("campaigns", leptos_views::web_campaigns_page()),
             ("campaigns_new", leptos_views::web_campaigns_new_page()),
@@ -671,7 +678,10 @@ mod tests {
     fn all_cp_pages_deterministic_parity() {
         let pages: Vec<(&str, String)> = vec![
             ("home", leptos_views::control_plane_home_page()),
-            ("login", leptos_views::control_plane_login_page()),
+            (
+                "login",
+                leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com"),
+            ),
             ("dashboard", leptos_views::control_plane_dashboard_page()),
             ("tenants", leptos_views::control_plane_tenants_page()),
             ("operators", leptos_views::control_plane_operators_page()),
@@ -748,7 +758,7 @@ mod tests {
 
     #[test]
     fn web_login_preserves_tailwind_classes() {
-        let html = leptos_views::web_login_page();
+        let html = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
         let classes = extract_classes(&html);
         let flat: Vec<&str> = classes
             .iter()
@@ -760,10 +770,10 @@ mod tests {
             "rounded-sm",
             "border",
             "bg-white",
-            "shadow-premium-premium",
+            "shadow-premium",
             "text-4xl",
             "font-bold",
-            "bg-brand-600",
+            "bg-primary",
         ];
         for cls in &required {
             assert!(flat.contains(cls), "web login missing class '{}'", cls);
@@ -772,7 +782,8 @@ mod tests {
 
     #[test]
     fn cp_login_preserves_tailwind_classes() {
-        let html = leptos_views::control_plane_login_page();
+        let html =
+            leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com");
         let classes = extract_classes(&html);
         let flat: Vec<&str> = classes
             .iter()
@@ -783,10 +794,10 @@ mod tests {
             "min-h-screen",
             "rounded-sm",
             "border",
-            "shadow-premium-premium",
+            "shadow-premium",
             "text-3xl",
             "font-bold",
-            "bg-brand-600",
+            "bg-primary",
         ];
         for cls in &required {
             assert!(flat.contains(cls), "cp login missing class '{}'", cls);
@@ -807,7 +818,7 @@ mod tests {
 
     #[test]
     fn dashboard_shell_preserves_all_aria_attrs() {
-        let html = leptos_views::web_dashboard_layout("<p>test</p>");
+        let html = leptos_views::web_dashboard_layout("<p>test</p>", "");
         let aria = extract_aria_attrs(&html);
 
         assert!(

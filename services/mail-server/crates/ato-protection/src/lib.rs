@@ -1,3 +1,4 @@
+#![allow(clippy::doc_lazy_continuation)]
 //! # ATO Protection — Account Takeover Prevention
 //!
 //! Multi-layered defense against account takeover attacks://!
@@ -27,6 +28,7 @@
 //! let risk = engine.evaluate(&event);
 //! ```
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 

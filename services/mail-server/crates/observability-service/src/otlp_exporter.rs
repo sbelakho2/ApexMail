@@ -97,22 +97,71 @@ impl Default for OtlpConfig {
             })
             .or_else(|| std::env::var("OTLP_AUTH_TOKEN").ok().map(Zeroizing::new));
 
+        // Resolve sampling rate from standard OpenTelemetry env vars:
+        //   1. OTEL_TRACES_SAMPLER + OTEL_TRACES_SAMPLER_ARG (OpenTelemetry SDK standard)
+        //   2. OTEL_SAMPLE_RATE (ApexMail legacy env var)
+        //   3. Default to 1.0 (100% sampling) for development
+        let sample_rate = resolve_sample_rate();
+
         Self {
             endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:4317".into()),
             service_name: std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "apexmail".into()),
             service_version: std::env::var("OTEL_SERVICE_VERSION").ok(),
             environment: std::env::var("OTEL_ENVIRONMENT").ok(),
-            sample_rate: std::env::var("OTEL_SAMPLE_RATE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1.0),
+            sample_rate,
             batch_size: 512,
             max_queue_size: 2048,
             scheduled_delay_ms: 5000,
             auth_token,
         }
     }
+}
+
+/// Resolve trace sampling rate from OpenTelemetry standard env vars.
+///
+/// Supports the following priority order:
+/// 1. `OTEL_TRACES_SAMPLER=TraceIdRatioBased` + `OTEL_TRACES_SAMPLER_ARG=<ratio>`
+/// 2. `OTEL_SAMPLE_RATE` (ApexMail legacy env var)
+/// 3. Default to 1.0 (100% sampling)
+///
+/// # Production recommendation
+/// Set `OTEL_TRACES_SAMPLER=TraceIdRatioBased` and `OTEL_TRACES_SAMPLER_ARG=0.1`
+/// to sample only 10% of traces, reducing span export costs significantly.
+fn resolve_sample_rate() -> f64 {
+    // Check OTEL_TRACES_SAMPLER first (OpenTelemetry SDK standard)
+    if let Ok(sampler) = std::env::var("OTEL_TRACES_SAMPLER") {
+        match sampler.as_str() {
+            "always_on" => return 1.0,
+            "always_off" => return 0.0,
+            "traceidratio" | "TraceIdRatioBased" => {
+                if let Ok(arg) = std::env::var("OTEL_TRACES_SAMPLER_ARG") {
+                    if let Ok(ratio) = arg.parse::<f64>() {
+                        return ratio.clamp(0.0, 1.0);
+                    }
+                }
+                // If ARG is missing or invalid, default to 0.1 for ratio-based
+                return 0.1;
+            }
+            "parentbased_traceidratio" | "ParentBasedTraceIdRatio" => {
+                if let Ok(arg) = std::env::var("OTEL_TRACES_SAMPLER_ARG") {
+                    if let Ok(ratio) = arg.parse::<f64>() {
+                        return ratio.clamp(0.0, 1.0);
+                    }
+                }
+                return 0.1;
+            }
+            _ => {
+                // Unknown sampler type — fall through to legacy env var
+            }
+        }
+    }
+
+    // Fallback to ApexMail legacy OTEL_SAMPLE_RATE
+    std::env::var("OTEL_SAMPLE_RATE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0)
 }
 
 /// Guard that shuts down the tracer provider when dropped.

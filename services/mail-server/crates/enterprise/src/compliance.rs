@@ -284,6 +284,7 @@ impl ComplianceService {
     }
 
     /// Log an audit event
+    #[allow(clippy::too_many_arguments)]
     pub async fn log_audit(
         &self,
         tenant_id: String,
@@ -351,6 +352,7 @@ impl ComplianceService {
     }
 
     /// Create a data access request (GDPR SAR)
+    #[allow(clippy::too_many_arguments)]
     pub async fn request_data_access(
         &self,
         tenant_id: String,

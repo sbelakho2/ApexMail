@@ -56,7 +56,9 @@ pub static TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 pub fn load_template_source(template_name: &str) -> Option<String> {
     // Try external directory first (env‑var driven)
     if let Ok(dir) = std::env::var("PDF_TEMPLATES_DIR") {
-        let path: PathBuf = [dir.as_str(), &format!("{}.typ", template_name)].iter().collect();
+        let path: PathBuf = [dir.as_str(), &format!("{}.typ", template_name)]
+            .iter()
+            .collect();
         if path.exists() {
             return std::fs::read_to_string(&path)
                 .map_err(|e| {

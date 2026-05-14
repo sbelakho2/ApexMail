@@ -3,6 +3,7 @@
 //! Provides inbound SMTP reception, bounce processing, feedback‑loop handling,
 //! and comprehensive email authentication (SPF, DKIM, DMARC, ARC, BIMI, DANE, MTA‑STS).
 
+#![deny(unsafe_code)]
 pub mod auth;
 pub mod config;
 pub mod gmail_annotations;

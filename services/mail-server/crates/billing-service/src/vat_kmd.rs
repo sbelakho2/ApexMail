@@ -94,6 +94,7 @@ pub struct KmdReturnResponse {
 // ---------------------------------------------------------------------------
 
 /// Map a raw row from `vat_kmd_returns` into the API response type.
+#[allow(clippy::too_many_arguments)]
 pub fn map_kmd_row(
     id: String,
     tax_year: i32,
@@ -132,9 +133,12 @@ pub fn vat_return_due_date(year: i32, month: u32) -> DateTime<Utc> {
     let due_year = if month == 12 { year + 1 } else { year };
 
     chrono::NaiveDate::from_ymd_opt(due_year, due_month, 20)
-        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(year, month, 20).unwrap())
+        .unwrap_or_else(|| {
+            chrono::NaiveDate::from_ymd_opt(year, month, 20)
+                .expect("invariant: fallback year/month date is always valid")
+        })
         .and_hms_opt(23, 59, 59)
-        .unwrap()
+        .expect("invariant: any NaiveDate supports 23:59:59")
         .and_utc()
 }
 
@@ -346,9 +350,11 @@ fn kmd_period_bounds_utc(
     let start_date = NaiveDate::from_ymd_opt(tax_year, tax_month, 1)
         .ok_or_else(|| format!("Invalid year/month: {tax_year}/{tax_month}"))?;
     let end_date = if tax_month == 12 {
-        NaiveDate::from_ymd_opt(tax_year + 1, 1, 1).unwrap()
+        NaiveDate::from_ymd_opt(tax_year + 1, 1, 1)
+            .expect("invariant: tax_year+1/1/1 is always valid")
     } else {
-        NaiveDate::from_ymd_opt(tax_year, tax_month + 1, 1).unwrap()
+        NaiveDate::from_ymd_opt(tax_year, tax_month + 1, 1)
+            .expect("invariant: tax_year/tax_month+1/1 is always valid")
     };
 
     Ok((
@@ -371,11 +377,11 @@ fn tallinn_midnight_to_utc(date: NaiveDate) -> Result<DateTime<Utc>, String> {
     }
 }
 
-/// All 27 EU member state ISO 3166-1 alpha-2 country codes used for SQL
-/// filtering and VAT classification.
-///
-/// Replaced by billing_common::vat_rates::{is_eu_country, get_eu_vat_rate, EU_COUNTRIES}
-
+// All 27 EU member state ISO 3166-1 alpha-2 country codes used for SQL
+// filtering and VAT classification.
+//
+// Replaced by billing_common::vat_rates::{is_eu_country, get_eu_vat_rate, EU_COUNTRIES}
+//
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

@@ -54,7 +54,7 @@ Create a dedicated IAM user (e.g. `apexmail-ses`) with the following policy:
 }
 ```
 
-> **Note:** Dedicated IP permissions are no longer needed. Dedicated IPs are provisioned via Hetzner Cloud API.
+> **Note:** Dedicated IPs are provisioned via Hetzner Cloud API, not SES. See [Hetzner Tool Contract](../tool-contracts/hetzner.md) for dedicated IP setup. The IAM policy above has been updated to remove dedicated IP permissions that are no longer applicable.
 
 Save the access key and secret key.
 

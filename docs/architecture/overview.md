@@ -4,32 +4,42 @@
 
 ## System Architecture
 
-ApexMail uses a Rust-first architecture with SSR browser surfaces, a dedicated tracking service, and Zola-generated marketing exports:
+ApexMail uses a Rust-first architecture with SSR browser surfaces, a dedicated tracking service, enterprise service, admin control-plane, devex service, sales autopilot, and Zola-generated marketing exports:
 
 ```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                              Load Balancer                              │
-│                         (nginx reverse proxy)                           │
-└────────────────────────────────────────────────────────────────────────┘
-                                 │
-            ┌───────────────────────┴───────────────────────┐
-            │                                               │
-            ▼                                               ▼
-    ┌─────────────────────────┐                    ┌─────────────────────────┐
-    │       API Server        │                    │    Tracking Service     │
-    │     (Rust/Axum)         │                    │      (Rust/Axum)        │
-    │ REST + SSR browser UI   │                    │ redirects / webhooks    │
-    │ Port: 3000              │                    │ Port: 3001              │
-    │ Metrics: 9090           │                    │ Metrics: 9092           │
-    └────────────┬────────────┘                    └────────────┬────────────┘
-              │                                              │
-    ┌───────────┼───────────────┬───────────────┐              │
-    │           │               │               │              │
-    ▼           ▼               ▼               ▼              ▼
-┌─────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────┐  ┌─────────────┐
-│PostgreSQL│ │ ClickHouse  │ │    Redis    │ │ Mailpit │  │ marketing-  │
-│  (OLTP) │ │   (OLAP)    │ │   (Cache)   │ │(DevSMTP)│  │ zola export  │
-└─────────┘ └─────────────┘ └─────────────┘ └─────────┘  └─────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                              Load Balancer                                          │
+│                         (nginx reverse proxy)                                       │
+└────────────────────────────────────────────────────────────────────────────────────┘
+                                  │
+         ┌────────────────────────┼────────────────────┬───────────────────┐
+         │                        │                    │                   │
+         ▼                        ▼                    ▼                   ▼
+ ┌──────────────────┐   ┌──────────────────┐   ┌──────────────┐   ┌──────────────┐
+ │   API Server     │   │ Tracking Service │   │  Enterprise  │   │  Admin CP    │
+ │  (Rust/Axum)     │   │   (Rust/Axum)    │   │  Service     │   │  (Rust/Axum) │
+ │ REST + SSR UI    │   │ pixels/redirects │   │ Enterprise   │   │  Admin-only  │
+ │ Port: 3000       │   │ Port: 3001       │   │ routes/support│   │  Port: 3003  │
+ │ Metrics: 9090    │   │ Metrics: 9092    │   │ Port: 3002   │   │              │
+ └────────┬─────────┘   └────────┬─────────┘   └──────┬───────┘   └──────┬───────┘
+          │                      │                    │                   │
+          ▼                      ▼                    ▼                   ▼
+ ┌──────────────────┐   ┌──────────────────┐   ┌──────────────┐   ┌──────────────┐
+ │   Devex Service  │   │  Sales Autopilot │   │  Submission  │   │     MTA      │
+ │  (Rust/Axum)     │   │   (Rust/Axum)    │   │  Service     │   │  SMTP nodes  │
+ │ SDK generation   │   │ Lead gen/sales   │   │ SMTP submit  │   │  Port: 25    │
+ │ Port: 3004       │   │ Port: 3010       │   │ Port: 587    │   │  465, 587    │
+ └──────────────────┘   └──────────────────┘   └──────────────┘   └──────────────┘
+          │                      │                    │                   │
+          └──────────────────────┼────────────────────┼───────────────────┘
+                                 │                    │
+         ┌───────────────────────┼────────────────────┼───────────────────┐
+         │                       │                    │                   │
+         ▼                       ▼                    ▼                   ▼
+ ┌──────────────┐       ┌──────────────┐       ┌──────────────┐   ┌──────────────┐
+ │  PostgreSQL  │       │  ClickHouse  │       │    Redis     │   │   Mailpit    │
+ │   (OLTP)     │       │   (OLAP)     │       │   (Cache)    │   │  (Dev SMTP)  │
+ └──────────────┘       └──────────────┘       └──────────────┘   └──────────────┘
 ```
 
 Marketing pages are generated from `apps/marketing-zola` and served through the Rust browser-surface stack.
@@ -41,14 +51,21 @@ Marketing pages are generated from `apps/marketing-zola` and served through the 
 | Service | Port | Technology | Purpose |
 | ------- | ---- | ---------- | ------- |
 | API Server | 3000 | Rust/Axum + `ui-foundation` | REST API plus SSR `web` and `control-plane` surfaces |
-| Tracking | 3001 | Rust/Axum | Tracking redirects, pixels, unsubscribe flows, webhooks |
+| Tracking Service | 3001 | Rust/Axum | Tracking redirects, pixels, unsubscribe flows, webhooks |
+| Enterprise Service | 3002 | Rust/Axum | Enterprise-only routes, support surfaces, private cloud APIs |
+| Admin Control-Plane | 3003 | Rust/Axum | Admin-only operational UI (separate from tenant surfaces) |
+| Devex Service | 3004 | Rust/Axum | SDK generation, webhook tester, onboarding flows |
+| Sales Autopilot | 3010 | Rust/Axum | Lead generation, sales pipeline automation |
+| Submission | 587 | Rust/Axum | SMTP message submission (RFC 6409) |
 
 ### Supporting Runtime Outputs
 
 | Service | Port | Technology | Purpose |
 | ------- | ---- | ---------- | ------- |
 | Marketing Export | n/a | Zola static export | Generated marketing documents consumed by production routing |
-| Metrics | 9090 / 9092 | Prometheus | Observability endpoints for Rust services |
+| Metrics (API) | 9090 | Prometheus | API server observability |
+| Metrics (Tracking) | 9092 | Prometheus | Tracking service observability |
+| MTA | 25, 465, 587 | Rust-native SMTP | Outbound mail transfer (SES shared pool + dedicated IPs) |
 
 ### Infrastructure (Docker)
 

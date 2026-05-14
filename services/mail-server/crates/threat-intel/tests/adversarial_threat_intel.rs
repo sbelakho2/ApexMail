@@ -3,8 +3,8 @@
 //! Critical properties under test://! - Blocklisted IPs are correctly flagged
 //! - CIDR ranges correctly match all IPs within them
 //! - TTL expiry:after purge, expired entries no longer block traffic
-//! (This catches the "empty blocklist after 24h" regression —
-//! without auto-refresh, all entries purge and blocklists go empty)
+//!   (This catches the "empty blocklist after 24h" regression —
+//!   without auto-refresh, all entries purge and blocklists go empty)
 //! - Domain blocklist works for known malicious domains
 //! - Clean IPs / domains are not false-positived
 //! - Feed refresh task can be spawned without panicking

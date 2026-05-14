@@ -1,5 +1,6 @@
 //! Events repository.
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -74,6 +75,46 @@ impl EventsRepo {
         .bind(offset)
         .fetch_all(pool)
         .await
+    }
+
+    /// List events for a tenant using keyset (cursor-based) pagination.
+    /// Uses `(timestamp, id)` tuple comparison since the events table uses `timestamp` (not `created_at`).
+    pub async fn list_keyset_by_tenant(
+        pool: &PgPool,
+        tenant_id: Uuid,
+        limit: i64,
+        cursor_timestamp: Option<DateTime<Utc>>,
+        cursor_id: Option<Uuid>,
+    ) -> Result<Vec<Event>, sqlx::Error> {
+        let limit = limit.clamp(1, 200);
+        let fetch_limit = limit + 1;
+        match (cursor_timestamp, cursor_id) {
+            (Some(ts), Some(id)) => {
+                sqlx::query_as::<_, Event>(
+                    "SELECT id, tenant_id, message_id, event_type, recipient, metadata, timestamp \
+                     FROM events WHERE tenant_id = $1 AND (timestamp, id) < ($2, $3) \
+                     ORDER BY timestamp DESC, id DESC LIMIT $4",
+                )
+                .bind(tenant_id)
+                .bind(ts)
+                .bind(id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+            _ => {
+                // First page — no cursor
+                sqlx::query_as::<_, Event>(
+                    "SELECT id, tenant_id, message_id, event_type, recipient, metadata, timestamp \
+                     FROM events WHERE tenant_id = $1 \
+                     ORDER BY timestamp DESC, id DESC LIMIT $2",
+                )
+                .bind(tenant_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+        }
     }
 
     /// Count events by type for a tenant within a time window.

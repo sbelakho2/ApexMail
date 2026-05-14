@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for threat intelligence
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreatIntelConfig {
     /// Default TTL for blocklist entries in seconds (default:86400 = 24h)
     pub default_ttl_secs: u64,

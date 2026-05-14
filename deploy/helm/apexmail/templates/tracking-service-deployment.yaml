@@ -134,29 +134,34 @@ spec:
             httpGet:
               path: /ready
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            failureThreshold: 3
+            initialDelaySeconds: {{ .Values.trackingService.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.trackingService.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.trackingService.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.trackingService.probes.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            failureThreshold: 4
+            initialDelaySeconds: {{ .Values.trackingService.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.trackingService.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.trackingService.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.trackingService.probes.liveness.failureThreshold }}
           startupProbe:
             httpGet:
               path: /ready
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 12
+            initialDelaySeconds: {{ .Values.trackingService.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.trackingService.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.trackingService.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.trackingService.probes.startup.failureThreshold }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: tmp
-          emptyDir: {}
+          # 🟡7: Added size limit to prevent disk exhaustion
+          emptyDir:
+            sizeLimit: {{ .Values.trackingService.tmpEmptyDirSizeLimit | default "256Mi" }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

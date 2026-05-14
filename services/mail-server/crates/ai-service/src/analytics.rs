@@ -201,14 +201,14 @@ impl AnalyticsPredictor {
             }
 
             // Recompute centroids
-            for c in 0..k {
+            for (c, centroid) in centroids.iter_mut().enumerate().take(k) {
                 let (sum, count) = engagement_scores
                     .iter()
                     .zip(assignments.iter())
                     .filter(|(_, &a)| a == c)
                     .fold((0.0, 0u64), |(s, cnt), (&v, _)| (s + v, cnt + 1));
                 if count > 0 {
-                    centroids[c] = sum / count as f64;
+                    *centroid = sum / count as f64;
                 }
             }
         }

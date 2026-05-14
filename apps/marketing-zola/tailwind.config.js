@@ -1,22 +1,26 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  content: [
-    './templates/**/*.html',
-    './content/**/*.{html,md}',
-    './static/js/**/*.js',
-  ],
+  content: {
+    relative: true,
+    files: [
+      './templates/**/*.html',
+      './content/**/*.{html,md}',
+      './static/js/**/*.js',
+    ],
+  },
   theme: {
     extend: {
       colors: {
         brand: colorScale('brand'),
         primary: colorScale('brand'),
+        accent: colorScale('brand'),
         surface: colorScale('surface'),
-        success: withAlpha('--success'),
-        warning: withAlpha('--warning'),
-        danger: withAlpha('--danger'),
-        info: withAlpha('--info'),
-        destructive: withAlpha('--destructive'),
-        error: withAlpha('--error'),
+        success: colorScale('success'),
+        warning: colorScale('warning'),
+        info: colorScale('info'),
+        danger: colorScale('brand'),
+        destructive: colorScale('brand'),
+        error: colorScale('brand'),
       },
       fontFamily: {
         sans: ['var(--font-apex)'],
@@ -30,8 +34,9 @@ module.exports = {
         xl: 'var(--radius-xl)',
       },
       boxShadow: {
-        premium: 'none',
-        'premium-hover': 'none',
+        premium: '0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)',
+        'premium-hover': '0 20px 40px rgba(0, 0, 0, 0.12)',
+        'premium-sm': '0 4px 12px rgba(0, 0, 0, 0.05)',
       },
     },
   },

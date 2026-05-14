@@ -390,7 +390,7 @@ mod concurrency_tests {
     /// Concurrent fast-path checks should be thread-safe
     #[test]
     fn test_concurrent_fast_path() {
-        let patterns = vec![
+        let patterns = [
             "SELECT * FROM users",
             "<script>alert(1)</script>",
             "; cat /etc/passwd",

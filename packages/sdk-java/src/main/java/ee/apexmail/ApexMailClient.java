@@ -1,6 +1,7 @@
 package ee.apexmail;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
@@ -12,18 +13,22 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.Optional;
 import java.util.regex.Pattern;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Official Java SDK client for the ApexMail API.
@@ -49,12 +54,19 @@ public final class ApexMailClient implements AutoCloseable {
     private static final int DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
     private static final Pattern API_KEY_PATTERN = Pattern.compile("^am_(live|test)_[A-Za-z0-9]{16,}$");
 
+    /**
+     * Default max thread pool size: 2× available processors.
+     * Prevents unbounded thread growth (CachedThreadPool) which can cause OOM.
+     */
+    private static final int DEFAULT_MAX_THREADS =
+        Math.max(4, Runtime.getRuntime().availableProcessors() * 2);
+
     private final String apiKey;
     private final String baseUrl;
     private final HttpClient httpClient;
     private final ExecutorService executor;
-    private final ScheduledExecutorService retryScheduler;
     private final ObjectMapper objectMapper;
+    private volatile RateLimitInfo lastRateLimit;
 
     // ── Resource accessors ────────────────────────────────────────────────
 
@@ -64,31 +76,91 @@ public final class ApexMailClient implements AutoCloseable {
     private final Templates    templates;
     private final Suppressions suppressions;
     private final Events       events;
+    private final Analytics    analytics;
+    private final APIKeys      apiKeys;
 
     // ── Constructors ──────────────────────────────────────────────────────
 
+    /**
+     * Creates a new ApexMailClient with default configuration.
+     *
+     * @param apiKey Your ApexMail API key (must match {@code am_(live|test)_[A-Za-z0-9]{16,}})
+     */
     public ApexMailClient(String apiKey) {
-        this(apiKey, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, null);
+        this(apiKey, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, DEFAULT_MAX_THREADS, null);
     }
 
+    /**
+     * Creates a new ApexMailClient with a custom base URL.
+     *
+     * @param apiKey  Your ApexMail API key
+     * @param baseUrl Custom API base URL
+     */
     public ApexMailClient(String apiKey, String baseUrl) {
-        this(apiKey, baseUrl, DEFAULT_TIMEOUT, null);
+        this(apiKey, baseUrl, DEFAULT_TIMEOUT, DEFAULT_MAX_THREADS, null);
     }
 
+    /**
+     * Creates a new ApexMailClient with a custom timeout.
+     *
+     * @param apiKey  Your ApexMail API key
+     * @param baseUrl Custom API base URL
+     * @param timeout Request and connect timeout
+     */
     public ApexMailClient(String apiKey, String baseUrl, Duration timeout) {
-        this(apiKey, baseUrl, timeout, null);
+        this(apiKey, baseUrl, timeout, DEFAULT_MAX_THREADS, null);
     }
 
-    public ApexMailClient(String apiKey, HttpClient httpClient) {
-        this(apiKey, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, httpClient);
-    }
-
+    /**
+     * Creates a new ApexMailClient with a custom base URL, timeout, and HttpClient.
+     *
+     * @param apiKey     Your ApexMail API key
+     * @param baseUrl    Custom API base URL
+     * @param timeout    Request and connect timeout
+     * @param httpClient Pre-configured HttpClient instance (the client's own executor is used)
+     */
     public ApexMailClient(String apiKey, String baseUrl, Duration timeout, HttpClient httpClient) {
+        this(apiKey, baseUrl, timeout, DEFAULT_MAX_THREADS, httpClient);
+    }
+
+    /**
+     * Creates a new ApexMailClient with a provided HttpClient.
+     *
+     * @param apiKey     Your ApexMail API key
+     * @param httpClient Pre-configured HttpClient instance (the client's own executor is used)
+     */
+    public ApexMailClient(String apiKey, HttpClient httpClient) {
+        this(apiKey, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, DEFAULT_MAX_THREADS, httpClient);
+    }
+
+    /**
+     * Creates a new ApexMailClient with a custom timeout and max thread count.
+     * <p>
+     * When no {@code httpClient} is supplied, the client creates a bounded thread pool
+     * with the given {@code maxThreads} and a {@link ThreadPoolExecutor.CallerRunsPolicy}
+     * rejection handler to prevent unbounded thread growth under high concurrency.
+     *
+     * @param apiKey     Your ApexMail API key
+     * @param baseUrl    Custom API base URL
+     * @param timeout    Request and connect timeout
+     * @param maxThreads Maximum number of threads in the internal executor pool
+     */
+    public ApexMailClient(String apiKey, String baseUrl, Duration timeout, int maxThreads) {
+        this(apiKey, baseUrl, timeout, maxThreads, null);
+    }
+
+    /**
+     * Main constructor — all others delegate here.
+     */
+    public ApexMailClient(String apiKey, String baseUrl, Duration timeout, int maxThreads, HttpClient httpClient) {
         if (apiKey == null || apiKey.isBlank()) {
             throw new IllegalArgumentException("apiKey must not be blank");
         }
         if (!API_KEY_PATTERN.matcher(apiKey).matches()) {
             throw new IllegalArgumentException("apiKey must match am_live_... or am_test_... format");
+        }
+        if (maxThreads < 1) {
+            throw new IllegalArgumentException("maxThreads must be >= 1, got " + maxThreads);
         }
         this.apiKey  = apiKey;
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
@@ -99,17 +171,24 @@ public final class ApexMailClient implements AutoCloseable {
             this.httpClient = httpClient;
             this.executor = null;
         } else {
-            this.executor = Executors.newCachedThreadPool();
+            // Bounded thread pool with CallerRunsPolicy prevents unbounded thread
+            // growth (which would cause OOM) under high concurrency.
+            this.executor = new ThreadPoolExecutor(
+                maxThreads, maxThreads,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<Runnable>(),
+                new ThreadPoolExecutor.CallerRunsPolicy()
+            );
             this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(timeout)
                 .version(HttpClient.Version.HTTP_2)
                 .executor(this.executor)
                 .build();
         }
-            this.retryScheduler = Executors.newSingleThreadScheduledExecutor();
         this.objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .registerModule(new Jdk8Module())
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
         this.emails       = new Emails(this);
@@ -118,6 +197,8 @@ public final class ApexMailClient implements AutoCloseable {
         this.templates    = new Templates(this);
         this.suppressions = new Suppressions(this);
         this.events       = new Events(this);
+        this.analytics    = new Analytics(this);
+        this.apiKeys      = new APIKeys(this);
     }
 
     // ── Public accessors ──────────────────────────────────────────────────
@@ -128,6 +209,9 @@ public final class ApexMailClient implements AutoCloseable {
     public Templates    templates()    { return templates; }
     public Suppressions suppressions() { return suppressions; }
     public Events       events()       { return events; }
+    public Analytics    analytics()    { return analytics; }
+    public APIKeys      apiKeys()      { return apiKeys; }
+    public Optional<RateLimitInfo> getLastRateLimit() { return Optional.ofNullable(lastRateLimit); }
 
     // ── HTTP transport ────────────────────────────────────────────────────
 
@@ -156,6 +240,7 @@ public final class ApexMailClient implements AutoCloseable {
                 );
 
                 int status = response.statusCode();
+                lastRateLimit = RateLimitInfo.from(response);
                 String responseBody = safeResponseBody(response);
                 ensureResponseWithinLimit(responseBody);
 
@@ -181,9 +266,9 @@ public final class ApexMailClient implements AutoCloseable {
                 if (attempt < DEFAULT_MAX_RETRIES) {
                     try {
                         sleepBackoff(attempt);
-                    } catch (InterruptedException interrupted) {
+                    } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
-                        throw new ApexMailException("Request interrupted", interrupted);
+                        throw new ApexMailException("Request interrupted", ie);
                     }
                     attempt++;
                     continue;
@@ -212,6 +297,7 @@ public final class ApexMailClient implements AutoCloseable {
                 );
 
                 int status = response.statusCode();
+                lastRateLimit = RateLimitInfo.from(response);
                 String responseBody = safeResponseBody(response);
                 ensureResponseWithinLimit(responseBody);
 
@@ -237,9 +323,9 @@ public final class ApexMailClient implements AutoCloseable {
                 if (attempt < DEFAULT_MAX_RETRIES) {
                     try {
                         sleepBackoff(attempt);
-                    } catch (InterruptedException interrupted) {
+                    } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
-                        throw new ApexMailException("Request interrupted", interrupted);
+                        throw new ApexMailException("Request interrupted", ie);
                     }
                     attempt++;
                     continue;
@@ -275,6 +361,7 @@ public final class ApexMailClient implements AutoCloseable {
         Object errorField = body.get("error");
         String message = "API error";
         String code = null;
+        Object details = null;
         if (errorField instanceof Map) {
             Map<String, Object> errorObj = (Map<String, Object>) errorField;
             Object msgField = errorObj.get("message");
@@ -285,37 +372,169 @@ public final class ApexMailClient implements AutoCloseable {
             if (codeField != null) {
                 code = String.valueOf(codeField);
             }
+            details = errorObj.get("details");
         } else if (errorField != null) {
             message = String.valueOf(errorField);
         }
 
         throw switch (status) {
-            case 401 -> new AuthenticationException(message, code, status);
-            case 403 -> new ForbiddenException(message, code, status);
-            case 404 -> new NotFoundException(message, code, status);
-            case 409 -> new ConflictException(message, code, status);
-            case 422 -> new ValidationException(message, code, status);
-            case 429 -> new RateLimitException(message, code, status);
-            default  -> new ApexMailException(message, code, status);
+            case 401 -> new AuthenticationException(message, code, status, details);
+            case 403 -> new ForbiddenException(message, code, status, details);
+            case 404 -> new NotFoundException(message, code, status, details);
+            case 409 -> new ConflictException(message, code, status, details);
+            case 400 -> new ValidationException(message, code, status, details);
+            case 429 -> new RateLimitException(message, code, status, details);
+            default  -> new ApexMailException(message, code, status, details);
         };
     }
 
-    private static Duration retryDelay(HttpResponse<String> response, int attempt) {
-        Optional<String> retryAfter = response.headers().firstValue("Retry-After");
-        if (retryAfter.isPresent()) {
-            String header = retryAfter.get();
-            try {
-                long seconds = Long.parseLong(header.trim());
-                return Duration.ofSeconds(seconds).compareTo(DEFAULT_MAX_BACKOFF) > 0
-                    ? DEFAULT_MAX_BACKOFF
-                    : Duration.ofSeconds(seconds);
-            } catch (NumberFormatException ignored) {
-                // fall through to backoff
-            }
+    public static boolean verifyWebhookSignature(
+        String payload,
+        String signatureHeader,
+        String secret,
+        Duration tolerance
+    ) {
+        if (payload == null || signatureHeader == null || signatureHeader.isBlank() || secret == null || secret.isBlank()) {
+            return false;
         }
-        return calculateBackoff(attempt);
+        SignatureParts parts = SignatureParts.parse(signatureHeader);
+        if (parts.signature() == null || parts.signature().isBlank()) {
+            return false;
+        }
+        long timestamp = parts.timestamp() != null ? parts.timestamp() : System.currentTimeMillis() / 1000L;
+        long toleranceSeconds = tolerance != null ? tolerance.getSeconds() : 300L;
+        if (Math.abs((System.currentTimeMillis() / 1000L) - timestamp) > toleranceSeconds) {
+            return false;
+        }
+
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] expected = toHex(mac.doFinal((timestamp + "." + payload).getBytes(StandardCharsets.UTF_8))).getBytes(StandardCharsets.UTF_8);
+            byte[] supplied = parts.signature().getBytes(StandardCharsets.UTF_8);
+            return MessageDigest.isEqual(expected, supplied);
+        } catch (Exception error) {
+            return false;
+        }
     }
 
+    public static boolean verifyWebhookSignature(String payload, String signatureHeader, String secret) {
+        return verifyWebhookSignature(payload, signatureHeader, secret, Duration.ofMinutes(5));
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder builder = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            builder.append(String.format("%02x", b));
+        }
+        return builder.toString();
+    }
+
+    public record RateLimitInfo(Long limit, Long remaining, Long reset, String retryAfter) {
+        static RateLimitInfo from(HttpResponse<?> response) {
+            Long limit = headerLong(response, "X-RateLimit-Limit");
+            Long remaining = headerLong(response, "X-RateLimit-Remaining");
+            Long reset = headerLong(response, "X-RateLimit-Reset");
+            String retryAfter = response.headers().firstValue("Retry-After").orElse(null);
+            if (limit == null && remaining == null && reset == null && retryAfter == null) {
+                return null;
+            }
+            return new RateLimitInfo(limit, remaining, reset, retryAfter);
+        }
+
+        private static Long headerLong(HttpResponse<?> response, String name) {
+            return response.headers().firstValue(name).flatMap(value -> {
+                try {
+                    return Optional.of(Long.parseLong(value.trim()));
+                } catch (NumberFormatException ignored) {
+                    return Optional.empty();
+                }
+            }).orElse(null);
+        }
+    }
+
+    private record SignatureParts(Long timestamp, String signature) {
+        static SignatureParts parse(String header) {
+            Long timestamp = null;
+            String signature = null;
+            for (String part : header.split(",")) {
+                String trimmed = part.trim();
+                int sep = trimmed.indexOf('=');
+                if (sep > 0) {
+                    String key = trimmed.substring(0, sep);
+                    String value = trimmed.substring(sep + 1);
+                    if ("t".equals(key)) {
+                        try {
+                            timestamp = Long.parseLong(value);
+                        } catch (NumberFormatException ignored) {
+                            return new SignatureParts(null, null);
+                        }
+                    } else if ("v1".equals(key)) {
+                        signature = value;
+                    }
+                }
+            }
+            if (signature == null) {
+                signature = header.startsWith("sha256=") ? header.substring("sha256=".length()) : header.trim();
+            }
+            return new SignatureParts(timestamp, signature);
+        }
+    }
+
+    /**
+     * Computes retry delay using the formula:
+     * {@code delay = max(retryAfterSeconds, baseDelay * attempt²)},
+     * capped at {@link #DEFAULT_MAX_BACKOFF}.
+     * <p>
+     * This ensures the server's requested delay is always honored while
+     * still providing quadratic backoff growth as the attempt count increases.
+     */
+    private static Duration retryDelay(HttpResponse<String> response, int attempt) {
+        long retryAfterSeconds = -1;
+        Optional<String> retryAfter = response.headers().firstValue("Retry-After");
+        if (retryAfter.isPresent()) {
+            String header = retryAfter.get().trim();
+            // Try integer seconds first (most common)
+            try {
+                retryAfterSeconds = Long.parseLong(header);
+            } catch (NumberFormatException ignored) {
+                // Try HTTP-date format (RFC 1123, e.g. "Wed, 21 Oct 2015 07:28:00 GMT")
+                try {
+                    ZonedDateTime retryAt = ZonedDateTime.parse(header, DateTimeFormatter.RFC_1123_DATE_TIME);
+                    long now = System.currentTimeMillis();
+                    long retryAtMs = retryAt.toInstant().toEpochMilli();
+                    if (retryAtMs > now) {
+                        retryAfterSeconds = (retryAtMs - now + 999) / 1000; // ceil division
+                    } else {
+                        retryAfterSeconds = 0; // retry time already passed
+                    }
+                } catch (Exception ignored2) {
+                    // Unparseable header — fall through to backoff
+                }
+            }
+        }
+
+        // Compute quadratic backoff: baseDelay * attempt²
+        long backoffMillis = DEFAULT_INITIAL_BACKOFF.toMillis() * (long) (attempt * attempt);
+
+        // Use max(retryAfter, quadraticBackoff), then cap at DEFAULT_MAX_BACKOFF
+        if (retryAfterSeconds > 0) {
+            long retryAfterMillis = retryAfterSeconds * 1000L;
+            if (retryAfterMillis > backoffMillis) {
+                backoffMillis = retryAfterMillis;
+            }
+        }
+
+        return backoffMillis > DEFAULT_MAX_BACKOFF.toMillis()
+            ? DEFAULT_MAX_BACKOFF
+            : Duration.ofMillis(backoffMillis);
+    }
+
+    /**
+     * Quadratic backoff used when no Retry-After header is available
+     * (e.g. on network-level IO errors).
+     * Formula: {@code baseDelay * attempt²}, capped at {@link #DEFAULT_MAX_BACKOFF}.
+     */
     private static Duration calculateBackoff(int attempt) {
         if (attempt < 0) {
             attempt = 0;
@@ -323,9 +542,10 @@ public final class ApexMailClient implements AutoCloseable {
         if (attempt > 30) {
             attempt = 30;
         }
-        long multiplier = 1L << attempt;
-        Duration delay = DEFAULT_INITIAL_BACKOFF.multipliedBy(multiplier);
-        return delay.compareTo(DEFAULT_MAX_BACKOFF) > 0 ? DEFAULT_MAX_BACKOFF : delay;
+        long millis = DEFAULT_INITIAL_BACKOFF.toMillis() * (long) (attempt * attempt);
+        return millis > DEFAULT_MAX_BACKOFF.toMillis()
+            ? DEFAULT_MAX_BACKOFF
+            : Duration.ofMillis(millis);
     }
 
     private HttpRequest buildRequest(String method, String path, String jsonBody, String idempotencyKey) {
@@ -363,14 +583,7 @@ public final class ApexMailClient implements AutoCloseable {
         if (delay == null || delay.isNegative() || delay.isZero()) {
             return;
         }
-
-        CompletableFuture<Void> future = new CompletableFuture<>();
-        retryScheduler.schedule(() -> future.complete(null), delay.toMillis(), TimeUnit.MILLISECONDS);
-        try {
-            future.get();
-        } catch (ExecutionException e) {
-            throw new ApexMailException("Retry scheduling failed", e.getCause());
-        }
+        Thread.sleep(delay.toMillis());
     }
 
     private void sleepBackoff(int attempt) throws InterruptedException {
@@ -382,18 +595,21 @@ public final class ApexMailClient implements AutoCloseable {
         if (executor != null) {
             executor.shutdown();
         }
-        retryScheduler.shutdown();
         try {
-            if (!retryScheduler.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                retryScheduler.shutdownNow();
-            }
-            if (executor != null && !executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+            if (executor != null && !executor.awaitTermination(5, TimeUnit.SECONDS)) {
                 executor.shutdownNow();
             }
         } catch (InterruptedException e) {
-            retryScheduler.shutdownNow();
             if (executor != null) executor.shutdownNow();
             Thread.currentThread().interrupt();
         }
+    }
+
+    @Override
+    public String toString() {
+        String masked = apiKey.length() > 8
+            ? apiKey.substring(0, 4) + "\u2026\u2026" + apiKey.substring(apiKey.length() - 4)
+            : "[REDACTED]";
+        return "ApexMailClient{apiKey=" + masked + ", baseUrl=" + baseUrl + "}";
     }
 }

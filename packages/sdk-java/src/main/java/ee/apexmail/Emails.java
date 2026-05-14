@@ -27,9 +27,29 @@ public final class Emails {
         Object cc,
         Object bcc,
         Object replyTo,
+        Object attachments,
+        Object tags,
+        String priority,
+        Map<String, Object> metadata,
         String scheduledAt,
         String idempotencyKey
     ) {
+        public SendRequest(
+            Object from,
+            Object to,
+            String subject,
+            String html,
+            String text,
+            String templateId,
+            Object cc,
+            Object bcc,
+            Object replyTo,
+            String scheduledAt,
+            String idempotencyKey
+        ) {
+            this(from, to, subject, html, text, templateId, cc, bcc, replyTo, null, null, null, null, scheduledAt, idempotencyKey);
+        }
+
         Map<String, Object> toMap() {
             Map<String, Object> body = new HashMap<>();
             body.put("from", from);
@@ -52,6 +72,18 @@ public final class Emails {
             }
             if (replyTo != null) {
                 body.put("replyTo", replyTo);
+            }
+            if (attachments != null) {
+                body.put("attachments", attachments);
+            }
+            if (tags != null) {
+                body.put("tags", tags);
+            }
+            if (priority != null) {
+                body.put("priority", priority);
+            }
+            if (metadata != null) {
+                body.put("metadata", metadata);
             }
             if (scheduledAt != null) {
                 body.put("scheduledAt", scheduledAt);
@@ -92,9 +124,18 @@ public final class Emails {
             params.get("cc"),
             params.get("bcc"),
             params.get("replyTo"),
+            params.get("attachments"),
+            params.get("tags"),
+            (String) params.get("priority"),
+            castStringObjectMap(params.get("metadata")),
             (String) params.get("scheduledAt"),
             (String) params.get("idempotencyKey")
         ));
+    }
+
+    /** Cancel a scheduled email. */
+    public GetResponse cancel(String id) {
+        return client.request("POST", "/v1/messages/" + encode(id) + "/cancel", Map.of(), GetResponse.class);
     }
 
     private static void validateSendParams(Map<String, Object> params) {
@@ -195,6 +236,19 @@ public final class Emails {
     }
 
     @SuppressWarnings("unchecked")
+    private static Map<String, Object> castStringObjectMap(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> result = new HashMap<>();
+            map.forEach((key, mapValue) -> result.put(String.valueOf(key), mapValue));
+            return result;
+        }
+        throw new IllegalArgumentException("metadata must be a map");
+    }
+
+    @SuppressWarnings("unchecked")
     private static void validateRecipients(Object value, String field) {
         if (value == null) {
             throw new IllegalArgumentException(field + " is required");
@@ -263,6 +317,20 @@ public final class Emails {
         String deliveredAt,
         String openedAt,
         String clickedAt
+    ) {}
+
+    /**
+     * SMTP delivery envelope with authentication results.
+     *
+     * <p>Returned as part of email detail and event responses.
+     */
+    public record Envelope(
+        String from,
+        java.util.List<String> to,
+        String dkim,
+        String spf,
+        String dmarc,
+        String timestamp
     ) {}
 
     public record GetResponse(EmailDetail message) {}

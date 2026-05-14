@@ -45,9 +45,7 @@ pub struct CredentialRow {
 /// Function the caller supplies for resolving a `secret_ref` to plaintext.
 /// Typically delegates to `compliance::secret_manager::SecretManager::get_secret`.
 pub type SecretResolver = std::sync::Arc<
-    dyn Fn(String) -> futures::future::BoxFuture<'static, Result<String, String>>
-        + Send
-        + Sync,
+    dyn Fn(String) -> futures::future::BoxFuture<'static, Result<String, String>> + Send + Sync,
 >;
 
 /// Spawn the poller.  Returns the `JoinHandle`; callers can drop it to detach.

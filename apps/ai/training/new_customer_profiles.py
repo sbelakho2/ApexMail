@@ -213,7 +213,7 @@ EXTENDED_PROFILES = {
     "enterprise_compliance_v2": {
         "account_id": "acct_ent800k",
         "plan_name": "Enterprise",
-        "plan_price": "800",
+        "plan_price": "3000",
         "emails_sent": "3,625,000",
         "email_limit": "5,000,000",
         "api_calls": "45,000,000",
@@ -229,7 +229,7 @@ EXTENDED_PROFILES = {
     "enterprise_sso_issue": {
         "account_id": "acct_sso4j7",
         "plan_name": "Enterprise",
-        "plan_price": "800",
+        "plan_price": "3000",
         "emails_sent": "2,150,000",
         "email_limit": "5,000,000",
         "api_calls": "28,000,000",
@@ -243,7 +243,7 @@ EXTENDED_PROFILES = {
     "enterprise_multi_region": {
         "account_id": "acct_mrg2l5",
         "plan_name": "Enterprise",
-        "plan_price": "800",
+        "plan_price": "3000",
         "emails_sent": "4,200,000",
         "email_limit": "5,000,000",
         "api_calls": "52,000,000",

@@ -129,6 +129,11 @@ class DomainsResource:
         _validate_id(domain_id, 'domain')
         self._client._request("DELETE", f"/v1/domains/{domain_id}")
 
+    def health(self, domain_id: str) -> dict:
+        """Check SPF/DKIM/DMARC/blacklist health for a domain."""
+        _validate_id(domain_id, 'domain')
+        return self._client._request("GET", f"/v1/domains/{domain_id}/health")
+
 
 class AsyncDomainsResource:
     """Asynchronous domains resource."""
@@ -189,3 +194,8 @@ class AsyncDomainsResource:
         """Delete a domain asynchronously."""
         _validate_id(domain_id, 'domain')
         await self._client._request("DELETE", f"/v1/domains/{domain_id}")
+
+    async def health(self, domain_id: str) -> dict:
+        """Check SPF/DKIM/DMARC/blacklist health for a domain asynchronously."""
+        _validate_id(domain_id, 'domain')
+        return await self._client._request("GET", f"/v1/domains/{domain_id}/health")

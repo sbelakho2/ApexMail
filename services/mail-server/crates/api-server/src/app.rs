@@ -270,7 +270,10 @@ async fn placement_list_providers(
 }
 
 /// Helper to produce an error JSON tuple (legacy non-grader call sites).
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "legacy route adapters still use this shape in downstream branches"
+)]
 fn err_tuple(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({"error": msg})))
 }
@@ -373,6 +376,10 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route_service(
             "/icon.svg",
+            ServeFile::new(format!("{marketing_public}/icon.svg")),
+        )
+        .route_service(
+            "/favicon.ico",
             ServeFile::new(format!("{marketing_public}/icon.svg")),
         )
         .route_service(
@@ -548,7 +555,8 @@ pub fn build_app(state: AppState) -> Router {
 // ─── Security headers ──────────────────────────────────────────
 
 static HDR_API_VERSION: HeaderValue = HeaderValue::from_static("v1");
-static HDR_HSTS: HeaderValue = HeaderValue::from_static("max-age=31536000; includeSubDomains");
+static HDR_HSTS: HeaderValue =
+    HeaderValue::from_static("max-age=63072000; includeSubDomains; preload");
 static HDR_FRAME_OPTIONS: HeaderValue = HeaderValue::from_static("DENY");
 static HDR_CONTENT_TYPE_OPTIONS: HeaderValue = HeaderValue::from_static("nosniff");
 static HDR_XSS_PROTECTION: HeaderValue = HeaderValue::from_static("0");
@@ -592,10 +600,28 @@ fn generate_csp_nonce() -> String {
 
 fn browser_csp_header(nonce: &str) -> HeaderValue {
     let analytics_img_src = std::env::var("ANALYTICS_IMAGE_SRC").ok();
-    browser_csp_header_with_analytics(nonce, analytics_img_src.as_deref())
+    let mcaptcha_base_url = std::env::var("MCAPTCHA_BASE_URL").ok();
+    browser_csp_header_with_sources(
+        nonce,
+        analytics_img_src.as_deref(),
+        mcaptcha_base_url.as_deref(),
+    )
 }
 
+#[allow(dead_code)]
 fn browser_csp_header_with_analytics(nonce: &str, analytics_img_src: Option<&str>) -> HeaderValue {
+    browser_csp_header_with_sources(nonce, analytics_img_src, None)
+}
+
+/// Build the browser Content-Security-Policy header.
+///
+/// `analytics_img_src` — optional HTTPS image source for analytics (e.g. Plausible).
+/// `mcaptcha_base_url` — optional mCaptcha server base URL for connect-src and script-src.
+fn browser_csp_header_with_sources(
+    nonce: &str,
+    analytics_img_src: Option<&str>,
+    mcaptcha_base_url: Option<&str>,
+) -> HeaderValue {
     let analytics_img_src = analytics_img_src
         .map(str::trim)
         .filter(|src| !src.is_empty())
@@ -603,8 +629,26 @@ fn browser_csp_header_with_analytics(nonce: &str, analytics_img_src: Option<&str
         .map(|src| format!(" {src}"))
         .unwrap_or_default();
 
+    let mcaptcha_connect_src = mcaptcha_base_url
+        .map(str::trim)
+        .filter(|src| !src.is_empty())
+        .map(|src| format!(" {src}"))
+        .unwrap_or_default();
+
+    let mcaptcha_script_src = mcaptcha_base_url
+        .map(str::trim)
+        .filter(|src| !src.is_empty())
+        .map(|src| format!(" {src}"))
+        .unwrap_or_default();
+
+    let mcaptcha_frame_src = mcaptcha_base_url
+        .map(str::trim)
+        .filter(|src| !src.is_empty())
+        .map(|src| src.to_string())
+        .unwrap_or_else(|| "'none'".to_string());
+
     HeaderValue::from_str(&format!(
-        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}'; object-src 'none'"
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'{mcaptcha_connect_src}; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}'{mcaptcha_script_src}; frame-src {mcaptcha_frame_src}; object-src 'none'"
     ))
     .expect("browser CSP should be valid")
 }
@@ -853,6 +897,9 @@ async fn browser_verify_email_page(
         } else {
             Some(query.as_str())
         },
+        None,
+        None,
+        None,
     );
 
     match html {
@@ -877,7 +924,19 @@ fn render_ui_response(
 
     let host = headers.get(HOST).and_then(|value| value.to_str().ok());
     let surface = config.ui_surface_for_host(host)?;
-    let html = ui_router::render_route_with_query(surface, uri.path(), uri.query())?;
+    // Pass CSRF secret so auth forms receive real tokens during SSR
+    let csrf_secret = Some(config.csrf_secret.as_str());
+    // Pass mCaptcha config so auth forms include the CAPTCHA widget
+    let mcaptcha_base_url = Some(config.mcaptcha_base_url.as_str());
+    let mcaptcha_site_key = Some(config.mcaptcha_site_key.as_str());
+    let html = ui_router::render_route_with_query(
+        surface,
+        uri.path(),
+        uri.query(),
+        csrf_secret,
+        mcaptcha_base_url,
+        mcaptcha_site_key,
+    )?;
     Some(browser_html_response(html))
 }
 
@@ -925,8 +984,17 @@ mod tests {
     use tokio::sync::Notify;
     use tower::ServiceExt;
 
+    use crate::resilience::ResilientClient;
     use crate::ses_provider::SesIpProvider;
     use crate::state::AppStateInner;
+
+    /// CSRF secret used by `test_config()` — must match the value in that function.
+    const TEST_CSRF_SECRET: &str = "test-csrf-secret-1234567890abcd";
+
+    /// Generate a valid CSRF token for integration tests using the test secret.
+    fn test_csrf_token() -> String {
+        ui_foundation::csrf::generate_csrf_token(TEST_CSRF_SECRET)
+    }
 
     async fn response_body_string(resp: Response) -> String {
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
@@ -984,8 +1052,13 @@ mod tests {
             "us-east-1".into(),
         );
 
+        let pools = apexmail_db::pool::create_pool_pair(&database_url, None, 1, 0)
+            .await
+            .expect("failed to create test pool pair");
+
         build_app(AppStateInner::with_ddos_protector(
             db,
+            pools,
             redis,
             test_config(),
             reqwest::Client::new(),
@@ -994,6 +1067,7 @@ mod tests {
             ddos_protector,
             None, // grader_state
             None, // placement_state
+            ResilientClient::new_from_config(&test_config()),
         ))
     }
 
@@ -1015,6 +1089,12 @@ mod tests {
             db_user: "apexmail".into(),
             db_password: "password".into(),
             db_max_connections: 20,
+            api_replica_count: 1,
+            db_cluster_connection_budget: None,
+            expected_replica_count: 3,
+            statement_cache_capacity: 500,
+            query_timeout_seconds: 30,
+            database_replica_url: None,
             redis_host: "localhost".into(),
             redis_port: 6379,
             redis_password: None,
@@ -1022,6 +1102,7 @@ mod tests {
             redis_pool_max_size: 40,
             jwt_private_key_pem: "BEGIN TEST".into(),
             jwt_public_key_pem: "BEGIN TEST".into(),
+            jwt_previous_public_keys_pem: vec![],
             jwt_expiry: Duration::from_secs(86400),
             api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
             rate_limit_window_ms: 60000,
@@ -1071,6 +1152,12 @@ mod tests {
             placement_imap_timeout_secs: 30,
             placement_encrypt_passwords: true,
             placement_encryption_secret: "test-placement-encryption-secret".into(),
+
+            mcaptcha_base_url: "https://mcaptcha.example.com".into(),
+            mcaptcha_site_key: "dev".into(),
+            mcaptcha_secret_key: "dev".into(),
+            mcaptcha_enabled: false,
+            mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
         }
     }
 
@@ -1217,8 +1304,9 @@ mod tests {
         );
 
         let body = response_body_string(response).await;
-        assert!(body.contains(":root {"));
-        assert!(body.contains("font-family: var(--font-sans);"));
+        let compact_body = body.replace(' ', "");
+        assert!(compact_body.contains(":root{"));
+        assert!(compact_body.contains("font-family:var(--font-sans)"));
     }
 
     #[test]
@@ -1379,12 +1467,14 @@ mod tests {
     #[tokio::test]
     async fn auth_public_routes_validate_inputs_and_render_browser_verify_page() {
         let app = test_app().await;
+        let csrf = test_csrf_token();
 
         let login_response = app
             .clone()
             .oneshot(
                 Request::post("/v1/auth/login")
                     .header("content-type", "application/json")
+                    .header("x-csrf-token", &csrf)
                     .body(Body::from(r#"{"email":"","password":""}"#))
                     .unwrap(),
             )
@@ -1400,6 +1490,7 @@ mod tests {
                 .oneshot(
                     Request::post(path)
                         .header("content-type", "application/json")
+                        .header("x-csrf-token", &csrf)
                         .body(Body::from(
                             r#"{"company_name":"","email":"","name":"","password":"short","plan":"free"}"#,
                         ))
@@ -1421,6 +1512,7 @@ mod tests {
             .oneshot(
                 Request::post("/v1/auth/forgot-password")
                     .header("content-type", "application/json")
+                    .header("x-csrf-token", &csrf)
                     .body(Body::from(r#"{"email":"invalid"}"#))
                     .unwrap(),
             )
@@ -1435,6 +1527,7 @@ mod tests {
             .oneshot(
                 Request::post("/v1/auth/reset-password")
                     .header("content-type", "application/json")
+                    .header("x-csrf-token", &csrf)
                     .body(Body::from(
                         r#"{"token":"tok_123","email":"owner@example.com","password":"StrongPass123!","confirmPassword":"MismatchPass123!"}"#,
                     ))
@@ -1466,7 +1559,7 @@ mod tests {
         assert!(verify_csp.contains("script-src 'self' 'nonce-"));
         assert!(verify_csp.contains("style-src 'self' 'nonce-"));
         let verify_body = response_body_string(verify_response).await;
-        assert!(verify_body.contains("Check your email"));
+        assert!(verify_body.contains("Verify your email"));
         assert!(verify_body.contains("Back to sign in"));
 
         let verify_unknown_host = app

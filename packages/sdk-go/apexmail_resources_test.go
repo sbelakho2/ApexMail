@@ -12,7 +12,10 @@ import (
 func TestClientExposesAdvancedResources(t *testing.T) {
 	t.Parallel()
 
-	client := New("am_live_1234567890abcdef", Config{BaseURL: "https://api.example.test"})
+	client, err := New("am_live_1234567890abcdef", Config{BaseURL: "https://api.example.test"})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
 
 	if client.Analytics == nil {
 		t.Fatal("expected Analytics resource")
@@ -50,7 +53,10 @@ func TestAPIKeysCreateUsesAuthEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	client, err := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
 	response, err := client.APIKeys.Create(context.Background(), &CreateAPIKeyRequest{Name: "Deploy key"})
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
@@ -79,7 +85,10 @@ func TestAnalyticsGetBuildsQuery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	client, err := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
 	response, err := client.Analytics.Get(context.Background(), AnalyticsOptions{GroupBy: "day", Tag: "welcome"})
 	if err != nil {
 		t.Fatalf("get analytics: %v", err)

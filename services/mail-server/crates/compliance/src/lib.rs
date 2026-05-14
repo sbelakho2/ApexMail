@@ -1,7 +1,9 @@
+#![deny(unsafe_code)]
 pub mod admin_routes;
 pub mod audit_logger;
 pub mod config;
 pub mod content_scanner;
+pub mod dsar_rate_limit;
 pub mod gdpr_automation;
 pub mod hipaa;
 pub mod risk_scoring;

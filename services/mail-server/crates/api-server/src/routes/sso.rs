@@ -95,7 +95,7 @@ async fn sso_google(
         .unwrap_or_else(|| "/dashboard".into());
     let safe_next = sanitize_redirect(&next);
 
-    let oauth_state = generate_oauth_state(&safe_next);
+    let oauth_state = generate_oauth_state(&safe_next)?;
 
     let auth_url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&access_type=offline&prompt=consent",
@@ -134,7 +134,7 @@ async fn sso_github(
         .unwrap_or_else(|| "/dashboard".into());
     let safe_next = sanitize_redirect(&next);
 
-    let oauth_state = generate_oauth_state(&safe_next);
+    let oauth_state = generate_oauth_state(&safe_next)?;
 
     let auth_url = format!(
         "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=read:user%20user:email&state={}",
@@ -529,14 +529,14 @@ async fn complete_sso_login(
 
 // ─── Helpers ───────────────────────────────────────────────────
 
-fn generate_oauth_state(next: &str) -> String {
+fn generate_oauth_state(next: &str) -> Result<String, ApiError> {
     use sha2::Digest;
-    let random_bytes: [u8; 32] = rand_bytes();
+    let random_bytes: [u8; 32] = rand_bytes()?;
     let hash = sha2::Sha256::digest(random_bytes);
     let state_token =
         base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, hash);
     // Encode the return path into the state so we can redirect back
-    format!("{state_token}:{next}")
+    Ok(format!("{state_token}:{next}"))
 }
 
 fn redirect_from_oauth_state(state: &str) -> String {
@@ -636,13 +636,14 @@ fn validate_oauth_state(
     Ok(redirect_from_oauth_state(returned_state))
 }
 
-fn rand_bytes() -> [u8; 32] {
+fn rand_bytes() -> Result<[u8; 32], ApiError> {
     use rand::TryRngCore;
     let mut buf = [0u8; 32];
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut buf)
-        .expect("OsRng should not fail");
-    buf
+    rand::rngs::OsRng.try_fill_bytes(&mut buf).map_err(|e| {
+        tracing::error!(error = %e, "failed to generate random bytes for OAuth state");
+        ApiError::Internal("failed to generate OAuth state".into())
+    })?;
+    Ok(buf)
 }
 
 fn sanitize_redirect(next: &str) -> String {
@@ -809,7 +810,7 @@ mod tests {
     #[test]
     fn test_generate_oauth_state() {
         // Verify the state token contains the redirect path and base64 token.
-        let state = generate_oauth_state("/dashboard");
+        let state = generate_oauth_state("/dashboard").unwrap();
         assert!(state.contains("/dashboard"));
         assert!(state.len() > 10);
     }
@@ -820,7 +821,7 @@ mod tests {
         // correctly for various paths.
         let paths = vec!["/dashboard", "/settings/billing", "/settings/profile", "/"];
         for path in paths {
-            let state = generate_oauth_state(path);
+            let state = generate_oauth_state(path).unwrap();
             let extracted = redirect_from_oauth_state(&state);
             assert_eq!(extracted, path, "Round-trip failed for path: {path}");
         }
@@ -830,7 +831,7 @@ mod tests {
     fn test_generate_oauth_state_rejects_external_url() {
         // Verify that an external URL in generate_oauth_state is sanitized
         // via the round-trip (the path is embedded, then sanitized on extraction).
-        let state = generate_oauth_state("https://evil.com");
+        let state = generate_oauth_state("https://evil.com").unwrap();
         let extracted = redirect_from_oauth_state(&state);
         assert_eq!(
             extracted, "/dashboard",
@@ -841,7 +842,7 @@ mod tests {
     #[test]
     fn test_generate_oauth_state_has_base64_token() {
         // Verify the state token contains a base64url-encoded portion before the colon.
-        let state = generate_oauth_state("/dashboard");
+        let state = generate_oauth_state("/dashboard").unwrap();
         let (token_part, _) = state.split_once(':').unwrap();
         assert!(!token_part.is_empty(), "Token portion must not be empty");
         // Base64url uses A-Z, a-z, 0-9, -, _
@@ -857,8 +858,8 @@ mod tests {
     fn test_generate_oauth_state_produces_unique_tokens() {
         // Verify two consecutive state generations produce different tokens
         // (due to random component).
-        let state1 = generate_oauth_state("/dashboard");
-        let state2 = generate_oauth_state("/dashboard");
+        let state1 = generate_oauth_state("/dashboard").unwrap();
+        let state2 = generate_oauth_state("/dashboard").unwrap();
         let (token1, _) = state1.split_once(':').unwrap();
         let (token2, _) = state2.split_once(':').unwrap();
         assert_ne!(token1, token2, "State tokens must be unique");

@@ -2,7 +2,7 @@
 
 ApexMail Enterprise includes a private deployment lifecycle for organizations that need dedicated tenancy, region scoping, dedicated IP management, or customer-owned IP range verification.
 
-The implementation is backed by the Enterprise private deploy service and the `ent_private_deployments`, `ent_dedicated_ips`, `ip_pool_available`, and `ent_byoip_ranges` tables. Routes below are shown relative to the Enterprise API mount and require the same bearer-token authentication and tenant access checks as other Enterprise routes.
+The implementation is backed by the Enterprise private deploy service and the `ent_private_deployments`, `ent_dedicated_ips`, `ip_pool_available`, and `ent_byoip_ranges` tables. Routes below are shown relative to the Enterprise API mount and require the same API key authentication (`X-API-Key` header) and tenant access checks as other Enterprise routes.
 
 ## Deployment Lifecycle
 
@@ -21,7 +21,7 @@ Supported statuses are `pending`, `provisioning`, `active`, `maintenance`, `deco
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/deployments \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "tenant_id": "00000000-0000-0000-0000-000000000000",
@@ -43,17 +43,17 @@ Response body wraps a `PrivateDeployment` in the standard `ApiResult` envelope. 
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/deployments/tenant/$TENANT_ID \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 
 curl https://api.apexmail.ee/enterprise/v1/deployments/$DEPLOYMENT_ID \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 ```
 
 ### Start Provisioning
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/deployments/$DEPLOYMENT_ID/provision \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 ```
 
 Provisioning moves a `pending` deployment to `provisioning`. If the deployment is missing or already outside `pending`, the service returns `INVALID_STATE`.
@@ -62,7 +62,7 @@ Provisioning moves a `pending` deployment to `provisioning`. If the deployment i
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/deployments/$DEPLOYMENT_ID/health \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 ```
 
 If the deployment record has a `health_check_url`, ApexMail probes it and stores `healthy`, `unhealthy`, or `unreachable`. Deployments without a health URL return `unknown`.
@@ -75,7 +75,7 @@ Dedicated IP records track tenant ownership, optional deployment association, PT
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/ips/allocate \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "tenant_id": "00000000-0000-0000-0000-000000000000",
@@ -90,13 +90,13 @@ The Enterprise plan includes 10 dedicated IPs in the backend plan seed. Addition
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/ips/$IP_ID \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 
 curl 'https://api.apexmail.ee/enterprise/v1/ips/tenant/'$TENANT_ID'?limit=50&offset=0' \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 
 curl https://api.apexmail.ee/enterprise/v1/ips/reputation/203.0.113.10 \
-  -H "Authorization: Bearer $TOKEN"
+  -H "X-API-Key: $API_KEY"
 ```
 
 Reputation is derived from stored reputation score, total sends, bounces, complaints, and blocklist state.
@@ -109,7 +109,7 @@ BYOIP registration stores a customer CIDR, marks it `pending_verification`, and 
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/ips/byoip \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "tenant_id": "00000000-0000-0000-0000-000000000000",
@@ -136,7 +136,7 @@ Example response payload:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/ips/byoip/$BYOIP_RANGE_ID/verify \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "verification_token": "apexmail-byoip-..."

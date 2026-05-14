@@ -85,7 +85,11 @@ impl ProviderThrottle {
             None => return ThrottleDecision::Send,
         };
         let tenant = tenant_id.unwrap_or("").to_string();
-        let key = (sender_domain.to_string(), provider.to_string(), tenant.clone());
+        let key = (
+            sender_domain.to_string(),
+            provider.to_string(),
+            tenant.clone(),
+        );
         let entry: Arc<CachedThrottle> = match self
             .cache
             .try_get_with(key.clone(), self.fetch(sender_domain, provider, tenant_id))
@@ -103,10 +107,7 @@ impl ProviderThrottle {
             ThrottleDecision::Send
         } else if throttle_pct >= 100 {
             ThrottleDecision::Defer {
-                reason: format!(
-                    "{} reputation throttle 100% ({})",
-                    provider, entry.source
-                ),
+                reason: format!("{} reputation throttle 100% ({})", provider, entry.source),
                 throttle_pct,
             }
         } else {

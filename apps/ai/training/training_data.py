@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 
 import json
 from pathlib import Path
@@ -8,7 +9,7 @@ def _prompt_catalog_path(data_file: str | Path) -> Path | None:
     path = Path(data_file)
     candidates = [path.parent / "system_prompts.json"]
     if path.is_absolute() and len(path.parts) > 2:
-        candidates.append(Path("/workspace/data/system_prompts.json"))
+        candidates.append(Path(os.environ.get("WORKSPACE_DIR", "/workspace")) / "data" / "system_prompts.json")
     candidates.append(Path(__file__).resolve().parents[3] / "data" / "system_prompts.json")
 
     for candidate in candidates:

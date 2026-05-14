@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 /// Sandbox configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
     /// Maximum file size in bytes (default:25 MB)
     pub max_file_size: u64,

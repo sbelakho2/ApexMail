@@ -1,0 +1,193 @@
+# ApexMail API Performance Alerting Rules
+# =========================================
+# This file defines Prometheus alerting rules specifically for API performance
+# degradation: high latency, error rate spikes, and throughput drops.
+#
+# Loaded by: prometheus.yml -> rule_files
+# Load order: This file should be loaded before infrastructure-alerts.yml
+
+groups:
+  - name: apexmail-api-performance
+    rules:
+      # ── High Latency Alerts ────────────────────────────────────────────────
+
+      - alert: ApiHighLatencyP95
+        expr: histogram_quantile(0.95, sum(rate(apexmail_http_request_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "API p95 latency exceeds 500ms"
+          description: "API p95 latency is {{ $value | humanizeDuration }} over the last 5 minutes (threshold: 500ms)."
+          runbook_url: "https://apexmail.ee/docs/runbooks/api-high-latency"
+
+      - alert: ApiHighLatencyP99
+        expr: histogram_quantile(0.99, sum(rate(apexmail_http_request_duration_seconds_bucket[5m])) by (le)) > 1.0
+        for: 3m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "API p99 latency exceeds 1s"
+          description: "API p99 latency is {{ $value | humanizeDuration }} over the last 3 minutes (threshold: 1s)."
+          runbook_url: "https://apexmail.ee/docs/runbooks/api-high-latency"
+
+      - alert: ApiEndpointHighLatency
+        expr: histogram_quantile(0.95, sum(rate(apexmail_http_request_duration_seconds_bucket{endpoint=~"/v1/email/send|/v1/email"}[5m])) by (le, endpoint)) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "High latency on endpoint {{ $labels.endpoint }}"
+          description: "p95 latency for {{ $labels.endpoint }} is {{ $value | humanizeDuration }} over the last 5 minutes."
+          runbook_url: "https://apexmail.ee/docs/runbooks/api-high-latency"
+
+      # ── Error Rate Alerts ──────────────────────────────────────────────────
+
+      - alert: ApiErrorRateSpike
+        expr: sum(rate(apexmail_http_requests_total{status=~"5.."}[5m])) / sum(rate(apexmail_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "API 5xx error rate exceeds 5%"
+          description: "API 5xx error rate is {{ $value | humanizePercentage }} over the last 5 minutes (threshold: 5%)."
+          runbook_url: "https://apexmail.ee/docs/runbooks/api-error-spike"
+
+      - alert: ApiErrorRateElevated
+        expr: sum(rate(apexmail_http_requests_total{status=~"5.."}[5m])) / sum(rate(apexmail_http_requests_total[5m])) > 0.01
+        for: 15m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "API 5xx error rate above 1% for 15 minutes"
+          description: "API 5xx error rate is {{ $value | humanizePercentage }} over the last 15 minutes (threshold: 1%)."
+          runbook_url: "https://apexmail.ee/docs/runbooks/api-error-spike"
+
+      - alert: ApiEndpointErrorBurst
+        expr: sum(rate(apexmail_http_requests_total{status=~"5.."}[1m])) by (endpoint) > 10
+        for: 2m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "Error burst on endpoint {{ $labels.endpoint }}"
+          description: "Endpoint {{ $labels.endpoint }} has {{ $value | humanize }} 5xx errors per second over the last 2 minutes."
+          runbook_url: "https://apexmail.ee/docs/runbooks/api-error-spike"
+
+      # ── Throughput Alerts ──────────────────────────────────────────────────
+
+      - alert: ApiThroughputDrop
+        expr: sum(rate(apexmail_http_requests_total[5m])) < (sum(rate(apexmail_http_requests_total[1h])) * 0.5)
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "API throughput dropped by more than 50%"
+          description: "Current throughput ({{ $value | humanize }} req/s) is less than 50% of the 1-hour average."
+          runbook_url: "https://apexmail.ee/docs/runbooks/api-throughput-drop"
+
+      - alert: ApiThroughputAnomaly
+        expr: abs(sum(rate(apexmail_http_requests_total[5m])) - avg_over_time(sum(rate(apexmail_http_requests_total[5m]))[7d:5m])) > (2 * stddev_over_time(sum(rate(apexmail_http_requests_total[5m]))[7d:5m]))
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "API throughput anomaly detected"
+          description: "Current throughput ({{ $value | humanize }} req/s) deviates more than 2 standard deviations from the 7-day pattern."
+          runbook_url: "https://apexmail.ee/docs/runbooks/api-throughput-drop"
+
+      # ── Connection Pool Alerts ─────────────────────────────────────────────
+
+      - alert: ApiConnectionPoolExhaustion
+        expr: apexmail_db_pool_utilization{pool="api-server"} > 0.90
+        for: 2m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "API server database connection pool at 90% utilization"
+          description: "API server DB pool is at {{ $value | humanizePercentage }} utilization. Risk of connection exhaustion."
+          runbook_url: "https://apexmail.ee/docs/runbooks/db-connection-pool"
+
+      - alert: ApiConnectionPoolHigh
+        expr: apexmail_db_pool_utilization{pool="api-server"} > 0.75
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "API server database connection pool above 75%"
+          description: "API server DB pool is at {{ $value | humanizePercentage }} utilization for over 10 minutes."
+          runbook_url: "https://apexmail.ee/docs/runbooks/db-connection-pool"
+
+      # ── SLO Burn Rate Alerts ───────────────────────────────────────────────
+
+      - alert: ApiAvailabilitySloBurnRate
+        expr: (
+          1 - (sum(increase(apexmail_http_requests_total{status=~"5.."}[1h])) / clamp_min(sum(increase(apexmail_http_requests_total[1h])), 1))
+        ) < 0.99
+        for: 5m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "API availability SLO burn rate exceeded (1h window)"
+          description: "API availability over the last 1 hour is {{ $value | humanizePercentage }} (SLO: 99.9%). Action required within 1 hour to avoid SLO violation."
+          runbook_url: "https://apexmail.ee/docs/runbooks/slo-burn-rate"
+
+      - alert: ApiLatencySloBurnRate
+        expr: (
+          sum(increase(apexmail_http_request_duration_seconds_bucket{le="0.5"}[1h])) / clamp_min(sum(increase(apexmail_http_request_duration_seconds_count[1h])), 1)
+        ) < 0.95
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "API latency SLO burn rate exceeded (1h window)"
+          description: "API requests under 500ms over the last 1 hour is {{ $value | humanizePercentage }} (SLO: 99%)."
+          runbook_url: "https://apexmail.ee/docs/runbooks/slo-burn-rate"
+
+      # ── Rate Limiter Alerts ────────────────────────────────────────────────
+
+      - alert: ApiRateLimitThrottling
+        expr: sum(rate(apexmail_rate_limiter_requests_denied_total[5m])) / sum(rate(apexmail_rate_limiter_requests_total[5m])) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "More than 10% of API requests are rate-limited"
+          description: "{{ $value | humanizePercentage }} of requests are being denied by rate limiter. Consider reviewing rate limit configuration."
+          runbook_url: "https://apexmail.ee/docs/runbooks/rate-limiter"
+
+      - alert: ApiRateLimitExhaustion
+        expr: sum(apexmail_rate_limiter_tokens_remaining{tenant=~".*"}) < 100
+        for: 2m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Rate limit tokens nearly exhausted for tenant {{ $labels.tenant }}"
+          description: "Tenant {{ $labels.tenant }} has only {{ $value }} rate limit tokens remaining."
+          runbook_url: "https://apexmail.ee/docs/runbooks/rate-limiter"
+
+      # ── Cache Alerts ───────────────────────────────────────────────────────
+
+      - alert: ApiCacheHitRateDrop
+        expr: sum(rate(apexmail_cache_hits_total[5m])) / (sum(rate(apexmail_cache_hits_total[5m])) + sum(rate(apexmail_cache_misses_total[5m]))) < 0.50
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "API cache hit rate dropped below 50%"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}. Consider reviewing cache configuration or warming strategy."
+          runbook_url: "https://apexmail.ee/docs/runbooks/cache-hit-rate"

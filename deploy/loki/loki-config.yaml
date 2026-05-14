@@ -1,0 +1,81 @@
+# =============================================================================
+# ApexMail Loki Configuration
+# =============================================================================
+# https://grafana.com/docs/loki/latest/configuration/
+#
+# 🟡4: S3-compatible object storage configured via env vars.
+# Falls back to local filesystem when S3 env vars are unset.
+#
+# Production (S3):
+#   LOKI_OBJECT_STORE=s3
+#   LOKI_S3_BUCKET=apexmail-loki-chunks
+#   LOKI_S3_ENDPOINT=s3.amazonaws.com
+#   LOKI_S3_ACCESS_KEY_ID=<key>
+#   LOKI_S3_SECRET_ACCESS_KEY=<secret>
+#   LOKI_S3_REGION=us-east-1              (optional, default: us-east-1)
+#
+# Development (local filesystem — default):
+#   No env vars needed.
+# =============================================================================
+
+auth_enabled: true
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 0.0.0.0
+  path_prefix: /loki
+  storage:
+    # S3-compatible object storage (fallback: local filesystem)
+    s3:
+      bucket: ${LOKI_S3_BUCKET:}
+      endpoint: ${LOKI_S3_ENDPOINT:-s3.amazonaws.com}
+      access_key_id: ${LOKI_S3_ACCESS_KEY_ID:}
+      secret_access_key: ${LOKI_S3_SECRET_ACCESS_KEY:}
+      region: ${LOKI_S3_REGION:-us-east-1}
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      # Env-var-driven object store: "s3" for production, "filesystem" (default) for dev
+      object_store: ${LOKI_OBJECT_STORE:-filesystem}
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 168h  # 7 days (ADR 0009 compliance)
+
+limits_config:
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+  max_query_length: 721h
+  max_entries_limit_per_query: 5000
+
+compactor:
+  working_directory: /loki/compactor
+  # Env-var-driven shared store: "s3" for production, "filesystem" (default) for dev
+  shared_store: ${LOKI_OBJECT_STORE:-filesystem}
+  retention_enabled: true
+
+ruler:
+  alertmanager_url: http://alertmanager:9093
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-temp

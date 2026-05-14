@@ -107,16 +107,16 @@ impl MlScoreCache {
             if entry.is_expired(self.config.ttl) {
                 // Entry expired, will be cleaned up later
                 drop(entry);
-                self.misses.fetch_add(1, Ordering::Relaxed);
+                self.misses.fetch_add(1, Ordering::SeqCst);
                 return None;
             }
             // Update hit count
             entry.hit_count += 1;
-            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.hits.fetch_add(1, Ordering::SeqCst);
             return Some(entry.clone());
         }
 
-        self.misses.fetch_add(1, Ordering::Relaxed);
+        self.misses.fetch_add(1, Ordering::SeqCst);
         None
     }
 
@@ -129,15 +129,15 @@ impl MlScoreCache {
         if let Some(mut entry) = self.session_cache.get_mut(session_fingerprint) {
             if entry.is_expired(self.config.ttl) {
                 drop(entry);
-                self.misses.fetch_add(1, Ordering::Relaxed);
+                self.misses.fetch_add(1, Ordering::SeqCst);
                 return None;
             }
             entry.hit_count += 1;
-            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.hits.fetch_add(1, Ordering::SeqCst);
             return Some(entry.clone());
         }
 
-        self.misses.fetch_add(1, Ordering::Relaxed);
+        self.misses.fetch_add(1, Ordering::SeqCst);
         None
     }
 
@@ -245,16 +245,16 @@ impl MlScoreCache {
         MlCacheStats {
             ip_cache_size: self.ip_cache.len(),
             session_cache_size: self.session_cache.len(),
-            hits: self.hits.load(Ordering::Relaxed),
-            misses: self.misses.load(Ordering::Relaxed),
+            hits: self.hits.load(Ordering::SeqCst),
+            misses: self.misses.load(Ordering::SeqCst),
             hit_rate: self.hit_rate(),
         }
     }
 
     /// Calculate cache hit rate
     pub fn hit_rate(&self) -> f64 {
-        let hits = self.hits.load(Ordering::Relaxed);
-        let misses = self.misses.load(Ordering::Relaxed);
+        let hits = self.hits.load(Ordering::SeqCst);
+        let misses = self.misses.load(Ordering::SeqCst);
         let total = hits + misses;
 
         if total == 0 {
@@ -268,8 +268,8 @@ impl MlScoreCache {
     pub fn clear(&self) {
         self.ip_cache.clear();
         self.session_cache.clear();
-        self.hits.store(0, Ordering::Relaxed);
-        self.misses.store(0, Ordering::Relaxed);
+        self.hits.store(0, Ordering::SeqCst);
+        self.misses.store(0, Ordering::SeqCst);
     }
 }
 

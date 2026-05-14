@@ -425,8 +425,10 @@ impl ClamAvSocketAnalyzer {
 ///
 /// Validation rules:
 /// 1. Path must be absolute.
-/// 2. If it exists, it must be a Unix socket (not a regular file, directory,
-///    FIFO, or device node).
+/// 2. Uses a single `symlink_metadata` call (atomic) to check the path exists
+///    and is a Unix socket. This eliminates the TOCTOU race between checking
+///    existence and reading metadata (previously a `.exists()` check followed
+///    by `.metadata()` call).
 /// 3. If it is a symlink, a warning is logged so operators can audit the
 ///    symlink target.
 fn validate_clamav_socket_path(path: &str) -> Result<(), String> {
@@ -440,37 +442,49 @@ fn validate_clamav_socket_path(path: &str) -> Result<(), String> {
         ));
     }
 
-    // If the path does not yet exist we cannot validate further — the daemon
-    // may not have created the socket yet.  Allow the connection attempt to
-    // proceed; the error will be caught by `UnixStream::connect`.
-    if !p.exists() {
-        tracing::warn!(
-            socket_path = path,
-            "ClamAV socket does not exist yet — will attempt connect anyway"
-        );
-        return Ok(());
-    }
-
-    // 2. Must be a socket
-    let metadata = std::fs::metadata(p)
-        .map_err(|e| format!("Cannot read ClamAV socket metadata at {}: {}", path, e))?;
-    if !metadata.file_type().is_socket() {
-        return Err(format!(
-            "ClamAV path is not a Unix socket (got {:?}): {}",
-            metadata.file_type(),
-            path
-        ));
-    }
-
-    // 3. Warn on symlink
-    let is_symlink = std::fs::symlink_metadata(p)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
-    if is_symlink {
-        tracing::warn!(
-            socket_path = path,
-            "ClamAV socket path is a symlink — verify target is trusted"
-        );
+    // Use symlink_metadata (does not follow symlinks) for a single atomic check.
+    // This avoids the TOCTOU race between .exists() and .metadata().
+    match std::fs::symlink_metadata(p) {
+        Ok(meta) => {
+            // 2. Warn on symlink
+            if meta.file_type().is_symlink() {
+                tracing::warn!(
+                    socket_path = path,
+                    "ClamAV socket path is a symlink — verify target is trusted"
+                );
+                // Follow the symlink to validate the target
+                let target_meta = std::fs::metadata(p)
+                    .map_err(|e| format!("Cannot follow symlink at {}: {}", path, e))?;
+                if !target_meta.file_type().is_socket() {
+                    return Err(format!(
+                        "ClamAV symlink target is not a Unix socket (got {:?}): {}",
+                        target_meta.file_type(),
+                        path
+                    ));
+                }
+            } else if !meta.file_type().is_socket() {
+                return Err(format!(
+                    "ClamAV path is not a Unix socket (got {:?}): {}",
+                    meta.file_type(),
+                    path
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Path does not exist yet — the daemon may not have created the
+            // socket yet. Allow the connection attempt to proceed; the error
+            // will be caught by `UnixStream::connect`.
+            tracing::warn!(
+                socket_path = path,
+                "ClamAV socket does not exist yet — will attempt connect anyway"
+            );
+        }
+        Err(e) => {
+            return Err(format!(
+                "Cannot read ClamAV socket metadata at {}: {}",
+                path, e
+            ));
+        }
     }
 
     Ok(())

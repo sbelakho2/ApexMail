@@ -1,3 +1,3 @@
-module github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go
+module github.com/apexmail/apexmail-go
 
 go 1.21

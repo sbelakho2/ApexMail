@@ -118,7 +118,7 @@ import java.util.Map;
 // Create a webhook
 Webhooks.WebhookResponse webhook = client.webhooks().create(Map.of(
     "url", "https://your-app.com/webhooks/apexmail",
-    "events", List.of("email.delivered", "email.bounced", "email.opened")
+    "events", List.of("message.delivered", "message.bounced", "message.opened")
 ));
 
 // List webhooks

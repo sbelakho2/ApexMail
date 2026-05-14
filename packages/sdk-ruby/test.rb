@@ -144,11 +144,11 @@ puts "\nWebhooks"
 t = FakeTransport.new
 t.queue_response({ 'webhook' => { 'id' => 'wh_1', 'url' => 'https://ex.com/hook' } })
 api = ApexMail::WebhooksAPI.new(t)
-resp = api.create(url: 'https://ex.com/hook', events: ['email.delivered'])
+resp = api.create(url: 'https://ex.com/hook', events: ['message.delivered'])
 expect('create() POST /v1/webhooks',      t.calls[0][:method] == 'POST' && t.calls[0][:path] == '/v1/webhooks')
 expect('create() returns webhook id',     resp.dig('webhook', 'id') == 'wh_1')
 expect('create() body has url',           t.calls[0][:body][:url] == 'https://ex.com/hook')
-expect('create() body has events array',  t.calls[0][:body][:events] == ['email.delivered'])
+expect('create() body has events array',  t.calls[0][:body][:events] == ['message.delivered'])
 
 t = FakeTransport.new
 t.queue_response({ 'webhooks' => [] })
@@ -166,10 +166,10 @@ expect('get() returns webhook id',         resp.dig('webhook', 'id') == 'wh_1')
 t = FakeTransport.new
 t.queue_response({ 'webhook' => { 'id' => 'wh_1', 'url' => 'https://new.com/hook' } })
 api = ApexMail::WebhooksAPI.new(t)
-resp = api.update('wh_1', url: 'https://new.com/hook', events: ['email.bounced'])
+resp = api.update('wh_1', url: 'https://new.com/hook', events: ['message.bounced'])
 expect('update() PATCH /v1/webhooks/wh_1',  t.calls[0][:method] == 'PATCH' && t.calls[0][:path] == '/v1/webhooks/wh_1')
 expect('update() body has url',             t.calls[0][:body][:url] == 'https://new.com/hook')
-expect('update() body has events',          t.calls[0][:body][:events] == ['email.bounced'])
+expect('update() body has events',          t.calls[0][:body][:events] == ['message.bounced'])
 
 t = FakeTransport.new
 t.queue_response({})
@@ -211,7 +211,7 @@ t = FakeTransport.new
 t.queue_response({ 'template' => { 'id' => 'tpl_1', 'name' => 'Updated' } })
 api = ApexMail::TemplatesAPI.new(t)
 resp = api.update('tpl_1', name: 'Updated', subject: 'New subject')
-expect('update() PATCH /v1/templates/tpl_1', t.calls[0][:method] == 'PATCH' && t.calls[0][:path] == '/v1/templates/tpl_1')
+expect('update() PUT /v1/templates/tpl_1', t.calls[0][:method] == 'PUT' && t.calls[0][:path] == '/v1/templates/tpl_1')
 expect('update() body has name',             t.calls[0][:body][:name] == 'Updated')
 
 t = FakeTransport.new

@@ -70,6 +70,9 @@ mod ui_xss {
             let html = ControlPlaneShell {
                 mobile_menu_open: false,
                 user_role: "admin",
+                page_title: "Security",
+                page_description: "Security status",
+                current_path: "/cp",
                 banners: vec![OperationalBanner {
                     tone: "critical",
                     message: payload,
@@ -88,6 +91,7 @@ mod ui_xss {
             sidebar_collapsed: false,
             mobile_menu_open: false,
             child_html: child,
+            current_path: "/dashboard",
             header: ShellHeader {
                 search_query: "safe",
                 unread_count: 0,
@@ -424,9 +428,8 @@ mod auth_security {
         let bcrypt_hash = "$2b$12$LJ3m4ys8Rp9gXPfBH9J9KuW5Eky0Zxy7v1X8X9X0X0X0X0X0X0X0";
         let result = crypto::verify_password("test", bcrypt_hash);
         // Must either error or return false — never panic or return true
-        match result {
-            Ok(verified) => assert!(!verified, "bcrypt hash must not verify as Argon2"),
-            Err(_) => {} // Expected:format error
+        if let Ok(verified) = result {
+            assert!(!verified, "bcrypt hash must not verify as Argon2")
         }
     }
 }

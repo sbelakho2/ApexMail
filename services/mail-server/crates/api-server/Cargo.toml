@@ -54,6 +54,7 @@ metrics-exporter-prometheus = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-sesv2 = { workspace = true }
 rand = { workspace = true }
+parking_lot = { workspace = true }
 urlencoding = { workspace = true }
 
 # Internal crates

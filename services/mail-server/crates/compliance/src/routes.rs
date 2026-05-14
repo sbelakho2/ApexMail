@@ -13,6 +13,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine;
 use deadpool_redis::Pool as RedisPool;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -22,6 +23,7 @@ use tracing::error;
 use crate::audit_logger::AuditLogger;
 use crate::config::ComplianceConfig;
 use crate::content_scanner::ContentScanner;
+use crate::dsar_rate_limit::{DsarRateLimitStatus, DsarRateLimiter};
 use crate::gdpr_automation::GdprAutomation;
 use crate::hipaa::HipaaService;
 use crate::risk_scoring::RiskScoringEngine;
@@ -46,6 +48,8 @@ pub struct AppState {
     pub db: PgPool,
     pub redis: RedisPool,
     pub http_client: reqwest::Client,
+    /// DSAR rate limiter (SEC-15): stricter rate limits for DSAR endpoints.
+    pub dsar_rate_limiter: DsarRateLimiter,
 }
 
 // ── Router factory ────────────────────────────────────────────────────────
@@ -57,10 +61,19 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = if cors_origin.is_empty() || cors_origin == "*" {
         CorsLayer::new().allow_origin(tower_http::cors::Any)
     } else {
-        let allow = cors_origin
-            .parse::<axum::http::HeaderValue>()
-            .map(tower_http::cors::AllowOrigin::exact)
-            .unwrap_or_else(|_| tower_http::cors::AllowOrigin::any());
+        // F-15: Log a warning and fail closed (deny all) if configured origin is invalid,
+        // rather than silently falling back to `AllowOrigin::any()`.
+        let allow = match cors_origin.parse::<axum::http::HeaderValue>() {
+            Ok(parsed) => tower_http::cors::AllowOrigin::exact(parsed),
+            Err(e) => {
+                tracing::error!(
+                    origin = %cors_origin,
+                    error = %e,
+                    "invalid cors_origin in config; CORS will deny all origins"
+                );
+                tower_http::cors::AllowOrigin::list([])
+            }
+        };
         CorsLayer::new().allow_origin(allow)
     }
     .allow_methods([
@@ -797,6 +810,10 @@ async fn secret_rollback(
 // ── GDPR endpoints ────────────────────────────────────────────────────────
 
 /// POST /gdpr/submit — submit a data-subject request.
+///
+/// SEC-15: Enforces DSAR rate limits before processing the submission:
+/// - Per-user: 1 request per 24 hours (by email)
+/// - Per-tenant: 100 requests per 24 hours
 async fn gdpr_submit_request(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -825,6 +842,36 @@ async fn gdpr_submit_request(
         .and_then(|v| v.as_str())
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Missing email"))?;
 
+    // SEC-15: Check DSAR rate limits before processing
+    match state
+        .dsar_rate_limiter
+        .check_submission(email, tenant_id)
+        .await
+    {
+        DsarRateLimitStatus::UserRateLimited { retry_after } => {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "rate_limited",
+                    "message": "You have already submitted a DSAR request in the last 24 hours.",
+                    "retry_after": retry_after.as_secs(),
+                })),
+            ));
+        }
+        DsarRateLimitStatus::TenantRateLimited { retry_after } => {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "rate_limited",
+                    "message": "Tenant DSAR quota exceeded. Please try again later.",
+                    "retry_after": retry_after.as_secs(),
+                })),
+            ));
+        }
+        DsarRateLimitStatus::Allowed => { /* proceed */ }
+        _ => {}
+    }
+
     match state
         .gdpr
         .submit_request(tenant_id, request_type, email)
@@ -842,6 +889,9 @@ async fn gdpr_submit_request(
 }
 
 /// POST /gdpr/verify/{request_id} — verify a data-subject request.
+///
+/// SEC-15: Enforces DSAR verification rate limit:
+/// - Per-token: 5 verification attempts per hour
 async fn gdpr_verify_request(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -853,6 +903,32 @@ async fn gdpr_verify_request(
         .get("token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Missing token"))?;
+
+    // SEC-15: Check DSAR verification rate limit (5 attempts per token per hour)
+    let token_hash = {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(token.as_bytes());
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
+    };
+    match state
+        .dsar_rate_limiter
+        .check_verification(&token_hash)
+        .await
+    {
+        DsarRateLimitStatus::VerificationRateLimited { retry_after } => {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "rate_limited",
+                    "message": "Too many verification attempts. Please try again later.",
+                    "retry_after": retry_after.as_secs(),
+                })),
+            ));
+        }
+        DsarRateLimitStatus::Allowed => { /* proceed */ }
+        _ => {}
+    }
+
     match state.gdpr.verify_request(&request_id, token).await {
         Ok(verified) => Ok(ok_json(serde_json::json!({ "verified": verified }))),
         Err(e) => {
@@ -1268,6 +1344,7 @@ mod tests {
                 rotation_days: 0,
                 max_versions_to_keep: 0,
             },
+            dsar_rate_limit: crate::config::DsarRateLimitConfig::default(),
         }
     }
 
@@ -1903,10 +1980,14 @@ mod tests {
             soc2: crate::soc2::Soc2Service::new(db.clone()),
             hipaa: crate::hipaa::HipaaService::new(db.clone(), b"test-baa-key".to_vec()),
             trust: crate::trust_portal::TrustPortalService::new(db.clone()),
-            config,
-            db,
-            redis,
+            config: config.clone(),
+            db: db.clone(),
+            redis: redis.clone(),
             http_client: reqwest::Client::new(),
+            dsar_rate_limiter: DsarRateLimiter::new(
+                config.dsar_rate_limit.clone(),
+                None, // No Redis in tests; uses in-memory fallback
+            ),
         })
     }
 

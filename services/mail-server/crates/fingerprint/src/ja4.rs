@@ -289,7 +289,7 @@ mod tests {
         let fp = Ja4Fingerprint::parse("td0506h2_abc123def456_789012345678");
         assert!(fp.is_some());
 
-        let fp = fp.unwrap();
+        let fp = fp.expect("fingerprint should be parseable");
         assert_eq!(fp.protocol, 't');
         assert_eq!(fp.sni, 'd');
         assert_eq!(fp.cipher_count, 5);

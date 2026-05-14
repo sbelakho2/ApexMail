@@ -25,6 +25,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use deadpool_redis::{Config as RedisPoolConfig, Runtime};
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use sqlx::postgres::PgPoolOptions;
 use tokio::signal;
 use tracing::info;
@@ -39,11 +42,8 @@ use crate::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // ── Structured logging ────────────────────────────────────────────
-    tracing_subscriber::registry()
-        .with(fmt::layer().json())
-        .with(EnvFilter::from_default_env().add_directive("tracking_service=info".parse()?))
-        .init();
+    // ── Structured logging / OTLP tracing ────────────────────────────
+    let _tracing_guard = init_tracing()?;
 
     info!("ApexMail Tracking Service starting");
 
@@ -175,4 +175,28 @@ async fn main() -> Result<()> {
     info!("ApexMail Tracking Service stopped cleanly");
 
     Ok(())
+}
+
+/// Initialize tracing subscriber with OTLP support.
+/// Falls back to JSON logging when OTLP is not configured.
+fn init_tracing() -> Result<Option<TracingGuard>> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "tracking-service".into(),
+            service_version: option_env!("CARGO_PKG_VERSION").map(str::to_string),
+            environment: std::env::var("APP_ENV").ok(),
+            ..Default::default()
+        };
+
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Ok(Some(guard)),
+            Err(error) => tracing::error!("failed to initialize OTLP tracing: {error}"),
+        }
+    }
+
+    tracing_subscriber::registry()
+        .with(fmt::layer().json())
+        .with(EnvFilter::from_default_env().add_directive("tracking_service=info".parse()?))
+        .init();
+    Ok(None)
 }

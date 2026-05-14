@@ -90,6 +90,12 @@ jobs:
         run: |
           cd services/mail-server
           cargo mutants \
+            -p api-server \
+            -p billing-service \
+            -p compliance \
+            -p tracking-service \
+            -p mta \
+            -p outbound-queue \
             -p waf-engine \
             -p ids-engine \
             -p spam-filter \

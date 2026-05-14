@@ -16,18 +16,18 @@
       </div>
     </div>
 
-    <div class="animate-in delay-200 bg-white rounded-sm border border-surface-200   overflow-x-auto">
+    <div class="animate-in delay-200 bg-white rounded-sm border border-surface-200 overflow-x-auto">
       <div class="min-w-[760px]">
         <div class="grid grid-cols-4 gap-4 p-6 border-b border-surface-200 bg-surface-100">
-          <div class="font-bold text-surface-600 text-xs self-center">Feature</div>
+          <div class="font-bold text-surface-600 text-xs self-center uppercase">Feature</div>
           <div class="text-center">
-            <div class="font-bold text-surface-950 flex items-center justify-center gap-2">
+            <div class="font-bold text-surface-950 flex items-center justify-center gap-2 uppercase">
               <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5C7 4 9 8 12 8s5-4 7.5-4a2.5 2.5 0 0 1 0 5H18"/><path d="M18 15h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M6 15H4.5a2.5 2.5 0 0 0 0 5H6"/><path d="M18 15h1.5a2.5 2.5 0 0 1 0 5H18"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="6" y1="15" x2="18" y2="15"/><line x1="6" y1="9" x2="18" y2="9"/></svg>
               ApexMail
             </div>
           </div>
-          <div class="text-center font-medium text-surface-950 self-center">{{ page.extra.competitor_name | default(value="Competitor") }}</div>
-          <div class="text-center font-bold text-surface-600 text-xs self-center">Winner</div>
+          <div class="text-center font-medium text-surface-950 self-center uppercase">{{ page.extra.competitor_name | default(value="Competitor") }}</div>
+          <div class="text-center font-bold text-surface-600 text-xs self-center uppercase">Winner</div>
         </div>
 
         {# Comparison rows rendered from content or hardcoded per page #}
@@ -35,9 +35,10 @@
       </div>
     </div>
 
-    {% if page.extra.pricing_as_of %}
+    {% set pricing_review_date = config.extra.pricing_as_of | default(value=page.extra.pricing_as_of) %}
+    {% if pricing_review_date %}
     <p class="mt-4 text-xs font-medium text-surface-500">
-      Competitor pricing and plan snapshots were last reviewed on {{ page.extra.pricing_as_of }} and may change.
+      Competitor pricing and plan snapshots were last reviewed on {{ pricing_review_date }} and may change.
     </p>
     {% endif %}
   </div>

@@ -1,19 +1,17 @@
 {# ── Pricing Calculator (static, zero JS) ────────────────────── #}
-{# Shows pricing at multiple predefined volume tiers.              #}
+{# Shows canonical pricing at multiple predefined volume tiers.     #}
 {# The interactive slider version required JS; this replaces it   #}
 {# with a clear comparison table. Users can sign up for exact     #}
 {# pricing via the CTA.                                            #}
 
 <section class="py-20 lg:py-32 bg-surface-100 relative overflow-hidden" id="pricing">
   <div class="absolute inset-0 pointer-events-none overflow-hidden">
-    <div class="absolute top-[4%] left-[4%] w-[28%] h-[28%] bg-brand-500/5 blur-[120px] rounded-sm"></div>
-    <div class="absolute bottom-[4%] right-[4%] w-[28%] h-[28%] bg-brand-500/5 blur-[120px] rounded-sm"></div>
   </div>
   <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-16">
       <h2 class="section-title mb-4">
         <span class="text-surface-950">Pricing That</span>
-        <span class="text-brand-600"> Scales With You</span>
+        <span class="text-brand-500"> Scales With You</span>
       </h2>
       <p class="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">Transparent plan math with a 30,000-email free tier, published overages, and Enterprise pricing reserved for managed ownership.</p>
     </div>
@@ -24,54 +22,54 @@
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b border-surface-100 bg-surface-100/50">
-              <th class="text-left px-8 py-6 font-bold text-surface-950 uppercase tracking-wider text-xs">Monthly Volume</th>
-              <th class="text-right px-8 py-6 font-bold text-brand-600 uppercase tracking-wider text-xs">ApexMail</th>
-              <th class="text-right px-8 py-6 font-bold text-surface-400 uppercase tracking-wider text-xs">SendGrid</th>
-              <th class="text-right px-8 py-6 font-bold text-surface-400 uppercase tracking-wider text-xs">Mailchimp</th>
-              <th class="text-right px-8 py-6 font-bold text-success-600 uppercase tracking-wider text-xs">You Save</th>
+              <th class="text-left px-8 py-6 font-bold text-surface-950 tracking-wider text-xs">Monthly Volume</th>
+              <th class="text-right px-8 py-6 font-bold text-brand-500 tracking-wider text-xs">ApexMail</th>
+              <th class="text-right px-8 py-6 font-bold text-surface-400 tracking-wider text-xs">SendGrid</th>
+              <th class="text-right px-8 py-6 font-bold text-surface-400 tracking-wider text-xs">Mailchimp</th>
+              <th class="text-right px-8 py-6 font-bold text-success-600 tracking-wider text-xs">You Save</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-surface-100">
             <tr class="hover:bg-surface-100 transition-colors">
               <td class="px-8 py-6 font-bold text-surface-950">30,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-600 tabular-nums">Free</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">Free</td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$14.95</td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$20.00</td>
               <td class="px-8 py-6 text-right font-bold text-success-600">100%</td>
             </tr>
             <tr class="hover:bg-surface-100 transition-colors">
               <td class="px-8 py-6 font-bold text-surface-950">50,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-600 tabular-nums">$25</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">€25</td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$89.95</td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$110.00</td>
               <td class="px-8 py-6 text-right font-bold text-success-600">72%</td>
             </tr>
             <tr class="hover:bg-surface-100 transition-colors">
               <td class="px-8 py-6 font-bold text-surface-950">100,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-600 tabular-nums">$45</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">€45 <span class="block text-[10px] font-bold tracking-tight text-surface-400">Starter + overage</span></td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$189.95</td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$230.00</td>
               <td class="px-8 py-6 text-right font-bold text-success-600">76%</td>
             </tr>
             <tr class="hover:bg-surface-100 transition-colors">
               <td class="px-8 py-6 font-bold text-surface-950">500,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-600 tabular-nums">$149</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums">€150 <span class="block text-[10px] font-bold tracking-tight text-surface-400">Growth</span></td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$749.95</td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$900.00</td>
               <td class="px-8 py-6 text-right font-bold text-success-600">80%</td>
             </tr>
             <tr class="hover:bg-surface-100 transition-colors bg-brand-50/20">
               <td class="px-8 py-6 font-bold text-surface-950 font-display text-lg">1,000,000</td>
-              <td class="px-8 py-6 text-right font-bold text-brand-600 tabular-nums text-lg">$249</td>
+              <td class="px-8 py-6 text-right font-bold text-brand-500 tabular-nums text-lg">€350 <span class="block text-[10px] font-bold tracking-tight text-surface-400">Scale</span></td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$1,199.95</td>
               <td class="px-8 py-6 text-right text-surface-500 tabular-nums">$1,510.00</td>
-              <td class="px-8 py-6 text-right font-bold text-success-600 text-lg">79%</td>
+              <td class="px-8 py-6 text-right font-bold text-success-600 text-lg">71%</td>
             </tr>
           </tbody>
         </table>
       </div>
       <p class="px-8 py-4 text-xs text-surface-500 border-t border-surface-100">
-        Competitor prices are illustrative public-list rates; verify current rates on each provider's site before purchasing.
+        ApexMail totals use the lowest published subscription plan plus subscription overage when that is cheaper than the next tier. Competitor prices are illustrative public-list rates; verify current rates on each provider's site before purchasing.
       </p>
     </div>
 
@@ -79,11 +77,11 @@
     <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-16">
       <div class="apex-card p-6">
         <span class="block font-bold text-surface-950 mb-1">Dedicated IP</span>
-        <span class="block text-sm text-surface-500 font-medium">$30/mo per IP</span>
+        <span class="block text-sm text-surface-500 font-medium">€30/mo per IP</span>
       </div>
       <div class="apex-card p-6">
         <span class="block font-bold text-surface-950 mb-1">SSO/SAML</span>
-        <span class="block text-sm text-surface-500 font-medium">$99/mo</span>
+        <span class="block text-sm text-surface-500 font-medium">Scale+ included</span>
       </div>
       <div class="apex-card p-6">
         <span class="block font-bold text-surface-950 mb-1">HIPAA Compliance</span>
@@ -91,13 +89,13 @@
       </div>
       <div class="apex-card p-6">
         <span class="block font-bold text-surface-950 mb-1">Private Cloud</span>
-        <span class="block text-sm text-surface-500 font-medium">Custom pricing</span>
+        <span class="block text-sm text-surface-500 font-medium">Enterprise annual contract</span>
       </div>
     </div>
 
     {# ── CTA ─────────────────────────────────────────── #}
-    <div class="max-w-2xl mx-auto p-12 bg-surface-950 rounded-sm text-white shadow-2xl text-center relative overflow-hidden">
-      <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-brand-500 via-brand-500 to-brand-500"></div>
+      <div class="max-w-2xl mx-auto p-12 bg-surface-950 rounded-sm text-white shadow-premium text-center relative overflow-hidden">
+        <div class="absolute top-0 left-0 w-full h-1 bg-brand-500"></div>
       <h4 class="text-3xl font-bold mb-4 font-display">Ready to switch?</h4>
       <p class="text-surface-400 text-lg leading-relaxed mb-10">Migration is seamless. Use our SMTP relay or API wrapper to start sending in minutes.</p>
       <a href="{{ config.extra.app_url }}/signup" class="btn-primary px-10 py-4 text-lg inline-flex items-center justify-center">

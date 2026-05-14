@@ -3,6 +3,7 @@
 //! Provides O(n) pattern matching with zero backtracking, suitable for
 //! bot detection, spam scoring, phishing URL detection, and content policy rules.
 
+#![deny(unsafe_code)]
 pub mod bot_patterns;
 pub mod matcher;
 pub mod rules;

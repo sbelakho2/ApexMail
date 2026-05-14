@@ -15,3 +15,59 @@ metadata:
   annotations:
     # Enforce network policies — only allow intra-namespace + ingress/monitoring traffic
     policy.network.k8s.io/level: restricted
+---
+# =============================================================================
+# ApexMail ResourceQuota — namespace-level resource limits
+# =============================================================================
+# 🟡1: Prevents resource exhaustion by capping aggregate CPU/memory across
+# all pods in the apexmail namespace.
+# =============================================================================
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: apexmail-quota
+  namespace: apexmail
+  labels:
+    app.kubernetes.io/name: apexmail
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: "16Gi"
+    limits.cpu: "16"
+    limits.memory: "32Gi"
+    requests.storage: "100Gi"
+    persistentvolumeclaims: "10"
+    pods: "50"
+    services: "20"
+    secrets: "30"
+    configmaps: "30"
+---
+# =============================================================================
+# ApexMail LimitRange — per-container default resource limits
+# =============================================================================
+# 🟡1: Sets default requests/limits for containers that don't specify their own.
+# Also enforces min/max constraints to prevent pods from being too small or
+# too large.
+# =============================================================================
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: apexmail-limits
+  namespace: apexmail
+  labels:
+    app.kubernetes.io/name: apexmail
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "4"
+        memory: "8Gi"
+      min:
+        cpu: "25m"
+        memory: "64Mi"

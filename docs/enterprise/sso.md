@@ -135,7 +135,7 @@ curl https://api.apexmail.ee/enterprise/v1/scim/config
 # Response
 {
   "scimBaseUrl": "https://api.apexmail.ee/enterprise/v1/scim",
-  "authMethod": "bearer",
+  "authMethod": "api_key",
   "token": "scim_xxx"
 }
 ```

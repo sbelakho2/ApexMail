@@ -25,10 +25,13 @@ import os
 import re
 import sys
 
+import tempfile
+
 os.chdir(os.path.dirname(__file__) or ".")
 sys.path.insert(0, ".")
 
-RECOVERED_DIR = "/tmp/apexmail_scenarios"
+TEMP_DIR = os.environ.get("TEMP_DIR", "/tmp/apexmail_scenarios")
+RECOVERED_DIR = TEMP_DIR
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PRICING TRANSFORMATION RULES

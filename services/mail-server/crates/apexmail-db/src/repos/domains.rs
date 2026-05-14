@@ -1,5 +1,6 @@
 //! Domains repository.
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -15,7 +16,9 @@ impl DomainsRepo {
             "INSERT INTO domains (id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
              return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, created_at, updated_at) \
              VALUES ($1, $2, $3, 'pending', false, false, false, false, false, false, false, NOW(), NOW()) \
-             RETURNING *"
+             RETURNING id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
+                      return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, \
+                      dkim_selector, dkim_public_key, dkim_private_key, created_at, updated_at"
         )
         .bind(Uuid::new_v4())
         .bind(tenant_id)
@@ -30,19 +33,29 @@ impl DomainsRepo {
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Domain>, sqlx::Error> {
-        sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(tenant_id)
-            .fetch_optional(pool)
-            .await
+        sqlx::query_as::<_, Domain>(
+            "SELECT id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
+             return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, \
+             dkim_selector, dkim_public_key, dkim_private_key, created_at, updated_at \
+             FROM domains WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
     }
 
     /// Find a domain by name across all tenants (for inbound routing).
     pub async fn find_by_name(pool: &PgPool, name: &str) -> Result<Option<Domain>, sqlx::Error> {
-        sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE name = $1")
-            .bind(name)
-            .fetch_optional(pool)
-            .await
+        sqlx::query_as::<_, Domain>(
+            "SELECT id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
+             return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, \
+             dkim_selector, dkim_public_key, dkim_private_key, created_at, updated_at \
+             FROM domains WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(pool)
+        .await
     }
 
     /// List domains for a tenant with pagination.
@@ -56,13 +69,58 @@ impl DomainsRepo {
         let limit = limit.clamp(1, 100);
         let offset = offset.max(0);
         sqlx::query_as::<_, Domain>(
-            "SELECT * FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+            "SELECT id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
+             return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, \
+             dkim_selector, dkim_public_key, dkim_private_key, created_at, updated_at \
+             FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
         )
         .bind(tenant_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
         .await
+    }
+
+    /// List domains for a tenant using keyset (cursor-based) pagination.
+    /// Uses `(created_at, id)` tuple comparison for stable, efficient pagination.
+    pub async fn list_keyset(
+        pool: &PgPool,
+        tenant_id: Uuid,
+        limit: i64,
+        cursor_created_at: Option<DateTime<Utc>>,
+        cursor_id: Option<Uuid>,
+    ) -> Result<Vec<Domain>, sqlx::Error> {
+        let limit = limit.clamp(1, 200);
+        let fetch_limit = limit + 1;
+        match (cursor_created_at, cursor_id) {
+            (Some(created_at), Some(id)) => sqlx::query_as::<_, Domain>(
+                "SELECT id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
+                     return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, \
+                     dkim_selector, dkim_public_key, dkim_private_key, created_at, updated_at \
+                     FROM domains WHERE tenant_id = $1 AND (created_at, id) < ($2, $3) \
+                     ORDER BY created_at DESC, id DESC LIMIT $4",
+            )
+            .bind(tenant_id)
+            .bind(created_at)
+            .bind(id)
+            .bind(fetch_limit)
+            .fetch_all(pool)
+            .await,
+            _ => {
+                // First page — no cursor
+                sqlx::query_as::<_, Domain>(
+                    "SELECT id, tenant_id, name, status, spf_verified, dkim_verified, dmarc_verified, \
+                     return_path_verified, mta_sts_verified, bimi_verified, tlsrpt_verified, \
+                     dkim_selector, dkim_public_key, dkim_private_key, created_at, updated_at \
+                     FROM domains WHERE tenant_id = $1 \
+                     ORDER BY created_at DESC, id DESC LIMIT $2"
+                )
+                .bind(tenant_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+        }
     }
 
     /// Update domain verification status.

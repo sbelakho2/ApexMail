@@ -130,7 +130,7 @@ ApexMail uses a **hybrid per-message routing** architecture. Both AWS SES (share
 | `DEFAULT_FROM_EMAIL` | | - | Default sender address |
 | `DEFAULT_FROM_NAME` | | - | Default sender name |
 
-> **Note:** There is no `EMAIL_TRANSPORT_TYPE` toggle for routing. Routing is automatic based on whether the tenant has dedicated IPs.
+> **Note:** The hybrid routing uses automatic per-message transport selection based on tenant dedicated IP ownership. The `EMAIL_TRANSPORT_TYPE` variable listed below is a legacy/advanced override for operators who want to bypass the hybrid model and force all traffic via a specific transport — it is **not** part of the standard routing configuration.
 
 #### AWS SES Configuration (Shared Pool)
 

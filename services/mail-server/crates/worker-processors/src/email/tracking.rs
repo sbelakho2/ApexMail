@@ -87,7 +87,7 @@ pub fn encode_tracking_id(payload: &TrackingPayload) -> String {
 }
 
 /// Decode a tracking ID back to its payload.
-#[allow(unused)]
+#[cfg(test)]
 pub fn decode_tracking_id(encoded: &str) -> Option<TrackingPayload> {
     let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -261,7 +261,7 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
 
     // Collect sorted positions of all replacement keys in the source HTML
     let mut positions: Vec<(usize, &str)> = Vec::new();
-    for (old, _new) in &replacements {
+    for old in replacements.keys() {
         let mut search_start = 0;
         while let Some(pos) = html[search_start..].find(old.as_str()) {
             let abs_pos = search_start + pos;

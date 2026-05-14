@@ -478,13 +478,11 @@ fn detect_tautology(tokens: &[SqlToken]) -> Option<u32> {
             }
             // String comparison with inequality operators:'z'>'a', 'Z'>='A', etc.
             // Catches tautology-style injections via SQL lexicographic ordering.
-            // Use a guard instead of nested OR patterns for maximum compatibility.
-            (SqlToken::StringLiteral(_), SqlToken::Operator(op), SqlToken::StringLiteral(_))
-                if matches!(
-                    op,
-                    SqlOp::Lt | SqlOp::Gt | SqlOp::LtEq | SqlOp::GtEq | SqlOp::Neq
-                ) =>
-            {
+            (
+                SqlToken::StringLiteral(_),
+                SqlToken::Operator(SqlOp::Lt | SqlOp::Gt | SqlOp::LtEq | SqlOp::GtEq | SqlOp::Neq),
+                SqlToken::StringLiteral(_),
+            ) => {
                 return Some(5);
             }
             // Number < Number (always true like 1<2)

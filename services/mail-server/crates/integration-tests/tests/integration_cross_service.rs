@@ -125,7 +125,7 @@ fn ai_content_score_with_sales_campaign() {
     assert_eq!(campaign.name, "Q1 Outreach");
 
     // Score candidate subject lines for the campaign
-    let subjects = vec![
+    let subjects = [
         "🔥 Limited time offer today!",
         "Hi {{name}}, quick question",
         "ENTER NOW AND WIN FREE STUFF",
@@ -209,7 +209,7 @@ fn observability_metrics_from_ops_health_checks() {
     }
 
     let summary = metrics.get_summary();
-    assert!(summary.len() >= 1);
+    assert!(!summary.is_empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

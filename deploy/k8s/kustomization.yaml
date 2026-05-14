@@ -25,6 +25,11 @@ resources:
   - api-server/pdb.yaml
   - api-server/network-policy.yaml
   - policies/configmap-secret-guardrail.yaml
+  - policies/priority-classes.yaml
+  # NOTE: policies/audit-policy.yaml is intentionally NOT a kustomize resource.
+  # It is a kube-apiserver config file (audit.k8s.io/v1 Policy without
+  # metadata.name) consumed via `--audit-policy-file=...` on the API server
+  # itself, not applied with `kubectl apply` to a workload namespace.
   - observability/otel-collector.yaml
   - observability/prometheus-rules.yaml
   - tracking-service/deployment.yaml

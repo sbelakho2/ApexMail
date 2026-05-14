@@ -776,7 +776,7 @@ async fn auto_provision_dedicated_ips_background(
     tenant_id: &str,
 ) -> Result<(), String> {
     // Re-borrow the inner fields we need
-    let state = &*app_state;
+    let state = app_state;
     let included_count = sqlx::query_scalar::<_, i32>(
         r#"
         SELECT COALESCE((p.features->>'dedicated_ip_count')::int, 0) AS included_count
@@ -1321,27 +1321,28 @@ async fn ensure_dunning_config_table(state: &AppState) -> Result<(), String> {
         return Ok(());
     }
 
-    // TODO: This is a temporary migration strategy — table creation should be
-    //       managed via the formal migration system (e.g. sqlx migrate).
-    tracing::warn!(
-        "Creating dunning_config table at runtime — this should be managed via migrations"
-    );
-
-    sqlx::query(
+    // The dunning_config table is now created via the formal migration system
+    // (migrations/045_create_dunning_config.sql). This function validates that
+    // the migration has been applied, rather than creating the table at runtime.
+    let table_exists: bool = sqlx::query_scalar(
         r#"
-        CREATE TABLE IF NOT EXISTS dunning_config (
-            tenant_id VARCHAR(36) PRIMARY KEY,
-            retry_schedule_days INTEGER[] NOT NULL,
-            soft_suspend_after_days INTEGER NOT NULL,
-            hard_suspend_after_days INTEGER NOT NULL,
-            grace_period_days INTEGER NOT NULL,
-            updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables
+            WHERE table_name = 'dunning_config'
         )
         "#,
     )
-    .execute(&state.db)
+    .fetch_one(&state.db)
     .await
-    .map_err(|error| format!("Failed to ensure dunning_config table: {error}"))?;
+    .map_err(|error| format!("Failed to check dunning_config table existence: {error}"))?;
+
+    if !table_exists {
+        tracing::error!(
+            "dunning_config table does not exist — migration 045 has not been applied. \
+             Dunning features will use hardcoded defaults."
+        );
+        return Err("dunning_config table not found — run migrations".to_string());
+    }
 
     let _ = DUNNING_CONFIG_TABLE_ENSURED.set(());
     Ok(())
@@ -1461,9 +1462,15 @@ struct PreparedDeadletter {
 
 #[derive(Debug)]
 struct ProcessWebhookResult {
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "returned for webhook worker diagnostics outside unit-test assertions"
+    )]
     event_type: String,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "returned for webhook worker diagnostics outside unit-test assertions"
+    )]
     processed: bool,
 }
 

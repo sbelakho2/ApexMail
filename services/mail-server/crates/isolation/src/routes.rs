@@ -22,6 +22,7 @@ use crate::encryption::EncryptionService;
 use crate::rate_limit::RateLimitService;
 use crate::tenant::TenantService;
 use crate::types::*;
+use apexmail_lib::crypto::timing_safe_compare;
 
 // ─── Shared State ───────────────────────────────────────────────
 
@@ -103,7 +104,16 @@ fn verify_bearer(headers: &HeaderMap, config: &Config) -> Result<(), (StatusCode
         .strip_prefix("Bearer ")
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid Authorization format"))?;
 
-    if !constant_time_eq(token, &config.internal_api_key) {
+    let accepted = if config.internal_api_keys.is_empty() {
+        timing_safe_compare(token, &config.internal_api_key)
+    } else {
+        config
+            .internal_api_keys
+            .iter()
+            .any(|key| timing_safe_compare(token, key))
+    };
+
+    if !accepted {
         return Err((StatusCode::UNAUTHORIZED, "Invalid token"));
     }
     Ok(())
@@ -115,17 +125,6 @@ fn extract_user_id(headers: &HeaderMap) -> Result<String, (StatusCode, &'static 
         .and_then(|v| v.to_str().ok())
         .map(String::from)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing x-user-id header"))
-}
-
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.bytes().zip(b.bytes()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 fn err_json(msg: &str) -> Json<serde_json::Value> {
@@ -628,7 +627,6 @@ async fn encryption_rotate(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreatePolicyRequest {
-    #[allow(unused)]
     organization_id: String,
     table_name: String,
     fields: Vec<String>,
@@ -894,12 +892,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_constant_time_eq() {
-        assert!(constant_time_eq("abc", "abc"));
-        assert!(!constant_time_eq("abc", "abd"));
-        assert!(!constant_time_eq("abc", "abcd"));
-        assert!(!constant_time_eq("", "a"));
-        assert!(constant_time_eq("", ""));
+    fn test_shared_timing_safe_compare() {
+        assert!(timing_safe_compare("abc", "abc"));
+        assert!(!timing_safe_compare("abc", "abd"));
+        assert!(!timing_safe_compare("abc", "abcd"));
+        assert!(!timing_safe_compare("", "a"));
+        assert!(timing_safe_compare("", ""));
     }
 
     #[test]

@@ -93,7 +93,7 @@ Double-check that your API key starts with `am_live_` or `am_test_` and hasn't b
 
 ### "Rate limit exceeded"
 
-The API enforces a default tenant-wide limit of 1,000 requests/minute. Authentication and other sensitive endpoints may use stricter caps, so check the `Retry-After` header before retrying.
+Rate limits are **plan-based** and enforced per API key. See the [rate limits documentation](api/rate-limits.md) and [pricing page](pricing.md) for your plan's throughput tier. Check the `Retry-After` header before retrying.
 
 ## Need Help?
 

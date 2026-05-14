@@ -131,7 +131,9 @@ pub struct GraderAuthContext {
 
 impl GraderAuthContext {
     pub fn has_scope(&self, required: &str) -> bool {
-        self.scopes.iter().any(|scope| scope == "*" || scope == required)
+        self.scopes
+            .iter()
+            .any(|scope| scope == "*" || scope == required)
     }
 }
 

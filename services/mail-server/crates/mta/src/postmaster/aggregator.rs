@@ -21,7 +21,15 @@ pub async fn recompute(db: &PgPool) -> Result<(usize, usize, usize), String> {
     let since = Utc::now().date_naive() - Duration::days(LOOKBACK_DAYS);
 
     // ── Google domain summaries ─────────────────────────────────────────────
-    let domain_rows: Vec<(String, Option<String>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let domain_rows: Vec<(
+        String,
+        Option<String>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    )> = sqlx::query_as(
         "SELECT domain,
                 MIN(domain_reputation) FILTER (WHERE observed_at = (
                     SELECT MAX(observed_at) FROM postmaster_google_reputation
@@ -33,23 +41,12 @@ pub async fn recompute(db: &PgPool) -> Result<(usize, usize, usize), String> {
                 AVG(user_reported_spam_ratio)::float8
          FROM postmaster_google_reputation g
          WHERE observed_at >= $1
-         GROUP BY domain"
+         GROUP BY domain",
     )
     .bind(since)
     .fetch_all(db)
     .await
     .map_err(|e| format!("DB error (google agg): {e}"))?;
-
-    let mut events = 0usize;
-    for (domain, latest_band, spf, dkim, dmarc, spam) in &domain_rows {
-        let (score, factors) = score_google(latest_band.as_deref(), *spf, *dkim, *dmarc, *spam);
-        let band = ReputationBand::from_score(score);
-        let new_event =
-            upsert_summary(db, "domain", domain, "google", score, band, &factors).await?;
-        if new_event {
-            events += 1;
-        }
-    }
 
     // ── SNDS IP summaries ──────────────────────────────────────────────────
     let ip_rows: Vec<(String, Option<String>, Option<f64>, i64)> = sqlx::query_as(
@@ -69,15 +66,139 @@ pub async fn recompute(db: &PgPool) -> Result<(usize, usize, usize), String> {
     .await
     .map_err(|e| format!("DB error (snds agg): {e}"))?;
 
+    // ── Batch upsert within a single transaction (DB-5) ─────────────────────
+    //
+    // **Root cause**: `upsert_summary` was called per row with its own
+    // connection acquisition, creating an N+1 round-trip pattern (1 query
+    // per domain/IP × 2–3 SQL statements each).
+    //
+    // **Fix**: Wrap all upserts in a single database transaction so all
+    // SELECT, UPSERT, and event-INSERT statements share one connection and
+    // commit atomically.  Band-change events are accumulated in memory and
+    // INSERTed as a batch at the end rather than one-at-a-time.
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| format!("DB error (begin tx): {e}"))?;
+
+    let mut events = 0usize;
+    #[allow(clippy::type_complexity)]
+    let mut event_rows: Vec<(
+        String,            // scope
+        String,            // identity
+        String,            // provider
+        String,            // severity
+        String,            // event_type
+        Option<String>,    // from_band
+        String,            // to_band
+        serde_json::Value, // payload
+    )> = Vec::new();
+
+    for (domain, latest_band, spf, dkim, dmarc, spam) in &domain_rows {
+        let (score, factors) = score_google(latest_band.as_deref(), *spf, *dkim, *dmarc, *spam);
+        let band = ReputationBand::from_score(score);
+        let (new_event, from_band_str) =
+            upsert_summary_in_tx(&mut tx, "domain", domain, "google", score, band, &factors)
+                .await?;
+        if new_event {
+            events += 1;
+            if let Some(from) = from_band_str {
+                let severity = match band {
+                    ReputationBand::Red => "critical",
+                    ReputationBand::Amber => "warn",
+                    ReputationBand::Green => "info",
+                };
+                let event_type = if matches!(band, ReputationBand::Red) {
+                    "red_listed"
+                } else {
+                    "band_drop"
+                };
+                let payload = serde_json::json!({
+                    "score": score,
+                    "factors": factors,
+                });
+                event_rows.push((
+                    "domain".into(),
+                    domain.clone(),
+                    "google".into(),
+                    severity.into(),
+                    event_type.into(),
+                    Some(from),
+                    band.as_str().into(),
+                    payload,
+                ));
+            }
+        }
+    }
+
     for (ip, filter, complaint, traps) in &ip_rows {
         let (score, factors) = score_snds(filter.as_deref(), *complaint, *traps);
         let band = ReputationBand::from_score(score);
-        let new_event =
-            upsert_summary(db, "ip", ip, "microsoft", score, band, &factors).await?;
+        let (new_event, from_band_str) =
+            upsert_summary_in_tx(&mut tx, "ip", ip, "microsoft", score, band, &factors).await?;
         if new_event {
             events += 1;
+            if let Some(from) = from_band_str {
+                let severity = match band {
+                    ReputationBand::Red => "critical",
+                    ReputationBand::Amber => "warn",
+                    ReputationBand::Green => "info",
+                };
+                let event_type = if matches!(band, ReputationBand::Red) {
+                    "red_listed"
+                } else {
+                    "band_drop"
+                };
+                let payload = serde_json::json!({
+                    "score": score,
+                    "factors": factors,
+                });
+                event_rows.push((
+                    "ip".into(),
+                    ip.clone(),
+                    "microsoft".into(),
+                    severity.into(),
+                    event_type.into(),
+                    Some(from),
+                    band.as_str().into(),
+                    payload,
+                ));
+            }
         }
     }
+
+    // Batch-INSERT all band-change events in a single statement.
+    if !event_rows.is_empty() {
+        let mut query_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO postmaster_reputation_events
+               (tenant_id, scope, identity, provider, severity, event_type,
+                from_band, to_band, payload)
+             VALUES ",
+        );
+        let mut sep = query_builder.separated(", ");
+        for (scope, identity, provider, severity, event_type, from_band, to_band, payload) in
+            &event_rows
+        {
+            sep.push_bind(None::<String>); // tenant_id (NULL for global events)
+            sep.push_bind(scope);
+            sep.push_bind(identity);
+            sep.push_bind(provider);
+            sep.push_bind(severity);
+            sep.push_bind(event_type);
+            sep.push_bind(from_band);
+            sep.push_bind(to_band);
+            sep.push_bind(payload);
+        }
+        query_builder
+            .build()
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB error (batch insert events): {e}"))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("DB error (commit tx): {e}"))?;
 
     info!(
         domains = domain_rows.len(),
@@ -88,16 +209,21 @@ pub async fn recompute(db: &PgPool) -> Result<(usize, usize, usize), String> {
     Ok((domain_rows.len(), ip_rows.len(), events))
 }
 
-/// UPSERT a summary row.  Returns `true` if the band changed (event emitted).
-async fn upsert_summary(
-    db: &PgPool,
+/// UPSERT a summary row within an existing transaction.
+///
+/// Returns `(band_changed, previous_band_string)` where `previous_band_string`
+/// is `Some(old_band)` if the band changed, or `None` if this is a new row
+/// or the band stayed the same.  The caller is responsible for batched event
+/// INSERTs (DB-5).
+async fn upsert_summary_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     scope: &str,
     identity: &str,
     provider: &str,
     score: i32,
     band: ReputationBand,
     factors: &[String],
-) -> Result<bool, String> {
+) -> Result<(bool, Option<String>), String> {
     let prior: Option<(String,)> = sqlx::query_as(
         "SELECT band FROM postmaster_reputation_summary
          WHERE scope = $1 AND identity = $2 AND provider = $3",
@@ -105,13 +231,12 @@ async fn upsert_summary(
     .bind(scope)
     .bind(identity)
     .bind(provider)
-    .fetch_optional(db)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|e| format!("DB error: {e}"))?;
     let prior_band = prior.as_ref().and_then(|(b,)| ReputationBand::parse(b));
 
-    let factors_json =
-        serde_json::to_value(factors).map_err(|e| format!("JSON: {e}"))?;
+    let factors_json = serde_json::to_value(factors).map_err(|e| format!("JSON: {e}"))?;
     sqlx::query(
         "INSERT INTO postmaster_reputation_summary
            (scope, identity, provider, reputation_score, band, factors,
@@ -133,47 +258,17 @@ async fn upsert_summary(
     .bind(&factors_json)
     .bind(band.suggested_throttle_pct())
     .bind(LOOKBACK_DAYS as i32)
-    .execute(db)
+    .execute(&mut **tx)
     .await
     .map_err(|e| format!("DB error: {e}"))?;
 
     let band_changed = prior_band.map(|b| b != band).unwrap_or(false);
-    if band_changed {
-        let from = prior_band.map(|b| b.as_str().to_string());
-        let to = Some(band.as_str().to_string());
-        let severity = match band {
-            ReputationBand::Red => "critical",
-            ReputationBand::Amber => "warn",
-            ReputationBand::Green => "info",
-        };
-        let event_type = if matches!(band, ReputationBand::Red) {
-            "red_listed"
-        } else {
-            "band_drop"
-        };
-        let payload = serde_json::json!({
-            "score": score,
-            "factors": factors,
-        });
-        sqlx::query(
-            "INSERT INTO postmaster_reputation_events
-               (tenant_id, scope, identity, provider, severity, event_type,
-                from_band, to_band, payload)
-             VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(scope)
-        .bind(identity)
-        .bind(provider)
-        .bind(severity)
-        .bind(event_type)
-        .bind(&from)
-        .bind(&to)
-        .bind(&payload)
-        .execute(db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-    }
-    Ok(band_changed)
+    let prev_str = if band_changed {
+        prior_band.map(|b| b.as_str().to_string())
+    } else {
+        None
+    };
+    Ok((band_changed, prev_str))
 }
 
 /// Score 0..=100 from Google Postmaster signals.  Algorithm (transparent so
@@ -196,10 +291,7 @@ fn score_google(
         Some("BAD") => 10,
         _ => 50,
     };
-    factors.push(format!(
-        "domain_reputation={}",
-        band.unwrap_or("UNKNOWN")
-    ));
+    factors.push(format!("domain_reputation={}", band.unwrap_or("UNKNOWN")));
 
     let mut bonus = 0.0_f64;
     if let Some(v) = spf {

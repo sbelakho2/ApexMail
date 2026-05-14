@@ -107,21 +107,24 @@ spec:
           readinessProbe:
             tcpSocket:
               port: submission
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            failureThreshold: 3
+            initialDelaySeconds: {{ .Values.mta.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.mta.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.mta.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.mta.probes.readiness.failureThreshold }}
           livenessProbe:
             tcpSocket:
               port: submission
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            failureThreshold: 4
+            initialDelaySeconds: {{ .Values.mta.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.mta.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.mta.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.mta.probes.liveness.failureThreshold }}
           startupProbe:
             tcpSocket:
               port: submission
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 12
+            initialDelaySeconds: {{ .Values.mta.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.mta.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.mta.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.mta.probes.startup.failureThreshold }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -129,10 +132,12 @@ spec:
               mountPath: /var/spool/apexmail
       volumes:
         - name: tmp
-          emptyDir: {}
+          # 🟡7: Added size limit to prevent disk exhaustion
+          emptyDir:
+            sizeLimit: {{ .Values.mta.tmpEmptyDirSizeLimit | default "256Mi" }}
         - name: spool
           emptyDir:
-            sizeLimit: 1Gi
+            sizeLimit: {{ .Values.mta.spoolEmptyDirSizeLimit | default "1Gi" }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

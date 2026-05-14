@@ -2,21 +2,27 @@
 # ============================================================================
 # Upload training files to Vast.ai instance
 # ============================================================================
-# Usage: ./upload.sh <host> <port> [ssh_key]
+# Usage: ./upload.sh <host> <port> [ssh_key] [train_script]
 #
-# Example:
-#   ./upload.sh 54.233.120.77 44968 ~/.ssh/vastai_new
+# Examples:
+#   ./upload.sh 54.233.120.77 44968 ~/.ssh/vastai_new          # train_4gpu.py
+#   ./upload.sh 54.233.120.77 44968 ~/.ssh/vastai_new train_8gpu.py
+#   ./upload.sh 54.233.120.77 44968 "" train_8gpu.py            # default ssh key
 # ============================================================================
 
 set -e
 
-HOST="${1:?Usage: $0 <host> <port> [ssh_key]}"
-PORT="${2:?Usage: $0 <host> <port> [ssh_key]}"
+# Use WORKSPACE_DIR env var (fallback to /workspace)
+WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
+
+HOST="${1:?Usage: $0 <host> <port> [ssh_key] [train_script]}"
+PORT="${2:?Usage: $0 <host> <port> [ssh_key] [train_script]}"
 SSH_KEY="${3:-~/.ssh/vastai_new}"
+TRAIN_SCRIPT="${4:-train_4gpu.py}"
 
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$LOCAL_DIR/../../.." && pwd)"
-WORKSPACE="/workspace"
+WORKSPACE="${WORKSPACE_DIR:-/workspace}"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -32,19 +38,33 @@ ssh -i "$SSH_KEY" -p "$PORT" -o ConnectTimeout=30 -o StrictHostKeyChecking=accep
 
 log "Uploading training files..."
 
-# Upload training script
-scp -i "$SSH_KEY" -P "$PORT" -o StrictHostKeyChecking=accept-new \
-    "$LOCAL_DIR/train_4gpu.py" "root@$HOST:$WORKSPACE/" && log "  train_4gpu.py"
+# Upload training script (configurable: default train_4gpu.py)
+if [ -f "$LOCAL_DIR/$TRAIN_SCRIPT" ]; then
+    scp -i "$SSH_KEY" -P "$PORT" -o StrictHostKeyChecking=accept-new \
+        "$LOCAL_DIR/$TRAIN_SCRIPT" "root@$HOST:$WORKSPACE/" && log "  $TRAIN_SCRIPT"
+else
+    error "Training script not found: $LOCAL_DIR/$TRAIN_SCRIPT"
+fi
+
+# Also upload any other training scripts that exist (multi-GPU variants)
+for alt_script in train_8gpu.py train_4gpu.py train_2gpu.py train_ddp.py train_fsdp.py train_qlora.py; do
+    if [ "$alt_script" != "$TRAIN_SCRIPT" ] && [ -f "$LOCAL_DIR/$alt_script" ]; then
+        scp -i "$SSH_KEY" -P "$PORT" -o StrictHostKeyChecking=accept-new \
+            "$LOCAL_DIR/$alt_script" "root@$HOST:$WORKSPACE/" && log "  $alt_script"
+    fi
+done
 
 # Upload pipeline
 scp -i "$SSH_KEY" -P "$PORT" -o StrictHostKeyChecking=accept-new \
     "$LOCAL_DIR/pipeline.sh" "root@$HOST:$WORKSPACE/" && log "  pipeline.sh"
 
-# Upload test script if exists
-if [ -f "$LOCAL_DIR/test_agent.py" ]; then
-    scp -i "$SSH_KEY" -P "$PORT" -o StrictHostKeyChecking=accept-new \
-        "$LOCAL_DIR/test_agent.py" "root@$HOST:$WORKSPACE/" && log "  test_agent.py"
-fi
+# Upload test scripts if they exist
+for test_script in test_agent.py stress_test.py stress_test_agent.py; do
+    if [ -f "$LOCAL_DIR/$test_script" ]; then
+        scp -i "$SSH_KEY" -P "$PORT" -o StrictHostKeyChecking=accept-new \
+            "$LOCAL_DIR/$test_script" "root@$HOST:$WORKSPACE/" && log "  $test_script"
+    fi
+done
 
 # Upload training data
 DATASET="$PROJECT_ROOT/data/train_agent.jsonl"
@@ -75,9 +95,18 @@ ssh -i "$SSH_KEY" -p "$PORT" -o StrictHostKeyChecking=accept-new "root@$HOST" "
 
 log "Upload complete!"
 echo ""
+echo "Uploaded files:"
+echo "  Training script : $TRAIN_SCRIPT"
+echo "  Pipeline        : pipeline.sh"
+echo "  Test scripts    : (auto-detected)"
+echo "  Dataset         : train_agent.jsonl"
+echo ""
 echo "Next steps on remote:"
 echo "  1. ssh -i $SSH_KEY -p $PORT root@$HOST"
 echo "  2. cd /workspace"
 echo "  3. ./pipeline.sh verify"
 echo "  4. ./pipeline.sh train"
 echo "  5. ./pipeline.sh status"
+echo ""
+echo "To upload a different training script, pass it as 4th argument:"
+echo "  $0 $HOST $PORT \"$SSH_KEY\" train_8gpu.py"

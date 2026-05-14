@@ -1,7 +1,7 @@
 use crate::types::*;
+use chrono::Utc as ChronoUtc;
 use sqlx::PgPool;
 use uuid::Uuid;
-use chrono::Utc as ChronoUtc;
 
 /// Keywords in failure reasons that indicate a permanent (non-transient)
 /// condition requiring operator intervention rather than automatic retry.
@@ -27,7 +27,9 @@ const BACKOFF_MAX_SECS: i64 = 86_400; // 24 hours
 /// that should lead to immediate auto-disable rather than exponential backoff.
 fn is_permanent_failure(reason: &str) -> bool {
     let lower = reason.to_lowercase();
-    PERMANENT_FAILURE_KEYWORDS.iter().any(|kw| lower.contains(kw))
+    PERMANENT_FAILURE_KEYWORDS
+        .iter()
+        .any(|kw| lower.contains(kw))
 }
 
 /// Compute the exponential backoff delay for a given number of consecutive
@@ -65,7 +67,7 @@ impl SeedManager {
         let mut responses = Vec::with_capacity(providers.len());
         for p in providers {
             let count: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM seed_accounts WHERE provider_id = $1 AND is_active = true"
+                "SELECT COUNT(*) FROM seed_accounts WHERE provider_id = $1 AND is_active = true",
             )
             .bind(p.id)
             .fetch_one(&self.db)
@@ -92,7 +94,10 @@ impl SeedManager {
         .await
     }
 
-    pub async fn get_provider_by_name(&self, name: &str) -> Result<Option<SeedProvider>, sqlx::Error> {
+    pub async fn get_provider_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<SeedProvider>, sqlx::Error> {
         sqlx::query_as::<_, SeedProvider>(
             "SELECT id, name, display_name, inbox_types, icon_url, created_at FROM seed_providers WHERE name = $1"
         )
@@ -107,17 +112,20 @@ impl SeedManager {
         sqlx::query_as::<_, SeedAccount>(
             r#"SELECT id, provider_id, email, imap_host, imap_port, imap_username, 
                is_active, last_checked_at, health_status, created_at
-               FROM seed_accounts WHERE is_active = true ORDER BY email"#
+               FROM seed_accounts WHERE is_active = true ORDER BY email"#,
         )
         .fetch_all(&self.db)
         .await
     }
 
-    pub async fn list_accounts_by_provider(&self, provider_id: Uuid) -> Result<Vec<SeedAccount>, sqlx::Error> {
+    pub async fn list_accounts_by_provider(
+        &self,
+        provider_id: Uuid,
+    ) -> Result<Vec<SeedAccount>, sqlx::Error> {
         sqlx::query_as::<_, SeedAccount>(
             r#"SELECT id, provider_id, email, imap_host, imap_port, imap_username,
                is_active, last_checked_at, health_status, created_at
-               FROM seed_accounts WHERE provider_id = $1 AND is_active = true ORDER BY email"#
+               FROM seed_accounts WHERE provider_id = $1 AND is_active = true ORDER BY email"#,
         )
         .bind(provider_id)
         .fetch_all(&self.db)
@@ -128,7 +136,7 @@ impl SeedManager {
         sqlx::query_as::<_, SeedAccount>(
             r#"SELECT id, provider_id, email, imap_host, imap_port, imap_username,
                is_active, last_checked_at, health_status, created_at
-               FROM seed_accounts WHERE id = $1"#
+               FROM seed_accounts WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -136,20 +144,22 @@ impl SeedManager {
     }
 
     pub async fn count_active_accounts(&self) -> Result<i64, sqlx::Error> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM seed_accounts WHERE is_active = true"
-        )
-        .fetch_one(&self.db)
-        .await?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM seed_accounts WHERE is_active = true")
+                .fetch_one(&self.db)
+                .await?;
         Ok(row.0)
     }
 
     /// Get seed accounts filtered by provider names (e.g. ["gmail", "outlook"])
-    pub async fn get_accounts_by_provider_names(&self, providers: &[String]) -> Result<Vec<SeedAccount>, sqlx::Error> {
+    pub async fn get_accounts_by_provider_names(
+        &self,
+        providers: &[String],
+    ) -> Result<Vec<SeedAccount>, sqlx::Error> {
         if providers.is_empty() {
             return self.list_active_accounts().await;
         }
-        
+
         // Build a query with provider name filter
         // Using a simple approach: get all providers first, then filter
         let providers_rows = sqlx::query_as::<_, SeedProvider>(
@@ -160,7 +170,7 @@ impl SeedManager {
         .await?;
 
         let provider_ids: Vec<Uuid> = providers_rows.into_iter().map(|p| p.id).collect();
-        
+
         if provider_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -168,7 +178,7 @@ impl SeedManager {
         sqlx::query_as::<_, SeedAccount>(
             r#"SELECT id, provider_id, email, imap_host, imap_port, imap_username,
                is_active, last_checked_at, health_status, created_at
-               FROM seed_accounts WHERE provider_id = ANY($1) AND is_active = true ORDER BY email"#
+               FROM seed_accounts WHERE provider_id = ANY($1) AND is_active = true ORDER BY email"#,
         )
         .bind(&provider_ids)
         .fetch_all(&self.db)
@@ -183,7 +193,7 @@ impl SeedManager {
         last_checked_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "UPDATE seed_accounts SET health_status = $1, last_checked_at = $2 WHERE id = $3"
+            "UPDATE seed_accounts SET health_status = $1, last_checked_at = $2 WHERE id = $3",
         )
         .bind(health_status)
         .bind(last_checked_at)
@@ -195,10 +205,7 @@ impl SeedManager {
 
     /// Record a successful IMAP health check: clears the consecutive-failure
     /// counter and marks the account `ok`.
-    pub async fn record_health_success(
-        &self,
-        account_id: Uuid,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn record_health_success(&self, account_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query(
             "UPDATE seed_accounts \
              SET health_status = 'ok', \
@@ -334,17 +341,15 @@ impl SeedManager {
         password: &str,
         encryptor: &enterprise::field_encryption::FieldEncryptor,
     ) -> Result<(), sqlx::Error> {
-        let encrypted = encryptor.encrypt(password).map_err(|e| {
-            sqlx::Error::Protocol(format!("password encryption failed: {e}"))
-        })?;
+        let encrypted = encryptor
+            .encrypt(password)
+            .map_err(|e| sqlx::Error::Protocol(format!("password encryption failed: {e}")))?;
 
-        sqlx::query(
-            "UPDATE seed_accounts SET imap_password_encrypted = $1 WHERE id = $2",
-        )
-        .bind(&encrypted)
-        .bind(account_id)
-        .execute(&self.db)
-        .await?;
+        sqlx::query("UPDATE seed_accounts SET imap_password_encrypted = $1 WHERE id = $2")
+            .bind(&encrypted)
+            .bind(account_id)
+            .execute(&self.db)
+            .await?;
 
         Ok(())
     }
@@ -356,12 +361,11 @@ impl SeedManager {
         account_id: Uuid,
         encryptor: &enterprise::field_encryption::FieldEncryptor,
     ) -> Result<Option<String>, sqlx::Error> {
-        let row: Result<(String,), _> = sqlx::query_as(
-            "SELECT imap_password_encrypted FROM seed_accounts WHERE id = $1",
-        )
-        .bind(account_id)
-        .fetch_one(&self.db)
-        .await;
+        let row: Result<(String,), _> =
+            sqlx::query_as("SELECT imap_password_encrypted FROM seed_accounts WHERE id = $1")
+                .bind(account_id)
+                .fetch_one(&self.db)
+                .await;
 
         match row {
             Ok((pw,)) => {

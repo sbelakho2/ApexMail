@@ -30,9 +30,16 @@ hyper-util.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
 
-# Logging
+# Logging & Observability
 tracing.workspace = true
 tracing-subscriber.workspace = true
+observability-service = { path = "../observability-service" }
+
+# OpenTelemetry (distributed tracing)
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 
 # Metrics
 metrics.workspace = true

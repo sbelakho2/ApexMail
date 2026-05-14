@@ -55,6 +55,7 @@ type Client struct {
 	apiKey           string
 	apiKeyErr        error
 	baseURL          string
+	timeout          time.Duration
 	httpClient       *http.Client
 	maxResponseBytes int64
 	Emails           *EmailsAPI
@@ -76,7 +77,8 @@ type Config struct {
 }
 
 // New creates a new ApexMail client with the provided API key.
-func New(apiKey string, cfg ...Config) *Client {
+// Returns an error if the API key is invalid or the base URL does not use HTTPS.
+func New(apiKey string, cfg ...Config) (*Client, error) {
 	var c Config
 	if len(cfg) > 0 {
 		c = cfg[0]
@@ -85,8 +87,13 @@ func New(apiKey string, cfg ...Config) *Client {
 	if c.BaseURL != "" {
 		baseURL = c.BaseURL
 	}
+	// Strip trailing slash to prevent double slashes when joining paths.
+	baseURL = strings.TrimRight(baseURL, "/")
 	if !strings.HasPrefix(baseURL, "https://") {
-		panic("apexmail: baseURL must use HTTPS")
+		return nil, fmt.Errorf("apexmail: baseURL %q must use HTTPS", baseURL)
+	}
+	if err := validateAPIKey(apiKey); err != nil {
+		return nil, err
 	}
 	timeout := defaultTimeout
 	if c.Timeout > 0 {
@@ -105,8 +112,9 @@ func New(apiKey string, cfg ...Config) *Client {
 	cl := &Client{
 		apiKey:           apiKey,
 		baseURL:          baseURL,
+		timeout:          timeout,
 		httpClient:       httpClient,
-		apiKeyErr:        validateAPIKey(apiKey),
+		apiKeyErr:        nil, // validated above
 		maxResponseBytes: maxResponseBytes,
 	}
 	cl.Emails = &EmailsAPI{client: cl}
@@ -117,7 +125,21 @@ func New(apiKey string, cfg ...Config) *Client {
 	cl.Events = &EventsAPI{client: cl}
 	cl.Analytics = &AnalyticsAPI{client: cl}
 	cl.APIKeys = &APIKeysAPI{client: cl}
-	return cl
+	return cl, nil
+}
+
+// String returns a redacted representation for safe logging.
+func (c *Client) String() string {
+	key := c.apiKey
+	if len(key) > 8 {
+		key = key[:4] + "…" + key[len(key)-4:]
+	}
+	return fmt.Sprintf("Client{apiKey=%s baseURL=%s}", key, c.baseURL)
+}
+
+// GoString returns a redacted representation for %#v formatting (fmt.GoStringer).
+func (c *Client) GoString() string {
+	return c.String()
 }
 
 func newDefaultHTTPClient(timeout time.Duration) *http.Client {
@@ -311,11 +333,18 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 	baseURL := c.baseURL
 	httpClient := c.httpClient
 	maxResponseBytes := c.maxResponseBytes
+	timeout := c.timeout
 	c.mu.RUnlock()
 
 	if apiKeyErr != nil {
 		return apiKeyErr
 	}
+
+	// Wrap the context with the configured per-request timeout so that
+	// the entire request lifecycle (including retry sleeps) has a bounded
+	// deadline, even when callers pass context.Background().
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	var bodyBytes []byte
 	if body != nil {
@@ -413,41 +442,69 @@ func readLimitedBody(resp *http.Response, maxBytes int64) ([]byte, error) {
 	return respBody, nil
 }
 
+// retryDelay computes the delay before the next retry using:
+//
+//	delay = max(retryAfterSeconds, baseDelay * attempt²)
+//
+// The server's Retry-After header (integer seconds or HTTP-date) is honored
+// first. When absent or unparseable, quadratic backoff is used instead.
+// Both paths are capped at defaultMaxBackoff.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	retryAfter := resp.Header.Get("Retry-After")
+
+	// Compute quadratic backoff: baseDelay * attempt²
+	backoff := calculateBackoff(attempt)
+
 	if retryAfter == "" {
-		return calculateBackoff(attempt)
+		return backoff
 	}
+
+	// Try integer seconds (most common)
 	if seconds, err := strconv.Atoi(retryAfter); err == nil {
-		delay := time.Duration(seconds) * time.Second
-		if delay > defaultMaxBackoff {
+		retryAfterDelay := time.Duration(seconds) * time.Second
+		if retryAfterDelay > backoff {
+			backoff = retryAfterDelay
+		}
+		if backoff > defaultMaxBackoff {
 			return defaultMaxBackoff
 		}
-		return delay
+		return backoff
 	}
+
+	// Try HTTP-date format (RFC 1123)
 	if t, err := time.Parse(time.RFC1123, retryAfter); err == nil {
-		delay := time.Until(t)
-		if delay < 0 {
-			return 0
+		retryAfterDelay := time.Until(t)
+		if retryAfterDelay < 0 {
+			retryAfterDelay = 0
 		}
-		if delay > defaultMaxBackoff {
+		if retryAfterDelay > backoff {
+			backoff = retryAfterDelay
+		}
+		if backoff > defaultMaxBackoff {
 			return defaultMaxBackoff
 		}
-		return delay
+		return backoff
 	}
 	if t, err := time.Parse(time.RFC1123Z, retryAfter); err == nil {
-		delay := time.Until(t)
-		if delay < 0 {
-			return 0
+		retryAfterDelay := time.Until(t)
+		if retryAfterDelay < 0 {
+			retryAfterDelay = 0
 		}
-		if delay > defaultMaxBackoff {
+		if retryAfterDelay > backoff {
+			backoff = retryAfterDelay
+		}
+		if backoff > defaultMaxBackoff {
 			return defaultMaxBackoff
 		}
-		return delay
+		return backoff
 	}
-	return calculateBackoff(attempt)
+
+	// Unparseable header — fall back to quadratic backoff
+	return backoff
 }
 
+// calculateBackoff computes quadratic backoff: baseDelay * attempt²,
+// capped at defaultMaxBackoff. Used when no Retry-After header is present.
 func calculateBackoff(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
@@ -455,7 +512,7 @@ func calculateBackoff(attempt int) time.Duration {
 	if attempt > 20 {
 		attempt = 20
 	}
-	delay := defaultInitialBackoff * time.Duration(1<<uint(attempt))
+	delay := defaultInitialBackoff * time.Duration(attempt*attempt)
 	if delay > defaultMaxBackoff {
 		return defaultMaxBackoff
 	}
@@ -627,8 +684,12 @@ func classifyAPIError(err *APIError) error {
 	switch {
 	case err.StatusCode == http.StatusUnauthorized || err.Code == "UNAUTHORIZED" || err.Code == "INVALID_API_KEY" || err.Code == "TOKEN_EXPIRED" || err.Code == "TOKEN_BLACKLISTED":
 		return &AuthenticationError{APIError: err}
+	case err.StatusCode == http.StatusForbidden || err.Code == "FORBIDDEN":
+		return &ForbiddenError{APIError: err}
 	case err.StatusCode == http.StatusNotFound || err.Code == "NOT_FOUND":
 		return &NotFoundError{APIError: err}
+	case err.StatusCode == http.StatusConflict || err.Code == "CONFLICT":
+		return &ConflictError{APIError: err}
 	case err.Code == "VALIDATION_ERROR" || err.Code == "INVALID_INPUT" || err.StatusCode == http.StatusUnprocessableEntity:
 		return &ValidationError{APIError: err}
 	case err.StatusCode == http.StatusTooManyRequests || err.Code == "RATE_LIMIT_EXCEEDED" || err.Code == "QUOTA_EXCEEDED":
@@ -643,8 +704,14 @@ func classifyAPIError(err *APIError) error {
 // AuthenticationError is returned when the API key is missing, invalid, or revoked (HTTP 401).
 type AuthenticationError struct{ *APIError }
 
+// ForbiddenError is returned when the API key lacks the required scopes (HTTP 403).
+type ForbiddenError struct{ *APIError }
+
 // NotFoundError is returned when the requested resource does not exist (HTTP 404).
 type NotFoundError struct{ *APIError }
+
+// ConflictError is returned when the request conflicts with the current state (HTTP 409).
+type ConflictError struct{ *APIError }
 
 // ValidationError is returned when request validation fails (HTTP 400/422).
 type ValidationError struct{ *APIError }
@@ -679,10 +746,11 @@ type Attachment struct {
 
 // Pagination holds list-response pagination metadata.
 type Pagination struct {
-	Total   int  `json:"total"`
-	Limit   int  `json:"limit"`
-	Offset  int  `json:"offset"`
-	HasMore bool `json:"hasMore"`
+	Total   int    `json:"total"`
+	Limit   int    `json:"limit"`
+	Offset  int    `json:"offset"`
+	Cursor  string `json:"cursor,omitempty"`
+	HasMore bool   `json:"hasMore"`
 }
 
 // EmailsAPI provides methods for sending and querying emails.
@@ -836,6 +904,7 @@ type ListEmailsOptions struct {
 	Status string
 	Limit  *int
 	Offset int
+	Cursor string
 	Tag    string
 }
 
@@ -854,6 +923,9 @@ func (a *EmailsAPI) List(ctx context.Context, opts ...ListEmailsOptions) (*ListE
 	values := url.Values{}
 	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 20)))
 	values.Set("offset", fmt.Sprintf("%d", o.Offset))
+	if o.Cursor != "" {
+		values.Set("cursor", o.Cursor)
+	}
 	if o.Status != "" {
 		values.Set("status", o.Status)
 	}
@@ -886,6 +958,16 @@ type DNSRecord struct {
 	Value    string `json:"value"`
 	Priority int    `json:"priority,omitempty"`
 	Verified bool   `json:"verified"`
+}
+
+// Envelope represents the SMTP delivery envelope with authentication results.
+type Envelope struct {
+	From      string   `json:"from"`
+	To        []string `json:"to"`
+	DKIM      string   `json:"dkim"`
+	SPF       string   `json:"spf"`
+	DMARC     string   `json:"dmarc"`
+	Timestamp string   `json:"timestamp"`
 }
 
 // CreateDomainRequest is the request body for adding a new domain.
@@ -1045,6 +1127,13 @@ func (a *WebhooksAPI) Delete(ctx context.Context, id string) error {
 	return a.client.do(ctx, http.MethodDelete, "/v1/webhooks/"+url.PathEscape(id), nil, nil)
 }
 
+// Test sends a signed test event to a registered webhook endpoint.
+func (a *WebhooksAPI) Test(ctx context.Context, id string) (map[string]interface{}, error) {
+	var resp map[string]interface{}
+	err := a.client.do(ctx, http.MethodPost, "/v1/webhooks/"+url.PathEscape(id)+"/test", map[string]interface{}{}, &resp)
+	return resp, err
+}
+
 // TemplatesAPI provides methods for managing email templates.
 type TemplatesAPI struct{ client *Client }
 
@@ -1112,6 +1201,7 @@ func (a *TemplatesAPI) GetBySlug(ctx context.Context, slug string) (*GetTemplate
 type ListTemplatesOptions struct {
 	Limit  *int
 	Offset int
+	Cursor string
 }
 
 // ListTemplatesResponse holds a paginated list of templates.
@@ -1129,6 +1219,9 @@ func (a *TemplatesAPI) List(ctx context.Context, opts ...ListTemplatesOptions) (
 	values := url.Values{}
 	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 20)))
 	values.Set("offset", fmt.Sprintf("%d", o.Offset))
+	if o.Cursor != "" {
+		values.Set("cursor", o.Cursor)
+	}
 	query := "?" + values.Encode()
 	var resp ListTemplatesResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/templates"+query, nil, &resp)
@@ -1153,7 +1246,27 @@ type UpdateTemplateResponse struct {
 // Update modifies a template. A new version is created automatically.
 func (a *TemplatesAPI) Update(ctx context.Context, id string, req *UpdateTemplateRequest) (*UpdateTemplateResponse, error) {
 	var resp UpdateTemplateResponse
-	err := a.client.do(ctx, http.MethodPatch, "/v1/templates/"+url.PathEscape(id), req, &resp)
+	err := a.client.do(ctx, http.MethodPut, "/v1/templates/"+url.PathEscape(id), req, &resp)
+	return &resp, err
+}
+
+// Duplicate creates a copy of a template with a new ID.
+func (a *TemplatesAPI) Duplicate(ctx context.Context, id string) (*CreateTemplateResponse, error) {
+	var resp CreateTemplateResponse
+	err := a.client.do(ctx, http.MethodPost, "/v1/templates/"+url.PathEscape(id)+"/duplicate", nil, &resp)
+	return &resp, err
+}
+
+// RollbackTemplateRequest is the request body for rolling back a template.
+type RollbackTemplateRequest struct {
+	Version int `json:"version"`
+}
+
+// Rollback rolls back a template to a previous version.
+func (a *TemplatesAPI) Rollback(ctx context.Context, id string, version int) (*UpdateTemplateResponse, error) {
+	var resp UpdateTemplateResponse
+	err := a.client.do(ctx, http.MethodPost, "/v1/templates/"+url.PathEscape(id)+"/rollback",
+		&RollbackTemplateRequest{Version: version}, &resp)
 	return &resp, err
 }
 
@@ -1204,6 +1317,8 @@ type ListSuppressionsOptions struct {
 	Reason string
 	Limit  *int
 	Offset int
+	Cursor string
+	Tag    string
 }
 
 // Suppression is a suppressed email address record.
@@ -1228,8 +1343,14 @@ func (a *SuppressionsAPI) List(ctx context.Context, opts ...ListSuppressionsOpti
 	values := url.Values{}
 	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 50)))
 	values.Set("offset", fmt.Sprintf("%d", o.Offset))
+	if o.Cursor != "" {
+		values.Set("cursor", o.Cursor)
+	}
 	if o.Reason != "" {
 		values.Set("reason", o.Reason)
+	}
+	if o.Tag != "" {
+		values.Set("tag", o.Tag)
 	}
 	query := "?" + values.Encode()
 	var resp ListSuppressionsResponse
@@ -1256,6 +1377,21 @@ func (a *SuppressionsAPI) Delete(ctx context.Context, email string) error {
 	return a.client.do(ctx, http.MethodDelete, "/v1/suppressions/"+url.PathEscape(email), nil, nil)
 }
 
+// BulkSuppressionsRequest is the request body for bulk suppression changes.
+type BulkSuppressionsRequest struct {
+	Entries []map[string]interface{} `json:"entries"`
+}
+
+// BulkSuppressionsResponse is a flexible bulk suppression response payload.
+type BulkSuppressionsResponse map[string]interface{}
+
+// Bulk adds suppressions through the API bulk endpoint.
+func (a *SuppressionsAPI) Bulk(ctx context.Context, req *BulkSuppressionsRequest) (BulkSuppressionsResponse, error) {
+	var resp BulkSuppressionsResponse
+	err := a.client.do(ctx, http.MethodPost, "/v1/suppressions/bulk", req, &resp)
+	return resp, err
+}
+
 // EventsAPI provides methods for querying email delivery events.
 type EventsAPI struct{ client *Client }
 
@@ -1277,6 +1413,7 @@ type ListEventsOptions struct {
 	End       string
 	Limit     *int
 	Offset    int
+	Cursor    string
 }
 
 // ListEventsResponse holds a paginated list of events.
@@ -1294,6 +1431,9 @@ func (a *EventsAPI) List(ctx context.Context, opts ...ListEventsOptions) (*ListE
 	values := url.Values{}
 	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 50)))
 	values.Set("offset", fmt.Sprintf("%d", o.Offset))
+	if o.Cursor != "" {
+		values.Set("cursor", o.Cursor)
+	}
 	if o.Type != "" {
 		values.Set("type", o.Type)
 	}
@@ -1335,6 +1475,65 @@ func (a *EventsAPI) Get(ctx context.Context, eventID string) (*GetEventResponse,
 	var resp GetEventResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/events/"+url.PathEscape(eventID), nil, &resp)
 	return &resp, err
+}
+
+// EventAggregateOptions filters aggregate event queries.
+type EventAggregateOptions struct {
+	Type      string
+	MessageID string
+	DomainID  string
+	Start     string
+	End       string
+	Interval  string
+}
+
+// EventAggregateResponse is a flexible aggregate event response payload.
+type EventAggregateResponse map[string]interface{}
+
+// Stats returns aggregate event counts with optional filters.
+func (a *EventsAPI) Stats(ctx context.Context, opts ...EventAggregateOptions) (EventAggregateResponse, error) {
+	path := "/v1/events/stats" + eventAggregateQuery(opts...)
+	var resp EventAggregateResponse
+	err := a.client.do(ctx, http.MethodGet, path, nil, &resp)
+	return resp, err
+}
+
+// Timeseries returns event counts over time with optional filters.
+func (a *EventsAPI) Timeseries(ctx context.Context, opts ...EventAggregateOptions) (EventAggregateResponse, error) {
+	path := "/v1/events/timeseries" + eventAggregateQuery(opts...)
+	var resp EventAggregateResponse
+	err := a.client.do(ctx, http.MethodGet, path, nil, &resp)
+	return resp, err
+}
+
+func eventAggregateQuery(opts ...EventAggregateOptions) string {
+	if len(opts) == 0 {
+		return ""
+	}
+	o := opts[0]
+	values := url.Values{}
+	if o.Type != "" {
+		values.Set("type", o.Type)
+	}
+	if o.MessageID != "" {
+		values.Set("messageId", o.MessageID)
+	}
+	if o.DomainID != "" {
+		values.Set("domainId", o.DomainID)
+	}
+	if o.Start != "" {
+		values.Set("start", o.Start)
+	}
+	if o.End != "" {
+		values.Set("end", o.End)
+	}
+	if o.Interval != "" {
+		values.Set("interval", o.Interval)
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return "?" + encoded
+	}
+	return ""
 }
 
 // APIKeysAPI provides API key management helpers.
@@ -1399,12 +1598,13 @@ type AnalyticsOptions struct {
 	To      string
 	GroupBy string
 	Tag     string
+	Domain  string
 }
 
 // AnalyticsResponse is a flexible analytics response payload.
 type AnalyticsResponse map[string]interface{}
 
-// Get fetches analytics with optional filters.
+// Get fetches analytics with required from/to and optional filters.
 func (a *AnalyticsAPI) Get(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
 	var options AnalyticsOptions
 	if len(opts) > 0 {
@@ -1422,6 +1622,9 @@ func (a *AnalyticsAPI) Get(ctx context.Context, opts ...AnalyticsOptions) (Analy
 	}
 	if options.Tag != "" {
 		query.Set("tag", options.Tag)
+	}
+	if options.Domain != "" {
+		query.Set("domain", options.Domain)
 	}
 	path := "/v1/analytics"
 	if encoded := query.Encode(); encoded != "" {

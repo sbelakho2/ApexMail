@@ -184,24 +184,34 @@ groups:
     rules:
       # Email queue backing up
       - alert: EmailQueueBacklog
+        expr: sum(apexmail_email_queue_depth{status=~"pending|deferred"}) > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Email queue backlog is high"
+          description: "More than 10,000 pending or deferred emails have been waiting for 10 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#email-queue-backlog"
+
+      - alert: CriticalEmailQueueBacklog
+        expr: sum(apexmail_email_queue_depth{status=~"pending|deferred"}) > 50000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical email queue backlog"
+          description: "More than 50,000 pending or deferred emails have been waiting for 5 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#critical-email-queue-backlog"
+
+      - alert: RedisMemoryPressure
         expr: redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"} > 0.80
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Redis queue memory pressure"
-          description: "Redis memory usage is above 80%, increasing risk for queue latency."
-          runbook_url: "https://apexmail.ee/docs/alerts#email-queue-backlog"
-
-      - alert: CriticalEmailQueueBacklog
-        expr: redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"} > 0.95
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Critical Redis queue memory pressure"
-          description: "Redis memory usage is above 95%; queue writes may fail under the noeviction policy."
-          runbook_url: "https://apexmail.ee/docs/alerts#critical-email-queue-backlog"
+          summary: "Redis memory pressure"
+          description: "Redis memory usage is above 80%; investigate cache and queue consumers before writes hit noeviction limits."
+          runbook_url: "https://apexmail.ee/docs/alerts#redis-memory-pressure"
 
       # Webhook delivery failures
       - alert: HighWebhookFailureRate
@@ -315,6 +325,16 @@ groups:
           summary: "Postgres connections near limit"
           description: "Postgres connection usage above 90% for 5 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#postgres-high-connections"
+
+      - alert: PostgresReplicationLagHigh
+        expr: max(pg_stat_replication_pg_wal_lsn_diff{job="postgres"}) > 268435456
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Postgres replication lag is high"
+          description: "A Postgres replica is more than 256 MiB behind the primary for 5 minutes."
+          runbook_url: "https://apexmail.ee/docs/alerts#postgres-replication-lag-high"
 
   - name: apexmail-storage
     rules:

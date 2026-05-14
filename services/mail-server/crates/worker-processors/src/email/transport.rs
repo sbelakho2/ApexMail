@@ -77,7 +77,7 @@ impl SmtpTransport {
         } else {
             // Still redact anything that looks like an embedded secret pattern
             let redacted = raw
-                .split(|c: char| c == ' ' || c == '\n')
+                .split([' ', '\n'])
                 .filter(|word| {
                     // Filter out anything that looks like a base64-encoded AUTH string
                     // (typical length > 20 and contains only base64 chars)
@@ -275,8 +275,8 @@ impl EmailTransport for SmtpTransport {
 /// - Bounce/complaint processing (via SNS notifications)
 /// - TLS to recipient MX servers
 /// - Warmup for dedicated IPs
-/// We send raw MIME because it preserves our custom headers, attachments,
-/// and multipart structure exactly as constructed.
+///   We send raw MIME because it preserves our custom headers, attachments,
+///   and multipart structure exactly as constructed.
 pub struct SesTransport {
     client: SesClient,
     config: SesConfig,

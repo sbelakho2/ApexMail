@@ -544,7 +544,7 @@ pub struct CoordinatorHub {
     /// Rate limit coordinator
     rate_limiter: Arc<RwLock<RateLimitCoordinator>>,
     /// Event ID cache for deduplication
-    seen_events: Arc<RwLock<HashSet<String>>>,
+    seen_events: Arc<RwLock<HashMap<String, Instant>>>,
     /// Configuration
     config: CoordinatorConfig,
 }
@@ -613,7 +613,7 @@ impl CoordinatorHub {
             node_id,
             blocklist: Arc::new(RwLock::new(blocklist)),
             rate_limiter: Arc::new(RwLock::new(rate_limiter)),
-            seen_events: Arc::new(RwLock::new(HashSet::new())),
+            seen_events: Arc::new(RwLock::new(HashMap::new())),
             config,
         }
     }
@@ -664,10 +664,12 @@ impl CoordinatorHub {
         // Check for duplicate
         {
             let mut seen = self.seen_events.write().await;
-            if seen.contains(&event.event_id) {
+            let cutoff = Instant::now() - self.config.event_retention;
+            seen.retain(|_, seen_at| *seen_at >= cutoff);
+            if seen.contains_key(&event.event_id) {
                 return false;
             }
-            seen.insert(event.event_id.clone());
+            seen.insert(event.event_id.clone(), Instant::now());
         }
 
         // Ignore expired events
@@ -741,8 +743,12 @@ impl CoordinatorHub {
             blocklist.cleanup_expired();
         }
 
-        // Cleanup seen events (keep last hour)
-        // In real implementation, this would use timestamps
+        // Cleanup seen events using the configured deduplication retention window.
+        {
+            let cutoff = Instant::now() - self.config.event_retention;
+            let mut seen = self.seen_events.write().await;
+            seen.retain(|_, seen_at| *seen_at >= cutoff);
+        }
     }
 }
 

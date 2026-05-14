@@ -179,7 +179,7 @@ impl Default for TrackingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            base_url: "https://tracking.localhost".to_string(),
+            base_url: "https://tracking.apexmail.ee".to_string(),
             open_pixel_path: "/o".to_string(),
             click_redirect_path: "/c".to_string(),
         }

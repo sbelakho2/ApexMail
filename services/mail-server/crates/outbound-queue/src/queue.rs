@@ -3,9 +3,9 @@
 //! Persistent queue for outbound emails with retry logic and per-domain
 //! rate limiting.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use futures::future::join_all;
+use futures::stream::StreamExt;
 use governor::{DefaultKeyedRateLimiter, Quota};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -13,6 +13,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -32,20 +33,15 @@ pub enum CancelResult {
 }
 
 /// Email status in the queue
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, Default)]
 #[sqlx(type_name = "email_status", rename_all = "lowercase")]
 pub enum EmailStatus {
+    #[default]
     Pending,
     Processing,
     Sent,
     Failed,
     Deferred,
-}
-
-impl Default for EmailStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 /// Queued email record
@@ -95,6 +91,15 @@ pub struct QueueConfig {
     /// Maximum outbound messages per second per tenant.
     /// 0 = unlimited. Default: 20.
     pub tenant_rate_per_second: u64,
+    /// Maximum concurrent email processing futures within a batch.
+    /// Prevents unbounded concurrency when batch_size is large (DB-4).
+    /// Default: 50.
+    pub max_concurrent_emails: usize,
+    /// DB-14: Sampling rate (0.0–1.0) for dead-lettering non-bounce permanently
+    /// failed emails. 0.0 = never sample (backward compatible), 1.0 = always.
+    /// Default: 0.01 (1% — enough for forensic visibility without filling the
+    /// dead-letter queue).
+    pub dead_letter_sample_rate: f64,
 }
 
 const DEFAULT_QUEUE_MAX_ATTEMPTS: i32 = 5;
@@ -106,6 +111,7 @@ const DEFAULT_QUEUE_WORKER_COUNT: usize = 4;
 const DEFAULT_GLOBAL_RATE_PER_SECOND: u64 = 50;
 const DEFAULT_DOMAIN_RATE_PER_SECOND: u64 = 10;
 const DEFAULT_TENANT_RATE_PER_SECOND: u64 = 20;
+const DEFAULT_MAX_CONCURRENT_EMAILS: usize = 50;
 
 impl Default for QueueConfig {
     fn default() -> Self {
@@ -140,6 +146,8 @@ impl Default for QueueConfig {
             global_rate_per_second: global_rate,
             domain_rate_per_second: domain_rate,
             tenant_rate_per_second: tenant_rate,
+            max_concurrent_emails: DEFAULT_MAX_CONCURRENT_EMAILS,
+            dead_letter_sample_rate: 0.01,
         }
     }
 }
@@ -169,6 +177,20 @@ pub struct EmailQueue {
     tenant_limiter: Option<Arc<DefaultKeyedRateLimiter<String>>>,
     /// Per-provider reputation-driven throttle.  Optional so tests can omit.
     provider_throttle: Option<Arc<ProviderThrottle>>,
+}
+
+/// Decision returned by [`check_rate_limits`] indicating which rate limit,
+/// if any, was exceeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RateLimitDecision {
+    /// All rate limits passed — the request may proceed.
+    Allowed,
+    /// Global rate limit was exceeded.
+    GlobalExceeded,
+    /// Per-domain rate limit was exceeded for the given domain.
+    DomainExceeded(String),
+    /// Per-tenant rate limit was exceeded.
+    TenantExceeded,
 }
 
 impl EmailQueue {
@@ -232,14 +254,29 @@ impl EmailQueue {
 
     /// Extract the domain part from an email address.
     /// e.g. "user@example.com" → "example.com"
+    /// Deterministic sampling using the UUID's hash to avoid a `rand` dependency.
+    /// Returns `true` if the email's ID falls within the sample rate.
+    fn sample_dead_letter(id: &Uuid, rate: f64) -> bool {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut hasher);
+        let hash = hasher.finish();
+        let normalized = (hash as f64) / (u64::MAX as f64);
+        normalized < rate
+    }
+
     fn extract_domain(addr: &str) -> String {
         addr.rsplit('@').next().unwrap_or("unknown").to_lowercase()
     }
 
     /// Check whether sending to the given recipient domains and tenant
-    /// should be rate-limited. Returns `Ok(())` if allowed, or an error
-    /// with a descriptive message if rate-limited.
-    fn check_rate_limits(&self, to_addresses: &[String], tenant_id: Option<&str>) -> Result<()> {
+    /// should be rate-limited. Returns [`RateLimitDecision::Allowed`] if the
+    /// request may proceed, or the specific exceeded variant otherwise.
+    fn check_rate_limits(
+        &self,
+        to_addresses: &[String],
+        tenant_id: Option<&str>,
+    ) -> RateLimitDecision {
         // Collect unique recipient domains
         let mut domains: Vec<String> = to_addresses
             .iter()
@@ -251,10 +288,7 @@ impl EmailQueue {
         // Check global rate limit (keyed by "__global__")
         if let Some(ref limiter) = self.global_limiter {
             if limiter.check_key(&"__global__".to_string()).is_err() {
-                return Err(anyhow::anyhow!(
-                    "Global rate limit exceeded (max {} msg/s)",
-                    self.config.global_rate_per_second
-                ));
+                return RateLimitDecision::GlobalExceeded;
             }
         }
 
@@ -262,11 +296,7 @@ impl EmailQueue {
         if let Some(ref limiter) = self.domain_limiter {
             for domain in &domains {
                 if limiter.check_key(domain).is_err() {
-                    return Err(anyhow::anyhow!(
-                        "Domain rate limit exceeded for '{}' (max {} msg/s)",
-                        domain,
-                        self.config.domain_rate_per_second
-                    ));
+                    return RateLimitDecision::DomainExceeded(domain.clone());
                 }
             }
         }
@@ -275,19 +305,17 @@ impl EmailQueue {
         if let Some(ref limiter) = self.tenant_limiter {
             let tenant_key = tenant_id.unwrap_or("__no_tenant__").to_string();
             if limiter.check_key(&tenant_key).is_err() {
-                return Err(anyhow::anyhow!(
-                    "Tenant rate limit exceeded for '{}' (max {} msg/s)",
-                    tenant_key,
-                    self.config.tenant_rate_per_second
-                ));
+                return RateLimitDecision::TenantExceeded;
             }
         }
 
-        Ok(())
+        RateLimitDecision::Allowed
     }
 
     /// Initialize queue tables
     pub async fn initialize(&self) -> Result<()> {
+        self.ensure_compatible_email_queue_schema().await?;
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS email_queue (
@@ -312,6 +340,22 @@ impl EmailQueue {
                 priority INT NOT NULL DEFAULT 0,
                 tenant_id TEXT
             )
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::raw_sql(
+            r#"
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS sequence_id UUID;
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS contact_id UUID;
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS last_error TEXT;
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS text_body TEXT;
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS html_body TEXT;
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS from_address TEXT;
+            ALTER TABLE email_queue ADD COLUMN IF NOT EXISTS to_addresses TEXT[];
         "#,
         )
         .execute(&self.pool)
@@ -395,40 +439,120 @@ impl EmailQueue {
         Ok(())
     }
 
+    async fn ensure_compatible_email_queue_schema(&self) -> Result<()> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'email_queue'
+            )
+        "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        if !exists {
+            return Ok(());
+        }
+
+        let has_service_schema = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'email_queue'
+                  AND column_name = 'from_address'
+            )
+        "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        if has_service_schema {
+            return Ok(());
+        }
+
+        let row_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM email_queue")
+            .fetch_one(&self.pool)
+            .await?;
+
+        if row_count > 0 {
+            bail!(
+                "email_queue uses the legacy schema and contains {row_count} rows; migrate it before starting outbound-queue"
+            );
+        }
+
+        warn!("Dropping empty legacy email_queue table so outbound-queue can create its runtime schema");
+        sqlx::query("DROP TABLE email_queue CASCADE")
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
     /// Enqueue an email
     ///
     /// Applies rate limits before accepting the email into the queue.
     /// If rate-limited, returns an error immediately.
     pub async fn enqueue(&self, email: QueuedEmail) -> Result<Uuid> {
         // Check rate limits before accepting into queue
-        self.check_rate_limits(&email.to_addresses, email.tenant_id.as_deref())?;
+        match self.check_rate_limits(&email.to_addresses, email.tenant_id.as_deref()) {
+            RateLimitDecision::Allowed => {}
+            RateLimitDecision::GlobalExceeded => {
+                return Err(anyhow::anyhow!(
+                    "Global rate limit exceeded (max {} msg/s)",
+                    self.config.global_rate_per_second
+                ));
+            }
+            RateLimitDecision::DomainExceeded(domain) => {
+                return Err(anyhow::anyhow!(
+                    "Domain rate limit exceeded for '{}' (max {} msg/s)",
+                    domain,
+                    self.config.domain_rate_per_second
+                ));
+            }
+            RateLimitDecision::TenantExceeded => {
+                let tenant_key = email.tenant_id.as_deref().unwrap_or("__no_tenant__");
+                return Err(anyhow::anyhow!(
+                    "Tenant rate limit exceeded for '{}' (max {} msg/s)",
+                    tenant_key,
+                    self.config.tenant_rate_per_second
+                ));
+            }
+        }
 
-        let id = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            INSERT INTO email_queue (
-                id, from_address, to_addresses, subject, text_body, html_body,
-                headers, status, max_attempts, campaign_id, sequence_id,
-                contact_id, priority, tenant_id
+        let id = timeout(
+            Duration::from_secs(30),
+            sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO email_queue (
+                    id, from_address, to_addresses, subject, text_body, html_body,
+                    headers, status, max_attempts, campaign_id, sequence_id,
+                    contact_id, priority, tenant_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13)
+                RETURNING id
+            "#,
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13)
-            RETURNING id
-        "#,
+            .bind(email.id)
+            .bind(&email.from_address)
+            .bind(&email.to_addresses)
+            .bind(&email.subject)
+            .bind(&email.text_body)
+            .bind(&email.html_body)
+            .bind(&email.headers)
+            .bind(email.max_attempts) // #112:Use the email's own max_attempts, not global config
+            .bind(email.campaign_id)
+            .bind(email.sequence_id)
+            .bind(email.contact_id)
+            .bind(email.priority)
+            .bind(&email.tenant_id)
+            .fetch_one(&self.pool),
         )
-        .bind(&email.id)
-        .bind(&email.from_address)
-        .bind(&email.to_addresses)
-        .bind(&email.subject)
-        .bind(&email.text_body)
-        .bind(&email.html_body)
-        .bind(&email.headers)
-        .bind(email.max_attempts) // #112:Use the email's own max_attempts, not global config
-        .bind(&email.campaign_id)
-        .bind(&email.sequence_id)
-        .bind(&email.contact_id)
-        .bind(email.priority)
-        .bind(&email.tenant_id)
-        .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("enqueue query timed out after 30s"))??;
 
         debug!(email_id = %id, "Email enqueued");
         Ok(id)
@@ -476,38 +600,44 @@ impl EmailQueue {
                 .bind(&email.html_body)
                 .bind(&email.headers)
                 .bind(email.max_attempts)
-                .bind(&email.campaign_id)
-                .bind(&email.sequence_id)
-                .bind(&email.contact_id)
+                .bind(email.campaign_id)
+                .bind(email.sequence_id)
+                .bind(email.contact_id)
                 .bind(email.priority)
                 .bind(&email.tenant_id);
         }
 
-        let returned_ids = query.fetch_all(&self.pool).await?;
+        let returned_ids = timeout(Duration::from_secs(30), query.fetch_all(&self.pool))
+            .await
+            .map_err(|_| anyhow::anyhow!("enqueue_batch query timed out after 30s"))??;
         info!(count = returned_ids.len(), "Batch emails enqueued");
         Ok(returned_ids)
     }
 
     /// Fetch pending emails for processing
     pub async fn fetch_pending(&self, limit: i64) -> Result<Vec<QueuedEmail>> {
-        let rows = sqlx::query(
-            r#"
-            UPDATE email_queue
-            SET status = 'processing', updated_at = NOW()
-            WHERE id IN (
-                SELECT id FROM email_queue
-                WHERE status IN ('pending', 'deferred')
-                AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-                ORDER BY priority DESC, created_at ASC
-                LIMIT $1
-                FOR UPDATE SKIP LOCKED
+        let rows = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                UPDATE email_queue
+                SET status = 'processing', updated_at = NOW()
+                WHERE id IN (
+                    SELECT id FROM email_queue
+                    WHERE status IN ('pending', 'deferred')
+                    AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+                    ORDER BY priority DESC, created_at ASC
+                    LIMIT $1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING *
+            "#,
             )
-            RETURNING *
-        "#,
+            .bind(limit)
+            .fetch_all(&self.pool),
         )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("fetch_pending query timed out after 30s"))??;
 
         let emails = rows
             .iter()
@@ -540,16 +670,20 @@ impl EmailQueue {
 
     /// Mark email as sent
     pub async fn mark_sent(&self, id: &Uuid) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE email_queue
-            SET status = 'sent', sent_at = NOW(), updated_at = NOW()
-            WHERE id = $1
-        "#,
+        timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                UPDATE email_queue
+                SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+                WHERE id = $1
+            "#,
+            )
+            .bind(id)
+            .execute(&self.pool),
         )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("mark_sent query timed out after 30s"))??;
 
         debug!(email_id = %id, "Email marked as sent");
         Ok(())
@@ -557,14 +691,18 @@ impl EmailQueue {
 
     /// Get queued email by ID
     pub async fn get_email(&self, id: &Uuid) -> Result<Option<QueuedEmail>> {
-        let row = sqlx::query(
-            r#"
-            SELECT * FROM email_queue WHERE id = $1
-        "#,
+        let row = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                SELECT * FROM email_queue WHERE id = $1
+            "#,
+            )
+            .bind(id)
+            .fetch_optional(&self.pool),
         )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("get_email query timed out after 30s"))??;
 
         let email = row.map(|row| {
             let status = match row.get::<String, _>("status").as_str() {
@@ -610,31 +748,38 @@ impl EmailQueue {
     /// exist or is in a non-cancellable state — a follow-up SELECT distinguishes
     /// the two cases.
     pub async fn cancel_email_atomic(&self, id: &Uuid) -> Result<CancelResult> {
-        let result = sqlx::query(
-            r#"
-            UPDATE email_queue
-            SET status = 'failed',
-                last_error = 'Cancelled by user',
-                updated_at = NOW()
-            WHERE id = $1
-              AND status IN ('pending', 'deferred')
-            RETURNING id
-        "#,
+        let result = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                UPDATE email_queue
+                SET status = 'failed',
+                    last_error = 'Cancelled by user',
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status IN ('pending', 'deferred')
+                RETURNING id
+            "#,
+            )
+            .bind(id)
+            .fetch_optional(&self.pool),
         )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("cancel_email_atomic UPDATE timed out after 30s"))??;
 
         if result.is_some() {
             return Ok(CancelResult::Cancelled);
         }
 
         // Zero rows affected — determine why
-        let existing =
+        let existing = timeout(
+            Duration::from_secs(30),
             sqlx::query_scalar::<_, String>("SELECT status FROM email_queue WHERE id = $1")
                 .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
+                .fetch_optional(&self.pool),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("cancel_email_atomic status check timed out after 30s"))??;
 
         match existing.as_deref() {
             None => Ok(CancelResult::NotFound),
@@ -673,17 +818,21 @@ impl EmailQueue {
     /// undeliverable bounces.
     async fn move_to_dead_letter(&self, id: &Uuid, error: &str) -> Result<()> {
         // Fetch the full email record for dead-letter storage
-        let row = sqlx::query(
-            r#"
-            SELECT
-                from_address, to_addresses, subject, text_body, html_body,
-                headers, attempts, max_attempts, created_at, tenant_id
-            FROM email_queue WHERE id = $1
-        "#,
+        let row = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                SELECT
+                    from_address, to_addresses, subject, text_body, html_body,
+                    headers, attempts, max_attempts, created_at, tenant_id
+                FROM email_queue WHERE id = $1
+            "#,
+            )
+            .bind(id)
+            .fetch_optional(&self.pool),
         )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("move_to_dead_letter SELECT timed out after 30s"))??;
 
         let row = match row {
             Some(r) => r,
@@ -692,43 +841,47 @@ impl EmailQueue {
                 return Ok(());
             }
         };
-
         let from_address: String = row.get("from_address");
         let subject: String = row.get("subject");
 
-        // Only dead-letter bounce notifications, not regular email failures
-        if !Self::is_bounce_email(&from_address) {
-            debug!(email_id = %id, "Not a bounce email; skipping dead-letter");
-            return Ok(());
-        }
+        // DB-14: Non-bounce failures may now arrive here via sampling in
+        // `mark_failed`. Use a sentinel bounce type for non-bounce entries
+        // so they are distinguishable in the dead-letter queue.
+        let bounce_type = if Self::is_bounce_email(&from_address) {
+            detect_bounce_type(&from_address, &subject)
+        } else {
+            "sampled_failure".to_string()
+        };
 
-        let bounce_type = detect_bounce_type(&from_address, &subject);
-
-        sqlx::query(
-            r#"
-            INSERT INTO dead_letter_queue (
-                id, original_email_id, from_address, to_addresses, subject,
-                text_body, html_body, headers, attempts, max_attempts,
-                last_error, bounce_type, created_at, dead_lettered_at, tenant_id
+        timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                INSERT INTO dead_letter_queue (
+                    id, original_email_id, from_address, to_addresses, subject,
+                    text_body, html_body, headers, attempts, max_attempts,
+                    last_error, bounce_type, created_at, dead_lettered_at, tenant_id
+                )
+                VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13)
+            "#,
             )
-            VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13)
-        "#,
+            .bind(id)
+            .bind(&from_address)
+            .bind(row.get::<Vec<String>, _>("to_addresses"))
+            .bind(&subject)
+            .bind(row.get::<Option<String>, _>("text_body"))
+            .bind(row.get::<Option<String>, _>("html_body"))
+            .bind(row.get::<serde_json::Value, _>("headers"))
+            .bind(row.get::<i32, _>("attempts"))
+            .bind(row.get::<i32, _>("max_attempts"))
+            .bind(error)
+            .bind(&bounce_type)
+            .bind(row.get::<chrono::DateTime<Utc>, _>("created_at"))
+            .bind(row.get::<Option<String>, _>("tenant_id"))
+            .execute(&self.pool),
         )
-        .bind(id)
-        .bind(&from_address)
-        .bind(row.get::<Vec<String>, _>("to_addresses"))
-        .bind(&subject)
-        .bind(row.get::<Option<String>, _>("text_body"))
-        .bind(row.get::<Option<String>, _>("html_body"))
-        .bind(row.get::<serde_json::Value, _>("headers"))
-        .bind(row.get::<i32, _>("attempts"))
-        .bind(row.get::<i32, _>("max_attempts"))
-        .bind(error)
-        .bind(&bounce_type)
-        .bind(row.get::<chrono::DateTime<Utc>, _>("created_at"))
-        .bind(row.get::<Option<String>, _>("tenant_id"))
-        .execute(&self.pool)
         .await
+        .map_err(|_| anyhow::anyhow!("move_to_dead_letter INSERT timed out after 30s"))?
         .map_err(|e| anyhow::anyhow!("Failed to insert dead-letter record: {}", e))?;
 
         metrics::counter!("outbound.dead_letter.bounces", "bounce_type" => bounce_type.clone())
@@ -752,34 +905,42 @@ impl EmailQueue {
         // longer than ProviderThrottle's cache TTL so the next look will
         // hit fresh data.
         let next_retry = Utc::now() + chrono::Duration::seconds(90);
-        sqlx::query(
-            r#"
-            UPDATE email_queue
-            SET status = 'deferred',
-                last_error = $2,
-                next_retry_at = $3,
-                updated_at = NOW()
-            WHERE id = $1
-            "#,
+        timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                UPDATE email_queue
+                SET status = 'deferred',
+                    last_error = $2,
+                    next_retry_at = $3,
+                    updated_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(reason)
+            .bind(next_retry)
+            .execute(&self.pool),
         )
-        .bind(id)
-        .bind(reason)
-        .bind(next_retry)
-        .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("mark_throttled query timed out after 30s"))??;
         Ok(())
     }
 
     /// Mark email as failed
     pub async fn mark_failed(&self, id: &Uuid, error: &str, defer: bool) -> Result<()> {
-        let email = sqlx::query(
-            r#"
-            SELECT attempts, max_attempts, from_address FROM email_queue WHERE id = $1
-        "#,
+        let email = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                SELECT attempts, max_attempts, from_address FROM email_queue WHERE id = $1
+            "#,
+            )
+            .bind(id)
+            .fetch_one(&self.pool),
         )
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("mark_failed SELECT timed out after 30s"))??;
 
         let attempts: i32 = email.get("attempts");
         let max_attempts: i32 = email.get("max_attempts");
@@ -799,20 +960,24 @@ impl EmailQueue {
                 .unwrap_or_else(|_| chrono::Duration::seconds(300)); // fallback:5 minutes
             let next_retry = Utc::now() + chrono_delay;
 
-            sqlx::query(
-                r#"
-                UPDATE email_queue
-                SET status = 'deferred', attempts = $2, last_error = $3,
-                    next_retry_at = $4, updated_at = NOW()
-                WHERE id = $1
-            "#,
+            timeout(
+                Duration::from_secs(30),
+                sqlx::query(
+                    r#"
+                    UPDATE email_queue
+                    SET status = 'deferred', attempts = $2, last_error = $3,
+                        next_retry_at = $4, updated_at = NOW()
+                    WHERE id = $1
+                "#,
+                )
+                .bind(id)
+                .bind(new_attempts)
+                .bind(error)
+                .bind(next_retry)
+                .execute(&self.pool),
             )
-            .bind(id)
-            .bind(new_attempts)
-            .bind(error)
-            .bind(next_retry)
-            .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|_| anyhow::anyhow!("mark_failed defer UPDATE timed out after 30s"))??;
 
             warn!(
                 email_id = %id,
@@ -821,28 +986,44 @@ impl EmailQueue {
                 "Email deferred for retry"
             );
         } else {
-            sqlx::query(
-                r#"
-                UPDATE email_queue
-                SET status = 'failed', attempts = $2, last_error = $3, updated_at = NOW()
-                WHERE id = $1
-            "#,
+            timeout(
+                Duration::from_secs(30),
+                sqlx::query(
+                    r#"
+                    UPDATE email_queue
+                    SET status = 'failed', attempts = $2, last_error = $3, updated_at = NOW()
+                    WHERE id = $1
+                "#,
+                )
+                .bind(id)
+                .bind(new_attempts)
+                .bind(error)
+                .execute(&self.pool),
             )
-            .bind(id)
-            .bind(new_attempts)
-            .bind(error)
-            .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|_| anyhow::anyhow!("mark_failed permanent UPDATE timed out after 30s"))??;
 
             error!(email_id = %id, error = error, "Email permanently failed");
 
-            // MI-008: Move bounce notifications to the dead-letter queue
-            if Self::is_bounce_email(&from_address) {
+            // MI-008 / DB-14: Move bounce notifications to the dead-letter queue.
+            // For non-bounce permanently failed emails, apply configurable sampling
+            // (dead_letter_sample_rate, default 1%) to provide a forensic trail
+            // without filling the dead-letter queue with routine failures.
+            // Uses deterministic hash-based sampling to avoid depending on `rand`.
+            let is_bounce = Self::is_bounce_email(&from_address);
+            let sample = !is_bounce
+                && self.config.dead_letter_sample_rate > 0.0
+                && Self::sample_dead_letter(id, self.config.dead_letter_sample_rate);
+            if is_bounce || sample {
+                if sample {
+                    debug!(email_id = %id, sample_rate = self.config.dead_letter_sample_rate,
+                        "Sampling non-bounce failure for dead-letter queue");
+                }
                 if let Err(e) = self.move_to_dead_letter(id, error).await {
                     error!(
                         email_id = %id,
                         dead_letter_error = %e,
-                        "Failed to move bounce to dead-letter queue"
+                        "Failed to move email to dead-letter queue"
                     );
                 }
             }
@@ -863,7 +1044,11 @@ impl EmailQueue {
                 let decision = throttle
                     .decide(&sender_domain, &recip_domain, email.tenant_id.as_deref())
                     .await;
-                if let ThrottleDecision::Defer { reason, throttle_pct } = decision {
+                if let ThrottleDecision::Defer {
+                    reason,
+                    throttle_pct,
+                } = decision
+                {
                     info!(
                         email_id = %email.id,
                         recipient,
@@ -871,9 +1056,7 @@ impl EmailQueue {
                         reason = %reason,
                         "Deferring outbound message per provider reputation throttle"
                     );
-                    return Err(anyhow::anyhow!(
-                        "provider_throttle: {reason}"
-                    ));
+                    return Err(anyhow::anyhow!("provider_throttle: {reason}"));
                 }
             }
         }
@@ -902,12 +1085,18 @@ impl EmailQueue {
     }
 
     /// Start the queue processor
+    ///
+    /// DB-12: `process_batch()` is wrapped in a 5-minute timeout so that a slow
+    /// batch cannot indefinitely delay shutdown. If the timeout fires the loop
+    /// simply retries on the next poll interval.
     pub async fn start_processing(self: std::sync::Arc<Self>, mut shutdown: mpsc::Receiver<()>) {
         info!(
             workers = self.config.worker_count,
             batch_size = self.config.batch_size,
             "Starting email queue processor"
         );
+
+        const BATCH_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
 
         loop {
             tokio::select! {
@@ -916,8 +1105,10 @@ impl EmailQueue {
                     break;
                 }
                 _ = tokio::time::sleep(self.config.poll_interval) => {
-                    if let Err(e) = self.process_batch().await {
-                        error!(error = %e, "Failed to process email batch");
+                    match tokio::time::timeout(BATCH_TIMEOUT, self.process_batch()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => error!(error = %e, "Failed to process email batch"),
+                        Err(_) => error!("Email batch processing timed out — will retry on next poll interval"),
                     }
                 }
             }
@@ -963,7 +1154,9 @@ impl EmailQueue {
                     .copied()
                     .unwrap_or(10); // default weight for unknown tenants
 
-                let queue = by_tenant.get_mut(key).unwrap();
+                let queue = by_tenant
+                    .get_mut(key)
+                    .expect("invariant: key was just verified to exist in by_tenant");
                 let to_take = weight.min(queue.len());
                 if to_take > 0 {
                     any_progress = true;
@@ -978,16 +1171,32 @@ impl EmailQueue {
             }
         }
 
-        // Process scheduled emails concurrently
-        let futures: Vec<_> = scheduled
-            .iter()
-            .map(|email| async {
+        // Process scheduled emails concurrently with bounded concurrency.
+        //
+        // # Performance (DB-4)
+        //
+        // **Root cause**: `join_all(futures)` launched all N futures at once
+        // (up to `batch_size` which defaults to 100), causing unbounded
+        // concurrency that could overwhelm SMTP connections, DNS resolvers,
+        // and database connection pools.
+        //
+        // **Fix**: Replaced `join_all` with `buffer_unordered(N)` where N
+        // = `max_concurrent_emails` (default: 50). This bounds the number
+        // of concurrently-polled futures to N, preventing resource exhaustion
+        // while still allowing pipeline parallelism within a batch.
+        let max_concurrent = self.config.max_concurrent_emails;
+        // Pre-build futures to avoid HRTB issues with async closures in stream combinators.
+        let futs: Vec<_> = scheduled
+            .into_iter()
+            .map(|email| async move {
                 let result = self.process_email(email).await;
                 (email.id, result)
             })
             .collect();
-
-        let results = join_all(futures).await;
+        let results: Vec<_> = futures::stream::iter(futs)
+            .buffer_unordered(max_concurrent)
+            .collect()
+            .await;
 
         for (email_id, result) in results {
             match result {
@@ -1016,40 +1225,50 @@ impl EmailQueue {
 
     /// Get queue statistics
     pub async fn get_stats(&self) -> Result<QueueStats> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                COUNT(*) FILTER (WHERE status = 'pending') as pending,
-                COUNT(*) FILTER (WHERE status = 'processing') as processing,
-                COUNT(*) FILTER (WHERE status = 'sent') as sent,
-                COUNT(*) FILTER (WHERE status = 'failed') as failed,
-                COUNT(*) FILTER (WHERE status = 'deferred') as deferred
-            FROM email_queue
-        "#,
+        let row = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                    COUNT(*) FILTER (WHERE status = 'processing') as processing,
+                    COUNT(*) FILTER (WHERE status = 'sent') as sent,
+                    COUNT(*) FILTER (WHERE status = 'failed') as failed,
+                    COUNT(*) FILTER (WHERE status = 'deferred') as deferred
+                FROM email_queue
+            "#,
+            )
+            .fetch_one(&self.pool),
         )
-        .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("get_stats query timed out after 30s"))??;
 
-        Ok(QueueStats {
+        let stats = QueueStats {
             pending: row.get::<i64, _>("pending") as u64,
             processing: row.get::<i64, _>("processing") as u64,
             sent: row.get::<i64, _>("sent") as u64,
             failed: row.get::<i64, _>("failed") as u64,
             deferred: row.get::<i64, _>("deferred") as u64,
-        })
+        };
+        stats.record_metrics();
+        Ok(stats)
     }
 
     /// Purge old sent emails
     pub async fn purge_old(&self, days: i32) -> Result<u64> {
-        let result = sqlx::query(
-            r#"
-            DELETE FROM email_queue
-            WHERE status = 'sent' AND sent_at < NOW() - $1::interval
-        "#,
+        let result = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                DELETE FROM email_queue
+                WHERE status = 'sent' AND sent_at < NOW() - $1::interval
+            "#,
+            )
+            .bind(format!("{} days", days))
+            .execute(&self.pool),
         )
-        .bind(format!("{} days", days))
-        .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("purge_old query timed out after 30s"))??;
 
         let count = result.rows_affected();
         info!(count = count, days = days, "Purged old sent emails");
@@ -1058,16 +1277,20 @@ impl EmailQueue {
 
     /// Cancel pending emails for a campaign
     pub async fn cancel_campaign(&self, campaign_id: &Uuid) -> Result<u64> {
-        let result = sqlx::query(
-            r#"
-            UPDATE email_queue
-            SET status = 'failed', last_error = 'Campaign cancelled', updated_at = NOW()
-            WHERE campaign_id = $1 AND status IN ('pending', 'deferred')
-        "#,
+        let result = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                UPDATE email_queue
+                SET status = 'failed', last_error = 'Campaign cancelled', updated_at = NOW()
+                WHERE campaign_id = $1 AND status IN ('pending', 'deferred')
+            "#,
+            )
+            .bind(campaign_id)
+            .execute(&self.pool),
         )
-        .bind(campaign_id)
-        .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|_| anyhow::anyhow!("cancel_campaign query timed out after 30s"))??;
 
         let count = result.rows_affected();
         info!(campaign_id = %campaign_id, count = count, "Cancelled campaign emails");
@@ -1088,6 +1311,18 @@ pub struct QueueStats {
 impl QueueStats {
     pub fn total(&self) -> u64 {
         self.pending + self.processing + self.sent + self.failed + self.deferred
+    }
+
+    pub fn record_metrics(&self) {
+        for (status, depth) in [
+            ("pending", self.pending),
+            ("processing", self.processing),
+            ("sent", self.sent),
+            ("failed", self.failed),
+            ("deferred", self.deferred),
+        ] {
+            metrics::gauge!("apexmail_email_queue_depth", "status" => status).set(depth as f64);
+        }
     }
 }
 

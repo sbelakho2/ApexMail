@@ -1,0 +1,21 @@
+{# ── Privacy-First Analytics Pixel ──────────────────────────── #}
+{# Uses script shielding: when analytics_enabled is false (dev)   #}
+{# OR consent hasn't been given, the script is type="text/plain" #}
+{# which prevents execution. JS unshields it after consent.      #}
+{# ───────────────────────────────────────────────────────────── #}
+
+{% set analytics_enabled = config.extra.analytics_enabled | default(value=false) %}
+{% set analytics_host = config.extra.analytics_host | default(value="analytics.apexmail.ee") %}
+{% set analytics_domain = config.extra.analytics_domain | default(value="apexmail.ee") %}
+
+{% if analytics_enabled %}
+<script
+  defer
+  id="apex-analytics"
+  data-domain="{{ analytics_domain }}"
+  data-api="https://{{ analytics_host }}/api/event"
+  src="https://{{ analytics_host }}/js/script.js"
+  type="text/plain"
+  data-consent-shield
+></script>
+{% endif %}

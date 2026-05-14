@@ -336,6 +336,7 @@ impl PrivateDeployService {
              FOR UPDATE SKIP LOCKED"
         };
 
+        #[allow(clippy::type_complexity)]
         let pool_row: Option<(
             Uuid,
             String,
@@ -690,7 +691,7 @@ pub fn calculate_reputation(bounce_rate: f64, complaint_rate: f64, blocklisted: 
         score -= 30.0;
     }
 
-    score.max(0.0).min(100.0)
+    score.clamp(0.0, 100.0)
 }
 
 /// Shared HTTP client for health checks — avoids TLS handshake per request
@@ -703,8 +704,11 @@ fn health_client() -> &'static reqwest::Client {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "Failed to build health check client, using default");
-                reqwest::Client::new()
+                tracing::error!(error = %e, "Failed to build health check client, using fallback with timeout");
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .expect("Client::builder with only timeout should never fail")
             })
     })
 }

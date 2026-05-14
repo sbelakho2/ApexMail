@@ -43,12 +43,22 @@ impl GraderState {
             let key = config
                 .encryption_master_key_base64
                 .as_deref()
-                .ok_or_else(|| "encrypt_stored_content=true but no master key configured".to_string())?;
-            Some(Cipher::from_base64_key(key).map_err(|e| format!("encryption master key rejected: {e}"))?)
+                .ok_or_else(|| {
+                    "encrypt_stored_content=true but no master key configured".to_string()
+                })?;
+            Some(
+                Cipher::from_base64_key(key)
+                    .map_err(|e| format!("encryption master key rejected: {e}"))?,
+            )
         } else {
             None
         };
-        Ok(Self { engine, config, db, cipher })
+        Ok(Self {
+            engine,
+            config,
+            db,
+            cipher,
+        })
     }
 }
 
@@ -66,7 +76,11 @@ fn ok<T: serde::Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>) {
         Ok(v) => (StatusCode::OK, Json(v)),
         Err(e) => {
             tracing::error!(error = %e, "grader: serialization failed");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERIALIZATION", "failed to serialize response")
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_SERIALIZATION",
+                "failed to serialize response",
+            )
         }
     }
 }
@@ -74,39 +88,67 @@ fn ok<T: serde::Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>) {
 fn map_grader_error(e: GraderError) -> (StatusCode, Json<serde_json::Value>) {
     match e {
         GraderError::InvalidDomain(msg) => err(StatusCode::BAD_REQUEST, "INVALID_INPUT", &msg),
-        GraderError::DomainNotFound(d) => err(StatusCode::NOT_FOUND, "DOMAIN_NOT_FOUND",
-            &format!("domain {d} does not exist")),
-        GraderError::BodyTooLarge(actual, max) => err(StatusCode::PAYLOAD_TOO_LARGE, "BODY_TOO_LARGE",
-            &format!("email body too large: {actual} bytes (max {max})")),
-        GraderError::TenantBudgetExhausted => err(StatusCode::TOO_MANY_REQUESTS, "TENANT_BUDGET",
-            "tenant DNS budget exhausted; retry later"),
+        GraderError::DomainNotFound(d) => err(
+            StatusCode::NOT_FOUND,
+            "DOMAIN_NOT_FOUND",
+            &format!("domain {d} does not exist"),
+        ),
+        GraderError::BodyTooLarge(actual, max) => err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "BODY_TOO_LARGE",
+            &format!("email body too large: {actual} bytes (max {max})"),
+        ),
+        GraderError::TenantBudgetExhausted => err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TENANT_BUDGET",
+            "tenant DNS budget exhausted; retry later",
+        ),
         GraderError::Internal(msg) => {
             tracing::error!(error = %msg, "grader: internal error");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", "internal grader error")
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL",
+                "internal grader error",
+            )
         }
     }
 }
 
 fn validate_tenant_id(t: &str) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
     if t.is_empty() || t.len() > MAX_TENANT_ID_LEN {
-        return Err(err(StatusCode::BAD_REQUEST, "INVALID_TENANT",
-            "tenant identifier is missing or out of range"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "INVALID_TENANT",
+            "tenant identifier is missing or out of range",
+        ));
     }
-    if !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err(err(StatusCode::BAD_REQUEST, "INVALID_TENANT",
-            "tenant identifier contains unsupported characters"));
+    if !t
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "INVALID_TENANT",
+            "tenant identifier contains unsupported characters",
+        ));
     }
     Ok(t)
 }
 
 fn validate_idempotency_key(k: &str) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
     if k.is_empty() || k.len() > MAX_IDEMPOTENCY_KEY_LEN {
-        return Err(err(StatusCode::BAD_REQUEST, "INVALID_IDEMPOTENCY_KEY",
-            "idempotency key length out of range"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "INVALID_IDEMPOTENCY_KEY",
+            "idempotency key length out of range",
+        ));
     }
     if !k.chars().all(|c| c.is_ascii_graphic()) {
-        return Err(err(StatusCode::BAD_REQUEST, "INVALID_IDEMPOTENCY_KEY",
-            "idempotency key must be printable ASCII"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "INVALID_IDEMPOTENCY_KEY",
+            "idempotency key must be printable ASCII",
+        ));
     }
     Ok(k)
 }
@@ -118,12 +160,18 @@ pub async fn check_domain(
     body: DomainCheckRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if !state.config.enabled {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "GRADER_DISABLED",
-            "Email Grader is disabled");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GRADER_DISABLED",
+            "Email Grader is disabled",
+        );
     }
     if !state.engine.check_rate_limit(&client_ip.to_string()) {
-        return err(StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED",
-            "rate limit exceeded; retry later");
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "rate limit exceeded; retry later",
+        );
     }
     match state.engine.check_domain(&body).await {
         Ok(response) => ok(response),
@@ -138,12 +186,18 @@ pub async fn submit_email(
     body: EmailSubmitRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if !state.config.enabled {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "GRADER_DISABLED",
-            "Email Grader is disabled");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GRADER_DISABLED",
+            "Email Grader is disabled",
+        );
     }
     if !auth.has_scope("grader:write") {
-        return err(StatusCode::FORBIDDEN, "INSUFFICIENT_SCOPE",
-            "scope `grader:write` is required");
+        return err(
+            StatusCode::FORBIDDEN,
+            "INSUFFICIENT_SCOPE",
+            "scope `grader:write` is required",
+        );
     }
     let tenant_id = match validate_tenant_id(&auth.tenant_id) {
         Ok(t) => t,
@@ -160,9 +214,22 @@ pub async fn submit_email(
         None => None,
     };
     if let Some(key) = idem_key {
-        let cutoff: DateTime<Utc> = Utc::now()
-            - ChronoDuration::seconds(state.config.idempotency_window_seconds);
-        let existing: Result<Option<(uuid::Uuid, String, i16, String, serde_json::Value, serde_json::Value, Vec<String>, DateTime<Utc>)>, sqlx::Error> = sqlx::query_as(
+        let cutoff: DateTime<Utc> =
+            Utc::now() - ChronoDuration::seconds(state.config.idempotency_window_seconds);
+        #[allow(clippy::type_complexity)]
+        let existing: Result<
+            Option<(
+                uuid::Uuid,
+                String,
+                i16,
+                String,
+                serde_json::Value,
+                serde_json::Value,
+                Vec<String>,
+                DateTime<Utc>,
+            )>,
+            sqlx::Error,
+        > = sqlx::query_as(
             r#"SELECT id, domain, score, grade, breakdown, findings, recommendations, created_at
                FROM grader_results
                WHERE tenant_id = $1 AND idempotency_key = $2 AND created_at >= $3
@@ -190,15 +257,25 @@ pub async fn submit_email(
             Ok(None) => {}
             Err(e) => {
                 tracing::error!(error = %e, "grader: idempotency lookup failed");
-                return err(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", "database error");
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DB_ERROR",
+                    "database error",
+                );
             }
         }
     }
 
     // Per-tenant DNS budget admission.
-    if !state.engine.check_tenant_dns_budget(tenant_id, SUBMIT_DNS_UNITS) {
-        return err(StatusCode::TOO_MANY_REQUESTS, "TENANT_BUDGET",
-            "tenant DNS budget exhausted; retry later");
+    if !state
+        .engine
+        .check_tenant_dns_budget(tenant_id, SUBMIT_DNS_UNITS)
+    {
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TENANT_BUDGET",
+            "tenant DNS budget exhausted; retry later",
+        );
     }
 
     let submission = match state.engine.validate_submission(&body) {
@@ -227,54 +304,70 @@ pub async fn submit_email(
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "grader: findings serialization failed");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERIALIZATION",
-                "failed to serialize findings");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_SERIALIZATION",
+                "failed to serialize findings",
+            );
         }
     };
     let breakdown_json = match serde_json::to_value(&result.breakdown) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "grader: breakdown serialization failed");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERIALIZATION",
-                "failed to serialize breakdown");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_SERIALIZATION",
+                "failed to serialize breakdown",
+            );
         }
     };
     if findings_json.to_string().len() > state.config.max_jsonb_bytes
         || breakdown_json.to_string().len() > state.config.max_jsonb_bytes
     {
-        return err(StatusCode::PAYLOAD_TOO_LARGE, "RESULT_TOO_LARGE",
-            "grader result exceeds configured size cap");
+        return err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "RESULT_TOO_LARGE",
+            "grader result exceeds configured size cap",
+        );
     }
 
     // Encrypt sensitive stored fields when configured.
-    let (stored_from, stored_subject, encrypted_flag) = match (&state.cipher, body.from.as_deref(), body.subject.as_deref()) {
-        (Some(c), from, subject) => {
-            let encrypted_from = match from {
-                Some(s) => match c.encrypt(s.as_bytes()) {
-                    Ok(blob) => Some(blob),
-                    Err(e) => {
-                        tracing::error!(error = %e, "grader: from encryption failed");
-                        return err(StatusCode::INTERNAL_SERVER_ERROR, "ENCRYPT_FAILED",
-                            "failed to encrypt stored content");
-                    }
-                },
-                None => None,
-            };
-            let encrypted_subject = match subject {
-                Some(s) => match c.encrypt(s.as_bytes()) {
-                    Ok(blob) => Some(blob),
-                    Err(e) => {
-                        tracing::error!(error = %e, "grader: subject encryption failed");
-                        return err(StatusCode::INTERNAL_SERVER_ERROR, "ENCRYPT_FAILED",
-                            "failed to encrypt stored content");
-                    }
-                },
-                None => None,
-            };
-            (encrypted_from, encrypted_subject, true)
-        }
-        _ => (body.from.clone(), body.subject.clone(), false),
-    };
+    let (stored_from, stored_subject, encrypted_flag) =
+        match (&state.cipher, body.from.as_deref(), body.subject.as_deref()) {
+            (Some(c), from, subject) => {
+                let encrypted_from = match from {
+                    Some(s) => match c.encrypt(s.as_bytes()) {
+                        Ok(blob) => Some(blob),
+                        Err(e) => {
+                            tracing::error!(error = %e, "grader: from encryption failed");
+                            return err(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "ENCRYPT_FAILED",
+                                "failed to encrypt stored content",
+                            );
+                        }
+                    },
+                    None => None,
+                };
+                let encrypted_subject = match subject {
+                    Some(s) => match c.encrypt(s.as_bytes()) {
+                        Ok(blob) => Some(blob),
+                        Err(e) => {
+                            tracing::error!(error = %e, "grader: subject encryption failed");
+                            return err(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "ENCRYPT_FAILED",
+                                "failed to encrypt stored content",
+                            );
+                        }
+                    },
+                    None => None,
+                };
+                (encrypted_from, encrypted_subject, true)
+            }
+            _ => (body.from.clone(), body.subject.clone(), false),
+        };
 
     let sender_ip_str = submission.sender_ip.map(|ip| ip.to_string());
     let expires_at: Option<DateTime<Utc>> = if state.config.default_retention_days > 0 {
@@ -316,8 +409,11 @@ pub async fn submit_email(
         Err(e) => {
             tracing::error!(error = %e, tenant_id = %auth.tenant_id, "grader: persist failed");
             metrics::counter!("grader.db.persist_errors").increment(1);
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "PERSIST_FAILED",
-                "failed to persist grader result");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PERSIST_FAILED",
+                "failed to persist grader result",
+            );
         }
     };
 
@@ -339,12 +435,18 @@ pub async fn get_result(
     id: uuid::Uuid,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if !state.config.enabled {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "GRADER_DISABLED",
-            "Email Grader is disabled");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GRADER_DISABLED",
+            "Email Grader is disabled",
+        );
     }
     if !auth.has_scope("grader:read") {
-        return err(StatusCode::FORBIDDEN, "INSUFFICIENT_SCOPE",
-            "scope `grader:read` is required");
+        return err(
+            StatusCode::FORBIDDEN,
+            "INSUFFICIENT_SCOPE",
+            "scope `grader:read` is required",
+        );
     }
     let tenant_id = match validate_tenant_id(&auth.tenant_id) {
         Ok(t) => t,
@@ -375,7 +477,11 @@ pub async fn get_result(
         Ok(None) => err(StatusCode::NOT_FOUND, "NOT_FOUND", "result not found"),
         Err(e) => {
             tracing::error!(error = %e, "grader: get_result query failed");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", "database error")
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                "database error",
+            )
         }
     }
 }
@@ -386,12 +492,18 @@ pub async fn list_results(
     params: PaginationParams,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if !state.config.enabled {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "GRADER_DISABLED",
-            "Email Grader is disabled");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GRADER_DISABLED",
+            "Email Grader is disabled",
+        );
     }
     if !auth.has_scope("grader:read") {
-        return err(StatusCode::FORBIDDEN, "INSUFFICIENT_SCOPE",
-            "scope `grader:read` is required");
+        return err(
+            StatusCode::FORBIDDEN,
+            "INSUFFICIENT_SCOPE",
+            "scope `grader:read` is required",
+        );
     }
     let tenant_id = match validate_tenant_id(&auth.tenant_id) {
         Ok(t) => t,
@@ -421,7 +533,11 @@ pub async fn list_results(
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "grader: list_results query failed");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", "database error");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                "database error",
+            );
         }
     };
 

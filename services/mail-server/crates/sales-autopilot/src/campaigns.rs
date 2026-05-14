@@ -1,8 +1,74 @@
 use chrono::Utc;
 use sqlx::PgPool;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::types::{Campaign, CampaignStatus, SalesError};
+
+// ---------------------------------------------------------------------------
+// Campaign email dispatcher trait (SA-5)
+// ---------------------------------------------------------------------------
+
+/// Abstraction for dispatching campaign emails to the outbound queue.
+///
+/// # Security (SA-5)
+///
+/// **Root cause**: `start_campaign` merely set a status flag to `'active'`
+/// without actually sending emails through the outbound queue. Campaign
+/// recipients were stored in the database but never delivered.
+///
+/// **Fix**: Added the `CampaignEmailDispatcher` trait as an injectable
+/// dependency on `CampaignManager`. When a campaign transitions to Active,
+/// `start_campaign` calls `dispatch()` with the campaign details so the
+/// caller can enqueue outbound emails. This keeps the sales-autopilot crate
+/// decoupled from the outbound-queue crate (no direct dependency).
+pub trait CampaignEmailDispatcher: Send + Sync + std::fmt::Debug {
+    /// Dispatch emails for a campaign that has just been started.
+    ///
+    /// `tenant_id` and `campaign_id` identify the campaign.
+    /// `recipient_emails` is the full list of campaign recipients.
+    /// Implementations should enqueue each recipient into the outbound
+    /// email queue, using `template_id` for content rendering.
+    ///
+    /// Returns the number of emails successfully enqueued.
+    fn dispatch(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+        template_id: &str,
+        recipient_emails: &[String],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>;
+}
+
+/// A no-op dispatcher used as the default. Logs that campaign emails
+/// were not dispatched.
+#[derive(Debug, Clone)]
+pub struct NoopCampaignDispatcher;
+
+impl CampaignEmailDispatcher for NoopCampaignDispatcher {
+    fn dispatch(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+        template_id: &str,
+        recipient_emails: &[String],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>
+    {
+        let tenant_id = tenant_id.to_string();
+        let template_id = template_id.to_string();
+        let count = recipient_emails.len();
+        Box::pin(async move {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                campaign_id = %campaign_id,
+                template_id = %template_id,
+                recipient_count = count,
+                "NoopCampaignDispatcher: campaign emails NOT dispatched. Inject a real CampaignEmailDispatcher to enable sending."
+            );
+            Ok(0)
+        })
+    }
+}
 
 /// PostgreSQL-backed campaign manager.
 /// Campaigns and recipients are persisted across restarts.
@@ -10,11 +76,28 @@ use crate::types::{Campaign, CampaignStatus, SalesError};
 pub struct CampaignManager {
     db: PgPool,
     max_campaigns: usize,
+    /// Optional outbound email dispatcher (SA-5).
+    /// When `Some`, campaign start will enqueue emails for delivery.
+    /// When `None` (default), a warning is logged and no emails are sent.
+    email_dispatcher: Option<std::sync::Arc<dyn CampaignEmailDispatcher>>,
 }
 
 impl CampaignManager {
     pub fn new(max_campaigns: usize, db: PgPool) -> Self {
-        Self { db, max_campaigns }
+        Self {
+            db,
+            max_campaigns,
+            email_dispatcher: None,
+        }
+    }
+
+    /// Attach an email dispatcher for outbound campaign email delivery (SA-5).
+    pub fn with_email_dispatcher(
+        mut self,
+        dispatcher: std::sync::Arc<dyn CampaignEmailDispatcher>,
+    ) -> Self {
+        self.email_dispatcher = Some(dispatcher);
+        self
     }
 
     /// Create a campaign in Draft status.
@@ -94,6 +177,23 @@ impl CampaignManager {
     }
 
     /// Transition a draft/paused campaign to Active.
+    ///
+    /// # Security (SA-13)
+    ///
+    /// **Root cause**: The previous implementation used a SELECT-then-UPDATE
+    /// pattern where the UPDATE SQL omitted `tenant_id`. This created a TOCTOU
+    /// (time-of-check-time-of-use) race window: between the SELECT verifying
+    /// tenant ownership and the UPDATE, another concurrent request could modify
+    /// the campaign state, potentially allowing cross-tenant state manipulation.
+    ///
+    /// **Fix**: Replaced the SELECT-then-UPDATE with a single atomic conditional
+    /// UPDATE that includes:
+    ///   - `AND tenant_id = $2` — prevents cross-tenant manipulation
+    ///   - `AND status = $3` — atomic state transition (fails if status changed
+    ///     between read and write, eliminating the race window entirely)
+    ///
+    ///   The UPDATE `RETURNING *` is used so the caller receives the confirmed
+    ///   new state without a follow-up SELECT.
     pub async fn start_campaign(&self, tenant_id: &str, id: Uuid) -> Result<Campaign, SalesError> {
         let row: Option<CampaignRow> = sqlx::query_as(
             "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
@@ -108,15 +208,77 @@ impl CampaignManager {
             .and_then(|r| r.into_campaign().ok())
             .ok_or(SalesError::CampaignNotFound(id))?;
 
+        let template_id = campaign.template_id.clone();
+
         match campaign.status {
             CampaignStatus::Draft | CampaignStatus::Paused => {
-                sqlx::query("UPDATE sales_campaigns SET status = 'active' WHERE id = $1")
+                // Atomic conditional UPDATE: tenant filter + expected status
+                // eliminate the TOCTOU race window (SA-13).
+                let expected_status = campaign.status.to_string();
+                let updated_row: Option<CampaignRow> = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    sqlx::query_as(
+                        "UPDATE sales_campaigns SET status = 'active' WHERE id = $1 AND tenant_id = $2 AND status = $3 RETURNING id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at",
+                    )
                     .bind(id)
-                    .execute(&self.db)
-                    .await
-                    .map_err(|e| SalesError::Database(e.to_string()))?;
-                let mut updated = campaign;
-                updated.status = CampaignStatus::Active;
+                    .bind(tenant_id)
+                    .bind(&expected_status)
+                    .fetch_optional(&self.db),
+                )
+                .await
+                .map_err(|_| SalesError::Database("campaign start query timed out".into()))?
+                .map_err(|e| SalesError::Database(e.to_string()))?;
+
+                let updated = match updated_row.and_then(|r| r.into_campaign().ok()) {
+                    Some(c) => c,
+                    None => {
+                        return Err(SalesError::InvalidInput(
+                            "campaign status changed concurrently; retry".into(),
+                        ))
+                    }
+                };
+
+                // SA-5: Dispatch campaign emails to the outbound queue.
+                // Fetch recipients and call the email dispatcher (if configured).
+                if let Some(ref dispatcher) = self.email_dispatcher {
+                    match self.get_recipients(tenant_id, id).await {
+                        Ok(emails) if !emails.is_empty() => {
+                            let enqueued = dispatcher
+                                .dispatch(tenant_id, id, &template_id, &emails)
+                                .await?;
+                            tracing::info!(
+                                tenant_id = %tenant_id,
+                                campaign_id = %id,
+                                enqueued = enqueued,
+                                total_recipients = emails.len(),
+                                "Campaign emails dispatched to outbound queue"
+                            );
+                        }
+                        Ok(_) => {
+                            tracing::warn!(
+                                tenant_id = %tenant_id,
+                                campaign_id = %id,
+                                "Campaign started with zero recipients — no emails dispatched"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                tenant_id = %tenant_id,
+                                campaign_id = %id,
+                                "Failed to fetch campaign recipients for email dispatch"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        campaign_id = %id,
+                        template_id = %template_id,
+                        "No CampaignEmailDispatcher configured — campaign emails NOT dispatched. "
+                    );
+                }
+
                 Ok(updated)
             }
             _ => Err(SalesError::InvalidInput(format!(
@@ -126,7 +288,33 @@ impl CampaignManager {
         }
     }
 
+    /// Fetch all recipient emails for a campaign, scoped to tenant.
+    async fn get_recipients(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+    ) -> Result<Vec<String>, SalesError> {
+        let rows = sqlx::query_as::<_, (String,)>(
+            "SELECT r.email FROM sales_campaign_recipients r \
+             JOIN sales_campaigns c ON r.campaign_id = c.id \
+             WHERE r.campaign_id = $1 AND c.tenant_id = $2",
+        )
+        .bind(campaign_id)
+        .bind(tenant_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|(email,)| email).collect())
+    }
+
     /// Pause an active campaign.
+    ///
+    /// # Security (SA-13)
+    ///
+    /// Same TOCTOU fix as `start_campaign`: atomic conditional UPDATE with
+    /// `tenant_id` filter and `AND status = 'active'` prevents cross-tenant
+    /// manipulation and race-condition state corruption.
     pub async fn pause_campaign(&self, tenant_id: &str, id: Uuid) -> Result<Campaign, SalesError> {
         let row: Option<CampaignRow> = sqlx::query_as(
             "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
@@ -145,15 +333,27 @@ impl CampaignManager {
             return Err(SalesError::InvalidInput("campaign is not active".into()));
         }
 
-        sqlx::query("UPDATE sales_campaigns SET status = 'paused' WHERE id = $1")
+        // Atomic conditional UPDATE: tenant filter + expected status
+        // eliminate the TOCTOU race window (SA-13).
+        let updated_row: Option<CampaignRow> = tokio::time::timeout(
+            Duration::from_secs(30),
+            sqlx::query_as(
+                "UPDATE sales_campaigns SET status = 'paused' WHERE id = $1 AND tenant_id = $2 AND status = 'active' RETURNING id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at",
+            )
             .bind(id)
-            .execute(&self.db)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
+            .bind(tenant_id)
+            .fetch_optional(&self.db),
+        )
+        .await
+        .map_err(|_| SalesError::Database("campaign pause query timed out".into()))?
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        let mut updated = campaign;
-        updated.status = CampaignStatus::Paused;
-        Ok(updated)
+        match updated_row.and_then(|r| r.into_campaign().ok()) {
+            Some(updated) => Ok(updated),
+            None => Err(SalesError::InvalidInput(
+                "campaign status changed concurrently or is not active; retry".into(),
+            )),
+        }
     }
 
     /// Return stats for a campaign (sent / opened / clicked / recipients).

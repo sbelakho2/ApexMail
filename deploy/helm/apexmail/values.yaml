@@ -30,7 +30,7 @@ apiServer:
   replicaCount: 2
   image:
     repository: api-server
-    tag: ""  # defaults to Chart.appVersion
+    tag: ""  # defaults to Chart.AppVersion
   resources:
     requests:
       cpu: 250m
@@ -50,12 +50,30 @@ apiServer:
     targetCPUUtilizationPercentage: 70
     targetMemoryUtilizationPercentage: 80
   podDisruptionBudget:
-    minAvailable: 1
+    maxUnavailable: 1
+  # 🟡7: Size limit for /tmp emptyDir to prevent disk exhaustion
+  tmpEmptyDirSizeLimit: 256Mi
+  # 🟢4: Configurable probe timeouts
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    liveness:
+      initialDelaySeconds: 15
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 4
+    startup:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 12
   env: {}
-  # Extra environment variables from secrets
   envFrom: []
 
-# ── Tracking Service ────────────────────────────────────────────────────────
+# ── Tracking Service ─────────────────────────────────────────────────────────
 
 trackingService:
   enabled: true
@@ -65,74 +83,60 @@ trackingService:
     tag: ""
   resources:
     requests:
-      cpu: 250m
-      memory: 256Mi
+      cpu: 100m
+      memory: 128Mi
     limits:
-      cpu: "1"
-      memory: 512Mi
+      cpu: 500m
+      memory: 256Mi
   port: 3001
+  metricsPort: 9091
   service:
     type: ClusterIP
     port: 3001
   autoscaling:
     enabled: true
     minReplicas: 2
-    maxReplicas: 20
-    targetCPUUtilizationPercentage: 65
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
     targetMemoryUtilizationPercentage: 80
   podDisruptionBudget:
-    minAvailable: 1
+    maxUnavailable: 1
+  # 🟡7: Size limit for /tmp emptyDir to prevent disk exhaustion
+  tmpEmptyDirSizeLimit: 256Mi
+  # 🟢4: Configurable probe timeouts
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    liveness:
+      initialDelaySeconds: 15
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 4
+    startup:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 12
   env: {}
   envFrom: []
 
-# ── MTA (Mail Transfer Agent) ───────────────────────────────────────────────
+# ── MTA Service ──────────────────────────────────────────────────────────────
 
 mta:
   enabled: true
-  replicaCount: 2
+  replicaCount: 3
   image:
-    repository: mail-server
+    repository: mta-service
     tag: ""
   resources:
     requests:
-      cpu: 500m
-      memory: 512Mi
-    limits:
-      cpu: "2"
-      memory: 1Gi
-  ports:
-    smtp: 25
-    submission: 587
-    smtps: 465
-    metrics: 9090
-  service:
-    type: LoadBalancer
-    # Annotations for cloud provider LB (override per provider)
-    annotations: {}
-  autoscaling:
-    enabled: true
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 70
-  podDisruptionBudget:
-    minAvailable: 1
-  env: {}
-  envFrom: []
-
-# ── Worker ───────────────────────────────────────────────────────────────────
-
-worker:
-  enabled: true
-  replicaCount: 2
-  image:
-    repository: worker
-    tag: ""
-  resources:
-    requests:
-      cpu: 250m
+      cpu: 100m
       memory: 256Mi
     limits:
-      cpu: "1"
+      cpu: 500m
       memory: 512Mi
   healthPort: 9090
   autoscaling:
@@ -142,7 +146,72 @@ worker:
     targetCPUUtilizationPercentage: 70
     targetMemoryUtilizationPercentage: 80
   podDisruptionBudget:
-    minAvailable: 1
+    maxUnavailable: 1
+  # 🟡7: Size limit for /tmp emptyDir to prevent disk exhaustion
+  tmpEmptyDirSizeLimit: 256Mi
+  # 🟢4: Configurable probe timeouts
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    liveness:
+      initialDelaySeconds: 15
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 4
+    startup:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 12
+  env: {}
+  envFrom: []
+
+# ── Worker Service ───────────────────────────────────────────────────────────
+
+worker:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: worker-service
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  healthPort: 9090
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    maxUnavailable: 1
+  # 🟡7: Size limit for /tmp emptyDir to prevent disk exhaustion
+  tmpEmptyDirSizeLimit: 256Mi
+  # 🟢4: Configurable probe timeouts
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    liveness:
+      initialDelaySeconds: 15
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 4
+    startup:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 12
   env: {}
   envFrom: []
 
@@ -172,7 +241,26 @@ enterprise:
     targetCPUUtilizationPercentage: 70
     targetMemoryUtilizationPercentage: 80
   podDisruptionBudget:
-    minAvailable: 1
+    maxUnavailable: 0
+  # 🟡7: Size limit for /tmp emptyDir to prevent disk exhaustion
+  tmpEmptyDirSizeLimit: 256Mi
+  # 🟢4: Configurable probe timeouts
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    liveness:
+      initialDelaySeconds: 15
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 4
+    startup:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 12
   env: {}
   envFrom: []
 
@@ -186,6 +274,12 @@ ingress:
     nginx.ingress.kubernetes.io/rate-limit: "100"
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/server-snippet: |
+      add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+      add_header X-Frame-Options "DENY" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+      add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
   hosts:
     - host: api.apexmail.ee
       paths:
@@ -201,10 +295,16 @@ ingress:
         - path: /
           pathType: Prefix
           service: api-server
+    - host: track.apexmail.ee
+      paths:
+        - path: /
+          pathType: Prefix
+          service: tracking-service
   tls:
     - secretName: apexmail-tls
       hosts:
         - api.apexmail.ee
+        - track.apexmail.ee
 
 # ── PostgreSQL (Bitnami subchart) ────────────────────────────────────────────
 
@@ -238,6 +338,13 @@ externalDatabase:
   existingSecretPasswordKey: password
   sslMode: require
 
+# Database connection budget:
+# Each pod's max_connections * replica_count must not exceed DB's max_connections.
+# Example: api-server (20 conn × 10 replicas = 200) + worker (20 × 20 = 400) + MTA (5 × 10 = 50)
+# Total: 650 connections. Ensure PostgreSQL max_connections >= 700 with 10% headroom.
+# T-205: If total replicas × max_connections exceeds budget, pool creation logs a warning.
+db_cluster_connection_budget: "650"
+
 # Public service URLs and cross-origin settings shared with Kustomize manifests.
 environment: production
 apiBaseUrl: https://api.apexmail.ee
@@ -245,11 +352,18 @@ oauthRedirectBaseUrl: https://app.apexmail.ee
 corsOrigins: https://app.apexmail.ee,https://admin.apexmail.ee
 
 # ── Redis (Bitnami subchart) ────────────────────────────────────────────────
+# Performance: allkeys-lru eviction policy prevents write failures when
+# memory is exhausted.  maxmemory of 512mb is sized for moderate workloads;
+# adjust based on cache hit ratio monitoring and available cluster RAM.
+# In production with dedicated Redis nodes, 2-4GB is typical.
 
 redis:
   enabled: true
   auth:
     existingSecret: apexmail-redis-credentials
+  configuration: |-
+    maxmemory 512mb
+    maxmemory-policy allkeys-lru
   master:
     persistence:
       size: 10Gi
@@ -293,6 +407,10 @@ secrets:
   #   TRACKING_SECRET_KEY
   #   SESSION_SECRET
   #   CSRF_SECRET
+  #   MCAPTCHA_ENABLED          — "true" to enforce CAPTCHA on login/signup
+  #   MCAPTCHA_SITE_KEY         — Site key rendered in the CAPTCHA widget
+  #   MCAPTCHA_SECRET           — Server-side secret for token verification
+  #   MCAPTCHA_VERIFY_URL       — mCaptcha verification endpoint URL
 
 # ── HIPAA Compliance ─────────────────────────────────────────────────────────
 
@@ -321,6 +439,23 @@ monitoring:
   grafana:
     enabled: false
     dashboards: true
+  tempo:
+    enabled: true
+    image: grafana/tempo:2.6.1
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""
+  loki:
+    enabled: true
+    image: grafana/loki:3.0.0
+    config:
+      auth_enabled: true
+      retention_period: 168h  # 7 days
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClass: ""
 
 # ── Network Policies ─────────────────────────────────────────────────────────
 
@@ -369,3 +504,95 @@ topologySpreadConstraints:
     labelSelector:
       matchLabels:
         app.kubernetes.io/part-of: apexmail
+
+# ── Service Mesh (Linkerd + SPIRE) ────────────────────────────────────────────
+# INF-23/INF-24: Service mesh configuration for mTLS and service identity.
+# See docs/operations/service-mesh.md for full documentation.
+
+serviceMesh:
+  enabled: true
+  # Provider: linkerd or istio
+  provider: linkerd
+  # mTLS mode: strict, permissive, permissive-mutual, disable
+  mtls: strict
+  spire:
+    enabled: true
+    trustDomain: apexmail.ee
+    server:
+      replicaCount: 2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+    agent:
+      certificateTTL: 24h
+      renewalWindow: 6h
+  sidecar:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+  authorization:
+    # Default action: deny (whitelist) or allow (blacklist)
+    defaultAction: deny
+  monitoring:
+    metrics: true
+    tracing: true
+    accessLogs: true
+  # Mesh-wide proxy configuration
+  proxy:
+    # Connection timeouts
+    connectTimeout: 5s
+    requestTimeout: 30s
+    # Circuit breaker defaults
+    circuitBreaker:
+      maxConnections: 100
+      maxPendingRequests: 50
+      maxRetries: 3
+      maxRequestsPerConnection: 10
+
+# ── Production-Ready Defaults ──────────────────────────────────────────────────
+# These values provide recommended production overrides. They are intentionally
+# separate from the main values to make them easy to review and adjust.
+
+productionDefaults:
+  # Logging
+  logging:
+    level: info
+    format: json
+    accessLogs: true
+  # Resource quotas per tenant
+  tenant:
+    maxSendingRate: 100  # emails/second default
+    maxDailyVolume: 1000000  # emails/day default
+  # Rate limiting
+  rateLimiting:
+    enabled: true
+    default: 100  # requests/second
+    burst: 150
+  # Retry policy
+  retry:
+    maxAttempts: 3
+    initialBackoff: 5s
+    maxBackoff: 60s
+  # Graceful shutdown
+  lifecycle:
+    preStopDelay: 15s  # Wait before SIGTERM for connection draining
+    terminationGracePeriod: 60s
+  # Pod disruption
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1  # Ensures at least 1 pod is always available
+  # Priority class
+  priorityClassName: apexmail-production
+  # Topology spread
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: DoNotSchedule

@@ -215,13 +215,10 @@ impl DlpEngine {
         domain: &str,
     ) -> Option<&crate::config::DlpTemporaryException> {
         let now = Utc::now().timestamp();
-        self.config
-            .temporary_exceptions
-            .iter()
-            .find(|ex| {
-                canonical_domain(&ex.recipient_domain) == canonical_domain(domain)
-                    && ex.expires_at_unix > now
-            })
+        self.config.temporary_exceptions.iter().find(|ex| {
+            canonical_domain(&ex.recipient_domain) == canonical_domain(domain)
+                && ex.expires_at_unix > now
+        })
     }
 }
 

@@ -327,10 +327,8 @@ pub fn validate_svg_content(svg: &str) -> bool {
                     let value = String::from_utf8_lossy(attr.value.as_ref()).to_lowercase();
 
                     // Check for SVG namespace on root element
-                    if name == "svg" && key == "xmlns" {
-                        if value == "http://www.w3.org/2000/svg" {
-                            has_svg_namespace = true;
-                        }
+                    if name == "svg" && key == "xmlns" && value == "http://www.w3.org/2000/svg" {
+                        has_svg_namespace = true;
                     }
 
                     if key.starts_with("on") {

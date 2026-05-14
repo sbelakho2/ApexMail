@@ -10,6 +10,7 @@ pub const DNS_MAX_TTL_CEILING_SECS: u64 = 86_400;
 
 /// DNS resolver configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DnsConfig {
     /// Cache TTL in seconds. Default:300 (5 minutes).
     /// This is the *configured* TTL; the effective cache TTL is capped
@@ -17,6 +18,14 @@ pub struct DnsConfig {
     pub cache_ttl_secs: u64,
     /// Maximum cache entries. Default:10,000.
     pub max_cache_entries: u64,
+    /// Positive cache size (max entries in the records cache). Default:10,000.
+    /// Controls LRU eviction — when the positive cache exceeds this many
+    /// entries, the least recently used entries are evicted.
+    pub positive_cache_size: u64,
+    /// Negative cache size (max entries for NXDOMAIN). Default:1,000.
+    /// Controls LRU eviction — when the negative cache exceeds this many
+    /// entries, the least recently used entries are evicted.
+    pub negative_cache_size: u64,
     /// Negative cache TTL (for NXDOMAIN). Default:60.
     pub negative_ttl_secs: u64,
     /// Query timeout in milliseconds. Default:5,000.
@@ -37,6 +46,8 @@ impl Default for DnsConfig {
         Self {
             cache_ttl_secs: 300,
             max_cache_entries: 10_000,
+            positive_cache_size: 10_000,
+            negative_cache_size: 1_000,
             negative_ttl_secs: 60,
             query_timeout_ms: 5_000,
             retries: 2,

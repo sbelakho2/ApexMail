@@ -1682,9 +1682,11 @@ async fn encrypt_field(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecryptFieldBody {
-    #[allow(unused)]
     pub tenant_id: String,
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "field is accepted for encrypted-field migration tooling request compatibility"
+    )]
     pub field_name: String,
     pub value: String,
 }

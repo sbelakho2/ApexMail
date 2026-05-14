@@ -17,10 +17,9 @@ sqlx = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-
 # Logging
 tracing = { workspace = true }
-metrics = { workspace = true }
+
 
 # Crypto
 hmac = { workspace = true }
@@ -31,7 +30,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
+metrics = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

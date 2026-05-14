@@ -124,8 +124,8 @@ mod ja4_tests {
         let protocol = 't';
         let tls_version = "13";
         let sni_type = 'd';
-        let cipher_count = format!("{:02}", 15.min(99));
-        let ext_count = format!("{:02}", 16.min(99));
+        let cipher_count = format!("{:02}", 15);
+        let ext_count = format!("{:02}", 16);
         let alpn = "h2";
 
         let prefix = format!(
@@ -296,13 +296,13 @@ mod http2_tests {
             (0x6, 262144),  // MAX_HEADER_LIST_SIZE
         ];
 
-        for (id, value) in &chrome_settings {
+        for (id, _value) in &chrome_settings {
             assert!(
                 Http2Setting::from_u16(*id).is_some(),
                 "Setting {} should be valid",
                 id
             );
-            assert!(*value <= u32::MAX);
+            // value is always <= u32::MAX by definition
         }
     }
 

@@ -311,7 +311,7 @@ async fn list_ticket_messages(
     Query(q): Query<ListTicketsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["support:read"])?;
-    let limit = q.limit.min(200).max(1);
+    let limit = q.limit.clamp(1, 200);
     let offset = q.offset.max(0);
 
     // Verify ticket belongs to tenant

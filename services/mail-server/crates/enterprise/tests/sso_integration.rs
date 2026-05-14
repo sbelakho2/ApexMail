@@ -633,8 +633,7 @@ async fn integration_saml_rejects_expired_assertion() {
         .expect("Configure");
 
     // SAML response with NotOnOrAfter set to a past date (already expired)
-    let expired_saml_xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+    let expired_saml_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
     ID="_test-expired" Version="2.0" IssueInstant="2020-01-01T00:00:00Z" Destination="https://apexmail.com/api/sso/saml/callback">
   <saml:Issuer>urn:apexmail:test</saml:Issuer>
@@ -652,8 +651,7 @@ async fn integration_saml_rejects_expired_assertion() {
       </saml:AudienceRestriction>
     </saml:Conditions>
   </saml:Assertion>
-</samlp:Response>"#,
-    );
+</samlp:Response>"#.to_string();
 
     let result = service
         .parse_and_validate_saml_response(&expired_saml_xml, domain)

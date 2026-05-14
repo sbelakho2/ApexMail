@@ -549,7 +549,7 @@ impl WebhookProcessor {
                                 chrono::DateTime::parse_from_rfc2822(v).ok().map(|dt| {
                                     let delay =
                                         dt.timestamp_millis() - Utc::now().timestamp_millis();
-                                    (delay.max(0) as u64).min(3600_000)
+                                    (delay.max(0) as u64).min(3_600_000)
                                 })
                             }
                         })

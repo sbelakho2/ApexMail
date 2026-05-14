@@ -98,12 +98,16 @@ impl SlidingWindowCounter {
         let current_estimate = state.weighted_count(now);
 
         if current_estimate >= self.max_events as f64 {
+            metrics::counter!("rate_limiter_requests_total", "strategy" => "sliding_window", "decision" => "denied").increment(1);
+            metrics::counter!("rate_limiter_blocked_total", "strategy" => "sliding_window")
+                .increment(1);
             let elapsed = now.duration_since(state.curr_window_start);
             let remaining_window = self.window.saturating_sub(elapsed);
             Decision::Denied {
                 retry_after: remaining_window,
             }
         } else {
+            metrics::counter!("rate_limiter_requests_total", "strategy" => "sliding_window", "decision" => "allowed").increment(1);
             state.curr_count += 1;
             let new_estimate = state.weighted_count(now);
             let remaining = (self.max_events as f64 - new_estimate).max(0.0) as u64;

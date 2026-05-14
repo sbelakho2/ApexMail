@@ -85,7 +85,8 @@ impl CampaignAutopilot {
         .bind(campaign_id)
         .bind(tenant_id)
         .fetch_one(&self.pool)
-        .await.map_err(|e| anyhow::anyhow!("{e}"))?
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
             > 0;
 
         if !owned {
@@ -810,8 +811,8 @@ mod tests {
     #[tokio::test]
     async fn test_no_premature_convergence_with_small_difference() {
         let mut rng = StdRng::seed_from_u64(2024);
-        let mut alphas = vec![1.0, 1.0];
-        let mut betas = vec![1.0, 1.0];
+        let mut alphas = [1.0, 1.0];
+        let mut betas = [1.0, 1.0];
         let true_rates = [0.06, 0.05];
         let rounds = 300;
 

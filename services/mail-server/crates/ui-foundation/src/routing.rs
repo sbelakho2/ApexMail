@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(declared_route_count("web"), Some(30));
         assert_eq!(declared_route_count("control-plane"), Some(24));
         assert_eq!(declared_route_count("marketing"), Some(19));
-        assert_eq!(declared_route_count("marketing-zola"), Some(20));
-        assert_eq!(total_route_count(), 93);
+        assert_eq!(declared_route_count("marketing-zola"), Some(37));
+        assert_eq!(total_route_count(), 110);
     }
 }

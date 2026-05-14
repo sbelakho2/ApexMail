@@ -18,11 +18,13 @@ import json
 import random
 from pathlib import Path
 
+from common_paths import TRAIN_JSONL, DATA_DIR
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Split training data into train/val/test sets")
-    parser.add_argument("--input", default="data/train_agent.jsonl", help="Source JSONL file")
-    parser.add_argument("--output-dir", default="data", help="Output directory for splits")
+    parser.add_argument("--input", default=str(TRAIN_JSONL), help="Source JSONL file")
+    parser.add_argument("--output-dir", default=str(DATA_DIR), help="Output directory for splits")
     parser.add_argument("--val", type=float, default=0.10, help="Validation set fraction (default: 0.10)")
     parser.add_argument("--test", type=float, default=0.10, help="Test set fraction (default: 0.10)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")

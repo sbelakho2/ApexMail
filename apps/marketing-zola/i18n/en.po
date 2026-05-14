@@ -1,0 +1,27 @@
+#
+# English translations for ApexMail marketing site.
+#
+msgid ""
+msgstr ""
+"Language: en\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "cookie_consent_heading"
+msgstr "Cookie preferences"
+
+msgid "cookie_consent_copy"
+msgstr "We use essential cookies and privacy-friendly analytics to improve ApexMail."
+
+msgid "cookie_consent_necessary"
+msgstr "Necessary Only"
+
+msgid "cookie_consent_dismiss"
+msgstr "Dismiss"
+
+msgid "cookie_consent_accept_all"
+msgstr "Accept All"
+
+msgid "cookie_consent_policy_link"
+msgstr "Cookie Policy"

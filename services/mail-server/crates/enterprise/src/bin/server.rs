@@ -4,20 +4,17 @@ use tracing::info;
 
 use enterprise::config::Config;
 use enterprise::routes::{router, AppState};
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env if present
     dotenvy::dotenv().ok();
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .json()
-        .init();
+    // Initialize tracing (with OTLP support)
+    let _tracing_guard = init_tracing();
 
     // Load configuration
     let config =
@@ -138,4 +135,31 @@ async fn shutdown_signal() {
         _ = ctrl_c => { info!("Received Ctrl+C, shutting down"); }
         _ = terminate => { info!("Received SIGTERM, shutting down"); }
     }
+}
+
+/// Initialize tracing subscriber with OTLP support.
+/// Falls back to JSON logging when OTLP is not configured.
+fn init_tracing() -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "enterprise-server".into(),
+            service_version: option_env!("CARGO_PKG_VERSION").map(str::to_string),
+            environment: std::env::var("APP_ENV").ok(),
+            ..Default::default()
+        };
+
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(error) => tracing::error!("failed to initialize OTLP tracing: {error}"),
+        }
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .json()
+        .init();
+    None
 }

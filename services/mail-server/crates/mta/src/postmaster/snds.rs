@@ -56,10 +56,7 @@ impl SndsClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("SNDS {status}: {body}"));
         }
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| format!("SNDS body: {e}"))?;
+        let body = resp.text().await.map_err(|e| format!("SNDS body: {e}"))?;
         Ok(parse_csv(&body))
     }
 }
@@ -84,8 +81,8 @@ fn parse_row(line: &str) -> Result<SndsRecord, String> {
     if fields.len() < 9 {
         return Err(format!("expected >=9 columns, got {}", fields.len()));
     }
-    let ip = IpAddr::from_str(fields[0].trim())
-        .map_err(|e| format!("bad ip {}: {e}", fields[0]))?;
+    let ip =
+        IpAddr::from_str(fields[0].trim()).map_err(|e| format!("bad ip {}: {e}", fields[0]))?;
     let activity_start = parse_dt(fields[1]);
     let activity_end = parse_dt(fields[2]);
     let observed_at = activity_start
@@ -101,8 +98,14 @@ fn parse_row(line: &str) -> Result<SndsRecord, String> {
     };
     let complaint_rate = parse_complaint(fields[7]);
     let trap_hits = fields[8].trim().parse::<i64>().unwrap_or(0);
-    let sample_helo = fields.get(9).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let sample_from = fields.get(10).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let sample_helo = fields
+        .get(9)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let sample_from = fields
+        .get(10)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     Ok(SndsRecord {
         ip,
         observed_at,
@@ -138,7 +141,9 @@ fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
     }
     // Fallback: try a date-only field.
     if let Ok(d) = NaiveDate::parse_from_str(t, "%Y-%m-%d") {
-        return d.and_hms_opt(0, 0, 0).and_then(|n| Utc.from_local_datetime(&n).single());
+        return d
+            .and_hms_opt(0, 0, 0)
+            .and_then(|n| Utc.from_local_datetime(&n).single());
     }
     None
 }

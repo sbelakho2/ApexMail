@@ -5,6 +5,7 @@ use thiserror::Error;
 
 /// Top-level billing configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BillingConfig {
     /// PostgreSQL connection string.
     pub database_url: String,
@@ -54,7 +55,7 @@ fn default_metering_flush_interval_ms() -> u64 {
     10_000
 }
 fn default_api_base_url() -> String {
-    "http://localhost:3001".into()
+    std::env::var("API_BASE_URL").unwrap_or_else(|_| "http://localhost:3001".into())
 }
 fn default_vat_rate() -> u32 {
     24

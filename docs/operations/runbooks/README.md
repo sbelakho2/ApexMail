@@ -15,6 +15,11 @@ Each runbook should be self-contained, actionable, and usable by any on-call eng
 | Runbook | Description |
 |---------|-------------|
 | [Incident Response](./incident-response.md) | General incident handling procedures, escalation, post-mortems |
+| [Database Recovery](./db-recovery.md) | Primary failure, connection pool exhaustion, slow queries, data corruption, WAL disk full |
+| [Network Partition](./network-partition.md) | Cross-region connectivity loss, WireGuard tunnel failure, split-brain scenarios |
+| [Traffic Spike / DDoS](./traffic-spike-ddos.md) | Rate limiting tuning, IP blocking, auto-scaling, emergency circuit breakers, tenant isolation |
+| [Redis Failure](./redis-failure.md) | Memory exhaustion, connection failure, data loss, AOF corruption, replication failure |
+| [MTA Degradation](./mta-degradation.md) | High bounce rate, SMTP failures, queue backlog, IP reputation damage, DKIM/SPF/DMARC failures |
 
 ---
 
@@ -73,3 +78,4 @@ Each runbook should be self-contained, actionable, and usable by any on-call eng
 | Monitoring guide | [operations/monitoring.md](../monitoring.md) |
 | Disaster recovery | [operations/disaster-recovery.md](../disaster-recovery.md) |
 | SLO management | [operations/slo-management.md](../slo-management.md) |
+| Service mesh & mTLS | [operations/service-mesh.md](../service-mesh.md) |

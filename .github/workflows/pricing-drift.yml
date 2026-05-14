@@ -6,6 +6,7 @@ on:
       - docs/pricing.md
       - apps/marketing-zola/templates/**
       - tools/validate_pricing_drift.py
+      - services/mail-server/crates/billing-service/src/plans.rs
       - .github/workflows/pricing-drift.yml
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - docs/pricing.md
       - apps/marketing-zola/templates/**
       - tools/validate_pricing_drift.py
+      - services/mail-server/crates/billing-service/src/plans.rs
       - .github/workflows/pricing-drift.yml
 
 jobs:

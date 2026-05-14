@@ -73,7 +73,7 @@
   ],
 )
 
-#set text(font: "Helvetica", size: 10pt)
+#set text(font: "Inter", "DejaVu Sans", sans-serif, size: 10pt)
 #set par(justify: true)
 #set heading(numbering: "1.")
 
@@ -94,18 +94,18 @@
 }
 
 #let change-indicator(pct) = {
-  let color = if pct > 0 { rgb("#22c55e") } else if pct < 0 { rgb("#ef4444") } else { luma(120) }
+  let color = if pct > 0 { rgb("#16a34a") } else if pct < 0 { rgb("#dc2626") } else { luma(120) }
   let arrow = if pct > 0 { "↑" } else if pct < 0 { "↓" } else { "→" }
   text(weight: "bold", fill: color)[#arrow #calc.abs(pct)%]
 }
 
 #let priority-badge(p) = {
-  let color = if p == "high" { rgb("#ef4444") } else if p == "medium" { rgb("#f59e0b") } else { rgb("#3b82f6") }
+  let color = if p == "high" { rgb("#dc2626") } else if p == "medium" { rgb("#f59e0b") } else { rgb("#71717a") }
   box(
     fill: color.lighten(80%),
     stroke: 0.5pt + color,
     inset: (x: 6pt, y: 2pt),
-    radius: 3pt,
+    radius: 0pt,
     text(weight: "bold", size: 7pt, fill: color.darken(20%))[#upper(p)]
   )
 }
@@ -117,13 +117,13 @@
 #v(20mm)
 
 #align(center)[
-  #text(weight: "bold", size: 14pt, fill: rgb("#2563eb"))[ApexMail]
+  #text(weight: "bold", size: 14pt, fill: rgb("#dc2626"))[ApexMail]
   #v(8pt)
   #text(weight: "bold", size: 28pt)[Quarterly Business Review]
   #v(4pt)
   #text(size: 16pt, fill: luma(80))[#data.quarter]
   #v(20pt)
-  #line(length: 50%, stroke: 1.5pt + rgb("#2563eb"))
+  #line(length: 50%, stroke: 1.5pt + rgb("#000000"))
   #v(20pt)
   #text(size: 14pt)[Prepared for *#data.tenant_name*]
   #v(8pt)
@@ -156,7 +156,7 @@
 #table(
   columns: (1fr, auto, auto, auto),
   stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
   inset: 10pt,
   align: (left, right, right, center),
   [*Metric*], [*This Quarter*], [*Last Quarter*], [*Change*],
@@ -180,7 +180,7 @@
 #table(
   columns: (1fr, auto, auto, auto, auto),
   stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
   inset: 8pt,
   align: (left, right, right, right, right),
   [*Month*], [*Sent*], [*Delivery*], [*Opens*], [*Clicks*],
@@ -204,7 +204,7 @@
 #table(
   columns: (1fr, auto, auto, auto, auto),
   stroke: 0.5pt + luma(220),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
   inset: 8pt,
   align: (left, right, right, right, right),
   [*Campaign*], [*Sent*], [*Open Rate*], [*Click Rate*], [*Revenue*],
@@ -227,9 +227,9 @@
 
 #if data.incidents.len() == 0 [
   #block(
-    fill: rgb("#22c55e").lighten(85%),
+    fill: rgb("#16a34a").lighten(85%),
     inset: 12pt,
-    radius: 4pt,
+    radius: 0pt,
     width: 100%,
   )[✓ No service incidents during this quarter.]
 ] else [
@@ -261,7 +261,7 @@
   #block(
     fill: luma(248),
     inset: 12pt,
-    radius: 4pt,
+    radius: 0pt,
     width: 100%,
     below: 8pt,
   )[

@@ -254,25 +254,25 @@ mod tests {
 
     #[test]
     fn drain_error_alert_threshold_is_reasonable() {
-        assert!(
+        const _: () = assert!(
             DRAIN_ERROR_ALERT_THRESHOLD > 0,
             "threshold must be positive"
         );
-        assert!(
+        const _: () = assert!(
             DRAIN_ERROR_ALERT_THRESHOLD <= 100,
-            "threshold should not exceed 100",
+            "threshold should not exceed 100"
         );
     }
 
     #[test]
     fn stale_event_age_limit_is_reasonable() {
-        assert!(
+        const _: () = assert!(
             STALE_EVENT_AGE_LIMIT_MINUTES > 0,
-            "stale age limit must be positive",
+            "stale age limit must be positive"
         );
-        assert!(
+        const _: () = assert!(
             STALE_EVENT_AGE_LIMIT_MINUTES <= 1440,
-            "stale age limit should not exceed 24 hours (1440 minutes)",
+            "stale age limit should not exceed 24 hours (1440 minutes)"
         );
     }
 

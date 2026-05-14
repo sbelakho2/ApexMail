@@ -42,6 +42,7 @@ pub enum AtoConfigError {
 /// registry, but multi-node deployments still require an external shared
 /// store (for example Redis) for perfect node-to-node consistency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AtoConfig {
     /// Maximum plausible travel speed in km/h (default:500).
     /// 900 km/h (commercial jet) causes false negatives for VPN hops that

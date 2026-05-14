@@ -21,6 +21,7 @@ use crate::middleware::auth::{
     JwtClaims,
 };
 use crate::middleware::rate_limiter::extract_public_client_ip;
+use crate::routes::csrf::validate_form_csrf;
 use crate::state::AppState;
 
 const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
@@ -34,6 +35,83 @@ const MAX_API_KEY_EXPIRY_DAYS: i64 = 365;
 const MFA_CHALLENGE_TTL_SECS: u64 = 10 * 60;
 const MFA_CHALLENGE_PREFIX: &str = "apexmail:auth:mfa_challenge:";
 const MFA_SECRET_BYTES: usize = 20;
+
+// ─── mCaptcha token verification ───────────────────────────────
+
+/// Verify a proof-of-work token against the configured mCaptcha instance.
+///
+/// In development mode (`site_key == "dev"`) verification is **bypassed**
+/// so developers are not required to run an mCaptcha instance locally.
+///
+/// The mCaptcha widget's JavaScript collects a proof-of-work solution and
+/// writes it into the hidden `mcaptcha__token` input. This function POSTs
+/// that token together with the server's secret key to the mCaptcha
+/// verification endpoint.
+async fn verify_mcaptcha_token(
+    config: &crate::config::Config,
+    http_client: &reqwest::Client,
+    mcaptcha_token: Option<&str>,
+) -> Result<(), ApiError> {
+    // Dev-mode bypass: if either key is "dev" we skip verification entirely.
+    if config.mcaptcha_site_key == "dev" || config.mcaptcha_secret_key == "dev" {
+        return Ok(());
+    }
+
+    // If mCaptcha is explicitly disabled via MCAPTCHA_ENABLED=false, skip verification.
+    if !config.mcaptcha_enabled {
+        return Ok(());
+    }
+
+    let token = mcaptcha_token.filter(|t| !t.is_empty()).ok_or_else(|| {
+        ApiError::Validation(vec!["mCaptcha verification token is required".into()])
+    })?;
+
+    // Use the explicit verify URL if configured, otherwise construct from base URL.
+    let verify_url = if config.mcaptcha_verify_url.is_empty() {
+        let base_url = config.mcaptcha_base_url.trim_end_matches('/');
+        format!("{base_url}/api/v1/verify")
+    } else {
+        config.mcaptcha_verify_url.clone()
+    };
+
+    let body = serde_json::json!({
+        "token": token,
+        "secret_key": config.mcaptcha_secret_key,
+    });
+
+    let resp = http_client
+        .post(&verify_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, url = %verify_url, "mCaptcha verification request failed");
+            ApiError::ServiceUnavailable("CAPTCHA verification service unreachable".into())
+        })?;
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+
+    // Parse the JSON response — mCaptcha may return `{"valid": true}` or `{"success": true}`.
+    let valid: bool = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("valid")
+                .and_then(|x| x.as_bool())
+                .or_else(|| v.get("success").and_then(|x| x.as_bool()))
+        })
+        .unwrap_or(false);
+
+    if !valid || !status.is_success() {
+        tracing::warn!(status = %status, response = %text, "mCaptcha verification rejected token");
+        return Err(ApiError::Validation(vec![
+            "CAPTCHA verification failed — please try again".into(),
+        ]));
+    }
+
+    Ok(())
+}
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
@@ -81,6 +159,16 @@ fn scopes_for_role(role: &str) -> Vec<String> {
             "analytics:read".into(),
             "contacts:read".into(),
             "contacts:write".into(),
+            "logs:read".into(),
+            "webhooks:read".into(),
+            "webhooks:write".into(),
+            "campaigns:read".into(),
+            "campaigns:write".into(),
+            "automations:read".into(),
+            "suppressions:read".into(),
+            "suppressions:write".into(),
+            "dedicated_ips:read".into(),
+            "dedicated_ips:write".into(),
         ],
         "viewer" => vec![
             "messages:read".into(),
@@ -89,6 +177,10 @@ fn scopes_for_role(role: &str) -> Vec<String> {
             "events:read".into(),
             "analytics:read".into(),
             "contacts:read".into(),
+            "logs:read".into(),
+            "campaigns:read".into(),
+            "suppressions:read".into(),
+            "dedicated_ips:read".into(),
         ],
         _ => vec!["messages:read".into()],
     }
@@ -153,13 +245,14 @@ fn base32_encode(bytes: &[u8]) -> String {
     output
 }
 
-fn generate_mfa_secret() -> String {
+fn generate_mfa_secret() -> Result<String, ApiError> {
     let mut secret = [0u8; MFA_SECRET_BYTES];
     use rand::TryRngCore;
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut secret)
-        .expect("OsRng should not fail");
-    base32_encode(&secret)
+    rand::rngs::OsRng.try_fill_bytes(&mut secret).map_err(|e| {
+        tracing::error!(error = %e, "failed to generate MFA secret via OsRng");
+        ApiError::Internal("failed to generate MFA secret".into())
+    })?;
+    Ok(base32_encode(&secret))
 }
 
 fn build_mfa_otpauth_url(email: &str, secret: &str) -> String {
@@ -180,7 +273,9 @@ fn mfa_challenge_key(token: &str) -> String {
 }
 
 fn validate_password_strength(password: &str) -> Result<(), ApiError> {
-    if password.len() < 12 || password.len() > 128 {
+    // Use char count for minimum length (Unicode-aware) and byte length for max (DB storage limit)
+    let char_count = password.chars().count();
+    if char_count < 12 || password.len() > 128 {
         return Err(ApiError::Validation(vec![
             "password must be 12-128 characters".into(),
         ]));
@@ -196,8 +291,131 @@ fn validate_password_strength(password: &str) -> Result<(), ApiError> {
         ]));
     }
 
+    // F-12: Check for common weak passwords (normalized to lowercase)
+    let lower = password.to_ascii_lowercase();
+    if COMMON_WEAK_PASSWORDS.binary_search(&lower.as_str()).is_ok() {
+        return Err(ApiError::Validation(vec![
+            "password is too common; choose a less predictable password".into(),
+        ]));
+    }
+
+    // F-12: Check for repeated characters (3+ identical consecutive chars)
+    if password
+        .as_bytes()
+        .windows(3)
+        .any(|w| w[0] == w[1] && w[1] == w[2])
+    {
+        return Err(ApiError::Validation(vec![
+            "password must not contain 3 or more repeated consecutive characters".into(),
+        ]));
+    }
+
+    // F-12: Check for sequential characters (e.g., "abcd", "1234", "4321")
+    if has_sequential_chars(password) {
+        return Err(ApiError::Validation(vec![
+            "password must not contain 3 or more sequential characters".into(),
+        ]));
+    }
+
     Ok(())
 }
+
+/// Returns true if the string contains 3+ sequential ASCII characters (forward or backward).
+fn has_sequential_chars(s: &str) -> bool {
+    let bytes: Vec<u8> = s
+        .as_bytes()
+        .iter()
+        .copied()
+        .filter(|&b| b.is_ascii())
+        .collect();
+    if bytes.len() < 3 {
+        return false;
+    }
+    bytes.windows(3).any(|w| {
+        (w[0] + 1 == w[1] && w[1] + 1 == w[2]) // forward sequential
+            || (w[0] == w[1] + 1 && w[1] == w[2] + 1) // backward sequential
+    })
+}
+
+/// Sorted list of common weak passwords (top ~100) to reject.
+static COMMON_WEAK_PASSWORDS: &[&str] = &[
+    "123456",
+    "1234567",
+    "12345678",
+    "123456789",
+    "1234567890",
+    "12345678910",
+    "111111",
+    "112233",
+    "121212",
+    "123123",
+    "1234",
+    "12345",
+    "123456789",
+    "654321",
+    "666666",
+    "696969",
+    "777777",
+    "888888",
+    "abc123",
+    "abcd1234",
+    "admin",
+    "admin123",
+    "baseball",
+    "chester",
+    "charlie",
+    "cookie",
+    "daniel",
+    "dragon",
+    "football",
+    "fuckme",
+    "fuckyou",
+    "guest",
+    "hunter",
+    "hunter2",
+    "iloveyou",
+    "jennifer",
+    "jessica",
+    "jordan",
+    "killer",
+    "letmein",
+    "master",
+    "michael",
+    "michelle",
+    "monkey",
+    "mustang",
+    "ninja",
+    "pass",
+    "passwd",
+    "password",
+    "password1",
+    "password12",
+    "password123",
+    "password1234",
+    "password12345",
+    "photoshop",
+    "princess",
+    "pussy",
+    "qazwsx",
+    "qwerty",
+    "qwerty123",
+    "qwertyuiop",
+    "robert",
+    "solo",
+    "starwars",
+    "sunshine",
+    "superman",
+    "thomas",
+    "trustno1",
+    "welcome",
+    "whatever",
+    "zxcvbnm",
+    "passw0rd",
+    "p@ssword",
+    "p@ssw0rd",
+    "Pa$$word",
+    "Pa$$w0rd",
+];
 
 fn authenticated_user_id(auth: &AuthUser) -> Result<&str, ApiError> {
     auth.user_id
@@ -417,13 +635,13 @@ async fn enqueue_verification_email(
     let safe_link = html_escape(&verification_link);
     let html_body = format!(
         r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:sans-serif;line-height:1.6;color:#1a1a1a;max-width:560px;margin:0 auto;padding:24px">
-<h2 style="color:#2563EB">Verify Your ApexMail Account</h2>
+<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
+<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Verify Your ApexMail Account</h2>
 <p>Finish setting up <strong>{safe_email}</strong> by confirming this email address.</p>
-<p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#2563EB;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Verify email</a></p>
-<p style="font-size:13px;color:#666">This link expires in 24 hours.</p>
-<hr style="border:none;border-top:1px solid #e5e5e5;margin:24px 0"/>
-<p style="font-size:12px;color:#999">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999">apexmail.ee</a></p>
+<p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Verify email</a></p>
+<p style="font-size:13px;color:#71717a">This link expires in 24 hours.</p>
+<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
+<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999;text-decoration:none">apexmail.ee</a></p>
 </body></html>"#,
     );
     let text_body = format!(
@@ -452,6 +670,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
         .route("/mfa/verify", post(complete_mfa_challenge))
+        .route("/mfa/setup", post(init_mfa_setup))
+        .route("/mfa/confirm-setup", post(confirm_mfa_setup))
+        .route("/mfa/status", get(mfa_status))
         .route("/register", post(register))
         .route("/signup", post(register))
         .route("/verify-email", get(verify_email))
@@ -468,6 +689,9 @@ pub fn control_plane_alias_router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
         .route("/mfa/verify", post(complete_mfa_challenge))
+        .route("/mfa/setup", post(init_mfa_setup))
+        .route("/mfa/confirm-setup", post(confirm_mfa_setup))
+        .route("/mfa/status", get(mfa_status))
         .route("/register", post(register))
         .route("/signup", post(register))
         .route("/verify-email", get(verify_email))
@@ -480,11 +704,16 @@ pub fn control_plane_alias_router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(non_snake_case)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
     #[serde(default, rename = "mfaCode", alias = "mfa_code")]
     pub mfa_code: Option<String>,
+    /// Token from the mCaptcha proof-of-work widget, submitted as a hidden form field.
+    /// Optional for non-interactive API clients; required if mCaptcha is not in dev mode.
+    #[serde(default, rename = "mcaptcha__token")]
+    pub mcaptcha__token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -593,7 +822,7 @@ pub struct ListApiKeysQuery {
 
 fn build_session_cookie(token: &str, max_age_secs: i64, secure: bool) -> String {
     format!(
-        "am_session={token}; HttpOnly; Path=/; Max-Age={max_age_secs}; SameSite=Lax{}",
+        "am_session={token}; HttpOnly; Path=/; Max-Age={max_age_secs}; SameSite=Strict{}",
         if secure { "; Secure" } else { "" }
     )
 }
@@ -743,13 +972,26 @@ pub struct ResetPasswordResponse {
 
 async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
+    // Validate CSRF token from X-CSRF-Token header (auth form protection)
+    validate_form_csrf(&headers, &state.config.csrf_secret)?;
+
     if body.email.is_empty() || body.password.is_empty() {
         return Err(ApiError::Validation(vec![
             "email and password are required".into(),
         ]));
     }
+
+    // Verify mCaptcha proof-of-work token before proceeding with credential check.
+    // Early verification avoids leaking user existence via timing or error messages.
+    verify_mcaptcha_token(
+        &state.config,
+        &state.http_client,
+        body.mcaptcha__token.as_deref(),
+    )
+    .await?;
 
     let login_identifier = normalized_login_identifier(&body.email);
     if login_lock_ttl(&state.redis, &login_identifier)
@@ -838,7 +1080,7 @@ async fn login(
                 ));
             }
         } else {
-            let secret = generate_mfa_secret();
+            let secret = generate_mfa_secret()?;
             let challenge_token = store_mfa_challenge(
                 &state.redis,
                 &MfaChallengeState {
@@ -1127,6 +1369,202 @@ async fn complete_mfa_challenge(
     }
 }
 
+// ─── MFA Management handlers ──────────────────────────────────
+
+/// Request to confirm an MFA setup by providing a valid TOTP code.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmMfaSetupRequest {
+    challenge_token: String,
+    #[serde(rename = "mfaCode", alias = "mfa_code")]
+    mfa_code: String,
+}
+
+/// Helper struct to fetch just the fields needed for MFA management.
+#[derive(sqlx::FromRow)]
+struct MfaUserRow {
+    id: String,
+    email: String,
+    name: Option<String>,
+    role: String,
+    mfa_enabled: bool,
+}
+
+/// Initialise MFA setup for the current user.
+///
+/// Generates a new TOTP secret, stores a Setup‑kind MFA challenge in Redis,
+/// and returns the challenge token, plaintext secret, and `otpauth://` URL
+/// so the front‑end can render a QR code.
+async fn init_mfa_setup(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Response, ApiError> {
+    let user_id = authenticated_user_id(&auth)?;
+
+    let user = sqlx::query_as::<_, MfaUserRow>(
+        "SELECT id, email, name, role, mfa_enabled, mfa_secret, mfa_recovery_hashes
+         FROM users WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(&auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+
+    if user.mfa_enabled {
+        return Err(ApiError::Validation(vec!["MFA is already enabled".into()]));
+    }
+
+    let secret = generate_mfa_secret()?;
+    let otpauth_url = build_mfa_otpauth_url(&user.email, &secret);
+
+    let challenge_token = store_mfa_challenge(
+        &state.redis,
+        &MfaChallengeState {
+            user_id: user.id.clone(),
+            tenant_id: auth.tenant_id.clone(),
+            email: user.email.clone(),
+            name: user.name.clone(),
+            role: user.role.clone(),
+            secret: secret.clone(),
+            kind: MfaChallengeKind::Setup,
+        },
+    )
+    .await?;
+
+    Ok(no_store_json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "challengeToken": challenge_token,
+            "secret": secret,
+            "otpauthUrl": otpauth_url,
+        }),
+    ))
+}
+
+/// Confirm MFA setup by validating a TOTP code against the challenge secret.
+///
+/// On success the user's `mfa_secret` is encrypted and persisted,
+/// `mfa_enabled` is set to `true`, and a set of recovery codes is generated.
+/// The session is rotated (AR‑005) so the new privilege level requires a
+/// fresh token.
+async fn confirm_mfa_setup(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<ConfirmMfaSetupRequest>,
+) -> Result<Response, ApiError> {
+    let user_id = authenticated_user_id(&auth)?;
+
+    if body.challenge_token.trim().is_empty() {
+        return Err(ApiError::Validation(vec![
+            "challenge_token is required".into()
+        ]));
+    }
+    if body.mfa_code.trim().is_empty() {
+        return Err(ApiError::Validation(vec!["mfa_code is required".into()]));
+    }
+
+    let challenge = load_mfa_challenge(&state.redis, &body.challenge_token).await?;
+
+    // Validate the TOTP code
+    if !apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code) {
+        return Err(ApiError::Unauthorized("invalid MFA code".into()));
+    }
+
+    let user = sqlx::query_as::<_, UserRow>(
+        "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
+         FROM users WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(&auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+
+    if user.mfa_enabled {
+        delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
+        return Err(ApiError::Validation(vec!["MFA is already enabled".into()]));
+    }
+
+    // Generate recovery codes
+    let recovery_codes = apexmail_lib::mfa::try_generate_default_recovery_codes()
+        .map_err(|e| ApiError::Internal(format!("failed to generate recovery codes: {e}")))?;
+    let recovery_hashes: Vec<String> = recovery_codes
+        .iter()
+        .map(|code| {
+            apexmail_lib::mfa::try_hash_recovery_code(code)
+                .map_err(|e| ApiError::Internal(format!("failed to hash recovery code: {e}")))
+        })
+        .collect::<Result<_, _>>()?;
+    let hashes_json = serde_json::to_value(&recovery_hashes)
+        .map_err(|e| ApiError::Internal(format!("failed to serialize recovery hashes: {e}")))?;
+
+    // Encrypt and persist
+    let encrypted_secret = encrypt_mfa_secret_for_user(&challenge.user_id, &challenge.secret)?;
+
+    sqlx::query(
+        "UPDATE users
+         SET mfa_secret = $1, mfa_enabled = true, mfa_recovery_hashes = $2, updated_at = NOW()
+         WHERE id = $3 AND tenant_id = $4",
+    )
+    .bind(&encrypted_secret)
+    .bind(&hashes_json)
+    .bind(&user.id)
+    .bind(&user.tenant_id)
+    .execute(&state.db)
+    .await?;
+
+    insert_auth_audit_log(
+        &state,
+        &user.tenant_id,
+        &user.id,
+        "auth.mfa_enabled",
+        serde_json::json!({
+            "role": user.role,
+            "enforced_for_admin": true,
+        }),
+        None, // client_ip – not fighting IP plumbing here
+        None, // user_agent
+    )
+    .await?;
+
+    delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
+
+    // AR-005: Rotate session after MFA setup (privilege escalation)
+    let ttl = state.config.jwt_expiry.as_secs();
+    revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
+
+    Ok(no_store_json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "mfaEnabled": true,
+            "recoveryCodes": recovery_codes,
+        }),
+    ))
+}
+
+/// Return the current MFA status for the authenticated user.
+async fn mfa_status(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = authenticated_user_id(&auth)?;
+
+    let row = sqlx::query_as::<_, (bool, String)>(
+        "SELECT mfa_enabled, role FROM users WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(&auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+
+    Ok(Json(serde_json::json!({
+        "mfaEnabled": row.0,
+        "roleRequiresMfa": role_requires_mfa(&row.1),
+    })))
+}
+
 #[derive(sqlx::FromRow)]
 struct UserRow {
     id: String,
@@ -1145,6 +1583,7 @@ struct UserRow {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(non_snake_case)]
 pub struct RegisterRequest {
     pub company_name: String,
     pub email: String,
@@ -1152,6 +1591,10 @@ pub struct RegisterRequest {
     pub password: String,
     #[serde(default = "default_plan")]
     pub plan: String,
+    /// Token from the mCaptcha proof-of-work widget, submitted as a hidden form field.
+    /// Optional for non-interactive API clients; required if mCaptcha is not in dev mode.
+    #[serde(default, rename = "mcaptcha__token")]
+    pub mcaptcha__token: Option<String>,
 }
 
 fn default_plan() -> String {
@@ -1184,6 +1627,9 @@ async fn register(
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisterResponse>), ApiError> {
+    // Validate CSRF token from X-CSRF-Token header (auth form protection)
+    validate_form_csrf(&headers, &state.config.csrf_secret)?;
+
     // Rate-limit by client IP using Redis (stricter: 3 sign-ups per 15 min per IP)
     let client_ip = connect_info
         .map(|ConnectInfo(addr)| {
@@ -1217,6 +1663,14 @@ async fn register(
             return Err(ApiError::RateLimited);
         }
     }
+
+    // Verify mCaptcha proof-of-work token before processing registration.
+    verify_mcaptcha_token(
+        &state.config,
+        &state.http_client,
+        body.mcaptcha__token.as_deref(),
+    )
+    .await?;
 
     // Validate input
     if body.company_name.is_empty() || body.company_name.len() > 100 {
@@ -1411,7 +1865,7 @@ pub(crate) async fn verify_email_token(
 
     // Find user with matching verification token
     let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, tenant_id, metadata FROM users 
+        "SELECT id, tenant_id, metadata FROM users
             WHERE metadata->>'verification_token_hash' = $1
          AND email_verified = false
          LIMIT 1",
@@ -1445,7 +1899,7 @@ pub(crate) async fn verify_email_token(
 
     // Mark email as verified
     sqlx::query(
-        "UPDATE users SET email_verified = true, 
+        "UPDATE users SET email_verified = true,
             metadata = metadata - 'verification_token_hash' - 'verification_token' - 'verification_expires',
          updated_at = NOW()
          WHERE id = $1"
@@ -1609,6 +2063,9 @@ async fn reset_password(
     headers: HeaderMap,
     Json(body): Json<ResetPasswordRequest>,
 ) -> Result<Json<ResetPasswordResponse>, ApiError> {
+    // Validate CSRF token from X-CSRF-Token header (auth form protection)
+    validate_form_csrf(&headers, &state.config.csrf_secret)?;
+
     // Rate-limit by client IP using Redis
     let client_ip = connect_info
         .map(|ConnectInfo(addr)| {
@@ -1790,17 +2247,14 @@ async fn refresh_token(
         .ok_or_else(|| ApiError::Unauthorized("active session required".into()))?;
     validate_session_csrf(&headers, &state.config.csrf_secret)?;
 
-    // Decode existing token to get claims
-    let key = jsonwebtoken::DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes())
-        .map_err(|e| {
-        ApiError::Internal(format!("invalid JWT public key configuration: {e}"))
-    })?;
+    // Decode existing token to get claims.
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
     validation.validate_exp = true;
     validation.validate_nbf = true;
     validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
 
-    let token_data = jsonwebtoken::decode::<JwtClaims>(&token, &key, &validation)?;
+    let token_data =
+        crate::middleware::auth::decode_jwt_with_rotation(&token, &state.config, &validation)?;
     let old_claims = token_data.claims;
 
     let user_id = old_claims.sub.clone();
@@ -2646,7 +3100,7 @@ async fn change_password(
     // refresh token) are rejected immediately. Without this, a stolen old refresh token
     // could still obtain new access tokens even after the password is changed.
     let ttl = state.config.jwt_expiry.as_secs();
-    revoke_user_sessions(&state.redis, &auth.tenant_id, &user_id, ttl).await?;
+    revoke_user_sessions(&state.redis, &auth.tenant_id, user_id, ttl).await?;
 
     Ok(Json(serde_json::json!({ "changed": true })))
 }
@@ -2673,7 +3127,7 @@ async fn revoke_session(
     // This closes the TOCTOU window where a revoked session's JWT could still
     // obtain a new refresh token via the refresh_token endpoint.
     let ttl = state.config.jwt_expiry.as_secs();
-    revoke_user_sessions(&state.redis, &auth.tenant_id, &user_id, ttl).await?;
+    revoke_user_sessions(&state.redis, &auth.tenant_id, user_id, ttl).await?;
 
     let affected = if body.revoke_all {
         // Revoke ALL sessions including the current one

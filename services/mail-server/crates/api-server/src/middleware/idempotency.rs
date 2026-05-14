@@ -24,9 +24,12 @@ struct CachedResponse {
     status: u16,
     headers: Vec<(String, String)>,
     body: String, // base64-encoded
-    /// L-06: The user_id of the requester who created this cached response.
-    /// Used to re-validate that the same user is requesting the idempotent replay.
-    /// None for unauthenticated requests or API keys without user association.
+    /// The authenticated principal that created this cached response.
+    /// API-key, session, and user identities are all distinct to prevent
+    /// same-tenant replay across credentials with the same idempotency key.
+    #[serde(default)]
+    principal_id: Option<String>,
+    /// L-06 compatibility: older cached records stored only user_id.
     user_id: Option<String>,
 }
 
@@ -39,10 +42,9 @@ struct CachedResponse {
 /// 2. On miss, let the request through, capture the response, and store it.
 ///
 /// # Security (L-06)
-/// Cached idempotency responses are bound to the AuthUser who created them.
-/// When a cached response is found, we verify the current request's AuthUser
-/// matches the cached user_id before returning it. This prevents User B from
-/// replaying User A's idempotency key and receiving User A's cached response.
+/// Cached idempotency responses are bound to the concrete AuthUser principal
+/// who created them. API-key and session identities are included, so one API
+/// key cannot replay another key's response merely because both lack user_id.
 pub async fn idempotency_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -66,18 +68,7 @@ pub async fn idempotency_middleware(
 
     // 1. Check cache — with AuthUser re-validation (L-06)
     if let Some(cached) = lookup_cached(&state, &cache_key).await {
-        // L-06: Verify the cached response belongs to the same user making this request.
-        // If the cached user_id differs from the current user's user_id, treat as a
-        // cache miss and let the request through. This prevents cross-user idempotency
-        // key replay attacks.
-        let user_id_matches = match (&current_user, &cached.user_id) {
-            // Both have no user_id (unauthenticated or API key without user) → match
-            (None, None) => true,
-            // Both have same user_id → match
-            (Some(a), Some(b)) => a.user_id.as_deref() == Some(b.as_str()),
-            // One has user_id, the other doesn't → mismatch
-            _ => false,
-        };
+        let user_id_matches = principal_matches(current_user.as_ref(), &cached);
 
         if !user_id_matches {
             tracing::warn!(
@@ -159,8 +150,9 @@ async fn store_response(
         }
     };
 
-    // L-06: Store the current user_id with the cached response so we can
-    // re-validate on subsequent requests.
+    // L-06: Store the concrete authenticated principal so we can re-validate
+    // subsequent requests against the same API key/session/user.
+    let principal_id = current_user.as_ref().map(principal_binding);
     let cached = CachedResponse {
         status: parts.status.as_u16(),
         headers: parts
@@ -169,6 +161,7 @@ async fn store_response(
             .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
             .collect(),
         body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body_bytes),
+        principal_id,
         user_id: current_user.and_then(|u| u.user_id),
     };
 
@@ -179,6 +172,29 @@ async fn store_response(
     }
 
     Response::from_parts(parts, axum::body::Body::from(body_bytes))
+}
+
+fn principal_binding(user: &AuthUser) -> String {
+    if let Some(api_key_id) = user.api_key_id.as_deref() {
+        return format!("api_key:{api_key_id}");
+    }
+    if let Some(session_id) = user.session_id.as_deref() {
+        return format!("session:{session_id}");
+    }
+    if let Some(user_id) = user.user_id.as_deref() {
+        return format!("user:{user_id}");
+    }
+    "anonymous".to_string()
+}
+
+fn principal_matches(current_user: Option<&AuthUser>, cached: &CachedResponse) -> bool {
+    match (current_user, cached.principal_id.as_deref()) {
+        (Some(user), Some(principal_id)) => principal_binding(user) == principal_id,
+        (None, Some("anonymous")) => true,
+        (None, None) => cached.user_id.is_none(),
+        (Some(user), None) => user.user_id.as_deref() == cached.user_id.as_deref(),
+        _ => false,
+    }
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -213,10 +229,61 @@ mod tests {
                 &base64::engine::general_purpose::STANDARD,
                 b"{\"ok\":true}",
             ),
+            principal_id: None,
             user_id: None,
         };
         let json = serde_json::to_string(&cached).unwrap();
         let decoded: CachedResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.status, 200);
+    }
+
+    #[test]
+    fn principal_binding_prefers_api_key_over_missing_user_id() {
+        let user = AuthUser {
+            tenant_id: "tenant_1".into(),
+            user_id: None,
+            api_key_id: Some("key_1".into()),
+            session_id: None,
+            scopes: vec![],
+        };
+        assert_eq!(principal_binding(&user), "api_key:key_1");
+    }
+
+    #[test]
+    fn principal_matches_rejects_different_api_keys_without_user_ids() {
+        let cached = CachedResponse {
+            status: 200,
+            headers: vec![],
+            body: String::new(),
+            principal_id: Some("api_key:key_1".into()),
+            user_id: None,
+        };
+        let current = AuthUser {
+            tenant_id: "tenant_1".into(),
+            user_id: None,
+            api_key_id: Some("key_2".into()),
+            session_id: None,
+            scopes: vec![],
+        };
+        assert!(!principal_matches(Some(&current), &cached));
+    }
+
+    #[test]
+    fn principal_matches_accepts_same_session() {
+        let cached = CachedResponse {
+            status: 200,
+            headers: vec![],
+            body: String::new(),
+            principal_id: Some("session:sess_1".into()),
+            user_id: Some("usr_1".into()),
+        };
+        let current = AuthUser {
+            tenant_id: "tenant_1".into(),
+            user_id: Some("usr_1".into()),
+            api_key_id: None,
+            session_id: Some("sess_1".into()),
+            scopes: vec![],
+        };
+        assert!(principal_matches(Some(&current), &cached));
     }
 }

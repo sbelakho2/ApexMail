@@ -22,7 +22,17 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt::init();
+    // Structured JSON logging with env-driven filter
+    // Sampling strategy: default `info` level; use `RUST_LOG` for fine-grained control.
+    // In production, set `RUST_LOG=warn,analytics=info` to reduce high-volume analytics output.
+    tracing_subscriber::fmt()
+        .json()
+        .with_target(true)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let config = analytics::config::AnalyticsConfig::from_env();
     let args = Args::parse();

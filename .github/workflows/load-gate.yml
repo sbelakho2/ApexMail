@@ -1,0 +1,406 @@
+# =============================================================================
+# ApexMail Load Test Gate — CI/CD Workflow
+# =============================================================================
+# Runs the full load test suite against a staging-like environment and enforces
+# performance thresholds. Results are compared against the active baseline and
+# regressions are reported.
+#
+# Triggers:
+#   - Push to main (reduced: 2 min hold)
+#   - Release tag (full suite)
+#   - Scheduled nightly (full suite + baseline comparison)
+#   - Scheduled weekly (full suite + new baseline candidate)
+#   - Manual workflow_dispatch
+# =============================================================================
+
+name: Load Test Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/mail-server/**'
+      - '.github/workflows/load-gate.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/mail-server/**'
+  release:
+    types: [published]
+  schedule:
+    # Nightly: 02:00 UTC — run full suite, compare against baseline
+    - cron: '0 2 * * *'
+    # Weekly: Sunday 04:00 UTC — full suite + baseline update candidate
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Load test profile'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+          - standard
+          - extended
+          - chaos
+      baseline_update:
+        description: 'Update baseline after run'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_LOG: info
+  K6_API_BASE: http://localhost:3000
+  K6_API_KEY: ${{ secrets.LOAD_TEST_API_KEY || 'ci-test-api-key' }}
+
+jobs:
+  # ── Provision test environment ────────────────────────────────────────────
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: apexmail_loadtest
+          POSTGRES_USER: apexmail
+          POSTGRES_PASSWORD: apexmail
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - run: echo "PostgreSQL and Redis provisioned"
+      - run: echo "DB_HOST=localhost" >> $GITHUB_ENV
+      - run: echo "REDIS_HOST=localhost" >> $GITHUB_ENV
+
+  # ── Rust load tests ───────────────────────────────────────────────────────
+  rust-load-tests:
+    needs: [provision]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          components: clippy
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            services/mail-server/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('services/mail-server/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run Rust load tests (release mode)
+        working-directory: services/mail-server
+        run: |
+          cargo test -p load-tests --release -- --nocapture 2>&1 | tee load-test-results.log
+
+      - name: Run Rust performance tests (release mode)
+        working-directory: services/mail-server
+        run: |
+          cargo test -p perf-tests --release -- --nocapture 2>&1 | tee perf-test-results.log
+
+      - name: Extract throughput metrics
+        run: |
+          echo "--- Extracting load test metrics ---"
+          # Parse ID generation throughput
+          ID_TPUT=$(grep -oP 'ID generation throughput: \K[\d.]+' load-test-results.log || echo "0")
+          echo "id_generation_tput=$ID_TPUT" >> $GITHUB_ENV
+
+          # Parse validation throughput
+          VAL_TPUT=$(grep -oP 'Validation throughput: \K[\d.]+' load-test-results.log || echo "0")
+          echo "validation_tput=$VAL_TPUT" >> $GITHUB_ENV
+
+          # Parse prediction throughput
+          PRED_TPUT=$(grep -oP 'Prediction throughput: \K[\d.]+' load-test-results.log || echo "0")
+          echo "prediction_tput=$PRED_TPUT" >> $GITHUB_ENV
+
+      - name: Check thresholds
+        run: |
+          FAILED=false
+          echo "=== Threshold Verification ==="
+          echo "ID Generation: ${id_generation_tput:-0} ops/s (min 10,000)"
+          if (( $(echo "${id_generation_tput:-0} < 10000" | bc -l) )); then
+            echo "❌ ID Generation below threshold"
+            FAILED=true
+          fi
+          echo "Validation: ${validation_tput:-0} ops/s (min 50,000)"
+          if (( $(echo "${validation_tput:-0} < 50000" | bc -l) )); then
+            echo "❌ Validation below threshold"
+            FAILED=true
+          fi
+          echo "Prediction: ${prediction_tput:-0} ops/s (min 5,000)"
+          if (( $(echo "${prediction_tput:-0} < 5000" | bc -l) )); then
+            echo "❌ Prediction below threshold"
+            FAILED=true
+          fi
+
+          if $FAILED; then
+            echo "❌ Some thresholds were not met!"
+            exit 1
+          fi
+          echo "✅ All thresholds passed!"
+
+  # ── k6 API journey tests ─────────────────────────────────────────────────
+  k6-api-tests:
+    needs: [provision]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            services/mail-server/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('services/mail-server/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build API server (CI profile)
+        working-directory: services/mail-server
+        run: |
+          cargo build -p api-server --profile release 2>&1 | tee build.log
+
+      - name: Start API server and wait for readiness
+        working-directory: services/mail-server
+        run: |
+          # Run database migrations
+          cargo run -p apexmail-db --release -- migrate 2>&1 | tee db-migrate.log || true
+
+          # Start API server in background
+          ./target/release/api-server &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+
+          # Wait for server to be ready (up to 60s)
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/v1/health/readiness > /dev/null 2>&1; then
+              echo "✅ API server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          # Verify server is running
+          if ! kill -0 $SERVER_PID 2>/dev/null; then
+            echo "❌ API server failed to start"
+            exit 1
+          fi
+
+      - name: Install k6
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg
+          sudo gpg -k
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/k6.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/k6.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Run k6 API auth load test
+        working-directory: load-tests/http-journey
+        run: |
+          K6_API_BASE=http://localhost:3000 k6 run auth-load-test.js \
+            --out json=/tmp/k6-api-results.json \
+            2>&1 | tee k6-api-output.log
+
+      - name: Run k6 email send load test
+        working-directory: load-tests/http-journey
+        run: |
+          K6_API_BASE=http://localhost:3000 K6_API_KEY=${{ env.K6_API_KEY }} \
+            k6 run email-send-load-test.js \
+            --out json=/tmp/k6-email-results.json \
+            2>&1 | tee k6-email-output.log
+
+      - name: Run k6 health check load test
+        working-directory: load-tests/http-journey
+        run: |
+          K6_API_BASE=http://localhost:3000 k6 run health-load-test.js \
+            --out json=/tmp/k6-health-results.json \
+            2>&1 | tee k6-health-output.log
+
+      - name: Run k6 combined journey test
+        working-directory: load-tests/http-journey
+        run: |
+          K6_API_BASE=http://localhost:3000 K6_API_KEY=${{ env.K6_API_KEY }} \
+            k6 run combined-journey-test.js \
+            --out json=/tmp/k6-journey-results.json \
+            2>&1 | tee k6-journey-output.log
+
+      - name: Store k6 results as artifacts
+        uses: actions/upload-artifact@65c4c4a1d7e2c2c0f0c7a6c6f9b3e7a1c6b7a8e9 # v4
+        with:
+          name: k6-test-results
+          path: |
+            /tmp/k6-api-results.json
+            /tmp/k6-email-results.json
+            /tmp/k6-health-results.json
+            /tmp/k6-journey-results.json
+            load-tests/http-journey/k6-api-output.log
+            load-tests/http-journey/k6-email-output.log
+            load-tests/http-journey/k6-health-output.log
+            load-tests/http-journey/k6-journey-output.log
+          retention-days: 7
+
+      - name: Check k6 thresholds
+        working-directory: load-tests/http-journey
+        run: |
+          FAILED=false
+          for log in k6-api-output.log k6-email-output.log k6-health-output.log k6-journey-output.log; do
+            if [ -f "$log" ] && grep -q "thresholds on metrics 'http_req_duration'" "$log"; then
+              echo "❌ k6 thresholds exceeded in $log"
+              FAILED=true
+            fi
+          done
+          if $FAILED; then
+            echo "❌ Some k6 thresholds were not met!"
+            exit 1
+          fi
+          echo "✅ All k6 tests passed!"
+
+      - name: Stop API server
+        if: always()
+        run: |
+          if [ -n "${SERVER_PID:-}" ]; then
+            kill $SERVER_PID 2>/dev/null || true
+            wait $SERVER_PID 2>/dev/null || true
+            echo "🛑 API server stopped"
+          fi
+
+  # ── Baseline comparison ──────────────────────────────────────────────────
+  baseline-check:
+    if: github.event_name == 'schedule' || github.event_name == 'release'
+    needs: [rust-load-tests, k6-api-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download k6 test results
+        uses: actions/download-artifact@v4
+        with:
+          name: k6-test-results
+          path: /tmp/k6-results
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Build results JSON from k6 outputs
+        run: |
+          jq -n \
+            --arg auth_rps "$(jq '.metrics.http_reqs.values.rate // 0' /tmp/k6-results/k6-api-results.json)" \
+            --arg auth_p95 "$(jq '.metrics.http_req_duration.values."p(95)" // 0' /tmp/k6-results/k6-api-results.json)" \
+            --arg auth_p99 "$(jq '.metrics.http_req_duration.values."p(99)" // 0' /tmp/k6-results/k6-api-results.json)" \
+            --arg auth_err "$(jq '.metrics.http_req_failed.values.rate // 0' /tmp/k6-results/k6-api-results.json)" \
+            --arg email_rps "$(jq '.metrics.http_reqs.values.rate // 0' /tmp/k6-results/k6-email-results.json)" \
+            --arg email_p95 "$(jq '.metrics.http_req_duration.values."p(95)" // 0' /tmp/k6-results/k6-email-results.json)" \
+            --arg email_p99 "$(jq '.metrics.http_req_duration.values."p(99)" // 0' /tmp/k6-results/k6-email-results.json)" \
+            --arg email_err "$(jq '.metrics.http_req_failed.values.rate // 0' /tmp/k6-results/k6-email-results.json)" \
+            --arg health_rps "$(jq '.metrics.http_reqs.values.rate // 0' /tmp/k6-results/k6-health-results.json)" \
+            --arg health_p95 "$(jq '.metrics.http_req_duration.values."p(95)" // 0' /tmp/k6-results/k6-health-results.json)" \
+            --arg health_p99 "$(jq '.metrics.http_req_duration.values."p(99)" // 0' /tmp/k6-results/k6-health-results.json)" \
+            --arg health_err "$(jq '.metrics.http_req_failed.values.rate // 0' /tmp/k6-results/k6-health-results.json)" \
+            --arg journey_rps "$(jq '.metrics.http_reqs.values.rate // 0' /tmp/k6-results/k6-journey-results.json)" \
+            --arg journey_p95 "$(jq '.metrics.http_req_duration.values."p(95)" // 0' /tmp/k6-results/k6-journey-results.json)" \
+            --arg journey_p99 "$(jq '.metrics.http_req_duration.values."p(99)" // 0' /tmp/k6-results/k6-journey-results.json)" \
+            --arg journey_err "$(jq '.metrics.http_req_failed.values.rate // 0' /tmp/k6-results/k6-journey-results.json)" \
+            '{
+              "meta": { "version": "1.0", "created_at": now | todate, "source": "ci-load-gate" },
+              "api_throughput": {
+                "sustained_rps": ($auth_rps | tonumber),
+                "p95_latency_ms": ($auth_p95 | tonumber),
+                "p99_latency_ms": ($auth_p99 | tonumber),
+                "error_rate": ($auth_err | tonumber)
+              },
+              "auth_login": {
+                "sustained_rps": ($auth_rps | tonumber),
+                "p95_latency_ms": ($auth_p95 | tonumber),
+                "p99_latency_ms": ($auth_p99 | tonumber),
+                "error_rate": ($auth_err | tonumber)
+              },
+              "email_send": {
+                "sustained_rps": ($email_rps | tonumber),
+                "p95_latency_ms": ($email_p95 | tonumber),
+                "p99_latency_ms": ($email_p99 | tonumber),
+                "error_rate": ($email_err | tonumber)
+              },
+              "health_liveness": {
+                "sustained_rps": ($health_rps | tonumber),
+                "p95_latency_ms": ($health_p95 | tonumber),
+                "p99_latency_ms": ($health_p99 | tonumber),
+                "error_rate": ($health_err | tonumber)
+              },
+              "health_readiness": {
+                "sustained_rps": ($health_rps | tonumber),
+                "p95_latency_ms": ($health_p95 | tonumber),
+                "p99_latency_ms": ($health_p99 | tonumber),
+                "error_rate": ($health_err | tonumber)
+              },
+              "combined_journey": {
+                "sustained_rps": ($journey_rps | tonumber),
+                "p95_latency_ms": ($journey_p95 | tonumber),
+                "p99_latency_ms": ($journey_p99 | tonumber),
+                "error_rate": ($journey_err | tonumber)
+              }
+            }' > /tmp/results.json
+
+      - name: Compare against load-tests baseline
+        run: |
+          LATEST_BASELINE=$(ls load-tests/baselines/v*.json | sort -V | tail -1)
+          echo "Comparing k6 results against baseline: $LATEST_BASELINE"
+          ./scripts/compare-baseline.sh /tmp/results.json --baseline "$LATEST_BASELINE" --verbose
+
+  # ── Notifications ────────────────────────────────────────────────────────
+  notify:
+    if: failure() && (github.event_name == 'schedule' || github.event_name == 'release')
+    needs: [rust-load-tests, k6-api-tests, baseline-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Notify load test failure
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+        with:
+          webhook: ${{ secrets.SLACK_LOAD_TEST_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "❌ Load Test Gate Failed: ${{ github.workflow }} #${{ github.run_number }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*❌ Load Test Gate Failed*\nWorkflow: ${{ github.workflow }}\nRun: #${{ github.run_number }}\nBranch: ${{ github.ref_name }}\nCommit: ${{ github.sha }}\n<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
+                  }
+                }
+              ]
+            }
+        continue-on-error: true

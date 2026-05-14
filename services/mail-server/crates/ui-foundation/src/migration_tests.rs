@@ -132,7 +132,7 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
                 route.pattern
             );
             assert!(
-                html.contains("<body class=\"antialiased bg-surface-950 text-surface-100\">"),
+                html.contains("<body class=\"antialiased bg-background text-surface-950\">"),
                 "[control-plane] {} missing control-plane body classes",
                 route.pattern
             );
@@ -313,13 +313,13 @@ fn migration_primitives_render_valid_html() {
 
 #[test]
 fn migration_login_pages_preserve_field_ids() {
-    let web = leptos_views::web_login_page();
-    let ids = ["id=\"email\"", "id=\"password\"", "id=\"mfaCode\""];
+    let web = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
+    let ids = ["id=\"login-email\"", "id=\"password\"", "id=\"mfaCode\""];
     for id in &ids {
         assert!(web.contains(id), "web login missing {}", id);
     }
 
-    let cp = leptos_views::control_plane_login_page();
+    let cp = leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com");
     let cp_ids = [
         "id=\"login-email\"",
         "id=\"login-password\"",
@@ -332,19 +332,19 @@ fn migration_login_pages_preserve_field_ids() {
 
 #[test]
 fn migration_forms_have_action_attributes() {
-    let login = leptos_views::web_login_page();
+    let login = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
     assert!(
         login.contains("action=\"/v1/auth/login\""),
         "login missing action"
     );
 
-    let signup = leptos_views::web_signup_page();
+    let signup = leptos_views::web_signup_page("", "dev", "https://mcaptcha.example.com");
     assert!(
         signup.contains("action=\"/v1/auth/signup\""),
         "signup missing action"
     );
 
-    let forgot = leptos_views::web_forgot_password_page();
+    let forgot = leptos_views::web_forgot_password_page("", "dev", "https://mcaptcha.example.com");
     assert!(
         forgot.contains("action=\"/v1/auth/forgot-password\""),
         "forgot missing action"
@@ -356,7 +356,8 @@ fn migration_forms_have_action_attributes() {
         "reset missing action"
     );
 
-    let cp_login = leptos_views::control_plane_login_page();
+    let cp_login =
+        leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com");
     assert!(
         cp_login.contains("action=\"/api/auth/login\""),
         "cp login missing action"
@@ -365,7 +366,7 @@ fn migration_forms_have_action_attributes() {
 
 #[test]
 fn migration_security_data_attributes_present() {
-    let login = leptos_views::web_login_page();
+    let login = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
     assert!(
         login.contains("data-error-key=\"auth.error.rate_limited\""),
         "rate limiting data attribute missing"
@@ -377,7 +378,7 @@ fn migration_security_data_attributes_present() {
 
 #[test]
 fn migration_sidebar_data_attributes_present() {
-    let html = leptos_views::web_dashboard_layout("<div></div>");
+    let html = leptos_views::web_dashboard_layout("<div></div>", "");
     assert!(
         html.contains("data-sidebar-storage-key=\"apexmail-ui\""),
         "sidebar key missing"
@@ -536,8 +537,9 @@ fn migration_unknown_routes_are_rejected_for_every_surface() {
 
 #[test]
 fn migration_web_and_cp_share_primitives() {
-    let web_login = leptos_views::web_login_page();
-    let cp_login = leptos_views::control_plane_login_page();
+    let web_login = leptos_views::web_login_page("", "dev", "https://mcaptcha.example.com");
+    let cp_login =
+        leptos_views::control_plane_login_page("", "dev", "https://mcaptcha.example.com");
 
     // Both should use the same button class pattern
     let btn_class = "inline-flex items-center justify-center";
@@ -666,7 +668,7 @@ fn migration_critical_css_classes_preserved() {
 
 #[test]
 fn migration_dashboard_layout_css_classes_preserved() {
-    let html = leptos_views::web_dashboard_layout("<div></div>");
+    let html = leptos_views::web_dashboard_layout("<div></div>", "");
 
     // Sidebar uses data attributes, not CSS classes
     assert!(
@@ -855,10 +857,7 @@ fn dump_html_for_visual_parity() {
     let out_dir = "/Users/sabelakhoua/IdeaProjects/ApexMail/reports/visual-parity/current_html";
     std::fs::create_dir_all(out_dir).ok();
 
-    println!(
-        "Writing to: {:?}",
-        std::env::current_dir().unwrap().join(out_dir)
-    );
+    println!("Writing to: {out_dir:?}",);
 
     let surfaces_and_paths = vec![
         ("web", "/login"),

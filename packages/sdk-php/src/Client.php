@@ -217,30 +217,46 @@ class Client
         return $this->lastRateLimit;
     }
 
+    /**
+     * Sleep for max(retryAfter, baseDelay * attempt²) seconds, capped at 5s.
+     *
+     * Honors the server's Retry-After header (integer seconds or HTTP-date)
+     * while providing quadratic backoff growth as attempts increase.
+     */
     private function sleepRetryAfter(?string $retryAfter, int $attempt): void
     {
+        // Compute quadratic backoff: baseDelay * attempt²
+        $backoff = $this->calculateBackoff($attempt);
+
         if ($retryAfter !== null && $retryAfter !== '') {
+            $retryAfterSeconds = -1;
+
+            // Try integer seconds (most common)
             if (ctype_digit($retryAfter)) {
-                sleep((int) $retryAfter);
-                return;
-            }
-            $parsed = strtotime($retryAfter);
-            if ($parsed !== false) {
-                $delay = $parsed - time();
-                if ($delay > 0) {
-                    sleep($delay);
-                    return;
+                $retryAfterSeconds = (int) $retryAfter;
+            } else {
+                // Try HTTP-date format
+                $parsed = strtotime($retryAfter);
+                if ($parsed !== false) {
+                    $retryAfterSeconds = max(0, $parsed - time());
                 }
+            }
+
+            if ($retryAfterSeconds >= 0) {
+                $backoff = max($backoff, $retryAfterSeconds);
             }
         }
 
-        $this->sleepBackoff($attempt);
+        $backoff = min($backoff, 5.0);
+        usleep((int) ($backoff * 1_000_000));
     }
 
-    private function sleepBackoff(int $attempt): void
+    /**
+     * Quadratic backoff: baseDelay * attempt², used when no Retry-After header.
+     */
+    private function calculateBackoff(int $attempt): float
     {
-        $delay = min(0.5 * (2 ** $attempt), 5.0);
-        usleep((int) ($delay * 1_000_000));
+        return 0.5 * ($attempt * $attempt);
     }
 
     public static function verifyWebhookSignature(
@@ -320,11 +336,7 @@ class Client
 
     private function decodeResponseBody(string $responseBody): array
     {
-        $decoded = json_decode($responseBody, false, 512, JSON_THROW_ON_ERROR);
-
-        if ($decoded instanceof \stdClass) {
-            return get_object_vars($decoded);
-        }
+        $decoded = json_decode($responseBody, true, 512, JSON_THROW_ON_ERROR);
 
         if (is_array($decoded)) {
             return $decoded;
@@ -369,11 +381,24 @@ class Client
             $statusCode === 403 => new Exceptions\ForbiddenException($message, $statusCode, $code, $metadata),
             $statusCode === 409 => new Exceptions\ConflictException($message, $statusCode, $code, $metadata),
             $statusCode === 404 => new Exceptions\NotFoundException($message, $statusCode, $code, $metadata),
-            $statusCode === 422 => new Exceptions\ValidationException($message, $statusCode, $code, $metadata),
+            $statusCode === 400 => new Exceptions\ValidationException($message, $statusCode, $code, $metadata),
             $statusCode === 429 => new Exceptions\RateLimitException($message, $statusCode, $code, $metadata),
             default             => new Exceptions\ApiException($message, $statusCode, $code, $metadata),
         };
 
         throw $exception;
+    }
+
+    /**
+     * Returns a redacted string representation for safe logging.
+     * Shows only the first 4 and last 4 characters of the API key.
+     */
+    public function __toString(): string
+    {
+        $key = $this->apiKey;
+        $masked = strlen($key) > 8
+            ? substr($key, 0, 4) . "\u2026\u2026" . substr($key, -4)
+            : '[REDACTED]';
+        return "ApexMail\Client{apiKey={$masked}, baseUrl={$this->baseUrl}}";
     }
 }

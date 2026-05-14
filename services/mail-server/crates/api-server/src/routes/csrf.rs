@@ -68,9 +68,10 @@ async fn get_csrf_token(
     headers.insert("Set-Cookie", val);
     headers.insert(
         "Cache-Control",
-        "no-store, no-cache, must-revalidate"
-            .parse()
-            .expect("valid cache-control header"),
+        "no-store, no-cache, must-revalidate".parse().map_err(|e| {
+            tracing::error!(error = %e, "failed to parse Cache-Control header value");
+            ApiError::Internal("failed to set security headers".into())
+        })?,
     );
 
     Ok((headers, Json(CsrfResponse { token })))
@@ -124,6 +125,25 @@ pub fn validate_csrf_token(token: &str, secret: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+// ─── Form CSRF validation (no cookie required) ─────────────────
+
+/// Validate a CSRF token from the `X-CSRF-Token` header of an auth form POST.
+///
+/// Unlike [`validate_session_csrf`] (which requires a `csrf_token` cookie),
+/// auth-form submissions carry their CSRF token from an SSR-embedded hidden
+/// input.  This function extracts it from the header and verifies the HMAC
+/// signature directly.
+pub fn validate_form_csrf(headers: &HeaderMap, csrf_secret: &str) -> Result<(), ApiError> {
+    let header_token = headers
+        .get("x-csrf-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| ApiError::Forbidden("missing X-CSRF-Token header".into()))?;
+
+    validate_csrf_token(header_token, csrf_secret)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -142,7 +162,7 @@ mod tests {
         mac.update(nonce.as_bytes());
         let sig = mac.finalize().into_bytes();
         let sig_b64 =
-            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &sig);
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig);
 
         let token = format!("{nonce_b64}.{sig_b64}");
         // Cannot validate because timestamp check (12345 ms ago) is expired

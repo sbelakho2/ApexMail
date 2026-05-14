@@ -5,7 +5,7 @@
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="text-center mb-16">
       <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-sm bg-surface-100 border border-surface-200 text-xs font-medium text-surface-950 mb-6">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="0" ry="0"/><rect width="20" height="8" x="2" y="14" rx="0" ry="0"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
         Deployment Options
       </div>
       <h2 class="text-3xl lg:text-4xl font-bold text-surface-950 mb-6 tracking-tight">Deployment Options</h2>
@@ -29,7 +29,7 @@
         Dedicated
       </label>
       <label for="deploy-private" class="flex items-center gap-2 px-6 py-3 rounded-sm text-sm font-semibold transition-all cursor-pointer bg-surface-100 text-surface-600 hover:text-surface-950 hover:bg-surface-100 border border-transparent hover:border-surface-200">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         Private Cloud
       </label>
       <label for="deploy-byoc" class="flex items-center gap-2 px-6 py-3 rounded-sm text-sm font-semibold transition-all cursor-pointer bg-surface-100 text-surface-600 hover:text-surface-950 hover:bg-surface-100 border border-transparent hover:border-surface-200">
@@ -41,7 +41,7 @@
     {# Panels #}
     <div class="deploy-panels">
       {# Shared Cloud #}
-      <div id="panel-shared" class="deploy-panel bg-white rounded-sm border border-surface-200 p-8  ">
+      <div id="panel-shared" class="deploy-panel bg-white rounded-sm border border-surface-200 p-8">
         <div class="grid lg:grid-cols-2 gap-12">
           <div>
             <h3 class="text-xl font-bold text-surface-950 mb-2">Shared Cloud</h3>
@@ -77,7 +77,7 @@
       </div>
 
       {# Dedicated #}
-      <div id="panel-dedicated" class="deploy-panel bg-white rounded-sm border border-surface-200 p-8  ">
+      <div id="panel-dedicated" class="deploy-panel bg-white rounded-sm border border-surface-200 p-8">
         <div class="grid lg:grid-cols-2 gap-12">
           <div>
             <h3 class="text-xl font-bold text-surface-950 mb-2">Dedicated Infrastructure</h3>
@@ -113,7 +113,7 @@
       </div>
 
       {# Private Cloud #}
-      <div id="panel-private" class="deploy-panel bg-white rounded-sm border border-surface-200 p-8  ">
+      <div id="panel-private" class="deploy-panel bg-white rounded-sm border border-surface-200 p-8">
         <div class="grid lg:grid-cols-2 gap-12">
           <div>
             <h3 class="text-xl font-bold text-surface-950 mb-2">Private Cloud</h3>
@@ -149,7 +149,7 @@
       </div>
 
       {# BYOC #}
-      <div id="panel-byoc" class="deploy-panel bg-white rounded-sm border border-surface-200 p-8  ">
+      <div id="panel-byoc" class="deploy-panel bg-white rounded-sm border border-surface-200 p-8">
         <div class="grid lg:grid-cols-2 gap-12">
           <div>
             <h3 class="text-xl font-bold text-surface-950 mb-2">Bring Your Own Cloud</h3>

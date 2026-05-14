@@ -41,7 +41,6 @@ const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 /// Email processor for sending emails from the queue.
 pub struct EmailProcessor {
     db: PgPool,
-    #[allow(unused)]
     redis: RedisPool,
     config: EmailConfig,
     transport: Box<dyn EmailTransport>,
@@ -51,7 +50,10 @@ pub struct EmailProcessor {
 
     // Caches
     suppression_cache: Cache<String, CachedSuppression>,
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "warmup day cache is retained for scheduled warmup routing integration"
+    )]
     warmup_day_cache: Cache<String, i32>,
     dkim_keys: RwLock<HashMap<String, DkimConfig>>,
     domain_cache: Cache<String, Domain>,
@@ -1400,42 +1402,42 @@ mod tests {
 
         // attempt 0 → 2^0 = 1
         assert_eq!(
-            base.saturating_mul(2_i64.saturating_pow(0u32.min(30))),
+            base.saturating_mul(2_i64.saturating_pow(0u32)),
             1,
             "attempt 0: 2^0 = 1s"
         );
 
         // attempt 1 → 2^1 = 2
         assert_eq!(
-            base.saturating_mul(2_i64.saturating_pow(1u32.min(30))),
+            base.saturating_mul(2_i64.saturating_pow(1u32)),
             2,
             "attempt 1: 2^1 = 2s"
         );
 
         // attempt 5 → 2^5 = 32
         assert_eq!(
-            base.saturating_mul(2_i64.saturating_pow(5u32.min(30))),
+            base.saturating_mul(2_i64.saturating_pow(5u32)),
             32,
             "attempt 5: 2^5 = 32s"
         );
 
         // attempt 29 → 2^29 = 536_870_912
         assert_eq!(
-            base.saturating_mul(2_i64.saturating_pow(29u32.min(30))),
+            base.saturating_mul(2_i64.saturating_pow(29u32)),
             536_870_912,
             "attempt 29: 2^29 = 536_870_912s"
         );
 
         // attempt 30 → capped at 30: 2^30 = 1_073_741_824
         assert_eq!(
-            base.saturating_mul(2_i64.saturating_pow(30u32.min(30))),
+            base.saturating_mul(2_i64.saturating_pow(30)),
             1_073_741_824,
             "attempt 30: 2^30 = 1_073_741_824s (capped)"
         );
 
         // attempt 31 → still capped at 30: 2^30 = 1_073_741_824
         assert_eq!(
-            base.saturating_mul(2_i64.saturating_pow(31u32.min(30))),
+            base.saturating_mul(2_i64.saturating_pow(30)),
             1_073_741_824,
             "attempt 31: capped at 2^30 = 1_073_741_824s"
         );

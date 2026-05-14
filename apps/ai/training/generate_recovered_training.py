@@ -15,11 +15,20 @@ All pricing uses canonical schema:
 """
 
 import json
-import os
+import logging
+import subprocess
+import sys
 
-os.chdir(os.path.dirname(__file__) or ".")
-
+from common_paths import RECOVERED_TRAINING_JSONL, TRAIN_JSONL
 from prompts_v2 import build_system_prompt, EXAMPLE_CONTEXTS
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("generate_recovered_training")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TRAINING EXAMPLES — RECOVERED + ENHANCED WITH CANONICAL PRICING
@@ -540,7 +549,7 @@ Would you like specific subject line tips?"""
 
 **Your current CTR:** Looking at your account, your newsletters average 2.3% CTR. Industry benchmark for your sector is ~2.9%.
 
-**Quick win:** Try A/B testing your CTA button text. ApexMail Pro ($65/mo) includes A/B testing — you can test this today!
+**Quick win:** Try a smaller segment test on your next campaign. ApexMail Pro ($65/mo) includes send-time optimization and custom tracking domains, while Growth adds formal A/B testing when you need experiment tooling.
 
 Want me to suggest some CTA variations for your next campaign?"""
     },
@@ -600,11 +609,11 @@ Would you like me to show the exact DNS record you need?"""
 
 **Recommendation:** At 60,000 emails, Starter + overage ($29) is cheaper than Pro ($65). However:
 
-- If you expect growth beyond 75,000/mo, Pro becomes better value
-- Pro includes **A/B testing** and **send-time optimization**
+- If you expect growth beyond 150,000/mo, Pro becomes better value
+- Pro includes **send-time optimization** and custom tracking domains
 - Pro includes **10 team members** vs Starter's 5
 
-**Break-even point:** At 100,000 emails/mo, Starter + overage = $45 vs Pro = $65. Pro becomes better value around 137,500 emails/mo.
+**Break-even point:** At 100,000 emails/mo, Starter + overage = $45 vs Pro = $65. Pro becomes better value once you exceed 150,000 emails/mo, and it unlocks send-time optimization.
 
 What's your growth trajectory looking like?"""
     },
@@ -629,8 +638,8 @@ What's your growth trajectory looking like?"""
 **Recommendation:** At exactly 150,000 emails/mo, the Pro plan at **$65/mo** saves you **$42/mo** compared to PAYG.
 
 Pro also includes:
-- A/B testing
 - Send-time optimization
+- Custom tracking domains
 - 10 team members
 - 25 sending domains
 
@@ -753,38 +762,50 @@ def generate_jsonl() -> list[dict]:
 
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("GENERATING RECOVERED TRAINING DATA")
-    print("=" * 70)
+    log.info("=" * 70)
+    log.info("GENERATING RECOVERED TRAINING DATA")
+    log.info("=" * 70)
     
     examples = generate_jsonl()
-    print(f"\n✅ Generated {len(examples)} training examples")
+    log.info("Generated %d training examples", len(examples))
     
     # Write to recovered_training.jsonl
-    output_path = "../../../data/recovered_training.jsonl"
-    with open(output_path, "w") as f:
-        for ex in examples:
-            f.write(json.dumps(ex) + "\n")
-    print(f"✅ Written to {output_path}")
+    try:
+        with open(RECOVERED_TRAINING_JSONL, "w") as f:
+            for ex in examples:
+                f.write(json.dumps(ex) + "\n")
+        log.info("Written to %s", RECOVERED_TRAINING_JSONL)
+    except OSError as exc:
+        log.error("Failed to write %s: %s", RECOVERED_TRAINING_JSONL, exc)
+        sys.exit(1)
     
     # Also append to train_agent.jsonl
-    train_agent_path = "../../../data/train_agent.jsonl"
-    with open(train_agent_path, "a") as f:
-        for ex in examples:
-            f.write(json.dumps(ex) + "\n")
-    
-    # Count total
-    with open(train_agent_path) as f:
-        total = sum(1 for line in f if line.strip())
-    
-    print(f"✅ Appended to train_agent.jsonl — now {total} total examples")
+    try:
+        with open(TRAIN_JSONL, "a") as f:
+            for ex in examples:
+                f.write(json.dumps(ex) + "\n")
+        
+        # Count total
+        with open(TRAIN_JSONL) as f:
+            total = sum(1 for line in f if line.strip())
+        log.info("Appended to %s — now %d total examples", TRAIN_JSONL, total)
+    except OSError as exc:
+        log.error("Failed to append to %s: %s", TRAIN_JSONL, exc)
+        sys.exit(1)
     
     # Re-run dataset split
-    print("\n" + "=" * 70)
-    print("Re-running dataset split...")
-    print("=" * 70)
-    import subprocess
-    result = subprocess.run(["python3", "generate_dataset.py"], capture_output=True, text=True)
-    print(result.stdout)
+    log.info("Re-running dataset split …")
+    try:
+        result = subprocess.run(
+            ["python3", "generate_dataset.py"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        log.error("generate_dataset.py timed out after 300s")
+        sys.exit(1)
+    
+    sys.stdout.write(result.stdout)
     if result.returncode != 0:
         print(result.stderr)

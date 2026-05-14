@@ -12,6 +12,7 @@ use tracing::{error, info};
 use compliance::audit_logger::AuditLogger;
 use compliance::config::ComplianceConfig;
 use compliance::content_scanner::ContentScanner;
+use compliance::dsar_rate_limit::DsarRateLimiter;
 use compliance::gdpr_automation::GdprAutomation;
 use compliance::hipaa::HipaaService;
 use compliance::risk_scoring::RiskScoringEngine;
@@ -85,6 +86,10 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .expect("Failed to build HTTP client");
 
+    // SEC-15: Build DSAR rate limiter (Redis-backed with in-memory fallback)
+    let dsar_rate_limiter =
+        DsarRateLimiter::new(config.dsar_rate_limit.clone(), Some(redis.clone()));
+
     let state = Arc::new(AppState {
         risk_engine,
         content_scanner,
@@ -98,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         db: db.clone(),
         redis: redis.clone(),
         http_client,
+        dsar_rate_limiter,
     });
 
     // Build router with middleware

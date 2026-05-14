@@ -2,6 +2,7 @@
 //!
 //! Core library for email storage and retrieval.
 
+#![deny(unsafe_code)]
 mod encryption;
 mod models;
 mod service;

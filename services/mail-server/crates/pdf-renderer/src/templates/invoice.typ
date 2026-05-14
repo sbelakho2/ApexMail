@@ -55,7 +55,7 @@
   ],
 )
 
-#set text(font: "Helvetica", size: 10pt)
+#set text(font: "Inter", "DejaVu Sans", sans-serif, size: 10pt)
 
 // ---------------------------------------------------------------------------
 // Helper: format cents to currency string
@@ -76,7 +76,7 @@
   columns: (1fr, 1fr),
   // Company info (left)
   [
-    #text(weight: "bold", size: 18pt, fill: rgb("#2563eb"))[ApexMail]
+    #text(weight: "bold", size: 18pt, fill: rgb("#dc2626"))[ApexMail]
     #v(4pt)
     #text(size: 8pt, fill: luma(100))[
       ApexMail OÜ \
@@ -104,7 +104,7 @@
 )
 
 #v(12pt)
-#line(length: 100%, stroke: 1pt + rgb("#2563eb"))
+#line(length: 100%, stroke: 1pt + rgb("#000000"))
 #v(12pt)
 
 // ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@
 #block(
   fill: luma(248),
   inset: 10pt,
-  radius: 4pt,
+  radius: 0pt,
   width: 50%,
 )[
   #if "bill_to" in data [
@@ -141,7 +141,7 @@
 #table(
   columns: (1fr, auto, auto, auto, auto),
   stroke: (x: none, y: 0.5pt + luma(200)),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else if calc.rem(y, 2) == 0 { luma(250) } else { none },
   inset: 8pt,
   align: (left, center, right, right, right),
   // Header row
@@ -173,7 +173,7 @@
       [VAT (#{ let rates = data.line_items.map(i => str(i.vat_rate) + "%"); rates.dedup(); rates.join(", ") })],
       [#fmt-money(data.vat_total)],
     )
-    #line(length: 100%, stroke: 1.5pt + rgb("#2563eb"))
+    #line(length: 100%, stroke: 1.5pt + rgb("#000000"))
     #table(
       columns: (1fr, auto),
       stroke: none,
@@ -195,7 +195,7 @@
 #block(
   fill: luma(248),
   inset: 12pt,
-  radius: 4pt,
+  radius: 0pt,
   width: 100%,
 )[
   #grid(
@@ -220,12 +220,12 @@
   #v(16pt)
   #align(center)[
     #block(
-      fill: rgb("#22c55e").lighten(80%),
-      stroke: 1pt + rgb("#22c55e"),
+      fill: rgb("#16a34a").lighten(80%),
+      stroke: 1pt + rgb("#16a34a"),
       inset: 12pt,
-      radius: 6pt,
+      radius: 0pt,
     )[
-      #text(weight: "bold", size: 14pt, fill: rgb("#15803d"))[
+      #text(weight: "bold", size: 14pt, fill: rgb("#16a34a"))[
         ✓ PAID
         #if "paid_at" in data [ — #data.paid_at ]
       ]

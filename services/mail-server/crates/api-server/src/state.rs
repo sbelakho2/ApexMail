@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use apexmail_db::pool::{PoolPair, WriteTracker};
 use ddos_protection::{DdosProtector, ProtectorConfig};
 use deadpool_redis::Pool as RedisPool;
 use email_grader::{GraderConfig, GraderEngine, GraderState};
@@ -12,6 +13,7 @@ use threat_intel::domain_blocklist::DomainBlocklist;
 
 use crate::config::Config;
 use crate::ip_provider::DedicatedIpProvider;
+use crate::resilience::ResilientClient;
 use crate::ses_provider::SesIpProvider;
 
 /// Cheaply-cloneable handle shared across all request handlers.
@@ -20,6 +22,10 @@ pub type AppState = Arc<AppStateInner>;
 /// Inner struct holding the database pool, Redis pool, config, and providers.
 pub struct AppStateInner {
     pub db: PgPool,
+    /// Read/write connection pool pair for primary/replica routing.
+    pub pools: PoolPair,
+    /// Tracks the last write for read-after-write consistency.
+    pub write_tracker: std::sync::Mutex<WriteTracker>,
     pub redis: RedisPool,
     pub config: Config,
     pub http_client: Client,
@@ -32,11 +38,14 @@ pub struct AppStateInner {
     pub grader_state: Option<Arc<GraderState>>,
     /// Pre-built inbox-placement state (engine + db). `None` if placement is disabled.
     pub placement_state: Option<Arc<PlacementState>>,
+    /// Circuit breakers and bulkheads for upstream dependency calls.
+    pub resilient: ResilientClient,
 }
 
 impl AppStateInner {
     pub async fn new(
         db: PgPool,
+        pools: PoolPair,
         redis: RedisPool,
         config: Config,
         http_client: Client,
@@ -107,8 +116,11 @@ impl AppStateInner {
             None
         };
 
+        let resilient = ResilientClient::new_from_config(&config);
+
         Ok(Self::with_ddos_protector(
             db,
+            pools,
             redis,
             config,
             http_client,
@@ -117,11 +129,13 @@ impl AppStateInner {
             ddos_protector,
             grader_state,
             placement_state,
+            resilient,
         ))
     }
 
     pub fn with_ddos_protector(
         db: PgPool,
+        pools: PoolPair,
         redis: RedisPool,
         config: Config,
         http_client: Client,
@@ -130,9 +144,12 @@ impl AppStateInner {
         ddos_protector: Arc<DdosProtector>,
         grader_state: Option<Arc<GraderState>>,
         placement_state: Option<Arc<PlacementState>>,
+        resilient: ResilientClient,
     ) -> AppState {
         Arc::new(Self {
             db,
+            pools,
+            write_tracker: std::sync::Mutex::new(WriteTracker::new()),
             redis,
             config,
             http_client,
@@ -141,6 +158,7 @@ impl AppStateInner {
             ddos_protector,
             grader_state,
             placement_state,
+            resilient,
         })
     }
 }

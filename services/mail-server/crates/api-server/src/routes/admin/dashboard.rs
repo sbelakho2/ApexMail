@@ -6,8 +6,8 @@ use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use std::sync::Mutex;
 use std::time::Instant;
+use tokio::sync::Mutex;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -17,13 +17,12 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/stats", get(get_dashboard_stats))
 }
 
-static CACHE: Mutex<Option<(Instant, DashboardStats)>> = Mutex::new(None);
+static CACHE: Mutex<Option<(Instant, DashboardStats)>> = Mutex::const_new(None);
 const CACHE_TTL_SECS: u64 = 5;
 
-pub(crate) fn invalidate_dashboard_cache() {
-    if let Ok(mut guard) = CACHE.lock() {
-        *guard = None;
-    }
+pub(crate) async fn invalidate_dashboard_cache() {
+    let mut guard = CACHE.lock().await;
+    *guard = None;
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,13 +131,13 @@ async fn get_dashboard_stats(
 
     // Check cache
     {
-        if let Ok(guard) = CACHE.lock() {
-            if let Some((ts, ref cached)) = *guard {
-                if ts.elapsed().as_secs() < CACHE_TTL_SECS {
-                    return Ok(Json(cached.clone()));
-                }
+        let guard = CACHE.lock().await;
+        if let Some((ts, ref cached)) = *guard {
+            if ts.elapsed().as_secs() < CACHE_TTL_SECS {
+                return Ok(Json(cached.clone()));
             }
         }
+        drop(guard);
     }
 
     let db = &state.db;
@@ -344,9 +343,9 @@ async fn get_dashboard_stats(
     };
 
     // Update cache
-    if let Ok(mut guard) = CACHE.lock() {
-        *guard = Some((Instant::now(), stats.clone()));
-    }
+    let mut guard = CACHE.lock().await;
+    *guard = Some((Instant::now(), stats.clone()));
+    drop(guard);
 
     Ok(Json(stats))
 }
@@ -387,15 +386,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn invalidate_dashboard_cache_clears_cached_value() {
-        if let Ok(mut guard) = CACHE.lock() {
+    #[tokio::test]
+    async fn invalidate_dashboard_cache_clears_cached_value() {
+        {
+            let mut guard = CACHE.lock().await;
             *guard = Some((Instant::now(), sample_stats()));
         }
 
-        invalidate_dashboard_cache();
+        invalidate_dashboard_cache().await;
 
-        let guard = CACHE.lock().expect("cache lock should succeed");
+        let guard = CACHE.lock().await;
         assert!(guard.is_none());
     }
 

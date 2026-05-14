@@ -99,6 +99,10 @@ spec:
             capabilities:
               drop:
                 - ALL
+              # 🟢2: NET_BIND_SERVICE is conditional — only needed when binding
+              # to privileged ports (< 1024). If the MTA is configured to use
+              # ports >= 1024 (e.g. 2525, 2587), this capability can be removed
+              # for tighter security.
               add:
                 - NET_BIND_SERVICE
           readinessProbe:
@@ -106,16 +110,19 @@ spec:
               port: submission
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5      # 🟢4: configurable; override via Kustomize patch
           livenessProbe:
             tcpSocket:
               port: submission
             initialDelaySeconds: 15
             periodSeconds: 20
+            timeoutSeconds: 5      # 🟢4: configurable; override via Kustomize patch
           startupProbe:
             tcpSocket:
               port: submission
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5      # 🟢4: configurable; override via Kustomize patch
             failureThreshold: 12
           volumeMounts:
             - name: tmp
@@ -124,7 +131,9 @@ spec:
               mountPath: /var/spool/apexmail
       volumes:
         - name: tmp
-          emptyDir: {}
+          # 🟡7: Added size limit to prevent disk exhaustion from temporary files
+          emptyDir:
+            sizeLimit: 256Mi
         - name: spool
           emptyDir:
             sizeLimit: 1Gi

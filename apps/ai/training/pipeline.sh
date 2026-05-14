@@ -3,15 +3,19 @@
 # ApexMail Agent Training Pipeline for 4× B200 GPUs
 # ============================================================================
 # Usage:
+#   ./pipeline.sh validate  # Validate pricing data
 #   ./pipeline.sh train     # Run training
 #   ./pipeline.sh test      # Run tests on adapter
 #   ./pipeline.sh status    # Check training status
-#   ./pipeline.sh full      # Train + test (blocking)
+#   ./pipeline.sh full      # Validate → train → test (blocking)
 # ============================================================================
 
 set -e
 
-WORKSPACE="/workspace"
+# Use WORKSPACE_DIR env var (fallback to /workspace)
+WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
+
+WORKSPACE="${WORKSPACE_DIR:-/workspace}"
 MODEL_PATH="$WORKSPACE/models/Qwen3-Next-80B-A3B-Instruct"
 DATA_PATH="$WORKSPACE/train_agent.jsonl"
 OUTPUT_DIR="$WORKSPACE/output_agent"
@@ -130,7 +134,25 @@ run_tests() {
     fi
 }
 
+run_validate_pricing() {
+    log "Validating pricing data against canonical rates..."
+    
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    
+    if [ -f "$SCRIPT_DIR/validate_pricing.py" ]; then
+        python3 "$SCRIPT_DIR/validate_pricing.py" --verbose
+        if [ $? -eq 0 ]; then
+            log "Pricing validation PASSED"
+        else
+            error "Pricing validation FAILED — fix pricing before training"
+        fi
+    else
+        warn "validate_pricing.py not found — skipping pricing validation"
+    fi
+}
+
 run_full() {
+    run_validate_pricing
     verify_env
     run_training
     
@@ -154,6 +176,9 @@ run_full() {
 }
 
 case "${1:-help}" in
+    validate)
+        run_validate_pricing
+        ;;
     verify)
         verify_env
         ;;
@@ -176,16 +201,18 @@ case "${1:-help}" in
         echo "Usage: $0 <command>"
         echo ""
         echo "Commands:"
-        echo "  verify  - Verify environment"
-        echo "  train   - Start training (background)"
-        echo "  test    - Run tests on adapter"
-        echo "  full    - Train + test (blocking)"
-        echo "  status  - Check training status"
+        echo "  validate  - Validate pricing data against canonical rates"
+        echo "  verify    - Verify environment"
+        echo "  train     - Start training (background)"
+        echo "  test      - Run tests on adapter"
+        echo "  full      - Validate → train → test (blocking)"
+        echo "  status    - Check training status"
         echo ""
         echo "Workflow:"
-        echo "  1. $0 verify"
-        echo "  2. $0 train"
-        echo "  3. $0 status"
-        echo "  4. $0 test"
+        echo "  1. $0 validate"
+        echo "  2. $0 verify"
+        echo "  3. $0 train"
+        echo "  4. $0 status"
+        echo "  5. $0 test"
         ;;
 esac

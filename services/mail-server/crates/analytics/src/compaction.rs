@@ -102,7 +102,12 @@ impl CompactionWorker {
                     .fetch_all(&self.pool),
                 )
                 .await
-                .map_err(|_| anyhow::anyhow!("Timed out fetching compaction batch for tenant {}", tenant_id))??;
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Timed out fetching compaction batch for tenant {}",
+                        tenant_id
+                    )
+                })??;
 
                 if rows.is_empty() {
                     break;

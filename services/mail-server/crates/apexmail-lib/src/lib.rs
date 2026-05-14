@@ -1,5 +1,6 @@
 //! ApexMail shared library — crypto, logging, caching, IDs, validation, HTTP client, error codes.
 
+#![deny(unsafe_code)]
 pub mod cache;
 pub mod config;
 pub mod crypto;
@@ -15,8 +16,9 @@ pub mod time;
 pub mod validation;
 
 pub use crypto::{
-    create_hmac_signature, hash_api_key, hash_api_key_with_secret, hash_password,
-    timing_safe_compare, verify_password,
+    create_hmac_signature, detect_api_key_hash_version, hash_api_key, hash_api_key_argon2,
+    hash_api_key_with_secret, hash_password, timing_safe_compare, verify_api_key_hash,
+    verify_password, ApiKeyHashVersion,
 };
 pub use error_codes::ErrorCode;
 pub use http_error::{ErrorDetail, ErrorEnvelope};

@@ -57,6 +57,16 @@ html { scroll-behavior: smooth; }
   outline: none;
 }
 
+/* Account for lg:h-20 header on larger screens */
+@media (min-width: 1024px) {
+  .skip-to-content {
+    top: -80px;
+  }
+  .skip-to-content:focus {
+    top: 0;
+  }
+}
+
 /* ── Focus Rings ────────────────────────────────────────────── */
 :focus-visible {
   outline: 2px solid rgb(var(--primary));
@@ -136,18 +146,16 @@ textarea:focus-visible {
 }
 
 /* ── Mobile Menu (checkbox hack) ────────────────────────────── */
-#mobile-menu-state { display: none; }
-#mobile-menu-state:checked ~ header #mobile-menu,
-#mobile-menu-state:checked ~ * header #mobile-menu {
-  display: block;
-}
-#mobile-menu-state:checked ~ header #menu-icon-open,
-#mobile-menu-state:checked ~ * header #menu-icon-open {
-  display: none;
-}
-#mobile-menu-state:checked ~ header #menu-icon-close,
-#mobile-menu-state:checked ~ * header #menu-icon-close {
-  display: block;
+/* Off-screen positioning instead of clip-based sr-only to maintain
+   keyboard focusability (clip:rect can break Tab focus in some browsers). */
+.nav-toggle-input {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 /* Ensure close icon is hidden by default (overrides header partial) */
 #menu-icon-close { display: none; }
@@ -167,7 +175,7 @@ details.faq-item .faq-icon {
 }
 details.faq-item[open] .faq-icon {
   transform: rotate(180deg);
-  color: rgb(var(--primary-600));
+  color: rgb(var(--brand-600));
 }
 
 /* ── Deployment Options (radio tabs) ────────────────────────── */
@@ -210,8 +218,23 @@ details.faq-item[open] .faq-icon {
   opacity: 0.7;
   transition: opacity 200ms;
 }
+#top[data-js="true"] #back-to-top {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  transition: opacity 200ms, transform 200ms;
+}
+#top[data-js="true"] #back-to-top.is-visible {
+  opacity: 0.7;
+  pointer-events: auto;
+  transform: translateY(0);
+}
 #back-to-top:hover {
   opacity: 1;
+}
+
+#cookie-consent-banner:not([hidden]) ~ #back-to-top {
+  display: none;
 }
 
 /* ── Status page auto-refresh indicator ──────────────────────── */
@@ -238,11 +261,11 @@ details.faq-item[open] .faq-icon {
 
 @keyframes grow-bar {
   from { width: 0; }
-  to { width: var(--bar-width); }
+  to { width: var(--bar-width, 0%); }
 }
 
 .latency-bar {
-  width: var(--bar-width);
+  width: var(--bar-width, 0%);
   animation: grow-bar 1s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 

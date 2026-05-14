@@ -1,5 +1,7 @@
 use crate::config::GraderConfig;
-use crate::network_checks::{lookup_bimi, lookup_mta_sts, lookup_tls_rpt, BimiInfo, MtaStsInfo, TlsRptInfo};
+use crate::network_checks::{
+    lookup_bimi, lookup_mta_sts, lookup_tls_rpt, BimiInfo, MtaStsInfo, TlsRptInfo,
+};
 use crate::scoring;
 use crate::scoring::GradeCalculator;
 use crate::types::*;
@@ -7,9 +9,7 @@ use apexmail_dns_resolver::lookup::DnsLookup;
 use apexmail_dns_resolver::records::{DmarcPolicy, MxRecord, SpfRecord};
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
-use mta::auth::email_authentication::{
-    AuthenticationResults, EmailAuthenticator, SpfVerdict,
-};
+use mta::auth::email_authentication::{AuthenticationResults, EmailAuthenticator, SpfVerdict};
 use mta::config::EmailAuthConfig;
 use spam_filter::content_scorer::{score_content, ContentScore};
 use spam_filter::engine::{SpamEngine, SpamVerdict};
@@ -102,10 +102,13 @@ impl DomainCache {
     }
 
     fn set(&self, domain: String, result: GraderResponse) {
-        self.inner.insert(domain, CachedResult {
-            result,
-            cached_at: Instant::now(),
-        });
+        self.inner.insert(
+            domain,
+            CachedResult {
+                result,
+                cached_at: Instant::now(),
+            },
+        );
         if self.inner.len() > 1000 {
             self.inner.retain(|_, v| v.cached_at.elapsed() < self.ttl);
         }
@@ -120,7 +123,9 @@ struct SingleFlight {
 
 impl SingleFlight {
     fn new() -> Self {
-        Self { inner: DashMap::new() }
+        Self {
+            inner: DashMap::new(),
+        }
     }
 
     fn lock_for(&self, key: &str) -> Arc<Mutex<()>> {
@@ -180,13 +185,14 @@ impl GraderEngine {
             let key = config
                 .encryption_master_key_base64
                 .as_deref()
-                .ok_or_else(|| "encrypt_stored_content=true but no master key configured".to_string())?;
+                .ok_or_else(|| {
+                    "encrypt_stored_content=true but no master key configured".to_string()
+                })?;
             crate::crypto::Cipher::from_base64_key(key)
                 .map_err(|e| format!("encryption master key rejected: {e}"))?;
         }
 
-        let dns_lookup = DnsLookup::new()
-            .map_err(|e| format!("DNS resolver init failed: {e}"))?;
+        let dns_lookup = DnsLookup::new().map_err(|e| format!("DNS resolver init failed: {e}"))?;
         let http = reqwest::Client::builder()
             .user_agent("ApexMail-Grader/1.0")
             .timeout(Duration::from_secs(config.network_timeout_seconds.max(1)))
@@ -224,7 +230,8 @@ impl GraderEngine {
         request: &DomainCheckRequest,
     ) -> Result<GraderResponse, GraderError> {
         let domain = normalize_domain(&request.domain)?;
-        let selectors = normalize_selectors(&request.selectors, &self.config.default_dkim_selectors)?;
+        let selectors =
+            normalize_selectors(&request.selectors, &self.config.default_dkim_selectors)?;
         let cache_key = format!("{}|{}", domain, selectors.join(","));
 
         if let Some(cached) = self.cache.get(&cache_key) {
@@ -276,8 +283,15 @@ impl GraderEngine {
             ),
         );
 
-        let (mx_res, spf_res, dmarc_res, a_res, bimi_res, tls_rpt_res, mta_sts_res) =
-            tokio::join!(mx_fut, spf_fut, dmarc_fut, a_fut, bimi_fut, tls_rpt_fut, mta_sts_fut);
+        let (mx_res, spf_res, dmarc_res, a_res, bimi_res, tls_rpt_res, mta_sts_res) = tokio::join!(
+            mx_fut,
+            spf_fut,
+            dmarc_fut,
+            a_fut,
+            bimi_fut,
+            tls_rpt_fut,
+            mta_sts_fut
+        );
 
         // Account DNS lookups against tenant budget (best-effort).
         if let Some(t) = tenant_id {
@@ -285,27 +299,32 @@ impl GraderEngine {
         }
 
         let mx_records = mx_res.unwrap_or(Ok(Vec::new())).unwrap_or_default();
-        let mx: Vec<MxInfo> = mx_records.iter().map(|m: &MxRecord| MxInfo {
-            priority: m.priority,
-            exchange: m.exchange.clone(),
-        }).collect();
+        let mx: Vec<MxInfo> = mx_records
+            .iter()
+            .map(|m: &MxRecord| MxInfo {
+                priority: m.priority,
+                exchange: m.exchange.clone(),
+            })
+            .collect();
 
-        let spf: Option<SpfInfo> = spf_res
-            .unwrap_or(Ok(None))
-            .unwrap_or(None)
-            .map(|s: SpfRecord| SpfInfo {
-                raw: s.raw.clone(),
-                hard_fail: s.is_hard_fail(),
-                soft_fail: s.is_soft_fail(),
-            });
+        let spf: Option<SpfInfo> =
+            spf_res
+                .unwrap_or(Ok(None))
+                .unwrap_or(None)
+                .map(|s: SpfRecord| SpfInfo {
+                    raw: s.raw.clone(),
+                    hard_fail: s.is_hard_fail(),
+                    soft_fail: s.is_soft_fail(),
+                });
 
-        let dmarc: Option<DmarcInfo> = dmarc_res
-            .unwrap_or(Ok(None))
-            .unwrap_or(None)
-            .map(|d: DmarcPolicy| DmarcInfo {
-                policy: d.policy.clone(),
-                pct: d.pct,
-            });
+        let dmarc: Option<DmarcInfo> =
+            dmarc_res
+                .unwrap_or(Ok(None))
+                .unwrap_or(None)
+                .map(|d: DmarcPolicy| DmarcInfo {
+                    policy: d.policy.clone(),
+                    pct: d.pct,
+                });
 
         let has_a_record = a_res
             .unwrap_or(Ok(Vec::new()))
@@ -329,7 +348,8 @@ impl GraderEngine {
                     .map(|sel| {
                         let sel = sel.clone();
                         async move {
-                            let r = tokio::time::timeout(net_to, dns.lookup_dkim(&sel, domain)).await;
+                            let r =
+                                tokio::time::timeout(net_to, dns.lookup_dkim(&sel, domain)).await;
                             (sel, r)
                         }
                     })
@@ -360,9 +380,13 @@ impl GraderEngine {
         let blocklist_hits = if let Some(ref bl) = self.blocklist {
             match bl.lookup(domain) {
                 Some(entry) => {
-                    let confidence = if entry.confidence >= 7.0 { "high" }
-                        else if entry.confidence >= 4.0 { "medium" }
-                        else { "low" };
+                    let confidence = if entry.confidence >= 7.0 {
+                        "high"
+                    } else if entry.confidence >= 4.0 {
+                        "medium"
+                    } else {
+                        "low"
+                    };
                     vec![(entry.source.clone(), confidence.to_string())]
                 }
                 None => Vec::new(),
@@ -390,15 +414,18 @@ impl GraderEngine {
         let mut findings: Vec<Finding> = Vec::new();
 
         let (dns_score, dns_details) = scoring::score_dns_health(
-            &a.mx, a.spf.as_ref(), &a.dkim, a.dmarc.as_ref(), a.has_a_record,
+            &a.mx,
+            a.spf.as_ref(),
+            &a.dkim,
+            a.dmarc.as_ref(),
+            a.has_a_record,
         );
 
         let (spf_score, spf_details) = scoring::score_spf(a.spf.as_ref());
         let (dkim_score, dkim_details) = scoring::score_dkim(&a.dkim);
         let (dmarc_score, dmarc_details) = scoring::score_dmarc(a.dmarc.as_ref());
-        let (modern_score, modern_details) = scoring::score_modern_security(
-            a.bimi.as_ref(), a.mta_sts.as_ref(), a.tls_rpt.as_ref(),
-        );
+        let (modern_score, modern_details) =
+            scoring::score_modern_security(a.bimi.as_ref(), a.mta_sts.as_ref(), a.tls_rpt.as_ref());
 
         let auth_details = serde_json::json!({
             "spf": spf_details,
@@ -411,10 +438,15 @@ impl GraderEngine {
             ((spf_score + dkim_score + dmarc_score + modern_score) as u32).min(100) as u16;
 
         // Spam likelihood from auth quality only when no message content.
-        let spam_score = if auth_score >= 80 { 90 }
-            else if auth_score >= 60 { 75 }
-            else if auth_score >= 40 { 50 }
-            else { 30 };
+        let spam_score = if auth_score >= 80 {
+            90
+        } else if auth_score >= 60 {
+            75
+        } else if auth_score >= 40 {
+            50
+        } else {
+            30
+        };
 
         let (rep_score, rep_details) = if a.blocklist_hits.is_empty() {
             scoring::score_reputation(0, "none")
@@ -423,9 +455,7 @@ impl GraderEngine {
             findings.push(Finding {
                 severity: FindingSeverity::Warning,
                 category: "reputation".into(),
-                message: format!(
-                    "Domain found in blocklist '{source}' (confidence: {confidence})"
-                ),
+                message: format!("Domain found in blocklist '{source}' (confidence: {confidence})"),
             });
             scoring::score_reputation(a.blocklist_hits.len(), confidence)
         };
@@ -479,14 +509,17 @@ impl GraderEngine {
             findings.push(Finding {
                 severity: FindingSeverity::Info,
                 category: "transport_security".into(),
-                message: "No MTA-STS policy detected — add `_mta-sts` TXT and well-known policy file".into(),
+                message:
+                    "No MTA-STS policy detected — add `_mta-sts` TXT and well-known policy file"
+                        .into(),
             });
         }
         if a.tls_rpt.is_none() {
             findings.push(Finding {
                 severity: FindingSeverity::Info,
                 category: "transport_security".into(),
-                message: "No TLS-RPT record — add `_smtp._tls` TXT to receive TLS failure reports".into(),
+                message: "No TLS-RPT record — add `_smtp._tls` TXT to receive TLS failure reports"
+                    .into(),
             });
         }
 
@@ -526,7 +559,10 @@ impl GraderEngine {
         let now = Instant::now();
         let window = Duration::from_secs(self.config.rate_limit_window_seconds.max(1));
         let mut bucket = self.rate_limits.entry(key.to_string()).or_default();
-        while bucket.front().is_some_and(|t| now.duration_since(*t) >= window) {
+        while bucket
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= window)
+        {
             bucket.pop_front();
         }
         if bucket.len() >= limit {
@@ -552,8 +588,14 @@ impl GraderEngine {
         }
         let now = Instant::now();
         let window = Duration::from_secs(self.config.tenant_dns_budget_window_seconds.max(1));
-        let mut bucket = self.tenant_dns_budget.entry(tenant_id.to_string()).or_default();
-        while bucket.front().is_some_and(|t| now.duration_since(*t) >= window) {
+        let mut bucket = self
+            .tenant_dns_budget
+            .entry(tenant_id.to_string())
+            .or_default();
+        while bucket
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= window)
+        {
             bucket.pop_front();
         }
         if bucket.len() as u32 + units > limit {
@@ -576,8 +618,14 @@ impl GraderEngine {
         // performs additional lookups beyond the initial admission.
         let now = Instant::now();
         let window = Duration::from_secs(self.config.tenant_dns_budget_window_seconds.max(1));
-        let mut bucket = self.tenant_dns_budget.entry(tenant_id.to_string()).or_default();
-        while bucket.front().is_some_and(|t| now.duration_since(*t) >= window) {
+        let mut bucket = self
+            .tenant_dns_budget
+            .entry(tenant_id.to_string())
+            .or_default();
+        while bucket
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= window)
+        {
             bucket.pop_front();
         }
         for _ in 0..units {
@@ -615,7 +663,9 @@ impl GraderEngine {
                 cached
             } else {
                 metrics::counter!("grader.domain_cache.miss").increment(1);
-                let r = self.do_domain_check(&domain, &selectors, Some(tenant_id)).await?;
+                let r = self
+                    .do_domain_check(&domain, &selectors, Some(tenant_id))
+                    .await?;
                 self.cache.set(cache_key.clone(), r.clone());
                 self.flight.release(&cache_key);
                 r
@@ -625,7 +675,9 @@ impl GraderEngine {
         let raw_message = build_raw_message(submission);
         let auth_results = self.authenticate_email(&raw_message, submission).await;
 
-        let auth_header = auth_results.as_ref().map(|r| r.auth_results_header.as_str());
+        let auth_header = auth_results
+            .as_ref()
+            .map(|r| r.auth_results_header.as_str());
         let spam_verdict = self.analyze_spam(submission, auth_header);
         let content_score = spam_verdict.content_score.clone();
 
@@ -643,12 +695,14 @@ impl GraderEngine {
             });
         }
 
-        let auth_details = auth_results.as_ref().map(|r| serde_json::json!({
-            "spf": r.spf,
-            "dkim": r.dkim,
-            "dmarc": r.dmarc,
-            "authentication_results": r.auth_results_header,
-        }));
+        let auth_details = auth_results.as_ref().map(|r| {
+            serde_json::json!({
+                "spf": r.spf,
+                "dkim": r.dkim,
+                "dmarc": r.dmarc,
+                "authentication_results": r.auth_results_header,
+            })
+        });
         let spam_details = serde_json::json!({
             "classification": spam_verdict.classification.to_string(),
             "bayesian_probability": spam_verdict.bayesian_probability,
@@ -714,9 +768,12 @@ impl GraderEngine {
                 EmailAuthenticator::new(
                     EmailAuthConfig::default(),
                     self.config.auth_hostname.clone(),
-                ).await
+                )
+                .await
             }),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(a)) => a,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "grader: authenticator init failed");
@@ -731,7 +788,9 @@ impl GraderEngine {
         match tokio::time::timeout(
             net_to.saturating_mul(2),
             authenticator.authenticate(raw_message, sender_ip, helo, mail_from),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(r)) => Some(r),
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "grader: message authentication failed");
@@ -789,7 +848,10 @@ impl GraderEngine {
         out
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "reserved helper for callers that provide split text/html inputs"
+    )]
     fn score_email_content(&self, body_text: &str, body_html: &str, subject: &str) -> ContentScore {
         let combined = format!("{} {} {}", subject, body_text, strip_html_tags(body_html));
         score_content(&combined)
@@ -815,12 +877,16 @@ pub(crate) fn normalize_domain(input: &str) -> Result<String, GraderError> {
         return Err(GraderError::InvalidDomain("empty domain".into()));
     }
     if trimmed.len() > MAX_DOMAIN_LEN {
-        return Err(GraderError::InvalidDomain("domain exceeds 253 chars".into()));
+        return Err(GraderError::InvalidDomain(
+            "domain exceeds 253 chars".into(),
+        ));
     }
     let ascii = idna::domain_to_ascii(trimmed)
         .map_err(|e| GraderError::InvalidDomain(format!("IDNA: {e}")))?;
     if !ascii.contains('.') {
-        return Err(GraderError::InvalidDomain("domain must contain a dot".into()));
+        return Err(GraderError::InvalidDomain(
+            "domain must contain a dot".into(),
+        ));
     }
     for label in ascii.split('.') {
         if label.is_empty() || label.len() > MAX_LABEL_LEN {
@@ -834,7 +900,11 @@ pub(crate) fn normalize_selectors(
     requested: &[String],
     defaults: &[String],
 ) -> Result<Vec<String>, GraderError> {
-    let source: &[String] = if requested.is_empty() { defaults } else { requested };
+    let source: &[String] = if requested.is_empty() {
+        defaults
+    } else {
+        requested
+    };
     if source.len() > MAX_DKIM_SELECTORS {
         return Err(GraderError::InvalidDomain(format!(
             "too many DKIM selectors (max {MAX_DKIM_SELECTORS})"
@@ -848,7 +918,10 @@ pub(crate) fn normalize_selectors(
         }
         // Accept Unicode letters/numbers in addition to ASCII for
         // internationalised selector support.
-        if !s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        if !s
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
             continue;
         }
         // Full Unicode case folding (e.g. Turkish İ → i, German ẞ → ss)
@@ -894,7 +967,9 @@ pub(crate) fn validate_submission(
 
     let subject = request.subject.as_deref().unwrap_or("").to_string();
     if subject.len() > MAX_SUBJECT_LEN {
-        return Err(GraderError::InvalidDomain("subject exceeds 998 chars".into()));
+        return Err(GraderError::InvalidDomain(
+            "subject exceeds 998 chars".into(),
+        ));
     }
     if subject.contains('\r') || subject.contains('\n') {
         return Err(GraderError::InvalidDomain("subject contains CR/LF".into()));
@@ -912,7 +987,10 @@ pub(crate) fn validate_submission(
         for (k, v) in map {
             let name = k.trim();
             let value = v.trim();
-            if name.is_empty() || name.len() > MAX_HEADER_NAME_LEN || value.len() > MAX_HEADER_VALUE_LEN {
+            if name.is_empty()
+                || name.len() > MAX_HEADER_NAME_LEN
+                || value.len() > MAX_HEADER_VALUE_LEN
+            {
                 continue;
             }
             if name.contains(':') || name.chars().any(|c| c.is_control()) {
@@ -1075,16 +1153,26 @@ mod tests {
 
     #[test]
     fn normalize_selectors_rejects_too_many() {
-        let many: Vec<String> = (0..MAX_DKIM_SELECTORS + 1).map(|i| format!("s{i}")).collect();
+        let many: Vec<String> = (0..MAX_DKIM_SELECTORS + 1)
+            .map(|i| format!("s{i}"))
+            .collect();
         assert!(normalize_selectors(&many, &[]).is_err());
     }
 
     #[test]
     fn validate_submission_requires_from_and_domain() {
         let req = EmailSubmitRequest {
-            domain: None, from: None, to: vec![], subject: None, body_text: None,
-            body_html: None, headers: None, selectors: vec![], sender_ip: None,
-            helo_hostname: None, mail_from: None,
+            domain: None,
+            from: None,
+            to: vec![],
+            subject: None,
+            body_text: None,
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
         };
         assert!(validate_submission(&req, &cfg()).is_err());
     }
@@ -1092,9 +1180,17 @@ mod tests {
     #[test]
     fn validate_submission_derives_domain_from_from_address() {
         let req = EmailSubmitRequest {
-            domain: None, from: Some("alice@Example.com".into()), to: vec!["bob@example.org".into()],
-            subject: Some("hi".into()), body_text: Some("hello".into()), body_html: None,
-            headers: None, selectors: vec![], sender_ip: None, helo_hostname: None, mail_from: None,
+            domain: None,
+            from: Some("alice@Example.com".into()),
+            to: vec!["bob@example.org".into()],
+            subject: Some("hi".into()),
+            body_text: Some("hello".into()),
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
         };
         let v = validate_submission(&req, &cfg()).unwrap();
         assert_eq!(v.domain, "example.com");
@@ -1105,9 +1201,17 @@ mod tests {
     #[test]
     fn validate_submission_rejects_crlf_subject() {
         let req = EmailSubmitRequest {
-            domain: Some("example.com".into()), from: Some("a@example.com".into()), to: vec![],
-            subject: Some("hi\r\nBcc: leak@evil.com".into()), body_text: None, body_html: None,
-            headers: None, selectors: vec![], sender_ip: None, helo_hostname: None, mail_from: None,
+            domain: Some("example.com".into()),
+            from: Some("a@example.com".into()),
+            to: vec![],
+            subject: Some("hi\r\nBcc: leak@evil.com".into()),
+            body_text: None,
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
         };
         assert!(validate_submission(&req, &cfg()).is_err());
     }
@@ -1118,9 +1222,17 @@ mod tests {
         headers.insert("X-Bad".to_string(), "ok\r\nBcc: leak@evil.com".to_string());
         headers.insert("X-Good".to_string(), "fine".to_string());
         let req = EmailSubmitRequest {
-            domain: Some("example.com".into()), from: Some("a@example.com".into()), to: vec![],
-            subject: Some("ok".into()), body_text: Some("body".into()), body_html: None,
-            headers: Some(headers), selectors: vec![], sender_ip: None, helo_hostname: None, mail_from: None,
+            domain: Some("example.com".into()),
+            from: Some("a@example.com".into()),
+            to: vec![],
+            subject: Some("ok".into()),
+            body_text: Some("body".into()),
+            body_html: None,
+            headers: Some(headers),
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
         };
         let v = validate_submission(&req, &cfg()).unwrap();
         assert!(v.headers.iter().all(|(k, _)| k != "X-Bad"));
@@ -1131,9 +1243,17 @@ mod tests {
     fn validate_submission_enforces_body_size_cap() {
         let big = "x".repeat(2000);
         let req = EmailSubmitRequest {
-            domain: Some("example.com".into()), from: Some("a@example.com".into()), to: vec![],
-            subject: Some("ok".into()), body_text: Some(big), body_html: None,
-            headers: None, selectors: vec![], sender_ip: None, helo_hostname: None, mail_from: None,
+            domain: Some("example.com".into()),
+            from: Some("a@example.com".into()),
+            to: vec![],
+            subject: Some("ok".into()),
+            body_text: Some(big),
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
         };
         assert!(matches!(
             validate_submission(&req, &cfg()),
@@ -1144,10 +1264,17 @@ mod tests {
     #[test]
     fn validate_submission_rejects_invalid_sender_ip() {
         let req = EmailSubmitRequest {
-            domain: Some("example.com".into()), from: Some("a@example.com".into()), to: vec![],
-            subject: Some("ok".into()), body_text: Some("body".into()), body_html: None,
-            headers: None, selectors: vec![], sender_ip: Some("not-an-ip".into()),
-            helo_hostname: None, mail_from: None,
+            domain: Some("example.com".into()),
+            from: Some("a@example.com".into()),
+            to: vec![],
+            subject: Some("ok".into()),
+            body_text: Some("body".into()),
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: Some("not-an-ip".into()),
+            helo_hostname: None,
+            mail_from: None,
         };
         assert!(validate_submission(&req, &cfg()).is_err());
     }
@@ -1200,10 +1327,17 @@ mod tests {
     #[test]
     fn build_raw_message_round_trip() {
         let req = EmailSubmitRequest {
-            domain: Some("example.com".into()), from: Some("a@example.com".into()),
-            to: vec!["b@example.com".into()], subject: Some("Hi".into()),
-            body_text: Some("hello".into()), body_html: None, headers: None, selectors: vec![],
-            sender_ip: None, helo_hostname: None, mail_from: None,
+            domain: Some("example.com".into()),
+            from: Some("a@example.com".into()),
+            to: vec!["b@example.com".into()],
+            subject: Some("Hi".into()),
+            body_text: Some("hello".into()),
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
         };
         let v = validate_submission(&req, &cfg()).unwrap();
         let raw = build_raw_message(&v);
@@ -1227,7 +1361,8 @@ mod tests {
         use base64::Engine as _;
         let mut c = cfg();
         c.encrypt_stored_content = true;
-        c.encryption_master_key_base64 = Some(base64::engine::general_purpose::STANDARD.encode([9u8; 32]));
+        c.encryption_master_key_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode([9u8; 32]));
         assert!(GraderEngine::new(c, None).is_ok());
     }
 
@@ -1258,9 +1393,18 @@ mod tests {
         // Build a representative response using the public scoring layer
         // (no DNS, no auth verification — those are network-dependent).
         let mut findings: Vec<Finding> = Vec::new();
-        let (score, grade, breakdown, findings_out, recs) = crate::scoring::GradeCalculator::calculate(
-            85, None, 80, None, 92, Some(88), 100, None, std::mem::take(&mut findings),
-        );
+        let (score, grade, breakdown, findings_out, recs) =
+            crate::scoring::GradeCalculator::calculate(
+                85,
+                None,
+                80,
+                None,
+                92,
+                Some(88),
+                100,
+                None,
+                std::mem::take(&mut findings),
+            );
         let response = GraderResponse {
             id: None,
             domain: validated.domain.clone(),

@@ -94,25 +94,30 @@ spec:
               port: metrics
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5      # 🟢4: configurable; override via Kustomize patch
           livenessProbe:
             httpGet:
               path: /health
               port: metrics
             initialDelaySeconds: 15
             periodSeconds: 20
+            timeoutSeconds: 5      # 🟢4: configurable; override via Kustomize patch
           startupProbe:
             httpGet:
               path: /health
               port: metrics
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5      # 🟢4: configurable; override via Kustomize patch
             failureThreshold: 12
           volumeMounts:
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: tmp
-          emptyDir: {}
+          # 🟡7: Added size limit to prevent disk exhaustion from temporary files
+          emptyDir:
+            sizeLimit: 256Mi
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

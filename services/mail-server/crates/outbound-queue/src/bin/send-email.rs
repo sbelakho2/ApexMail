@@ -89,7 +89,17 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    // Structured JSON logging with env-driven filter
+    // Sampling strategy: default `info` level; use RUST_LOG for fine-grained control.
+    // For high-volume outbound queue, consider `RUST_LOG=warn,outbound_queue=info` in prod.
+    tracing_subscriber::fmt()
+        .json()
+        .with_target(true)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let cli = Cli::parse();
 
@@ -137,10 +147,8 @@ async fn main() -> Result<()> {
                     subject = %subject,
                     "Email sent successfully"
                 );
-                println!("✓ Email sent: {}", result.email_id);
             } else {
                 error!(error = %result.error, "Failed to send email");
-                eprintln!("✗ Failed: {}", result.error);
             }
         }
 
@@ -181,10 +189,8 @@ async fn main() -> Result<()> {
                     to = %mail_common::pii::redact_email_list(&to),
                     "Email queued"
                 );
-                println!("✓ Email queued: {}", result.email_id);
             } else {
                 error!(status = %result.status, "Failed to queue email");
-                eprintln!("✗ Failed: {}", result.status);
             }
         }
 
@@ -196,13 +202,13 @@ async fn main() -> Result<()> {
                 .await?;
             let stats = response.into_inner();
 
-            println!("Email Queue Statistics");
-            println!("======================");
-            println!("Pending:    {:>8}", stats.pending_count);
-            println!("Sending:    {:>8}", stats.sending_count);
-            println!("Sent Today: {:>8}", stats.sent_today);
-            println!("Failed:     {:>8}", stats.failed_today);
-            println!("Bounced:    {:>8}", stats.bounced_today);
+            info!("Email Queue Statistics");
+            info!("======================");
+            info!("Pending:    {:>8}", stats.pending_count);
+            info!("Sending:    {:>8}", stats.sending_count);
+            info!("Sent Today: {:>8}", stats.sent_today);
+            info!("Failed:     {:>8}", stats.failed_today);
+            info!("Bounced:    {:>8}", stats.bounced_today);
         }
     }
 

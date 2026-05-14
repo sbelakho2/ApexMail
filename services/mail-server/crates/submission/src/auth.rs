@@ -14,8 +14,8 @@ use zeroize::Zeroize;
 
 /// #174:Rate limiter for authentication attempts per IP.
 /// Tracks failure count per IP; rejects after MAX_AUTH_FAILURES within the TTL window.
-const MAX_AUTH_FAILURES: u32 = 5;
-static AUTH_FAIL_CACHE: LazyLock<Cache<IpAddr, u32>> = LazyLock::new(|| {
+const MAX_AUTH_FAILURES: u64 = 5;
+static AUTH_FAIL_CACHE: LazyLock<Cache<IpAddr, u64>> = LazyLock::new(|| {
     Cache::builder()
         .max_capacity(50_000)
         .time_to_live(Duration::from_secs(300)) // 5-minute window
@@ -23,9 +23,9 @@ static AUTH_FAIL_CACHE: LazyLock<Cache<IpAddr, u32>> = LazyLock::new(|| {
 });
 
 // O-2.3:Per-username lockout tracking — prevents repeated auth attempts against the same account
-const MAX_USERNAME_FAILURES: u32 = 5;
+const MAX_USERNAME_FAILURES: u64 = 5;
 /// Tracks authentication failures per username to prevent credential stuffing.
-static USERNAME_FAIL_CACHE: LazyLock<Cache<String, u32>> = LazyLock::new(|| {
+static USERNAME_FAIL_CACHE: LazyLock<Cache<String, u64>> = LazyLock::new(|| {
     Cache::builder()
         .max_capacity(100_000)
         .time_to_live(Duration::from_secs(300)) // 5-minute window
@@ -348,9 +348,10 @@ fn is_rate_limited(ip: IpAddr) -> bool {
 }
 
 /// #174:Record an authentication failure for the given IP.
+/// Uses saturating arithmetic to prevent counter wrapping at u64::MAX.
 fn record_auth_failure(ip: IpAddr) {
     let count = AUTH_FAIL_CACHE.get(&ip).unwrap_or(0);
-    AUTH_FAIL_CACHE.insert(ip, count + 1);
+    AUTH_FAIL_CACHE.insert(ip, count.saturating_add(1));
 }
 
 // O-2.3:Per-username lockout — prevents credential stuffing against the same account
@@ -360,13 +361,17 @@ fn is_username_rate_limited(username: &str) -> bool {
 }
 
 /// Record an authentication failure for the given username.
+/// Uses saturating arithmetic to prevent counter wrapping at u64::MAX.
 fn record_username_failure(username: &str) {
     let count = USERNAME_FAIL_CACHE.get(username).unwrap_or(0);
-    USERNAME_FAIL_CACHE.insert(username.to_string(), count + 1);
+    USERNAME_FAIL_CACHE.insert(username.to_string(), count.saturating_add(1));
 }
 
 /// Generate a password hash
-#[allow(unused)]
+#[expect(
+    dead_code,
+    reason = "public helper kept for submission account provisioning flows"
+)]
 pub fn hash_password(password: &str) -> Result<String> {
     apexmail_lib::crypto::hash_password(password)
         .map_err(|e| anyhow!("Failed to hash password: {}", e))

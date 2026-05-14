@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Temporary policy exception for a recipient domain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DlpTemporaryException {
     /// Recipient domain to which exception applies.
     pub recipient_domain: String,
@@ -17,6 +18,7 @@ pub struct DlpTemporaryException {
 
 /// DLP engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DlpConfig {
     /// Enable credit card number detection
     pub detect_credit_cards: bool,

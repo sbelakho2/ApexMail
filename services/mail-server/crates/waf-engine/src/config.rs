@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// WAF engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WafConfig {
     /// Paranoia level (1-4)
     pub paranoia_level: u8,

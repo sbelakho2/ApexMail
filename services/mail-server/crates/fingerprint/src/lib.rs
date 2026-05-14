@@ -22,6 +22,7 @@
 //! HTTP/2 fingerprinting uses SETTINGS frame values and pseudo-header
 //! order to identify clients.
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 

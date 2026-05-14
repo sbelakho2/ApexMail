@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level configuration for the AI service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiConfig {
     /// External model inference endpoint (e.g. llama-server URL).
     pub model_endpoint: String,
@@ -39,7 +40,7 @@ pub struct AiConfig {
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
-            model_endpoint: "http://127.0.0.1:8081".into(),
+            model_endpoint: "http://localhost:8081".into(),
             embedding_dim: 384,
             max_tokens: 768,
             temperature: 0.0,

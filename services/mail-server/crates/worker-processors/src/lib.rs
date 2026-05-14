@@ -12,6 +12,7 @@
 //! - [`webhook`] — Webhook delivery with SSRF protection and circuit breakers
 //! - [`common`] — Shared types, database pools, circuit breakers, error handling
 
+#![deny(unsafe_code)]
 pub mod analytics;
 pub mod common;
 pub mod email;

@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 pub mod audit;
 pub mod config;
 pub mod data_isolation;

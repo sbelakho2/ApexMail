@@ -705,7 +705,10 @@ fn factor(factor_type: RiskFactorType, score: f64, weight: f64, details: String)
 struct ProfileRow {
     tenant_id: String,
     risk_score: f64,
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "risk_level is selected to preserve DB row mapping for profile reads"
+    )]
     risk_level: String,
     factors: serde_json::Value,
     limits: serde_json::Value,
@@ -735,6 +738,7 @@ impl ProfileRow {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 

@@ -133,7 +133,7 @@ fn evict_stale_rate_entries() {
     // Phase 1 — remove fully-expired entries
     COMMAND_RATE_TRACKER.retain(|_ip, timestamps| {
         // Drop entries if the newest timestamp is outside the window
-        timestamps.back().map_or(false, |t| *t >= window_start)
+        timestamps.back().is_some_and(|t| *t >= window_start)
     });
 
     // Phase 2 — if still over capacity, drop entries with fewest recent commands
@@ -172,7 +172,10 @@ pub struct SmtpConfig {
     pub enable_starttls: bool,
     pub tls_acceptor: Option<TlsAcceptor>,
     /// Domains this server accepts mail for
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "original domain list is retained beside lowercase lookup for diagnostics"
+    )]
     pub local_domains: Vec<String>,
     /// Lowercased local domains for fast lookup
     pub local_domains_lower: HashSet<String>,
@@ -194,6 +197,7 @@ struct CachedChannel {
 
 impl SmtpConfig {
     /// Create a new SmtpConfig.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         hostname: String,
         mailstore_addr: String,
@@ -290,6 +294,7 @@ impl Default for SmtpState {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum SessionStream {
     Plain(BufStream<TcpStream>),
     Tls(BufStream<TlsStream<TcpStream>>),
@@ -309,7 +314,10 @@ enum ReadLineBytesStatus {
 }
 
 impl SessionStream {
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "shared stream adapter is retained for TLS/plain operation consolidation"
+    )]
     async fn with_stream<T, FPlain, FTls, FutPlain, FutTls>(
         &mut self,
         plain_op: FPlain,
@@ -513,10 +521,7 @@ async fn read_client_data_line(
 }
 
 fn is_end_of_data_line(line: &[u8]) -> bool {
-    match line {
-        b".\n" | b".\r\n" => true,
-        _ => false,
-    }
+    matches!(line, b".\n" | b".\r\n")
 }
 
 async fn drain_data_until_end(
@@ -742,7 +747,7 @@ async fn handle_command_mode(
             Ok(true)
         }
         Ok(ReadLineStatus::Line) => {
-            let command = line.trim().split_whitespace().next().unwrap_or("");
+            let command = line.split_whitespace().next().unwrap_or("");
 
             if !allow_command_from_peer(peer_addr.ip()).await {
                 stream
@@ -842,9 +847,7 @@ async fn allow_command_from_peer(peer_ip: IpAddr) -> bool {
     let window_start = now - COMMAND_RATE_WINDOW;
 
     // DashMap entry API — only locks the shard for this IP, not the entire map
-    let mut entry = COMMAND_RATE_TRACKER
-        .entry(peer_ip)
-        .or_insert_with(VecDeque::new);
+    let mut entry = COMMAND_RATE_TRACKER.entry(peer_ip).or_default();
     let timestamps = entry.value_mut();
 
     // Purge expired timestamps from the front
@@ -1116,7 +1119,7 @@ fn extract_address(s: &str) -> Option<String> {
 
     // Handle bare address token up to first whitespace, strip trailing params.
     let addr = s.split_whitespace().next()?;
-    let addr = addr.trim_end_matches(|c| c == '>' || c == ',' || c == ';');
+    let addr = addr.trim_end_matches(['>', ',', ';']);
     if addr.is_empty() {
         return None;
     }
@@ -1130,7 +1133,7 @@ fn is_valid_addr_spec(addr: &str) -> bool {
     let mut parts = addr.split('@');
     let local = parts.next().unwrap_or_default();
     let domain = parts.next().unwrap_or_default();
-    local.len() > 0 && domain.len() > 0 && parts.next().is_none()
+    !local.is_empty() && !domain.is_empty() && parts.next().is_none()
 }
 
 fn is_local_domain(addr: &str, config: &SmtpConfig) -> bool {
@@ -1193,7 +1196,7 @@ async fn process_message(
             };
             info!(
                 peer = %peer_addr,
-                from = %mail_common::pii::redact_email(&from_addr),
+                from = %mail_common::pii::redact_email(from_addr),
                 spf = %spf_status,
                 "SPF verification result"
             );
@@ -1235,7 +1238,7 @@ async fn process_message(
                     }
                     info!(
                         peer = %peer_addr,
-                        from = %mail_common::pii::redact_email(&from_addr),
+                        from = %mail_common::pii::redact_email(from_addr),
                         dkim = %overall,
                         "DKIM verification result"
                     );
@@ -1289,7 +1292,7 @@ async fn process_message(
 
     info!(
         peer = %peer_addr,
-        from = %mail_common::pii::redact_email(&from_addr),
+        from = %mail_common::pii::redact_email(from_addr),
         spf = %spf_result,
         dkim = %dkim_result,
         dmarc = %dmarc_result,
@@ -1305,7 +1308,7 @@ async fn process_message(
             "reject" => {
                 warn!(
                     peer = %peer_addr,
-                    from = %mail_common::pii::redact_email(&from_addr),
+                    from = %mail_common::pii::redact_email(from_addr),
                     dmarc_policy = "reject",
                     "DMARC reject — SPF and DKIM both failed, domain policy demands rejection"
                 );
@@ -1318,7 +1321,7 @@ async fn process_message(
             "quarantine" => {
                 warn!(
                     peer = %peer_addr,
-                    from = %mail_common::pii::redact_email(&from_addr),
+                    from = %mail_common::pii::redact_email(from_addr),
                     dmarc_policy = "quarantine",
                     "DMARC quarantine — SPF and DKIM both failed, marking suspicious"
                 );
@@ -1328,7 +1331,7 @@ async fn process_message(
                 // p=none or no policy — accept the message
                 info!(
                     peer = %peer_addr,
-                    from = %mail_common::pii::redact_email(&from_addr),
+                    from = %mail_common::pii::redact_email(from_addr),
                     dmarc_policy = %dmarc_policy.policy,
                     "DMARC fail but policy is none/missing — accepting message"
                 );
@@ -1337,7 +1340,7 @@ async fn process_message(
     } else if dmarc_result == "temperror" {
         warn!(
             peer = %peer_addr,
-            from = %mail_common::pii::redact_email(&from_addr),
+            from = %mail_common::pii::redact_email(from_addr),
             dmarc_policy = %dmarc_policy.policy,
             "DMARC temp error — deferring enforcement"
         );
@@ -1390,7 +1393,7 @@ async fn process_message(
     })?;
 
     let internal_date = chrono::Utc::now().timestamp();
-    let store_tasks = state.rcpt_to.iter().cloned().map(|recipient| {
+    let store_tasks = state.rcpt_to.iter().map(|recipient| {
         let mut recipient_client = client.clone();
         let payload = final_message.clone();
         let custom_flags = custom_flags.clone();
@@ -1420,7 +1423,7 @@ async fn process_message(
                 .into_inner();
 
             debug!(
-                recipient = %mail_common::pii::redact_email(&recipient),
+                recipient = %mail_common::pii::redact_email(recipient),
                 message_id = %response.message_id,
                 uid = response.uid,
                 blob_hash = %response.blob_hash,
@@ -1439,7 +1442,7 @@ async fn process_message(
 
     info!(
         peer = %peer_addr,
-        from = %mail_common::pii::redact_email(&from_addr),
+        from = %mail_common::pii::redact_email(from_addr),
         to = %mail_common::pii::redact_email_list(&state.rcpt_to),
         subject = ?parsed_subject,
         size = final_message.len(),
@@ -1480,7 +1483,10 @@ fn extract_header_from_domain(message_data: &[u8]) -> String {
         .to_lowercase()
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "DMARC alignment helper is retained for policy evaluation expansion"
+)]
 fn domains_align(header_domain: &str, auth_domain: &str) -> bool {
     if header_domain.is_empty() || auth_domain.is_empty() {
         return false;
@@ -1497,12 +1503,10 @@ fn domains_align(header_domain: &str, auth_domain: &str) -> bool {
     header_org.is_some() && header_org == auth_org
 }
 
-#[allow(dead_code)]
 fn canonical_domain(domain: &str) -> String {
     domain.trim_end_matches('.').to_lowercase()
 }
 
-#[allow(dead_code)]
 fn organizational_domain(domain: &str) -> Option<String> {
     let labels: Vec<&str> = domain
         .split('.')
@@ -1609,7 +1613,10 @@ struct DmarcRecord {
 
 struct DmarcPolicyResult {
     policy: String,
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "record domain is retained for DMARC diagnostics and reporting"
+    )]
     record_domain: String,
 }
 
@@ -1673,7 +1680,7 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1));
         COMMAND_RATE_TRACKER.remove(&ip); // ensure clean slate for this IP
         assert!(allow_command_from_peer(ip).await);
-        assert!(COMMAND_RATE_TRACKER.get(&ip).unwrap().len() >= 1);
+        assert!(!COMMAND_RATE_TRACKER.get(&ip).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1881,16 +1888,19 @@ mod tests {
 
     #[test]
     fn rate_constants_are_sane() {
-        assert!(MAX_COMMANDS_PER_WINDOW > 0);
-        assert!(COMMAND_RATE_WINDOW.as_secs() > 0);
-        assert!(MAX_RATE_TRACKER_ENTRIES > 0);
-        assert!(RATE_TRACKER_EVICTION_INTERVAL.as_secs() > 0);
-        assert!(RATE_TRACKER_EVICTION_INTERVAL < COMMAND_RATE_WINDOW);
+        const { assert!(MAX_COMMANDS_PER_WINDOW > 0) };
+        const { assert!(COMMAND_RATE_WINDOW.as_secs() > 0) };
+        const { assert!(MAX_RATE_TRACKER_ENTRIES > 0) };
+        const { assert!(RATE_TRACKER_EVICTION_INTERVAL.as_secs() > 0) };
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(RATE_TRACKER_EVICTION_INTERVAL < COMMAND_RATE_WINDOW);
+        }
     }
 
     #[test]
     fn data_buffer_thresholds_are_consistent() {
-        assert!(DATA_BUFFER_DEFAULT_CAPACITY < DATA_BUFFER_SHRINK_THRESHOLD);
+        const { assert!(DATA_BUFFER_DEFAULT_CAPACITY < DATA_BUFFER_SHRINK_THRESHOLD) };
     }
 
     // -----------------------------------------------------------------------

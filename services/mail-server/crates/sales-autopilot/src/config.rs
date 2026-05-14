@@ -6,6 +6,7 @@ use tracing::error;
 /// (control-plane port 3010). It stores the platform *owner's* sales leads,
 /// never customer data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SalesConfig {
     /// Base URL of the enrichment / company-lookup API.
     pub enrichment_api_url: String,

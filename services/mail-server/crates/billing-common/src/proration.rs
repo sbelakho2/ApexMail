@@ -61,6 +61,7 @@ pub fn prorated_amount(
 }
 
 /// Build a human-readable proration explanation string.
+#[allow(clippy::too_many_arguments)]
 pub fn build_proration_explanation(
     current_plan_display_name: &str,
     new_plan_display_name: &str,

@@ -417,7 +417,7 @@ mod http2_tests {
             }
         }
 
-        fn to_char(&self) -> char {
+        fn to_char(self) -> char {
             match self {
                 Self::Data => 'd',
                 Self::Headers => 'h',
@@ -451,7 +451,7 @@ mod http2_tests {
 
     #[test]
     fn test_frame_order_signature() {
-        let frames = vec![
+        let frames = [
             FrameType::Settings,
             FrameType::WindowUpdate,
             FrameType::Headers,
@@ -731,12 +731,7 @@ mod pow_tests {
     }
 
     fn solve_pow(prefix: &str, difficulty: u8, max_iterations: u64) -> Option<u64> {
-        for nonce in 0..max_iterations {
-            if verify_pow(prefix, nonce, difficulty) {
-                return Some(nonce);
-            }
-        }
-        None
+        (0..max_iterations).find(|&nonce| verify_pow(prefix, nonce, difficulty))
     }
 
     #[test]

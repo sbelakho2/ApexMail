@@ -4,8 +4,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::engine::PlacementEngine;
 use crate::config::PlacementConfig;
+use crate::engine::PlacementEngine;
 use crate::imap_poller::ImapPoller;
 
 /// Background task that periodically polls for pending placement tests and

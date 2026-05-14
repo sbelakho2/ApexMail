@@ -10,10 +10,10 @@ Analytics responses are cached to ensure fast, consistent performance. Concurren
 
 ## Authentication
 
-Include your API key in the `Authorization` header:
+Include your API key in the `X-API-Key` header:
 
 ```
-X-API-Key: ak_live_...
+X-API-Key: am_live_...
 ```
 
 ---
@@ -60,7 +60,7 @@ Returns a high-level dashboard overview including totals for sends, deliveries, 
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/overview?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -130,7 +130,7 @@ Returns time-bucketed metric data suitable for charting. Supports multiple inter
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/timeseries?start_date=2026-01-01&end_date=2026-01-07&interval=day&metric=delivered" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -187,7 +187,7 @@ Returns per-campaign performance data with sorting and optional filtering to a s
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/campaigns?start_date=2026-01-01&end_date=2026-01-31&sort_by=open_rate" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -251,7 +251,7 @@ Returns performance metrics broken down by sending domain. Useful for monitoring
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/domains?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -324,7 +324,7 @@ Returns detailed engagement metrics such as open/click heatmaps, device breakdow
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/engagement?start_date=2026-01-01&end_date=2026-01-31&metric=clicks" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -393,7 +393,7 @@ Returns delivery and engagement metrics broken down by receiving ISP / mailbox p
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/providers?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -484,7 +484,7 @@ Returns aggregate deliverability statistics including inbox placement estimates,
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/deliverability?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -546,7 +546,7 @@ Returns a detailed breakdown of bounce events by category, type, ISP, and SMTP r
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/bounce-analysis?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -613,7 +613,7 @@ Exports analytics data as JSON or CSV. Large exports are processed asynchronousl
 
 ```bash
 curl -X GET "https://api.apexmail.ee/v1/analytics/export?start_date=2026-01-01&end_date=2026-01-31&format=csv&report_type=campaigns" \
-  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
+  -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response (synchronous — small dataset)

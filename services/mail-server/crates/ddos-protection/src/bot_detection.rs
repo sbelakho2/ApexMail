@@ -251,6 +251,7 @@ impl SessionBehavior {
 
         let error_rate = self.error_count as f64 / self.total_count as f64;
 
+        #[allow(clippy::if_same_then_else)]
         if error_rate > 0.4 {
             0.9 // Very high error rate = probing
         } else if error_rate > 0.2 {
@@ -461,7 +462,7 @@ mod tests {
             .map(|i| hash_endpoint(&format!("/api/ep{}", i)))
             .collect();
 
-        for (_i, ep) in endpoints.iter().cycle().take(50).enumerate() {
+        for ep in endpoints.iter().cycle().take(50) {
             // Cycle through all 10 endpoints
             behavior.record_request(*ep, "GET", false);
         }

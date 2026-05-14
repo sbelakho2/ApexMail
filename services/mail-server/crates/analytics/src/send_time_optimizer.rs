@@ -192,19 +192,19 @@ pub fn compute_optimal_windows(profile: &RecipientProfile) -> Vec<OptimalSendWin
     // Compute smoothed scores for each (hour, day) pair
     let mut windows: Vec<OptimalSendWindow> = Vec::with_capacity(24 * 7);
 
-    for hour in 0..24_usize {
+    for (hour, hour_prior) in HOUR_PRIORS.iter().enumerate() {
         let hour_posterior = bayesian_smooth(
             profile.hour_distribution.hours[hour],
             profile.total_events as f64,
-            HOUR_PRIORS[hour],
+            *hour_prior,
             alpha,
         );
 
-        for day in 0..7_usize {
+        for (day, day_prior) in DAY_PRIORS.iter().enumerate() {
             let day_posterior = bayesian_smooth(
                 profile.day_distribution.days[day],
                 profile.total_events as f64,
-                DAY_PRIORS[day],
+                *day_prior,
                 alpha,
             );
 

@@ -203,8 +203,9 @@ async fn main() -> Result<()> {
     // Per-provider reputation throttle: gates outbound to Gmail / Outlook /
     // Yahoo / iCloud based on signals from the postmaster scheduler. Always
     // enabled — when no reputation summary exists yet, the throttle is 0%.
-    queue = queue
-        .with_provider_throttle(crate::provider_throttle::ProviderThrottle::new(pool.clone()));
+    queue = queue.with_provider_throttle(crate::provider_throttle::ProviderThrottle::new(
+        pool.clone(),
+    ));
     info!("Per-provider reputation throttle enabled");
 
     // Initialize queue tables

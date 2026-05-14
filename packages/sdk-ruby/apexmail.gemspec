@@ -13,7 +13,9 @@ Gem::Specification.new do |spec|
     "bug_tracker_uri" => "https://github.com/Bel-Consulting-OU/ApexMail/issues",
   }
 
-  spec.required_ruby_version = ">= 2.7"
+  spec.required_ruby_version = ">= 3.0"
+
+  spec.add_dependency "json", ">= 2.5", "< 3"
 
   spec.files = Dir["lib/**/*.rb", "README.md"]
   spec.require_paths = ["lib"]

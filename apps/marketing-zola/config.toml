@@ -49,37 +49,56 @@ anchors = "on"
 [extra]
 site_name = "ApexMail"
 author = "Bel Consulting OÜ"
-og_image = "/images/og-image.png"
+og_image = "/images/og-image.svg"
 twitter_handle = "@apexmail"
 twitter_url = "https://twitter.com/apexmail"
 linkedin_url = "https://linkedin.com/company/apexmail"
-github_url = "https://github.com/sbelakho2/ApexMail"
+github_url = "https://github.com/apexmail/apexmail"
 docs_url = "https://apexmail.ee/docs"
 app_url = "https://app.apexmail.ee"
 api_url = "https://api.apexmail.ee"
+pricing_as_of = "2026-05-09"
 asset_cdn_base_url = "https://cdn.apexmail.ee"
-analytics_pixel_url = ""
+
+# ── Analytics (Plausible-compatible) ─────────────────────────
+analytics_enabled = false         # Toggle: true in production, false in dev
+analytics_host = "analytics.apexmail.ee"
+analytics_domain = "apexmail.ee"
+analytics_pixel_url = ""          # Legacy pixel URL (kept for backward compat)
+
 support_email = "support@apexmail.ee"
 cookie_consent_cookie_name = "apexmail_cookie_consent"
-cookie_consent_heading = "Cookie preferences"
-cookie_consent_copy = "We use essential cookies and privacy-friendly analytics to improve ApexMail."
 cookie_consent_policy_path = "/cookies"
 cookie_consent_policy_label = "Cookie Policy"
 
 [[extra.cookie_consent_choices]]
 value = "necessary"
-label = "Necessary Only"
 analytics = false
 primary = false
 
 [[extra.cookie_consent_choices]]
 value = "dismiss"
-label = "Dismiss"
 analytics = false
 primary = false
 
 [[extra.cookie_consent_choices]]
 value = "all"
-label = "Accept All"
 analytics = true
 primary = true
+
+# ── Internationalization ──────────────────────────────────────
+# i18n .po files are in ./i18n/{lang}.po
+# The trans() macro in templates uses these translations.
+# Each language section below configures the language metadata.
+
+[languages.fr]
+title = "ApexMail - API d'email professionnelle pour développeurs"
+description = "API d'email professionnelle avec support de conformité, suivi de livraison et API orientées développeur. Hébergé dans l'UE, conforme RGPD, avec options de déploiement privé Enterprise."
+
+[languages.de]
+title = "ApexMail - E-Mail-API für Entwickler"
+description = "Enterprise-E-Mail-API mit Compliance-Workflow-Unterstützung, Zustellungsverfolgung und entwicklerfreundlichen APIs. EU-gehostet, DSGVO-konform, mit privaten Enterprise-Bereitstellungsoptionen."
+
+[languages.es]
+title = "ApexMail - API de correo electrónico empresarial para desarrolladores"
+description = "API de correo electrónico empresarial con soporte de flujos de cumplimiento normativo, seguimiento de entrega y APIs orientadas a desarrolladores. Alojado en la UE, conforme al RGPD, con opciones de implementación privada Enterprise."

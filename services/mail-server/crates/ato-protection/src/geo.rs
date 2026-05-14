@@ -50,7 +50,7 @@ pub fn check_impossible_travel(
 }
 
 /// Convert degrees to radians (helper, also available via .to_radians)
-#[allow(unused)]
+#[allow(dead_code)]
 fn deg_to_rad(deg: f64) -> f64 {
     deg * PI / 180.0
 }

@@ -1,0 +1,105 @@
+{# ── Cookie Consent Banner (i18n-aware) ───────────────────────── #}
+{# The banner stays visible until static/js/apexmail-site.js      #}
+{# stores an explicit configured consent choice and hides it.     #}
+{# Uses Zola's trans() macro for multilingual label support.      #}
+{# ───────────────────────────────────────────────────────────── #}
+
+{% set consent_choices = config.extra.cookie_consent_choices | default(value=[]) %}
+{% set consent_lang = lang | default(value=config.default_language) %}
+
+{% if consent_lang == "de" %}
+  {% set consent_heading = "Cookie-Einstellungen" %}
+  {% set consent_copy = "Wir verwenden essentielle Cookies und datenschutzfreundliche Analysen, um ApexMail zu verbessern." %}
+  {% set consent_necessary = "Nur notwendige" %}
+  {% set consent_dismiss = "Schliessen" %}
+  {% set consent_accept_all = "Alle akzeptieren" %}
+  {% set consent_policy_link = "Cookie-Richtlinie" %}
+{% elif consent_lang == "fr" %}
+  {% set consent_heading = "Preferences de cookies" %}
+  {% set consent_copy = "Nous utilisons des cookies essentiels et des analyses respectueuses de la vie privee pour ameliorer ApexMail." %}
+  {% set consent_necessary = "Essentiels uniquement" %}
+  {% set consent_dismiss = "Ignorer" %}
+  {% set consent_accept_all = "Tout accepter" %}
+  {% set consent_policy_link = "Politique de cookies" %}
+{% elif consent_lang == "es" %}
+  {% set consent_heading = "Preferencias de cookies" %}
+  {% set consent_copy = "Utilizamos cookies esenciales y analisis respetuosos con la privacidad para mejorar ApexMail." %}
+  {% set consent_necessary = "Solo necesarias" %}
+  {% set consent_dismiss = "Descartar" %}
+  {% set consent_accept_all = "Aceptar todas" %}
+  {% set consent_policy_link = "Politica de cookies" %}
+{% else %}
+  {% set consent_heading = "Cookie preferences" %}
+  {% set consent_copy = "We use essential cookies and privacy-friendly analytics to improve ApexMail." %}
+  {% set consent_necessary = "Necessary Only" %}
+  {% set consent_dismiss = "Dismiss" %}
+  {% set consent_accept_all = "Accept All" %}
+  {% set consent_policy_link = "Cookie Policy" %}
+{% endif %}
+
+<div
+  id="cookie-consent-banner"
+  role="dialog"
+  aria-modal="true"
+  aria-label="Cookie consent"
+  aria-labelledby="cookie-consent-heading"
+  aria-describedby="cookie-consent-copy"
+  data-focus-trap="true"
+  data-cookie-consent-cookie-name="{{ config.extra.cookie_consent_cookie_name | default(value='apexmail_cookie_consent') }}"
+  data-analytics-enabled="{{ config.extra.analytics_enabled | default(value=false) }}"
+  class="cookie-consent-banner"
+>
+  <div class="flex flex-col gap-2.5 md:gap-3" tabindex="0">
+    <div>
+      <div class="mb-2 flex items-center gap-2">
+        <div class="w-2 h-2 bg-brand-500"></div>
+        <h2 id="cookie-consent-heading" class="text-[10px] font-bold text-surface-950 tracking-[0.16em] md:tracking-[0.2em]">
+          {{- consent_heading -}}
+        </h2>
+      </div>
+      <p id="cookie-consent-copy" class="text-[11px] text-surface-600 leading-[1.35] md:text-[13px] md:leading-[1.45]">
+        {{- consent_copy -}}
+      </p>
+    </div>
+    <div class="cookie-consent-actions">
+      {% if consent_choices | length > 0 %}
+        {% for choice in consent_choices %}
+          <button
+            type="button"
+            data-cookie-consent-choice
+            data-cookie-consent-value="{{ choice.value }}"
+            data-cookie-consent-analytics="{{ choice.analytics | default(value=false) }}"
+            {% if loop.first %}data-focus-initial="true"{% endif %}
+            {% if loop.last %}data-focus-final="true"{% endif %}
+            class="cookie-consent-button
+              {%- if choice.primary | default(value=false) %} cookie-consent-button--primary
+              {%- else %} cookie-consent-button--secondary
+              {%- endif -%}"
+          >
+            {%- if choice.value == "necessary" -%}
+              {{- consent_necessary -}}
+            {%- elif choice.value == "dismiss" -%}
+              {{- consent_dismiss -}}
+            {%- elif choice.value == "all" -%}
+              {{- consent_accept_all -}}
+            {%- else -%}
+              {{- choice.label | default(value=choice.value) -}}
+            {%- endif -%}
+          </button>
+        {% endfor %}
+      {% else %}
+        <button type="button" data-cookie-consent-choice data-cookie-consent-value="reject_all" data-cookie-consent-analytics="false" data-focus-initial="true" class="cookie-consent-button cookie-consent-button--secondary">
+          {{- consent_necessary -}}
+        </button>
+        <button type="button" data-cookie-consent-choice data-cookie-consent-value="all" data-cookie-consent-analytics="true" data-focus-final="true" class="cookie-consent-button cookie-consent-button--primary">
+          {{- consent_accept_all -}}
+        </button>
+      {% endif %}
+    </div>
+    <div class="mt-1">
+      <a href="{{ config.extra.cookie_consent_policy_path | default(value='/cookies') }}" data-focus-final="true" class="text-[10px] text-surface-500 underline hover:text-brand-600 transition-colors">
+        {{- consent_policy_link -}}
+      </a>
+    </div>
+  </div>
+</div>

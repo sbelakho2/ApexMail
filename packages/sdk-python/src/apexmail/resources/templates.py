@@ -60,8 +60,8 @@ class TemplatesResource:
         payload = {
             "name": name,
             "subject": subject,
-            "html_body": html_body,
-            "text_body": text_body,
+            "htmlBody": html_body,
+            "textBody": text_body,
         }
         data = self._client._request("POST", "/v1/templates", json=payload)
         return Template(**_extract_item(data, "template"))
@@ -88,6 +88,11 @@ class TemplatesResource:
         data = self._client._request("GET", f"/v1/templates/{template_id}")
         return Template(**_extract_item(data, "template"))
 
+    def get_by_slug(self, slug: str) -> Template:
+        _validate_id(slug, "template slug")
+        data = self._client._request("GET", f"/v1/templates/slug/{slug}")
+        return Template(**_extract_item(data, "template"))
+
     def update(
         self,
         template_id: str,
@@ -104,12 +109,28 @@ class TemplatesResource:
         if subject is not None:
             payload["subject"] = subject
         if html_body is not None:
-            payload["html_body"] = html_body
+            payload["htmlBody"] = html_body
         if text_body is not None:
-            payload["text_body"] = text_body
+            payload["textBody"] = text_body
         if not payload:
             raise ValidationError("Update payload must include at least one field")
-        data = self._client._request("PATCH", f"/v1/templates/{template_id}", json=payload)
+        data = self._client._request("PUT", f"/v1/templates/{template_id}", json=payload)
+        return Template(**_extract_item(data, "template"))
+
+    def duplicate(self, template_id: str) -> Template:
+        _validate_id(template_id, "template")
+        data = self._client._request(
+            "POST", f"/v1/templates/{template_id}/duplicate"
+        )
+        return Template(**_extract_item(data, "template"))
+
+    def rollback(self, template_id: str, version: int) -> Template:
+        _validate_id(template_id, "template")
+        data = self._client._request(
+            "POST",
+            f"/v1/templates/{template_id}/rollback",
+            json={"version": version},
+        )
         return Template(**_extract_item(data, "template"))
 
     def delete(self, template_id: str) -> None:
@@ -143,8 +164,8 @@ class AsyncTemplatesResource:
         payload = {
             "name": name,
             "subject": subject,
-            "html_body": html_body,
-            "text_body": text_body,
+            "htmlBody": html_body,
+            "textBody": text_body,
         }
         data = await self._client._request("POST", "/v1/templates", json=payload)
         return Template(**_extract_item(data, "template"))
@@ -171,6 +192,11 @@ class AsyncTemplatesResource:
         data = await self._client._request("GET", f"/v1/templates/{template_id}")
         return Template(**_extract_item(data, "template"))
 
+    async def get_by_slug(self, slug: str) -> Template:
+        _validate_id(slug, "template slug")
+        data = await self._client._request("GET", f"/v1/templates/slug/{slug}")
+        return Template(**_extract_item(data, "template"))
+
     async def update(
         self,
         template_id: str,
@@ -187,12 +213,28 @@ class AsyncTemplatesResource:
         if subject is not None:
             payload["subject"] = subject
         if html_body is not None:
-            payload["html_body"] = html_body
+            payload["htmlBody"] = html_body
         if text_body is not None:
-            payload["text_body"] = text_body
+            payload["textBody"] = text_body
         if not payload:
             raise ValidationError("Update payload must include at least one field")
-        data = await self._client._request("PATCH", f"/v1/templates/{template_id}", json=payload)
+        data = await self._client._request("PUT", f"/v1/templates/{template_id}", json=payload)
+        return Template(**_extract_item(data, "template"))
+
+    async def duplicate(self, template_id: str) -> Template:
+        _validate_id(template_id, "template")
+        data = await self._client._request(
+            "POST", f"/v1/templates/{template_id}/duplicate"
+        )
+        return Template(**_extract_item(data, "template"))
+
+    async def rollback(self, template_id: str, version: int) -> Template:
+        _validate_id(template_id, "template")
+        data = await self._client._request(
+            "POST",
+            f"/v1/templates/{template_id}/rollback",
+            json={"version": version},
+        )
         return Template(**_extract_item(data, "template"))
 
     async def delete(self, template_id: str) -> None:

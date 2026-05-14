@@ -28,13 +28,13 @@ pub fn render_error_page(message: &str) -> String {
   <title>Error - ApexMail</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background-color: #F8FAFC; color: #0F172A;
+    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
+      background-color: #ffffff; color: #000000;
       min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #E2E8F0; border-radius: 18px; padding: 40px; max-width: 400px; text-align: center; }}
+    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 400px; text-align: center; }}
     .icon {{ font-size: 48px; margin-bottom: 20px; }}
-    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; }}
-    p {{ color: #475569; line-height: 1.6; font-weight: 500; }}
+    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
+    p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
   </style>
 </head>
 <body>
@@ -59,14 +59,14 @@ pub fn render_success_page(email: &str) -> String {
   <title>Unsubscribed - ApexMail</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background-color: #F8FAFC; color: #0F172A;
+    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
+      background-color: #ffffff; color: #000000;
       min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #E2E8F0; border-radius: 18px; padding: 40px; max-width: 400px; text-align: center; }}
+    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 400px; text-align: center; }}
     .icon {{ font-size: 48px; margin-bottom: 20px; }}
-    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; }}
-    p {{ color: #475569; line-height: 1.6; font-weight: 500; }}
-    .email {{ color: #0F172A; font-weight: 700; }}
+    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
+    p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
+    .email {{ color: #000000; font-weight: 700; }}
   </style>
 </head>
 <body>
@@ -94,15 +94,15 @@ pub fn render_confirmation_page(token: &str, email: &str, unsub_path: &str) -> S
   <title>Confirm Unsubscribe - ApexMail</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background-color: #F8FAFC; color: #0F172A;
+    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
+      background-color: #ffffff; color: #000000;
       min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #E2E8F0; border-radius: 18px; padding: 40px; max-width: 400px; text-align: center; }}
-    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; }}
-    p {{ color: #475569; line-height: 1.6; margin-bottom: 24px; font-weight: 500; }}
-    .email {{ color: #0F172A; font-weight: 700; display: block; margin-top: 8px; }}
-    .btn {{ display: inline-block; background: #2563EB; color: #fff; padding: 12px 24px;
-      border-radius: 12px; text-decoration: none; font-weight: 700; transition: all 0.2s;
+    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 400px; text-align: center; }}
+    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
+    p {{ color: #52525b; line-height: 1.6; margin-bottom: 24px; font-weight: 400; }}
+    .email {{ color: #000000; font-weight: 700; display: block; margin-top: 8px; }}
+    .btn {{ display: inline-block; background: #dc2626; color: #fff; padding: 12px 24px;
+      border-radius: 0px; text-decoration: none; font-weight: 700; transition: all 0.2s;
       text-transform: uppercase; letter-spacing: 0.05em; font-size: 14px; }}
   </style>
 </head>
@@ -184,7 +184,7 @@ pub fn render_preferences_page(
         <div class="divider"></div>
         <div class="section">
           <div class="section-title">Unsubscribe</div>
-          <p style="color:#64748B;font-size:14px;margin-bottom:12px;">Stop receiving all emails from this sender.</p>
+          <p style="color:#71717a;font-size:14px;margin-bottom:12px;">Stop receiving all emails from this sender.</p>
         </div>
       </form>
       <form method="POST" action="{prefs_path}/{token_safe}">
@@ -203,31 +203,31 @@ pub fn render_preferences_page(
   <title>Email Preferences - ApexMail</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background-color: #F8FAFC; color: #0F172A;
+    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
+      background-color: #ffffff; color: #000000;
       min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .card {{ background: #FFF; border: 1px solid #E2E8F0; border-radius: 18px; padding: 40px; max-width: 500px; width: 100%; }}
-    h1 {{ font-size: 24px; margin-bottom: 8px; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; }}
-    .subtitle {{ color: #475569; margin-bottom: 24px; font-weight: 500; }}
-    .email {{ color: #0F172A; font-weight: 700; }}
+    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 500px; width: 100%; }}
+    h1 {{ font-size: 24px; margin-bottom: 8px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
+    .subtitle {{ color: #52525b; margin-bottom: 24px; font-weight: 400; }}
+    .email {{ color: #000000; font-weight: 700; }}
     .section {{ margin-bottom: 24px; }}
-    .section-title {{ font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748B; margin-bottom: 12px; }}
+    .section-title {{ font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; letter-spacing: 0.1em; letter-spacing: 0.05em; color: #71717a; margin-bottom: 12px; }}
     .pref-item {{ display: flex; align-items: flex-start; gap: 12px; padding: 12px;
-      background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; margin-bottom: 8px; cursor: pointer; }}
-    .pref-item input[type="checkbox"] {{ margin-top: 4px; accent-color: #2563EB; }}
+      background: #ffffff; border: 1px solid #e4e4e7; border-radius: 0px; margin-bottom: 8px; cursor: pointer; }}
+    .pref-item input[type="checkbox"] {{ margin-top: 4px; accent-color: #dc2626; }}
     .pref-info {{ flex: 1; }}
-    .pref-name {{ display: block; font-weight: 700; margin-bottom: 2px; color: #0F172A; }}
-    .pref-desc {{ display: block; font-size: 14px; color: #64748B; font-weight: 500; }}
-    .btn {{ display: inline-block; padding: 12px 24px; border-radius: 12px; font-weight: 700;
+    .pref-name {{ display: block; font-weight: 700; margin-bottom: 2px; color: #000000; }}
+    .pref-desc {{ display: block; font-size: 14px; color: #71717a; font-weight: 400; }}
+    .btn {{ display: inline-block; padding: 12px 24px; border-radius: 0px; font-weight: 700;
       text-decoration: none; border: none; cursor: pointer; font-size: 13px;
-      text-transform: uppercase; letter-spacing: 0.05em; }}
-    .btn-primary {{ background: #2563EB; color: #fff; }}
-    .btn-danger {{ background: #FFF; color: #EF4444; border: 1px solid #FECACA; }}
-    .btn-success {{ background: #16A34A; color: #fff; }}
+      text-transform: uppercase; letter-spacing: 0.1em; letter-spacing: 0.1em; letter-spacing: 0.05em; }}
+    .btn-primary {{ background: #dc2626; color: #fff; }}
+    .btn-danger {{ background: #FFF; color: #dc2626; border: 1px solid #fee2e2; }}
+    .btn-success {{ background: #16a34a; color: #fff; }}
     .actions {{ display: flex; gap: 12px; flex-wrap: wrap; }}
-    .divider {{ border-top: 1px solid #E2E8F0; margin: 24px 0; }}
-    .alert {{ padding: 12px 16px; border-radius: 10px; margin-bottom: 16px; font-size: 14px; font-weight: 500; }}
-    .alert-warning {{ background: #FFFBEB; border: 1px solid #FEF3C7; color: #92400E; }}
+    .divider {{ border-top: 1px solid #e4e4e7; margin: 24px 0; }}
+    .alert {{ padding: 12px 16px; border-radius: 0px; margin-bottom: 16px; font-size: 14px; font-weight: 400; }}
+    .alert-warning {{ background: #fffbeb; border: 1px solid #fef3c7; color: #92400e; }}
     .alert-success {{ background: #F0FDF4; border: 1px solid #DCFCE7; color: #166534; }}
   </style>
 </head>

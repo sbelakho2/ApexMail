@@ -538,8 +538,11 @@ impl From<DomainRow> for DomainResponse {
 }
 
 #[derive(sqlx::FromRow)]
-#[allow(unused)]
 struct DomainFullRow {
+    #[expect(
+        dead_code,
+        reason = "domain detail query keeps id for row-shape stability"
+    )]
     id: String,
     name: String,
     dkim_selector: Option<String>,

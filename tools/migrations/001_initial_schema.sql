@@ -254,6 +254,23 @@ CREATE INDEX idx_email_queue_tenant ON email_queue(tenant_id);
 CREATE INDEX idx_email_queue_scheduled ON email_queue(scheduled_at) WHERE scheduled_at IS NOT NULL;
 CREATE INDEX idx_email_queue_locked ON email_queue(locked_until) WHERE locked_until IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS bounce_events (
+    id TEXT PRIMARY KEY,
+    original_message_id TEXT,
+    original_recipient TEXT,
+    bounce_type TEXT NOT NULL,
+    bounce_subtype TEXT NOT NULL DEFAULT '',
+    diagnostic_code TEXT,
+    status_code TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_bounce_events_created_at ON bounce_events(created_at);
+CREATE INDEX idx_bounce_events_original_message ON bounce_events(original_message_id)
+    WHERE original_message_id IS NOT NULL;
+CREATE INDEX idx_bounce_events_recipient ON bounce_events(original_recipient)
+    WHERE original_recipient IS NOT NULL;
+
 -- =============================================================================
 -- EVENTS
 -- =============================================================================

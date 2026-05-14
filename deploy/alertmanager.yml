@@ -1,5 +1,11 @@
 global:
   resolve_timeout: 5m
+  # Fallback SMTP for email notifications
+  smtp_smarthost: '${SMTP_HOST:?SMTP_HOST not set}:${SMTP_PORT:-587}'
+  smtp_from: 'alertmanager@apexmail.ee'
+  smtp_auth_username: '${SMTP_USERNAME:-}'
+  smtp_auth_password: '${SMTP_PASSWORD:-}'
+  smtp_require_tls: true
 
 route:
   receiver: warning-notify
@@ -8,20 +14,34 @@ route:
   group_interval: 5m
   repeat_interval: 3h
   routes:
+    # ── Critical alerts: all receivers fire (webhook + fallbacks) ──
     - matchers:
         - severity="critical"
       receiver: critical-pager
       repeat_interval: 30m
+      continue: true
+    - matchers:
+        - severity="critical"
+      receiver: critical-fallback
+      repeat_interval: 30m
+    # ── Warning alerts: webhook + fallback ──
     - matchers:
         - severity="warning"
       receiver: warning-notify
       repeat_interval: 2h
+      continue: true
+    - matchers:
+        - severity="warning"
+      receiver: warning-fallback
+      repeat_interval: 2h
+    # ── Info alerts ──
     - matchers:
         - severity="info"
       receiver: info-log
       repeat_interval: 12h
 
 receivers:
+  # ── Primary webhook receivers ──
   - name: critical-pager
     webhook_configs:
       - url: 'http://observability:4400/alerts/critical'
@@ -34,3 +54,23 @@ receivers:
     webhook_configs:
       - url: 'http://observability:4400/alerts/info'
         send_resolved: true
+
+  # ── Fallback receivers (SPOF mitigation) ──
+  - name: critical-fallback
+    email_configs:
+      - to: 'admin@apexmail.ee'
+        send_resolved: true
+        headers:
+          subject: '[CRITICAL] {{ .GroupLabels.alertname }} - ApexMail'
+    webhook_configs:
+      - url: 'https://hooks.slack.com/services/${SLACK_WEBHOOK_PATH:-}'
+        send_resolved: true
+        # Slack webhook is optional; if SLACK_WEBHOOK_PATH is not set, this
+        # receiver gracefully degrades to email-only delivery.
+
+  - name: warning-fallback
+    email_configs:
+      - to: 'admin@apexmail.ee'
+        send_resolved: true
+        headers:
+          subject: '[WARNING] {{ .GroupLabels.alertname }} - ApexMail'

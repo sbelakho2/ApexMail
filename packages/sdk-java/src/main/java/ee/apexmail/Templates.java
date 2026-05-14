@@ -54,12 +54,28 @@ public final class Templates {
 
     /** Update a template. A new version is created automatically. */
     public TemplateResponse update(String id, Map<String, Object> params) {
-        return client.request("PATCH", "/v1/templates/" + encode(id), params, TemplateResponse.class);
+        return client.request("PUT", "/v1/templates/" + encode(id), params, TemplateResponse.class);
     }
 
     /** Delete a template and all its versions. */
     public void delete(String id) {
         client.request("DELETE", "/v1/templates/" + encode(id), null, Void.class);
+    }
+
+    /** Duplicate a template, creating a copy with a new ID. */
+    public TemplateResponse duplicate(String id) {
+        return client.request("POST", "/v1/templates/" + encode(id) + "/duplicate", null, TemplateResponse.class);
+    }
+
+    /**
+     * Rollback a template to a previous version.
+     *
+     * @param id      Template ID
+     * @param version The version number to roll back to
+     */
+    public TemplateResponse rollback(String id, int version) {
+        return client.request("POST", "/v1/templates/" + encode(id) + "/rollback",
+            Map.of("version", version), TemplateResponse.class);
     }
 
     /**

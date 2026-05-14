@@ -6,9 +6,9 @@ ApexMail provides official SDKs for **five languages** to simplify integration w
 |----------|---------|--------------|
 | Python | `apexmail` (PyPI) | Python ≥ 3.9 |
 | Go | `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go` | Go 1.21 |
-| Ruby | `apexmail` (RubyGems) | Ruby ≥ 2.7 |
-| PHP | `apexmail/apexmail-php` (Packagist) | PHP ≥ 8.1 |
+| Ruby | `apexmail` (RubyGems) | Ruby ≥ 3.0 |
 | Java | `ee.apexmail:apexmail-java` (Maven Central) | Java 17 |
+| PHP | `apexmail/apexmail-php` (Packagist) | PHP ≥ 8.1 |
 
 ---
 
@@ -29,7 +29,7 @@ If you need another client language, use the HTTP API directly or maintain that 
 
 ## Common Resources
 
-The examples below use the Python SDK for the shared API surface. The same resources are available in Go, Ruby, PHP, and Java with language-appropriate naming.
+The examples below use the Python SDK for the shared API surface. The same resources are available in Go, Ruby, Java, and PHP with language-appropriate naming.
 
 ### Emails
 
@@ -302,7 +302,7 @@ Official SDKs return structured response objects:
 
 - **Python:** Type hints with `TypedDict` and dataclass-based response models. Compatible with `mypy` strict mode.
 - **Go / Java:** Native structs and classes with compile-time type checking.
-- **Ruby / PHP:** Idiomatic hashes or arrays wrapped by resource-specific helpers.
+- **Ruby:** Idiomatic hashes or arrays wrapped by resource-specific helpers.
 
 ### Error Classes
 
@@ -436,7 +436,7 @@ gem install apexmail
 # or add to Gemfile: gem 'apexmail'
 ```
 
-**Requirements:** Ruby ≥ 2.7. No gem dependencies.
+**Requirements:** Ruby ≥ 3.0. No gem dependencies.
 
 ### Initialization
 
@@ -487,70 +487,6 @@ rescue ApexMail::Error => e
   puts "API error: #{e.message}"
 end
 ```
-
----
-
-## PHP SDK
-
-**Package:** `apexmail/apexmail-php` (Packagist)
-
-```bash
-composer require apexmail/apexmail-php
-```
-
-**Requirements:** PHP ≥ 8.1, ext-curl, ext-json.
-
-### Initialization
-
-```php
-use ApexMail\Client;
-
-$client = new Client('am_live_your_api_key');
-
-// With options:
-$client = new Client('am_live_your_api_key', [
-    'baseUrl' => 'https://api.apexmail.ee',
-    'timeout' => 30,
-]);
-```
-
-### Send an email
-
-```php
-$msg = $client->emails->send([
-    'from'    => 'Sender <hello@example.com>',
-    'to'      => 'user@example.com',
-    'subject' => 'Hello from ApexMail',
-    'html'    => '<p>Hello!</p>',
-]);
-echo $msg['id'];
-```
-
-### Batch send
-
-```php
-$result = $client->emails->batch([
-    ['from' => 'hello@example.com', 'to' => 'a@example.com', 'subject' => 'Hi A', 'html' => '...'],
-    ['from' => 'hello@example.com', 'to' => 'b@example.com', 'subject' => 'Hi B', 'html' => '...'],
-]);
-```
-
-### Error handling
-
-```php
-use ApexMail\Exceptions\RateLimitException;
-use ApexMail\Exceptions\ApexMailException;
-
-try {
-    $client->emails->send([...]);
-} catch (RateLimitException $e) {
-    echo "Rate limited: " . $e->getMessage();
-} catch (ApexMailException $e) {
-    echo "API error [{$e->getStatusCode()}]: " . $e->getMessage();
-}
-```
-
----
 
 ## Java SDK
 
@@ -624,6 +560,79 @@ try {
     System.out.println("Auth failed: " + e.getMessage());
 } catch (ApexMailException e) {
     System.out.printf("API error [%d]: %s%n", e.getStatusCode(), e.getMessage());
+}
+```
+
+---
+
+## PHP SDK
+
+**Package:** `apexmail/apexmail-php` (Packagist)
+
+```bash
+composer require apexmail/apexmail-php
+```
+
+**Requirements:** PHP ≥ 8.1. No external dependencies — uses only native PHP 8 features (fibers, typed properties, enums).
+
+### Initialization
+
+```php
+use ApexMail\ApexMailClient;
+
+$client = new ApexMailClient('am_live_your_api_key');
+
+// With custom options:
+$client = new ApexMailClient('am_live_your_api_key', [
+    'base_url' => 'https://api.apexmail.ee',
+    'timeout' => 30,
+]);
+```
+
+### Send an email
+
+```php
+$message = $client->emails->send([
+    'from'    => 'Sender <hello@example.com>',
+    'to'      => ['user@example.com'],
+    'subject' => 'Hello from ApexMail',
+    'html'    => '<p>Hello!</p>',
+]);
+
+echo $message['id']; // msg_x9y8z7w6
+```
+
+### Batch send
+
+```php
+$result = $client->emails->batch([
+    'messages' => [
+        ['from' => 'hello@example.com', 'to' => ['a@example.com'], 'subject' => 'Hi A', 'html' => '...'],
+        ['from' => 'hello@example.com', 'to' => ['b@example.com'], 'subject' => 'Hi B', 'html' => '...'],
+    ],
+]);
+```
+
+### Domains
+
+```php
+$domain = $client->domains->create('mail.example.com');
+$client->domains->verify($domain['id']);
+$domains = $client->domains->list();
+```
+
+### Error handling
+
+```php
+use ApexMail\Exception\RateLimitException;
+use ApexMail\Exception\ApexMailException;
+
+try {
+    $client->emails->send([...]);
+} catch (RateLimitException $e) {
+    echo "Rate limited: " . $e->getMessage();
+} catch (ApexMailException $e) {
+    echo "API error [{$e->getStatusCode()}]: {$e->getMessage()}";
 }
 ```
 

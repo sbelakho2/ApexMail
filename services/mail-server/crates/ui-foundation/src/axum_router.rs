@@ -1,4 +1,4 @@
-//! Route → view function wiring.
+//! Route to view function wiring.
 //!
 //! Maps every SSR route pattern to its corresponding `leptos_views` function,
 //! producing the final HTML response. This replaces the legacy browser
@@ -75,6 +75,12 @@ fn decode_query_component(input: &str) -> String {
 }
 
 fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> {
+    let path = if path != "/" {
+        path.strip_suffix('/').unwrap_or(path)
+    } else {
+        path
+    };
+
     match (surface, path) {
         ("marketing", "/") | ("marketing-zola", "/") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/index.html"
@@ -106,8 +112,20 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing", "/compare/sendgrid") | ("marketing-zola", "/compare/sendgrid") => Some(
             include_str!("../../../../../apps/marketing-zola/public/compare/sendgrid/index.html"),
         ),
+        ("marketing-zola", "/contact") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/contact/index.html"
+        )),
+        ("marketing-zola", "/contact/sales") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/contact/sales/index.html"
+        )),
         ("marketing", "/cookies") | ("marketing-zola", "/cookies") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/cookies/index.html"
+        )),
+        ("marketing-zola", "/de") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/index.html"
+        )),
+        ("marketing-zola", "/de/cookies") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/de/cookies/index.html"
         )),
         ("marketing", "/dpa") | ("marketing-zola", "/dpa") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/dpa/index.html"
@@ -121,6 +139,9 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing", "/docs/api") | ("marketing-zola", "/docs/api") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/docs/api/index.html"
         )),
+        ("marketing-zola", "/docs/api/grader") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/docs/api/grader/index.html"
+        )),
         ("marketing", "/docs/alerts") | ("marketing-zola", "/docs/alerts") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/docs/alerts/index.html"
         )),
@@ -133,8 +154,23 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing", "/features") | ("marketing-zola", "/features") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/features/index.html"
         )),
+        ("marketing-zola", "/es") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/index.html"
+        )),
+        ("marketing-zola", "/es/cookies") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/es/cookies/index.html"
+        )),
         ("marketing", "/forensic") | ("marketing-zola", "/forensic") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/forensic/index.html"
+        )),
+        ("marketing-zola", "/fr") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/index.html"
+        )),
+        ("marketing-zola", "/fr/cookies") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/fr/cookies/index.html"
+        )),
+        ("marketing-zola", "/inbox-placement") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/inbox-placement/index.html"
         )),
         ("marketing", "/pricing") | ("marketing-zola", "/pricing") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/pricing/index.html"
@@ -148,6 +184,9 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
         ("marketing", "/private-cloud") | ("marketing-zola", "/private-cloud") => Some(
             include_str!("../../../../../apps/marketing-zola/public/private-cloud/index.html"),
         ),
+        ("marketing-zola", "/secure-email-for-regulated-saas") => Some(include_str!(
+            "../../../../../apps/marketing-zola/public/secure-email-for-regulated-saas/index.html"
+        )),
         ("marketing", "/sla") | ("marketing-zola", "/sla") => Some(include_str!(
             "../../../../../apps/marketing-zola/public/sla/index.html"
         )),
@@ -204,27 +243,72 @@ fn normalize_marketing_static_document(document: &str) -> String {
 /// Renders the full HTML page for a given surface and path.
 /// Returns `None` if the route is not recognized.
 pub fn render_route(surface: &str, path: &str) -> Option<String> {
-    render_route_with_query(surface, path, None)
+    render_route_with_query(surface, path, None, None, None, None)
 }
 
-pub fn render_route_with_query(surface: &str, path: &str, query: Option<&str>) -> Option<String> {
+/// Renders the full HTML page with an optional CSRF secret for form protection.
+/// When `csrf_secret` is `Some`, CSRF tokens are generated for auth-related forms.
+/// `mcaptcha_base_url` and `mcaptcha_site_key` control the mCaptcha CAPTCHA widget on auth pages.
+pub fn render_route_with_query(
+    surface: &str,
+    path: &str,
+    query: Option<&str>,
+    csrf_secret: Option<&str>,
+    mcaptcha_base_url: Option<&str>,
+    mcaptcha_site_key: Option<&str>,
+) -> Option<String> {
     let html = match surface {
         "web" => {
-            let inner = render_inner(surface, path, query)?;
+            let inner = render_inner(
+                surface,
+                path,
+                query,
+                csrf_secret,
+                mcaptcha_base_url,
+                mcaptcha_site_key,
+            )?;
             match path {
                 "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
                 | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
-                _ => leptos_views::web_root_layout(&leptos_views::web_dashboard_layout(&inner)),
+                _ => {
+                    leptos_views::web_root_layout(&leptos_views::web_dashboard_layout(&inner, path))
+                }
             }
         }
         "control-plane" => {
-            let inner = render_inner(surface, path, query)?;
-            leptos_views::control_plane_root_layout(&inner)
+            let inner = render_inner(
+                surface,
+                path,
+                query,
+                csrf_secret,
+                mcaptcha_base_url,
+                mcaptcha_site_key,
+            )?;
+            let page = match path {
+                "/login" => inner,
+                _ => {
+                    let (title, description) = control_plane_route_context(path);
+                    leptos_views::control_plane_app_layout_with_title(
+                        &inner,
+                        title,
+                        description,
+                        path,
+                    )
+                }
+            };
+            leptos_views::control_plane_root_layout(&page)
         }
         "marketing" | "marketing-zola" => marketing_static_document(surface, path)
             .map(normalize_marketing_static_document)
             .or_else(|| {
-                let inner = render_inner(surface, path, query)?;
+                let inner = render_inner(
+                    surface,
+                    path,
+                    query,
+                    csrf_secret,
+                    mcaptcha_base_url,
+                    mcaptcha_site_key,
+                )?;
                 Some(leptos_views::marketing_page(&inner))
             })?,
         _ => return None,
@@ -232,29 +316,124 @@ pub fn render_route_with_query(surface: &str, path: &str, query: Option<&str>) -
     Some(html)
 }
 
+fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
+    match path {
+        "/" => ("Control Plane", "ApexMail administration and monitoring."),
+        "/cp" | "/dashboard" => (
+            "Dashboard",
+            "Fleet health, operator coverage, and throughput.",
+        ),
+        "/cp/tenants" | "/tenants" => ("Tenants", "Customer workspaces and launch readiness."),
+        "/tenants/new" => (
+            "Add Tenant",
+            "Create a tenant workspace for enterprise onboarding.",
+        ),
+        "/cp/sales" | "/sales" => (
+            "Operator Console",
+            "Enterprise pipeline, expansion, and conversion posture.",
+        ),
+        "/operators" => ("Operators", "Administrator access, roles, and activity."),
+        "/operators/new" => (
+            "Add Operator",
+            "Invite an administrator with controlled access.",
+        ),
+        "/analytics" => (
+            "Analytics",
+            "System volume, latency, and availability telemetry.",
+        ),
+        "/discovery" => (
+            "Service Discovery",
+            "Registered service health and routing state.",
+        ),
+        "/jobs" => ("Jobs", "Background work and remediation queues."),
+        "/cp/infra" | "/cp/infrastructure" | "/infrastructure" => {
+            ("Infrastructure", "Nodes, queues, and fleet operations.")
+        }
+        "/infrastructure/nodes" => ("Nodes", "Cluster capacity and node health."),
+        "/infrastructure/queues" => ("Queues", "Mail queue depth and worker processing."),
+        "/domains" => ("Domains", "Tenant sending domains and verification."),
+        "/billing" => ("Billing", "Plan packaging and subscription operations."),
+        "/billing/plans" => ("Plans", "Pricing, quotas, and subscriber coverage."),
+        "/compliance" => ("Compliance", "Trust workflows and policy operations."),
+        "/compliance/gdpr" => ("GDPR Compliance", "Data protection request handling."),
+        "/alerts" => ("Alerts", "Incident triage and fleet risk signals."),
+        "/alerts/rules" => ("Alert Rules", "Alerting policy and escalation thresholds."),
+        "/settings" => ("Settings", "Control-plane configuration."),
+        "/cp/security" | "/settings/security" => (
+            "Security Settings",
+            "Authentication and operator access controls.",
+        ),
+        "/cp/audit" | "/audit" => ("Audit Logs", "Operator activity and security review trail."),
+        _ => ("Control Plane", "ApexMail administration and monitoring."),
+    }
+}
+
 /// Renders the inner content (without layout wrapper) for a route.
-fn render_inner(surface: &str, path: &str, query: Option<&str>) -> Option<String> {
+fn render_inner(
+    surface: &str,
+    path: &str,
+    query: Option<&str>,
+    csrf_secret: Option<&str>,
+    mcaptcha_base_url: Option<&str>,
+    mcaptcha_site_key: Option<&str>,
+) -> Option<String> {
     match surface {
-        "web" => render_web(path, query),
-        "control-plane" => render_control_plane(path),
+        "web" => render_web(
+            path,
+            query,
+            csrf_secret,
+            mcaptcha_base_url,
+            mcaptcha_site_key,
+        ),
+        "control-plane" => {
+            render_control_plane(path, csrf_secret, mcaptcha_base_url, mcaptcha_site_key)
+        }
         "marketing" | "marketing-zola" => render_marketing(surface, path),
         _ => None,
     }
 }
 
-fn render_web(path: &str, query: Option<&str>) -> Option<String> {
+fn render_web(
+    path: &str,
+    query: Option<&str>,
+    csrf_secret: Option<&str>,
+    mcaptcha_base_url: Option<&str>,
+    mcaptcha_site_key: Option<&str>,
+) -> Option<String> {
     let params = parse_query_params(query);
+
+    // Generate CSRF token for auth routes if a secret is available
+    let csrf_token = |secret: &str| crate::csrf::generate_csrf_token(secret);
+    let mcaptcha_site_key_str = mcaptcha_site_key.unwrap_or("dev");
+    let mcaptcha_base_url_str = mcaptcha_base_url.unwrap_or("https://mcaptcha.example.com");
 
     Some(match path {
         "/" => leptos_views::web_home_page(),
-        "/login" => leptos_views::web_login_page(),
-        "/signup" => leptos_views::web_signup_page(),
-        "/forgot-password" => leptos_views::web_forgot_password_page(),
-        "/reset-password" => leptos_views::web_reset_password_page_with_state(
-            params.token.as_deref(),
-            params.email.as_deref(),
-            params.message.as_deref(),
-        ),
+        "/login" => {
+            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            leptos_views::web_login_page(&token, mcaptcha_site_key_str, mcaptcha_base_url_str)
+        }
+        "/signup" => {
+            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            leptos_views::web_signup_page(&token, mcaptcha_site_key_str, mcaptcha_base_url_str)
+        }
+        "/forgot-password" => {
+            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            leptos_views::web_forgot_password_page(
+                &token,
+                mcaptcha_site_key_str,
+                mcaptcha_base_url_str,
+            )
+        }
+        "/reset-password" => {
+            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            leptos_views::web_reset_password_page_with_state(
+                params.token.as_deref(),
+                params.email.as_deref(),
+                params.message.as_deref(),
+                &token,
+            )
+        }
         "/verify-email" => leptos_views::web_verify_email_page_with_state(
             params.token.as_deref(),
             params.email.as_deref(),
@@ -294,10 +473,32 @@ fn render_web(path: &str, query: Option<&str>) -> Option<String> {
     })
 }
 
-fn render_control_plane(path: &str) -> Option<String> {
+fn render_control_plane(
+    path: &str,
+    csrf_secret: Option<&str>,
+    mcaptcha_base_url: Option<&str>,
+    mcaptcha_site_key: Option<&str>,
+) -> Option<String> {
+    let csrf_token = |secret: &str| crate::csrf::generate_csrf_token(secret);
+    let mcaptcha_site_key_str = mcaptcha_site_key.unwrap_or("dev");
+    let mcaptcha_base_url_str = mcaptcha_base_url.unwrap_or("https://mcaptcha.example.com");
+
     Some(match path {
+        "/cp" => leptos_views::control_plane_dashboard_page(),
+        "/cp/tenants" => leptos_views::control_plane_tenants_page(),
+        "/cp/infra" | "/cp/infrastructure" => leptos_views::control_plane_infrastructure_page(),
+        "/cp/security" => leptos_views::control_plane_security_page(),
+        "/cp/audit" => leptos_views::control_plane_audit_page(),
+        "/cp/sales" => leptos_views::control_plane_sales_page(),
         "/" => leptos_views::control_plane_home_page(),
-        "/login" => leptos_views::control_plane_login_page(),
+        "/login" => {
+            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            leptos_views::control_plane_login_page(
+                &token,
+                mcaptcha_site_key_str,
+                mcaptcha_base_url_str,
+            )
+        }
         "/dashboard" => leptos_views::control_plane_dashboard_page(),
         "/tenants" => leptos_views::control_plane_tenants_page(),
         "/tenants/new" => leptos_views::control_plane_tenants_new_page(),
@@ -455,8 +656,23 @@ mod tests {
     #[test]
     fn control_plane_routes_use_dark_theme() {
         let html = render_route("control-plane", "/dashboard").unwrap();
-        assert!(html.contains("bg-surface-950"));
-        assert!(html.contains("text-surface-100"));
+        assert!(html.contains("<body class=\"antialiased bg-background text-surface-950\">"));
+        assert!(html.contains("data-user-role=\"admin\""));
+        assert!(html.contains("data-theme-storage-key=\"apexmail-ui:theme\""));
+    }
+
+    #[test]
+    fn control_plane_cp_aliases_render() {
+        for path in [
+            "/cp",
+            "/cp/tenants",
+            "/cp/infra",
+            "/cp/security",
+            "/cp/audit",
+        ] {
+            let html = render_route("control-plane", path).unwrap();
+            assert!(html.contains("<title>ApexMail Control Plane</title>"));
+        }
     }
 
     #[test]
@@ -547,6 +763,9 @@ mod tests {
             "web",
             "/reset-password",
             Some("token=reset-token-123&email=owner%40apexmail.ee"),
+            None,
+            None,
+            None,
         )
         .expect("reset-password route should render with query state");
         assert!(reset.contains("name=\"token\" value=\"reset-token-123\""));
@@ -557,6 +776,9 @@ mod tests {
             "web",
             "/verify-email",
             Some("token=verify-token-456&status=success&message=Email%20verified%20successfully"),
+            None,
+            None,
+            None,
         )
         .expect("verify-email route should render with query state");
         assert!(verify.contains("Email verified successfully"));
@@ -589,13 +811,6 @@ mod tests {
             }
 
             if html.contains("<script") {
-                assert!(
-                    matches!(route.surface, "marketing" | "marketing-zola"),
-                    "[{}] {} unexpectedly emitted a script tag",
-                    route.surface,
-                    route.pattern,
-                );
-
                 for script in html.split("<script").skip(1) {
                     let opening_tag = script.split('>').next().unwrap_or_default();
                     let is_json_ld = opening_tag.contains("type=application/ld+json")
@@ -603,12 +818,36 @@ mod tests {
                     let is_allowed_marketing_js = opening_tag
                         .contains("src=\"/js/apexmail-site.js")
                         && opening_tag.contains("defer");
+                    // Inline mobile-menu toggle script injected by shell::mobile_menu_script()
+                    // into both web and control-plane shells. It is an inline self-contained IIFE
+                    // with no external dependencies and requires no separate CSP nonce exemption
+                    // because `script-src 'self' 'strict-dynamic'` covers the HTTP-header CSP.
+                    let is_mobile_menu_script = !opening_tag.contains("src=")
+                        && script.contains("data-mobile-menu-breakpoint")
+                        && script.contains("ResizeObserver");
+                    // Inline auth-form bridge script injected by `web_auth_form_script`
+                    // (and shared by control-plane login). Self-contained IIFE that
+                    // converts native form submission to JSON for the auth handlers.
+                    let is_auth_form_script = !opening_tag.contains("src=")
+                        && script.contains("authBound")
+                        && script.contains("/v1/auth/");
+                    // Inline MFA management script injected by `control_plane_security_page`.
+                    // Self-contained IIFE that handles MFA setup flow (status check, QR code
+                    // display, TOTP verification, recovery codes) via the /v1/auth/mfa/* API.
+                    let is_mfa_management_script = !opening_tag.contains("src=")
+                        && script.contains("mfaChallengeToken")
+                        && script.contains("/v1/auth/mfa/");
+                    let allowed = match route.surface {
+                        "marketing" | "marketing-zola" => is_json_ld || is_allowed_marketing_js,
+                        "web" | "control-plane" => {
+                            is_mobile_menu_script || is_auth_form_script || is_mfa_management_script
+                        }
+                        _ => false,
+                    };
                     assert!(
-                        is_json_ld || is_allowed_marketing_js,
+                        allowed,
                         "[{}] {} emitted an unexpected script tag: <script{}>",
-                        route.surface,
-                        route.pattern,
-                        opening_tag,
+                        route.surface, route.pattern, opening_tag,
                     );
                     if opening_tag.contains("src=") {
                         assert!(

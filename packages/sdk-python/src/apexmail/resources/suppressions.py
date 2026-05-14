@@ -56,6 +56,15 @@ class SuppressionsResource:
         reason: str,
         source: Optional[str] = None,
     ) -> Suppression:
+        return self.add(email=email, reason=reason, source=source)
+
+    def add(
+        self,
+        *,
+        email: str,
+        reason: str,
+        source: Optional[str] = None,
+    ) -> Suppression:
         payload = {"email": email, "reason": reason, "source": source}
         data = self._client._request("POST", "/v1/suppressions", json=payload)
         return Suppression(**_extract_item(data, "suppression"))
@@ -100,6 +109,15 @@ class AsyncSuppressionsResource:
         self._client = client
 
     async def create(
+        self,
+        *,
+        email: str,
+        reason: str,
+        source: Optional[str] = None,
+    ) -> Suppression:
+        return await self.add(email=email, reason=reason, source=source)
+
+    async def add(
         self,
         *,
         email: str,

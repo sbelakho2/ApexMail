@@ -296,22 +296,22 @@ async fn get_current_vat_summary(
 
     // Query current month invoice totals directly
     let period_start = chrono::NaiveDate::from_ymd_opt(year, month, 1)
-        .unwrap()
+        .expect("invariant: current year/month always valid for from_ymd_opt")
         .and_hms_opt(0, 0, 0)
-        .unwrap()
+        .expect("invariant: valid date always has 00:00:00 time")
         .and_utc();
 
     let period_end = if month == 12 {
         chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
-            .unwrap()
+            .expect("invariant: year+1 with January 1st always valid")
             .and_hms_opt(0, 0, 0)
-            .unwrap()
+            .expect("invariant: valid date always has 00:00:00 time")
             .and_utc()
     } else {
         chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
-            .unwrap()
+            .expect("invariant: current year/next month 1st always valid")
             .and_hms_opt(0, 0, 0)
-            .unwrap()
+            .expect("invariant: valid date always has 00:00:00 time")
             .and_utc()
     };
 
@@ -476,7 +476,7 @@ async fn get_kmd_by_period(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     require_system_kmd_access(&auth)?;
 
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err(ApiError::Validation(vec![
             "month must be between 1 and 12".into()
         ]));
@@ -537,9 +537,12 @@ fn compute_due_date(year: i32, month: u32) -> chrono::DateTime<chrono::Utc> {
     let due_year = if month == 12 { year + 1 } else { year };
 
     chrono::NaiveDate::from_ymd_opt(due_year, due_month, 20)
-        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(year, month, 20).unwrap())
+        .unwrap_or_else(|| {
+            chrono::NaiveDate::from_ymd_opt(year, month, 20)
+                .expect("invariant: fallback year/month is always valid")
+        })
         .and_hms_opt(23, 59, 59)
-        .unwrap()
+        .expect("invariant: any NaiveDate supports 23:59:59")
         .and_utc()
 }
 

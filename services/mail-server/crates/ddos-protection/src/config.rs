@@ -1,3 +1,5 @@
+#![allow(clippy::doc_lazy_continuation)]
+
 //! Configuration for DDoS protection
 //!
 //! ## Security hardening (February 2026)

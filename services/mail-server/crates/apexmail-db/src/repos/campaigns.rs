@@ -1,5 +1,6 @@
 //! Campaigns repository.
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -22,7 +23,7 @@ impl CampaignsRepo {
             "INSERT INTO campaigns \
              (id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, 'draft', $6, 0, NOW(), NOW()) \
-             RETURNING *"
+             RETURNING id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at"
         )
         .bind(Uuid::new_v4())
         .bind(tenant_id)
@@ -40,7 +41,10 @@ impl CampaignsRepo {
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Campaign>, sqlx::Error> {
-        sqlx::query_as::<_, Campaign>("SELECT * FROM campaigns WHERE id = $1 AND tenant_id = $2")
+        sqlx::query_as::<_, Campaign>(
+            "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at \
+             FROM campaigns WHERE id = $1 AND tenant_id = $2"
+        )
             .bind(id)
             .bind(tenant_id)
             .fetch_optional(pool)
@@ -57,13 +61,54 @@ impl CampaignsRepo {
         let limit = limit.clamp(1, 100);
         let offset = offset.clamp(0, 100_000);
         sqlx::query_as::<_, Campaign>(
-            "SELECT * FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+            "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at \
+             FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(tenant_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
         .await
+    }
+
+    /// List campaigns for a tenant using keyset (cursor-based) pagination.
+    /// Uses `(created_at, id)` tuple comparison for stable, efficient pagination.
+    pub async fn list_keyset(
+        pool: &PgPool,
+        tenant_id: Uuid,
+        limit: i64,
+        cursor_created_at: Option<DateTime<Utc>>,
+        cursor_id: Option<Uuid>,
+    ) -> Result<Vec<Campaign>, sqlx::Error> {
+        let limit = limit.clamp(1, 200);
+        let fetch_limit = limit + 1;
+        match (cursor_created_at, cursor_id) {
+            (Some(created_at), Some(id)) => {
+                sqlx::query_as::<_, Campaign>(
+                    "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at \
+                     FROM campaigns WHERE tenant_id = $1 AND (created_at, id) < ($2, $3) \
+                     ORDER BY created_at DESC, id DESC LIMIT $4"
+                )
+                .bind(tenant_id)
+                .bind(created_at)
+                .bind(id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+            _ => {
+                // First page — no cursor
+                sqlx::query_as::<_, Campaign>(
+                    "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at \
+                     FROM campaigns WHERE tenant_id = $1 \
+                     ORDER BY created_at DESC, id DESC LIMIT $2"
+                )
+                .bind(tenant_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+        }
     }
 
     /// Update campaign status (draft → sending → sent, etc.).

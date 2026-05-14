@@ -446,15 +446,24 @@ struct DedicatedIpRow {
     id: String,
     ip_address: String,
     rdns_hostname: Option<String>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "selected for dedicated-IP admin response compatibility"
+    )]
     region: String,
     status: String,
     warmup_progress: f64,
     warmup_started_at: Option<DateTime<Utc>>,
     warmup_completed_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "selected for billing reconciliation and future API response expansion"
+    )]
     billing_status: Option<String>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "selected for billing reconciliation and future API response expansion"
+    )]
     allocated_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,

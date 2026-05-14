@@ -38,8 +38,11 @@ func TestClientListReturnsValidationErrorFromRustEnvelope(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
-	_, err := client.Events.List(context.Background(), ListEventsOptions{})
+	client, err := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	_, err = client.Events.List(context.Background(), ListEventsOptions{})
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
@@ -69,8 +72,11 @@ func TestClientReturnsServerAPIErrorFromRustEnvelopeAfterRetries(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
-	_, err := client.Emails.Get(context.Background(), "msg_123")
+	client, err := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	_, err = client.Emails.Get(context.Background(), "msg_123")
 	if err == nil {
 		t.Fatal("expected API error")
 	}

@@ -206,4 +206,6 @@ ClickHouse data is persisted in the `clickhouse_data` Docker volume. For product
 | **Retention** | 730 days @ billions of rows | Memory-bound | Index bloat |
 | **Industry use** | Cloudflare, Uber, Resend | Analytics notebooks | OLTP |
 
+> **DuckDB version:** The comparison above reflects DuckDB **1.1.x** (stable). DuckDB is a rapidly evolving project — pin to a specific version in production. Check [duckdb.org](https://duckdb.org/docs/installation/) for the latest stable release.
+
 **Conclusion:** ClickHouse is the right choice for ApexMail's enterprise email analytics at scale.

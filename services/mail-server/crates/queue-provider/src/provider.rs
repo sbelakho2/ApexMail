@@ -411,6 +411,7 @@ impl PostgresQueueProvider {
         .execute(&self.db)
         .await?;
 
+        metrics::counter!("queue.dead_letter.total").increment(1);
         warn!(job_id = %job_id, "Job moved to dead letter queue");
         Ok(())
     }
@@ -524,7 +525,7 @@ struct PreparedPayload {
 }
 
 fn retry_backoff_secs(attempts: i32) -> i64 {
-    let exponent = attempts.max(0).min(7) as u32;
+    let exponent = attempts.clamp(0, 7) as u32;
     ((1_i64 << exponent) * 30).min(MAX_RETRY_BACKOFF_SECS)
 }
 

@@ -58,6 +58,7 @@ impl std::fmt::Display for BounceCategory {
 }
 
 impl BounceCategory {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "hard" => Self::Hard,
@@ -176,6 +177,7 @@ impl DomainRiskLevel {
     }
 
     /// Parse the persisted string representation (matches `Display`).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "critical" => Self::Critical,
@@ -218,7 +220,9 @@ impl BounceAnalyticsReport {
         // Check overall bounce rate
         let total_bounces = self.aggregation.total_bounces;
         if total_bounces > 0 {
-            let hard_count = self.aggregation.by_category
+            let hard_count = self
+                .aggregation
+                .by_category
                 .iter()
                 .find(|c| c.category == BounceCategory::Hard)
                 .map(|c| c.count)
@@ -256,7 +260,8 @@ impl BounceAnalyticsReport {
         }
 
         // Check problematic domains
-        let critical_domains: Vec<&str> = self.problematic_domains
+        let critical_domains: Vec<&str> = self
+            .problematic_domains
             .iter()
             .filter(|d| d.risk_level == DomainRiskLevel::Critical)
             .map(|d| d.domain.as_str())
@@ -277,6 +282,27 @@ impl BounceAnalyticsReport {
 
 /// DDL for the bounce analytics aggregate tables.
 pub const BOUNCE_ANALYTICS_SCHEMA: &str = r#"
+-- Raw bounce events populated by the MTA bounce and feedback-loop servers.
+CREATE TABLE IF NOT EXISTS bounce_events (
+    id                  TEXT PRIMARY KEY,
+    original_message_id TEXT,
+    original_recipient  TEXT,
+    bounce_type         TEXT NOT NULL,
+    bounce_subtype      TEXT NOT NULL DEFAULT '',
+    diagnostic_code     TEXT,
+    status_code         TEXT NOT NULL DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bounce_events_created_at
+    ON bounce_events (created_at);
+CREATE INDEX IF NOT EXISTS idx_bounce_events_original_message
+    ON bounce_events (original_message_id)
+    WHERE original_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_bounce_events_recipient
+    ON bounce_events (original_recipient)
+    WHERE original_recipient IS NOT NULL;
+
 -- Aggregated bounce metrics per tenant per day
 CREATE TABLE IF NOT EXISTS bounce_analytics_daily (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -344,8 +370,14 @@ mod tests {
     fn test_bounce_category_from_str() {
         assert_eq!(BounceCategory::from_str("hard"), BounceCategory::Hard);
         assert_eq!(BounceCategory::from_str("SOFT"), BounceCategory::Soft);
-        assert_eq!(BounceCategory::from_str("transient"), BounceCategory::Transient);
-        assert_eq!(BounceCategory::from_str("unknown"), BounceCategory::Transient);
+        assert_eq!(
+            BounceCategory::from_str("transient"),
+            BounceCategory::Transient
+        );
+        assert_eq!(
+            BounceCategory::from_str("unknown"),
+            BounceCategory::Transient
+        );
     }
 
     #[test]
@@ -356,10 +388,22 @@ mod tests {
 
     #[test]
     fn test_domain_risk_level_from_rate() {
-        assert_eq!(DomainRiskLevel::from_bounce_rate(0.01), DomainRiskLevel::Normal);
-        assert_eq!(DomainRiskLevel::from_bounce_rate(0.06), DomainRiskLevel::Elevated);
-        assert_eq!(DomainRiskLevel::from_bounce_rate(0.12), DomainRiskLevel::High);
-        assert_eq!(DomainRiskLevel::from_bounce_rate(0.25), DomainRiskLevel::Critical);
+        assert_eq!(
+            DomainRiskLevel::from_bounce_rate(0.01),
+            DomainRiskLevel::Normal
+        );
+        assert_eq!(
+            DomainRiskLevel::from_bounce_rate(0.06),
+            DomainRiskLevel::Elevated
+        );
+        assert_eq!(
+            DomainRiskLevel::from_bounce_rate(0.12),
+            DomainRiskLevel::High
+        );
+        assert_eq!(
+            DomainRiskLevel::from_bounce_rate(0.25),
+            DomainRiskLevel::Critical
+        );
     }
 
     #[test]

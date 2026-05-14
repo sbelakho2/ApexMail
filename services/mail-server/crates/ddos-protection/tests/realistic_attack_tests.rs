@@ -148,6 +148,7 @@ mod smtp_attacks {
     /// Attack:Attacker opens many connections but never sends EHLO, holding
     /// resources with NOOP spam.
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn noop_spam_before_greeting_consumes_command_budget() {
         let mut config = SmtpProtectionConfig::default();
         config.max_commands = 20;
@@ -254,6 +255,7 @@ mod smtp_attacks {
 
     /// Attack:RSET loop to reset transaction state and avoid DATA phase forever
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn rset_loop_doesnt_bypass_command_limit() {
         let mut config = SmtpProtectionConfig::default();
         config.max_commands = 10;
@@ -428,7 +430,7 @@ mod adaptive_attacks {
         let threshold = limiter.current_threshold();
         // With EMA alpha=0.3 and 100 iterations, should be very close to 300
         assert!(
-            threshold >= 250 && threshold <= 350,
+            (250..=350).contains(&threshold),
             "Threshold should converge near 300 (200 * 1.5), got: {}",
             threshold
         );
@@ -652,7 +654,7 @@ mod bot_attacks {
         // Human:varied endpoints
         let mut human = SessionBehavior::new(100);
         let eps: Vec<u64> = (0..15).map(|i| hash_ep(&format!("/page/{}", i))).collect();
-        for (_i, ep) in eps.iter().cycle().take(50).enumerate() {
+        for ep in eps.iter().cycle().take(50) {
             human.record_request(*ep, "GET", false);
         }
         let human_entropy = human.sequence_entropy();
@@ -776,11 +778,10 @@ mod cost_attacks {
 
         // Check how many batch sends we can do
         let mut count = 0;
-        loop {
-            match limiter.check("t1", "/v1/messages/send/batch", None) {
-                CostDecision::Allowed { .. } => count += 1,
-                _ => break,
-            }
+        while let CostDecision::Allowed { .. } =
+            limiter.check("t1", "/v1/messages/send/batch", None)
+        {
+            count += 1;
             if count > 1000 {
                 break;
             } // Safety valve
@@ -850,6 +851,7 @@ mod reputation_attacks {
 
     /// Reputation recovers through passed challenges
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn reputation_recovers_through_good_behavior() {
         let mut rep = ReputationScore::default();
         rep.score = 10; // Start low
@@ -883,6 +885,7 @@ mod reputation_attacks {
 
     /// Score is bounded 0-100
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn score_stays_bounded() {
         let mut rep = ReputationScore::default();
         rep.score = 98;
@@ -1318,7 +1321,7 @@ mod invariant_tests {
 
             let t = limiter.current_threshold();
             assert!(
-                t >= 50 && t <= 10_000,
+                (50..=10_000).contains(&t),
                 "Threshold out of bounds: {} (min=50, max=10000)",
                 t
             );

@@ -1,5 +1,6 @@
 use regex::Regex;
 use std::net::IpAddr;
+use std::net::ToSocketAddrs;
 use url::Url;
 
 /// Well-known internal hostnames that should never be scraped.
@@ -100,8 +101,12 @@ impl WebScraper {
     ///   loopback, multicast, site-local IPv6)
     /// - Hostnames without a dot (internal network names like `http://internal-app/`)
     ///
-    /// Full DNS-based SSRF prevention (resolve-then-verify) should be added for
-    /// production use — see [`worker-processors` SSRF validator] for reference.
+    /// **Additional fix (RB-6)**: Added DNS resolution to validate that hostnames
+    /// resolve to public IP addresses only. This prevents SSRF attacks where a
+    /// hostname like `evil.com` resolves to `127.0.0.1` or a private IP (DNS
+    /// rebinding / DNS poisoning mitigation). The resolution uses the system
+    /// resolver (synchronous), checking both IPv4 and IPv6 addresses. If DNS
+    /// resolution fails entirely, the URL is rejected as unsafe.
     pub fn validate_url(input: &str) -> bool {
         let url = match Url::parse(input) {
             Ok(u) => u,
@@ -134,6 +139,33 @@ impl WebScraper {
             .and_then(|h| h.parse::<IpAddr>().ok())
         {
             if is_private_ip(&ip) {
+                return false;
+            }
+            // IP literal is valid and public — no DNS resolution needed
+            return true;
+        }
+
+        // DNS resolution: resolve hostname and verify all resolved IPs are public.
+        // This prevents SSRF via DNS rebinding where a hostname resolves to a
+        // private/internal IP address.
+        let port = url.port_or_known_default().unwrap_or(80);
+        match (host, port).to_socket_addrs() {
+            Ok(addrs) => {
+                let mut any_public = false;
+                for addr in addrs {
+                    let ip = addr.ip();
+                    if is_private_ip(&ip) {
+                        return false;
+                    }
+                    any_public = true;
+                }
+                // If DNS resolution succeeded but returned no addresses, reject
+                if !any_public {
+                    return false;
+                }
+            }
+            Err(_) => {
+                // DNS resolution failed entirely — reject as unsafe
                 return false;
             }
         }

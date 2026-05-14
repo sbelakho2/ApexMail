@@ -29,7 +29,7 @@
 //! 4. Inserts a `dedicated_ips` row (status = "warming")
 //! 5. The DB trigger updates `transport_routing_cache`
 //! 6. `TransportRouter` picks this up and starts routing that tenant's
-//! emails via the self-hosted SMTP path **automatically**
+//!    emails via the self-hosted SMTP path **automatically**
 //!
 //! If the tenant releases all dedicated IPs, the trigger flips them back to
 //! SES shared sending with zero downtime.

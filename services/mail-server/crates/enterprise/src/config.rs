@@ -139,7 +139,7 @@ pub struct DatabaseConfig {
 impl DatabaseConfig {
     pub fn from_env() -> Self {
         Self {
-            host: env::var("DB_HOST").unwrap_or_else(|_| "localhost".into()),
+            host: env::var("DB_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             port: env::var("DB_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -177,7 +177,7 @@ pub struct RedisConfig {
 impl RedisConfig {
     pub fn from_env() -> Self {
         Self {
-            host: env::var("REDIS_HOST").unwrap_or_else(|_| "localhost".into()),
+            host: env::var("REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             port: env::var("REDIS_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -408,7 +408,7 @@ impl Config {
                     .unwrap_or_else(|_| "mail".into()),
                 default_logo_url: env::var("DEFAULT_LOGO_URL").unwrap_or_default(),
                 default_primary_color: env::var("DEFAULT_PRIMARY_COLOR")
-                    .unwrap_or_else(|_| "#2563eb".into()),
+                    .unwrap_or_else(|_| "#dc2626".into()),
                 default_company_name: env::var("DEFAULT_COMPANY_NAME")
                     .unwrap_or_else(|_| "ApexMail".into()),
             },

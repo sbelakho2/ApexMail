@@ -5,8 +5,8 @@ use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
 use std::time::Instant;
+use tokio::sync::Mutex;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -72,7 +72,7 @@ pub struct RecentTicket {
 }
 
 // 60-second in-memory cache
-static CACHE: Mutex<Option<(Instant, i64, SupportAnalytics)>> = Mutex::new(None);
+static CACHE: Mutex<Option<(Instant, i64, SupportAnalytics)>> = Mutex::const_new(None);
 
 async fn get_support_analytics(
     State(state): State<AppState>,
@@ -84,18 +84,16 @@ async fn get_support_analytics(
     let days = params.days.clamp(1, 365);
 
     // Check cache
-    if let Ok(guard) = CACHE.lock() {
-        if let Some((ts, cached_days, ref data)) = *guard {
-            if ts.elapsed().as_secs() < 60 && cached_days == days {
-                return Ok(Json(data.clone()));
-            }
+    let guard = CACHE.lock().await;
+    if let Some((ts, cached_days, ref data)) = *guard {
+        if ts.elapsed().as_secs() < 60 && cached_days == days {
+            return Ok(Json(data.clone()));
         }
     }
-
-    let interval = format!("{days} days");
+    drop(guard);
 
     // Status counts
-    let status_row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(&format!(
+    let status_row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
         "SELECT
                 COUNT(*),
                 SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END),
@@ -104,8 +102,9 @@ async fn get_support_analytics(
                 SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN priority = 'urgent' THEN 1 ELSE 0 END)
-             FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval"
-    ))
+             FROM support_tickets WHERE created_at >= NOW() - $1::interval",
+    )
+    .bind(format!("{days} days"))
     .fetch_optional(&state.db)
     .await?
     .unwrap_or((0, 0, 0, 0, 0, 0, 0));
@@ -121,11 +120,12 @@ async fn get_support_analytics(
     .flatten();
 
     // Category breakdown
-    let cat_rows = sqlx::query_as::<_, (Option<String>, i64)>(&format!(
+    let cat_rows = sqlx::query_as::<_, (Option<String>, i64)>(
         "SELECT COALESCE(category, 'uncategorized'), COUNT(*)
-             FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval
-             GROUP BY category"
-    ))
+             FROM support_tickets WHERE created_at >= NOW() - $1::interval
+             GROUP BY category",
+    )
+    .bind(format!("{days} days"))
     .fetch_all(&state.db)
     .await?;
 
@@ -135,11 +135,12 @@ async fn get_support_analytics(
     }
 
     // Priority breakdown
-    let pri_rows = sqlx::query_as::<_, (String, i64)>(&format!(
+    let pri_rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT priority, COUNT(*)
-             FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval
-             GROUP BY priority"
-    ))
+             FROM support_tickets WHERE created_at >= NOW() - $1::interval
+             GROUP BY priority",
+    )
+    .bind(format!("{days} days"))
     .fetch_all(&state.db)
     .await?;
 
@@ -149,20 +150,22 @@ async fn get_support_analytics(
     }
 
     // Timeline
-    let timeline = sqlx::query_as::<_, (String, i64)>(&format!(
+    let timeline = sqlx::query_as::<_, (String, i64)>(
         "SELECT DATE(created_at)::text, COUNT(*)
-             FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval
-             GROUP BY DATE(created_at) ORDER BY DATE(created_at)"
-    ))
+             FROM support_tickets WHERE created_at >= NOW() - $1::interval
+             GROUP BY DATE(created_at) ORDER BY DATE(created_at)",
+    )
+    .bind(format!("{days} days"))
     .fetch_all(&state.db)
     .await?;
 
     // Top tenants
-    let top = sqlx::query_as::<_, (Option<String>, i64)>(&format!(
+    let top = sqlx::query_as::<_, (Option<String>, i64)>(
         "SELECT COALESCE(tenant_name, 'Unknown'), COUNT(*)
-             FROM support_tickets WHERE created_at >= NOW() - '{interval}'::interval
-             GROUP BY tenant_name ORDER BY COUNT(*) DESC LIMIT 10"
-    ))
+             FROM support_tickets WHERE created_at >= NOW() - $1::interval
+             GROUP BY tenant_name ORDER BY COUNT(*) DESC LIMIT 10",
+    )
+    .bind(format!("{days} days"))
     .fetch_all(&state.db)
     .await?;
 
@@ -246,9 +249,9 @@ async fn get_support_analytics(
     };
 
     // Update cache
-    if let Ok(mut guard) = CACHE.lock() {
-        *guard = Some((Instant::now(), days, result.clone()));
-    }
+    let mut guard = CACHE.lock().await;
+    *guard = Some((Instant::now(), days, result.clone()));
+    drop(guard);
 
     Ok(Json(result))
 }

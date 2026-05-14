@@ -443,12 +443,7 @@ mod challenge_e2e_tests {
         }
 
         fn solve(&self, max_attempts: u64) -> Option<u64> {
-            for nonce in 0..max_attempts {
-                if self.verify(nonce).is_ok() {
-                    return Some(nonce);
-                }
-            }
-            None
+            (0..max_attempts).find(|&nonce| self.verify(nonce).is_ok())
         }
     }
 

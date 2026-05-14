@@ -1,0 +1,1217 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: 'Inter Variable';
+  src: url('/fonts/InterVariable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter Variable';
+  src: url('/fonts/InterVariable-Italic.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono Variable';
+  src: url('/fonts/JetBrainsMono-Variable.ttf') format('truetype');
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono Variable';
+  src: url('/fonts/JetBrainsMono-Italic-Variable.ttf') format('truetype');
+  font-weight: 100 800;
+  font-style: italic;
+  font-display: swap;
+}
+
+@layer base {
+  :root {
+    --background: 255 255 255;
+    --foreground: 9 9 11;
+    --card: 255 255 255;
+    --card-foreground: 9 9 11;
+    --popover: 255 255 255;
+    --popover-foreground: 9 9 11;
+    --primary: 220 38 38;
+    --primary-foreground: 255 255 255;
+    --secondary: 244 244 245;
+    --secondary-foreground: 9 9 11;
+    --muted: 244 244 245;
+    --muted-foreground: 113 113 122;
+    --accent: 244 244 245;
+    --accent-foreground: 9 9 11;
+    --destructive: 220 38 38;
+    --destructive-foreground: 255 255 255;
+    --warning: 217 119 6;
+    --border: 228 228 231;
+    --input: 228 228 231;
+    --ring: 220 38 38;
+    --error: 220 38 38;
+
+    --surface-50: 250 250 250;
+    --surface-100: 244 244 245;
+    --surface-200: 228 228 231;
+    --surface-300: 212 212 216;
+    --surface-400: 161 161 170;
+    --surface-500: 113 113 122;
+    --surface-600: 82 82 91;
+    --surface-700: 63 63 70;
+    --surface-800: 39 39 42;
+    --surface-900: 24 24 27;
+    --surface-950: 9 9 11;
+
+    --brand-50: 254 242 242;
+    --brand-100: 254 226 226;
+    --brand-200: 254 202 202;
+    --brand-300: 252 165 165;
+    --brand-400: 248 113 113;
+    --brand-500: 220 38 38;
+    --brand-600: 185 28 28;
+    --brand-700: 153 27 27;
+    --brand-800: 127 29 29;
+    --brand-900: 69 10 10;
+    --brand-950: 45 10 10;
+
+    --success-50: 240 253 244;
+    --success-100: 220 252 231;
+    --success-200: 187 247 208;
+    --success-300: 134 239 172;
+    --success-400: 74 222 128;
+    --success-500: 34 197 94;
+    --success-600: 22 163 74;
+    --success-700: 21 128 61;
+    --success-800: 22 101 52;
+    --success-900: 20 83 45;
+    --success-950: 5 46 22;
+    --success: 22 163 74;
+
+    --warning-50: 255 251 235;
+    --warning-100: 254 243 199;
+    --warning-200: 253 230 138;
+    --warning-300: 252 211 77;
+    --warning-400: 251 191 36;
+    --warning-500: 245 158 11;
+    --warning-600: 217 119 6;
+    --warning-700: 180 83 9;
+    --warning-800: 146 64 14;
+    --warning-900: 120 53 15;
+    --warning-950: 69 26 3;
+    --warning: 217 119 6;
+
+    --info-50: 236 254 255;
+    --info-100: 207 250 254;
+    --info-200: 165 243 252;
+    --info-300: 103 232 249;
+    --info-400: 34 211 238;
+    --info-500: 6 182 212;
+    --info-600: 8 145 178;
+    --info-700: 14 116 144;
+    --info-800: 21 94 117;
+    --info-900: 22 78 99;
+    --info-950: 8 51 68;
+    --info: 8 145 178;
+
+    --font-sans: 'Inter Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-display: 'Inter Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+    --radius: 0px;
+    --radius-sm: 0px;
+    --radius-md: 2px;
+    --radius-lg: 4px;
+    --radius-xl: 6px;
+    --radius-full: 9999px;
+  }
+
+  .dark {
+    --background: 9 9 11;
+    --foreground: 250 250 250;
+    --card: 18 18 21;
+    --card-foreground: 250 250 250;
+    --popover: 9 9 11;
+    --popover-foreground: 250 250 250;
+    --secondary: 24 24 27;
+    --secondary-foreground: 250 250 250;
+    --muted: 24 24 27;
+    --muted-foreground: 161 161 170;
+    --accent: 24 24 27;
+    --accent-foreground: 250 250 250;
+    --border: 39 39 42;
+    --input: 39 39 42;
+    --surface-50: 9 9 11;
+    --surface-100: 24 24 27;
+    --surface-200: 39 39 42;
+    --surface-300: 63 63 70;
+    --surface-400: 82 82 91;
+    --surface-500: 113 113 122;
+    --surface-600: 161 161 170;
+    --surface-700: 212 212 216;
+    --surface-800: 228 228 231;
+    --surface-900: 244 244 245;
+    --surface-950: 250 250 250;
+  }
+
+  html {
+    min-height: 100%;
+    overflow-x: hidden;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    min-height: 100vh;
+    margin: 0;
+    background: rgb(var(--background));
+    color: rgb(var(--foreground));
+    font-family: var(--font-sans);
+    font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1, 'cv05' 1;
+    line-height: 1.55;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6,
+  p {
+    margin: 0;
+  }
+
+  button,
+  [role='button'],
+  a[role='button'],
+  input[type='button'],
+  input[type='submit'],
+  input[type='reset'] {
+    min-height: 44px;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-sm bg-primary px-5 py-3 text-sm font-bold uppercase text-white transition-all duration-200 ease-premium;
+    letter-spacing: 0;
+  }
+
+  .btn-primary:hover {
+    @apply bg-brand-700;
+    transform: translateY(-1px);
+  }
+
+  .apex-card {
+    @apply rounded-sm border border-surface-200 bg-white transition-all duration-300 ease-premium;
+  }
+
+  .apex-card:hover {
+    @apply border-surface-950 shadow-premium;
+  }
+
+  .glass {
+    @apply border border-white/10 bg-white/10 backdrop-blur-xl;
+  }
+
+  .apex-metric-number {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .apex-console-shell,
+  .apex-cp-shell {
+    color: rgb(var(--surface-950));
+    background: #f6f6f3;
+    font-feature-settings: 'tnum' 1, 'ss01' 1;
+  }
+
+  .apex-console-main,
+  .apex-cp-main {
+    background-color: #f6f6f3;
+    /* Whisper-soft graph-paper texture instead of a visible grid — gives an instrument-panel
+       feel without bleeding through cards. */
+    background-image:
+      linear-gradient(rgba(9, 9, 11, 0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(9, 9, 11, 0.018) 1px, transparent 1px),
+      radial-gradient(circle at top, rgba(9, 9, 11, 0.015), transparent 60%);
+    background-size: 80px 80px, 80px 80px, 100% 480px;
+    background-attachment: local, local, scroll;
+  }
+
+  .apex-console-content,
+  .apex-cp-page-frame {
+    max-width: 1120px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .apex-console-header {
+    min-height: 72px;
+    border-color: rgba(9, 9, 11, 0.1);
+    box-shadow: 0 1px 0 rgba(9, 9, 11, 0.04);
+  }
+
+  .apex-console-search input,
+  .apex-console-shell input,
+  .apex-console-shell textarea,
+  .apex-console-shell select,
+  .apex-cp-shell input,
+  .apex-cp-shell textarea,
+  .apex-cp-shell select {
+    border-color: rgba(9, 9, 11, 0.14);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  }
+
+  .apex-console-search input:focus,
+  .apex-console-shell input:focus,
+  .apex-console-shell textarea:focus,
+  .apex-console-shell select:focus,
+  .apex-cp-shell input:focus,
+  .apex-cp-shell textarea:focus,
+  .apex-cp-shell select:focus {
+    border-color: rgb(var(--primary));
+    box-shadow: 0 0 0 3px rgb(var(--primary) / 0.12);
+  }
+
+  .apex-console-sidebar.apex-console-sidebar,
+  .apex-cp-sidebar.apex-cp-sidebar {
+    position: relative;
+    overflow: hidden;
+    background: #09090b;
+    color: #fff;
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .apex-console-sidebar::before,
+  .apex-cp-sidebar::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto;
+    height: 3px;
+    background: rgb(var(--primary));
+  }
+
+  .apex-logo-mark {
+    background: rgb(var(--primary));
+    color: #fff;
+    box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.22);
+  }
+
+  .apex-sidebar-brand {
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0;
+  }
+
+  .apex-console-sidebar .border-surface-100,
+  .apex-console-sidebar .border-t,
+  .apex-cp-sidebar .border-t,
+  .apex-cp-sidebar .border-b {
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .apex-console-sidebar a,
+  .apex-cp-sidebar a,
+  .apex-sidebar-link,
+  .apex-cp-sidebar-link {
+    min-height: 44px;
+    border: 1px solid transparent;
+    color: rgba(255, 255, 255, 0.72);
+    text-transform: uppercase;
+    font-size: 0.76rem;
+    line-height: 1rem;
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+
+  .apex-console-sidebar a:hover,
+  .apex-cp-sidebar a:hover,
+  .apex-sidebar-link:hover,
+  .apex-cp-sidebar-link:hover {
+    border-color: rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+  }
+
+  .apex-console-sidebar .text-surface-500,
+  .apex-console-sidebar .text-\[10px\],
+  .apex-cp-sidebar .text-white\/40 {
+    color: rgba(255, 255, 255, 0.42);
+  }
+
+  .apex-console-sidebar .rounded-full {
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .apex-page-hero {
+    position: relative;
+    display: grid;
+    gap: 2rem;
+    min-height: 200px;
+    overflow: hidden;
+    border: 1px solid #18181b;
+    /* Sculpted gradient instead of flat black so the hero feels engineered, not stamped. */
+    background:
+      radial-gradient(120% 80% at 0% 0%, rgba(255, 255, 255, 0.06), transparent 55%),
+      linear-gradient(135deg, #0b0b0e 0%, #09090b 55%, #050507 100%);
+    color: #fff;
+    padding: 2rem;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 24px 60px rgba(9, 9, 11, 0.18);
+  }
+
+  .apex-page-hero::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    background: rgb(var(--primary));
+  }
+
+  .apex-page-hero::after {
+    content: '';
+    position: absolute;
+    left: 2rem;
+    right: 2rem;
+    bottom: 1.25rem;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .apex-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    color: rgb(var(--primary));
+    font-size: 0.72rem;
+    line-height: 1rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+  }
+
+  .apex-eyebrow::before {
+    content: "";
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    background: rgb(var(--primary));
+    flex-shrink: 0;
+  }
+
+  .apex-eyebrow span {
+    display: inline-block;
+  }
+
+  .apex-hero-title {
+    margin-top: 1rem;
+    max-width: 720px;
+    font-size: 2.25rem;
+    line-height: 0.98;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: -0.005em;
+  }
+
+  .apex-hero-copy {
+    margin-top: 1rem;
+    max-width: 620px;
+    color: rgba(255, 255, 255, 0.68);
+    font-size: 0.98rem;
+    line-height: 1.65;
+  }
+
+  .apex-hero-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+    align-self: end;
+  }
+
+  .apex-hero-stat-grid div {
+    min-height: 88px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.04);
+    padding: 1rem;
+  }
+
+  .apex-hero-stat-grid span {
+    display: block;
+    color: rgba(255, 255, 255, 0.48);
+    font-size: 0.64rem;
+    line-height: 1rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+  }
+
+  .apex-hero-stat-grid strong {
+    display: block;
+    margin-top: 0.65rem;
+    color: #fff;
+    font-size: 1.5rem;
+    line-height: 1.2;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+
+  .apex-card.apex-card,
+  .apex-panel,
+  .apex-signal-card,
+  .apex-ops-board {
+    position: relative;
+    border-color: rgba(9, 9, 11, 0.14);
+    background: #fff;
+    box-shadow: 0 1px 0 rgba(9, 9, 11, 0.05), 0 18px 44px rgba(9, 9, 11, 0.06);
+  }
+
+  .apex-card.apex-card::before,
+  .apex-panel::before,
+  .apex-signal-card::before {
+    content: '';
+    position: absolute;
+    left: -1px;
+    top: -1px;
+    bottom: -1px;
+    width: 3px;
+    background: rgb(var(--primary));
+    opacity: 0;
+    transition: opacity 160ms ease-out;
+  }
+
+  .apex-card.apex-card:hover::before,
+  .apex-panel:hover::before,
+  .apex-signal-card:hover::before {
+    opacity: 1;
+  }
+
+  .apex-card.apex-card h3,
+  .apex-panel h3,
+  .apex-signal-card p:first-child {
+    color: rgb(var(--surface-500));
+    letter-spacing: 0.16em;
+  }
+
+  .apex-card.apex-card .text-2xl,
+  .apex-signal-card .text-2xl {
+    font-size: 2.3rem;
+    line-height: 1;
+    font-weight: 900;
+  }
+
+  .apex-table-wrap {
+    border: 1px solid rgba(9, 9, 11, 0.14);
+    background: #fff;
+  }
+
+  .apex-table thead,
+  .apex-table thead tr,
+  .apex-table thead th {
+    background: #09090b;
+  }
+
+  .apex-table th {
+    color: rgba(255, 255, 255, 0.74);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+
+  .apex-table td {
+    border-color: rgba(9, 9, 11, 0.08);
+  }
+
+  .apex-table tbody tr:hover {
+    background: rgb(var(--brand-50));
+  }
+
+  .apex-empty-state {
+    min-height: 260px;
+    background: #fff;
+  }
+
+  .apex-page-heading {
+    border-bottom: 1px solid rgba(9, 9, 11, 0.12);
+    padding-bottom: 1.25rem;
+  }
+
+  .apex-page-heading h1 {
+    margin-top: 0.75rem;
+    font-size: 2.25rem;
+    line-height: 1;
+    font-weight: 900;
+  }
+
+  .apex-page-heading .apex-eyebrow {
+    color: rgb(var(--primary));
+  }
+
+  .apex-ops-board {
+    display: grid;
+    gap: 1.5rem;
+    padding: 1.5rem;
+    border: 1px solid rgba(9, 9, 11, 0.14);
+  }
+
+  .apex-ops-board h2 {
+    margin-top: 0.75rem;
+    color: rgb(var(--surface-950));
+    font-size: 2rem;
+    line-height: 1.05;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+
+  .apex-ops-board p {
+    margin-top: 0.75rem;
+    max-width: 560px;
+    color: rgb(var(--surface-600));
+    font-size: 0.9rem;
+    line-height: 1.65;
+  }
+
+  .apex-lane-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  .apex-lane-grid a {
+    display: block;
+    min-height: 144px;
+    border: 1px solid rgba(9, 9, 11, 0.14);
+    background: #fafafa;
+    padding: 1rem;
+    transition: border-color 160ms ease-out, background-color 160ms ease-out;
+  }
+
+  .apex-lane-grid a:hover {
+    border-color: rgb(var(--primary));
+    background: #fff;
+  }
+
+  .apex-lane-grid span {
+    display: block;
+    color: rgb(var(--primary));
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 900;
+  }
+
+  .apex-lane-grid strong,
+  .apex-lane-grid em {
+    display: block;
+    font-style: normal;
+  }
+
+  .apex-lane-grid strong {
+    margin-top: 1.25rem;
+    color: rgb(var(--surface-950));
+    font-size: 0.95rem;
+    line-height: 1.2;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+
+  .apex-lane-grid em {
+    margin-top: 0.5rem;
+    color: rgb(var(--surface-500));
+    font-size: 0.78rem;
+    line-height: 1.45;
+  }
+
+  @media (min-width: 1024px) {
+    .apex-page-hero {
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      align-items: end;
+      padding: 2.5rem;
+    }
+
+    .apex-hero-title {
+      font-size: 3rem;
+    }
+  }
+
+  @media (max-width: 900px) {
+    .apex-hero-stat-grid,
+    .apex-lane-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .apex-cp-shell .apex-table {
+      min-width: 520px;
+    }
+
+    .apex-cp-shell .apex-table th,
+    .apex-cp-shell .apex-table td {
+      padding-left: 0.625rem;
+      padding-right: 0.625rem;
+    }
+
+    .apex-cp-shell .apex-table th {
+      font-size: 0.6rem;
+      letter-spacing: 0.06em;
+    }
+  }
+
+  /* ─── Premium upgrades (cards, tables, dashboard hero, chart frames) ────── */
+
+  /* Lift the apex-card / apex-panel / apex-signal-card with a layered surface,
+     a hairline accent strip on the side, and a sharper drop shadow. The accent
+     strip is always visible (low opacity), and intensifies on hover. */
+  .apex-card.apex-card,
+  .apex-panel,
+  .apex-signal-card,
+  .apex-ops-board {
+    background:
+      linear-gradient(180deg, #ffffff 0%, #fbfbfa 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.9),
+      0 1px 0 rgba(9, 9, 11, 0.04),
+      0 14px 38px rgba(9, 9, 11, 0.06),
+      0 2px 6px rgba(9, 9, 11, 0.03);
+    transition:
+      box-shadow 200ms cubic-bezier(0.23, 1, 0.32, 1),
+      border-color 200ms ease-out,
+      transform 200ms ease-out;
+  }
+
+  .apex-card.apex-card:hover,
+  .apex-panel:hover,
+  .apex-signal-card:hover {
+    border-color: rgba(9, 9, 11, 0.22);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      0 1px 0 rgba(9, 9, 11, 0.06),
+      0 22px 52px rgba(9, 9, 11, 0.10),
+      0 4px 10px rgba(9, 9, 11, 0.05);
+  }
+
+  .apex-card.apex-card::before,
+  .apex-panel::before,
+  .apex-signal-card::before {
+    opacity: 0.18;
+  }
+
+  .apex-card.apex-card:hover::before,
+  .apex-panel:hover::before,
+  .apex-signal-card:hover::before {
+    opacity: 1;
+  }
+
+  .apex-signal-card {
+    padding: 1.1rem 1.15rem;
+  }
+
+  .apex-signal-card p:first-child {
+    color: rgb(var(--surface-500));
+    font-size: 0.62rem;
+    letter-spacing: 0.22em;
+  }
+
+  .apex-signal-card .text-2xl {
+    font-size: 2rem;
+    line-height: 1;
+    font-weight: 900;
+    letter-spacing: -0.01em;
+  }
+
+  /* Inventory panel — softer, more refined table head */
+  .apex-table-wrap {
+    border: 0;
+    background: transparent;
+  }
+
+  .apex-table thead,
+  .apex-table thead tr,
+  .apex-table thead th {
+    background:
+      linear-gradient(180deg, #18181b 0%, #09090b 100%);
+  }
+
+  .apex-table thead th {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: inset 0 -1px 0 rgba(var(--primary), 0.45);
+  }
+
+  .apex-table th {
+    color: rgba(255, 255, 255, 0.78);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 0.66rem;
+    font-weight: 700;
+    padding-top: 0.85rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .apex-table td {
+    border-color: rgba(9, 9, 11, 0.06);
+    padding-top: 0.85rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .apex-table tbody tr {
+    transition: background 140ms ease-out;
+  }
+
+  .apex-table tbody tr:hover {
+    background: rgb(var(--brand-50));
+  }
+
+  .apex-inventory-panel {
+    overflow: hidden;
+  }
+
+  .apex-inventory-head {
+    background:
+      linear-gradient(180deg, rgba(250, 250, 249, 0.9) 0%, rgba(255, 255, 255, 1) 100%);
+  }
+
+  .apex-inventory-empty {
+    background:
+      radial-gradient(120% 100% at 50% 0%, rgba(9, 9, 11, 0.025), transparent 70%);
+  }
+
+  /* Empty-state polish (used in inventory + general empty states) */
+  .apex-empty-state {
+    min-height: 240px;
+    background:
+      radial-gradient(80% 80% at 50% 0%, rgba(var(--primary), 0.04), transparent 70%);
+    border: 1px dashed rgba(9, 9, 11, 0.14);
+    border-radius: 0.125rem;
+  }
+
+  /* Chart card — empty state inside an apex-panel should not look caged. */
+  .apex-chart-card {
+    background:
+      linear-gradient(180deg, #ffffff 0%, #fbfbfa 100%);
+  }
+
+  .apex-chart-empty {
+    background:
+      radial-gradient(60% 60% at 50% 30%, rgba(9, 9, 11, 0.025), transparent 70%);
+    border-radius: 0.125rem;
+  }
+
+  /* Control-plane dashboard hero (replaces former white card-in-card layout) */
+  .apex-cp-hero {
+    position: relative;
+    border: 1px solid rgba(9, 9, 11, 0.14);
+    border-radius: 0.125rem;
+    background:
+      linear-gradient(180deg, #ffffff 0%, #fafaf8 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      0 1px 0 rgba(9, 9, 11, 0.04),
+      0 18px 44px rgba(9, 9, 11, 0.06);
+  }
+
+  .apex-cp-hero::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 3px;
+    background: rgb(var(--primary));
+  }
+
+  .apex-cp-hero-main {
+    position: relative;
+  }
+
+  .apex-cp-hero-side {
+    position: relative;
+    background:
+      radial-gradient(120% 100% at 100% 0%, rgba(255, 255, 255, 0.05), transparent 55%),
+      linear-gradient(135deg, #0b0b0e 0%, #09090b 60%, #050507 100%);
+    border-top: 1px solid rgba(9, 9, 11, 0.14);
+  }
+
+  @media (min-width: 1024px) {
+    .apex-cp-hero-side {
+      border-top: 0;
+      border-left: 1px solid rgba(9, 9, 11, 0.14);
+    }
+  }
+
+  .apex-cp-stream-item {
+    transition: transform 160ms ease-out, border-color 160ms ease-out;
+  }
+
+  .apex-cp-stream-item:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.28);
+  }
+
+  /* Stat tiles inside the CP hero — borderless ghost tiles with hairline accent. */
+  .apex-cp-stat-tile {
+    position: relative;
+    padding: 0.95rem 1rem 1.05rem;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(250, 250, 249, 0.9) 100%);
+    border: 1px solid rgba(9, 9, 11, 0.08);
+    border-radius: 0.125rem;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    overflow: hidden;
+    transition: border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out;
+  }
+
+  .apex-cp-stat-tile::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: rgb(var(--primary));
+    opacity: 0.55;
+  }
+
+  .apex-cp-stat-tile[data-tone='warn']::before {
+    background: rgb(var(--warning-500, 234 179 8));
+    opacity: 0.85;
+  }
+
+  .apex-cp-stat-tile:hover {
+    transform: translateY(-1px);
+    border-color: rgba(9, 9, 11, 0.18);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      0 8px 18px rgba(9, 9, 11, 0.06);
+  }
+
+  .apex-cp-stat-label {
+    font-size: 0.64rem;
+    font-weight: 800;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: rgb(var(--surface-500));
+  }
+
+  .apex-cp-stat-value {
+    margin-top: 0.55rem;
+    font-size: 1.5rem;
+    line-height: 1.05;
+    font-weight: 900;
+    letter-spacing: -0.01em;
+    color: rgb(var(--surface-950));
+    word-break: break-word;
+    overflow-wrap: break-word;
+  }
+
+  .apex-cp-stat-help {
+    margin-top: 0.5rem;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: rgb(var(--surface-500));
+  }
+
+  .apex-cp-launch-step {
+    position: relative;
+  }
+
+  .apex-cp-launch-step::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: rgb(var(--primary));
+    opacity: 0;
+    transition: opacity 160ms ease-out;
+  }
+
+  .apex-cp-launch-step:hover::before {
+    opacity: 1;
+  }
+
+  .apex-cp-region-row {
+    position: relative;
+    border: 1px solid rgba(9, 9, 11, 0.08);
+    border-radius: 0.125rem;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(250, 250, 249, 0.9) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  }
+
+  /* Web console hero \u2014 same chassis as page-hero but slightly more restrained. */
+  .apex-console-hero.apex-console-hero {
+    min-height: 180px;
+  }
+
+  .apex-console-hero .apex-hero-title {
+    font-size: 2rem;
+  }
+
+  @media (min-width: 1024px) {
+    .apex-console-hero .apex-hero-title {
+      font-size: 2.5rem;
+    }
+  }
+
+  /* ── Sales Cockpit / dark control-plane premium uplift ───────────────────── */
+  .apex-cp-sales {
+    position: relative;
+    background:
+      radial-gradient(120% 70% at 0% 0%, rgba(220, 38, 38, 0.10), transparent 55%),
+      radial-gradient(110% 65% at 100% 100%, rgba(59, 130, 246, 0.08), transparent 55%),
+      linear-gradient(180deg, #0a0a0c 0%, #050507 60%, #09090b 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.03);
+    overflow: hidden;
+  }
+
+  .apex-cp-sales::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(to right, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+    background-size: 80px 80px;
+    pointer-events: none;
+    opacity: 0.7;
+  }
+
+  .apex-cp-sales > * {
+    position: relative;
+  }
+
+  .apex-cp-dark-hero {
+    position: relative;
+    background:
+      linear-gradient(135deg, rgba(220, 38, 38, 0.10) 0%, transparent 38%),
+      linear-gradient(180deg, rgba(0, 0, 0, 0.45) 0%, rgba(0, 0, 0, 0.30) 100%);
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 24px 48px rgba(0, 0, 0, 0.45),
+      0 2px 6px rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+  }
+
+  .apex-cp-dark-hero::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 2px;
+    background: linear-gradient(90deg, rgb(var(--primary)) 0%, rgba(220, 38, 38, 0.45) 50%, transparent 100%);
+  }
+
+  .apex-cp-dark-panel {
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.015) 100%),
+      linear-gradient(180deg, rgba(0, 0, 0, 0.20) 0%, rgba(0, 0, 0, 0.35) 100%);
+    border-color: rgba(255, 255, 255, 0.07) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 12px 24px rgba(0, 0, 0, 0.35);
+    transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
+                box-shadow 180ms cubic-bezier(0.23, 1, 0.32, 1),
+                border-color 180ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  .apex-cp-dark-panel:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.10),
+      0 16px 32px rgba(0, 0, 0, 0.45);
+  }
+
+  .apex-cp-dark-panel--accent {
+    overflow: hidden;
+  }
+
+  .apex-cp-dark-panel--accent::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 2px;
+    background: linear-gradient(90deg, rgb(var(--primary)) 0%, rgba(220, 38, 38, 0.4) 60%, transparent 100%);
+  }
+
+  /* Inner stat tiles inside sales dark panels — refine the generic black/25 cards. */
+  .apex-cp-sales [class*="bg-black/25"],
+  .apex-cp-sales [class*="bg-black/15"] {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0.25) 100%) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.07) !important;
+    transition: border-color 160ms ease, transform 160ms ease;
+  }
+
+  .apex-cp-sales [class*="bg-black/25"]:hover,
+  .apex-cp-sales [class*="bg-black/15"]:hover {
+    border-color: rgba(255, 255, 255, 0.16) !important;
+    transform: translateY(-1px);
+  }
+
+  /* Buttons inside dark sales surface get a richer hover. */
+  .apex-cp-sales button[type="button"][class*="border-white/15"] {
+    transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+  }
+
+  .apex-cp-sales button[type="button"][class*="border-white/15"]:hover {
+    transform: translateY(-1px);
+  }
+
+  /* Inputs inside dark surfaces. */
+  .apex-cp-sales input,
+  .apex-cp-sales select {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .apex-cp-sales input:focus,
+  .apex-cp-sales select:focus {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 0 0 2px rgba(220, 38, 38, 0.35);
+  }
+
+  /* Tables inside dark sales surface. */
+  .apex-cp-sales table thead {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0.40) 100%);
+  }
+
+  .apex-cp-sales table thead th {
+    border-bottom: 1px solid rgba(220, 38, 38, 0.35);
+    font-size: 0.65rem;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .apex-cp-sales table tbody tr {
+    transition: background-color 140ms ease;
+  }
+
+  .apex-cp-sales table tbody tr:hover {
+    background-color: rgba(255, 255, 255, 0.04);
+  }
+}
+
+@layer utilities {
+  .transition-premium {
+    transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter;
+    transition-duration: 180ms;
+    transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  .shadow-premium-primary\/25 {
+    box-shadow: 0 18px 36px rgb(var(--primary) / 0.25);
+  }
+
+  .shadow-premium-black\/30 {
+    box-shadow: 0 18px 36px rgb(0 0 0 / 0.30);
+  }
+
+  .shadow-premium-none {
+    box-shadow: none;
+  }
+
+  .safe-area-inset-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .safe-area-inset-top {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .space-y-1 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
+    --tw-space-y-reverse: 0;
+    margin-top: calc(0.25rem * calc(1 - var(--tw-space-y-reverse)));
+    margin-bottom: calc(0.25rem * var(--tw-space-y-reverse));
+  }
+
+  .space-y-1\.5 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
+    --tw-space-y-reverse: 0;
+    margin-top: calc(0.375rem * calc(1 - var(--tw-space-y-reverse)));
+    margin-bottom: calc(0.375rem * var(--tw-space-y-reverse));
+  }
+
+  .space-y-2 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
+    --tw-space-y-reverse: 0;
+    margin-top: calc(0.5rem * calc(1 - var(--tw-space-y-reverse)));
+    margin-bottom: calc(0.5rem * var(--tw-space-y-reverse));
+  }
+
+  .space-y-3 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
+    --tw-space-y-reverse: 0;
+    margin-top: calc(0.75rem * calc(1 - var(--tw-space-y-reverse)));
+    margin-bottom: calc(0.75rem * var(--tw-space-y-reverse));
+  }
+
+  .space-y-4 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
+    --tw-space-y-reverse: 0;
+    margin-top: calc(1rem * calc(1 - var(--tw-space-y-reverse)));
+    margin-bottom: calc(1rem * var(--tw-space-y-reverse));
+  }
+
+  .space-y-5 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
+    --tw-space-y-reverse: 0;
+    margin-top: calc(1.25rem * calc(1 - var(--tw-space-y-reverse)));
+    margin-bottom: calc(1.25rem * var(--tw-space-y-reverse));
+  }
+
+  .space-y-6 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
+    --tw-space-y-reverse: 0;
+    margin-top: calc(1.5rem * calc(1 - var(--tw-space-y-reverse)));
+    margin-bottom: calc(1.5rem * var(--tw-space-y-reverse));
+  }
+
+  .space-y-8 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {
+    --tw-space-y-reverse: 0;
+    margin-top: calc(2rem * calc(1 - var(--tw-space-y-reverse)));
+    margin-bottom: calc(2rem * var(--tw-space-y-reverse));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

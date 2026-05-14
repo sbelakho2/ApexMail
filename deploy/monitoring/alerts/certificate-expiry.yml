@@ -1,0 +1,230 @@
+# ==============================================================================
+# ApexMail — Certificate Expiry Alerting Rules
+# ==============================================================================
+# MON-17: Certificate expiry monitoring for all TLS certificates
+#
+# This file defines Prometheus alerting rules for monitoring TLS certificate
+# expiration across all ApexMail services, including:
+#   - Ingress TLS certificates (Let's Encrypt via cert-manager)
+#   - Internal mTLS certificates (service mesh)
+#   - DKIM public key certificates
+#   - SMTP TLS certificates (STARTTLS for outbound mail)
+#
+# Data sources:
+#   - cert-manager metrics (certmanager_certificate_expiration_timestamp_seconds)
+#   - Blackbox exporter TLS probe
+#   - Prometheus x509 certificate exporter
+#
+# Loaded by: prometheus.yml -> rule_files
+# ==============================================================================
+
+groups:
+  - name: apexmail-certificate-expiry
+    rules:
+      # ── Ingress TLS Certificates (External) ────────────────────────────────
+      # Monitors certificates issued by cert-manager for ingress endpoints.
+
+      - alert: CertificateExpiringSoon
+        expr: |
+          certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"}
+          - time() < 604800  # 7 days
+        for: 1h
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "TLS certificate '{{ $labels.name }}' expires in {{ $value | humanizeDuration }}"
+          description: |
+            Certificate {{ $labels.name }} in namespace {{ $labels.namespace }}
+            will expire on {{ $labels | humanizeTimestamp }}.
+            Renew automatically via cert-manager or renew manually.
+          runbook_url: "https://apexmail.ee/docs/runbooks/certificate-renewal"
+
+      - alert: CertificateExpiringCritical
+        expr: |
+          certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"}
+          - time() < 172800  # 48 hours
+        for: 30m
+        labels:
+          severity: critical
+          team: infrastructure
+          pagerduty: true
+        annotations:
+          summary: "CRITICAL: TLS certificate '{{ $labels.name }}' expires in {{ $value | humanizeDuration }}"
+          description: |
+            Certificate {{ $labels.name }} will expire in less than 48 hours.
+            Immediate renewal required to prevent service disruption.
+            Check cert-manager logs: kubectl logs -n cert-manager deploy/cert-manager
+            Check certificate status: kubectl get certificate -n {{ $labels.namespace }} {{ $labels.name }}
+          runbook_url: "https://apexmail.ee/docs/runbooks/certificate-renewal"
+
+      - alert: CertificateExpired
+        expr: |
+          certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"}
+          - time() < 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infrastructure
+          pagerduty: true
+        annotations:
+          summary: "TLS certificate '{{ $labels.name }}' HAS EXPIRED"
+          description: |
+            Certificate {{ $labels.name }} expired at {{ $labels | humanizeTimestamp }}.
+            Services may be rejecting connections.
+            IMMEDIATE ACTION REQUIRED.
+          runbook_url: "https://apexmail.ee/docs/runbooks/certificate-renewal"
+
+      # ── Blackbox TLS Probe (External Endpoints) ────────────────────────────
+      # Probes external endpoints to verify certificate validity from outside.
+
+      - alert: EndpointCertificateExpiring
+        expr: |
+          probe_ssl_earliest_cert_expiry{job="blackbox-apexmail"}
+          - time() < 604800  # 7 days
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "SSL certificate for {{ $labels.target }} expires in {{ $value | humanizeDuration }}"
+          description: |
+            Probed endpoint {{ $labels.target }} has a TLS certificate
+            expiring in {{ $value | humanizeDuration }}.
+            This may be a CDN, upstream API, or external dependency.
+
+      - alert: EndpointCertificateExpired
+        expr: |
+          probe_ssl_earliest_cert_expiry{job="blackbox-apexmail"}
+          - time() < 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infrastructure
+          pagerduty: true
+        annotations:
+          summary: "SSL certificate for {{ $labels.target }} HAS EXPIRED"
+          description: |
+            Probed endpoint {{ $labels.target }} has an expired TLS certificate.
+            External services may be unable to connect.
+
+      # ── cert-manager Issuer Status ─────────────────────────────────────────
+      # Monitors cert-manager issuer readiness to catch issuance failures early.
+
+      - alert: CertificateIssuerNotReady
+        expr: |
+          certmanager_issuer_condition_status{condition_type="Ready", status="false"}
+        for: 15m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Certificate issuer '{{ $labels.name }}' is not ready"
+          description: |
+            Issuer {{ $labels.name }} (kind: {{ $labels.kind }}) is not ready.
+            Check issuer status: kubectl describe issuer -n {{ $labels.namespace }} {{ $labels.name }}
+            New certificate issuance and renewal may fail.
+
+      - alert: CertificateIssuerFailure
+        expr: |
+          certmanager_issuer_condition_status{condition_type="Ready", status="false"}
+        for: 1h
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Certificate issuer '{{ $labels.name }}' has been failing for 1 hour"
+          description: |
+            Issuer {{ $labels.name }} has been unavailable for over 1 hour.
+            Certificates cannot be issued or renewed.
+            Check issuer logs: kubectl logs -n cert-manager deploy/cert-manager
+            Check ACME account status.
+          runbook_url: "https://apexmail.ee/docs/runbooks/certificate-renewal"
+
+      # ── Certificate Renewal Failures ───────────────────────────────────────
+
+      - alert: CertificateRenewalFailure
+        expr: |
+          rate(certmanager_http_acme_request_errors_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "ACME certificate renewal errors detected for issuer {{ $labels.issuer }}"
+          description: |
+            ACME HTTP request errors are occurring for issuer {{ $labels.issuer }}.
+            Rate: {{ $value | humanizePercentage }}
+            This may indicate DNS validation failures, rate limiting, or
+            CA availability issues.
+          runbook_url: "https://apexmail.ee/docs/runbooks/certificate-renewal"
+
+      # ── Internal mTLS Certificates (Service Mesh) ──────────────────────────
+
+      - alert: InternalCertificateExpiring
+        expr: |
+          certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail", issuer=~".*internal.*|.*mtls.*|.*spire.*"}
+          - time() < 3024000  # 35 days
+        for: 1h
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Internal mTLS certificate '{{ $labels.name }}' expires in {{ $value | humanizeDuration }}"
+          description: |
+            Internal service mesh certificate {{ $labels.name }}
+            expires in {{ $value | humanizeDuration }}.
+            Rotate via cert-manager or SPIRE before expiry.
+          runbook_url: "https://apexmail.ee/docs/runbooks/certificate-renewal"
+
+      # ── SMTP TLS Certificate ───────────────────────────────────────────────
+
+      - alert: SmtpTlsCertificateExpiring
+        expr: |
+          certmanager_certificate_expiration_timestamp_seconds{name=~".*smtp.*|.*mail.*", namespace="apexmail"}
+          - time() < 604800
+        for: 1h
+        labels:
+          severity: warning
+          team: mta
+        annotations:
+          summary: "SMTP TLS certificate '{{ $labels.name }}' expires in {{ $value | humanizeDuration }}"
+          description: |
+            SMTP TLS certificate for outbound mail will expire
+            in {{ $value | humanizeDuration }}.
+            Renew to maintain STARTTLS capability for email delivery.
+
+      - alert: SmtpTlsCertificateExpired
+        expr: |
+          certmanager_certificate_expiration_timestamp_seconds{name=~".*smtp.*|.*mail.*", namespace="apexmail"}
+          - time() < 0
+        for: 1m
+        labels:
+          severity: critical
+          team: mta
+          pagerduty: true
+        annotations:
+          summary: "SMTP TLS certificate '{{ $labels.name }}' HAS EXPIRED"
+          description: |
+            SMTP TLS certificate has expired. Outbound mail delivery
+            with STARTTLS may fail. Renew immediately.
+          runbook_url: "https://apexmail.ee/docs/runbooks/certificate-renewal"
+
+      # ── Certificate Count Anomaly ──────────────────────────────────────────
+      # Detect if certificates disappear unexpectedly.
+
+      - alert: CertificateCountDrop
+        expr: |
+          count(certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"})
+          offset 1d - ignoring() count(certmanager_certificate_expiration_timestamp_seconds{namespace="apexmail"})
+          > 1
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Certificate count dropped by {{ $value }} in the last 24 hours"
+          description: |
+            The number of monitored certificates has decreased.
+            This may indicate accidental deletion or failed renewal.
+            List certificates: kubectl get certificate -n apexmail

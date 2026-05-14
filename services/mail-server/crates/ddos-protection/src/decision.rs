@@ -2,6 +2,16 @@
 
 use std::time::Duration;
 
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |diff, (x, y)| diff | (x ^ y))
+        == 0
+}
+
 /// Decision returned by the DDoS protector
 #[derive(Debug, Clone)]
 pub enum ProtectionDecision {
@@ -115,7 +125,7 @@ impl JsChallenge {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        now <= self.expires_at && result == self.expected_result
+        now <= self.expires_at && constant_time_eq(result, &self.expected_result)
     }
 }
 
@@ -167,6 +177,43 @@ impl CookieChallenge {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        now <= self.expires_at && cookie_value == self.value
+        now <= self.expires_at && constant_time_eq(cookie_value, &self.value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn js_challenge_uses_exact_constant_time_value_match() {
+        let challenge = JsChallenge {
+            id: "challenge".into(),
+            script: "return 42".into(),
+            expected_result: "42".into(),
+            expires_at: current_time_secs() + 60,
+        };
+        assert!(challenge.verify("42"));
+        assert!(!challenge.verify("43"));
+        assert!(!challenge.verify("420"));
+    }
+
+    #[test]
+    fn cookie_challenge_uses_exact_constant_time_value_match() {
+        let challenge = CookieChallenge {
+            name: "__apexmail_verify".into(),
+            value: "signed-cookie".into(),
+            expires_at: current_time_secs() + 60,
+        };
+        assert!(challenge.verify("signed-cookie"));
+        assert!(!challenge.verify("signed-cookif"));
+        assert!(!challenge.verify("signed-cookie-extra"));
+    }
+
+    fn current_time_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
     }
 }

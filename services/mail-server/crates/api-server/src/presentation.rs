@@ -44,7 +44,7 @@ pub mod leads {
 ///
 /// let mut buf = JsonBuffer::new();
 /// let payload = Payload { name: "test".into() };
-/// let bytes = buf.serialize(&payload).unwrap();
+/// let bytes = buf.serialize(&payload).expect("invariant: serialization should succeed");
 /// ```
 pub mod json_buffer {
     use serde::Serialize;

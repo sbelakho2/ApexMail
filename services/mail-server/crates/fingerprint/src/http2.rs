@@ -8,7 +8,6 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// HTTP/2 Settings identifiers
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Http2Setting {
     /// SETTINGS_HEADER_TABLE_SIZE (0x1)
@@ -27,7 +26,10 @@ pub enum Http2Setting {
     Unknown(u16),
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "kept with Http2Setting for upcoming binary frame parser integration"
+)]
 impl Http2Setting {
     /// Parse from raw setting ID
     pub fn from_id(id: u16) -> Self {
@@ -43,7 +45,7 @@ impl Http2Setting {
     }
 
     /// Get raw setting ID
-    pub fn to_id(&self) -> u16 {
+    pub fn to_id(self) -> u16 {
         match self {
             Self::HeaderTableSize => 0x1,
             Self::EnablePush => 0x2,
@@ -51,7 +53,7 @@ impl Http2Setting {
             Self::InitialWindowSize => 0x4,
             Self::MaxFrameSize => 0x5,
             Self::MaxHeaderListSize => 0x6,
-            Self::Unknown(id) => *id,
+            Self::Unknown(id) => id,
         }
     }
 }

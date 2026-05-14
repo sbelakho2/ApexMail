@@ -1,3 +1,4 @@
+#![allow(clippy::doc_lazy_continuation)]
 //! # Threat Intelligence — Feed Ingestion & Reputation
 //!
 //! Aggregates threat intelligence from multiple sources to provide
@@ -14,6 +15,7 @@
 //! (feed refresh). All lookups are O(1) via DashMap, with CIDR queries using
 //! precomputed prefix masks.
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 

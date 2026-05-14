@@ -18,15 +18,19 @@ fn src_ip() -> IpAddr {
 }
 
 fn ids_engine() -> IdsEngine {
-    let mut cfg = IdsConfig::default();
-    cfg.inline_mode = false; // detection only
-    IdsEngine::new(cfg).expect("IDS engine init")
+    IdsEngine::new(IdsConfig {
+        inline_mode: false, // detection only
+        ..Default::default()
+    })
+    .expect("IDS engine init")
 }
 
 fn ips_engine() -> IdsEngine {
-    let mut cfg = IdsConfig::default();
-    cfg.inline_mode = true; // inline prevention mode
-    IdsEngine::new(cfg).expect("IPS engine init")
+    IdsEngine::new(IdsConfig {
+        inline_mode: true, // inline prevention mode
+        ..Default::default()
+    })
+    .expect("IPS engine init")
 }
 
 // ── NOP sled (P0 regression) ─────────────────────────────────────────────────

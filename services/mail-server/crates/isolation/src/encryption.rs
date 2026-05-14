@@ -1,4 +1,9 @@
 //! Encryption:AES-256-GCM envelope encryption with key rotation.
+//!
+//! # Security: Key Zeroization
+//! All intermediate key material (derived keys, raw data keys, plaintext buffers)
+//! is zeroized on drop using the `zeroize` crate to prevent key material from
+//! persisting in process memory after use.
 
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
@@ -12,6 +17,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use tracing::{info, warn};
 use uuid::Uuid;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::SecurityConfig;
 use crate::types::*;
@@ -19,11 +25,12 @@ use crate::types::*;
 const ALGORITHM: &str = "aes-256-gcm";
 const KEY_LENGTH: usize = 32;
 const IV_LENGTH: usize = 12;
+const LEGACY_DATA_KEY_SALT: &[u8] = b"apexmail-isolation-master";
 
 fn fill_os_random(bytes: &mut [u8]) -> anyhow::Result<()> {
-    OsRng
-        .try_fill_bytes(bytes)
-        .map_err(|e| anyhow::anyhow!("OsRng failed while generating isolation encryption material: {e}"))
+    OsRng.try_fill_bytes(bytes).map_err(|e| {
+        anyhow::anyhow!("OsRng failed while generating isolation encryption material: {e}")
+    })
 }
 
 // ── Key Derivation ─────────────────────────────────────────
@@ -33,7 +40,14 @@ fn derive_key(master_key: &str, salt: &[u8], info: &str) -> anyhow::Result<[u8; 
     let mut okm = [0u8; KEY_LENGTH];
     hk.expand(info.as_bytes(), &mut okm)
         .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
+    // Note: okm is a fixed-size array on the stack; it will be overwritten
+    // when the function returns. The caller should handle it with Zeroizing
+    // if it needs to persist beyond this scope.
     Ok(okm)
+}
+
+fn organization_data_key_salt(organization_id: &str) -> Vec<u8> {
+    format!("apexmail-isolation-master:{organization_id}").into_bytes()
 }
 
 fn hash_code(s: &str) -> i64 {
@@ -78,9 +92,9 @@ impl EncryptionService {
 
     // ── Data Key Encryption ────────────────────────────────
 
-    fn encrypt_data_key(&self, raw_key: &[u8]) -> anyhow::Result<String> {
-        let salt = b"apexmail-isolation-master";
-        let derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption")?;
+    fn encrypt_data_key(&self, organization_id: &str, raw_key: &[u8]) -> anyhow::Result<String> {
+        let salt = organization_data_key_salt(organization_id);
+        let mut derived = derive_key(&self.config.encryption_key, &salt, "data-key-encryption")?;
 
         let cipher = Aes256Gcm::new_from_slice(&derived)?;
         let mut iv = [0u8; IV_LENGTH];
@@ -91,15 +105,24 @@ impl EncryptionService {
         let tag = cipher
             .encrypt_in_place_detached(nonce, b"", &mut buffer)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
-        Ok(format!(
+        let result = format!(
             "{}:{}:{}",
             B64.encode(iv),
             B64.encode(tag),
-            B64.encode(buffer)
-        ))
+            B64.encode(&buffer)
+        );
+        // Zeroize intermediate key material
+        derived.zeroize();
+        buffer.zeroize();
+        Ok(result)
     }
 
-    fn decrypt_data_key(&self, encrypted: &str) -> anyhow::Result<Vec<u8>> {
+    fn decrypt_data_key(&self, organization_id: &str, encrypted: &str) -> anyhow::Result<Vec<u8>> {
+        self.decrypt_data_key_with_salt(encrypted, &organization_data_key_salt(organization_id))
+            .or_else(|_| self.decrypt_data_key_with_salt(encrypted, LEGACY_DATA_KEY_SALT))
+    }
+
+    fn decrypt_data_key_with_salt(&self, encrypted: &str, salt: &[u8]) -> anyhow::Result<Vec<u8>> {
         let parts: Vec<&str> = encrypted.split(':').collect();
         if parts.len() != 3 {
             anyhow::bail!("Invalid encrypted key format");
@@ -108,8 +131,7 @@ impl EncryptionService {
         let tag_bytes = B64.decode(parts[1])?;
         let mut buffer = B64.decode(parts[2])?;
 
-        let salt = b"apexmail-isolation-master";
-        let derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption")?;
+        let mut derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption")?;
 
         let cipher = Aes256Gcm::new_from_slice(&derived)?;
         let nonce = Nonce::from_slice(&iv);
@@ -119,6 +141,9 @@ impl EncryptionService {
             .decrypt_in_place_detached(nonce, b"", &mut buffer, tag)
             .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
 
+        // Zeroize derived key — buffer is returned as plaintext and will be
+        // zeroized by the caller.
+        derived.zeroize();
         Ok(buffer)
     }
 
@@ -137,7 +162,8 @@ impl EncryptionService {
         plaintext: &str,
     ) -> anyhow::Result<EncryptedField> {
         let key = self.get_or_create_active_key(organization_id).await?;
-        let raw_key = self.decrypt_data_key(&key.encrypted_key)?;
+        let raw_key =
+            Zeroizing::new(self.decrypt_data_key(&key.organization_id, &key.encrypted_key)?);
 
         let cipher = Aes256Gcm::new_from_slice(&raw_key)?;
         let mut iv = [0u8; IV_LENGTH];
@@ -149,18 +175,22 @@ impl EncryptionService {
             .encrypt_in_place_detached(nonce, b"", &mut buffer)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-        Ok(EncryptedField {
-            ciphertext: B64.encode(buffer),
+        let result = EncryptedField {
+            ciphertext: B64.encode(&buffer),
             key_id: key.id.clone(),
             algorithm: ALGORITHM.into(),
             iv: B64.encode(iv),
             auth_tag: B64.encode(tag),
-        })
+        };
+        // Zeroize intermediate buffers
+        buffer.zeroize();
+        Ok(result)
     }
 
     pub async fn decrypt(&self, encrypted: &EncryptedField) -> anyhow::Result<String> {
         let key = self.get_key_by_id(&encrypted.key_id).await?;
-        let raw_key = self.decrypt_data_key(&key.encrypted_key)?;
+        let raw_key =
+            Zeroizing::new(self.decrypt_data_key(&key.organization_id, &key.encrypted_key)?);
 
         let cipher = Aes256Gcm::new_from_slice(&raw_key)?;
         let iv = B64.decode(&encrypted.iv)?;
@@ -173,7 +203,9 @@ impl EncryptionService {
             .decrypt_in_place_detached(nonce, b"", &mut buffer, tag)
             .map_err(|e| anyhow::anyhow!("Decryption failed (possibly tampered): {}", e))?;
 
-        String::from_utf8(buffer).map_err(Into::into)
+        let result = String::from_utf8(buffer.clone()).map_err(Into::into);
+        buffer.zeroize();
+        result
     }
 
     /// Encrypt specific fields of an object based on policy.
@@ -310,6 +342,7 @@ impl EncryptionService {
 
     // ── Private ────────────────────────────────────────────
 
+    #[allow(clippy::type_complexity)]
     async fn load_active_keys(&self) -> anyhow::Result<()> {
         let rows: Vec<(String, String, i32, String, Vec<u8>, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)> =
             sqlx::query_as(
@@ -403,6 +436,7 @@ impl EncryptionService {
         }
 
         // Check DB
+        #[allow(clippy::type_complexity)]
         let row: Option<(String, String, i32, String, Vec<u8>, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)> =
             sqlx::query_as(
                 "SELECT id, organization_id, version, algorithm, key_material, status, created_at, rotated_at, expires_at
@@ -450,6 +484,7 @@ impl EncryptionService {
             return Ok(cached.clone());
         }
 
+        #[allow(clippy::type_complexity)]
         let row: (String, String, i32, String, Vec<u8>, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>) =
             sqlx::query_as(
                 "SELECT id, organization_id, version, algorithm, key_material, status, created_at, rotated_at, expires_at
@@ -487,7 +522,8 @@ impl EncryptionService {
         let mut raw_key = [0u8; KEY_LENGTH];
         fill_os_random(&mut raw_key)?;
 
-        let encrypted_key = self.encrypt_data_key(&raw_key)?;
+        let encrypted_key = self.encrypt_data_key(organization_id, &raw_key)?;
+        raw_key.zeroize();
 
         let version: i32 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(version), 0) + 1 FROM iso_encryption_keys WHERE organization_id = $1"
@@ -557,9 +593,13 @@ impl EncryptionService {
         let old_key = self.get_key_by_id(old_key_id).await?;
         let new_key = self.get_key_by_id(new_key_id).await?;
 
-        // Decrypt the raw key material for both keys
-        let old_raw = self.decrypt_data_key(&old_key.encrypted_key)?;
-        let new_raw = self.decrypt_data_key(&new_key.encrypted_key)?;
+        // Decrypt the raw key material for both keys — zeroized on drop via Zeroizing
+        let old_raw = Zeroizing::new(
+            self.decrypt_data_key(&old_key.organization_id, &old_key.encrypted_key)?,
+        );
+        let new_raw = Zeroizing::new(
+            self.decrypt_data_key(&new_key.organization_id, &new_key.encrypted_key)?,
+        );
 
         let old_cipher = Aes256Gcm::new_from_slice(&old_raw)?;
         let new_cipher = Aes256Gcm::new_from_slice(&new_raw)?;
@@ -666,7 +706,6 @@ impl EncryptionService {
                     fill_os_random(&mut new_iv)?;
                     let new_nonce = Nonce::from_slice(&new_iv);
 
-                    let mut buffer = buffer;
                     let new_tag = match new_cipher.encrypt_in_place_detached(
                         new_nonce,
                         b"",
@@ -674,13 +713,21 @@ impl EncryptionService {
                     ) {
                         Ok(tag) => tag,
                         Err(e) => {
+                            buffer.zeroize();
                             warn!(record_id = record_id, error = %e, "Failed to re-encrypt field");
                             continue;
                         }
                     };
 
+                    // Zeroize buffer after re-encryption (plaintext no longer needed)
+                    let ciphertext = {
+                        let ct = B64.encode(&buffer);
+                        buffer.zeroize();
+                        ct
+                    };
+
                     let new_enc_field = EncryptedField {
-                        ciphertext: B64.encode(buffer),
+                        ciphertext,
                         key_id: new_key_id.to_string(),
                         algorithm: ALGORITHM.to_string(),
                         iv: B64.encode(new_iv),
@@ -708,7 +755,6 @@ impl EncryptionService {
                         separated.push_bind(value);
                         separated.push(")");
                     }
-                    drop(separated);
 
                     qb.push(") AS u(id, val) WHERE t.id = u.id");
 
@@ -729,6 +775,13 @@ impl EncryptionService {
 
     fn get_policy_for_resource(&self, resource: &str) -> Option<EncryptionPolicy> {
         self.policies.get(resource).map(|e| e.value().clone())
+    }
+}
+
+/// Ensure the master encryption key is zeroized when the service is dropped.
+impl Drop for EncryptionService {
+    fn drop(&mut self) {
+        self.config.encryption_key.zeroize();
     }
 }
 
@@ -770,8 +823,8 @@ mod tests {
     fn test_data_key_encrypt_decrypt_roundtrip() {
         let svc = test_service();
         let raw = [42u8; KEY_LENGTH];
-        let encrypted = svc.encrypt_data_key(&raw).unwrap();
-        let decrypted = svc.decrypt_data_key(&encrypted).unwrap();
+        let encrypted = svc.encrypt_data_key("org-a", &raw).unwrap();
+        let decrypted = svc.decrypt_data_key("org-a", &encrypted).unwrap();
         assert_eq!(decrypted, raw);
     }
 
@@ -779,7 +832,7 @@ mod tests {
     fn test_data_key_encrypted_format() {
         let svc = test_service();
         let raw = [1u8; KEY_LENGTH];
-        let encrypted = svc.encrypt_data_key(&raw).unwrap();
+        let encrypted = svc.encrypt_data_key("org-a", &raw).unwrap();
         let parts: Vec<&str> = encrypted.split(':').collect();
         assert_eq!(parts.len(), 3); // iv:tag:ciphertext
     }
@@ -788,14 +841,14 @@ mod tests {
     fn test_data_key_different_ciphertexts() {
         let svc = test_service();
         let raw = [99u8; KEY_LENGTH];
-        let e1 = svc.encrypt_data_key(&raw).unwrap();
-        let e2 = svc.encrypt_data_key(&raw).unwrap();
+        let e1 = svc.encrypt_data_key("org-a", &raw).unwrap();
+        let e2 = svc.encrypt_data_key("org-a", &raw).unwrap();
         // Different IVs produce different ciphertexts
         assert_ne!(e1, e2);
         // But both decrypt to the same key
         assert_eq!(
-            svc.decrypt_data_key(&e1).unwrap(),
-            svc.decrypt_data_key(&e2).unwrap()
+            svc.decrypt_data_key("org-a", &e1).unwrap(),
+            svc.decrypt_data_key("org-a", &e2).unwrap()
         );
     }
 
@@ -803,7 +856,7 @@ mod tests {
     fn test_data_key_tampered_ciphertext_fails() {
         let svc = test_service();
         let raw = [7u8; KEY_LENGTH];
-        let encrypted = svc.encrypt_data_key(&raw).unwrap();
+        let encrypted = svc.encrypt_data_key("org-a", &raw).unwrap();
         let parts: Vec<&str> = encrypted.split(':').collect();
         // Tamper with ciphertext part
         let mut ct_bytes = B64.decode(parts[2]).unwrap();
@@ -811,17 +864,17 @@ mod tests {
             *b ^= 0xFF;
         }
         let tampered = format!("{}:{}:{}", parts[0], parts[1], B64.encode(&ct_bytes));
-        assert!(svc.decrypt_data_key(&tampered).is_err());
+        assert!(svc.decrypt_data_key("org-a", &tampered).is_err());
     }
 
     #[test]
     fn test_data_key_wrong_master_key_fails() {
         let svc1 = test_service();
         let raw = [5u8; KEY_LENGTH];
-        let encrypted = svc1.encrypt_data_key(&raw).unwrap();
+        let encrypted = svc1.encrypt_data_key("org-a", &raw).unwrap();
 
         let svc2 = test_service_with_key("different-key-that-is-32-chars!!");
-        assert!(svc2.decrypt_data_key(&encrypted).is_err());
+        assert!(svc2.decrypt_data_key("org-a", &encrypted).is_err());
     }
 
     #[test]
@@ -889,7 +942,7 @@ mod tests {
         EncryptionService::new(
             test_pool(),
             SecurityConfig {
-                encryption_key: "test-master-key-change-in-prod!!".into(),
+                encryption_key: Zeroizing::new("test-master-key-change-in-prod!!".to_string()),
                 data_key_rotation_days: 90,
                 audit_retention_days: 365,
                 session_timeout_minutes: 30,
@@ -901,7 +954,7 @@ mod tests {
         EncryptionService::new(
             test_pool(),
             SecurityConfig {
-                encryption_key: key.into(),
+                encryption_key: Zeroizing::new(key.to_string()),
                 data_key_rotation_days: 90,
                 audit_retention_days: 365,
                 session_timeout_minutes: 30,

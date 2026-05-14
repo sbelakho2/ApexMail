@@ -101,7 +101,7 @@ class Emails
     /**
      * List emails with optional filters.
      *
-     * @param array $options { status, limit, offset, tag }
+     * @param array $options { status, limit, offset, cursor, tag }
      */
     public function list(array $options = []): array
     {
@@ -109,6 +109,7 @@ class Emails
             'status' => $options['status'] ?? null,
             'limit'  => $options['limit']  ?? 20,
             'offset' => $options['offset'] ?? 0,
+            'cursor' => $options['cursor'] ?? null,
             'tag'    => $options['tag']    ?? null,
         ], static fn ($v) => $v !== null && $v !== ''));
 

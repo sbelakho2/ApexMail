@@ -38,6 +38,7 @@ aes-gcm    = { workspace = true }
 flate2 = "1.1"
 sysinfo = "0.33"
 observability-service = { path = "../observability-service" }
+apexmail-lib = { path = "../apexmail-lib" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

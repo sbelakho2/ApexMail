@@ -713,7 +713,8 @@ mod tests {
         let engine = SpamEngine::new();
         // Train with some spam
         for _ in 0..10 {
-            let _ = engine.train_spam("Buy viagra now! Million dollars free lottery winner act now");
+            let _ =
+                engine.train_spam("Buy viagra now! Million dollars free lottery winner act now");
             let _ = engine.train_spam("Nigerian prince needs your help wire transfer urgently");
             let _ = engine.train_spam("You have won congratulations claim your prize immediately");
         }
@@ -787,8 +788,10 @@ mod tests {
 
     #[test]
     fn test_training_review_workflow() {
-        let mut config = SpamConfig::default();
-        config.enable_guarded_training = true;
+        let config = SpamConfig {
+            enable_guarded_training: true,
+            ..Default::default()
+        };
         let engine = SpamEngine::with_config(config);
 
         engine.add_reviewer("sec-reviewer");

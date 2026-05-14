@@ -257,15 +257,15 @@ impl IpPool {
             self.rotation_order
                 .iter()
                 .filter(|addr| {
-                    self.ips.get(addr).map_or(false, |ip| {
-                        ip.tenant_id.as_deref() == Some(tid) && ip.can_send()
-                    })
+                    self.ips
+                        .get(addr)
+                        .is_some_and(|ip| ip.tenant_id.as_deref() == Some(tid) && ip.can_send())
                 })
                 .collect()
         } else {
             self.rotation_order
                 .iter()
-                .filter(|addr| self.ips.get(addr).map_or(false, |ip| ip.can_send()))
+                .filter(|addr| self.ips.get(addr).is_some_and(|ip| ip.can_send()))
                 .collect()
         };
 

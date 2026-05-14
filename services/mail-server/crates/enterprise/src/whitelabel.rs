@@ -363,6 +363,7 @@ impl WhiteLabelService {
 
     /// Update (upsert) white-label configuration
     /// #254:Now sanitizes custom_css to prevent XSS
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_config(
         &self,
         tenant_id: String,

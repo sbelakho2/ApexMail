@@ -1,7 +1,9 @@
+#![allow(clippy::doc_lazy_continuation)]
 //! Mail Common - Shared types, configuration, and utilities
 //!
 //! This crate provides common functionality used across all mail server components.
 
+#![deny(unsafe_code)]
 pub mod config;
 pub mod error;
 pub mod hot_config;

@@ -42,7 +42,10 @@ pub struct TrackingData {
 pub struct UnsubscribeData {
     pub tenant_id: String,
     pub recipient: String,
-    #[allow(unused)] // timestamp used for token expiry validation, wired in future middleware
+    #[expect(
+        dead_code,
+        reason = "timestamp is decoded for token-expiry validation in the unsubscribe flow"
+    )]
     pub timestamp_ms: u64,
 }
 
@@ -83,7 +86,10 @@ pub struct TrackingCodec {
 // Token encode/generation methods are not yet wired at the binary level
 // (the decode path is active; encode will be used once the MTA calls this service
 // to embed tokens into outgoing messages).
-#[allow(unused)]
+#[expect(
+    dead_code,
+    reason = "encode helpers are kept with the decode path for outbound token generation"
+)]
 impl TrackingCodec {
     /// Build a codec from the master secret string.
     /// Derives two sub-keys with HMAC-SHA-256.
@@ -394,13 +400,11 @@ fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option
 // v2 – 1-byte version + u16-BE per-field lengths
 // v3 – v2 + originalUrl field
 
-#[allow(unused)] // encode path wired once outbound tokens are generated here
 fn write_u16be(buf: &mut Vec<u8>, v: u16) {
     buf.push((v >> 8) as u8);
     buf.push((v & 0xff) as u8);
 }
 
-#[allow(unused)] // encode path
 fn serialize_tracking_data(data: &TrackingData) -> Vec<u8> {
     let tid = data.tenant_id.as_bytes();
     let mid = data.message_id.as_bytes();

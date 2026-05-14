@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check plan context for lines with complex math errors."""
-import json, re
+import json
+import re
 
 filepath = 'data/train_agent.jsonl'
 target_lines = [533, 596, 783, 964, 115, 226, 419, 612, 763]
@@ -8,7 +9,13 @@ target_lines = [533, 596, 783, 964, 115, 226, 419, 612, 763]
 with open(filepath) as f:
     lines = f.readlines()
 
+max_line = len(lines)
+
 for ln in target_lines:
+    if ln > max_line:
+        print(f"L{ln}: SKIPPED (file has {max_line} lines)")
+        print()
+        continue
     data = json.loads(lines[ln-1])
     text = data['text']
     plan = re.search(r'Plan: (\w+) \(\$(\d+)/mo\)', text)

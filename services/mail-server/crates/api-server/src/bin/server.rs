@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
+use apexmail_db::pool::set_query_timeout;
 use api_server::app::build_app;
 use api_server::config::Config;
 use api_server::ip_provider::DedicatedIpProvider;
@@ -32,6 +33,13 @@ async fn main() -> anyhow::Result<()> {
         "loaded configuration"
     );
 
+    // ── Query timeout ────────────────────────────────────────
+    set_query_timeout(config.query_timeout_seconds);
+    tracing::info!(
+        timeout_secs = config.query_timeout_seconds,
+        "global query timeout configured"
+    );
+
     // ── Database pool ───────────────────────────────────────
     let db = apexmail_db::pool::create_pool_from_config(
         &config.db_host,
@@ -40,15 +48,29 @@ async fn main() -> anyhow::Result<()> {
         &config.db_user,
         &config.db_password,
         config.db_max_connections,
+        config.statement_cache_capacity,
     )
     .await?;
     tracing::info!("database pool created");
+
+    // ── Pool pair (primary + replica) ───────────────────────
+    let pools = apexmail_db::pool::create_pool_pair(
+        &config.database_url(),
+        config.database_replica_url.as_deref(),
+        config.db_max_connections,
+        config.statement_cache_capacity,
+    )
+    .await?;
+    tracing::info!(
+        replica_configured = config.database_replica_url.is_some(),
+        "database pool pair created"
+    );
 
     // ── Redis pool ──────────────────────────────────────────
     // PP-002: Configure pool timeouts so Redis outages don't hang indefinitely.
     // `create_timeout` limits TCP connect to Redis; `wait_timeout` limits
     // waiting for a pooled connection (acquire).
-    let redis_cfg = deadpool_redis::Config::from_url(&config.redis_url());
+    let redis_cfg = deadpool_redis::Config::from_url(config.redis_url());
     let mut pool_cfg = deadpool_redis::PoolConfig::new(config.redis_pool_max_size);
     pool_cfg.timeouts = deadpool_redis::Timeouts {
         wait: Some(std::time::Duration::from_secs(5)),
@@ -94,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppStateInner::new(
         db,
+        pools,
         redis,
         config.clone(),
         http_client,
@@ -102,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .map_err(|e| anyhow::anyhow!("failed to initialize DDoS protector: {e}"))?;
+    tracing::info!(
+        "resilience layer initialised — circuit breakers (db, redis, clickhouse) and bulkheads active"
+    );
     let shutdown_state = state.clone();
 
     // ── Inbox-placement scheduler ───────────────────────────

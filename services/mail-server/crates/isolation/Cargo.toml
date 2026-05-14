@@ -35,5 +35,7 @@ dotenvy = { workspace = true }
 regex = { workspace = true }
 bytes = { workspace = true }
 hkdf = "0.12"
+zeroize = { workspace = true }
+apexmail-lib = { path = "../apexmail-lib" }
 
 [dev-dependencies]

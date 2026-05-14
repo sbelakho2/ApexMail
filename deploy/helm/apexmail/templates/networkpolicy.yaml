@@ -54,13 +54,15 @@ spec:
       ports:
         - port: 6379
           protocol: TCP
-    # ClickHouse HTTP + native ports
+    # ClickHouse HTTP, HTTPS, and native ports
     - to:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: {{ include "apexmail.fullname" . }}-clickhouse
       ports:
         - port: 8123
+          protocol: TCP
+        - port: 8443
           protocol: TCP
         - port: 9000
           protocol: TCP

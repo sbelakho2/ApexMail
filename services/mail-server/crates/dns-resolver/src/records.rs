@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_mx_ordering() {
-        let mut records = vec![
+        let mut records = [
             MxRecord::new(20, "backup.example.com"),
             MxRecord::new(5, "primary.example.com"),
             MxRecord::new(10, "secondary.example.com"),

@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RendererConfig {
     pub db: DatabaseConfig,
     pub server: ServerConfig,
@@ -9,6 +10,7 @@ pub struct RendererConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     pub url: String,
     #[serde(default = "default_max_connections")]
@@ -16,6 +18,7 @@ pub struct DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -24,6 +27,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
     /// Max execution time in milliseconds
     #[serde(default = "default_timeout_ms")]
@@ -40,6 +44,7 @@ pub struct SandboxConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheConfig {
     /// Max cached compiled templates
     #[serde(default = "default_cache_max")]
@@ -76,6 +81,9 @@ fn default_cache_max() -> u64 {
 fn default_cache_ttl() -> u64 {
     3600
 }
+fn max_cache_ttl() -> u64 {
+    86_400
+}
 
 impl RendererConfig {
     pub fn validate(&self) -> Result<(), String> {
@@ -102,6 +110,9 @@ impl RendererConfig {
         }
         if self.cache.max_entries == 0 || self.cache.ttl_secs == 0 {
             return Err("Cache limits must be > 0".into());
+        }
+        if self.cache.ttl_secs > max_cache_ttl() {
+            return Err("Cache TTL must be <= 86400 seconds".into());
         }
         Ok(())
     }
@@ -156,5 +167,23 @@ mod tests {
         assert_eq!(cfg.sandbox.timeout_ms, 3000);
         assert_eq!(cfg.sandbox.max_memory_bytes, default_max_memory());
         assert_eq!(cfg.cache.max_entries, default_cache_max());
+    }
+
+    #[test]
+    fn test_config_rejects_unknown_cache_fields() {
+        let json = r#"{
+            "db": { "url": "postgres://localhost/test" },
+            "server": { "host": "0.0.0.0", "port": 8080 },
+            "sandbox": { "timeout_ms": 3000 },
+            "cache": { "ttl_seconds": 60 }
+        }"#;
+        assert!(serde_json::from_str::<RendererConfig>(json).is_err());
+    }
+
+    #[test]
+    fn test_config_rejects_excessive_cache_ttl() {
+        let mut cfg = test_config();
+        cfg.cache.ttl_secs = max_cache_ttl() + 1;
+        assert!(cfg.validate().is_err());
     }
 }

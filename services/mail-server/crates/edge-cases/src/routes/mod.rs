@@ -92,7 +92,7 @@ async fn require_api_key(
         .headers()
         .get("x-api-key")
         .and_then(|value| value.to_str().ok());
-    if provided != Some(state.api_key.as_str()) {
+    if !provided.is_some_and(|k| apexmail_lib::timing_safe_compare(k, &state.api_key)) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 

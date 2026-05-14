@@ -63,4 +63,4 @@ Enterprise customers receive dedicated support with guaranteed SLAs:
 | Medium | 4 hours | 24 hours |
 | Low | 8 hours | 48 hours |
 
-Contact: enterprise-support@apexmail.ee
+Contact: support@apexmail.ee

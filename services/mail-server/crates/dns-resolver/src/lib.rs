@@ -7,6 +7,7 @@
 //! - TLSA (DANE) record lookups
 //! - Generic A/AAAA/CNAME queries
 
+#![deny(unsafe_code)]
 pub mod cache;
 pub mod config;
 pub mod lookup;

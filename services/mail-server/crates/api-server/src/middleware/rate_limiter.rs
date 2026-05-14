@@ -19,6 +19,8 @@ use crate::state::AppState;
 
 const TENANT_RATE_LIMIT_CACHE_PREFIX: &str = "apexmail:ratelimit:tenant_plan:";
 const TENANT_RATE_LIMIT_CACHE_TTL_SECS: u64 = 60;
+/// DB-15: ±10% jitter range for cache TTL to prevent stampede on expiry.
+const TENANT_RATE_LIMIT_CACHE_TTL_JITTER: f64 = 0.10;
 const TENANT_RATE_LIMIT_CACHE_NONE: &str = "__none__";
 
 // ─── Fixed-window rate limiter (middleware function) ────────────
@@ -182,6 +184,25 @@ async fn lookup_cached_rate_limit_tier(
     }
 }
 
+/// DB-15: Apply ±jitter to a base TTL (seconds) so that cache entries expire
+/// at slightly different times, preventing all concurrent requests from
+/// stampeding the database when the TTL elapses.
+fn ttl_with_jitter(base_secs: u64, jitter: f64) -> u64 {
+    let jitter_secs = (base_secs as f64 * jitter) as u64;
+    if jitter_secs == 0 {
+        return base_secs;
+    }
+    // Deterministic jitter using a simple hash of the cache key is a viable
+    // alternative for embededded environments, but here we use the system time
+    // as a cheap source of per-request variation.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    let offset = (nanos % (jitter_secs * 2 + 1)) as i64 - jitter_secs as i64;
+    (base_secs as i64 + offset).max(1) as u64
+}
+
 async fn cache_rate_limit_tier(state: &AppState, tenant_id: &str, tier: Option<RateLimitTier>) {
     let value = match tier {
         Some(tier) => match serde_json::to_string(&tier) {
@@ -196,9 +217,11 @@ async fn cache_rate_limit_tier(state: &AppState, tenant_id: &str, tier: Option<R
 
     let cache_key = tenant_rate_limit_cache_key(tenant_id);
     if let Ok(mut conn) = state.redis.get().await {
-        let _: Result<(), _> = conn
-            .set_ex(&cache_key, value, TENANT_RATE_LIMIT_CACHE_TTL_SECS)
-            .await;
+        let ttl = ttl_with_jitter(
+            TENANT_RATE_LIMIT_CACHE_TTL_SECS,
+            TENANT_RATE_LIMIT_CACHE_TTL_JITTER,
+        );
+        let _: Result<(), _> = conn.set_ex(&cache_key, value, ttl).await;
     }
 }
 

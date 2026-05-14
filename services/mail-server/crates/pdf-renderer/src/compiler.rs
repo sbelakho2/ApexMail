@@ -29,7 +29,7 @@ use crate::world::{TypstWorld, WorldError};
 
 /// Maximum allowed size (in bytes) for the serialised JSON input data.
 /// Prevents deeply‑nested or oversized JSON from causing resource exhaustion.
-const MAX_DATA_JSON_BYTES: usize = 1 * 1024 * 1024; // 1 MB
+const MAX_DATA_JSON_BYTES: usize = 1024 * 1024; // 1 MB
 
 /// Maximum allowed size (in bytes) for the generated PDF output.
 /// Prevents a template (e.g. with huge data arrays) from producing a

@@ -586,6 +586,7 @@ mod reputation_extended_tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn reputation_saturating_operations() {
         let mut rep = ReputationScore::default();
         rep.score = 100;

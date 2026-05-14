@@ -16,7 +16,17 @@ use edge_cases::services::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Structured JSON logging with env-driven filter
+    // Sampling strategy: default to `info` level; use RUST_LOG for fine-grained control
+    // e.g., `RUST_LOG=warn,edge_cases=debug` for verbose debug in dev
+    tracing_subscriber::fmt()
+        .json()
+        .with_target(true)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let config = EdgeCasesConfig::from_env()?;
     info!(port = config.port, "Starting edge-cases server");

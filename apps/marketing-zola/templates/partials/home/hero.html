@@ -1,26 +1,26 @@
 {# ── Hero Section ────────────────────────────────────────────── #}
 {# Converted from HeroSection.tsx — pure static, no JS needed  #}
 
-<section aria-label="Introduction" class="relative min-h-[90vh] flex items-center pt-32 pb-24 lg:pt-16 overflow-hidden bg-white">
-  <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div class="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
+<section aria-label="Introduction" class="relative min-h-[90vh] flex items-center pt-36 pb-24 lg:pt-40 overflow-hidden bg-white">
+  <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="grid min-w-0 lg:grid-cols-2 gap-12 lg:gap-20 items-center">
       {# Left Column - Copy #}
-      <div>
+      <div class="min-w-0">
         {# Badge #}
-        <div class="inline-flex items-center gap-3 px-3 py-1 border border-surface-200 text-[11px] font-bold uppercase tracking-widest text-surface-600 mb-10">
+        <div class="inline-flex items-center gap-3 px-3 py-1 border border-surface-200 text-[11px] font-bold tracking-widest text-surface-600 mb-10 uppercase">
           <div class="w-2 h-2 bg-brand-500"></div>
           Now with Private Cloud deployments
         </div>
 
         {# Headline #}
-        <h1 class="mb-8 text-surface-950 leading-[0.95] text-balance">
-          The Email API <br />
-          Built for <span class="text-brand-600">Stability.</span>
+        <h1 class="mb-8 text-surface-950 leading-[0.95] text-balance text-[40px] sm:text-6xl lg:text-8xl">
+          <span class="block">The Email API</span>
+          <span class="block">Built for <span class="block sm:inline text-brand-500">Stability.</span></span>
         </h1>
 
         {# Subheadline #}
         <p class="text-surface-600 mb-10 max-w-xl text-[17px] leading-[1.5]">
-          Send <strong class="text-surface-950 font-bold uppercase tracking-tight">HIPAA &amp; GDPR-ready</strong> transactional emails.
+          Send <strong class="text-surface-950 font-bold tracking-tight">HIPAA &amp; GDPR-ready</strong> transactional emails.
           High-performance infrastructure for developers who demand precision and reliability over marketing hype.
         </p>
 
@@ -37,11 +37,11 @@
 
         {# CTA Buttons #}
         <div class="flex flex-col sm:flex-row flex-wrap gap-4">
-          <a href="{{ config.extra.app_url }}/signup" class="btn-primary px-8 py-4 text-lg" aria-label="Get API Keys - Sign up for free">
+          <a href="{{ config.extra.app_url }}/signup" class="btn-primary px-8 py-4 text-lg uppercase" aria-label="Get API Keys - Sign up for free">
             Get API Keys
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
-          <a href="/api-console" class="btn-secondary px-8 py-4 text-lg" aria-label="Open the interactive API console">
+          <a href="/api-console" class="btn-secondary px-8 py-4 text-lg uppercase" aria-label="Open the interactive API console">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             Open API Console
           </a>
@@ -49,7 +49,7 @@
       </div>
 
       {# Right Column - Code Block #}
-      <div class="relative lg:mt-0 mt-16">
+      <div class="relative min-w-0 lg:mt-0 mt-16">
         <div class="bg-surface-950 text-surface-100 p-0 font-mono text-[13px] overflow-hidden border border-surface-800">
           <div class="flex items-center gap-2 bg-surface-900 px-4 py-3 border-b border-surface-800">
             <div class="flex gap-2">
@@ -57,28 +57,28 @@
               <div class="w-2 h-2 bg-surface-700"></div>
               <div class="w-2 h-2 bg-surface-700"></div>
             </div>
-            <span class="ml-4 text-[10px] uppercase font-bold tracking-widest text-surface-500">api/request.ts</span>
+            <span class="ml-4 text-[10px] font-bold tracking-widest text-surface-500">api/request.ts</span>
           </div>
-          <div class="p-6 overflow-x-auto">
-<pre class="whitespace-pre"><code><span class="text-surface-500">// Server-side send example</span>
-<span class="text-brand-400">const</span> response = <span class="text-brand-400">await</span> <span class="text-brand-400">fetch</span>(<span class="text-green-400">'https://api.apexmail.ee/v1/messages'</span>, {
-  method: <span class="text-green-400">'POST'</span>,
+          <div class="p-6 overflow-x-auto max-w-full">
+<pre class="whitespace-pre"><code><span class="code-comment">// Server-side send example</span>
+<span class="code-keyword">const</span> response = <span class="code-keyword">await</span> <span class="code-keyword">fetch</span>(<span class="code-string">'https://api.apexmail.ee/v1/messages'</span>, {
+  method: <span class="code-string">'POST'</span>,
   headers: {
-    <span class="text-green-400">'X-API-Key'</span>: <span class="text-brand-400">process</span>.env.<span class="text-brand-400">APEXMAIL_API_KEY</span>,
-    <span class="text-green-400">'Content-Type'</span>: <span class="text-green-400">'application/json'</span>
+    <span class="code-string">'X-API-Key'</span>: <span class="code-keyword">process</span>.env.<span class="code-keyword">APEXMAIL_API_KEY</span>,
+    <span class="code-string">'Content-Type'</span>: <span class="code-string">'application/json'</span>
   },
-  body: <span class="text-brand-400">JSON</span>.<span class="text-brand-400">stringify</span>({
-    from: <span class="text-green-400">'hello@yourcompany.com'</span>,
-    to: <span class="text-green-400">'customer@example.com'</span>,
-    subject: <span class="text-green-400">'Welcome to Our Platform!'</span>,
-    html: <span class="text-green-400">'&lt;h1&gt;Hello World!&lt;/h1&gt;'</span>,
-    type: <span class="text-green-400">'transactional'</span>
+  body: <span class="code-keyword">JSON</span>.<span class="code-keyword">stringify</span>({
+    from: <span class="code-string">'hello@yourcompany.com'</span>,
+    to: <span class="code-string">'customer@example.com'</span>,
+    subject: <span class="code-string">'Welcome to Our Platform!'</span>,
+    html: <span class="code-string">'&lt;h1&gt;Hello World!&lt;/h1&gt;'</span>,
+    type: <span class="code-string">'transactional'</span>
   })
 });
 
-<span class="text-surface-500">// That's it. Email delivered with full tracking.</span>
-<span class="text-brand-400">console</span>.<span class="text-brand-400">log</span>(<span class="text-brand-400">await</span> response.<span class="text-brand-400">json</span>());
-<span class="text-surface-400">// { id: "msg_abc123", status: "queued" }</span></code></pre>
+<span class="code-comment">// That's it. Email delivered with full tracking.</span>
+<span class="code-keyword">console</span>.<span class="code-keyword">log</span>(<span class="code-keyword">await</span> response.<span class="code-keyword">json</span>());
+<span class="code-comment">// { id: "msg_abc123", status: "queued" }</span></code></pre>
         </div>
         </div>
       </div>

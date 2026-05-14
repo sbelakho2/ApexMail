@@ -16,6 +16,13 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 tracing    = { workspace = true }
 tracing-subscriber = { workspace = true }
+observability-service = { path = "../observability-service" }
+
+# OpenTelemetry (distributed tracing)
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 chrono     = { workspace = true }
 uuid       = { workspace = true }
 sha2       = { workspace = true }

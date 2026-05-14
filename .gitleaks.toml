@@ -1,0 +1,44 @@
+# =============================================================================
+# Gitleaks Configuration for ApexMail
+# =============================================================================
+# This file configures Gitleaks secret scanning behaviour.
+# Reference: https://github.com/gitleaks/gitleaks
+
+title = "ApexMail Gitleaks Configuration"
+
+# Extend the default rules with additional patterns
+[extend]
+useDefault = true
+
+# Allowlist — patterns that should NOT trigger alerts
+[allowlist]
+description = "Global allowlist for ApexMail"
+
+# Test fixtures and mock data containing fake credentials
+paths = [
+    # Test fixture directories with deliberately embedded test secrets
+    "(?i)test",
+    "(?i)sample",
+    "(?i)fixture",
+    "(?i)mock",
+    "(?i)example",
+    # Migration directories might contain example connection strings
+    "migrations/",
+    # Benchmark data
+    "benches/",
+    # Generated code
+    "generated",
+]
+
+# Regex allowlist for specific false-positive patterns
+regexes = [
+    # Allow secrets in pull request templates (they're examples)
+    "(?i)pull_request_template",
+    # Allow references in markdown documentation
+    "(?i)your-.+-here",
+    # Allow placeholder values in config maps
+    "CHANGEME",
+    "changethis",
+    # Allow JWT example or test tokens
+    "eyJ[0-9a-zA-Z_-]+\\.[0-9a-zA-Z_-]+\\.[0-9a-zA-Z_-]+",
+]

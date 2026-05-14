@@ -52,6 +52,7 @@ pub struct Job {
 // ─── Job creation options ──────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnqueueOptions {
     pub tenant_id: Uuid,
     pub queue: String,

@@ -74,10 +74,10 @@ impl fmt::Display for RedactedEmailList<'_> {
     }
 }
 
-/// Truncate an IP address for logging. IPv4 → /24, IPv6 → /48.
+/// Truncate an IP address for logging. IPv4 → /24, IPv6 → /64.
 /// ```text
 /// 192.168.1.42 → "192.168.1.0/24"
-/// 2001:db8::1 → "2001:db8::/48"
+/// 2001:db8::1 → "2001:db8::/64"
 /// ```
 pub fn redact_ip(ip: &IpAddr) -> String {
     match ip {

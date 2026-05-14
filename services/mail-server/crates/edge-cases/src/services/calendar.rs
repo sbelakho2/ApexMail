@@ -42,6 +42,7 @@ impl CalendarMethod {
     /// Any unrecognised or malformed method string is rejected with an
     /// error, preventing injection of arbitrary method values into
     /// downstream iCal processing.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_uppercase().as_str() {
             "REQUEST" => Ok(Self::Request),
@@ -72,6 +73,7 @@ impl CalendarStatus {
             Self::Cancelled => "CANCELLED",
         }
     }
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_uppercase().as_str() {
             "TENTATIVE" => Self::Tentative,
@@ -156,6 +158,7 @@ impl CalendarService {
     }
 
     /// Create a calendar invite.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_invite(
         &self,
         summary: &str,
@@ -749,10 +752,10 @@ fn generate_html_preview(event: &CalendarEvent) -> String {
 
     format!(
         r#"<div style="font-family:sans-serif;max-width:600px;margin:auto">
-<div style="background:#1a73e8;color:#fff;padding:16px;border-radius:8px 8px 0 0">
+<div style="background:#18181b;color:#fff;padding:16px;border-radius:0px">
   <h2 style="margin:0">{summary_html}</h2>
 </div>
-<div style="padding:16px;border:1px solid #ddd;border-top:0;border-radius:0 0 8px 8px">
+<div style="padding:16px;border:1px solid #e4e4e7;border-top:0;border-radius:0px">
   <p><strong>When:</strong> {when}</p>
   {loc}
   {desc}

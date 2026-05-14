@@ -32,7 +32,12 @@ impl InboxManager {
     }
 
     /// Classify and store a message, returning the assigned category.
-    pub async fn categorize_message(&self, tenant_id: &str, from: String, subject: String) -> InboxMessage {
+    pub async fn categorize_message(
+        &self,
+        tenant_id: &str,
+        from: String,
+        subject: String,
+    ) -> InboxMessage {
         let msg = Self::classify_message(tenant_id.to_string(), from, subject);
 
         let _ = sqlx::query(
@@ -89,7 +94,13 @@ impl InboxManager {
     }
 
     /// List messages belonging to a given category, scoped to tenant.
-    pub async fn list_by_category(&self, tenant_id: &str, cat: MessageCategory, limit: i64, offset: i64) -> Vec<InboxMessage> {
+    pub async fn list_by_category(
+        &self,
+        tenant_id: &str,
+        cat: MessageCategory,
+        limit: i64,
+        offset: i64,
+    ) -> Vec<InboxMessage> {
         let rows = sqlx::query_as::<_, InboxMessageRow>(
             "SELECT id, tenant_id, sender, subject, received_at, category, replied FROM sales_inbox_messages WHERE tenant_id = $1 AND category = $2 ORDER BY received_at DESC LIMIT $3 OFFSET $4",
         )
@@ -131,11 +142,13 @@ impl InboxManager {
 
     /// Mark a message as replied (scoped to tenant).
     pub async fn mark_replied(&self, tenant_id: &str, id: Uuid) -> bool {
-        let result = sqlx::query("UPDATE sales_inbox_messages SET replied = true WHERE tenant_id = $1 AND id = $2")
-            .bind(tenant_id)
-            .bind(id)
-            .execute(&self.db)
-            .await;
+        let result = sqlx::query(
+            "UPDATE sales_inbox_messages SET replied = true WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(id)
+        .execute(&self.db)
+        .await;
 
         matches!(result, Ok(r) if r.rows_affected() > 0)
     }
@@ -208,22 +221,38 @@ mod tests {
     async fn test_categorization() {
         let mgr = make_mgr().await;
         let m1 = mgr
-            .categorize_message("tenant-1", "alice@x.com".into(), "Interested in a demo".into())
+            .categorize_message(
+                "tenant-1",
+                "alice@x.com".into(),
+                "Interested in a demo".into(),
+            )
             .await;
         assert_eq!(m1.category, MessageCategory::Lead);
 
         let m2 = mgr
-            .categorize_message("tenant-1", "noreply@spam.biz".into(), "You won the lottery!".into())
+            .categorize_message(
+                "tenant-1",
+                "noreply@spam.biz".into(),
+                "You won the lottery!".into(),
+            )
             .await;
         assert_eq!(m2.category, MessageCategory::Spam);
 
         let m3 = mgr
-            .categorize_message("tenant-1", "bob@y.com".into(), "Support ticket #1234".into())
+            .categorize_message(
+                "tenant-1",
+                "bob@y.com".into(),
+                "Support ticket #1234".into(),
+            )
             .await;
         assert_eq!(m3.category, MessageCategory::Support);
 
         let m4 = mgr
-            .categorize_message("tenant-1", "billing@co.com".into(), "Invoice for subscription".into())
+            .categorize_message(
+                "tenant-1",
+                "billing@co.com".into(),
+                "Invoice for subscription".into(),
+            )
             .await;
         assert_eq!(m4.category, MessageCategory::Customer);
     }
@@ -238,7 +267,9 @@ mod tests {
             .await;
         assert_eq!(m.category, MessageCategory::Lead);
 
-        let leads = mgr.list_by_category("tenant-1", MessageCategory::Lead, 100, 0).await;
+        let leads = mgr
+            .list_by_category("tenant-1", MessageCategory::Lead, 100, 0)
+            .await;
         assert_eq!(leads.len(), 1);
 
         assert!(mgr.mark_replied("tenant-1", m.id).await);

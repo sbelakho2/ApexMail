@@ -38,7 +38,7 @@ pub fn encode_cursor(cursor: &str) -> String {
 /// Decode a cursor string back to its original value.
 /// Returns `None` if the cursor is malformed.
 pub fn decode_cursor(cursor: &str) -> Option<String> {
-    if cursor.len() % 2 != 0 {
+    if !cursor.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(cursor.len() / 2);
@@ -153,37 +153,35 @@ pub fn is_not_modified(headers: &HeaderMap, current_etag: &str) -> bool {
 pub fn with_cache_control(response: &mut axum::response::Response, max_age_secs: u32) {
     response.headers_mut().insert(
         CACHE_CONTROL,
-        HeaderValue::from_str(&format!("public, max-age={max_age_secs}")).unwrap(),
+        HeaderValue::from_str(&format!("public, max-age={max_age_secs}"))
+            .expect("invariant: cache-control value is valid ASCII"),
     );
 }
 
 /// A simple in-memory response cache keyed by request path.
 /// Used to avoid re-serialising the same response body.
 pub struct ResponseCache {
-    store: std::sync::Mutex<std::collections::HashMap<String, (String, Vec<u8>)>>,
+    store: parking_lot::Mutex<std::collections::HashMap<String, (String, Vec<u8>)>>,
 }
 
 impl ResponseCache {
     /// Create a new empty cache.
     pub fn new() -> Self {
         Self {
-            store: std::sync::Mutex::new(std::collections::HashMap::new()),
+            store: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     /// Look up a cached response by cache key.
     pub fn get(&self, key: &str) -> Option<(String, Vec<u8>)> {
-        self.store
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(key).cloned())
+        let cache = self.store.lock();
+        cache.get(key).cloned()
     }
 
     /// Insert a response into the cache.
     pub fn set(&self, key: &str, etag: String, body: Vec<u8>) {
-        if let Ok(mut cache) = self.store.lock() {
-            cache.insert(key.to_string(), (etag, body));
-        }
+        let mut cache = self.store.lock();
+        cache.insert(key.to_string(), (etag, body));
     }
 }
 

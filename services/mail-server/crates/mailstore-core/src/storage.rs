@@ -1199,7 +1199,10 @@ impl MessageStorage {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "account usage adjustment is kept for quota reconciliation jobs"
+    )]
     async fn update_account_usage(&self, account_id: &Uuid, delta: i64) -> Result<()> {
         sqlx::query(
             r#"

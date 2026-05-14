@@ -1,8 +1,8 @@
 -- PP-009: Add missing DB indexes for high-frequency query columns.
 --
 -- These indexes target the most commonly filtered/joined columns identified
--- during performance analysis.  Each uses CONCURRENTLY to avoid blocking
--- writes on production tables.
+-- during performance analysis.  All indexes use CONCURRENTLY via EXECUTE
+-- inside DO blocks to avoid blocking writes on production tables.
 --
 -- Index candidates (per the fault report):
 --   (tenant_id, status)   – plan gating, domain lookups
@@ -12,13 +12,21 @@
 --   (stripe_event_id)     – stripe webhook dedup (already covered by UNIQUE)
 --   (tenant_id, event_type) – metering aggregation
 --   (tenant_id, id)       – tenant-scoped lookups
+--
+-- NOTE: This migration MUST NOT be wrapped in a transaction block.
+-- CREATE INDEX CONCURRENTLY requires running outside any explicit transaction.
 
 -- =============================================================================
 -- 1. Composite index on email_queue (tenant_id, status)
 --    Used by: plan gate, queue status checks per tenant
 -- =============================================================================
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_email_queue_tenant_status
-    ON email_queue (tenant_id, status);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_email_queue_tenant_status') THEN
+    EXECUTE format('CREATE INDEX CONCURRENTLY idx_email_queue_tenant_status
+      ON email_queue (tenant_id, status)');
+  END IF;
+END $$;
 
 -- =============================================================================
 -- 2. Index on webhook_events (message_id)
@@ -26,10 +34,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_email_queue_tenant_status
 -- =============================================================================
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'webhook_events') THEN
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_webhook_events_message_id
-            ON webhook_events (message_id);
-    END IF;
+  IF to_regclass('public.webhook_events') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_webhook_events_message_id') THEN
+    EXECUTE format('CREATE INDEX CONCURRENTLY idx_webhook_events_message_id
+      ON webhook_events (message_id)');
+  END IF;
 END $$;
 
 -- =============================================================================
@@ -38,10 +47,11 @@ END $$;
 -- =============================================================================
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'audit_log') THEN
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_log_user_created
-            ON audit_log (user_id, created_at DESC);
-    END IF;
+  IF to_regclass('public.audit_logs') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_audit_logs_user_created') THEN
+    EXECUTE format('CREATE INDEX CONCURRENTLY idx_audit_logs_user_created
+      ON audit_logs (user_id, created_at DESC)');
+  END IF;
 END $$;
 
 -- =============================================================================
@@ -50,10 +60,11 @@ END $$;
 -- =============================================================================
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'domains') THEN
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_domains_domain
-            ON domains (domain);
-    END IF;
+  IF to_regclass('public.domains') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_domains_domain') THEN
+    EXECUTE format('CREATE INDEX CONCURRENTLY idx_domains_domain
+      ON domains (domain)');
+  END IF;
 END $$;
 
 -- =============================================================================
@@ -64,10 +75,11 @@ END $$;
 -- =============================================================================
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'metering_events') THEN
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_metering_events_tenant_type
-            ON metering_events (tenant_id, event_type);
-    END IF;
+  IF to_regclass('public.metering_events') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_metering_events_tenant_type') THEN
+    EXECUTE format('CREATE INDEX CONCURRENTLY idx_metering_events_tenant_type
+      ON metering_events (tenant_id, event_type)');
+  END IF;
 END $$;
 
 -- =============================================================================
@@ -75,20 +87,21 @@ END $$;
 -- =============================================================================
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'api_keys') THEN
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_api_keys_tenant_id
-            ON api_keys (tenant_id, id);
-    END IF;
+  IF to_regclass('public.api_keys') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_api_keys_tenant_id') THEN
+    EXECUTE format('CREATE INDEX CONCURRENTLY idx_api_keys_tenant_id
+      ON api_keys (tenant_id, id)');
+  END IF;
 END $$;
 
 -- =============================================================================
--- 7. Index on billing_plans / plans (tenant_id, status)
+-- 7. Index on subscriptions (tenant_id, status)
 --    Used by: plan gating queries
 -- =============================================================================
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'plans') THEN
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_plans_tenant_status
-            ON plans (tenant_id, status);
-    END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_subscriptions_tenant_status') THEN
+    EXECUTE format('CREATE INDEX CONCURRENTLY idx_subscriptions_tenant_status
+      ON subscriptions (tenant_id, status)');
+  END IF;
 END $$;

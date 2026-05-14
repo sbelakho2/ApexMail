@@ -6,7 +6,7 @@
 
 <header
   id="site-header"
-  class="fixed top-0 left-0 right-0 z-50 transition-all duration-300 bg-transparent border-b border-transparent"
+  class="sticky top-0 left-0 right-0 z-50 transition-all duration-300 bg-surface-50/95 backdrop-blur-md border-b border-surface-200/80"
 >
   <nav class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8" aria-label="Main navigation">
     <div class="flex items-center justify-between h-16 lg:h-20">
@@ -15,7 +15,7 @@
         <div class="w-8 h-8 rounded-sm bg-surface-950 flex items-center justify-center transition-transform group-hover:scale-105 border border-surface-800">
           <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
-        <span class="text-xl font-bold text-surface-950 tracking-tighter uppercase">ApexMail</span>
+        <span class="text-xl font-bold text-surface-950 tracking-tighter">ApexMail</span>
       </a>
 
       {# ── Desktop Navigation ─────────────────────── #}
@@ -23,7 +23,7 @@
         {# Product dropdown #}
         <div class="relative" data-dropdown="product">
           <button
-            class="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100"
+            class="flex items-center gap-1.5 px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100"
             aria-haspopup="menu"
             aria-expanded="false"
             data-state="closed"
@@ -32,13 +32,13 @@
             Product
             <svg class="w-4 h-4 transition-transform duration-150 dropdown-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-          <div class="hidden absolute top-full left-0 mt-1 w-72 p-1 bg-white rounded-sm border border-surface-950" data-dropdown-menu role="menu">
+          <div class="hidden absolute top-full left-0 mt-0 w-80 p-1 bg-surface-50 rounded-sm border border-surface-950 shadow-premium" data-dropdown-menu role="menu" aria-orientation="vertical" data-keyboard-nav="true">
             <a href="/features" {% if current_path_value == "/features" or current_path_value == "/features/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
               <div class="w-8 h-8 rounded-sm bg-surface-100 flex items-center justify-center text-surface-600 group-hover:text-white group-hover:bg-surface-800 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
               </div>
               <div>
-                <div class="font-bold text-surface-950 group-hover:text-white text-xs uppercase tracking-wider mb-0.5">Features</div>
+                <div class="font-bold text-surface-950 group-hover:text-white text-xs tracking-wider mb-0.5">Features</div>
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">Explore our complete feature set</div>
               </div>
             </a>
@@ -47,7 +47,7 @@
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               </div>
               <div>
-                <div class="font-bold text-surface-950 group-hover:text-white text-xs uppercase tracking-wider mb-0.5">Security</div>
+                <div class="font-bold text-surface-950 group-hover:text-white text-xs tracking-wider mb-0.5">Security</div>
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">Enterprise-grade protection</div>
               </div>
             </a>
@@ -56,7 +56,7 @@
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
               </div>
               <div>
-                <div class="font-bold text-surface-950 group-hover:text-white text-xs uppercase tracking-wider mb-0.5">Private Cloud</div>
+                <div class="font-bold text-surface-950 group-hover:text-white text-xs tracking-wider mb-0.5">Private Cloud</div>
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">Single-tenant deployments</div>
               </div>
             </a>
@@ -66,7 +66,7 @@
         {# Developers dropdown #}
         <div class="relative" data-dropdown="developers">
           <button
-            class="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100"
+            class="flex items-center gap-1.5 px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100"
             aria-haspopup="menu"
             aria-expanded="false"
             data-state="closed"
@@ -75,13 +75,13 @@
             Developers
             <svg class="w-4 h-4 transition-transform duration-150 dropdown-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-          <div class="hidden absolute top-full left-0 mt-2 w-80 p-2 bg-white rounded-sm border border-surface-200   shadow-surface-900/5" data-dropdown-menu role="menu">
+          <div class="hidden absolute top-full left-0 mt-0 w-80 p-1 bg-surface-50 rounded-sm border border-surface-950 shadow-premium" data-dropdown-menu role="menu" aria-orientation="vertical" data-keyboard-nav="true">
             <a href="/docs" {% if current_path_value == "/docs" or current_path_value == "/docs/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group" role="menuitem" tabindex="-1">
               <div class="w-8 h-8 rounded-sm bg-surface-100 flex items-center justify-center text-surface-600 group-hover:text-white group-hover:bg-surface-800 transition-colors">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
               </div>
               <div>
-                <div class="font-bold text-surface-950 group-hover:text-white text-xs uppercase tracking-wider mb-0.5">Documentation</div>
+                <div class="font-bold text-surface-950 group-hover:text-white text-xs tracking-wider mb-0.5">Documentation</div>
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">API reference & guides</div>
               </div>
             </a>
@@ -90,24 +90,35 @@
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
               </div>
               <div>
-                <div class="font-bold text-surface-950 group-hover:text-white text-xs uppercase tracking-wider mb-0.5">API Console</div>
+                <div class="font-bold text-surface-950 group-hover:text-white text-xs tracking-wider mb-0.5">API Console</div>
                 <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">Try the API console</div>
               </div>
             </a>
           </div>
         </div>
 
-        <a href="/pricing" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">Pricing</a>
-        <a href="/compliance" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">Compliance</a>
-        <a href="/private-cloud" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">Enterprise</a>
+        <a href="/pricing" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">Pricing</a>
+        <a href="/compliance" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">Compliance</a>
+        <a href="/private-cloud" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">Enterprise</a>
       </div>
 
       {# ── CTA Buttons ──────────────────────────────── #}
       <div class="hidden lg:flex items-center gap-3">
-        <a href="{{ config.extra.app_url }}/login" class="text-xs font-bold uppercase tracking-widest text-surface-600 hover:text-surface-950 transition-colors px-3 py-2 hover:bg-surface-100 rounded-sm">
+        {# Theme toggle #}
+        <button
+          id="theme-toggle"
+          data-theme-toggle
+          class="p-2 text-surface-600 hover:text-surface-950 rounded-sm hover:bg-surface-100 transition-colors"
+          aria-label="Toggle dark mode"
+          type="button"
+        >
+          <svg data-theme-icon="sun" xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg data-theme-icon="moon" xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="{{ config.extra.app_url }}/login" class="text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors px-3 py-2 hover:bg-surface-100 rounded-sm">
           Sign In
         </a>
-        <a href="{{ config.extra.app_url }}/signup" class="btn-primary">
+        <a href="{{ config.extra.app_url }}/signup" class="btn-primary uppercase">
           Get Started
         </a>
       </div>
@@ -132,10 +143,10 @@
   </nav>
 
   {# ── Mobile Menu ───────────────────────────────────── #}
-  <nav id="mobile-menu" class="hidden lg:hidden bg-white border-b border-surface-200 overflow-hidden" aria-label="Mobile navigation">
+  <nav id="mobile-menu" class="hidden lg:hidden bg-surface-50 border-b border-surface-200 overflow-hidden" aria-label="Mobile navigation">
     <div class="px-4 py-6 space-y-6">
       <div class="space-y-3">
-        <div class="text-xs font-bold text-surface-950 px-3">Product</div>
+        <div class="text-xs font-bold uppercase text-surface-950 px-3">Product</div>
         <div class="space-y-1">
           <a href="/features" {% if current_path_value == "/features" or current_path_value == "/features/" %}aria-current="page"{% endif %} class="flex items-center gap-3 p-4 rounded-sm hover:bg-surface-100 transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -153,7 +164,7 @@
       </div>
 
       <div class="space-y-3">
-        <div class="text-xs font-bold text-surface-950 px-3">Developers</div>
+        <div class="text-xs font-bold uppercase text-surface-950 px-3">Developers</div>
         <div class="space-y-1">
           <a href="/docs" {% if current_path_value == "/docs" or current_path_value == "/docs/" %}aria-current="page"{% endif %} class="flex items-center gap-3 p-4 rounded-sm hover:bg-surface-100 transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
@@ -166,15 +177,26 @@
         </div>
       </div>
 
-      <a href="/pricing" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %} class="block px-3 py-3 text-surface-950 font-medium hover:bg-surface-100 rounded-sm text-sm">Pricing</a>
-      <a href="/compliance" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %} class="block px-3 py-3 text-surface-950 font-medium hover:bg-surface-100 rounded-sm text-sm">Compliance</a>
-      <a href="/private-cloud" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="block px-3 py-3 text-surface-950 font-medium hover:bg-surface-100 rounded-sm text-sm">Enterprise</a>
+      <a href="/pricing" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %} class="block px-3 py-3 text-surface-950 font-medium uppercase hover:bg-surface-100 rounded-sm text-sm">Pricing</a>
+      <a href="/compliance" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %} class="block px-3 py-3 text-surface-950 font-medium uppercase hover:bg-surface-100 rounded-sm text-sm">Compliance</a>
+      <a href="/private-cloud" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="block px-3 py-3 text-surface-950 font-medium uppercase hover:bg-surface-100 rounded-sm text-sm">Enterprise</a>
 
       <div class="pt-6 border-t border-surface-200 space-y-3 px-3">
-        <a href="{{ config.extra.app_url }}/login" class="block w-full text-center py-3 text-surface-950 font-semibold border border-surface-200 rounded-sm hover:bg-surface-100 transition-colors text-sm">
+        <button
+          id="theme-toggle-mobile"
+          data-theme-toggle
+          class="flex items-center justify-center gap-2 w-full py-3 text-surface-950 font-semibold uppercase border border-surface-200 rounded-sm hover:bg-surface-100 transition-colors text-sm"
+          aria-label="Toggle dark mode"
+          type="button"
+        >
+          <svg data-theme-icon="sun" xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg data-theme-icon="moon" xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <span id="theme-toggle-label">Theme</span>
+        </button>
+        <a href="{{ config.extra.app_url }}/login" class="block w-full text-center py-3 text-surface-950 font-semibold uppercase border border-surface-200 rounded-sm hover:bg-surface-100 transition-colors text-sm">
           Sign In
         </a>
-        <a href="{{ config.extra.app_url }}/signup" class="block w-full btn-primary text-center py-3 text-sm">
+        <a href="{{ config.extra.app_url }}/signup" class="block w-full btn-primary text-center py-3 text-sm uppercase">
           Get Started Free
         </a>
       </div>

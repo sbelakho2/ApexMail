@@ -22,6 +22,7 @@ use crate::health_check::HealthCheckService;
 use crate::multi_region::MultiRegionService;
 use crate::replication::ReplicationService;
 use crate::types::*;
+use apexmail_lib::crypto::timing_safe_compare;
 
 // ── Error helper ───────────────────────────────────────────
 
@@ -48,25 +49,14 @@ pub struct AppState {
 
 // ── Auth middleware helper ──────────────────────────────────
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
-
 fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode> {
     let key = headers
         .get("x-api-key")
         .or_else(|| headers.get("x-internal-api-key"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let key_bytes = key.as_bytes();
-    if constant_time_eq(key_bytes, config.internal_api_key.as_bytes())
-        || constant_time_eq(key_bytes, config.admin_api_key.as_bytes())
+    if timing_safe_compare(key, &config.internal_api_key)
+        || timing_safe_compare(key, &config.admin_api_key)
     {
         Ok(())
     } else {
@@ -570,7 +560,7 @@ async fn regions_list(
     Query(q): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    let limit = q.limit.max(1).min(200);
+    let limit = q.limit.clamp(1, 200);
     let offset = q.offset.max(0);
     state
         .multi_region
@@ -762,7 +752,7 @@ async fn geo_rules_list(
     Query(q): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    let limit = q.limit.max(1).min(200);
+    let limit = q.limit.clamp(1, 200);
     let offset = q.offset.max(0);
     state
         .multi_region

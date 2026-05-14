@@ -1,16 +1,21 @@
 <!DOCTYPE html>
-<html lang="en" dir="ltr" id="top" data-theme="apex">
+<html lang="{{ lang | default(value=config.default_language) }}" dir="ltr" id="top" data-theme="apex" class="scroll-smooth">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
-  <meta name="theme-color" content="#000000" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
+  {# ── Dark Mode Detection (prevents white flash) ───── #}
+  <script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %}>
+    (function(){var e=localStorage.getItem('apexmail-theme');if(e==='dark'||(!e&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark')}})();
+  </script>
 
   {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
   {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.ttf", cachebust=true) %}
+  {% set fraunces_font_url = get_url(path="fonts/Fraunces-Variable.ttf", cachebust=true) %}
   {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
   {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
-  {% set giallo_css_url = get_url(path="giallo.css", cachebust=true) %}
   {% set site_js_url = get_url(path="js/apexmail-site.js", cachebust=true) %}
 
   <title>{% block title %}{{ config.title }}{% endblock title %}</title>
@@ -19,7 +24,14 @@
   {# ── Canonical & SEO ──────────────────────────────── #}
   {% block canonical_tag %}<link rel="canonical" href="{{ current_url | default(value=config.base_url) }}" />{% endblock canonical_tag %}
   {# ── Hreflang language alternates ────────────────── #}
-  <link rel="alternate" hreflang="en" href="{{ current_url | default(value=config.base_url) }}" />
+  {# Collect configured language codes from the languages map and include the default. #}
+  {% set_global supported_langs = [config.default_language] %}
+  {% for lcode, lang_cfg in config.languages %}
+    {% set_global supported_langs = supported_langs | concat(with=[lcode]) %}
+  {% endfor %}
+  {% for lcode in supported_langs | unique %}
+  <link rel="alternate" hreflang="{{ lcode }}" href="{{ current_url | default(value=config.base_url) }}" />
+  {% endfor %}
   <link rel="alternate" hreflang="x-default" href="{{ config.base_url }}" />
   <meta name="robots" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="googlebot" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
@@ -34,7 +46,7 @@
   <meta property="og:site_name" content="{{ config.extra.site_name }}" />
   <meta property="og:title" content="{% block og_title %}{{ config.title }}{% endblock og_title %}" />
   <meta property="og:description" content="{% block og_description %}{{ config.description }}{% endblock og_description %}" />
-  <meta property="og:image" content="{{ config.base_url }}{% block og_image %}{{ config.extra.og_image | replace(from='.svg', to='.png') }}{% endblock og_image %}" />
+  <meta property="og:image" content="{{ config.base_url }}{% block og_image %}{{ config.extra.og_image }}{% endblock og_image %}" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta property="og:image:alt" content="{% block og_image_alt %}{{ config.extra.site_name }} — Enterprise Email API{% endblock og_image_alt %}" />
@@ -43,7 +55,7 @@
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="{% block twitter_title %}{{ config.title }}{% endblock twitter_title %}" />
   <meta name="twitter:description" content="{% block twitter_description %}{{ config.description }}{% endblock twitter_description %}" />
-  <meta name="twitter:image" content="{{ config.base_url }}{{ config.extra.og_image | replace(from='.svg', to='.png') }}" />
+  <meta name="twitter:image" content="{{ config.base_url }}{{ config.extra.og_image }}" />
   <meta name="twitter:creator" content="{{ config.extra.twitter_handle }}" />
 
   {# ── Favicons ──────────────────────────────────────── #}
@@ -52,16 +64,15 @@
 
   {# ── Font Preloads ────────────────────────────────── #}
   <link rel="preload" href="{{ inter_font_url }}" as="font" type="font/woff2" crossorigin />
-  <link rel="preload" href="{{ mono_font_url }}" as="font" type="font/ttf" crossorigin />
 
   {# ── CSS ───────────────────────────────────────────── #}
+  {% set giallo_css_url = get_url(path="giallo.css", cachebust=true) %}
   <link rel="stylesheet" href="{{ styles_css_url }}" />
   <link rel="stylesheet" href="{{ no_js_css_url }}" />
-  {# giallo.css syntax highlighting inlined to reduce HTTP requests #}
-  <style>.z-code{color:#24292E;background-color:#FFFFFF}.z-hl{background-color:#F6F8FA}.giallo-ln{color:#1B1F234D}.z-comment{color:#6A737D}.z-constant{color:#005CC5}.z-entity{color:#6F42C1}.z-keyword{color:#D73A49}.z-storage{color:#D73A49}.z-string{color:#032F62}.z-support{color:#005CC5}.z-variable{color:#E36209}.z-carriage-return{color:#FAFBFC;background-color:#D73A49;font-style:italic;text-decoration:underline}.z-source{color:#032F62}.z-string.z-comment{color:#6A737D}.z-variable.z-language{color:#005CC5}.z-entity.z-name{color:#6F42C1}.z-storage.z-type{color:#D73A49}.z-meta.z-property-name{color:#005CC5}.z-variable.z-other{color:#24292E}.z-invalid.z-broken{color:#B31D28;font-style:italic}.z-invalid.z-deprecated{color:#B31D28;font-style:italic}.z-invalid.z-illegal{color:#B31D28;font-style:italic}.z-invalid.z-unimplemented{color:#B31D28;font-style:italic}.z-message.z-error{color:#B31D28}.z-source.z-regexp{color:#032F62}.z-string.z-regexp{color:#032F62}.z-support.z-constant{color:#005CC5}.z-support.z-variable{color:#005CC5}.z-meta.z-module-reference{color:#005CC5}.z-markup.z-heading{color:#005CC5;font-weight:bold}.z-markup.z-quote{color:#22863A}.z-markup.z-italic{color:#24292E;font-style:italic}.z-markup.z-bold{color:#24292E;font-weight:bold}.z-markup.z-underline{text-decoration:underline}.z-markup.z-strikethrough{text-decoration:line-through}.z-markup.z-deleted{color:#B31D28;background-color:#FFEEF0}.z-markup.z-inserted{color:#22863A;background-color:#F0FFF4}.z-markup.z-changed{color:#E36209;background-color:#FFEBDA}.z-markup.z-ignored{color:#F6F8FA;background-color:#005CC5}.z-markup.z-untracked{color:#F6F8FA;background-color:#005CC5}.z-meta.z-separator{color:#005CC5;font-weight:bold}.z-meta.z-output{color:#005CC5}.z-brackethighlighter.z-tag{color:#586069}.z-brackethighlighter.z-curly{color:#586069}.z-brackethighlighter.z-round{color:#586069}.z-brackethighlighter.z-square{color:#586069}.z-brackethighlighter.z-angle{color:#586069}.z-brackethighlighter.z-quote{color:#586069}.z-brackethighlighter.z-unmatched{color:#B31D28}.z-punctuation.z-definition.z-comment{color:#6A737D}.z-entity.z-name.z-constant{color:#005CC5}.z-variable.z-other.z-constant{color:#005CC5}.z-variable.z-other.z-enummember{color:#005CC5}.z-variable.z-parameter.z-function{color:#24292E}.z-entity.z-name.z-tag{color:#22863A}.z-storage.z-modifier.z-package{color:#24292E}.z-storage.z-modifier.z-import{color:#24292E}.z-storage.z-type.z-java{color:#24292E}.z-punctuation.z-definition.z-string{color:#032F62}.z-string.z-regexp.z-character-class{color:#032F62}.z-markup.z-inline.z-raw{color:#005CC5}.z-punctuation.z-definition.z-deleted{color:#B31D28;background-color:#FFEEF0}.z-punctuation.z-definition.z-inserted{color:#22863A;background-color:#F0FFF4}.z-punctuation.z-definition.z-changed{color:#E36209;background-color:#FFEBDA}.z-meta.z-diff.z-range{color:#6F42C1;font-weight:bold}.z-meta.z-diff.z-header{color:#005CC5}.z-string.z-other.z-link{color:#032F62;text-decoration:underline}.z-constant.z-character.z-escape{color:#032F62}.z-source.z-ruby.z-embedded{color:#032F62}.z-string.z-regexp.z-arbitrary-repitition{color:#032F62}.z-constant.z-character.z-escape{color:#22863A;font-weight:bold}.z-meta.z-diff.z-header.z-from-file{color:#B31D28;background-color:#FFEEF0}.z-meta.z-diff.z-header.z-to-file{color:#22863A;background-color:#F0FFF4}.z-constant.z-other.z-reference.z-link{color:#032F62;text-decoration:underline}.z-punctuation.z-definition.z-list.z-begin.z-markdown{color:#E36209}</style>
+  <link rel="stylesheet" href="{{ giallo_css_url }}" />
 
   {# ── Organization JSON-LD ─────────────────────────── #}
-  <script type="application/ld+json">
+  <script type="application/ld+json" {% if csp_nonce %}nonce="{{ csp_nonce }}"{% endif %}>
   {
     "@context": "https://schema.org",
     "@type": "Organization",
@@ -79,20 +90,25 @@
   {# ── Page-Specific Head Blocks ────────────────────── #}
   {% block head %}{% endblock head %}
 
+  {# ── Analytics / Tracking Pixel ────────────────────── #}
+  {% include "partials/analytics.html" %}
+
 </head>
 <body class="antialiased min-h-screen safe-area-inset-bottom flex flex-col">
-  <a href="#main-content" id="skip-to-content" class="skip-to-content" tabindex="1">Skip to main content</a>
+  <a href="#main-content" id="skip-to-content" class="skip-to-content top-0" tabindex="1">Skip to main content</a>
 
   {# ── Hidden state inputs for CSS-only interactivity ──── #}
   {# The checkbox pattern provides a no-JS fallback for mobile menu. #}
   {# JS enhancement (in apexmail-site.js) adds keyboard support.     #}
-  <input type="checkbox" id="nav-toggle" class="sr-only" aria-label="Toggle navigation menu" />
+  {# Uses off-screen positioning instead of sr-only to maintain      #}
+  {# keyboard focusability (clip-based sr-only can break Tab focus). #}
+  <input type="checkbox" id="nav-toggle" class="nav-toggle-input" aria-label="Toggle navigation menu" />
 
   {# ── Header ─────────────────────────────────────────── #}
   {% include "partials/header.html" %}
 
   {# ── Main Content ──────────────────────────────────── #}
-  <main id="main-content" class="flex-1" tabindex="-1">
+  <main id="main-content" class="flex-1 scroll-mt-16 lg:scroll-mt-20" tabindex="-1">
     {% block content %}{% endblock content %}
   </main>
 
@@ -100,7 +116,7 @@
   {% include "partials/footer.html" %}
 
   {# ── Cookie Consent ─────────────────────────────────── #}
-  {% include "partials/generated/cookie-consent-island.html" %}
+  {% include "partials/cookie-consent.html" %}
 
   {# ── Back to Top ─────────────────────────────────────── #}
   <a

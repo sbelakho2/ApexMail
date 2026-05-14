@@ -32,7 +32,7 @@
           </a>
         </div>
         <div>
-          <div class="rounded-sm border border-surface-700 bg-surface-950 overflow-hidden  ">
+          <div class="rounded-sm border border-surface-700 bg-surface-950 overflow-hidden">
             <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
               <div class="flex gap-1.5">
                 <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
@@ -41,7 +41,7 @@
               </div>
               <span class="text-xs text-surface-400 ml-2 font-mono font-medium">example.py</span>
             </div>
-            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto"><code>from apexmail import ApexMail
+            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>from apexmail import ApexMail
 
 client = ApexMail(api_key="am_live_xxx")
 
@@ -83,7 +83,7 @@ print(status.status)  # 'delivered'</code></pre>
           </a>
         </div>
         <div class="lg:order-1">
-          <div class="rounded-sm border border-surface-700 bg-surface-950 overflow-hidden  ">
+          <div class="rounded-sm border border-surface-700 bg-surface-950 overflow-hidden">
             <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
               <div class="flex gap-1.5">
                 <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
@@ -92,7 +92,7 @@ print(status.status)  # 'delivered'</code></pre>
               </div>
               <span class="text-xs text-surface-400 ml-2 font-mono font-medium">example.ts</span>
             </div>
-            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto"><code>// Handle GDPR requests automatically
+            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>// Handle GDPR requests automatically
 await apexmail.compliance.gdpr.createRequest({
   email: 'user@example.com',
   type: 'export', // or 'delete'
@@ -136,7 +136,7 @@ await apexmail.compliance.consent.record({
           </a>
         </div>
         <div>
-          <div class="rounded-sm border border-surface-200 bg-surface-900 overflow-hidden  ">
+          <div class="rounded-sm border border-surface-200 bg-surface-900 overflow-hidden">
             <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
               <div class="flex gap-1.5">
                 <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
@@ -145,7 +145,7 @@ await apexmail.compliance.consent.record({
               </div>
               <span class="text-xs text-surface-500 ml-2 font-mono font-medium">example.ts</span>
             </div>
-            <pre class="p-4 text-sm text-surface-300 font-mono overflow-x-auto"><code>// Analyze engagement timing before scheduling
+            <pre class="p-4 text-sm text-surface-300 font-mono overflow-x-auto max-w-full"><code>// Analyze engagement timing before scheduling
 const timing = await apexmail.insights.sendTime.analyze({
   campaignId: 'cmp_weekly_digest',
   timezone: 'America/New_York',
@@ -168,24 +168,24 @@ console.log(events); // delivered, opened, clicked...</code></pre>
       <!-- Email Grader -->
       <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
         <div>
-          <span class="text-sm font-semibold text-brand-600 uppercase tracking-wider">New</span>
+          <span class="text-sm font-semibold text-brand-500 tracking-wider">New</span>
           <h2 class="text-3xl font-bold text-surface-900 mt-2 mb-4">Email Grader</h2>
           <p class="text-lg text-surface-600 mb-6">Analyze your email infrastructure and content against industry best practices. Get a comprehensive deliverability score with specific, prioritized recommendations.</p>
           <ul class="space-y-3 mb-8">
             <li class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-green-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+              <svg class="w-5 h-5 text-success-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
               <span class="text-surface-700"><strong>DNS Health Check</strong> — MX, SPF, DKIM, DMARC record analysis with configuration recommendations</span>
             </li>
             <li class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-green-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+              <svg class="w-5 h-5 text-success-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
               <span class="text-surface-700"><strong>Authentication Strength</strong> — SPF alignment, DKIM key strength, DMARC policy enforcement grading</span>
             </li>
             <li class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-green-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+              <svg class="w-5 h-5 text-success-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
               <span class="text-surface-700"><strong>Content Analysis</strong> — Spam trigger detection, phishing indicators, and content quality scoring</span>
             </li>
             <li class="flex items-start gap-3">
-              <svg class="w-5 h-5 text-green-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+              <svg class="w-5 h-5 text-success-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
               <span class="text-surface-700"><strong>Reputation Monitoring</strong> — Domain blocklist checks with confidence-weighted scoring</span>
             </li>
           </ul>
@@ -195,16 +195,16 @@ console.log(events); // delivered, opened, clicked...</code></pre>
           </a>
         </div>
         <div>
-          <div class="rounded-sm border border-surface-700 bg-surface-950 overflow-hidden  ">
+          <div class="rounded-sm border border-surface-700 bg-surface-950 overflow-hidden">
             <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
               <div class="flex gap-1.5">
                 <span class="w-3 h-3 rounded-sm bg-brand-500"></span>
-                <span class="w-3 h-3 rounded-sm bg-yellow-500"></span>
-                <span class="w-3 h-3 rounded-sm bg-green-500"></span>
+                <span class="w-3 h-3 rounded-sm bg-warning-500"></span>
+                <span class="w-3 h-3 rounded-sm bg-success-500"></span>
               </div>
               <span class="text-xs text-surface-400 font-mono">terminal</span>
             </div>
-            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto"><code>curl -X POST https://api.apexmail.ee/v1/grader/check \
+            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>curl -X POST https://api.apexmail.ee/v1/grader/check \
   -H "Content-Type: application/json" \
   -d '{"domain": "example.com"}'</code></pre>
           </div>
@@ -217,7 +217,7 @@ console.log(events); // delivered, opened, clicked...</code></pre>
           <div>
             <div class="flex items-center gap-3 mb-6">
               <div class="w-10 h-10 rounded-sm bg-brand-100 flex items-center justify-center">
-                <svg class="w-5 h-5 text-brand-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg class="w-5 h-5 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
               </div>
@@ -229,38 +229,38 @@ console.log(events); // delivered, opened, clicked...</code></pre>
             <h4 class="font-semibold text-surface-950 mb-3">Key Capabilities</h4>
             <ul class="space-y-3 mb-8">
               <li class="flex items-start gap-3">
-                <svg class="w-5 h-5 text-brand-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
                 <span class="text-sm text-surface-600"><strong>Seed List Management</strong> — Provision and manage seed accounts across Gmail, Outlook, Yahoo, iCloud, AOL, and Zoho with automatic health monitoring.</span>
               </li>
               <li class="flex items-start gap-3">
-                <svg class="w-5 h-5 text-brand-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
                 <span class="text-sm text-surface-600"><strong>Provider Testing</strong> — Simultaneously test deliverability across 6 providers with automated SMTP sending and IMAP-based delivery verification.</span>
               </li>
               <li class="flex items-start gap-3">
-                <svg class="w-5 h-5 text-brand-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                <span class="text-sm text-surface-600"><strong>Placement Scoring</strong> — Composite score weighing inbox rate (40%), promotions (20%), spam penalty (25%), absent penalty (15%), auth pass rate (20%), and delivery speed (10%).</span>
+                <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                <span class="text-sm text-surface-600"><strong>Placement Scoring</strong> — Composite score weighing inbox rate (50%), promotions (10%), spam penalty (15%), absent penalty (10%), auth pass rate (10%), and delivery speed (5%).</span>
               </li>
               <li class="flex items-start gap-3">
-                <svg class="w-5 h-5 text-brand-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                <svg class="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
                 <span class="text-sm text-surface-600"><strong>Retention Analytics</strong> — Historical trend analysis with per-provider breakdowns to track deliverability improvements over time.</span>
               </li>
             </ul>
-            <a href="/docs/inbox-placement" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
+            <a href="/inbox-placement/" class="inline-flex items-center gap-2 text-surface-950 font-semibold hover:text-brand-700 transition-colors">
               Explore the API
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
             </a>
           </div>
           <div>
-            <div class="rounded-sm border border-surface-700 bg-surface-950 overflow-hidden  ">
+            <div class="rounded-sm border border-surface-700 bg-surface-950 overflow-hidden">
               <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
                 <div class="flex gap-1.5">
                   <span class="w-3 h-3 rounded-sm bg-brand-500"></span>
-                  <span class="w-3 h-3 rounded-sm bg-yellow-500"></span>
-                  <span class="w-3 h-3 rounded-sm bg-green-500"></span>
+                  <span class="w-3 h-3 rounded-sm bg-warning-500"></span>
+                  <span class="w-3 h-3 rounded-sm bg-success-500"></span>
                 </div>
                 <span class="text-xs text-surface-400 font-mono">curl</span>
               </div>
-              <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto"><code>curl -X POST https://api.apexmail.com/v1/inbox-placement/tests \
+              <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>curl -X POST https://api.apexmail.ee/v1/inbox-placement/tests \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{

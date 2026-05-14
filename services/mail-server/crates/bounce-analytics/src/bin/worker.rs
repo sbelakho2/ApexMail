@@ -74,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let elapsed = start.elapsed();
-        let sleep_duration = Duration::from_secs(config.aggregation_interval_secs)
-            .saturating_sub(elapsed);
+        let sleep_duration =
+            Duration::from_secs(config.aggregation_interval_secs).saturating_sub(elapsed);
 
         info!(
             elapsed_ms = elapsed.as_millis(),

@@ -22,17 +22,17 @@ import sys
 SYSTEM_PROMPT = """You are ApexMail Agent — the AI support agent for the ApexMail email platform (Bel Consulting OÜ, Tallinn, Estonia, founded 2022).
 You have access to the customer's account context and can help with billing, technical issues, and general questions.
 
-ApexMail Pricing (effective March 2026):
+ApexMail Pricing (effective May 2026):
 - Free: $0, 30,000 emails/mo, 300,000 API calls/mo, 1 domain, 1 team, 7 days retention
 - Starter: $25/mo, 50,000 emails/mo, 500,000 API calls/mo, 5 domains, 5 team, 30 days retention
-- Pro: $65/mo, 150,000 emails/mo, 2,000,000 API calls/mo, 25 domains, 10 team, 60 days retention, A/B testing, send-time optimization
+- Pro: $65/mo, 150,000 emails/mo, 2,000,000 API calls/mo, 25 domains, 10 team, 60 days retention, send-time optimization, no A/B testing
 - Growth: $150/mo, 500,000 emails/mo, 5,000,000 API calls/mo, 100 domains, 25 team, 90 days retention, 1 dedicated IP included
 - Scale: $350/mo, 2,000,000 emails/mo, 20,000,000 API calls/mo, unlimited domains, 50 team, 365 days retention, 3 dedicated IPs included, SSO/SAML
 - Enterprise: $3,000/mo, 5,000,000 emails/mo, unlimited API calls, unlimited domains and team, 730 days retention, 10 dedicated IPs included, HIPAA/SOC2/white-label
 
 Overages: $0.40 per 1,000 emails; $0.10 per 1,000 API calls (first 100,000 API calls free on all plans)
 Dedicated IP add-on: $30/mo on Pro+ (Growth includes 1, Scale 3, Enterprise 10)
-Annual billing: 2 months free (~17% discount) — annual prices: Starter $250, Pro $650, Growth $1,500, Scale $3,500, Enterprise $8,000
+Annual billing: 2 months free (~17% discount) — annual prices: Starter $250, Pro $650, Growth $1,500, Scale $3,500, Enterprise $30,000
 
 Be helpful, accurate, and concise. For account-specific actions, use tool calls."""
 
@@ -165,9 +165,9 @@ TEST_CASES = [
     },
     {
         "name": "feature_ab_testing",
-        "input": "Do I get A/B testing on Pro?",
-        "required": ["Pro", "A/B"],
-        "forbidden": ["Starter"],
+        "input": "Which plan includes A/B testing?",
+        "required": ["Growth", "A/B"],
+        "forbidden": ["Pro includes"],
     },
     {
         "name": "company_info",

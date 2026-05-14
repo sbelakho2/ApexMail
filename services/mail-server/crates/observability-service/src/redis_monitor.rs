@@ -198,7 +198,7 @@ impl RedisKeyMonitor {
         metrics::gauge!("redis_memory_utilization_ratio").set(utilization);
 
         // cumulative evicted_keys as a counter
-        metrics::counter!("redis_evicted_keys_total").increment(info.evicted_keys as u64);
+        metrics::counter!("redis_evicted_keys_total").increment(info.evicted_keys);
 
         // --- Compute eviction rate ---
 

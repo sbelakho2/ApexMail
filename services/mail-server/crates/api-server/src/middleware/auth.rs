@@ -10,7 +10,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use chrono::{DateTime, Utc};
 use deadpool_redis::redis::{self, AsyncCommands};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, TokenData, Validation};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -153,6 +153,37 @@ fn tenant_id_from_request_path(path: &str) -> Option<&str> {
     None
 }
 
+/// Extract tenant ID from X-Tenant-ID header if present.
+fn tenant_id_from_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Verify that the authenticated user is actually a member of the claimed tenant.
+/// Queries the database to prevent tenant impersonation via header injection.
+async fn verify_tenant_membership(
+    user_id: &str,
+    tenant_id: &str,
+    db: &sqlx::PgPool,
+) -> Result<bool, ApiError> {
+    let exists: Option<(i64,)> = sqlx::query_as(
+        "SELECT COUNT(*) FROM user_tenant_membership WHERE user_id = $1 AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "tenant membership check failed");
+        ApiError::Internal("authentication error".into())
+    })?;
+
+    Ok(exists.is_some_and(|(count,)| count > 0))
+}
+
 fn enforce_api_key_tenant_binding(user: &AuthUser, request_path: &str) -> Result<(), ApiError> {
     if user.tenant_id == "system" {
         return Ok(());
@@ -245,20 +276,20 @@ async fn authenticate_api_key(
         }
     }
 
-    // This prevents offline brute-force if the database is compromised.
-    let key_hash = apexmail_lib::hash_api_key_with_secret(key, &state.config.api_key_hash_secret);
+    // Compute all hash variants: Argon2id (preferred), HMAC-SHA256, SHA-256 (legacy)
+    let hmac_hash = apexmail_lib::hash_api_key_with_secret(key, &state.config.api_key_hash_secret);
     let legacy_hash = apexmail_lib::hash_api_key(key);
 
-    // Check Redis cache first
-    if let Ok(cached) = lookup_cached_api_key(&key_hash, state).await {
+    // Check Redis cache (try HMAC first, then legacy SHA-256)
+    if let Ok(cached) = lookup_cached_api_key(&hmac_hash, state).await {
         enforce_api_key_tenant_binding(&cached, request_path)?;
         if let Some(api_key_id) = cached.api_key_id.as_deref() {
-            touch_api_key_last_used(api_key_id, &key_hash, state).await?;
+            touch_api_key_last_used(api_key_id, &hmac_hash, state).await?;
         }
         return Ok(cached);
     }
 
-    if legacy_hash != key_hash {
+    if legacy_hash != hmac_hash {
         if let Ok(cached) = lookup_cached_api_key(&legacy_hash, state).await {
             enforce_api_key_tenant_binding(&cached, request_path)?;
             if let Some(api_key_id) = cached.api_key_id.as_deref() {
@@ -268,11 +299,11 @@ async fn authenticate_api_key(
         }
     }
 
-    // DB look-up (try HMAC hash first, fall back to legacy SHA-256 for migration)
+    // DB look-up: try HMAC hash first, fall back to legacy SHA-256, then Argon2id
     let row = sqlx::query_as::<_, ApiKeyRow>(
         "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
     )
-    .bind(&key_hash)
+    .bind(&hmac_hash)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| {
@@ -281,19 +312,40 @@ async fn authenticate_api_key(
     })?;
 
     // Fall back to legacy SHA-256 hash for keys created before migration
-    let row = match row {
-        Some(r) => r,
-        None => sqlx::query_as::<_, ApiKeyRow>(
-            "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
-        )
-        .bind(&legacy_hash)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "api key lookup failed (legacy)");
-            ApiError::Internal("authentication error".into())
-        })?
-        .ok_or_else(|| ApiError::Unauthorized("invalid API key".into()))?,
+    let (row, used_legacy_hash) = match row {
+        Some(r) => (r, false),
+        None => {
+            // Try legacy SHA-256 lookup
+            let legacy_row = sqlx::query_as::<_, ApiKeyRow>(
+                "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE key_hash = $1",
+            )
+            .bind(&legacy_hash)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "api key lookup failed (legacy)");
+                ApiError::Internal("authentication error".into())
+            })?;
+
+            match legacy_row {
+                Some(r) => (r, true),
+                None => {
+                    // Last resort: try Argon2id hash verification if the key was
+                    // hashed with Argon2id and stored in a different key_hash column.
+                    //
+                    // Fetch all active keys for this scope and verify individually
+                    // (expensive, but only happens when the key is not found via
+                    // the fast HMAC path — typically once per key creation).
+                    return authenticate_api_key_argon2_fallback(
+                        key,
+                        &state.db,
+                        request_path,
+                        state,
+                    )
+                    .await;
+                }
+            }
+        }
     };
 
     // Check expiry
@@ -318,12 +370,156 @@ async fn authenticate_api_key(
 
     enforce_api_key_tenant_binding(&auth_user, request_path)?;
 
-    // Cache in Redis (fire-and-forget)
+    // Re-hash legacy SHA-256 key on successful authentication (upgrade to Argon2id)
+    if used_legacy_hash {
+        let hash_to_store = row.key_hash.clone();
+        tokio::spawn(upgrade_api_key_hash(
+            row.id.clone(),
+            key.to_string(),
+            hash_to_store,
+            state.db.clone(),
+        ));
+        tracing::info!(
+            api_key_id = %row.id,
+            "Legacy API key authenticated — spawning background re-hash to Argon2id"
+        );
+    }
+
+    // Cache in Redis (fire-and-forget) using the current stored hash as key
     cache_api_key(&row.key_hash, &auth_user, state).await;
 
     touch_api_key_last_used(&row.id, &row.key_hash, state).await?;
 
     Ok(auth_user)
+}
+
+/// Fallback authentication for Argon2id-hashed API keys.
+/// Loads all active keys, tries Argon2id verification against each,
+/// and re-hashes to HMAC-SHA256 for fast future lookups.
+async fn authenticate_api_key_argon2_fallback(
+    key: &str,
+    db: &sqlx::PgPool,
+    request_path: &str,
+    state: &AppState,
+) -> Result<AuthUser, ApiError> {
+    use apexmail_lib::detect_api_key_hash_version;
+
+    // Scan all active keys (limited scope — only runs when HMAC lookup fails)
+    let rows = sqlx::query_as::<_, ApiKeyRow>(
+        "SELECT id, tenant_id, key_hash, scopes, expires_at FROM api_keys WHERE expires_at IS NULL OR expires_at > NOW()",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "api key argon2 fallback lookup failed");
+        ApiError::Internal("authentication error".into())
+    })?;
+
+    for row in rows {
+        let version = detect_api_key_hash_version(&row.key_hash);
+        tracing::debug!(
+            api_key_id = %row.id,
+            hash_version = %version,
+            "Checking API key hash during fallback scan"
+        );
+
+        // Try Argon2id verification
+        let matched = match version {
+            apexmail_lib::ApiKeyHashVersion::Argon2id => {
+                apexmail_lib::verify_api_key_hash(key, &row.key_hash).unwrap_or(false)
+            }
+            _ => continue, // Already tried HMAC and SHA-256
+        };
+
+        if !matched {
+            continue;
+        }
+
+        // Check expiry
+        if let Some(exp) = row.expires_at {
+            if exp < Utc::now() {
+                continue;
+            }
+        }
+
+        let scopes: Vec<String> = serde_json::from_value(row.scopes.clone()).map_err(|e| {
+            tracing::warn!(error = %e, api_key_id = %row.id, "malformed scopes in api_keys table");
+            ApiError::Internal("invalid API key scopes configuration".into())
+        })?;
+
+        let auth_user = AuthUser {
+            tenant_id: row.tenant_id.clone(),
+            user_id: None,
+            api_key_id: Some(row.id.clone()),
+            session_id: None,
+            scopes,
+        };
+
+        enforce_api_key_tenant_binding(&auth_user, request_path)?;
+
+        // Upgrade: re-hash to HMAC-SHA256 for fast future lookups
+        let new_hash =
+            apexmail_lib::hash_api_key_with_secret(key, &state.config.api_key_hash_secret);
+
+        if let Err(e) = sqlx::query("UPDATE api_keys SET key_hash = $1 WHERE id = $2")
+            .bind(&new_hash)
+            .bind(&row.id)
+            .execute(db)
+            .await
+        {
+            tracing::warn!(
+                api_key_id = %row.id,
+                error = %e,
+                "Failed to upgrade Argon2id key hash to HMAC-SHA256"
+            );
+        } else {
+            tracing::info!(
+                api_key_id = %row.id,
+                "Upgraded Argon2id API key hash to HMAC-SHA256 for fast lookups"
+            );
+        }
+
+        cache_api_key(&new_hash, &auth_user, state).await;
+        touch_api_key_last_used(&row.id, &new_hash, state).await?;
+
+        return Ok(auth_user);
+    }
+
+    Err(ApiError::Unauthorized("invalid API key".into()))
+}
+
+/// Background task: upgrade a legacy SHA-256 API key hash to Argon2id.
+async fn upgrade_api_key_hash(
+    api_key_id: String,
+    raw_key: String,
+    _old_hash: String,
+    db: sqlx::PgPool,
+) {
+    match apexmail_lib::hash_api_key_argon2(&raw_key) {
+        Ok(new_hash) => {
+            match sqlx::query("UPDATE api_keys SET key_hash = $1 WHERE id = $2")
+                .bind(&new_hash)
+                .bind(&api_key_id)
+                .execute(&db)
+                .await
+            {
+                Ok(_) => tracing::info!(
+                    api_key_id = %api_key_id,
+                    "API key hash upgraded from SHA-256 to Argon2id"
+                ),
+                Err(e) => tracing::error!(
+                    api_key_id = %api_key_id,
+                    error = %e,
+                    "Failed to upgrade API key hash to Argon2id"
+                ),
+            }
+        }
+        Err(e) => tracing::error!(
+            api_key_id = %api_key_id,
+            error = %e,
+            "Failed to compute Argon2id hash for API key upgrade"
+        ),
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -383,7 +579,7 @@ async fn lookup_cached_api_key(key_hash: &str, state: &AppState) -> Result<AuthU
                     // as invalid. Previously map_or(true, ...) caused None user_id
                     // to always be treated as invalid, evicting valid cache entries.
                     let is_invalid = user.tenant_id.is_empty()
-                        || user.user_id.as_deref().map_or(false, |id| id.is_empty());
+                        || user.user_id.as_deref().is_some_and(|id| id.is_empty());
                     if is_invalid {
                         tracing::warn!(
                             cache_key,
@@ -557,9 +753,7 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
 
-    let key = DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes())
-        .map_err(|e| ApiError::Internal(format!("invalid JWT public key configuration: {e}")))?;
-    let token_data = decode::<JwtClaims>(token, &key, &validation)?;
+    let token_data = decode_jwt_with_rotation(token, &state.config, &validation)?;
 
     let claims = token_data.claims;
 
@@ -637,6 +831,36 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
     })
 }
 
+pub(crate) fn decode_jwt_with_rotation(
+    token: &str,
+    config: &crate::config::Config,
+    validation: &Validation,
+) -> Result<TokenData<JwtClaims>, ApiError> {
+    let mut saw_valid_key = false;
+    let mut last_decode_error = None;
+
+    for public_key_pem in config.jwt_verification_public_keys() {
+        let Ok(key) = DecodingKey::from_rsa_pem(public_key_pem.as_bytes()) else {
+            continue;
+        };
+        saw_valid_key = true;
+        match decode::<JwtClaims>(token, &key, validation) {
+            Ok(token_data) => return Ok(token_data),
+            Err(error) => last_decode_error = Some(error),
+        }
+    }
+
+    if !saw_valid_key {
+        return Err(ApiError::Internal(
+            "invalid JWT public key configuration".into(),
+        ));
+    }
+
+    Err(last_decode_error
+        .map(ApiError::from)
+        .unwrap_or_else(|| ApiError::Unauthorized("invalid token".into())))
+}
+
 /// Check if a JWT has been blacklisted (revoked).
 async fn is_token_blacklisted(token: &str, state: &AppState) -> Result<bool, ApiError> {
     let key = token_blacklist_key(token);
@@ -689,6 +913,59 @@ pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError
         }
     }
     Ok(())
+}
+
+// ─── Header-based tenant binding enforcement ───────────────────
+
+/// Middleware that enforces tenant binding from X-Tenant-ID header.
+/// After the user is authenticated, this checks that if an X-Tenant-ID
+/// header is present, the authenticated user belongs to that tenant.
+pub async fn enforce_tenant_header_binding(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    // Extract the tenant_id header if present
+    let header_tenant_id = tenant_id_from_header(req.headers());
+
+    if let Some(claimed_tenant_id) = header_tenant_id {
+        // Check if an AuthUser is already in extensions
+        if let Some(auth_user) = req.extensions().get::<AuthUser>() {
+            // If the user is a system admin, allow cross-tenant access
+            if auth_user.tenant_id != "system" {
+                // If the user's own tenant doesn't match the claimed tenant,
+                // verify DB-level membership
+                if auth_user.tenant_id != claimed_tenant_id {
+                    if let Some(ref user_id) = auth_user.user_id {
+                        let is_member =
+                            verify_tenant_membership(user_id, &claimed_tenant_id, &state.db)
+                                .await?;
+
+                        if !is_member {
+                            tracing::warn!(
+                                user_id = %user_id,
+                                auth_tenant_id = %auth_user.tenant_id,
+                                claimed_tenant_id = %claimed_tenant_id,
+                                "X-Tenant-ID header injection attempt blocked"
+                            );
+                            return Err(ApiError::Forbidden("tenant access denied".into()));
+                        }
+                    } else {
+                        // API key auth without user_id — cannot verify cross-tenant
+                        tracing::warn!(
+                            api_key_id = ?auth_user.api_key_id,
+                            auth_tenant_id = %auth_user.tenant_id,
+                            claimed_tenant_id = %claimed_tenant_id,
+                            "X-Tenant-ID header with API key without user_id — rejected"
+                        );
+                        return Err(ApiError::Forbidden("tenant access denied".into()));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(next.run(req).await)
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -861,7 +1138,7 @@ mod tests {
         mac.update(nonce.as_bytes());
         let sig = mac.finalize().into_bytes();
         let sig_b64 =
-            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &sig);
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig);
         let token = format!("{nonce_b64}.{sig_b64}");
 
         let mut headers = HeaderMap::new();
@@ -1166,7 +1443,7 @@ mod tests {
         // The validation predicate used in lookup_cached_api_key:
         // L-05: map_or(false, ...) so None user_id is NOT invalid.
         let is_invalid =
-            user.tenant_id.is_empty() || user.user_id.as_deref().map_or(false, |id| id.is_empty());
+            user.tenant_id.is_empty() || user.user_id.as_deref().is_some_and(|id| id.is_empty());
         assert!(
             is_invalid,
             "cached API key with empty tenant_id must be flagged as invalid and evicted"
@@ -1185,7 +1462,7 @@ mod tests {
             scopes: vec!["*".into()],
         };
         let is_invalid =
-            user.tenant_id.is_empty() || user.user_id.as_deref().map_or(false, |id| id.is_empty());
+            user.tenant_id.is_empty() || user.user_id.as_deref().is_some_and(|id| id.is_empty());
         assert!(
             is_invalid,
             "cached API key with empty user_id must be flagged as invalid and evicted"
@@ -1208,7 +1485,7 @@ mod tests {
         // user_id is None → .as_deref() returns None → .map_or(false, ...) returns false
         // This is correct: API key authentication legitimately has user_id = None.
         let is_invalid =
-            user.tenant_id.is_empty() || user.user_id.as_deref().map_or(false, |id| id.is_empty());
+            user.tenant_id.is_empty() || user.user_id.as_deref().is_some_and(|id| id.is_empty());
         assert!(
             !is_invalid,
             "API key cache entries with None user_id must NOT be evicted (L-05 fix)"

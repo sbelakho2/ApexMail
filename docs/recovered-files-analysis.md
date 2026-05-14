@@ -2,6 +2,8 @@
 
 > Generated from deep read of all 13 recovered files (25,120 lines, ~1.7 MB total)
 
+> Historical note: this document records stale recovered schemas for audit and migration context. It is not a pricing source of truth; use `docs/pricing.md` for current plan prices, limits, overages, and feature gates.
+
 ---
 
 ## CRITICAL FINDING: Two Conflicting Pricing Schemas

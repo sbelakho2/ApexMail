@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 
 use crate::error::ApiError;
 use crate::middleware::rate_limiter::extract_public_client_ip;
+use crate::routes::csrf::validate_form_csrf;
 use crate::state::AppState;
 
 const SYSTEM_TENANT_ID: &str = "system_internal_tenant01";
@@ -41,6 +42,9 @@ async fn forgot_password(
     headers: HeaderMap,
     Json(body): Json<ForgotPasswordRequest>,
 ) -> Result<Json<ForgotPasswordResponse>, ApiError> {
+    // Validate CSRF token from X-CSRF-Token header (auth form protection)
+    validate_form_csrf(&headers, &state.config.csrf_secret)?;
+
     // Validate email
     let email = body.email.trim().to_lowercase();
     if email.is_empty() || email.len() > 254 || !email.contains('@') {
@@ -59,33 +63,54 @@ async fn forgot_password(
             "unknown".to_string()
         });
 
-    let rate_key = format!("apexmail:forgot_password_rate:{client_ip}");
+    // F-11: Dual rate-limiting — IP-based and email-based.
+    // IP-based prevents single-source flooding; email-based prevents
+    // multi-IP botnet attacks targeting a specific user's inbox.
     let window_secs: u64 = 15 * 60; // 15 minutes
-    let max_requests: i64 = 5;
+    let max_ip_requests: i64 = 5;
+    let max_email_requests: i64 = 3;
 
     if let Ok(mut conn) = state.redis.get().await {
+        let ip_rate_key = format!("apexmail:forgot_password_rate:ip:{client_ip}");
+        let email_rate_key = format!("apexmail:forgot_password_rate:email:{}", &email);
+
         // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
         // The script atomically increments the counter and sets expiry on first creation.
+        // Checks both IP and email keys; denies if either exceeds its limit.
         let count: i64 = deadpool_redis::redis::Script::new(
             r#"
-                local key = KEYS[1]
-                local max_requests = tonumber(ARGV[1])
-                local window_secs = tonumber(ARGV[2])
-                local count = redis.call('INCR', key)
-                if count == 1 then
-                    redis.call('EXPIRE', key, window_secs)
+                local ip_key = KEYS[1]
+                local email_key = KEYS[2]
+                local max_ip = tonumber(ARGV[1])
+                local max_email = tonumber(ARGV[2])
+                local window_secs = tonumber(ARGV[3])
+
+                local ip_count = redis.call('INCR', ip_key)
+                if ip_count == 1 then
+                    redis.call('EXPIRE', ip_key, window_secs)
                 end
-                return count
+
+                local email_count = redis.call('INCR', email_key)
+                if email_count == 1 then
+                    redis.call('EXPIRE', email_key, window_secs)
+                end
+
+                if ip_count > max_ip or email_count > max_email then
+                    return 1
+                end
+                return 0
             "#,
         )
-        .key(&rate_key)
-        .arg(max_requests)
+        .key(&ip_rate_key)
+        .key(&email_rate_key)
+        .arg(max_ip_requests)
+        .arg(max_email_requests)
         .arg(window_secs)
-        .invoke_async(&mut *conn)
+        .invoke_async::<i64>(&mut *conn)
         .await
-        .unwrap_or(1);
+        .unwrap_or(0);
 
-        if count > max_requests {
+        if count > 0 {
             return Err(ApiError::RateLimited);
         }
     }
@@ -135,13 +160,13 @@ async fn forgot_password(
         let safe_link = html_escape(&reset_link);
         let html_body = format!(
             r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:sans-serif;line-height:1.6;color:#1a1a1a;max-width:560px;margin:0 auto;padding:24px">
-<h2 style="color:#2563EB">Reset Your Password</h2>
+<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
+<h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Reset Your Password</h2>
 <p>We received a request to reset the password for <strong>{safe_email}</strong>.</p>
-<p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#2563EB;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Reset Password</a></p>
-<p style="font-size:13px;color:#666">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p>
-<hr style="border:none;border-top:1px solid #e5e5e5;margin:24px 0"/>
-<p style="font-size:12px;color:#999">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999">apexmail.ee</a></p>
+<p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Reset Password</a></p>
+<p style="font-size:13px;color:#71717a">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p>
+<hr style="border:none;border-top:1px solid #000;margin:24px 0"/>
+<p style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:0.05em">&copy; 2026 ApexMail &middot; <a href="https://apexmail.ee" style="color:#999;text-decoration:none">apexmail.ee</a></p>
 </body></html>"#,
         );
         let text_body = format!(

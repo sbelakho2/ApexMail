@@ -2,6 +2,8 @@
 //!
 //! gRPC/Protobuf definitions for inter-service communication.
 
+#![deny(unsafe_code)]
+#![allow(clippy::large_enum_variant)]
 use prost::Message;
 
 /// Generated protobuf types and gRPC service definitions

@@ -199,8 +199,10 @@ mod tests {
 
     #[test]
     fn test_decay() {
-        let mut rep = ReputationScore::default();
-        rep.score = 20;
+        let mut rep = ReputationScore {
+            score: 20,
+            ..Default::default()
+        };
         rep.decay_toward_neutral(5);
         assert_eq!(rep.score, 25);
 

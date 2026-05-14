@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 pub mod bot_detection;
 pub mod campaign_autopilot;
 pub mod churn_prediction;
@@ -13,3 +14,6 @@ pub mod reply_tracking;
 pub mod send_time_optimizer;
 pub mod subject_line_analyzer;
 pub mod types;
+
+pub use clickhouse_engine::ClickHouseEngine;
+pub use query_engine::{QueryEngine, QueryError};

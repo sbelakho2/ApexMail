@@ -290,7 +290,7 @@ fn has_mixed_scripts(host: &str) -> bool {
         }
     }
 
-    (has_latin && has_cyrillic) || (has_latin && has_greek) || (has_cyrillic && has_greek)
+    (has_greek || has_cyrillic) && has_latin || has_cyrillic && has_greek
 }
 
 // ---------------------------------------------------------------------------
@@ -620,11 +620,11 @@ mod tests {
 
     #[test]
     fn test_max_redirect_hops_constant() {
-        assert!(
+        const _: () = assert!(
             MAX_REDIRECT_HOPS >= 5,
             "Should allow at least 5 redirect hops"
         );
-        assert!(
+        const _: () = assert!(
             MAX_REDIRECT_HOPS <= 20,
             "Should cap redirect hops to avoid infinite loops"
         );

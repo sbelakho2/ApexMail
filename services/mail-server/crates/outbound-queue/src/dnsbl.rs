@@ -169,17 +169,15 @@ impl DnsblCircuitBreaker {
         }
 
         state.consecutive_failures = state.consecutive_failures.saturating_add(1);
-        if state.consecutive_failures >= self.failure_threshold {
-            if state.opened_at == 0 {
-                state.opened_at = chrono::Utc::now().timestamp();
-                state.half_open_trial_in_progress = false;
-                warn!(
-                    dnsbl_zone = zone,
-                    consecutive_failures = state.consecutive_failures,
-                    cooldown_secs = self.cooldown.as_secs(),
-                    "DNSBL circuit breaker opened for zone"
-                );
-            }
+        if state.consecutive_failures >= self.failure_threshold && state.opened_at == 0 {
+            state.opened_at = chrono::Utc::now().timestamp();
+            state.half_open_trial_in_progress = false;
+            warn!(
+                dnsbl_zone = zone,
+                consecutive_failures = state.consecutive_failures,
+                cooldown_secs = self.cooldown.as_secs(),
+                "DNSBL circuit breaker opened for zone"
+            );
         }
     }
 
@@ -590,6 +588,32 @@ impl Default for DnsblChecker {
     }
 }
 
+/// Test-only constructor allowing injection of a custom DNS resolver.
+///
+/// This enables tests to use a mock DNS server instead of making real
+/// network queries, keeping tests self-contained and deterministic.
+#[cfg(test)]
+impl DnsblChecker {
+    pub fn with_resolver(resolver: TokioAsyncResolver) -> Self {
+        Self {
+            resolver,
+            circuit_breaker: Arc::new(DnsblCircuitBreaker::from_env()),
+            query_timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_resolver_and_cb(
+        resolver: TokioAsyncResolver,
+        circuit_breaker: Arc<DnsblCircuitBreaker>,
+    ) -> Self {
+        Self {
+            resolver,
+            circuit_breaker,
+            query_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,31 +670,5 @@ mod tests {
         assert_eq!(state.consecutive_failures, 0);
         assert_eq!(state.opened_at, 0);
         assert!(!state.half_open_trial_in_progress);
-    }
-}
-
-/// Test-only constructor allowing injection of a custom DNS resolver.
-///
-/// This enables tests to use a mock DNS server instead of making real
-/// network queries, keeping tests self-contained and deterministic.
-#[cfg(test)]
-impl DnsblChecker {
-    pub fn with_resolver(resolver: TokioAsyncResolver) -> Self {
-        Self {
-            resolver,
-            circuit_breaker: Arc::new(DnsblCircuitBreaker::from_env()),
-            query_timeout: Duration::from_secs(5),
-        }
-    }
-
-    pub fn with_resolver_and_cb(
-        resolver: TokioAsyncResolver,
-        circuit_breaker: Arc<DnsblCircuitBreaker>,
-    ) -> Self {
-        Self {
-            resolver,
-            circuit_breaker,
-            query_timeout: Duration::from_secs(5),
-        }
     }
 }

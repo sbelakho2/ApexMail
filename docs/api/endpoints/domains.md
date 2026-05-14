@@ -6,18 +6,18 @@ Manage sending domains, DNS verification, and advanced email authentication.
 
 | Method | Endpoint | Description |
 | ------ | -------- | ----------- |
-| POST | `/domains` | Add a new domain |
-| GET | `/domains` | List all domains |
-| GET | `/domains/:id` | Get domain details |
-| POST | `/domains/:id/verify` | Verify domain DNS |
-| GET | `/domains/:id/health` | Check DNS health |
-| DELETE | `/domains/:id` | Delete a domain |
-| GET | `/domains/:id/dns-records` | Get DNS setup instructions |
-| GET | `/domains/:id/mta-sts` | Check MTA-STS configuration |
-| GET | `/domains/:id/bimi` | Check BIMI configuration |
-| POST | `/domains/:id/bimi/validate-logo` | Validate BIMI logo |
-| GET | `/domains/:id/tlsrpt` | Check TLS reporting |
-| GET | `/domains/:id/auth-status` | Comprehensive auth score |
+| POST | `/v1/domains` | Add a new domain |
+| GET | `/v1/domains` | List all domains |
+| GET | `/v1/domains/:id` | Get domain details |
+| POST | `/v1/domains/:id/verify` | Verify domain DNS |
+| GET | `/v1/domains/:id/health` | Check DNS health |
+| DELETE | `/v1/domains/:id` | Delete a domain |
+| GET | `/v1/domains/:id/dns-records` | Get DNS setup instructions |
+| GET | `/v1/domains/:id/mta-sts` | Check MTA-STS configuration |
+| GET | `/v1/domains/:id/bimi` | Check BIMI configuration |
+| POST | `/v1/domains/:id/bimi/validate-logo` | Validate BIMI logo |
+| GET | `/v1/domains/:id/tlsrpt` | Check TLS reporting |
+| GET | `/v1/domains/:id/auth-status` | Comprehensive auth score |
 
 ---
 

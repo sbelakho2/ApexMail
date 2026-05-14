@@ -6,7 +6,8 @@ This directory contains both supported workflow scripts and historical one-off r
 
 These scripts are part of the current repeatable developer workflow and are referenced by tasks or active docs:
 
-- `browser_smoke.py`: visual/browser smoke validation used by the VS Code visual parity tasks.
+- `browser_smoke.py`: visual/browser smoke validation used by the VS Code visual parity tasks. Artifact updates default to Playwright screenshots with linked-stylesheet validation and marketing cookie-consent preload; use `--screenshot-engine chromium-cli` only for local fallback debugging.
+- `run-browser-smoke.sh`: local runner for `browser_smoke.py`; creates `.venv/browser-smoke` and installs the Playwright Python package there so system Python stays untouched.
 - `run-mail-server-tests.sh`: mail-server test wrapper used by focused cargo task definitions.
 - `run-compose-smoke.sh`: Docker Compose smoke validation helper.
 - `validate-compose-secrets.sh`: preflight check that required local Docker secret files exist and are non-empty before compose startup.
@@ -43,6 +44,20 @@ bash tools/update-checksums.sh \
 ```
 
 The script rewrites the checksum file atomically so stale placeholder hashes do not linger across releases.
+
+## Shared Library (`tools/lib/`)
+
+The `tools/lib/` package provides a single source of truth for pricing constants and fix utilities,
+shared across all audit/fix scripts to eliminate duplication:
+
+- `lib/pricing.py` — Canonical plan prices, PAYG tiers, overage rates, and IP pricing.
+  Import with: `from lib.pricing import PLANS, PAYG_TIERS, DEDICATED_IP_PRICE, OVERAGE_RATE_PER_1K`
+- `lib/fix_utils.py` — Shared JSONL helpers (`read_jsonl`, `write_jsonl`, `iter_jsonl`),
+  ChatML parsing (`split_messages`, `edit_assistant_text`), and the `apply_line_fixes` batch framework.
+
+Scripts that used to have their own hardcoded pricing constants now import from `lib/pricing.py`:
+`definitive_audit.py`, `fix_all_errors.py`, `fix_all_training_limits.py`,
+`fix_payg_calculations.py`, `fix_payg_errors.py`.
 
 ## Historical Audit And Remediation Scripts
 

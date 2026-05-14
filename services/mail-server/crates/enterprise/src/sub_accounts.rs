@@ -27,6 +27,7 @@ impl SubAccountService {
     }
 
     /// Create a sub-account
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         parent_id: Uuid,

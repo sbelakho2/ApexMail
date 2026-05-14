@@ -10,11 +10,15 @@ ApexMail now runs as a Rust-focused monorepo. The browser surfaces are served by
 
 | Service | Description | Port |
 |---------|-------------|------|
-| `api-server` | REST API plus SSR `web` and `control-plane` surfaces | 3000 |
-| `tracking-service` | Open pixel, click tracking, unsubscribe handling | 3001 |
+| `api-server` | REST API plus SSR `web` and `control-plane` surfaces | 3001 |
+| `tracking-service` | Open pixel, click tracking, unsubscribe handling | 3001 (own pod) |
 | `enterprise` | Enterprise-only routes and support surfaces | 3002 |
 | `worker-processors` | Background job processing | N/A |
 | `mta` | SMTP handling and mail transfer | 25, 587, 465 |
+
+> Local dev (`tools/dev-start.sh`) runs `api-server` on `http://127.0.0.1:3001`.
+> `tracking-service` listens on port 3001 inside its own deployment pod, so there
+> is no collision in production. For local development they are not co-resident.
 
 ## Tech Stack
 

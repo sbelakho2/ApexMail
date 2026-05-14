@@ -10,6 +10,7 @@
 //! - **Health-check dashboards** exposed via Axum HTTP routes
 //! - **Redis key eviction monitoring** with eviction rate threshold alerts
 
+#![deny(unsafe_code)]
 pub mod alerting;
 pub mod config;
 pub mod log_aggregator;

@@ -19,21 +19,28 @@ use rsa::traits::PublicKeyParts;
 use rsa::{pkcs8::DecodePrivateKey, RsaPrivateKey};
 use sha2::{Digest, Sha256};
 use tracing::debug;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const MIN_DKIM_RSA_BITS: usize = 2048;
 
 /// DKIM Configuration
+///
+/// Uses `Zeroizing<String>` for the private key PEM to ensure the key material
+/// is zeroized in memory when the config is dropped, protecting against
+/// memory-dump attacks.
 #[derive(Debug, Clone)]
 pub struct DkimConfig {
     pub domain: String,
     pub selector: String,
-    pub private_key_pem: String,
+    /// Private key PEM, wrapped in `Zeroizing` for automatic zeroization on drop.
+    pub private_key_pem: Zeroizing<String>,
     pub headers_to_sign: Vec<String>,
 }
 
 impl Drop for DkimConfig {
     fn drop(&mut self) {
+        // Zeroizing<String> automatically zeroizes on drop;
+        // explicit zeroize() call as defense-in-depth.
         self.private_key_pem.zeroize();
     }
 }
@@ -43,7 +50,7 @@ impl Default for DkimConfig {
         Self {
             domain: "apexmail.ee".to_string(),
             selector: "apexmail2026".to_string(),
-            private_key_pem: String::new(),
+            private_key_pem: Zeroizing::new(String::new()),
             headers_to_sign: vec![
                 "from".to_string(),
                 "to".to_string(),
@@ -137,7 +144,7 @@ impl DkimSigner {
         let config = DkimConfig {
             domain: domain.to_string(),
             selector: selector.to_string(),
-            private_key_pem,
+            private_key_pem: Zeroizing::new(private_key_pem),
             headers_to_sign: vec![
                 "from".to_string(),
                 "to".to_string(),
@@ -168,7 +175,7 @@ impl DkimSigner {
         let config = DkimConfig {
             domain: domain.to_string(),
             selector: selector.to_string(),
-            private_key_pem,
+            private_key_pem: Zeroizing::new(private_key_pem),
             headers_to_sign: vec![
                 "from".to_string(),
                 "to".to_string(),
@@ -324,7 +331,10 @@ fn dkim_key_mode_is_group_or_world_readable(mode: u32) -> bool {
 }
 
 /// Generate a new DKIM key pair
-pub fn generate_dkim_keypair() -> Result<(String, String)> {
+///
+/// The private key is returned as a `Zeroizing<String>` to ensure the key
+/// material is zeroized in memory when it goes out of scope.
+pub fn generate_dkim_keypair() -> Result<(Zeroizing<String>, String)> {
     use rsa::pkcs8::EncodePrivateKey;
     use rsa::pkcs8::EncodePublicKey;
     use rsa::rand_core::OsRng;
@@ -345,7 +355,7 @@ pub fn generate_dkim_keypair() -> Result<(String, String)> {
         .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
         .map_err(|e| anyhow!("Failed to encode public key: {}", e))?;
 
-    Ok((private_pem.to_string(), public_pem))
+    Ok((Zeroizing::new(private_pem.to_string()), public_pem))
 }
 
 #[cfg(test)]
@@ -376,7 +386,7 @@ mod tests {
         let config = DkimConfig {
             domain: "test.com".into(),
             selector: "sel".into(),
-            private_key_pem: "test-key".to_string(),
+            private_key_pem: Zeroizing::new("test-key".to_string()),
             headers_to_sign: vec!["from".into()],
         };
         let _signer = DkimSigner {
@@ -417,7 +427,7 @@ mod tests {
         let result = DkimSigner::new(DkimConfig {
             domain: "test.com".into(),
             selector: "sel".into(),
-            private_key_pem,
+            private_key_pem: Zeroizing::new(private_key_pem),
             headers_to_sign: vec!["from".into()],
         });
 

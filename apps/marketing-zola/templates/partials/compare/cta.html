@@ -5,8 +5,8 @@
   <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="bg-white border border-surface-200 rounded-sm p-10 lg:p-16">
       <div class="text-center mb-16">
-        <span class="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-400 border border-surface-200 rounded-sm mb-6">Comparative Verdict</span>
-        <h2 class="text-surface-950 mb-6 uppercase tracking-tighter">
+        <span class="inline-block px-2 py-0.5 text-[10px] font-bold tracking-widest text-surface-400 border border-surface-200 rounded-sm mb-6 uppercase">Comparative Verdict</span>
+        <h2 class="text-surface-950 mb-6 tracking-tighter">
           {{ page.extra.verdict_title | default(value="Engineering-First Infrastructure Wins.") }}
         </h2>
       </div>
@@ -16,34 +16,34 @@
         {% for point in verdict_points %}
         <li class="flex items-center gap-4 p-4 border border-surface-100 bg-surface-50">
           <div class="w-1.5 h-1.5 bg-brand-500 flex-shrink-0"></div>
-          <span class="text-[11px] font-bold text-surface-950 uppercase tracking-tight">{{ point }}</span>
+          <span class="text-[11px] font-bold text-surface-950 tracking-tight">{{ point }}</span>
         </li>
         {% endfor %}
       </ul>
 
       <div class="text-center">
         <div class="flex flex-col sm:flex-row justify-center gap-4 mb-10">
-          <a href="{{ config.extra.app_url }}/signup" class="btn-primary">
+          <a href="{{ config.extra.app_url }}/signup" class="btn-primary uppercase">
             Initialize Free Trial
           </a>
-          <a href="/pricing" class="btn-secondary">View Economic Model</a>
+          <a href="/pricing" class="btn-secondary uppercase">View Economic Model</a>
         </div>
-        <p class="text-[10px] text-surface-400 font-bold uppercase tracking-[0.2em]">
+        <p class="text-[10px] text-surface-400 font-bold tracking-[0.2em]">
           Zero Credit Commitment &bull; Setup: &lt; 300s
         </p>
       </div>
     </div>
 
     <div class="mt-16 text-center">
-      <p class="text-[10px] text-surface-500 mb-6 font-bold uppercase tracking-widest text-balance">Alternative Comparative Mappings</p>
+      <p class="text-[10px] text-surface-500 mb-6 font-bold tracking-widest text-balance uppercase">Alternative Comparative Mappings</p>
       <div class="flex flex-wrap justify-center gap-2">
-        <a href="/compare/sendgrid" class="text-[10px] font-bold uppercase tracking-widest px-4 py-2 bg-white border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
+        <a href="/compare/sendgrid" class="text-[10px] font-bold tracking-widest px-4 py-2 bg-white border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
           vs SendGrid
         </a>
-        <a href="/compare/resend" class="text-[10px] font-bold uppercase tracking-widest px-4 py-2 bg-white border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
+        <a href="/compare/resend" class="text-[10px] font-bold tracking-widest px-4 py-2 bg-white border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
           vs Resend
         </a>
-        <a href="/compare/postmark" class="text-[10px] font-bold uppercase tracking-widest px-4 py-2 bg-white border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
+        <a href="/compare/postmark" class="text-[10px] font-bold tracking-widest px-4 py-2 bg-white border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
           vs Postmark
         </a>
       </div>

@@ -1,5 +1,6 @@
 //! Templates repository.
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -21,7 +22,7 @@ impl TemplatesRepo {
         sqlx::query_as::<_, Template>(
             "INSERT INTO templates (id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, 1, 'draft', NOW(), NOW()) \
-             RETURNING *"
+             RETURNING id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at"
         )
         .bind(Uuid::new_v4())
         .bind(tenant_id)
@@ -39,7 +40,10 @@ impl TemplatesRepo {
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Template>, sqlx::Error> {
-        sqlx::query_as::<_, Template>("SELECT * FROM templates WHERE id = $1 AND tenant_id = $2")
+        sqlx::query_as::<_, Template>(
+            "SELECT id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at \
+             FROM templates WHERE id = $1 AND tenant_id = $2"
+        )
             .bind(id)
             .bind(tenant_id)
             .fetch_optional(pool)
@@ -57,13 +61,54 @@ impl TemplatesRepo {
         let limit = limit.clamp(1, 100);
         let offset = offset.max(0);
         sqlx::query_as::<_, Template>(
-            "SELECT * FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3"
+            "SELECT id, tenant_id, name, subject, version, status, created_at, updated_at \
+             FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
         )
         .bind(tenant_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
         .await
+    }
+
+    /// List templates for a tenant using keyset (cursor-based) pagination.
+    /// Uses `(updated_at, id)` tuple comparison since templates orders by `updated_at DESC`.
+    pub async fn list_keyset(
+        pool: &PgPool,
+        tenant_id: Uuid,
+        limit: i64,
+        cursor_updated_at: Option<DateTime<Utc>>,
+        cursor_id: Option<Uuid>,
+    ) -> Result<Vec<Template>, sqlx::Error> {
+        let limit = limit.clamp(1, 200);
+        let fetch_limit = limit + 1;
+        match (cursor_updated_at, cursor_id) {
+            (Some(updated_at), Some(id)) => {
+                sqlx::query_as::<_, Template>(
+                    "SELECT id, tenant_id, name, subject, version, status, created_at, updated_at \
+                     FROM templates WHERE tenant_id = $1 AND (updated_at, id) < ($2, $3) \
+                     ORDER BY updated_at DESC, id DESC LIMIT $4",
+                )
+                .bind(tenant_id)
+                .bind(updated_at)
+                .bind(id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+            _ => {
+                // First page — no cursor
+                sqlx::query_as::<_, Template>(
+                    "SELECT id, tenant_id, name, subject, version, status, created_at, updated_at \
+                     FROM templates WHERE tenant_id = $1 \
+                     ORDER BY updated_at DESC, id DESC LIMIT $2",
+                )
+                .bind(tenant_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+        }
     }
 
     /// Update a template (bumps version).
@@ -79,7 +124,7 @@ impl TemplatesRepo {
         sqlx::query_as::<_, Template>(
             "UPDATE templates SET name = $1, subject = $2, html_body = $3, text_body = $4, \
              version = version + 1, updated_at = NOW() \
-             WHERE id = $5 AND tenant_id = $6 RETURNING *",
+             WHERE id = $5 AND tenant_id = $6 RETURNING id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at",
         )
         .bind(name)
         .bind(subject)
@@ -107,7 +152,10 @@ impl TemplatesRepo {
         tenant_id: Uuid,
         name: &str,
     ) -> Result<Option<Template>, sqlx::Error> {
-        sqlx::query_as::<_, Template>("SELECT * FROM templates WHERE tenant_id = $1 AND name = $2")
+        sqlx::query_as::<_, Template>(
+            "SELECT id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at \
+             FROM templates WHERE tenant_id = $1 AND name = $2"
+        )
             .bind(tenant_id)
             .bind(name)
             .fetch_optional(pool)

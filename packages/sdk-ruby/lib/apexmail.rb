@@ -19,6 +19,7 @@ require "net/http"
 require "uri"
 require "json"
 require "openssl"
+require "time"
 
 module ApexMail
   DEFAULT_BASE_URL = "https://api.apexmail.ee"
@@ -37,22 +38,62 @@ module ApexMail
     "?" + URI.encode_www_form(filtered)
   end
 
+  def self.verify_signature(payload, signature_header, secret, tolerance_seconds: 300, timestamp: nil)
+    raise ArgumentError, "payload must not be nil" if payload.nil?
+    raise ArgumentError, "signature header must not be blank" if signature_header.to_s.empty?
+    raise ArgumentError, "secret must not be blank" if secret.to_s.empty?
+
+    parsed = parse_signature_header(signature_header.to_s)
+    timestamp_value = timestamp || parsed[:timestamp]
+    signature = parsed[:signature]
+    return false if timestamp_value.nil? || signature.to_s.empty?
+
+    timestamp_int = Integer(timestamp_value, exception: false)
+    return false unless timestamp_int
+    return false if (Time.now.to_i - timestamp_int).abs > tolerance_seconds
+
+    signed_payload = "#{timestamp_int}.#{payload}"
+    expected = OpenSSL::HMAC.hexdigest("sha256", secret, signed_payload)
+    return false unless expected.bytesize == signature.bytesize
+
+    OpenSSL.fixed_length_secure_compare(expected, signature)
+  end
+
+  def self.parse_signature_header(header)
+    values = header.split(",").filter_map do |part|
+      key, value = part.strip.split("=", 2)
+      [key, value] if key && value
+    end.to_h
+    signature = values["v1"] || header.delete_prefix("sha256=").strip
+    { timestamp: values["t"], signature: signature }
+  end
+
   # ── Errors ─────────────────────────────────────────────────────────────────
 
   class Error < StandardError
-    attr_reader :status_code, :code
+    attr_reader :status_code, :code, :details
 
-    def initialize(message, status_code: nil, code: nil)
+    def initialize(message, status_code: nil, code: nil, details: nil)
       super(message)
       @status_code = status_code
       @code        = code
+      @details     = details
     end
   end
 
   class AuthenticationError < Error; end
+  class ForbiddenError      < Error; end
+  class ConflictError       < Error; end
   class NotFoundError       < Error; end
   class ValidationError     < Error; end
-  class RateLimitError      < Error; end
+  class RateLimitError < Error
+    attr_reader :retry_after
+
+    def initialize(message, status_code: nil, code: nil, details: nil, retry_after: nil)
+      super(message, status_code: status_code, code: code, details: details)
+      @retry_after = retry_after
+    end
+  end
   class NetworkError        < Error; end
 
   # ── HTTP transport ─────────────────────────────────────────────────────────
@@ -62,6 +103,7 @@ module ApexMail
     MAX_RETRIES = 3
     INITIAL_BACKOFF = 0.5
     MAX_BACKOFF = 5.0
+    JITTER_MAX = 1.0
 
     def initialize(api_key:, base_url:, open_timeout:, read_timeout:, max_response_bytes:)
       @api_key      = api_key
@@ -70,6 +112,7 @@ module ApexMail
       @open_timeout = open_timeout
       @read_timeout = read_timeout
       @max_response_bytes = max_response_bytes
+      @mutex = Mutex.new
       @http = Net::HTTP.new(@base_uri.host, @base_uri.port)
       @http.use_ssl = @base_uri.scheme == "https"
       @http.verify_mode = OpenSSL::SSL::VERIFY_PEER if @http.use_ssl?
@@ -85,21 +128,26 @@ module ApexMail
 
       loop do
         begin
-          ensure_connection
-          uri = URI.parse("#{@base_uri}#{path}")
-          req = build_request(method, uri, body, idempotency_key)
-          body = +""
-          resp = @http.request(req) do |response|
-            response.read_body do |chunk|
-              body << chunk
-              if body.bytesize > @max_response_bytes
-                reset_connection
-                raise Error.new("Response body exceeds max_response_bytes",
-                                status_code: response.code.to_i)
+          resp = @mutex.synchronize do
+            ensure_connection
+            uri = URI.parse("#{@base_uri}#{path}")
+            req = build_request(method, uri, body, idempotency_key)
+            response_body = +""
+            resp = @http.request(req) do |response|
+              response.read_body do |chunk|
+                response_body << chunk
+                if response_body.bytesize > @max_response_bytes
+                  reset_connection
+                  raise Error.new("Response body exceeds max_response_bytes",
+                                  status_code: response.code.to_i)
+                end
               end
             end
+            @last_used_at = Time.now
+            [resp, response_body]
           end
-          @last_used_at = Time.now
+
+          resp, response_body = resp
 
           if retryable_status?(resp.code.to_i) && attempt < MAX_RETRIES
             sleep(retry_delay(resp, attempt))
@@ -107,9 +155,9 @@ module ApexMail
             next
           end
 
-          return handle_response(resp, body)
+          return handle_response(resp, response_body)
         rescue IOError, EOFError, Timeout::Error, Errno::ECONNRESET, Errno::ECONNREFUSED, SocketError, OpenSSL::SSL::SSLError => e
-          reset_connection
+          @mutex.synchronize { reset_connection }
           if attempt < MAX_RETRIES
             sleep(backoff(attempt))
             attempt += 1
@@ -156,24 +204,31 @@ module ApexMail
 
     def retry_delay(resp, attempt)
       retry_after = resp["Retry-After"]
+      delay = backoff(attempt)
+
       if retry_after
         seconds = Integer(retry_after, exception: false)
-        return [seconds.to_f, MAX_BACKOFF].min if seconds
+        if seconds
+          retry_after_delay = seconds.to_f
+          delay = retry_after_delay if retry_after_delay > delay
+          return [delay, MAX_BACKOFF].min
+        end
 
         begin
           date = Time.httpdate(retry_after)
-          delay = [date - Time.now, 0].max
-          return [delay, MAX_BACKOFF].min
+          retry_after_delay = [date - Time.now, 0].max
+          delay = retry_after_delay if retry_after_delay > delay
         rescue ArgumentError, TypeError
         end
       end
 
-      backoff(attempt)
+      [delay, MAX_BACKOFF].min
     end
 
     def backoff(attempt)
-      delay = INITIAL_BACKOFF * (2**attempt)
-      [delay, MAX_BACKOFF].min
+      delay = INITIAL_BACKOFF * (attempt * attempt)
+      capped = [delay, MAX_BACKOFF].min
+      capped + rand(0.0..JITTER_MAX)
     end
 
     def handle_response(resp, body)
@@ -187,25 +242,43 @@ module ApexMail
       parsed = { raw: body_text, parse_error: e.message }
     ensure
       parsed ||= {}
+      error = parsed[:error]
+      if error.is_a?(Hash)
+        message = error[:message] || body_text
+        code = error[:code]
+        details = error[:details]
+      else
+        message = error || parsed[:message] || body_text
+        code = parsed[:code]
+        details = parsed[:errors]
+      end
+      message = "HTTP #{resp.code}" if message.to_s.empty?
 
       case resp.code.to_i
       when 200..299
         parsed
       when 401
-        raise AuthenticationError.new(parsed[:error] || body_text || "Unauthorized",
-                                      status_code: 401, code: parsed[:code])
+        raise AuthenticationError.new(message || "Unauthorized",
+                                      status_code: 401, code: code, details: details)
+      when 403
+        raise ForbiddenError.new(message || "Forbidden",
+                                 status_code: 403, code: code, details: details)
       when 404
-        raise NotFoundError.new(parsed[:error] || body_text || "Not found",
-                                status_code: 404, code: parsed[:code])
-      when 422
-        raise ValidationError.new(parsed[:error] || body_text || "Unprocessable entity",
-                                  status_code: 422, code: parsed[:code])
+        raise NotFoundError.new(message || "Not found",
+                                status_code: 404, code: code, details: details)
+      when 409
+        raise ConflictError.new(message || "Conflict",
+                                status_code: 409, code: code, details: details)
+      when 400
+        raise ValidationError.new(message || "Bad request",
+                                  status_code: 400, code: code, details: details)
       when 429
-        raise RateLimitError.new(parsed[:error] || body_text || "Rate limit exceeded",
-                                 status_code: 429, code: parsed[:code])
+        raise RateLimitError.new(message || "Rate limit exceeded",
+                                 status_code: 429, code: code, details: details,
+                                 retry_after: resp["Retry-After"])
       else
-        raise Error.new(parsed[:error] || body_text || "HTTP #{resp.code}",
-                        status_code: resp.code.to_i, code: parsed[:code])
+        raise Error.new(message,
+                        status_code: resp.code.to_i, code: code, details: details)
       end
     end
   end
@@ -223,6 +296,7 @@ module ApexMail
     def initialize(api_key, base_url: DEFAULT_BASE_URL, open_timeout: 10, read_timeout: 30,
                    max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES)
       validate_api_key!(api_key)
+      @api_key     = api_key
       @transport   = Transport.new(api_key: api_key, base_url: base_url,
                                    open_timeout: open_timeout, read_timeout: read_timeout,
                                    max_response_bytes: max_response_bytes)
@@ -236,10 +310,17 @@ module ApexMail
       @api_keys    = ApiKeysAPI.new(@transport)
     end
 
-    private
+    # Returns a redacted string representation showing metadata only.
+    def to_s
+      masked = @api_key.length > 8 \
+        ? @api_key[0, 4] + "\u2026\u2026" + @api_key[-4, 4] \
+        : "[REDACTED]"
+      "#<#{self.class} api_key=#{masked}>"
+    end
 
+    # Redacted inspect to prevent credential leakage in logs or console output.
     def inspect
-      "#<#{self.class} api_key=[FILTERED] resources=#{%i[emails domains webhooks templates suppressions events analytics api_keys].join(',')}>"
+      to_s
     end
 
     def validate_api_key!(api_key)
@@ -336,9 +417,17 @@ module ApexMail
     # @param status [String, nil]
     # @param limit  [Integer]
     # @param offset [Integer]
-    def list(status: nil, limit: 20, offset: 0, tag: nil)
-      query = ApexMail.build_query(limit: limit, offset: offset, status: status, tag: tag)
+    # @param cursor [String, nil]
+    # @param tag    [String, nil]
+    def list(status: nil, limit: 20, offset: 0, cursor: nil, tag: nil)
+      query = ApexMail.build_query(limit: limit, offset: offset, cursor: cursor, status: status, tag: tag)
       @t.request("GET", "/v1/messages#{query}")
+    end
+
+    # Cancel a queued or scheduled email by ID.
+    # @param id [String] The message ID to cancel
+    def cancel(id)
+      @t.request("POST", "/v1/messages/#{ApexMail.encode_path(id)}/cancel", body: {})
     end
 
     private
@@ -470,6 +559,10 @@ module ApexMail
     def delete(id)
       @t.request("DELETE", "/v1/webhooks/#{ApexMail.encode_path(id)}")
     end
+
+    def test(id)
+      @t.request("POST", "/v1/webhooks/#{ApexMail.encode_path(id)}/test")
+    end
   end
 
   # ── Templates ───────────────────────────────────────────────────────────────
@@ -488,8 +581,8 @@ module ApexMail
       }.compact)
     end
 
-    def list(limit: 50, offset: 0)
-      query = ApexMail.build_query(limit: limit, offset: offset)
+    def list(limit: 50, offset: 0, cursor: nil)
+      query = ApexMail.build_query(limit: limit, offset: offset, cursor: cursor)
       @t.request("GET", "/v1/templates#{query}")
     end
 
@@ -505,11 +598,24 @@ module ApexMail
     # @param id     [String]
     # @param params [Hash] { name:, subject:, html:, text:, engine:, schema: }
     def update(id, **params)
-      @t.request("PATCH", "/v1/templates/#{ApexMail.encode_path(id)}", body: params)
+      @t.request("PUT", "/v1/templates/#{ApexMail.encode_path(id)}", body: params)
     end
 
     def delete(id)
       @t.request("DELETE", "/v1/templates/#{ApexMail.encode_path(id)}")
+    end
+
+    # Duplicate a template (creates a copy with a new ID).
+    # @param id [String]
+    def duplicate(id)
+      @t.request("POST", "/v1/templates/#{ApexMail.encode_path(id)}/duplicate")
+    end
+
+    # Rollback a template to a previous version.
+    # @param id [String]
+    # @param version [Integer] The version number to roll back to
+    def rollback(id, version:)
+      @t.request("POST", "/v1/templates/#{ApexMail.encode_path(id)}/rollback", body: { version: version })
     end
 
     # Render a template with given variables (dry-run, does not send).
@@ -533,8 +639,8 @@ module ApexMail
       @t.request("POST", "/v1/suppressions", body: { emails: email_list, reason: reason })
     end
 
-    def list(limit: 50, offset: 0)
-      query = ApexMail.build_query(limit: limit, offset: offset)
+    def list(limit: 50, offset: 0, cursor: nil, reason: nil, tag: nil)
+      query = ApexMail.build_query(limit: limit, offset: offset, cursor: cursor, reason: reason, tag: tag)
       @t.request("GET", "/v1/suppressions#{query}")
     end
 
@@ -545,6 +651,10 @@ module ApexMail
     def delete(email)
       @t.request("DELETE", "/v1/suppressions/#{ApexMail.encode_path(email)}")
     end
+
+    def bulk(entries:)
+      @t.request("POST", "/v1/suppressions/bulk", body: { entries: entries })
+    end
   end
 
   # ── Events ──────────────────────────────────────────────────────────────────
@@ -552,8 +662,22 @@ module ApexMail
   class EventsAPI
     def initialize(transport) = @t = transport
 
-    def list(message_id: nil, limit: 50, offset: 0)
-      query = ApexMail.build_query(limit: limit, offset: offset, messageId: message_id)
+    # List events with optional filters.
+    #
+    # Each event in the response may include an +envelope+ hash with:
+    #   from::      [String, nil]  Envelope MAIL FROM address
+    #   to::        [Array<String>] Envelope RCPT TO addresses
+    #   dkim::      [String]  Authentication result: +pass+, +fail+, +neutral+, +none+
+    #   spf::       [String]  Authentication result: +pass+, +fail+, +neutral+, +none+
+    #   dmarc::     [String]  Authentication result: +pass+, +fail+, +neutral+, +none+
+    #   timestamp:: [String]  ISO 8601 delivery event timestamp
+    def list(message_id: nil, limit: 50, offset: 0, cursor: nil, type: nil, status: nil,
+             date_from: nil, date_to: nil, domain_id: nil)
+      query = ApexMail.build_query(
+        limit: limit, offset: offset, cursor: cursor, messageId: message_id,
+        type: type, status: status, dateFrom: date_from,
+        dateTo: date_to, domainId: domain_id
+      )
       @t.request("GET", "/v1/events#{query}")
     end
 
@@ -566,6 +690,16 @@ module ApexMail
     # @param event_id [String]
     def get(event_id)
       @t.request("GET", "/v1/events/#{ApexMail.encode_path(event_id)}")
+    end
+
+    def stats(**filters)
+      query = ApexMail.build_query(filters)
+      @t.request("GET", "/v1/events/stats#{query}")
+    end
+
+    def timeseries(**filters)
+      query = ApexMail.build_query(filters)
+      @t.request("GET", "/v1/events/timeseries#{query}")
     end
   end
 
@@ -595,8 +729,14 @@ module ApexMail
   class AnalyticsAPI
     def initialize(transport) = @t = transport
 
-    def get(from: nil, to: nil, group_by: nil, tag: nil)
-      query = ApexMail.build_query(from: from, to: to, groupBy: group_by, tag: tag)
+    # Fetch analytics with required date range and optional filters.
+    # @param from     [String] ISO 8601 start date (required)
+    # @param to       [String] ISO 8601 end date (required)
+    # @param group_by [String] Grouping dimension
+    # @param tag      [String] Filter by tag name
+    # @param domain   [String] Filter by sending domain
+    def get(from:, to:, group_by: nil, tag: nil, domain: nil)
+      query = ApexMail.build_query(from: from, to: to, groupBy: group_by, tag: tag, domain: domain)
       @t.request("GET", "/v1/analytics#{query}")
     end
   end

@@ -1,0 +1,25 @@
+- targets:
+    - billing-service:9090
+  labels:
+    job: apexmail-internal-services
+    component: billing-service
+- targets:
+    - compliance:9090
+  labels:
+    job: apexmail-internal-services
+    component: compliance
+- targets:
+    - sandbox:9090
+  labels:
+    job: apexmail-internal-services
+    component: sandbox
+- targets:
+    - outbound-queue:9090
+  labels:
+    job: apexmail-internal-services
+    component: outbound-queue
+- targets:
+    - worker:9090
+  labels:
+    job: apexmail-internal-services
+    component: worker-processors

@@ -4,7 +4,7 @@ integrate_recovered.py — Extract & transform recovered files into current pipe
 ══════════════════════════════════════════════════════════════════════════════════
 
 This script:
-1. Reads stress_test_extra.py and stress_test_r34.py from /tmp/apexmail_scenarios/
+1. Reads stress_test_extra.py and stress_test_r34.py from TEMP_DIR (default: /tmp/apexmail_scenarios/)
 2. Transforms Schema A pricing → Canonical pricing
 3. Transforms Schema A limits → Canonical limits
 4. Merges into current stress_test.py and generates more training data
@@ -24,6 +24,8 @@ import ast
 import os
 
 os.chdir(os.path.dirname(__file__) or ".")
+
+TEMP_DIR = os.environ.get("TEMP_DIR", "/tmp/apexmail_scenarios")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PRICING TRANSFORMATIONS

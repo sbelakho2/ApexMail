@@ -17,7 +17,6 @@ use crate::types::*;
 
 pub struct AuditService {
     db: PgPool,
-    #[allow(unused)]
     config: SecurityConfig,
     signing_key: String,
     buffer: RwLock<Vec<AuditEvent>>,
@@ -25,7 +24,7 @@ pub struct AuditService {
 
 impl AuditService {
     pub fn new(db: PgPool, config: SecurityConfig) -> Self {
-        let signing_key = config.encryption_key.clone(); // use as HMAC key
+        let signing_key = config.encryption_key.to_string(); // use as HMAC key
         Self {
             db,
             config,
@@ -53,6 +52,7 @@ impl AuditService {
     }
 
     /// Create a new audit event with auto-generated ID and timestamp.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_event(
         &self,
         organization_id: &str,
@@ -588,6 +588,7 @@ fn export_csv(events: &[AuditEvent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroizing;
 
     #[test]
     fn test_compute_event_hash_deterministic() {
@@ -789,7 +790,9 @@ mod tests {
         AuditService::new(
             test_pool(),
             SecurityConfig {
-                encryption_key: "test-key-for-audit-at-least-32-chars!!".into(),
+                encryption_key: Zeroizing::new(
+                    "test-key-for-audit-at-least-32-chars!!".to_string(),
+                ),
                 data_key_rotation_days: 90,
                 audit_retention_days: 365,
                 session_timeout_minutes: 30,

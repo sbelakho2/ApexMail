@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 pub mod compliance;
 pub mod config;
 pub mod contracts;

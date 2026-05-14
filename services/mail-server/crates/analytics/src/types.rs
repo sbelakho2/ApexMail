@@ -57,6 +57,25 @@ pub struct EngagementBucket {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeStats {
+    /// Counts for the current hour window.
+    pub this_hour: EventCounts,
+    /// Counts for the current day.
+    pub today: EventCounts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventCounts {
+    pub sent: i64,
+    pub delivered: i64,
+    pub bounced: i64,
+    pub opened: i64,
+    pub clicked: i64,
+    pub complained: i64,
+    pub unsubscribed: i64,
+}
+
 // ── event row (for compaction serialization) ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

@@ -51,9 +51,7 @@ pub fn html_to_plaintext(html: &str) -> String {
                     .as_ref()
                     .map(|re| re.replace_all(label, "").into_owned())
                     .unwrap_or_else(|| label.to_string());
-                if label_clean.trim().is_empty() {
-                    url.to_string()
-                } else if label_clean.trim() == url {
+                if label_clean.trim().is_empty() || label_clean.trim() == url {
                     url.to_string()
                 } else {
                     format!("{} ({})", label_clean.trim(), url)

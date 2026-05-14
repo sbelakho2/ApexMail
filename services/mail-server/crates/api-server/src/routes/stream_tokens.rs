@@ -6,11 +6,12 @@
 //! signed JWT that can be sent as a Bearer token to the tracking-service's
 //! SSE endpoint (`GET /v1/stream`).
 //!
-//! The token is intentionally://! - Short-lived (5 minutes) to limit replay window.
+//! The token is intentionally:
+//! - Short-lived (5 minutes) to limit replay window.
 //! - Signed with HMAC-SHA256 using the shared `TRACKING_SECRET_KEY`
-//! (the same key the tracking-service uses to verify).
+//!   (the same key the tracking-service uses to verify).
 //! - Scoped to `["stream"]` — the tracking-service rejects tokens without
-//! this scope.
+//!   this scope.
 //!
 //! This endpoint requires standard API authentication (Bearer JWT or X-API-Key).
 

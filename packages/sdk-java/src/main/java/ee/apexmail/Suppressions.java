@@ -1,5 +1,7 @@
 package ee.apexmail;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -18,23 +20,36 @@ public final class Suppressions {
     }
 
     /**
-     * Add one or more addresses to the suppression list.
+     * Add a single email address to the suppression list.
      *
-     * @param emails  Single address or list of addresses
-     * @param reason  "unsubscribe" | "bounce" | "complaint" | "manual"
+     * @param email  Email address to suppress
+     * @param reason "unsubscribe" | "bounce" | "complaint" | "manual"
      */
-    public Suppression add(Object emails, String reason) {
-        List<String> emailList = emails instanceof List<?>
-            ? ((List<?>) emails).stream().map(Object::toString).toList()
-            : List.of(emails.toString());
+    public Suppression add(String email, String reason) {
         return client.request("POST", "/v1/suppressions", Map.of(
-            "emails", emailList,
+            "emails", List.of(email),
             "reason", reason != null ? reason : "manual"
         ), Suppression.class);
     }
 
+    /**
+     * Add a single email address with default reason "manual".
+     */
     public Suppression add(String email) {
         return add(email, "manual");
+    }
+
+    /**
+     * Add multiple email addresses to the suppression list.
+     *
+     * @param emails List of email addresses
+     * @param reason "unsubscribe" | "bounce" | "complaint" | "manual"
+     */
+    public Suppression addBulk(List<String> emails, String reason) {
+        return client.request("POST", "/v1/suppressions", Map.of(
+            "emails", emails,
+            "reason", reason != null ? reason : "manual"
+        ), Suppression.class);
     }
 
     /**
@@ -72,6 +87,11 @@ public final class Suppressions {
      */
     public void delete(String email) {
         client.request("DELETE", "/v1/suppressions/" + encode(email), null, Void.class);
+    }
+
+    /** Add suppressions in bulk using the API's batch endpoint. */
+    public Map<String, Object> bulk(Map<String, Object> params) {
+        return client.request("POST", "/v1/suppressions/bulk", params, new TypeReference<Map<String, Object>>() {});
     }
 
     private static String encode(String s) {

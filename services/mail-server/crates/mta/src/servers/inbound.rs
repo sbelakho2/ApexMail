@@ -60,7 +60,11 @@ pub struct InboundServer {
     /// Per‑IP connection counter.
     connections: Arc<DashMap<IpAddr, u32>>,
     /// Rate limiter per IP (token bucket).
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "rate limiters are initialized for connection admission wiring in the inbound server"
+    )]
+    #[allow(clippy::type_complexity)]
     ip_limiters: Arc<
         DashMap<
             IpAddr,

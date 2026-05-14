@@ -10,6 +10,8 @@ Get ApexMail running locally in under 10 minutes.
 - **Docker** and Docker Compose
 - **Git**
 
+> **macOS compatibility:** The bootstrap script (`./tools/bootstrap.sh`) is designed for Linux environments. On macOS, use Docker-based development instead: run `docker compose up` from the project root to start all services in containers. See [Docker Compose Configuration](../../docker-compose.yml) for service definitions.
+
 ## 1. Clone the Repository
 
 ```bash
@@ -99,9 +101,10 @@ This starts:
 ```bash
 cargo run --manifest-path services/mail-server/Cargo.toml -p api-server
 
-# Browser surfaces:
-#   http://127.0.0.1:3000 -> web
-#   http://localhost:3000 -> control-plane
+# Browser surfaces (same port, host-based routing):
+#   http://127.0.0.1:3000 -> web user interface
+#   http://localhost:3000 -> admin control-plane
+#   (The Rust api-server uses host-based routing to distinguish surfaces)
 ```
 
 ## 5. Verify Installation
@@ -110,8 +113,8 @@ Open your browser and navigate to:
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Dashboard | http://127.0.0.1:3000 | User web interface |
-| Control Plane | http://localhost:3000 | Admin interface |
+| Dashboard | http://127.0.0.1:3000 | User web interface (host-based routing) |
+| Control Plane | http://localhost:3000 | Admin interface (host-based routing, same port) |
 | Tracking Health | http://localhost:3001/health | Backend health check |
 | Mailpit | http://localhost:8025 | Dev email inbox |
 | Prometheus Metrics | http://localhost:9092/metrics | Service metrics |

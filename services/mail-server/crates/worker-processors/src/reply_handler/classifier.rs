@@ -543,6 +543,6 @@ mod tests {
             "I'd love to schedule a call. When are you available?",
         );
         assert_eq!(result.classification, ReplyClassification::MeetingRequest);
-        assert_eq!(result.extracted_data.meeting_request, true);
+        assert!(result.extracted_data.meeting_request);
     }
 }

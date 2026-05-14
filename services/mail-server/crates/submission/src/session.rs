@@ -40,6 +40,7 @@ static MAX_RECIPIENTS: LazyLock<usize> = LazyLock::new(|| {
         .unwrap_or(100)
 });
 
+#[allow(clippy::large_enum_variant)]
 enum SessionStream {
     Plain(BufStream<TcpStream>),
     Tls(BufStream<TlsStream<TcpStream>>),
@@ -441,7 +442,7 @@ impl SubmissionSession {
                             &line
                         };
                         if !too_large {
-                            if self.data_buffer.len() + data.as_bytes().len() > MAX_MESSAGE_SIZE {
+                            if self.data_buffer.len() + data.len() > MAX_MESSAGE_SIZE {
                                 too_large = true;
                                 self.data_buffer.clear();
                             } else {
@@ -449,7 +450,7 @@ impl SubmissionSession {
                             }
                         }
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(e),
                 }, // Ok(result)
             } // match timeout
         } // loop
@@ -514,7 +515,7 @@ impl SubmissionSession {
             VALUES ($1, $2, $3, $4, $5, $6, 'pending', 50)
         "#,
         )
-        .bind(&message_id)
+        .bind(message_id)
         .bind(&from)
         .bind(&to)
         .bind(&subject)
@@ -621,6 +622,25 @@ impl SubmissionSession {
     }
 }
 
+/// #169/#172:Extract email address from SMTP command argument,
+/// properly handling angle brackets and ESMTP parameters after '>'.
+fn extract_address(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.starts_with('<') {
+        if let Some(end) = s.find('>') {
+            let addr = &s[1..end];
+            return Some(addr.to_string());
+        }
+        return None; // malformed
+    }
+    // Bare address:take up to first whitespace
+    let addr = s.split_whitespace().next()?;
+    if addr.is_empty() {
+        return None;
+    }
+    Some(addr.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,23 +689,4 @@ mod tests {
         let response = String::from_utf8_lossy(&buf[..n]);
         assert!(response.contains("250 OK"));
     }
-}
-
-/// #169/#172:Extract email address from SMTP command argument,
-/// properly handling angle brackets and ESMTP parameters after '>'.
-fn extract_address(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.starts_with('<') {
-        if let Some(end) = s.find('>') {
-            let addr = &s[1..end];
-            return Some(addr.to_string());
-        }
-        return None; // malformed
-    }
-    // Bare address:take up to first whitespace
-    let addr = s.split_whitespace().next()?;
-    if addr.is_empty() {
-        return None;
-    }
-    Some(addr.to_string())
 }

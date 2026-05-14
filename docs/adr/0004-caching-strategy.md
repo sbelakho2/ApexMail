@@ -1,5 +1,9 @@
 # ADR 0004: Caching Strategy
 
+> **⚠️ SUPERSEDED BY ADR 0009**  
+> This ADR has been superseded by [ADR 0009: Observability Architecture](./0009-observability-architecture.md).  
+> All caching and observability concerns are now governed by ADR 0009.
+
 ## Status
 
 Superseded by ADR 0009 — see [0009-observability-architecture.md](./0009-observability-architecture.md).

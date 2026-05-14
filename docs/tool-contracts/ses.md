@@ -148,6 +148,8 @@ See [hetzner.md](hetzner.md) for dedicated IP provisioning, warmup, and lifecycl
 | Scale | 3 included | Included |
 | Enterprise | 10+ included, BYOIP supported | Custom pricing |
 
+> **Pricing note:** The $30/mo customer-facing price is the **consumer price** that includes the underlying Hetzner floating IP cost (~€4/mo ≈ $4.50) plus margin. This is consistent across [pricing.md](../pricing.md#dedicated-ips) and [marketing/pricing.md](../marketing/pricing.md#dedicated-ip-add-on). The Stripe billing contract does not specify per-IP pricing because it applies the add-on as a flat plan modifier rather than a per-unit line item. Hetzner infrastructure costs are detailed in [hetzner.md](../tool-contracts/hetzner.md).
+
 Auto-provisioning occurs on plan change via `autoProvisionDedicatedIps()` in `stripe-integration.ts`, which calls `POST /v1/dedicated-ips` to create Hetzner floating IPs.
 
 ---

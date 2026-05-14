@@ -14,7 +14,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'dedicated_ips') THEN
         CREATE TABLE dedicated_ips (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tenant_id       UUID NOT NULL REFERENCES tenants(id),
+            tenant_id       UUID NOT NULL,
             ip_address      INET NOT NULL UNIQUE,
             region          VARCHAR(20) NOT NULL DEFAULT 'fsn1',
             status          VARCHAR(20) NOT NULL DEFAULT 'warming'
@@ -52,6 +52,20 @@ BEGIN
         BEGIN ALTER TABLE dedicated_ips ADD COLUMN billing_status VARCHAR(30) DEFAULT 'included'; EXCEPTION WHEN duplicate_column THEN NULL; END;
         BEGIN ALTER TABLE dedicated_ips ADD COLUMN allocated_at TIMESTAMPTZ DEFAULT NOW(); EXCEPTION WHEN duplicate_column THEN NULL; END;
 
+-- H-02: Reconcile billing_status CHECK constraint — migration 003 uses
+-- 'canceled' (one 'l') but this migration defines 'cancelled' (two 'l's).
+-- Fix by accepting both spellings to avoid data migration issues.
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'public.dedicated_ips'::regclass
+              AND conname = 'dedicated_ips_billing_status_check'
+              AND pg_get_constraintdef(oid) LIKE '%canceled%'
+        ) THEN
+            ALTER TABLE dedicated_ips DROP CONSTRAINT dedicated_ips_billing_status_check;
+            ALTER TABLE dedicated_ips ADD CONSTRAINT dedicated_ips_billing_status_check
+                CHECK (billing_status IN ('included', 'pending_charge', 'active', 'pending_cancel', 'canceled', 'cancelled'));
+        END IF;
+
 -- Remove legacy provider column if it exists (no longer needed — all dedicated IPs are Hetzner)
         BEGIN ALTER TABLE dedicated_ips DROP COLUMN IF EXISTS provider; EXCEPTION WHEN undefined_column THEN NULL; END;
 
@@ -69,7 +83,7 @@ END $$;
 -- (fast, no joins).
 
 CREATE TABLE IF NOT EXISTS transport_routing_cache (
-    tenant_id           UUID PRIMARY KEY REFERENCES tenants(id),
+    tenant_id           UUID PRIMARY KEY,
     has_dedicated_ips   BOOLEAN NOT NULL DEFAULT false,
     preferred_dedicated_ip  INET,
     dedicated_ip_count  INTEGER NOT NULL DEFAULT 0,
@@ -149,8 +163,8 @@ CREATE TABLE IF NOT EXISTS hetzner_mta_servers (
 
 CREATE TABLE IF NOT EXISTS self_hosted_bounces (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id       UUID NOT NULL REFERENCES tenants(id),
-    message_id      UUID REFERENCES messages(id),
+    tenant_id       UUID NOT NULL,
+    message_id      UUID,
     source_ip       INET NOT NULL,
     bounce_type     VARCHAR(20) NOT NULL CHECK (bounce_type IN ('hard', 'soft', 'block')),
     smtp_code       INTEGER,
@@ -169,8 +183,8 @@ CREATE INDEX IF NOT EXISTS idx_self_hosted_bounces_ip ON self_hosted_bounces(sou
 
 CREATE TABLE IF NOT EXISTS self_hosted_complaints (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id       UUID NOT NULL REFERENCES tenants(id),
-    message_id      UUID REFERENCES messages(id),
+    tenant_id       UUID NOT NULL,
+    message_id      UUID,
     source_ip       INET NOT NULL,
     complaint_type  VARCHAR(30) NOT NULL DEFAULT 'abuse',
     feedback_id     VARCHAR(255),
@@ -187,7 +201,7 @@ CREATE INDEX IF NOT EXISTS idx_self_hosted_complaints_tenant ON self_hosted_comp
 
 CREATE TABLE IF NOT EXISTS self_hosted_dkim_keys (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id       UUID NOT NULL REFERENCES tenants(id),
+    tenant_id       UUID NOT NULL,
     domain          VARCHAR(255) NOT NULL,
     selector        VARCHAR(63) NOT NULL,
     private_key_enc BYTEA NOT NULL,
@@ -219,7 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_ip_daily_usage_date ON ip_daily_usage(usage_date)
 
 CREATE TABLE IF NOT EXISTS self_hosted_send_stats (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id       UUID NOT NULL REFERENCES tenants(id),
+    tenant_id       UUID NOT NULL,
     ip_address      INET NOT NULL,
     stat_date       DATE NOT NULL DEFAULT CURRENT_DATE,
     messages_sent   BIGINT NOT NULL DEFAULT 0,
@@ -235,16 +249,85 @@ CREATE INDEX IF NOT EXISTS idx_self_hosted_stats_tenant ON self_hosted_send_stat
 
 -- ─── Add transport column to messages table ──────────────────
 -- Records which transport was used for each message.
+-- C-05: Guard against missing messages table (created later in migration 052).
 
 DO $$
 BEGIN
-    ALTER TABLE messages ADD COLUMN transport VARCHAR(10)
-        CHECK (transport IN ('ses', 'smtp'));
-EXCEPTION WHEN duplicate_column THEN NULL;
+    IF to_regclass('public.messages') IS NOT NULL THEN
+        BEGIN
+            ALTER TABLE messages ADD COLUMN transport VARCHAR(10)
+                CHECK (transport IN ('ses', 'smtp'));
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END;
+    END IF;
 END $$;
 
 DO $$
 BEGIN
-    ALTER TABLE messages ADD COLUMN source_ip INET;
-EXCEPTION WHEN duplicate_column THEN NULL;
+    IF to_regclass('public.messages') IS NOT NULL THEN
+        BEGIN
+            ALTER TABLE messages ADD COLUMN source_ip INET;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END;
+    END IF;
+END $$;
+
+-- ─── Conditional FK constraints ─────────────────────────────
+-- C-02: Add FK REFERENCES tenants(id) for tables that expected it inline.
+-- These are added conditionally because tenants may not exist yet
+-- (it's created in migration 052 for fresh deployments).
+
+DO $$
+BEGIN
+    IF to_regclass('public.tenants') IS NOT NULL THEN
+        -- dedicated_ips.tenant_id -> tenants(id)
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dedicated_ips_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE dedicated_ips ADD CONSTRAINT dedicated_ips_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+        END IF;
+        -- transport_routing_cache.tenant_id -> tenants(id)
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transport_routing_cache_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE transport_routing_cache ADD CONSTRAINT transport_routing_cache_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+        END IF;
+        -- self_hosted_bounces.tenant_id -> tenants(id)
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_bounces_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE self_hosted_bounces ADD CONSTRAINT self_hosted_bounces_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+        END IF;
+        -- self_hosted_complaints.tenant_id -> tenants(id)
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_complaints_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE self_hosted_complaints ADD CONSTRAINT self_hosted_complaints_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+        END IF;
+        -- self_hosted_dkim_keys.tenant_id -> tenants(id)
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_dkim_keys_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE self_hosted_dkim_keys ADD CONSTRAINT self_hosted_dkim_keys_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+        END IF;
+        -- self_hosted_send_stats.tenant_id -> tenants(id)
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_send_stats_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE self_hosted_send_stats ADD CONSTRAINT self_hosted_send_stats_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)';
+        END IF;
+    ELSE
+        RAISE WARNING 'Migration 021: tenants table does not exist — skipping FK constraints.';
+    END IF;
+END $$;
+
+-- C-05: Add FK REFERENCES messages(id) for bounce/complaint tracking.
+DO $$
+BEGIN
+    IF to_regclass('public.messages') IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_bounces_message_id_fkey') THEN
+            EXECUTE 'ALTER TABLE self_hosted_bounces ADD CONSTRAINT self_hosted_bounces_message_id_fkey
+                FOREIGN KEY (message_id) REFERENCES messages(id)';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'self_hosted_complaints_message_id_fkey') THEN
+            EXECUTE 'ALTER TABLE self_hosted_complaints ADD CONSTRAINT self_hosted_complaints_message_id_fkey
+                FOREIGN KEY (message_id) REFERENCES messages(id)';
+        END IF;
+    ELSE
+        RAISE WARNING 'Migration 021: messages table does not exist — skipping FK constraints on self_hosted_bounces/complaints.';
+    END IF;
 END $$;

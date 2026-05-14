@@ -1,5 +1,6 @@
 //! Messages repository.
 
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
@@ -10,6 +11,7 @@ pub struct MessagesRepo;
 
 impl MessagesRepo {
     /// Create a new message.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -29,7 +31,7 @@ impl MessagesRepo {
              (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
               status, tags, metadata, scheduled_at, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, $11, $12, NOW()) \
-             RETURNING *"
+             RETURNING id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, status, tags, metadata, scheduled_at, sent_at, created_at"
         )
         .bind(Uuid::new_v4())
         .bind(tenant_id)
@@ -53,7 +55,11 @@ impl MessagesRepo {
         tenant_id: Uuid,
         id: Uuid,
     ) -> Result<Option<Message>, sqlx::Error> {
-        sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id = $1 AND tenant_id = $2")
+        sqlx::query_as::<_, Message>(
+            "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
+             status, tags, metadata, scheduled_at, sent_at, created_at \
+             FROM messages WHERE id = $1 AND tenant_id = $2"
+        )
             .bind(id)
             .bind(tenant_id)
             .fetch_optional(pool)
@@ -71,7 +77,9 @@ impl MessagesRepo {
         match status {
             Some(s) => {
                 sqlx::query_as::<_, Message>(
-                    "SELECT * FROM messages WHERE tenant_id = $1 AND status = $2 \
+                    "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
+                     status, tags, metadata, scheduled_at, sent_at, created_at \
+                     FROM messages WHERE tenant_id = $1 AND status = $2 \
                      ORDER BY created_at DESC LIMIT $3 OFFSET $4",
                 )
                 .bind(tenant_id)
@@ -83,12 +91,88 @@ impl MessagesRepo {
             }
             None => {
                 sqlx::query_as::<_, Message>(
-                    "SELECT * FROM messages WHERE tenant_id = $1 \
+                    "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
+                     status, tags, metadata, scheduled_at, sent_at, created_at \
+                     FROM messages WHERE tenant_id = $1 \
                      ORDER BY created_at DESC LIMIT $2 OFFSET $3",
                 )
                 .bind(tenant_id)
                 .bind(limit)
                 .bind(offset)
+                .fetch_all(pool)
+                .await
+            }
+        }
+    }
+
+    /// List messages for a tenant using keyset (cursor-based) pagination.
+    /// Uses `(created_at, id)` tuple comparison for stable, efficient pagination.
+    /// Returns up to `limit` rows; the caller should request `limit + 1` and use
+    /// the extra row as a "has_more" indicator.
+    pub async fn list_keyset(
+        pool: &PgPool,
+        tenant_id: Uuid,
+        limit: i64,
+        cursor_created_at: Option<DateTime<Utc>>,
+        cursor_id: Option<Uuid>,
+        status: Option<&str>,
+    ) -> Result<Vec<Message>, sqlx::Error> {
+        let limit = limit.clamp(1, 200);
+        let fetch_limit = limit + 1;
+        match (cursor_created_at, cursor_id, status) {
+            (Some(created_at), Some(id), Some(s)) => {
+                sqlx::query_as::<_, Message>(
+                    "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
+                     status, tags, metadata, scheduled_at, sent_at, created_at \
+                     FROM messages WHERE tenant_id = $1 AND status = $2 AND (created_at, id) < ($3, $4) \
+                     ORDER BY created_at DESC, id DESC LIMIT $5",
+                )
+                .bind(tenant_id)
+                .bind(s)
+                .bind(created_at)
+                .bind(id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+            (_, _, Some(s)) => {
+                // First page with status filter — no cursor
+                sqlx::query_as::<_, Message>(
+                    "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
+                     status, tags, metadata, scheduled_at, sent_at, created_at \
+                     FROM messages WHERE tenant_id = $1 AND status = $2 \
+                     ORDER BY created_at DESC, id DESC LIMIT $3",
+                )
+                .bind(tenant_id)
+                .bind(s)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+            (Some(created_at), Some(id), None) => {
+                sqlx::query_as::<_, Message>(
+                    "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
+                     status, tags, metadata, scheduled_at, sent_at, created_at \
+                     FROM messages WHERE tenant_id = $1 AND (created_at, id) < ($2, $3) \
+                     ORDER BY created_at DESC, id DESC LIMIT $4",
+                )
+                .bind(tenant_id)
+                .bind(created_at)
+                .bind(id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+            _ => {
+                // First page without status filter — no cursor
+                sqlx::query_as::<_, Message>(
+                    "SELECT id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, html_body, text_body, \
+                     status, tags, metadata, scheduled_at, sent_at, created_at \
+                     FROM messages WHERE tenant_id = $1 \
+                     ORDER BY created_at DESC, id DESC LIMIT $2",
+                )
+                .bind(tenant_id)
+                .bind(fetch_limit)
                 .fetch_all(pool)
                 .await
             }
@@ -126,6 +210,7 @@ impl MessagesRepo {
     }
 
     /// Batch-create multiple messages in a single INSERT.
+    #[allow(clippy::type_complexity)]
     pub async fn batch_create(
         pool: &PgPool,
         tenant_id: Uuid,
@@ -158,7 +243,7 @@ impl MessagesRepo {
                 .push("'queued'")
                 .push("NOW()");
         });
-        query_builder.push(" RETURNING *");
+        query_builder.push(" RETURNING id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, created_at");
 
         query_builder
             .build_query_as::<Message>()

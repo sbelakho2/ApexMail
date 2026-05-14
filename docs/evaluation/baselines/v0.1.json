@@ -1,0 +1,62 @@
+{
+  "meta": {
+    "version": "0.1",
+    "created_at": "2026-05-12T00:00:00Z",
+    "created_by": "platform-engineering",
+    "environment": "staging-sim",
+    "notes": "Initial baseline established on staging simulation infrastructure (Hetzner ARM, 4 vCPU, 16 GB RAM). Thresholds are conservative shared-runner minimums suitable for CI."
+  },
+  "api_throughput": {
+    "sustained_rps": 1000,
+    "p95_latency_ms": 200,
+    "p99_latency_ms": 500,
+    "error_rate": 0.001
+  },
+  "tracking_pixel": {
+    "sustained_rps": 10000,
+    "p95_latency_ms": 50,
+    "data_loss_pct": 0
+  },
+  "ssr_browsers": {
+    "concurrent_sessions": 500,
+    "page_load_p95_ms": 1500,
+    "ssr_render_p95_ms": 400
+  },
+  "id_generation": {
+    "throughput_ops_per_sec": 10000
+  },
+  "email_validation": {
+    "throughput_ops_per_sec": 50000
+  },
+  "prediction_scoring": {
+    "throughput_ops_per_sec": 5000
+  },
+  "pattern_matching": {
+    "throughput_ops_per_sec": 10000
+  },
+  "billing_calculations": {
+    "throughput_ops_per_sec": 50000
+  },
+  "trust_scoring": {
+    "throughput_ops_per_sec": 50000
+  },
+  "template_rendering": {
+    "p95_latency_ms": 500
+  },
+  "analytics_rollup": {
+    "p95_latency_ms": 500
+  },
+  "compliance_evaluation": {
+    "p95_latency_ms": 500
+  },
+  "smtp_submission": {
+    "p95_latency_ms": 2000,
+    "p99_latency_ms": 5000,
+    "error_rate": 0.01
+  },
+  "criterion_microbenchmarks": {
+    "id_generation_ns_per_op": 100,
+    "email_validation_ns_per_op": 20,
+    "hmac_signing_ns_per_op": 500
+  }
+}

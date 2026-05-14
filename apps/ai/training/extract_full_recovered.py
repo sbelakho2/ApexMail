@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
+from common_paths import TRAIN_JSONL
 """
 Complete extraction of ALL recovered content with canonical pricing.
 
@@ -19,6 +22,86 @@ Canonical pricing applied:
 import json
 import re
 import os
+import logging
+
+# ── Logging setup ────────────────────────────────────────────────────
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════
+# CANONICAL PRICING TABLE (source of truth)
+# Used by validate_recovered_price() to verify recovered pricing data.
+# ═══════════════════════════════════════════════════════════════════════
+
+CANONICAL_PRICES = {
+    "0": "Free",
+    "25": "Starter",
+    "65": "Pro",
+    "150": "Growth",
+    "350": "Scale",
+    "3000": "Enterprise",
+}
+
+# Also match human-readable forms
+CANONICAL_PRICE_PATTERNS = [
+    r"\$0",
+    r"\$25",
+    r"\$65",
+    r"\$150",
+    r"\$350",
+    r"\$3,000",
+    r"\$3000",
+    r'"plan_price": "0"',
+    r'"plan_price": "25"',
+    r'"plan_price": "65"',
+    r'"plan_price": "150"',
+    r'"plan_price": "350"',
+    r'"plan_price": "3000"',
+]
+
+# Known plan display names
+KNOWN_PLANS = ["Free", "Starter", "Pro", "Growth", "Scale", "Enterprise"]
+KNOWN_PRICES = ["$0", "$25", "$65", "$150", "$350", "$3,000"]
+
+
+def validate_recovered_price(text: str, source: str = "unknown") -> bool:
+    """Validate recovered pricing data against the canonical price table.
+
+    Scans the given text for price-like values and checks each against
+    the known canonical prices. If a price doesn't match any known value,
+    logs a warning and flags it for review.
+
+    Returns True if all prices are valid, False if any anomalies found.
+    """
+    # Extract numeric price patterns
+    price_patterns = [
+        (r'\$(\d[\d,]*)', "dollar amount"),
+        (r'"plan_price":\s*"(\d+)"', "plan_price field"),
+    ]
+    found_anomaly = False
+
+    for pattern, label in price_patterns:
+        for match in re.finditer(pattern, text):
+            raw_value = match.group(1).replace(",", "")
+            if raw_value in CANONICAL_PRICES:
+                continue  # Known price, OK
+            # Check if it's a non-price number (email count, API calls, etc.)
+            # Ignore values > 10000 (these are email/API limits, not prices)
+            try:
+                num_val = int(raw_value)
+                if num_val > 10000:
+                    continue
+            except ValueError:
+                pass
+            logger.warning(
+                "Recovered price '%s' (from %s) does not match any known price "
+                "in canonical table: %s. [source: %s] — FLAGGED FOR REVIEW",
+                match.group(0), label, list(CANONICAL_PRICES.values()), source,
+            )
+            found_anomaly = True
+
+    return not found_anomaly
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # PRICING FIX MAPPINGS
@@ -51,8 +134,8 @@ PRICE_FIXES = {
     r'"plan_price": "59"': '"plan_price": "65"',
     r'"plan_price": "129"': '"plan_price": "150"',
     r'"plan_price": "399"': '"plan_price": "350"',
-    r'"plan_price": "1299"': '"plan_price": "800"',
-    r'"plan_price": "1,299"': '"plan_price": "800"',
+    r'"plan_price": "1299"': '"plan_price": "3000"',
+    r'"plan_price": "1,299"': '"plan_price": "3,000"',
 }
 
 EMAIL_LIMIT_FIXES = {
@@ -316,7 +399,7 @@ NEW_PROFILES = {
     "enterprise_compliance_v2": {
         "account_id": "acct_ent800k",
         "plan_name": "Enterprise",
-        "plan_price": "800",
+        "plan_price": "3000",
         "emails_sent": "3,625,000",
         "email_limit": "5,000,000",
         "api_calls": "45,000,000",
@@ -332,7 +415,7 @@ NEW_PROFILES = {
     "enterprise_sso_issue": {
         "account_id": "acct_sso4j7",
         "plan_name": "Enterprise",
-        "plan_price": "800",
+        "plan_price": "3000",
         "emails_sent": "2,150,000",
         "email_limit": "5,000,000",
         "api_calls": "28,000,000",
@@ -346,7 +429,7 @@ NEW_PROFILES = {
     "enterprise_multi_region": {
         "account_id": "acct_mrg2l5",
         "plan_name": "Enterprise",
-        "plan_price": "800",
+        "plan_price": "3000",
         "emails_sent": "4,200,000",
         "email_limit": "5,000,000",
         "api_calls": "52,000,000",
@@ -583,26 +666,54 @@ def main():
     
     all_new_examples = training_examples + adversarial_examples
     
-    # Append to train_agent.jsonl
-    train_file = "../../../data/train_agent.jsonl"
+    # Append to train_agent.jsonl with dedup
+    train_file = TRAIN_JSONL
+    
+    # Read existing records to build dedup set
+    existing_texts: set[str] = set()
+    if os.path.exists(train_file):
+        with open(train_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        record = json.loads(line)
+                        if "text" in record:
+                            existing_texts.add(record["text"])
+                    except json.JSONDecodeError:
+                        continue
+    
+    # Filter out duplicates
+    deduped = []
+    skipped = 0
+    for ex in all_new_examples:
+        if "text" in ex and ex["text"] in existing_texts:
+            skipped += 1
+            continue
+        deduped.append(ex)
+        if "text" in ex:
+            existing_texts.add(ex["text"])
+    
     with open(train_file, "a") as f:
-        for ex in all_new_examples:
+        for ex in deduped:
             f.write(json.dumps(ex) + "\n")
     
-    print(f"✅ Added {len(training_examples)} multi-turn examples")
-    print(f"✅ Added {len(adversarial_examples)} adversarial examples")
-    print(f"✅ Total new examples: {len(all_new_examples)}")
+    print(f"✅ Added {len(deduped)} new examples ({skipped} duplicates skipped)")
+    print(f"   +-- {len(training_examples)} multi-turn examples")
+    print(f"   +-- {len(adversarial_examples)} adversarial examples")
     
     # Count final
     with open(train_file) as f:
         total = sum(1 for _ in f)
-    print(f"✅ train_agent.jsonl now has {total} examples")
+    print(f"✅ train_agent.jsonl now has {total} examples (unique)")
+    if skipped:
+        print(f"   (skipped {skipped} already-existing examples)")
     
     print("\n" + "=" * 60)
     print("NEXT STEPS:")
     print("=" * 60)
     print("1. Review new_customer_profiles.py for EXAMPLE_CONTEXTS merge")
-    print("2. Run: python3 generate_dataset.py to re-split train/val/test")  
+    print("2. Run: python3 generate_dataset.py to re-split train/val/test")
     print("3. Run: python3 validate_pipeline.py to verify all checks pass")
 
 

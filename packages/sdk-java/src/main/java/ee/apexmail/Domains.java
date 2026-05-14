@@ -65,13 +65,11 @@ public final class Domains {
 
     public record Domain(
         String id,
-        String name,
+        String domain,
         String status,
-        boolean spfVerified,
-        boolean dkimVerified,
-        boolean dmarcVerified,
-        boolean returnPathVerified,
-        String createdAt
+        String healthStatus,
+        String createdAt,
+        String updatedAt
     ) {}
 
     public record DNSRecord(

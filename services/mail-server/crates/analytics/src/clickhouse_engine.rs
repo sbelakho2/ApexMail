@@ -1,15 +1,19 @@
 //! ClickHouse OLAP query engine for enterprise-scale analytics.
 //!
-//! Uses ClickHouse for://! - Billions of events with sub-second queries
+//! Uses ClickHouse for:
+//! - Billions of events with sub-second queries
 //! - Time-series aggregations with partition pruning
 //! - Multi-tenant concurrent analytics
 //! - 730-day retention with columnar compression
 //! - Real-time event ingestion via async inserts
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tokio::time::timeout;
+use tracing::{debug, info, warn};
 
 use crate::config::ClickHouseConfig;
 use crate::types::*;
@@ -88,6 +92,11 @@ impl ClickHouseEngine {
             .with_user(&config.user)
             .with_password(&config.password)
             .with_compression(clickhouse::Compression::Lz4)
+            // DB-11: async_insert=1 with wait_for_async_insert=0 gives eventual consistency.
+            // Materialized views (daily_aggregates_mv, hourly_aggregates_mv) may lag behind
+            // the main table by up to ~1s (the async insert flush interval).
+            // For critical reads-after-write (e.g., real-time dashboards), set
+            // wait_for_async_insert=1 or query the raw events table.
             .with_option("async_insert", "1")
             .with_option("wait_for_async_insert", "0");
 
@@ -143,6 +152,7 @@ impl ClickHouseEngine {
                     
                     INDEX idx_message_id message_id TYPE bloom_filter GRANULARITY 4,
                     INDEX idx_recipient recipient TYPE bloom_filter GRANULARITY 4
+                    ,INDEX idx_timestamp timestamp TYPE minmax GRANULARITY 1
                 )
                 ENGINE = MergeTree()
                 PARTITION BY toYYYYMM(timestamp)
@@ -232,16 +242,36 @@ impl ClickHouseEngine {
     }
 
     /// Insert events using async inserts for high throughput.
+    ///
+    /// The insert is bounded by [`ClickHouseConfig::insert_timeout_seconds`] (T-309)
+    /// to prevent unbounded waits when ClickHouse is slow or unresponsive.
     pub async fn insert_events(&self, events: &[ClickHouseEvent]) -> anyhow::Result<()> {
         if events.is_empty() {
             return Ok(());
         }
 
-        let mut insert = self.client.insert("events")?;
-        for event in events {
-            insert.write(event).await?;
-        }
-        insert.end().await?;
+        let timeout_dur = Duration::from_secs(self.config.insert_timeout_seconds);
+
+        timeout(timeout_dur, async {
+            let mut insert = self.client.insert("events")?;
+            for event in events {
+                insert.write(event).await?;
+            }
+            insert.end().await
+        })
+        .await
+        .map_err(|_elapsed| {
+            warn!(
+                count = events.len(),
+                timeout_s = self.config.insert_timeout_seconds,
+                "ClickHouse insert timed out"
+            );
+            anyhow::anyhow!(
+                "ClickHouse insert timed out after {}s for {} events",
+                self.config.insert_timeout_seconds,
+                events.len()
+            )
+        })??;
 
         debug!(count = events.len(), "Inserted events into ClickHouse");
         Ok(())
@@ -276,19 +306,23 @@ impl ClickHouseEngine {
             "complained",
             "unsubscribed",
         ];
-        let event_filter = if let Some(types) = event_types {
-            let safe: Vec<String> = types
+        let (event_filter, type_values): (String, Vec<String>) = if let Some(types) = event_types {
+            let safe: Vec<&str> = types
                 .iter()
                 .filter(|t| ALLOWED_EVENT_TYPES.contains(&t.as_str()))
-                .map(|t| format!("'{}'", t))
+                .map(|t| t.as_str())
                 .collect();
             if safe.is_empty() {
-                String::new()
+                (String::new(), Vec::new())
             } else {
-                format!(" AND event_type IN ({})", safe.join(","))
+                let placeholders: Vec<&str> = vec!["?"; safe.len()];
+                (
+                    format!(" AND event_type IN ({})", placeholders.join(",")),
+                    safe.iter().map(|s| s.to_string()).collect(),
+                )
             }
         } else {
-            String::new()
+            (String::new(), Vec::new())
         };
 
         let query = format!(
@@ -307,14 +341,18 @@ impl ClickHouseEngine {
             trunc_fn, event_filter
         );
 
-        let rows = self
+        let mut query_obj = self
             .client
             .query(&query)
             .bind(tenant_id)
             .bind(start.timestamp_millis() as f64 / 1000.0)
-            .bind(end.timestamp_millis() as f64 / 1000.0)
-            .fetch_all::<TimeSeriesRow>()
-            .await?;
+            .bind(end.timestamp_millis() as f64 / 1000.0);
+
+        for t in &type_values {
+            query_obj = query_obj.bind(t.as_str());
+        }
+
+        let rows = query_obj.fetch_all::<TimeSeriesRow>().await?;
 
         Ok(rows
             .into_iter()
@@ -405,15 +443,16 @@ impl ClickHouseEngine {
             "complained",
             "unsubscribed",
         ];
-        let safe_stages: Vec<String> = stages
+        let safe_stages: Vec<&str> = stages
             .iter()
             .filter(|s| ALLOWED_STAGES.contains(s))
-            .map(|s| format!("'{}'", s))
+            .copied()
             .collect();
         if safe_stages.is_empty() {
             return Ok(Vec::new());
         }
-        let stages_list = safe_stages.join(",");
+        let placeholders: Vec<&str> = vec!["?"; safe_stages.len()];
+        let stages_list = placeholders.join(",");
 
         let query = format!(
             r#"
@@ -430,14 +469,18 @@ impl ClickHouseEngine {
             stages_list
         );
 
-        let rows = self
+        let mut query_obj = self
             .client
             .query(&query)
             .bind(tenant_id)
             .bind(start.timestamp_millis() as f64 / 1000.0)
-            .bind(end.timestamp_millis() as f64 / 1000.0)
-            .fetch_all::<FunnelRow>()
-            .await?;
+            .bind(end.timestamp_millis() as f64 / 1000.0);
+
+        for stage in &safe_stages {
+            query_obj = query_obj.bind(stage);
+        }
+
+        let rows = query_obj.fetch_all::<FunnelRow>().await?;
 
         let counts: std::collections::HashMap<String, u64> = rows
             .into_iter()
@@ -523,6 +566,128 @@ impl ClickHouseEngine {
             open_rate: safe_div(opened, delivered),
             click_rate: safe_div(clicked, delivered),
             unsubscribe_rate: safe_div(unsubscribed, delivered),
+        })
+    }
+
+    /// Engagement histogram: group recipients by engagement level.
+    pub async fn engagement_histogram(
+        &self,
+        tenant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<EngagementBucket>> {
+        let query = r#"
+            SELECT
+                multiIf(
+                    countIf(event_type = 'clicked') > 2, 'highly_engaged',
+                    countIf(event_type = 'opened') > 2, 'engaged',
+                    countIf(event_type = 'opened') > 0, 'somewhat_engaged',
+                    countIf(event_type = 'unsubscribed') > 0, 'unsubscribed',
+                    'not_engaged'
+                ) AS bucket,
+                count() AS count
+            FROM events
+            WHERE tenant_id = ?
+              AND timestamp >= toDateTime64(?, 3)
+              AND timestamp < toDateTime64(?, 3)
+            GROUP BY bucket
+            ORDER BY bucket
+        "#;
+
+        #[derive(Debug, Row, Deserialize)]
+        struct HistogramRow {
+            bucket: String,
+            count: u64,
+        }
+
+        let rows = self
+            .client
+            .query(query)
+            .bind(tenant_id)
+            .bind(start.timestamp_millis() as f64 / 1000.0)
+            .bind(end.timestamp_millis() as f64 / 1000.0)
+            .fetch_all::<HistogramRow>()
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| EngagementBucket {
+                range: r.bucket,
+                count: r.count as i64,
+            })
+            .collect())
+    }
+
+    /// Real-time stats for the current hour and day windows.
+    pub async fn realtime_stats(&self, tenant_id: &str) -> anyhow::Result<RealtimeStats> {
+        #[derive(Debug, Row, Deserialize)]
+        struct StatsRow {
+            sent: u64,
+            delivered: u64,
+            bounced: u64,
+            opened: u64,
+            clicked: u64,
+            complained: u64,
+            unsubscribed: u64,
+        }
+
+        // Hour window
+        let hour_query = r#"
+            SELECT
+                countIf(event_type = 'sent') AS sent,
+                countIf(event_type = 'delivered') AS delivered,
+                countIf(event_type = 'bounced') AS bounced,
+                countIf(event_type = 'opened') AS opened,
+                countIf(event_type = 'clicked') AS clicked,
+                countIf(event_type = 'complained') AS complained,
+                countIf(event_type = 'unsubscribed') AS unsubscribed
+            FROM events
+            WHERE tenant_id = ?
+              AND timestamp >= now() - INTERVAL 1 HOUR
+        "#;
+
+        let hour_row = self
+            .client
+            .query(hour_query)
+            .bind(tenant_id)
+            .fetch_one::<StatsRow>()
+            .await?;
+
+        // Day window
+        let day_query = r#"
+            SELECT
+                countIf(event_type = 'sent') AS sent,
+                countIf(event_type = 'delivered') AS delivered,
+                countIf(event_type = 'bounced') AS bounced,
+                countIf(event_type = 'opened') AS opened,
+                countIf(event_type = 'clicked') AS clicked,
+                countIf(event_type = 'complained') AS complained,
+                countIf(event_type = 'unsubscribed') AS unsubscribed
+            FROM events
+            WHERE tenant_id = ?
+              AND timestamp >= now() - INTERVAL 1 DAY
+        "#;
+
+        let day_row = self
+            .client
+            .query(day_query)
+            .bind(tenant_id)
+            .fetch_one::<StatsRow>()
+            .await?;
+
+        let to_counts = |r: StatsRow| crate::types::EventCounts {
+            sent: r.sent as i64,
+            delivered: r.delivered as i64,
+            bounced: r.bounced as i64,
+            opened: r.opened as i64,
+            clicked: r.clicked as i64,
+            complained: r.complained as i64,
+            unsubscribed: r.unsubscribed as i64,
+        };
+
+        Ok(RealtimeStats {
+            this_hour: to_counts(hour_row),
+            today: to_counts(day_row),
         })
     }
 
@@ -623,6 +788,7 @@ mod tests {
             password: "".into(),
             max_connections: 10,
             query_timeout_secs: 30,
+            insert_timeout_seconds: 30,
             tls_enabled: false,
             ca_cert_path: String::new(),
         };

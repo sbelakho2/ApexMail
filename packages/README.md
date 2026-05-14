@@ -29,4 +29,16 @@ All SDKs should parse the standard ApexMail API error envelope:
 }
 ```
 
+## Cursor Pagination
+
+All SDKs now support cursor-based pagination for list endpoints (messages, templates, events, suppressions).
+The `Pagination` struct in each SDK includes `cursor` (string, for the next page token) and `has_more` (boolean)
+fields. See each SDK's CHANGELOG for details:
+
+- **Go SDK:** `ListEmailsOptions.Cursor`, `ListTemplatesOptions.Cursor`, `ListSuppressionsOptions.Cursor`, `ListEventsOptions.Cursor`
+- **Java SDK:** Cursor parameter in all list methods via `Map` options
+- **PHP SDK:** `$options['cursor']` in all list methods
+- **Python SDK:** `cursor=` keyword argument in all list methods
+- **Ruby SDK:** `cursor:` keyword argument in all list methods
+
 SDK clients should return typed error objects with `Code` and `Message` fields.

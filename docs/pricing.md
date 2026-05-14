@@ -1,4 +1,4 @@
-# ApexMail Pricing — Canonical Reference (April 2026)
+# ApexMail Pricing — Canonical Reference (May 2026)
 
 > **This is the single source of truth for all pricing.**
 > Every document, marketing page, AI training file, support playbook, and backend

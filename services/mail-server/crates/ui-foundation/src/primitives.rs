@@ -1,3 +1,17 @@
+use crate::icons::{render_icon, IconRenderOptions};
+
+fn primitive_icon(name: &str, class_name: &str) -> String {
+    render_icon(
+        name,
+        IconRenderOptions {
+            size: 18,
+            stroke_width: 2.0,
+            class_name: Some(class_name),
+        },
+    )
+    .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimitiveSpec {
     pub checklist_id: &'static str,
@@ -263,7 +277,7 @@ impl<'a> Input<'a> {
             ""
         };
         let input_markup = format!(
-            "<input type=\"{}\" value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-sm border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/20 focus-visible:border-brand-600 disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80  {} {}{}{}\" data-variant=\"{}\" data-size=\"{}\" />",
+            "<input type=\"{}\" value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-sm border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}{}{}\" data-variant=\"{}\" data-size=\"{}\" />",
             self.input_type,
             self.value,
             self.placeholder,
@@ -314,7 +328,7 @@ impl<'a> Textarea<'a> {
             String::new()
         };
         let textarea = format!(
-            "<textarea class=\"flex min-h-[80px] w-full rounded-sm border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/20 focus-visible:border-brand-600 disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80  transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            "<textarea class=\"flex min-h-[80px] w-full rounded-sm border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
             input_variant_class(self.variant),
             textarea_resize_class(self.resize),
             self.variant,
@@ -366,14 +380,14 @@ impl Checkbox {
             .map(|label| format!(" aria-label=\"{}\"", label))
             .unwrap_or_default();
         let indicator = if self.indeterminate {
-            "<span class=\"w-full h-full p-0.5\">−</span>"
+            primitive_icon("minus", "h-3 w-3")
         } else if self.checked {
-            "<span class=\"w-full h-full p-0.5\">✓</span>"
+            primitive_icon("check", "h-3 w-3")
         } else {
-            ""
+            String::new()
         };
         format!(
-            "<button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" class=\"peer shrink-0 border ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 relative after:absolute after:left-1/2 after:top-1/2 after:h-[44px] after:w-[44px] after:-translate-x-1/2 after:-translate-y-1/2 after:content-[\"\"] {} {}\" data-state=\"{}\"{}{}>{}</button>",
+            "<button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" class=\"peer shrink-0 border ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 relative after:absolute after:left-1/2 after:top-1/2 after:h-[44px] after:w-[44px] after:-translate-x-1/2 after:-translate-y-1/2 after:content-[\"\"] {} {}\" data-state=\"{}\"{}{}>{}</button>",
             self.checked || self.indeterminate,
             checkbox_variant_class(self.variant),
             checkbox_size_class(self.size),
@@ -428,7 +442,11 @@ impl<'a> Select<'a> {
                 .iter()
                 .enumerate()
                 .map(|(i, option)| {
-                    let selected = if option.selected { "<span class=\"absolute left-2 flex h-3.5 w-3.5 items-center justify-center\">✓</span>" } else { "" };
+                    let selected = if option.selected {
+                        format!("<span class=\"absolute left-2 flex h-3.5 w-3.5 items-center justify-center\">{}</span>", primitive_icon("check", "h-3.5 w-3.5"))
+                    } else {
+                        String::new()
+                    };
                     let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
                     format!(
                         "<div id=\"select-option-{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-sm py-3 pl-8 pr-2 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
@@ -441,7 +459,7 @@ impl<'a> Select<'a> {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-sm border bg-popover text-popover-foreground  border-border/60 data-[state=open]:animate-in\" role=\"listbox\"><div class=\"p-1\">{}</div></div>",
+                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-sm border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\"><div class=\"p-1\">{}</div></div>",
                 listbox_id, items,
             )
         } else {
@@ -455,7 +473,7 @@ impl<'a> Select<'a> {
         };
 
         format!(
-            "<div data-open=\"{}\"><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between border border-input bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-brand-600/20 focus:border-brand-600 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1  transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
+            "<div data-open=\"{}\"><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between border border-input bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
             self.open,
             expanded, listbox_id,
             activedescendant,
@@ -487,7 +505,7 @@ impl Switch {
         };
         let state = if self.checked { "checked" } else { "unchecked" };
         format!(
-            "<button type=\"button\" role=\"switch\" aria-checked=\"{}\" class=\"peer inline-flex shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/20 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 hover:opacity-90 active:scale-95 duration-200 relative after:absolute after:left-1/2 after:top-1/2 after:h-[44px] after:w-[44px] after:-translate-x-1/2 after:-translate-y-1/2 after:content-[\"\"] {} {}\" data-state=\"{}\"{}><span class=\"pointer-events-none block rounded-full bg-background ring-0 transition-transform  {} {}\"></span></button>",
+            "<button type=\"button\" role=\"switch\" aria-checked=\"{}\" class=\"peer inline-flex shrink-0 cursor-pointer items-center rounded-sm border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 hover:opacity-90 active:scale-95 duration-200 relative after:absolute after:left-1/2 after:top-1/2 after:h-[44px] after:w-[44px] after:-translate-x-1/2 after:-translate-y-1/2 after:content-[\"\"] {} {}\" data-state=\"{}\"{}><span class=\"pointer-events-none block rounded-sm bg-background ring-0 transition-transform {} {}\"></span></button>",
             self.checked,
             switch_variant_class(self.variant),
             switch_size_class(self.size),
@@ -510,12 +528,12 @@ pub struct Slider {
 impl Slider {
     pub fn render_html(&self) -> String {
         let tooltip = if self.show_tooltip {
-            format!("<span class=\"absolute -top-8 left-1/2 -translate-x-1/2 rounded bg-brand-600 px-3 py-1 text-xs text-white\">{}</span>", self.value)
+            format!("<span class=\"absolute -top-8 left-1/2 -translate-x-1/2 rounded bg-primary px-3 py-1 text-xs text-white\">{}</span>", self.value)
         } else {
             String::new()
         };
         format!(
-            "<div class=\"relative flex w-full touch-none select-none items-center\" data-size=\"{}\"><div class=\"relative w-full grow overflow-hidden rounded-full bg-secondary {}\"><div class=\"absolute h-full {}\" style=\"width:{}%\"></div></div><span class=\"block rounded-full border-2 border-brand-600 bg-background ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/20 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50  hover:scale-110 hover: relative {}\">{}</span></div>",
+            "<div class=\"relative flex w-full touch-none select-none items-center\" data-size=\"{}\"><div class=\"relative w-full grow overflow-hidden rounded-sm bg-secondary {}\"><div class=\"absolute h-full {}\" style=\"width:{}%\"></div></div><span class=\"block rounded-sm border-2 border-primary bg-background ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:scale-110 hover: relative {}\">{}</span></div>",
             self.size,
             slider_track_size_class(self.size),
             progress_indicator_class(self.variant),
@@ -552,13 +570,13 @@ impl<'a> RadioGroup<'a> {
             let disabled = if item.disabled { " disabled aria-disabled=\"true\"" } else { "" };
             let tabindex = if checked || (self.selected.is_empty() && i == 0) { "0" } else { "-1" };
             let indicator = if checked {
-                "<span class=\"h-2.5 w-2.5 rounded-full bg-current\"></span>"
+                "<span class=\"h-2.5 w-2.5 rounded-sm bg-current\"></span>"
             } else {
                 ""
             };
             let state = if checked { "checked" } else { "unchecked" };
             format!(
-                "<div class=\"flex items-center space-x-2\"><button type=\"button\" role=\"radio\" aria-checked=\"{}\" tabindex=\"{}\" data-value=\"{}\" data-state=\"{}\" class=\"aspect-square rounded-full border ring-offset-background focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 {} {}\"{}>{}</button><label class=\"text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70\">{}</label></div>",
+                "<div class=\"flex items-center space-x-2\"><button type=\"button\" role=\"radio\" aria-checked=\"{}\" tabindex=\"{}\" data-value=\"{}\" data-state=\"{}\" class=\"aspect-square rounded-sm border ring-offset-background focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 {} {}\"{}>{}</button><label class=\"text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70\">{}</label></div>",
                 checked, tabindex, item.value, state,
                 radio_variant_class(self.variant),
                 radio_size_class(self.size),
@@ -665,7 +683,7 @@ impl Progress {
             String::new()
         };
         format!(
-            "<div class=\"flex items-center gap-2\"><div class=\"relative w-full overflow-hidden rounded-full {} {}\"><div class=\"h-full w-full flex-1 transition-all duration-300 ease-in-out {}{}\" style=\"transform: translateX(-{}%);\"></div></div>{}</div>",
+            "<div class=\"flex items-center gap-2\"><div class=\"relative w-full overflow-hidden rounded-sm {} {}\"><div class=\"h-full w-full flex-1 transition-all duration-300 ease-in-out {}{}\" style=\"transform: translateX(-{}%);\"></div></div>{}</div>",
             progress_track_class(self.variant),
             progress_size_class(self.size),
             progress_indicator_class(self.variant),
@@ -729,7 +747,7 @@ impl<'a> Avatar<'a> {
             String::new()
         };
         format!(
-            "<div class=\"relative flex shrink-0 overflow-hidden rounded-sm border border-surface-200  {} {}\" aria-label=\"{}\">{}{}</div>",
+            "<div class=\"relative flex shrink-0 overflow-hidden rounded-sm border border-surface-200 {} {}\" aria-label=\"{}\">{}{}</div>",
             avatar_size_class(self.size),
             avatar_status_class(self.status),
             self.label,
@@ -749,11 +767,11 @@ pub struct EmptyState<'a> {
 
 impl<'a> EmptyState<'a> {
     pub fn render_html(&self) -> String {
-        let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-muted/50 border border-border/50\">{}</div>", icon)).unwrap_or_default();
+        let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center rounded-sm bg-muted/50 border border-border/50\">{}</div>", icon)).unwrap_or_default();
         let description = self.description.map(|text| format!("<p class=\"mx-auto max-w-[320px] text-sm text-muted-foreground leading-relaxed\">{}</p>", text)).unwrap_or_default();
         let action = self.action_label.map(|label| format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-[14px] font-sans font-bold tracking-[0.01em] border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground h-10 rounded-sm px-3 text-sm min-h-[44px] mt-6 font-bold\">{}</button>", label)).unwrap_or_default();
         format!(
-            "<div class=\"flex flex-col items-center justify-center py-12 px-6 text-center animate-in fade-in zoom-in-95 duration-500\">{}<h3 class=\"text-[17px] font-bold text-foreground mb-2\">{}</h3>{}{}</div>",
+            "<div class=\"apex-empty-state flex flex-col items-center justify-center py-12 px-6 text-center animate-in fade-in zoom-in-95 duration-500\">{}<h3 class=\"text-[17px] font-bold text-foreground mb-2\">{}</h3>{}{}</div>",
             icon,
             self.title,
             description,
@@ -885,10 +903,10 @@ impl<'a> Dialog<'a> {
         let close = if self.hide_close_button {
             String::new()
         } else {
-            "<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\" aria-label=\"Close\"><span class=\"h-4 w-4\">✕</span><span class=\"sr-only\">Close</span></button>".to_string()
+            format!("<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\" aria-label=\"Close\">{}<span class=\"sr-only\">Close</span></button>", primitive_icon("x", "h-4 w-4"))
         };
         format!(
-            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"dialog-title-id\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6  duration-200 sm:rounded-sm {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 id=\"dialog-title-id\" class=\"text-lg font-bold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
+            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"dialog-title-id\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 duration-200 sm:rounded-sm {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 id=\"dialog-title-id\" class=\"text-lg font-bold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
             dialog_size_class(self.size),
             dialog_variant_class(self.variant),
             self.title,
@@ -925,7 +943,7 @@ impl<'a> AlertDialog<'a> {
             String::new()
         };
         format!(
-            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-sm  p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"dialog-title\" aria-describedby=\"dialog-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"dialog-title\" class=\"text-lg font-bold text-foreground mb-2\">{}</h2><p id=\"dialog-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-sm text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
+            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-sm p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"dialog-title\" aria-describedby=\"dialog-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"dialog-title\" class=\"text-lg font-bold text-foreground mb-2\">{}</h2><p id=\"dialog-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-sm text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
             initial_focus,
             self.title,
             self.message,
@@ -951,7 +969,7 @@ pub struct Popover<'a> {
 impl<'a> Popover<'a> {
     pub fn render_html(&self) -> String {
         format!(
-            "<div class=\"relative min-h-[180px] rounded-sm border border-border bg-muted/10 p-4\"><div class=\"flex items-start justify-between gap-4\"><div><p class=\"text-sm font-bold text-foreground\">{}</p><p class=\"text-xs text-muted-foreground\">{}</p></div><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-[14px] font-sans font-bold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground h-12 px-4 py-2\">Review segment health</button></div><div class=\"absolute right-4 top-16 z-10 w-[280px] rounded-sm border border-border bg-popover p-4 text-popover-foreground \"><p class=\"text-sm font-bold\">{}</p><p class=\"mt-1 text-xs text-muted-foreground\">{}</p><div class=\"mt-3 flex items-center justify-between rounded-sm border border-border bg-background px-3 py-2 text-xs\"><span>{}</span>{}</div><div class=\"mt-3 flex justify-end gap-2\"><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-[14px] font-sans font-bold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-foreground hover:bg-accent hover:text-accent-foreground h-10 rounded-sm px-3 text-sm min-h-[44px]\">{}</button><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-[14px] font-sans font-bold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-brand-600 text-white hover:bg-brand-600/90 h-10 rounded-sm px-3 text-sm min-h-[44px]\">{}</button></div></div></div>",
+            "<div class=\"relative min-h-[180px] rounded-sm border border-border bg-muted/10 p-4\"><div class=\"flex items-start justify-between gap-4\"><div><p class=\"text-sm font-bold text-foreground\">{}</p><p class=\"text-xs text-muted-foreground\">{}</p></div><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-[14px] font-sans font-bold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground h-12 px-4 py-2\">Review segment health</button></div><div class=\"absolute right-4 top-16 z-10 w-[280px] rounded-sm border border-border bg-popover p-4 text-popover-foreground\"><p class=\"text-sm font-bold\">{}</p><p class=\"mt-1 text-xs text-muted-foreground\">{}</p><div class=\"mt-3 flex items-center justify-between rounded-sm border border-border bg-background px-3 py-2 text-xs\"><span>{}</span>{}</div><div class=\"mt-3 flex justify-end gap-2\"><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-[14px] font-sans font-bold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-foreground hover:bg-accent hover:text-accent-foreground h-10 rounded-sm px-3 text-sm min-h-[44px]\">{}</button><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-[14px] font-sans font-bold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-white hover:bg-primary/90 h-10 rounded-sm px-3 text-sm min-h-[44px]\">{}</button></div></div></div>",
             self.preview_title,
             self.preview_description,
             self.title,
@@ -995,7 +1013,7 @@ impl<'a> DropdownMenu<'a> {
             format!("<div role=\"menuitem\" tabindex=\"{}\" class=\"relative flex cursor-default select-none items-center rounded-sm px-3 py-3 text-[14px] font-medium outline-none transition-colors focus:bg-surface-100 focus:text-surface-900 cursor-pointer min-h-[44px]{}{}\">{}{}</div>", tabindex, inset, destructive, item.label, shortcut)
         }).collect::<Vec<_>>().join("");
         let keyboard_attrs = " data-keyboard-contract=\"dropdown-menu\" data-keyboard-arrow-navigates=\"true\" data-keyboard-enter-activates=\"true\" data-keyboard-escape-closes=\"true\"";
-        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-sm border border-surface-200/60 bg-white/90 backdrop-blur-xl p-1.5 text-surface-900  data-[state=open]:animate-in\" role=\"menu\"{}>{}{}</div>{}", keyboard_attrs, label, items, separator)
+        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-sm border border-surface-200/60 bg-white/90 backdrop-blur-xl p-1.5 text-surface-900 data-[state=open]:animate-in\" role=\"menu\"{}>{}{}</div>{}", keyboard_attrs, label, items, separator)
     }
 }
 
@@ -1009,7 +1027,7 @@ pub struct Tooltip<'a> {
 
 impl<'a> Tooltip<'a> {
     pub fn render_html(&self) -> String {
-        format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden rounded-sm border px-3 py-1.5 text-xs  animate-in fade-in-0 zoom-in-95 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
+        format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden rounded-sm border px-3 py-1.5 text-xs animate-in fade-in-0 zoom-in-95 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
     }
 
     /// Tooltip delay and positioning contract:matches Radix Tooltip behavior.
@@ -1323,13 +1341,18 @@ impl<'a> Table<'a> {
         let headers = self.columns.iter().map(|column| {
             format!("<th scope=\"col\" class=\"h-12 px-4 align-middle font-bold text-muted-foreground text-xs bg-muted/20 whitespace-nowrap {}\">{}</th>", table_align_class(column.align), column.label)
         }).collect::<Vec<_>>().join("");
-        let rows = self.rows.iter().map(|row| {
-            let cells = row.iter().enumerate().map(|(index, value)| {
-                let align = self.columns.get(index).map(|column| table_align_class(column.align)).unwrap_or("text-left");
-                format!("<td class=\"p-4 align-middle apex-metric-number whitespace-nowrap {}\">{}</td>", align, value)
-            }).collect::<Vec<_>>().join("");
-            format!("<tr class=\"border-b transition-colors hover:bg-muted/50 min-h-[44px]\">{}</tr>", cells)
-        }).collect::<Vec<_>>().join("");
+        let rows = if self.rows.is_empty() {
+            let colspan = self.columns.len().max(1);
+            format!("<tr class=\"border-b\"><td colspan=\"{}\" class=\"p-6 text-center text-sm text-muted-foreground\">No rows to display</td></tr>", colspan)
+        } else {
+            self.rows.iter().map(|row| {
+                let cells = row.iter().enumerate().map(|(index, value)| {
+                    let align = self.columns.get(index).map(|column| table_align_class(column.align)).unwrap_or("text-left");
+                    format!("<td class=\"p-4 align-middle apex-metric-number whitespace-nowrap {}\">{}</td>", align, value)
+                }).collect::<Vec<_>>().join("");
+                format!("<tr class=\"border-b transition-colors hover:bg-muted/50 min-h-[44px]\">{}</tr>", cells)
+            }).collect::<Vec<_>>().join("")
+        };
         let caption = self
             .caption
             .map(|value| {
@@ -1339,7 +1362,7 @@ impl<'a> Table<'a> {
                 )
             })
             .unwrap_or_default();
-        format!("<div class=\"relative w-full overflow-x-auto\"><table class=\"w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"[&_tr]:border-b sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody class=\"[&_tr:last-child]:border-0\">{}</tbody>{}</table></div>", headers, rows, caption)
+        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\"><table class=\"apex-table w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"[&_tr]:border-b sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody class=\"[&_tr:last-child]:border-0\">{}</tbody>{}</table></div>", headers, rows, caption)
     }
 }
 
@@ -1354,7 +1377,7 @@ impl<'a> Toast<'a> {
             .map(|value| format!("<div class=\"text-sm opacity-90\">{}</div>", value))
             .unwrap_or_default();
         let action = self.action_label.map(|value| format!("<button class=\"inline-flex h-8 shrink-0 items-center justify-center rounded-sm border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-secondary\">{}</button>", value)).unwrap_or_default();
-        format!("<div class=\"group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-sm border p-4 pr-8 transition-all  {}\" role=\"status\"><div class=\"flex items-start gap-3\">{}<div class=\"grid gap-1\">{}{}</div></div>{}<button class=\"absolute right-2 top-2 rounded-sm p-1 text-foreground/50\" aria-label=\"Close notification\">✕</button></div>", toast_variant_class(self.variant), toast_icon_markup(self.variant), title, description, action)
+        format!("<div class=\"group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-sm border p-4 pr-8 transition-all {}\" role=\"status\"><div class=\"flex items-start gap-3\">{}<div class=\"grid gap-1\">{}{}</div></div>{}<button class=\"absolute right-2 top-2 rounded-sm p-1 text-foreground/50\" aria-label=\"Close notification\">{}</button></div>", toast_variant_class(self.variant), toast_icon_markup(self.variant), title, description, action, primitive_icon("x", "h-4 w-4"))
     }
 }
 
@@ -1459,7 +1482,7 @@ impl<'a> Tabs<'a> {
                 let tabindex = if tab.active { "0" } else { "-1" };
                 let tabpanel_id = format!("tabpanel-{}", i);
                 format!(
-                    "<button type=\"button\" role=\"tab\" aria-selected=\"{}\" aria-controls=\"{}\" tabindex=\"{}\" data-state=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-3 py-3 text-[14px] font-medium ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/20 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 min-h-[44px] {}\">{}</button>",
+                    "<button type=\"button\" role=\"tab\" aria-selected=\"{}\" aria-controls=\"{}\" tabindex=\"{}\" data-state=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap px-3 py-3 text-[14px] font-medium ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 min-h-[44px] {}\">{}</button>",
                     aria_selected, tabpanel_id, tabindex, state,
                     tabs_trigger_variant_class(self.variant),
                     tab.label,
@@ -1484,7 +1507,7 @@ impl<'a> Card<'a> {
             ""
         };
         format!(
-            "<div class=\"rounded-sm border border-surface-200 bg-white text-surface-950 transition-premium {} {}{}\"><div class=\"flex flex-col space-y-2 min-w-0 mb-4\"><h3 class=\"text-xs font-bold uppercase tracking-widest leading-tight break-words text-surface-400\">{}</h3></div><div class=\"min-w-0\">{}</div></div>",
+            "<div class=\"apex-card rounded-sm border border-surface-200 bg-white text-surface-950 transition-premium {} {}{}\"><div class=\"flex flex-col space-y-2 min-w-0 mb-4\"><h3 class=\"text-xs font-bold uppercase tracking-widest leading-tight break-words text-surface-400\">{}</h3></div><div class=\"min-w-0\">{}</div></div>",
             card_variant_class(self.variant),
             card_padding_class(self.padding),
             interactive,
@@ -1496,12 +1519,12 @@ impl<'a> Card<'a> {
 
 fn button_variant_class(variant: &str) -> &'static str {
     match variant {
-        "destructive" => "bg-brand-600 text-white hover:bg-brand-700",
+        "destructive" => "bg-primary text-white hover:bg-brand-700",
         "outline" => "border border-surface-200 bg-white text-surface-950 hover:border-surface-950 hover:bg-surface-50",
         "secondary" => "bg-surface-100 text-surface-950 border border-surface-200 hover:border-surface-950 hover:bg-surface-200",
         "ghost" => "hover:bg-surface-100 text-surface-600 hover:text-surface-950",
-        "link" => "text-brand-600 font-bold underline decoration-brand-200 underline-offset-4 hover:decoration-brand-600",
-        _ => "bg-brand-600 text-white border border-brand-700 hover:bg-brand-700",
+        "link" => "text-primary font-bold underline decoration-brand-200 underline-offset-4 hover:decoration-primary",
+        _ => "bg-primary text-white border border-brand-700 hover:bg-brand-700",
     }
 }
 
@@ -1517,9 +1540,7 @@ fn button_size_class(size: &str) -> &'static str {
 
 fn input_variant_class(variant: &str) -> &'static str {
     match variant {
-        "error" => {
-            "border-brand-600 focus-visible:ring-brand-600/20 focus-visible:border-brand-600"
-        }
+        "error" => "border-primary focus-visible:ring-primary/20 focus-visible:border-primary",
         "success" => "border-success focus-visible:ring-success/20 focus-visible:border-success",
         "ghost" => "border-transparent bg-transparent hover:bg-surface-50",
         _ => "border-surface-200 focus-visible:border-surface-950",
@@ -1547,7 +1568,7 @@ fn checkbox_variant_class(variant: &str) -> &'static str {
     match variant {
         "success" => "border-success data-[state=checked]:bg-success data-[state=checked]:text-white",
         "destructive" => "border-destructive data-[state=checked]:bg-destructive data-[state=checked]:text-destructive-foreground",
-        _ => "border-input data-[state=checked]:bg-brand-600 data-[state=checked]:text-white data-[state=checked]:border-brand-600",
+        _ => "border-input data-[state=checked]:bg-primary data-[state=checked]:text-white data-[state=checked]:border-primary",
     }
 }
 
@@ -1561,7 +1582,7 @@ fn checkbox_size_class(size: &str) -> &'static str {
 
 fn select_variant_class(variant: &str) -> &'static str {
     match variant {
-        "error" => "border-brand-600 focus:ring-brand-600/20 focus:border-brand-600",
+        "error" => "border-primary focus:ring-primary/20 focus:border-primary",
         "success" => "border-success focus:ring-success/20 focus:border-success",
         "ghost" => "border-transparent bg-transparent hover:bg-surface-50",
         _ => "border-surface-200 hover:border-surface-950",
@@ -1582,7 +1603,7 @@ fn switch_variant_class(variant: &str) -> &'static str {
         "destructive" => {
             "data-[state=checked]:bg-destructive data-[state=unchecked]:bg-muted shadow-inner"
         }
-        _ => "data-[state=checked]:bg-brand-600 data-[state=unchecked]:bg-muted shadow-inner",
+        _ => "data-[state=checked]:bg-primary data-[state=unchecked]:bg-muted shadow-inner",
     }
 }
 
@@ -1667,7 +1688,7 @@ fn progress_indicator_class(variant: &str) -> &'static str {
         "success" => "bg-success",
         "warning" => "bg-warning",
         "error" => "bg-destructive",
-        _ => "bg-brand-600",
+        _ => "bg-primary",
     }
 }
 
@@ -1690,7 +1711,7 @@ fn badge_variant_class(variant: &str) -> &'static str {
         "outline-success" => "text-foreground border-success/35 bg-success/15",
         "outline-warning" => "text-foreground border-warning/35 bg-warning/20",
         "outline-error" => "text-destructive border-destructive/30 bg-destructive/5",
-        _ => "border-transparent bg-brand-600 text-white hover:bg-brand-600/90 ",
+        _ => "border-transparent bg-primary text-white hover:bg-primary/90 ",
     }
 }
 
@@ -1706,11 +1727,9 @@ fn card_variant_class(variant: &str) -> &'static str {
     match variant {
         "ghost" => "border-transparent shadow-none",
         "outline" => "border-border bg-transparent",
-        "elevated" => "shadow-premium-hover hover:border-brand-600/30",
+        "elevated" => "shadow-premium-hover hover:border-primary/30",
         "inset" => "border-border bg-muted/30 shadow-inner",
-        _ => {
-            "shadow-premium hover:border-brand-600/30 hover:bg-muted/40 hover:shadow-premium-hover"
-        }
+        _ => "shadow-premium hover:border-primary/30 hover:bg-muted/40 hover:shadow-premium-hover",
     }
 }
 
@@ -1750,7 +1769,7 @@ fn skeleton_variant_class(variant: &str) -> &'static str {
     match variant {
         "card" => "bg-surface-200/50 rounded-sm",
         "text" => "bg-surface-100 h-4 w-full rounded-sm",
-        "circle" => "bg-surface-100 rounded-full",
+        "circle" => "bg-surface-100 rounded-sm",
         _ => "bg-surface-100",
     }
 }
@@ -1760,48 +1779,48 @@ fn status_indicator_config(status: &str) -> (&str, &str, &str) {
         "draft" => (
             "Draft",
             "secondary",
-            "<span class=\"mr-1 h-3 w-3\">○</span>",
+            "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>",
         ),
-        "scheduled" => ("Scheduled", "info", "<span class=\"mr-1 h-3 w-3\">◷</span>"),
+        "scheduled" => ("Scheduled", "info", "<span class=\"mr-1 h-2 w-2 rounded-full bg-info-500\" aria-hidden=\"true\"></span>"),
         "sending" => (
             "Sending",
             "warning",
-            "<span class=\"mr-1 h-3 w-3\">◷</span>",
+            "<span class=\"mr-1 h-2 w-2 rounded-full bg-warning-500\" aria-hidden=\"true\"></span>",
         ),
-        "sent" => ("Sent", "success", "<span class=\"mr-1 h-3 w-3\">✓</span>"),
-        "paused" => ("Paused", "outline", "<span class=\"mr-1 h-3 w-3\">Ⅱ</span>"),
+        "sent" => ("Sent", "success", "<span class=\"mr-1 h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>"),
+        "paused" => ("Paused", "outline", "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>"),
         "subscribed" => (
             "Subscribed",
             "success",
-            "<span class=\"mr-1 h-3 w-3\">✓</span>",
+            "<span class=\"mr-1 h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>",
         ),
         "unsubscribed" => (
             "Unsubscribed",
             "secondary",
-            "<span class=\"mr-1 h-3 w-3\">Ⅱ</span>",
+            "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>",
         ),
         "bounced" => (
             "Bounced",
             "warning",
-            "<span class=\"mr-1 h-3 w-3\">!</span>",
+            "<span class=\"mr-1 h-2 w-2 rounded-full bg-warning-500\" aria-hidden=\"true\"></span>",
         ),
         "complained" => (
             "Complained",
             "error",
-            "<span class=\"mr-1 h-3 w-3\">✕</span>",
+            "<span class=\"mr-1 h-2 w-2 rounded-full bg-destructive\" aria-hidden=\"true\"></span>",
         ),
         "delivered" => (
             "Delivered",
             "success",
-            "<span class=\"mr-1 h-3 w-3\">✓</span>",
+            "<span class=\"mr-1 h-2 w-2 rounded-full bg-success-500\" aria-hidden=\"true\"></span>",
         ),
         "queued" => (
             "Queued",
             "secondary",
-            "<span class=\"mr-1 h-3 w-3\">◷</span>",
+            "<span class=\"mr-1 h-2 w-2 rounded-full bg-muted-foreground\" aria-hidden=\"true\"></span>",
         ),
-        "failed" => ("Failed", "error", "<span class=\"mr-1 h-3 w-3\">✕</span>"),
-        _ => (status, "secondary", "<span class=\"mr-1 h-3 w-3\">○</span>"),
+        "failed" => ("Failed", "error", "<span class=\"mr-1 h-2 w-2 rounded-full bg-destructive\" aria-hidden=\"true\"></span>"),
+        _ => (status, "secondary", "<span class=\"mr-1 h-2 w-2 rounded-full border border-current\" aria-hidden=\"true\"></span>"),
     }
 }
 
@@ -1826,7 +1845,7 @@ fn dialog_variant_class(variant: &str) -> &'static str {
 fn alert_dialog_confirm_class(variant: &str) -> &'static str {
     match variant {
         "destructive" => "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        _ => "bg-brand-600 text-white hover:bg-brand-600/90",
+        _ => "bg-primary text-white hover:bg-primary/90",
     }
 }
 
@@ -1860,18 +1879,18 @@ fn toast_variant_class(variant: &str) -> &'static str {
         "success" => "border-success/30 bg-success/10 backdrop-blur-xl text-success-700",
         "destructive" => "destructive group border-destructive/30 bg-destructive/10 backdrop-blur-xl text-destructive",
         "warning" => "border-warning/30 bg-warning/10 backdrop-blur-xl text-warning-700",
-        "info" => "border-brand-600/30 bg-brand-600/10 backdrop-blur-xl text-brand-600-700",
+        "info" => "border-primary/30 bg-primary/10 backdrop-blur-xl text-primary-700",
         _ => "border-surface-200 bg-white/90 backdrop-blur-xl text-surface-900",
     }
 }
 
-fn toast_icon_markup(variant: &str) -> &'static str {
+fn toast_icon_markup(variant: &str) -> String {
     match variant {
-        "success" => "<span class=\"h-5 w-5 text-success\">✓</span>",
-        "destructive" => "<span class=\"h-5 w-5 text-destructive-foreground\">!</span>",
-        "warning" => "<span class=\"h-5 w-5 text-warning\">!</span>",
-        "info" => "<span class=\"h-5 w-5 text-brand-600\">i</span>",
-        _ => "",
+        "success" => primitive_icon("check-circle", "h-5 w-5 text-success"),
+        "destructive" => primitive_icon("alert-circle", "h-5 w-5 text-destructive-foreground"),
+        "warning" => primitive_icon("alert-triangle", "h-5 w-5 text-warning"),
+        "info" => primitive_icon("info", "h-5 w-5 text-primary"),
+        _ => String::new(),
     }
 }
 
@@ -1887,7 +1906,10 @@ fn chart_empty_description(reason: &str) -> &'static str {
 }
 
 fn chart_empty_state_markup(reason: &str) -> String {
-    format!("<div class=\"flex min-h-[220px] items-center justify-center rounded-sm border border-border bg-muted/20 p-6 text-center text-sm text-muted-foreground\">{}</div>", chart_empty_description(reason))
+    // No outer border/background here — the surrounding chart frame already provides the
+    // single visible boundary. Adding another border created a triple-stacked look when
+    // the chart frame itself was nested inside a card.
+    format!("<div class=\"apex-chart-empty flex min-h-[220px] flex-col items-center justify-center gap-3 p-6 text-center text-sm text-muted-foreground\"><svg aria-hidden=\"true\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" class=\"h-7 w-7 opacity-40\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M3 3v18h18M7 15l3-3 3 3 5-5\"/></svg><p class=\"max-w-xs leading-5\">{}</p></div>", chart_empty_description(reason))
 }
 
 fn chart_meta_markup(last_updated_label: Option<&str>) -> String {
@@ -1908,7 +1930,7 @@ fn chart_legend_markup(items: &[ChartLegendItem<'_>]) -> String {
 
     let entries = items
         .iter()
-        .map(|item| format!("<div class=\"inline-flex items-center gap-2 text-xs text-muted-foreground\"><span class=\"h-2.5 w-2.5 rounded-full\" style=\"background-color: {}\" aria-hidden=\"true\"></span><span>{}</span></div>", item.color, item.name))
+        .map(|item| format!("<div class=\"inline-flex items-center gap-2 text-xs text-muted-foreground\"><span class=\"h-2.5 w-2.5 rounded-sm\" style=\"background-color: {}\" aria-hidden=\"true\"></span><span>{}</span></div>", item.color, item.name))
         .collect::<Vec<_>>()
         .join("");
 
@@ -1933,9 +1955,13 @@ fn render_chart_frame(
         String::new()
     };
 
-    format!("<div class=\"rounded-sm border border-border bg-card text-card-foreground \">{}<div class=\"p-6\"><div style=\"height: {}px\">{}</div></div></div>", header, height, content)
+    // The chart frame is almost always wrapped in a panel/card by the page layout.
+    // Use a transparent border and no inner padding so we don't double-frame nor
+    // double-pad the chart inside that card.
+    format!("<div class=\"apex-chart-frame rounded-sm border border-transparent bg-transparent text-card-foreground\">{}<div style=\"height: {}px\">{}</div></div>", header, height, content)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_chart_shell(
     title: Option<&str>,
     description: Option<&str>,
@@ -1975,8 +2001,8 @@ fn tabs_list_variant_class(variant: &str) -> &'static str {
 
 fn tabs_trigger_variant_class(variant: &str) -> &'static str {
     match variant {
-        "underline" => "relative border-b-2 border-transparent pb-3 pt-2 px-1 text-muted-foreground rounded-none data-[state=active]:border-brand-600 data-[state=active]:text-foreground hover:text-foreground/80",
-        "pills" => "rounded-sm px-4 bg-transparent hover:bg-muted/50 data-[state=active]:bg-brand-600 data-[state=active]:text-white data-[state=active]:",
+        "underline" => "relative border-b-2 border-transparent pb-3 pt-2 px-1 text-muted-foreground rounded-none data-[state=active]:border-primary data-[state=active]:text-foreground hover:text-foreground/80",
+        "pills" => "rounded-sm px-4 bg-transparent hover:bg-muted/50 data-[state=active]:bg-primary data-[state=active]:text-white data-[state=active]:",
         _ => "rounded-sm data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:",
     }
 }
@@ -1987,7 +2013,7 @@ fn radio_variant_class(variant: &str) -> &'static str {
         "destructive" => {
             "border-destructive text-destructive data-[state=checked]:border-destructive"
         }
-        _ => "border-brand-600 text-brand-600 data-[state=checked]:border-brand-600",
+        _ => "border-primary text-primary data-[state=checked]:border-primary",
     }
 }
 
@@ -2299,11 +2325,16 @@ pub fn render_sortable_header(
 
 /// Renderable selectable table row checkbox.
 pub fn render_row_checkbox(selected: bool) -> String {
+    let indicator = if selected {
+        primitive_icon("check", "h-3 w-3")
+    } else {
+        String::new()
+    };
     format!(
-        "<td class=\"w-12 p-4 align-middle\"><button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" aria-label=\"Select row\" class=\"peer shrink-0 border border-input ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-600/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 h-4 w-4 rounded-sm data-[state=checked]:bg-brand-600 data-[state=checked]:text-white data-[state=checked]:border-brand-600\" data-state=\"{}\">{}</button></td>",
+        "<td class=\"w-12 p-4 align-middle\"><button type=\"button\" role=\"checkbox\" aria-checked=\"{}\" aria-label=\"Select row\" class=\"peer shrink-0 border border-input ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 h-4 w-4 rounded-sm data-[state=checked]:bg-primary data-[state=checked]:text-white data-[state=checked]:border-primary\" data-state=\"{}\">{}</button></td>",
         selected,
         if selected { "checked" } else { "unchecked" },
-        if selected { "<span class=\"w-full h-full p-0.5\">✓</span>" } else { "" },
+        indicator,
     )
 }
 
@@ -2554,7 +2585,7 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("bg-brand-600"));
+        assert!(html.contains("bg-primary"));
         assert!(html.contains("text-white"));
         assert!(html.contains("px-8 py-4 text-[15px] uppercase tracking-tight"));
         assert!(html.contains("disabled aria-disabled=\"true\""));
@@ -2612,7 +2643,7 @@ mod tests {
 
         assert!(html.contains("relative"));
         assert!(html.contains("pl-10 pr-10"));
-        assert!(html.contains("border-brand-600"));
+        assert!(html.contains("border-primary"));
         assert!(html.contains("Required"));
         assert!(html.contains("placeholder=\"email\""));
         assert!(html.contains("focus-visible:ring-2"));
@@ -2816,7 +2847,7 @@ mod tests {
         .render_html();
 
         assert!(html.contains("role=\"tablist\""));
-        assert!(html.contains("data-[state=active]:border-brand-600"));
+        assert!(html.contains("data-[state=active]:border-primary"));
         assert!(html.contains("data-state=\"active\""));
         assert!(html.contains("<section>Panel</section>"));
     }
@@ -2887,7 +2918,7 @@ mod tests {
         }
         .render_html();
         assert!(html.contains("animate-pulse"));
-        assert!(html.contains("rounded-full"));
+        assert!(html.contains("rounded-sm"));
         assert!(html.contains("h-10 w-10"));
     }
 
@@ -2988,7 +3019,9 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("bg-popover p-4 text-popover-foreground "));
+        assert!(
+            html.contains("rounded-sm border border-border bg-popover p-4 text-popover-foreground")
+        );
         assert!(html.contains("Segment risk summary"));
         assert!(html.contains("Open report"));
     }
@@ -3074,7 +3107,7 @@ mod tests {
             areas: vec![ChartSeries {
                 key: "sent",
                 name: "Sent",
-                color: "rgb(var( --brand-600))",
+                color: "rgb(var( --primary))",
             }],
             data_count: 0,
             empty_state_reason: "no-data",
@@ -3271,7 +3304,7 @@ mod tests {
 
     #[test]
     fn radio_group_variant_classes_map_correctly() {
-        assert!(radio_variant_class("default").contains("border-brand-600"));
+        assert!(radio_variant_class("default").contains("border-primary"));
         assert!(radio_variant_class("success").contains("border-success"));
         assert!(radio_variant_class("destructive").contains("border-destructive"));
     }
@@ -3623,7 +3656,7 @@ mod tests {
         let checked = render_row_checkbox(true);
         assert!(checked.contains("aria-checked=\"true\""));
         assert!(checked.contains("data-state=\"checked\""));
-        assert!(checked.contains("✓"));
+        assert!(checked.contains("<svg"));
 
         let unchecked = render_row_checkbox(false);
         assert!(unchecked.contains("aria-checked=\"false\""));

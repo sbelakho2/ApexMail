@@ -306,7 +306,10 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                         enabled: false,
                         ..emta_config
                     },
-                    reqwest::Client::new(),
+                    reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .expect("Client::builder with only timeout should never fail"),
                 )
             }
         };
@@ -1620,6 +1623,7 @@ async fn load_usage_alert_webhook_url(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_usage_alert(
     state: &AppState,
     client: &Client,

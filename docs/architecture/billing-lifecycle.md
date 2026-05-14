@@ -1,6 +1,6 @@
 # Billing Lifecycle
 
-> **Implementation Note (2026-04):** This page reflects the current Rust billing implementation in `services/mail-server/crates/billing-service/`.
+> **Implementation Note (2026-05):** This page reflects the current Rust billing implementation in `services/mail-server/crates/billing-service/`.
 
 ## Overview
 
@@ -19,12 +19,12 @@ Default plans are seeded in `src/plans.rs` and persisted to the `plans` table.
 
 | Plan | Monthly | Yearly | Emails / month | API calls / month | Rate-limit tier |
 |------|---------|--------|----------------|-------------------|-----------------|
-| Free | `0` | `0` | `3,000` | `50,000` | `Free` |
+| Free | `0` | `0` | `30,000` | `300,000` | `Free` |
 | Starter | `2,500` cents | `25,000` cents | `50,000` | `500,000` | `Standard` |
 | Pro | `6,500` cents | `65,000` cents | `150,000` | `2,000,000` | `Standard` |
 | Growth | `15,000` cents | `150,000` cents | `500,000` | `5,000,000` | `High` |
 | Scale | `35,000` cents | `350,000` cents | `2,000,000` | `20,000,000` | `High` |
-| Enterprise | `80,000` cents | `800,000` cents | `5,000,000` | unlimited (`-1`) | `Unlimited` |
+| Enterprise | `300,000` cents | `3,000,000` cents | `5,000,000` | unlimited (`-1`) | `Unlimited` |
 | PAYG | `0` | `0` | unlimited (`-1`) | unlimited (`-1`) | `Standard` |
 
 Rate-limit tiers map to API throughput in `src/types.rs`:
@@ -42,7 +42,7 @@ See `docs/pricing.md` for the user-facing plan summary.
 
 - `checkout.session.completed` marks the tenant status as active.
 - `customer.subscription.created` and `customer.subscription.updated` upsert `stripe_subscriptions`.
-- The Stripe price ID is mapped back to an ApexMail plan via `plans.stripe_price_id_monthly` / `plans.stripe_price_id_yearly`.
+- The Stripe price ID is mapped back to an ApexMail plan through the billing-service Stripe price mapping. The live `plans` table does not persist Stripe price columns; legacy API fields for plan Stripe price IDs are exposed as `null`.
 - When a subscription becomes active, the billing service can auto-provision included dedicated IPs.
 
 ### Plan changes

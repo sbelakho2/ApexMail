@@ -905,7 +905,7 @@ impl StripeClient {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     fn new(
         http: reqwest::Client,
         base_url: String,
@@ -1640,23 +1640,23 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto) -> String {
   <meta charset="utf-8">
   <title>Invoice {invoice_number}</title>
   <style>
-    body {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; color: #333; margin: 40px; }}
+    body {{ font-family:ui-monospace, 'JetBrains Mono', monospace; font-size: 12px; color: #18181b; margin: 40px; }}
     .header {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
-    .logo {{ font-size: 24px; font-weight: bold; color: #1a1a1a; }}
+    .logo {{ font-size: 24px; font-weight: bold; color: #09090b; }}
     .invoice-info {{ text-align: right; }}
     .invoice-number {{ font-size: 18px; font-weight: bold; }}
     .addresses {{ display: flex; justify-content: space-between; margin-bottom: 40px; }}
     .address {{ width: 45%; }}
-    .address h3 {{ font-size: 10px; text-transform: uppercase; color: #666; margin-bottom: 10px; }}
+    .address h3 {{ font-size: 10px; text-transform: uppercase; color: #71717a; margin-bottom: 10px; }}
     table {{ width: 100%; border-collapse: collapse; margin-bottom: 30px; }}
-    th {{ background: #f5f5f5; padding: 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #ddd; }}
-    td {{ padding: 12px; border-bottom: 1px solid #eee; }}
+    th {{ background: #f4f4f5; padding: 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #d4d4d8; }}
+    td {{ padding: 12px; border-bottom: 1px solid #e4e4e7; }}
     .amount {{ text-align: right; }}
     .totals {{ margin-left: auto; width: 300px; }}
     .totals table {{ margin-bottom: 0; }}
     .totals td {{ border: none; padding: 8px 12px; }}
-    .total-row {{ font-weight: bold; font-size: 14px; background: #f5f5f5; }}
-    .footer {{ margin-top: 60px; padding-top: 20px; border-top: 1px solid #eee; font-size: 10px; color: #666; }}
+    .total-row {{ font-weight: bold; font-size: 14px; background: #f4f4f5; }}
+    .footer {{ margin-top: 60px; padding-top: 20px; border-top: 1px solid #e4e4e7; font-size: 10px; color: #71717a; }}
     .vat-note {{ font-style: italic; margin-top: 20px; }}
   </style>
 </head>
@@ -2422,7 +2422,7 @@ async fn compare_plans(
                     "features": plan1_features,
                     "limits": {
                         "emailLimit": plan1.email_limit,
-                        "apiCallLimit": plan1.api_call_limit,
+                        "apiCallsPerMonth": plan1.api_call_limit,
                     }
                 },
                 "plan2": {
@@ -2432,7 +2432,7 @@ async fn compare_plans(
                     "features": plan2_features,
                     "limits": {
                         "emailLimit": plan2.email_limit,
-                        "apiCallLimit": plan2.api_call_limit,
+                        "apiCallsPerMonth": plan2.api_call_limit,
                     }
                 },
                 "differences": {
@@ -3264,7 +3264,10 @@ async fn get_invoice_xml(
                     "attachment; filename=\"invoice-{}.xml\"",
                     safe_invoice_filename(&invoice.invoice_number)
                 ))
-                .expect("invoice filename should be a valid header value"),
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, invoice = %invoice.invoice_number, "invalid invoice filename header, falling back to default");
+                    HeaderValue::from_static("attachment; filename=\"invoice.xml\"")
+                }),
             );
             Ok(response)
         }
@@ -4392,6 +4395,12 @@ mod tests {
             db_user: "apexmail".into(),
             db_password: "password".into(),
             db_max_connections: 20,
+            api_replica_count: 1,
+            db_cluster_connection_budget: None,
+            expected_replica_count: 3,
+            statement_cache_capacity: 500,
+            query_timeout_seconds: 30,
+            database_replica_url: None,
             redis_host: "localhost".into(),
             redis_port: 6379,
             redis_password: None,
@@ -4399,6 +4408,7 @@ mod tests {
             redis_pool_max_size: 40,
             jwt_private_key_pem: "BEGIN TEST".into(),
             jwt_public_key_pem: "BEGIN TEST".into(),
+            jwt_previous_public_keys_pem: vec![],
             jwt_expiry: Duration::from_secs(86_400),
             api_key_hash_secret: "test-api-key-secret-12345678901234567890".into(),
             rate_limit_window_ms: 60_000,
@@ -4447,6 +4457,11 @@ mod tests {
             placement_imap_timeout_secs: 30,
             placement_encrypt_passwords: false,
             placement_encryption_secret: "test-placement-encryption-secret-32b".into(),
+            mcaptcha_base_url: "https://mcaptcha.example.com".into(),
+            mcaptcha_site_key: "dev".into(),
+            mcaptcha_secret_key: "dev".into(),
+            mcaptcha_enabled: false,
+            mcaptcha_verify_url: "https://demo.mcaptcha.org/api/v1/pow/siteverify".into(),
         }
     }
 
@@ -4477,9 +4492,14 @@ mod tests {
             "us-east-1".into(),
         );
 
+        let pools = apexmail_db::pool::create_pool_pair(&database_url, None, 1, 0)
+            .await
+            .expect("failed to create test pool pair");
+
         build_app(
             AppStateInner::new(
                 db,
+                pools,
                 redis,
                 test_config(),
                 reqwest::Client::new(),

@@ -1,0 +1,51 @@
+{
+  "meta": {
+    "version": "0.1-criterion",
+    "created_at": "2026-05-12T00:00:00Z",
+    "created_by": "platform-engineering",
+    "environment": "ci-ubuntu-latest",
+    "notes": "Criterion microbenchmark baseline for hot-path operations. Values are nanoseconds per operation measured on standard GitHub Actions CI runner."
+  },
+  "benchmarks": {
+    "id_generation": {
+      "ns_per_op": 100,
+      "ops_per_sec": 10000000,
+      "description": "Time to generate a single unique ID (20-char ULID-like)"
+    },
+    "email_validation_basic": {
+      "ns_per_op": 20,
+      "ops_per_sec": 50000000,
+      "description": "Time to validate a well-formed email address"
+    },
+    "email_validation_invalid": {
+      "ns_per_op": 15,
+      "ops_per_sec": 66666667,
+      "description": "Time to reject an invalid email address"
+    },
+    "hmac_signing": {
+      "ns_per_op": 500,
+      "ops_per_sec": 2000000,
+      "description": "Time to create an HMAC-SHA256 signature"
+    },
+    "template_render_simple": {
+      "ns_per_op": 5000,
+      "ops_per_sec": 200000,
+      "description": "Time to render a simple Handlebars template with 3 variables"
+    },
+    "template_render_complex": {
+      "ns_per_op": 50000,
+      "ops_per_sec": 20000,
+      "description": "Time to render a complex template with loops, conditionals, and partials"
+    },
+    "json_serialize_email": {
+      "ns_per_op": 2000,
+      "ops_per_sec": 500000,
+      "description": "Time to serialize a standard email payload to JSON"
+    },
+    "json_deserialize_email": {
+      "ns_per_op": 3000,
+      "ops_per_sec": 333333,
+      "description": "Time to deserialize a standard email payload from JSON"
+    }
+  }
+}

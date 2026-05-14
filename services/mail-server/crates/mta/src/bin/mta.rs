@@ -4,6 +4,9 @@ use std::sync::Arc;
 
 use axum::{routing::get, Router};
 use clap::Parser;
+use observability_service::otlp_exporter::{
+    init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
+};
 use sqlx::postgres::PgPoolOptions;
 use tokio::signal;
 use tracing::{error, info};
@@ -24,12 +27,8 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
-        )
-        .init();
+    // Initialize tracing (with OTLP support)
+    let _tracing_guard = init_tracing(&cli.log_level);
 
     let config = MtaConfig::from_env()?;
     info!(mta_id = %config.mta_id, "Starting MTA server");
@@ -183,24 +182,23 @@ async fn main() -> anyhow::Result<()> {
                 Box::pin(async move {
                     if let Ok(mut conn) = r.get().await {
                         let key = format!("compliance:secrets:{}:plaintext", secret_ref);
-                        let v: Result<Option<String>, _> = redis::cmd("GET")
-                            .arg(&key)
-                            .query_async(&mut *conn)
-                            .await;
+                        let v: Result<Option<String>, _> =
+                            redis::cmd("GET").arg(&key).query_async(&mut *conn).await;
                         if let Ok(Some(val)) = v {
                             return Ok(val);
                         }
                     }
                     // Last-resort fallback: env var with the secret_ref name.
                     std::env::var(&secret_ref).map_err(|_| {
-                        format!(
-                            "secret_ref '{secret_ref}' not found in Redis or env",
-                        )
+                        format!("secret_ref '{secret_ref}' not found in Redis or env",)
                     })
                 })
             });
         let cfg = mta::postmaster::scheduler::ScheduleConfig::default();
-        info!("Postmaster reputation poller starting (interval = {:?})", cfg.interval);
+        info!(
+            "Postmaster reputation poller starting (interval = {:?})",
+            cfg.interval
+        );
         let handle = mta::postmaster::scheduler::spawn(postmaster_pool, cfg, resolver);
         if let Err(e) = handle.await {
             error!(error = %e, "Postmaster scheduler exited");
@@ -286,4 +284,30 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<tokio_ru
         .with_single_cert(certs, key)?;
 
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Initialize tracing subscriber with OTLP support.
+/// Falls back to JSON logging when OTLP is not configured.
+fn init_tracing(log_level: &str) -> Option<TracingGuard> {
+    if is_otlp_enabled() {
+        let config = OtlpConfig {
+            service_name: "mta-server".into(),
+            service_version: option_env!("CARGO_PKG_VERSION").map(str::to_string),
+            environment: std::env::var("APP_ENV").ok(),
+            ..Default::default()
+        };
+
+        match init_otlp_tracing(config) {
+            Ok(guard) => return Some(guard),
+            Err(error) => tracing::error!("failed to initialize OTLP tracing: {error}"),
+        }
+    }
+
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)),
+        )
+        .init();
+    None
 }

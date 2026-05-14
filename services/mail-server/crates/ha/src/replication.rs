@@ -357,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn test_stats_with_replicas() {
         let replicas = vec![
             ReplicaInfo {

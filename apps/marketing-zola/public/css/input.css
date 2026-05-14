@@ -59,25 +59,25 @@
 
   /* Font Variables */
   --font-apex: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
-  --font-display: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Fraunces Variable', ui-serif, serif;
   --font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
 
-  /* Core Brand Colors — Functionalist Signal Red */
+  /* Core Brand Colors — Brand Red */
   --brand-50: 254 242 242;
   --brand-100: 254 226 226;
   --brand-200: 254 202 202;
   --brand-300: 252 165 165;
   --brand-400: 248 113 113;
-  --brand-500: 220 38 38;     /* Signal Red */
-  --brand-600: 185 28 28;
-  --brand-700: 153 27 27;
-  --brand-800: 127 29 29;
-  --brand-900: 69 10 10;
+  --brand-500: 239 68 68;     /* Brand Red (#EF4444) */
+  --brand-600: 220 38 38;
+  --brand-700: 185 28 28;
+  --brand-800: 153 27 27;
+  --brand-900: 127 29 29;
 
   /* Primary — matches brand-500 */
-  --primary: 220 38 38;
+  --primary: 239 68 68;
 
-  /* Surfaces — Zinc palette for neutral, industrial feel */
+  /* Surfaces — Zinc palette for neutral, industrial feel (Light Mode) */
   --surface-50: 250 250 250;
   --surface-100: 244 244 245;
   --surface-200: 228 228 231;
@@ -91,9 +91,28 @@
   --surface-950: 9 9 11;
 
   /* Semantic Colors */
+  --success-50: 240 253 244;
+  --success-100: 220 252 231;
+  --success-500: 34 197 94;
+  --success-600: 22 163 74;
+  --success-700: 21 128 61;
   --success: 22 163 74;
+
+  --warning-50: 255 251 235;
+  --warning-100: 254 243 199;
+  --warning-200: 253 230 138;
+  --warning-500: 245 158 11;
+  --warning-600: 217 119 6;
+  --warning-700: 180 83 9;
+  --warning-800: 146 64 14;
   --warning: 217 119 6;
+
+  --info-50: 236 254 255;
+  --info-500: 6 182 212;
+  --info-600: 8 145 178;
+  --info-700: 14 116 144;
   --info: 8 145 178;
+
   --destructive: 185 28 28;   /* brand-600 for better contrast */
   --error: 220 38 38;
 
@@ -107,22 +126,24 @@
   --space-12: 48px;
   --space-16: 64px;
 
-  /* Radius (Apex Style: Sharp) */
-  --radius-sm: 0px;
-  --radius-md: 2px;
-  --radius-lg: 2px;
-  --radius-xl: 2px;
+  /* Radius (Style Guide v2) */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-xl: 8px;
+
+  /* Theme transition speed */
+  --theme-transition-duration: 200ms;
 }
+
+/* ─── Dark Mode ───────────────────────────────────── */
+
+/* Apply dark variables when the user prefers dark scheme OR the .dark class is set.
+   The class-based approach allows a JS theme toggle for manual override.
+   The media query provides automatic system-level switching. */
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --text: 229 231 235;
-    --muted: 203 213 225;
-    --surface: 15 23 42;
-    --card-dark: 18 26 42;
-    --divider-dark: 31 41 55;
-
-    /* Surface Colors - Dark Mode (Zinc) */
     --surface-50: 9 9 11;
     --surface-100: 24 24 27;
     --surface-200: 39 39 42;
@@ -137,15 +158,7 @@
   }
 }
 
-/* Dark mode via .dark class (alternative to prefers-color-scheme for manual toggle) */
 html.dark {
-  --text: 229 231 235;
-  --muted: 203 213 225;
-  --surface: 15 23 42;
-  --card-dark: 18 26 42;
-  --divider-dark: 31 41 55;
-
-  /* Surface Colors - Dark Mode (Zinc) */
   --surface-50: 9 9 11;
   --surface-100: 24 24 27;
   --surface-200: 39 39 42;
@@ -157,6 +170,46 @@ html.dark {
   --surface-800: 228 228 231;
   --surface-900: 244 244 245;
   --surface-950: 250 250 250;
+}
+
+/* Override hardcoded bg-white to respect dark mode via CSS variables.
+   This catches all 140+ instances across templates without modifying each one.
+   !important is needed to override Tailwind's ! modifier (!bg-white) in pricing/card.html */
+html.dark .bg-white {
+  background-color: rgb(var(--surface-50) / var(--tw-bg-opacity, 1)) !important;
+}
+html.dark .bg-white\/95 {
+  background-color: rgb(var(--surface-50) / 0.95) !important;
+}
+html.dark .bg-white\/80 {
+  background-color: rgb(var(--surface-50) / 0.8) !important;
+}
+html.dark .bg-white\/5 {
+  background-color: rgb(var(--surface-50) / 0.05) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .bg-white {
+    background-color: rgb(var(--surface-50) / var(--tw-bg-opacity, 1)) !important;
+  }
+  .bg-white\/95 {
+    background-color: rgb(var(--surface-50) / 0.95) !important;
+  }
+  .bg-white\/80 {
+    background-color: rgb(var(--surface-50) / 0.8) !important;
+  }
+  .bg-white\/5 {
+    background-color: rgb(var(--surface-50) / 0.05) !important;
+  }
+
+  /* Override focus-visible ring-offset to use surface-50 so it's visible in dark mode */
+  :focus-visible {
+    --tw-ring-offset-color: rgb(var(--surface-50));
+  }
+}
+
+html.dark :focus-visible {
+  --tw-ring-offset-color: rgb(var(--surface-50));
 }
 
 @layer base {
@@ -184,10 +237,13 @@ html.dark {
   }
 
   body {
-    @apply bg-white text-surface-950 font-sans text-[16px] leading-[1.5];
+    @apply bg-surface-50 text-surface-950 font-sans text-[16px] leading-[1.5];
     font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1, 'cv05' 1;
     min-height: 100vh;
+    overflow-x: hidden;
     text-rendering: optimizeLegibility;
+    transition: background-color var(--theme-transition-duration) ease,
+                color var(--theme-transition-duration) ease;
   }
 
   button,
@@ -210,24 +266,24 @@ html.dark {
   }
 
   h1 {
-    @apply font-display text-[48px] md:text-[80px] font-bold leading-[0.95] tracking-[-0.04em] uppercase;
+    @apply font-display text-[40px] sm:text-[48px] md:text-[80px] font-bold leading-[0.95] tracking-normal;
   }
 
   h2 {
-    @apply font-display text-[32px] md:text-[48px] font-bold leading-[1.0] tracking-[-0.03em] uppercase;
+    @apply font-display text-[32px] md:text-[48px] font-bold leading-[1.0] tracking-normal;
   }
 
   h3 {
-    @apply font-display text-[20px] md:text-[24px] font-bold leading-[1.1] tracking-[-0.02em] uppercase;
+    @apply font-display text-[20px] md:text-[24px] font-bold leading-[1.1] tracking-normal;
   }
 
   /* Core UI elements from Style Guide */
   .apex-card {
-    @apply bg-white border border-surface-200 rounded-sm transition-premium;
+    @apply bg-surface-50 border border-surface-200 rounded-sm transition-premium;
   }
 
   .apex-card:hover {
-    @apply border-surface-950 bg-white;
+    @apply border-surface-950 bg-surface-50;
   }
 
   /* Card variants */
@@ -239,10 +295,10 @@ html.dark {
   }
 
   .apex-card--glass {
-    @apply bg-white/80 border border-surface-200;
+    @apply bg-surface-50/80 border border-surface-200;
   }
   .apex-card--glass:hover {
-    @apply bg-white border-surface-950;
+    @apply bg-surface-50 border-surface-950;
   }
 
   .apex-card--compact {
@@ -278,39 +334,43 @@ html.dark {
   }
 
   .shadow-premium {
-    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
   }
 
   .shadow-premium-hover {
-    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.12);
+  }
+
+  .shadow-premium-sm {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
   }
 
   .container-marketing {
-    @apply max-w-7xl mx-auto px-4 md:px-6 lg:px-8;
+    @apply max-w-[1200px] mx-auto px-4 md:px-6 lg:px-8;
   }
 
   .honest-surface {
-    @apply bg-white border border-surface-200 rounded-sm transition-premium;
+    @apply bg-surface-50 border border-surface-200 rounded-sm transition-premium;
   }
 
   .premium-card {
-    @apply bg-white border border-surface-200 rounded-sm transition-premium;
+    @apply bg-surface-50 border border-surface-200 rounded-sm transition-premium;
   }
 
   .premium-card:hover {
-    @apply border-surface-950 bg-white;
+    @apply border-surface-950 bg-surface-50;
   }
 
   .btn-primary {
-    @apply px-6 py-3 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-sm border border-brand-700 transition-premium uppercase tracking-tight text-xs;
+    @apply px-6 py-3 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-sm border border-brand-700 transition-premium tracking-tight text-xs;
   }
 
   .btn-secondary {
-    @apply px-6 py-3 border border-surface-200 hover:border-surface-950 hover:bg-surface-50 bg-white text-surface-950 font-bold rounded-sm transition-premium uppercase tracking-tight text-xs;
+    @apply px-6 py-3 border border-surface-200 hover:border-surface-950 hover:bg-surface-50 bg-surface-50 text-surface-950 font-bold rounded-sm transition-premium tracking-tight text-xs;
   }
 
   .btn-accent {
-    @apply px-6 py-3 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-sm border border-brand-700 transition-premium uppercase tracking-tight text-xs;
+    @apply px-6 py-3 bg-brand-600 hover:bg-brand-700 text-white font-bold rounded-sm border border-brand-700 transition-premium tracking-tight text-xs;
   }
 
   /* Apex Style Prose — for technical documentation and legal pages */
@@ -319,7 +379,7 @@ html.dark {
   }
 
   .prose h1, .prose h2, .prose h3, .prose h4 {
-    @apply text-surface-950 font-bold uppercase tracking-tight mb-4 mt-12;
+    @apply text-surface-950 font-bold tracking-tight mb-4 mt-12;
   }
 
   .prose h2 { @apply text-2xl border-b border-surface-100 pb-2; }
@@ -335,7 +395,7 @@ html.dark {
     @apply text-brand-600 font-bold underline decoration-brand-600/30 underline-offset-4 hover:decoration-brand-600 transition-colors;
   }
 
-  .prose strong { @apply text-surface-950 font-bold uppercase tracking-tight; }
+  .prose strong { @apply text-surface-950 font-bold tracking-tight; }
 
   .prose code {
     @apply px-1.5 py-0.5 bg-surface-100 border border-surface-200 text-surface-900 rounded-sm font-mono text-[13px];
@@ -358,7 +418,7 @@ html.dark {
   }
 
   .prose th {
-    @apply px-4 py-3 bg-surface-100 border border-surface-200 text-[10px] font-bold uppercase tracking-widest text-surface-400;
+    @apply px-4 py-3 bg-surface-100 border border-surface-200 text-[10px] font-bold tracking-widest text-surface-400;
   }
 
   .prose td {
@@ -410,6 +470,33 @@ html.dark {
     min-width: 44px;
     min-height: 44px;
   }
+
+  /* 12-Column Grid System (Style Guide v2) */
+  .grid-12 {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 16px;
+  }
+
+  @screen sm {
+    .grid-12 { gap: 16px; }
+  }
+  @screen lg {
+    .grid-12 { gap: 24px; }
+  }
+
+  .col-span-1 { grid-column: span 1 / span 1; }
+  .col-span-2 { grid-column: span 2 / span 2; }
+  .col-span-3 { grid-column: span 3 / span 3; }
+  .col-span-4 { grid-column: span 4 / span 4; }
+  .col-span-5 { grid-column: span 5 / span 5; }
+  .col-span-6 { grid-column: span 6 / span 6; }
+  .col-span-7 { grid-column: span 7 / span 7; }
+  .col-span-8 { grid-column: span 8 / span 8; }
+  .col-span-9 { grid-column: span 9 / span 9; }
+  .col-span-10 { grid-column: span 10 / span 10; }
+  .col-span-11 { grid-column: span 11 / span 11; }
+  .col-span-12 { grid-column: span 12 / span 12; }
 
   /* Button active state */
   .btn-primary:active {
@@ -487,6 +574,79 @@ html.dark {
   .nav-link:hover::after {
     width: 100%;
   }
+
+  .cookie-consent-banner {
+    position: fixed;
+    right: 1.5rem;
+    bottom: 1.5rem;
+    z-index: 40;
+    width: min(28rem, calc(100vw - 2rem));
+    border: 1px solid rgb(var(--surface-800));
+    background: rgb(var(--surface-50));
+    padding: 1rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
+
+  .cookie-consent-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+  }
+
+  .cookie-consent-button {
+    display: inline-flex;
+    min-width: 0;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    padding: 0.55rem 0.5rem;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+    transition: color 200ms cubic-bezier(0.23, 1, 0.32, 1), background-color 200ms cubic-bezier(0.23, 1, 0.32, 1), border-color 200ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  .cookie-consent-button--primary {
+    border: 1px solid rgb(var(--brand-700));
+    background: rgb(var(--brand-600));
+    color: #fff;
+  }
+
+  .cookie-consent-button--primary:hover {
+    background: rgb(var(--brand-700));
+  }
+
+  .cookie-consent-button--secondary {
+    border: 1px solid rgb(var(--surface-200));
+    background: rgb(var(--surface-50));
+    color: rgb(var(--surface-950));
+  }
+
+  .cookie-consent-button--secondary:hover {
+    border-color: rgb(var(--surface-950));
+    background: rgb(var(--surface-100));
+  }
+}
+
+@media (max-width: 479px) {
+  .cookie-consent-banner {
+    right: 0.5rem;
+    bottom: 0.5rem;
+    left: 0.5rem;
+    width: auto;
+    padding: 0.625rem;
+  }
+
+  .cookie-consent-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cookie-consent-button[data-cookie-consent-value="all"] {
+    grid-column: 1 / -1;
+  }
 }
 
 @layer utilities {
@@ -529,11 +689,11 @@ html.dark {
   }
 
   ::-webkit-scrollbar-track {
-    @apply bg-surface-100 rounded-full;
+    @apply bg-surface-100 rounded-sm;
   }
 
   ::-webkit-scrollbar-thumb {
-    @apply bg-surface-300 rounded-full;
+    @apply bg-surface-300 rounded-sm;
   }
 
   ::-webkit-scrollbar-thumb:hover {
@@ -541,21 +701,32 @@ html.dark {
   }
 }
 
-/* Prism/Code highlighting */
+/* Apex Syntax Theme (Syntect/Giallo compatible) */
+.z-code { @apply text-surface-100 bg-surface-950; }
+.z-comment { @apply text-surface-500 italic; }
+.z-keyword { @apply text-brand-400 font-bold; }
+.z-string { @apply text-brand-200; }
+.z-constant { @apply text-brand-500; }
+.z-entity { @apply text-surface-100; }
+.z-support { @apply text-brand-400; }
+.z-variable { @apply text-surface-100; }
+.z-punctuation { @apply text-surface-400; }
+
+/* Prism/Code highlighting (Manual/Legacy) */
 .code-highlight {
-  @apply text-primary-500 font-bold;
+  @apply text-brand-500 font-bold;
 }
 
 .code-string {
-  @apply text-accent-400;
+  @apply text-brand-300;
 }
 
 .code-keyword {
-  @apply text-violet-400;
+  @apply text-brand-400;
 }
 
 .code-comment {
-  @apply text-surface-400 italic;
+  @apply text-surface-500 italic;
 }
 
 /* Calculator slider */
@@ -566,22 +737,22 @@ input[type='range'] {
 }
 
 input[type='range']::-webkit-slider-track {
-  @apply h-2 rounded-full bg-surface-700;
+  @apply h-2 rounded-none bg-surface-700;
 }
 
 input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  @apply w-7 h-7 rounded-full bg-primary-500 cursor-pointer shadow-lg shadow-primary-500/20 border-2 border-white;
+  @apply w-7 h-7 rounded-sm bg-brand-500 cursor-pointer shadow-premium border-2 border-white;
   margin-top: -10px;
 }
 
 input[type='range']::-moz-range-track {
-  @apply h-2 rounded-full bg-surface-700;
+  @apply h-2 rounded-none bg-surface-700;
 }
 
 input[type='range']::-moz-range-thumb {
-  @apply w-7 h-7 rounded-full bg-primary-500 cursor-pointer border-2 border-white shadow-lg;
+  @apply w-7 h-7 rounded-sm bg-brand-500 cursor-pointer border-2 border-white shadow-premium;
 }
 
 /* Terminal animation */
@@ -668,7 +839,7 @@ input[type='range']::-moz-range-thumb {
 
 .hover-lift:hover {
   transform: translateY(-4px);
-  box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.15);
+  @apply shadow-premium-hover;
 }
 
 .hover-scale {

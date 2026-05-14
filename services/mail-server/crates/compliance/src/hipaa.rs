@@ -630,6 +630,7 @@ impl HipaaService {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_event_hash(
     id: &str,
     baa_id: &str,

@@ -484,6 +484,34 @@ The following auth-related routes use `AuthUser` but don't enforce scopes:
 | Edit contacts | ✓ | ✓ | ✓ | ✗ | ✗ |
 | Wildcard/admin operations | ✓ | ✓ | ✗ | ✗ | ✗ |
 
+### 9.3 API Key Scope Reference (OpenAPI Enum)
+
+The following 19 scopes are defined in the [OpenAPI spec](../api/openapi.yaml) and can be assigned to API keys. Each scope maps to specific API operations:
+
+| Scope | Owner | Admin | Developer | Viewer | Member | Endpoint Examples |
+|-------|:-----:|:-----:|:---------:|:------:|:------:|-------------------|
+| `messages:send` | ✓ | ✓ | ✓ | ✗ | ✗ | POST /v1/messages, POST /v1/messages/batch |
+| `messages:read` | ✓ | ✓ | ✓ | ✓ | ✓ | GET /v1/messages/{id}, GET /v1/messages |
+| `messages:write` | ✓ | ✓ | ✓ | ✗ | ✗ | PUT /v1/messages/{id}, DELETE /v1/messages/{id} |
+| `domains:read` | ✓ | ✓ | ✓ | ✓ | ✗ | GET /v1/domains, GET /v1/domains/{id} |
+| `domains:write` | ✓ | ✓ | ✗ | ✗ | ✗ | POST /v1/domains, PUT /v1/domains/{id} |
+| `suppressions:read` | ✓ | ✓ | ✗ | ✗ | ✗ | GET /v1/suppressions |
+| `suppressions:write` | ✓ | ✓ | ✗ | ✗ | ✗ | POST /v1/suppressions, DELETE /v1/suppressions |
+| `events:read` | ✓ | ✓ | ✓ | ✓ | ✗ | GET /v1/events, GET /v1/events/{id} |
+| `events:write` | ✓ | ✓ | ✗ | ✗ | ✗ | POST /v1/events (webhook test events) |
+| `templates:read` | ✓ | ✓ | ✓ | ✓ | ✗ | GET /v1/templates, GET /v1/templates/{id} |
+| `templates:write` | ✓ | ✓ | ✓ | ✗ | ✗ | POST /v1/templates, PUT /v1/templates/{id} |
+| `analytics:read` | ✓ | ✓ | ✓ | ✓ | ✗ | GET /v1/analytics/* |
+| `webhooks:read` | ✓ | ✓ | ✗ | ✗ | ✗ | GET /v1/webhooks |
+| `webhooks:write` | ✓ | ✓ | ✗ | ✗ | ✗ | POST /v1/webhooks, PUT /v1/webhooks/{id} |
+| `dedicated-ips:read` | ✓ | ✓ | ✗ | ✗ | ✗ | GET /v1/dedicated-ips |
+| `dedicated-ips:write` | ✓ | ✓ | ✗ | ✗ | ✗ | POST /v1/dedicated-ips, DELETE /v1/dedicated-ips |
+| `contacts:read` | ✓ | ✓ | ✓ | ✓ | ✗ | GET /v1/contacts, GET /v1/contacts/{id} |
+| `contacts:write` | ✓ | ✓ | ✓ | ✗ | ✗ | POST /v1/contacts, PUT /v1/contacts/{id} |
+| `admin` | ✓ | ✓ | ✗ | ✗ | ✗ | Tenant admin operations, SCIM provisioning |
+
+> **Note:** The developer and viewer role scope assignments above reflect the **current** role→scope mappings in `auth.rs`. Some scopes (marked ✗ for developer/viewer) can be assigned directly via API key creation even if not included in the default role profile. See the [OpenAPI spec](../api/openapi.yaml) for per-endpoint scope requirements.
+
 ---
 
 ## 10. Recommendations

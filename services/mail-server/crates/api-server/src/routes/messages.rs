@@ -700,7 +700,7 @@ async fn list_messages(
             .status(StatusCode::NOT_MODIFIED)
             .header("ETag", &etag)
             .body(axum::body::Body::empty())
-            .unwrap());
+            .expect("invariant: Response builder with empty body should not fail"));
     }
 
     Ok(axum::response::Response::builder()
@@ -709,7 +709,7 @@ async fn list_messages(
         .header("Cache-Control", "private, max-age=0, must-revalidate")
         .header("Content-Type", "application/json")
         .body(axum::body::Body::from(body_bytes))
-        .unwrap())
+        .expect("invariant: Response builder with valid body should not fail"))
 }
 
 async fn get_message(
@@ -1112,7 +1112,7 @@ mod tests {
         )
         .bind(&id)
         .bind(format!("Test Tenant {suffix}"))
-        .bind(format!("test-{suffix}"))
+        .bind(format!("test-{suffix}-{id}"))
         .execute(pool)
         .await
         .expect("failed to insert test tenant");

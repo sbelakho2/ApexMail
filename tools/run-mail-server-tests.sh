@@ -33,14 +33,17 @@ select_database_url() {
   local candidate=""
   local -a candidates=()
 
+  # Build candidate from explicit env vars (preferred — no hardcoded secrets)
   if [[ -n "$password" ]]; then
     candidates+=("postgres://${user}:${password}@${host}:${port}/${name}")
   fi
 
+  # Fallback: try local unix socket with peer/auth or pgpass-based connection
+  # (no password on command line — relies on pg_hba.conf trust/peer or ~/.pgpass)
   candidates+=(
-    "postgres://apexmail:apexmail@127.0.0.1:5432/apexmail"
-    "postgres://apexmail:apexmail@127.0.0.1:55432/apexmail"
-    "postgres://apexmail:apexmail@127.0.0.1:5435/apexmail"
+    "postgres://${user}@127.0.0.1:5432/${name}?sslmode=disable"
+    "postgres://${user}@127.0.0.1:55432/${name}?sslmode=disable"
+    "postgres://${user}@127.0.0.1:5435/${name}?sslmode=disable"
   )
 
   for candidate in "${candidates[@]}"; do

@@ -229,8 +229,10 @@ impl TransportRouter {
         let cache = self.cache.read().await;
         match cache.entries.get(&tenant_id) {
             Some(entry) if entry.has_dedicated_ips => {
-                let mut config = TransportConfig::default();
-                config.bind_ip = entry.preferred_ip.clone();
+                let config = TransportConfig {
+                    bind_ip: entry.preferred_ip.clone(),
+                    ..Default::default()
+                };
                 debug!(
                     tenant_id = %tenant_id,
                     ip = ?config.bind_ip,

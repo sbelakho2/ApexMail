@@ -310,13 +310,25 @@ mod tests {
         assert_eq!(event.title, "Demo");
 
         let events = svc
-            .list_events(tenant, date(2025, 6, 9, 0, 0), date(2025, 6, 11, 0, 0), 100, 0)
+            .list_events(
+                tenant,
+                date(2025, 6, 9, 0, 0),
+                date(2025, 6, 11, 0, 0),
+                100,
+                0,
+            )
             .await;
         assert_eq!(events.len(), 1);
 
         // Other tenant should not see this event
         let other_events = svc
-            .list_events("tenant-b", date(2025, 6, 9, 0, 0), date(2025, 6, 11, 0, 0), 100, 0)
+            .list_events(
+                "tenant-b",
+                date(2025, 6, 9, 0, 0),
+                date(2025, 6, 11, 0, 0),
+                100,
+                0,
+            )
             .await;
         assert_eq!(other_events.len(), 0);
     }
@@ -328,9 +340,9 @@ mod tests {
         };
         let tenant = "tenant-b";
 
-        // Clean up
-        let _ = sqlx::query("DELETE FROM sales_calendar_events WHERE tenant_id = $1")
-            .bind(tenant)
+        // Clean up both tenants used by this test so reruns are deterministic.
+        let _ = sqlx::query("DELETE FROM sales_calendar_events WHERE tenant_id = ANY($1)")
+            .bind(&["tenant-b", "tenant-c"][..])
             .execute(&svc.db)
             .await;
 

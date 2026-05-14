@@ -46,7 +46,9 @@ impl Cipher {
             return Err(CryptoError::InvalidKeyLength(raw.len()));
         }
         let key = Key::<Aes256Gcm>::from_slice(&raw);
-        Ok(Self { inner: Aes256Gcm::new(key) })
+        Ok(Self {
+            inner: Aes256Gcm::new(key),
+        })
     }
 
     /// Encrypt `plaintext` and return the canonical `v1:<nonce>:<ct>` form.
@@ -58,11 +60,7 @@ impl Cipher {
             .inner
             .encrypt(nonce, plaintext)
             .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
-        Ok(format!(
-            "v1:{}:{}",
-            B64.encode(nonce_bytes),
-            B64.encode(ct)
-        ))
+        Ok(format!("v1:{}:{}", B64.encode(nonce_bytes), B64.encode(ct)))
     }
 
     /// Decrypt a `v1:<nonce>:<ct>` blob.
@@ -84,7 +82,9 @@ impl Cipher {
             .decode(ct_b64)
             .map_err(|_| CryptoError::MalformedCiphertext)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
-        self.inner.decrypt(nonce, ct.as_ref()).map_err(|_| CryptoError::DecryptionFailed)
+        self.inner
+            .decrypt(nonce, ct.as_ref())
+            .map_err(|_| CryptoError::DecryptionFailed)
     }
 }
 
@@ -117,12 +117,12 @@ mod tests {
     #[test]
     fn detects_tampering() {
         let c = Cipher::from_base64_key(&test_key()).unwrap();
-        let mut blob = c.encrypt(b"abc").unwrap();
-        // Flip one byte in the ciphertext segment.
+        let blob = c.encrypt(b"abc").unwrap();
+        // Flip one byte in the ciphertext segment using safe byte manipulation.
         let flip_at = blob.len() - 4;
-        let ch = blob.as_bytes()[flip_at];
-        let new = if ch == b'A' { b'B' } else { b'A' };
-        unsafe { blob.as_bytes_mut()[flip_at] = new; }
+        let mut bytes: Vec<u8> = blob.into_bytes();
+        bytes[flip_at] = if bytes[flip_at] == b'A' { b'B' } else { b'A' };
+        let blob = String::from_utf8(bytes).expect("tampered bytes remain valid UTF-8");
         assert!(c.decrypt(&blob).is_err());
     }
 
@@ -131,12 +131,18 @@ mod tests {
         let c = Cipher::from_base64_key(&test_key()).unwrap();
         let blob = c.encrypt(b"x").unwrap();
         let v2 = blob.replacen("v1:", "v2:", 1);
-        assert!(matches!(c.decrypt(&v2), Err(CryptoError::MalformedCiphertext)));
+        assert!(matches!(
+            c.decrypt(&v2),
+            Err(CryptoError::MalformedCiphertext)
+        ));
     }
 
     #[test]
     fn rejects_truncated_blob() {
         let c = Cipher::from_base64_key(&test_key()).unwrap();
-        assert!(matches!(c.decrypt("v1:short"), Err(CryptoError::MalformedCiphertext)));
+        assert!(matches!(
+            c.decrypt("v1:short"),
+            Err(CryptoError::MalformedCiphertext)
+        ));
     }
 }

@@ -10,7 +10,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-DEFAULT_SCRAPE_URI = "http://clickhouse:8123/"
+DEFAULT_SCRAPE_URI = "https://clickhouse:8443/"
 DEFAULT_PORT = 9116
 METRIC_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]")
 

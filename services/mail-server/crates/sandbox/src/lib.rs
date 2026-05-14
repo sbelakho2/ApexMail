@@ -1,3 +1,4 @@
+#![allow(clippy::doc_lazy_continuation)]
 //! # Sandbox — Secure Attachment Detonation
 //!
 //! Provides a sandboxed execution environment for analyzing email attachments,
@@ -24,6 +25,7 @@
 //! The sandbox still provides static analysis, content inspection, and policy enforcement,
 //! which catch the vast majority of malicious attachments without process execution.
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 

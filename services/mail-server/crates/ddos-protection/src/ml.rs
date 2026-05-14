@@ -380,7 +380,7 @@ impl IsolationForest {
     /// first training, breaking the online learning loop.
     pub fn needs_retraining(&self) -> bool {
         let buffer = self.training_buffer.read();
-        let last = self.samples_at_last_training.load(Ordering::Relaxed);
+        let last = self.samples_at_last_training.load(Ordering::SeqCst);
         let new_samples = buffer.len().saturating_sub(last);
         let threshold_size =
             (self.config.online_buffer_size as f64 * self.config.retrain_threshold) as usize;
@@ -401,7 +401,7 @@ impl IsolationForest {
 
         self.train(&data, seed);
         self.samples_at_last_training
-            .store(current_len, Ordering::Relaxed);
+            .store(current_len, Ordering::SeqCst);
     }
 
     /// Get model statistics

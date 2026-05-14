@@ -72,16 +72,9 @@ impl Default for TrustScorerConfig {
 /// Trust scorer with optional custom weights.
 ///
 /// Uses [`TrustScorerConfig::default`] when no custom config is provided.
+#[derive(Default)]
 pub struct TrustScorer {
     config: TrustScorerConfig,
-}
-
-impl Default for TrustScorer {
-    fn default() -> Self {
-        Self {
-            config: TrustScorerConfig::default(),
-        }
-    }
 }
 
 impl TrustScorer {

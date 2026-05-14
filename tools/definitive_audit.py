@@ -3,7 +3,7 @@
 DEFINITIVE LINE-BY-LINE AUDIT — checks every assistant response in every training example.
 
 For each line, extracts ALL claims about pricing/plans/features/math from assistant
-responses and validates them against the canonical source (docs/pricing.md).
+responses and validates them against the canonical source (tools/lib/pricing.py).
 
 This script does NOT use broad regexes. It checks specific, targeted patterns
 that represent actual claims an assistant might make.
@@ -13,28 +13,43 @@ import re
 import sys
 from collections import defaultdict
 
-FILEPATH = 'data/train_agent.jsonl'
+from lib.pricing import PLANS as _CANONICAL_PLANS, PAYG_TIERS, DEDICATED_IP_PRICE, OVERAGE_RATE_PER_1K
+from common_paths import data_path
+
+FILEPATH = str(data_path('train_agent.jsonl'))
 
 # ══════════════════════════════════════════════════════════════════════
-# CANONICAL VALUES (from docs/pricing.md, February 2026)
+# CANONICAL VALUES (from tools/lib/pricing.py — single source of truth)
 # ══════════════════════════════════════════════════════════════════════
 
-PLANS = {
-    'free':       {'price': 0,   'annual': 0,    'emails': 3000,     'api': 50000,      'team': 1,  'domains': 1,   'contacts': 500,    'retention': 7,   'webhooks': 0},
-    'starter':    {'price': 25,  'annual': 250,  'emails': 50000,    'api': 500000,     'team': 5,  'domains': 5,   'contacts': 10000,  'retention': 30,  'webhooks': 5},
-    'pro':        {'price': 65,  'annual': 650,  'emails': 150000,   'api': 2000000,    'team': 10, 'domains': 25,  'contacts': 50000,  'retention': 60,  'webhooks': 10},
-    'growth':     {'price': 150, 'annual': 1500, 'emails': 500000,   'api': 5000000,    'team': 25, 'domains': 100, 'contacts': 200000, 'retention': 90,  'webhooks': 25},
-    'scale':      {'price': 350, 'annual': 3500, 'emails': 2000000,  'api': 20000000,   'team': 50, 'domains': -1,  'contacts': 500000, 'retention': 365, 'webhooks': -1},
-    'enterprise': {'price': 800, 'annual': 8000, 'emails': 5000000,  'api': -1,         'team': -1, 'domains': -1,  'contacts': -1,     'retention': 730, 'webhooks': -1},
-}
+_UL = -1  # sentinel for unlimited
 
-# Old values that should NOT appear
+# Normalise canonical plans (TitleCase keys, api_calls/retention_days fields)
+# into the lowercase-key, aliased-field format this audit expects.
+# Annual pricing = 10 × monthly price.
+# webhooks field computed from plan tier; not all plans expose webhook count.
+PLANS = {}
+_WEBHOOKS_BY_PLAN = {'free': 0, 'starter': 5, 'pro': 10, 'growth': 25}
+for name, vals in _CANONICAL_PLANS.items():
+    key = name.lower()
+    PLANS[key] = {
+        'price':     vals['price'],
+        'annual':    vals['price'] * 10,
+        'emails':    vals['emails'],
+        'api':       vals['api_calls'],
+        'team':      _UL if key in ('scale', 'enterprise') else vals['team'],
+        'domains':   _UL if key in ('scale', 'enterprise') else vals['domains'],
+        'retention': vals['retention_days'],
+        'contacts':  _UL if key == 'enterprise' else vals['contacts'],
+        'webhooks':  _UL if key in ('scale', 'enterprise') else _WEBHOOKS_BY_PLAN.get(key, 0),
+    }
+
+# Old values that should NOT appear (audit-specific historical reference)
 OLD_PRICES = {'starter': [29], 'pro': [59], 'growth': [129], 'scale': [399], 'enterprise': [1299]}
 OLD_EMAILS = {'starter': [25000], 'pro': [50000], 'growth': [100000], 'scale': [500000], 'enterprise': [2000000]}
 
-OVERAGE_RATE = 0.40  # per 1,000 emails
-PAYG_TIERS = [(10000, 0.001), (100000, 0.0008), (1000000, 0.0005), (float('inf'), 0.0003)]
-DEDICATED_IP_PRICE = 30  # $/mo
+# Alias for consistent naming in check functions
+OVERAGE_RATE = OVERAGE_RATE_PER_1K
 
 # Feature gates: plan → set of features available
 FEATURE_GATES = {
@@ -412,16 +427,14 @@ def check_company_info(ln, assistant):
         pass  # Hard to verify encoding issues
 
 def check_contact_limits(ln, assistant):
-    """Check contact limit claims."""
+    """Check contact limit claims (derived from canonical PLANS)."""
     lower = assistant.lower()
     
-    contact_vals = {
-        'free': 500, 'starter': 10000, 'pro': 50000, 
-        'growth': 200000, 'scale': 500000
-        # Enterprise is Unlimited
-    }
-    
-    for plan_name, expected in contact_vals.items():
+    for plan_name, vals in PLANS.items():
+        expected = vals['contacts']
+        if expected == _UL:  # Enterprise — unlimited
+            continue
+        
         pat = rf'\b{plan_name}\b.{{0,150}}?([\d,]+[KkMm]?)\s*contacts?'
         for m in re.finditer(pat, lower, re.DOTALL):
             num = parse_number(m.group(1))
@@ -429,12 +442,14 @@ def check_contact_limits(ln, assistant):
                 add_issue(ln, 'wrong_contacts', f"{plan_name.title()} shown with {num:,} contacts (should be {expected:,})")
 
 def check_webhook_limits(ln, assistant):
-    """Check webhook limit claims."""
+    """Check webhook limit claims (derived from canonical PLANS)."""
     lower = assistant.lower()
     
-    webhook_vals = {'free': 0, 'starter': 5, 'pro': 10, 'growth': 25}
-    
-    for plan_name, expected in webhook_vals.items():
+    for plan_name, vals in PLANS.items():
+        expected = vals['webhooks']
+        if expected == _UL:  # Scale/Enterprise — unlimited
+            continue
+        
         pat = rf'\b{plan_name}\b.{{0,150}}?(\d+)\s*webhooks?'
         for m in re.finditer(pat, lower, re.DOTALL):
             claimed = int(m.group(1))
@@ -443,72 +458,77 @@ def check_webhook_limits(ln, assistant):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# MAIN LOOP — process every line
+# MAIN
 # ══════════════════════════════════════════════════════════════════════
 
-with open(FILEPATH) as f:
-    lines = f.readlines()
+def main():
+    with open(FILEPATH) as f:
+        lines = f.readlines()
 
-print(f"Scanning {len(lines)} training examples line by line...")
-print()
+    print(f"Scanning {len(lines)} training examples line by line...")
+    print()
 
-for i, raw in enumerate(lines, 1):
-    data = json.loads(raw)
-    text = data['text']
-    assistant = get_assistant_text(text)
-    
-    if not assistant:
-        add_issue(i, 'no_assistant', 'No assistant response found')
-        continue
-    
-    # Run ALL checks
-    check_plan_prices(i, assistant)
-    check_email_limits(i, assistant)
-    check_team_counts(i, assistant)
-    check_domain_counts(i, assistant)
-    check_overage_rate(i, assistant)
-    check_old_prices(i, assistant)
-    check_arithmetic(i, assistant)
-    check_dedicated_ip(i, assistant)
-    check_annual_pricing(i, assistant)
-    check_retention(i, assistant)
-    check_feature_gates(i, assistant)
-    check_payg_math(i, assistant)
-    check_company_info(i, assistant)
-    check_contact_limits(i, assistant)
-    check_webhook_limits(i, assistant)
+    for i, raw in enumerate(lines, 1):
+        data = json.loads(raw)
+        text = data['text']
+        assistant = get_assistant_text(text)
+        
+        if not assistant:
+            add_issue(i, 'no_assistant', 'No assistant response found')
+            continue
+        
+        # Run ALL checks
+        check_plan_prices(i, assistant)
+        check_email_limits(i, assistant)
+        check_team_counts(i, assistant)
+        check_domain_counts(i, assistant)
+        check_overage_rate(i, assistant)
+        check_old_prices(i, assistant)
+        check_arithmetic(i, assistant)
+        check_dedicated_ip(i, assistant)
+        check_annual_pricing(i, assistant)
+        check_retention(i, assistant)
+        check_feature_gates(i, assistant)
+        check_payg_math(i, assistant)
+        check_company_info(i, assistant)
+        check_contact_limits(i, assistant)
+        check_webhook_limits(i, assistant)
 
-# ══════════════════════════════════════════════════════════════════════
-# REPORT
-# ══════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════
+    # REPORT
+    # ══════════════════════════════════════════════════════════════════
 
-print("=" * 72)
-print("DEFINITIVE LINE-BY-LINE AUDIT RESULTS")
-print("=" * 72)
+    print("=" * 72)
+    print("DEFINITIVE LINE-BY-LINE AUDIT RESULTS")
+    print("=" * 72)
 
-if not issues:
-    print("\n✅ ALL 1,089 LINES CLEAN — zero issues found.")
-    sys.exit(0)
+    if not issues:
+        print("\n✅ ALL 1,089 LINES CLEAN — zero issues found.")
+        return
 
-# Group by category
-by_category = defaultdict(list)
-for ln, cat, msg in issues:
-    by_category[cat].append((ln, msg))
+    # Group by category
+    by_category = defaultdict(list)
+    for ln, cat, msg in issues:
+        by_category[cat].append((ln, msg))
 
-print(f"\nTotal issues: {len(issues)}")
-print(f"Categories: {len(by_category)}")
+    print(f"\nTotal issues: {len(issues)}")
+    print(f"Categories: {len(by_category)}")
 
-for cat in sorted(by_category.keys()):
-    items = by_category[cat]
-    print(f"\n{'─' * 60}")
-    print(f"  {cat.upper()} ({len(items)} issues)")
-    print(f"{'─' * 60}")
-    for ln, msg in sorted(items):
-        print(f"  L{ln}: {msg}")
+    for cat in sorted(by_category.keys()):
+        items = by_category[cat]
+        print(f"\n{'─' * 60}")
+        print(f"  {cat.upper()} ({len(items)} issues)")
+        print(f"{'─' * 60}")
+        for ln, msg in sorted(items):
+            print(f"  L{ln}: {msg}")
 
-# Summary
-all_lines = sorted(set(ln for ln, _, _ in issues))
-print(f"\n{'=' * 72}")
-print(f"LINES WITH ISSUES: {all_lines}")
-print(f"TOTAL LINES AFFECTED: {len(all_lines)}")
-print(f"{'=' * 72}")
+    # Summary
+    all_lines = sorted(set(ln for ln, _, _ in issues))
+    print(f"\n{'=' * 72}")
+    print(f"LINES WITH ISSUES: {all_lines}")
+    print(f"TOTAL LINES AFFECTED: {len(all_lines)}")
+    print(f"{'=' * 72}")
+
+
+if __name__ == '__main__':
+    main()

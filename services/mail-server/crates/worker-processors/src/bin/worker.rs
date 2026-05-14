@@ -22,8 +22,13 @@ use worker_processors::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    // Initialize structured JSON logging with env-driven filter
+    // Sampling strategy: default `info` level; use RUST_LOG for fine-grained control.
+    // For high-volume worker, set `RUST_LOG=warn,worker_processors=info` in production
+    // to reduce log volume while retaining visibility into worker operations.
     tracing_subscriber::fmt()
+        .json()
+        .with_target(true)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )

@@ -124,6 +124,15 @@ docker-compose up -d mail-server
 
 Internal integrations now communicate with the mail server through its Rust-owned HTTP and gRPC surfaces.
 
+## What's New
+
+- **MFA / Admin 2FA TOTP** — Multi-factor authentication for admin accounts using time-based one-time passwords
+- **Dark mode** — Marketing Zola templates now respect `prefers-color-scheme` with full dark mode support
+- **HSTS preload** — `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` header on all HTTPS responses
+- **CSRF protection** — All auth POST forms (login, signup, forgot-password, reset-password) include CSRF tokens
+- **DSAR rate limiting** — GDPR data-subject request endpoints enforce per-user (1/24h), per-tenant (100/24h), and per-IP rate limits
+- **Cursor pagination** — All list endpoints now support cursor-based pagination across all 5 SDKs (Go, Java, PHP, Python, Ruby)
+
 ## Security Features
 
 - Memory-safe Rust implementation
@@ -131,10 +140,14 @@ Internal integrations now communicate with the mail server through its Rust-owne
 - DKIM signing for outbound mail
 - SPF/DMARC verification for inbound
 - Rate limiting and abuse prevention
+- MFA (TOTP) for admin accounts
+- HSTS preload header
+- CSRF token protection on all auth forms
+- DSAR rate limiting for GDPR compliance
 - Minimal external API dependencies
 
 ## License
 
-MIT License - Bel Consulting OÜ 2026
+Proprietary — Bel Consulting OÜ 2026
 
 ApexMail is a brand of Bel Consulting OÜ, Estonia.

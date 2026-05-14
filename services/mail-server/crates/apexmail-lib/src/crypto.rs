@@ -72,6 +72,10 @@ pub fn timing_safe_compare(a: &str, b: &str) -> bool {
 }
 
 /// Hash an API key using SHA-256 (backward-compatible, for migration).
+/// # Deprecated
+/// Use [`hash_api_key_argon2`] or [`hash_api_key_with_secret`] instead.
+/// Plain SHA-256 is trivially brute-forced at ~10 GHash/s and MUST NOT
+/// be used for new keys.
 pub fn hash_api_key(key: &str) -> String {
     use sha2::Digest;
     let hash = Sha256::digest(key.as_bytes());
@@ -83,6 +87,85 @@ pub fn hash_api_key(key: &str) -> String {
 /// even if the database is leaked.
 pub fn hash_api_key_with_secret(key: &str, secret: &str) -> String {
     create_hmac_signature(secret.as_bytes(), key.as_bytes())
+}
+
+/// Hash an API key using Argon2id (memory-hard, recommended for new keys).
+/// The returned string encodes the salt and parameters, suitable for
+/// direct storage in the `api_keys.key_hash` column.
+///
+/// ## Hash versioning
+/// The output is prefixed with `$argon2id$` for algorithm detection.
+/// Use [`verify_api_key_hash`] to verify and optionally re-hash.
+pub fn hash_api_key_argon2(key: &str) -> Result<String, argon2::password_hash::Error> {
+    let mut salt_bytes = [0u8; 16];
+    OsRng
+        .try_fill_bytes(&mut salt_bytes)
+        .map_err(|_| argon2::password_hash::Error::Crypto)?;
+    let salt = SaltString::encode_b64(&salt_bytes)?;
+    let argon2 = Argon2::default();
+    let hash = argon2.hash_password(key.as_bytes(), salt.as_salt())?;
+    Ok(hash.to_string())
+}
+
+/// Verify an API key against a stored hash (supports both Argon2id and
+/// HMAC-SHA256 — the two actively-used schemes).  Returns `Ok(true)` if
+/// the key matches, `Ok(false)` otherwise.
+///
+/// For plain SHA-256 legacy hashes, use [`hash_api_key`] and compare directly.
+pub fn verify_api_key_hash(
+    key: &str,
+    stored_hash: &str,
+) -> Result<bool, argon2::password_hash::Error> {
+    if stored_hash.starts_with("$argon2") {
+        let parsed = PasswordHash::new(stored_hash)?;
+        Ok(Argon2::default()
+            .verify_password(key.as_bytes(), &parsed)
+            .is_ok())
+    } else if stored_hash.starts_with("$2") {
+        // Legacy bcrypt-encoded API keys (rare, but handle gracefully)
+        Ok(bcrypt::verify(key, stored_hash).unwrap_or(false))
+    } else {
+        // Assume HMAC-SHA256 or plain SHA-256 — caller must compare externally
+        Err(argon2::password_hash::Error::Crypto)
+    }
+}
+
+/// Detect the API key hash algorithm version from the stored hash string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeyHashVersion {
+    /// Plain SHA-256 (legacy, weak — must migrate)
+    Sha256,
+    /// HMAC-SHA256 with a server secret
+    HmacSha256,
+    /// Argon2id (memory-hard, recommended)
+    Argon2id,
+    /// Unknown or unsupported format
+    Unknown,
+}
+
+impl std::fmt::Display for ApiKeyHashVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sha256 => write!(f, "SHA-256"),
+            Self::HmacSha256 => write!(f, "HMAC-SHA256"),
+            Self::Argon2id => write!(f, "Argon2id"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Determine the hash version used for a stored API key hash.
+pub fn detect_api_key_hash_version(stored_hash: &str) -> ApiKeyHashVersion {
+    if stored_hash.starts_with("$argon2") {
+        ApiKeyHashVersion::Argon2id
+    } else if stored_hash.len() == 64 && stored_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        // 64-char hex = SHA-256 digest
+        // HMAC-SHA256 also produces 64-char hex output, so we can't distinguish
+        // between plain SHA-256 and HMAC-SHA256 based on format alone.
+        ApiKeyHashVersion::HmacSha256
+    } else {
+        ApiKeyHashVersion::Unknown
+    }
 }
 
 /// Hash a password using Argon2id.

@@ -176,6 +176,7 @@ impl ChaosEngineeringService {
     }
 
     /// Safety monitoring loop. Runs until experiment completes or gets aborted.
+    #[allow(clippy::too_many_arguments)]
     async fn monitor_experiment(
         pool: PgPool,
         experiment_id: Uuid,
@@ -198,11 +199,12 @@ impl ChaosEngineeringService {
                                 for check in &safety_checks {
                                     if check.abort_on_failure {
                                         let value = Self::get_metric_value(&current, &check.check_type);
-                                        let violated = match check.operator.as_str() {
-                                            ">" | "gt" => value > check.threshold,
-                                            "<" | "lt" => value < check.threshold,
-                                            ">=" | "gte" => value >= check.threshold,
-                                            _ => false,
+                                        let violated = match Self::safety_check_violated(value, &check.operator, check.threshold) {
+                                            Ok(violated) => violated,
+                                            Err(error) => {
+                                                warn!(experiment_id = %experiment_id, operator = check.operator, error = %error, "Unknown safety check operator — aborting experiment");
+                                                true
+                                            }
                                         };
                                         if violated {
                                             warn!(
@@ -263,6 +265,19 @@ impl ChaosEngineeringService {
     ) {
         let mut running = running_experiments.write().await;
         running.remove(&experiment_id);
+    }
+
+    fn safety_check_violated(value: f64, operator: &str, threshold: f64) -> Result<bool, String> {
+        let violated = match operator.trim().to_ascii_lowercase().as_str() {
+            ">" | "gt" => value > threshold,
+            "<" | "lt" => value < threshold,
+            ">=" | "gte" => value >= threshold,
+            "<=" | "lte" => value <= threshold,
+            "=" | "==" | "eq" => (value - threshold).abs() < f64::EPSILON,
+            "!=" | "ne" => (value - threshold).abs() >= f64::EPSILON,
+            other => return Err(format!("unknown safety check operator: {other}")),
+        };
+        Ok(violated)
     }
 
     async fn complete_experiment_static(

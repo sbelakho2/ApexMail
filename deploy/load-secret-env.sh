@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+original_umask="$(umask)"
 umask 077
 
 if [ -u "$0" ] || [ -g "$0" ]; then
@@ -80,4 +81,5 @@ else
     shift 2
 fi
 
+umask "$original_umask"
 exec "$@"

@@ -36,7 +36,7 @@ Content-Type: application/json
     }
   ],
   "metadata": {
-    "userId": "usr_123",
+    "userId": "usr_01HQMXJ5KXMW0NREP0YGCZKNVD",
     "orderId": "ord_456"
   },
   "tags": ["welcome", "onboarding"],
@@ -79,7 +79,7 @@ Content-Type: application/json
 
 ```json
 {
-  "id": "msg_abc123xyz",
+  "id": "msg_01HQMXJ5KXMW0NREP0YGCZKNVD",
   "status": "queued",
   "to": "recipient@example.com",
   "from": "sender@yourcompany.com",
@@ -168,7 +168,7 @@ Retrieve detailed information about a specific message.
 ### Request
 
 ```http
-GET /v1/messages/msg_abc123xyz
+GET /v1/messages/msg_01HQMXJ5KXMW0NREP0YGCZKNVD
 X-API-Key: {{api_key}}
 ```
 
@@ -348,7 +348,7 @@ Cancel a message that hasn't been sent yet.
 ### Request
 
 ```http
-DELETE /v1/messages/msg_abc123xyz
+DELETE /v1/messages/msg_01HQMXJ5KXMW0NREP0YGCZKNVD
 X-API-Key: {{api_key}}
 ```
 

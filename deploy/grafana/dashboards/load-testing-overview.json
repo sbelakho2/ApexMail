@@ -1,0 +1,365 @@
+{
+  "annotations": {"list": []},
+  "description": "Real-time monitoring dashboard for ApexMail load testing runs. Provides visibility into request rates, latency distributions, database load, and resource utilization during performance tests.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 10,
+      "panels": [],
+      "title": "Request Rate & Error Rate",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Total HTTP request rate across all endpoints under test",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 20, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 2000}]},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "sum(rate(http_requests_total{job=~\"apexmail-api|apexmail-tracking\"}[1m]))", "legendFormat": "Total requests/s", "refId": "A"},
+        {"expr": "sum(rate(http_requests_total{job=~\"apexmail-api|apexmail-tracking\",handler=\"/v1/email/send\"}[1m]))", "legendFormat": "Email send /s", "refId": "B"},
+        {"expr": "sum(rate(tracking_opens_total[1m]))", "legendFormat": "Tracking pixels /s", "refId": "C"},
+        {"expr": "sum(rate(tracking_clicks_total[1m]))", "legendFormat": "Tracking clicks /s", "refId": "D"}
+      ],
+      "title": "Request Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Error rate as a fraction of total requests",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 1, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "dashed"}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.001}, {"color": "red", "value": 0.01}]},
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "sum(rate(http_requests_total{job=~\"apexmail-api|apexmail-tracking\",status=~\"5..\"}[1m])) / clamp_min(sum(rate(http_requests_total{job=~\"apexmail-api|apexmail-tracking\"}[1m])), 1)", "legendFormat": "5xx ratio", "refId": "A"},
+        {"expr": "sum(rate(http_requests_total{job=~\"apexmail-api|apexmail-tracking\",status=~\"4..\"}[1m])) / clamp_min(sum(rate(http_requests_total{job=~\"apexmail-api|apexmail-tracking\"}[1m])), 1)", "legendFormat": "4xx ratio", "refId": "B"}
+      ],
+      "title": "Error Rate",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "id": 11,
+      "panels": [],
+      "title": "Latency Distribution",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "P50, P95, and P99 latency percentiles for API requests",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 1, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "dashed"}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 200}, {"color": "red", "value": 500}]},
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+      "id": 3,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) * 1000", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) * 1000", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) * 1000", "legendFormat": "p99", "refId": "C"}
+      ],
+      "title": "API Latency (p50 / p95 / p99)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Latency heatmap showing request duration distribution over time",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"hideFrom": {"legend": false, "tooltip": false, "viz": false}},
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "id": 8,
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "color": {"exponent": 0.5, "fill": "dark", "mode": "opacity", "reverse": false, "scale": "exponential", "scheme": "Oranges", "steps": 64},
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "rowsFrame": {"layout": "self"},
+        "sort": {"excludeZero": false, "order": "desc"},
+        "tooltip": {"mode": "single", "showColorScale": false, "yAxis": {"min": 0}}
+      },
+      "targets": [
+        {"expr": "sum(increase(http_request_duration_seconds_bucket[1m])) by (le)", "legendFormat": "le={{le}}", "refId": "A"}
+      ],
+      "title": "Request Duration Heatmap",
+      "type": "heatmap"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 18},
+      "id": 12,
+      "panels": [],
+      "title": "Database & Cache",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Active PostgreSQL connections and query duration during load test",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 20, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
+      "id": 4,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "sum(pg_stat_activity_count{datname=~\"apexmail.*\"})", "legendFormat": "Active connections", "refId": "A"},
+        {"expr": "rate(pg_stat_database_xact_commit{datname=~\"apexmail.*\"}[1m])", "legendFormat": "Transactions/s", "refId": "B"}
+      ],
+      "title": "PostgreSQL Active Connections & Query Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Redis operations per second and memory usage during load test",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 20, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "rate(redis_commands_processed_total[1m])", "legendFormat": "Ops/s", "refId": "A"},
+        {"expr": "redis_memory_used_bytes", "legendFormat": "Memory used", "refId": "B"}
+      ],
+      "title": "Redis Ops/sec & Memory Usage",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 27},
+      "id": 13,
+      "panels": [],
+      "title": "Resource Utilization",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "CPU and memory utilization of the tracking service during load test",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 20, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/memory/"},
+            "properties": [{"id": "unit", "value": "bytes"}]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "id": 6,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "process_cpu_seconds_total{job=~\"apexmail-api|apexmail-tracking\"}", "legendFormat": "CPU - {{job}}", "refId": "A"},
+        {"expr": "process_resident_memory_bytes{job=~\"apexmail-api|apexmail-tracking\"}", "legendFormat": "Memory - {{job}}", "refId": "B"}
+      ],
+      "title": "Tracking Service CPU & Memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Cache hit ratio across Redis and application-level caches",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 1, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "dashed"}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.8}, {"color": "green", "value": 0.95}]},
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "id": 7,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "sum(rate(cache_hits_total[1m])) / clamp_min(sum(rate(cache_requests_total[1m])), 1)", "legendFormat": "Cache hit ratio", "refId": "A"},
+        {"expr": "sum(rate(cache_misses_total[1m])) / clamp_min(sum(rate(cache_requests_total[1m])), 1)", "legendFormat": "Cache miss ratio", "refId": "B"}
+      ],
+      "title": "Cache Hit Ratio",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
+      "id": 14,
+      "panels": [],
+      "title": "Load Test Progress",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Total number of requests processed during the current load test run",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 20, "gradientMode": "none", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 37},
+      "id": 9,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+      "targets": [
+        {"expr": "sum(increase(http_requests_total[5m]))", "legendFormat": "Total requests (5m)", "refId": "A"}
+      ],
+      "title": "Total Requests",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Current request rate averaged over the last minute",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {"hideFrom": {"legend": false, "tooltip": false, "viz": false}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 500}, {"color": "red", "value": 1000}]},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 37},
+      "id": 15,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showPercentChange": false, "textMode": "auto", "wideLayout": true},
+      "targets": [
+        {"expr": "sum(rate(http_requests_total[1m]))", "legendFormat": "Current rps", "refId": "A"}
+      ],
+      "title": "Current Request Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Current P95 latency across all endpoints",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {"hideFrom": {"legend": false, "tooltip": false, "viz": false}},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 200}, {"color": "red", "value": 500}]},
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 37},
+      "id": 16,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showPercentChange": false, "textMode": "auto", "wideLayout": true},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) * 1000", "legendFormat": "p95", "refId": "A"}
+      ],
+      "title": "Current P95 Latency",
+      "type": "stat"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["apexmail", "load-testing", "performance"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": true, "text": "Prometheus", "value": "Prometheus"},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {"selected": false, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "Prometheus"},
+        "definition": "label_values(job)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(job)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "/apexmail.*/",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Load Testing Overview",
+  "uid": "load-testing-overview",
+  "version": 1,
+  "weekStart": ""
+}

@@ -154,7 +154,7 @@ impl FeedbackLoopServer {
 
         let mut stream = BufStream::new(socket);
         let greeting = format!("220 {} FBL Processor\r\n", self.hostname);
-        if let Err(_) = write_line(&mut stream, &greeting).await {
+        if write_line(&mut stream, &greeting).await.is_err() {
             return;
         }
 
@@ -211,7 +211,7 @@ impl FeedbackLoopServer {
                                 break;
                             }
                             if line.starts_with("..") {
-                                message.extend_from_slice(line[1..].as_bytes());
+                                message.extend_from_slice(&line.as_bytes()[1..]);
                             } else {
                                 message.extend_from_slice(line.as_bytes());
                             }

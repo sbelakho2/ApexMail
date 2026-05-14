@@ -137,9 +137,7 @@ impl TrainingManager {
             Ok(())
         })
         .await
-        .map_err(|e| {
-            AiError::CheckpointError(format!("spawn_blocking join failed: {e}"))
-        })?
+        .map_err(|e| AiError::CheckpointError(format!("spawn_blocking join failed: {e}")))?
     }
 
     /// Return the checkpoint interval.
@@ -178,6 +176,7 @@ impl TrainingManager {
     }
 
     /// Cancel a running or queued training job.
+    #[allow(clippy::await_holding_lock)]
     pub async fn cancel_job(&self, id: &str) -> Result<TrainingJob, AiError> {
         let mut jobs = self.jobs.write();
         let job = jobs

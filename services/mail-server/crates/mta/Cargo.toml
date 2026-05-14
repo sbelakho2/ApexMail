@@ -58,6 +58,13 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 metrics.workspace = true
+observability-service = { path = "../observability-service" }
+
+# OpenTelemetry (distributed tracing)
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 metrics-exporter-prometheus.workspace = true
 
 # Utils

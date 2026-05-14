@@ -1,5 +1,9 @@
 # ADR 0005: SDK Generation and Versioning
 
+> **⚠️ SUPERSEDED BY ADR 0007**  
+> This ADR has been superseded by [ADR 0007: SDK Design Philosophy](./0007-sdk-design-philosophy.md).  
+> All SDK design and versioning concerns are now governed by ADR 0007.
+
 ## Status
 
 Superseded by ADR 0007 — see [0007-sdk-design-philosophy.md](./0007-sdk-design-philosophy.md).

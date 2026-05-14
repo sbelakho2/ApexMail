@@ -1,3 +1,5 @@
+#![allow(clippy::doc_lazy_continuation)]
+
 //! # ApexMail Spam Filter
 //!
 //! Multi-layered spam and phishing detection providing://!
@@ -12,6 +14,7 @@
 //! - **Composite Scoring Engine**:Combines all signals into a final score
 //! with configurable thresholds for ham/spam/reject.
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 

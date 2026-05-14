@@ -31,6 +31,8 @@ from .exceptions import (
 from .resources.domains import AsyncDomainsResource, DomainsResource
 from .resources.emails import AsyncEmailsResource, EmailsResource
 from .resources.events import AsyncEventsResource, EventsResource
+from .resources.analytics import AnalyticsResource, AsyncAnalyticsResource
+from .resources.api_keys import ApiKeysResource, AsyncApiKeysResource
 from .resources.suppressions import AsyncSuppressionsResource, SuppressionsResource
 from .resources.templates import AsyncTemplatesResource, TemplatesResource
 from .resources.webhooks import AsyncWebhooksResource, WebhooksResource
@@ -102,10 +104,18 @@ class BaseClient:
         }
 
     # SECURITY FIX: Mask API key in repr to prevent accidental logging
+    def close(self) -> None:
+    	"""Clear sensitive API key data from memory.
+   
+    	Overriding subclasses MUST call super().close() to ensure the
+    	bytearray-backed API key is cleared.
+    	"""
+    	self._api_key_bytes.clear()
+   
     def __repr__(self) -> str:
-        key = self.api_key
-        masked_key = f"{key[:6]}...{key[-2:]}"
-        return f"{self.__class__.__name__}(api_key='{masked_key}', base_url='{self.base_url}')"
+    	key = self.api_key
+    	masked_key = f"{key[:4]}\u2026\u2026{key[-4:]}"
+    	return f"{self.__class__.__name__}(api_key='{masked_key}', base_url='{self.base_url}')"
 
     @property
     def api_key(self) -> str:
@@ -118,6 +128,11 @@ class BaseClient:
         return {}
 
     def _parse_retry_after(self, retry_after: Optional[str]) -> Optional[float]:
+        """Parse Retry-After header value into seconds.
+
+        Supports both integer/float seconds and HTTP-date format (RFC 2822/1123).
+        Returns None if the header is absent or unparseable.
+        """
         if not retry_after:
             return None
         try:
@@ -132,8 +147,8 @@ class BaseClient:
                 return None
 
     def _calculate_backoff(self, attempt: int) -> float:
-        """Calculate bounded exponential backoff."""
-        return min(DEFAULT_INITIAL_BACKOFF * (2 ** max(attempt, 0)), DEFAULT_MAX_BACKOFF)
+        """Calculate bounded quadratic backoff: baseDelay * attempt²."""
+        return min(DEFAULT_INITIAL_BACKOFF * (attempt * attempt), DEFAULT_MAX_BACKOFF)
 
     def _ensure_response_size(self, response: httpx.Response) -> None:
         content = response.content
@@ -155,9 +170,15 @@ class BaseClient:
 
         try:
             error_data = response.json()
-            message = error_data.get("error") or error_data.get("message") or response.text or "Unknown error"
-            code = error_data.get("code") or "UNKNOWN"
-            errors = error_data.get("errors", [])
+            error_obj = error_data.get("error")
+            if isinstance(error_obj, dict):
+                message = error_obj.get("message") or response.text or "Unknown error"
+                code = error_obj.get("code") or "UNKNOWN"
+                errors = error_obj.get("details") or error_obj.get("errors") or []
+            else:
+                message = error_obj or error_data.get("message") or response.text or "Unknown error"
+                code = error_data.get("code") or "UNKNOWN"
+                errors = error_data.get("errors", [])
         except (ValueError, TypeError):
             message = response.text or f"HTTP {response.status_code}"
             code = "UNKNOWN"
@@ -238,6 +259,8 @@ class ApexMail(BaseClient):
         self.suppressions = SuppressionsResource(self)
         self.events = EventsResource(self)
         self.webhooks = WebhooksResource(self)
+        self.analytics = AnalyticsResource(self)
+        self.api_keys = ApiKeysResource(self)
 
     def _request(
         self,
@@ -271,12 +294,13 @@ class ApexMail(BaseClient):
                 
                 # Retry on retryable status codes
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries:
+                    # Compute quadratic backoff: baseDelay * attempt²
+                    delay = self._calculate_backoff(attempt)
                     if response.status_code == 429:
-                        # Use Retry-After header if present
+                        # Honor Retry-After header using max(retryAfter, quadraticBackoff)
                         retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
-                        delay = retry_after if retry_after is not None else self._calculate_backoff(attempt)
-                    else:
-                        delay = self._calculate_backoff(attempt)
+                        if retry_after is not None:
+                            delay = max(delay, retry_after)
                     self._sleep(delay)
                     continue
                     
@@ -309,7 +333,8 @@ class ApexMail(BaseClient):
         raise ApexMailError(message="Request failed", code="UNKNOWN", status_code=0)
 
     def close(self) -> None:
-        """Close the HTTP client."""
+        """Close the HTTP client and clear sensitive data from memory."""
+        super().close()
         self._client.close()
 
     def __enter__(self) -> "ApexMail":
@@ -370,6 +395,8 @@ class AsyncApexMail(BaseClient):
         self.suppressions = AsyncSuppressionsResource(self)
         self.events = AsyncEventsResource(self)
         self.webhooks = AsyncWebhooksResource(self)
+        self.analytics = AsyncAnalyticsResource(self)
+        self.api_keys = AsyncApiKeysResource(self)
 
     async def _request(
         self,
@@ -403,12 +430,13 @@ class AsyncApexMail(BaseClient):
                 
                 # Retry on retryable status codes
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries:
+                    # Compute quadratic backoff: baseDelay * attempt²
+                    delay = self._calculate_backoff(attempt)
                     if response.status_code == 429:
-                        # Use Retry-After header if present
+                        # Honor Retry-After header using max(retryAfter, quadraticBackoff)
                         retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
-                        delay = retry_after if retry_after is not None else self._calculate_backoff(attempt)
-                    else:
-                        delay = self._calculate_backoff(attempt)
+                        if retry_after is not None:
+                            delay = max(delay, retry_after)
                     await asyncio.sleep(delay)
                     continue
                     
@@ -441,7 +469,8 @@ class AsyncApexMail(BaseClient):
         raise ApexMailError(message="Request failed", code="UNKNOWN", status_code=0)
 
     async def close(self) -> None:
-        """Close the HTTP client."""
+        """Close the HTTP client and clear sensitive data from memory."""
+        super().close()
         await self._client.aclose()
 
     async def __aenter__(self) -> "AsyncApexMail":

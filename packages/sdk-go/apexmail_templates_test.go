@@ -45,10 +45,13 @@ func TestTemplatesRenderUsesVariablesPayload(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New("am_live_1234567890abcdef", Config{
+	client, err := New("am_live_1234567890abcdef", Config{
 		BaseURL:    server.URL,
 		HTTPClient: server.Client(),
 	})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
 
 	resp, err := client.Templates.Render(context.Background(), "template-123", map[string]interface{}{
 		"first_name": "Alice",
@@ -87,10 +90,13 @@ func TestTemplatesRenderNilDataSendsEmptyVariablesObject(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New("am_live_1234567890abcdef", Config{
+	client, err := New("am_live_1234567890abcdef", Config{
 		BaseURL:    server.URL,
 		HTTPClient: server.Client(),
 	})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
 
 	if _, err := client.Templates.Render(context.Background(), "template-123", nil); err != nil {
 		t.Fatalf("render template with nil data: %v", err)

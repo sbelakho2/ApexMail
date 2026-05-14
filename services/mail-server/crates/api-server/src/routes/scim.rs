@@ -719,7 +719,10 @@ struct GroupScimRow {
     id: String,
     scim_id: String,
     display_name: String,
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "SCIM group row keeps created_at for stable SELECT mapping"
+    )]
     created_at: chrono::DateTime<Utc>,
 }
 

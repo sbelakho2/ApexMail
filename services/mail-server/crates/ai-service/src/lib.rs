@@ -4,6 +4,7 @@
 //! optimization, inference engine, send-time optimization (STO), and
 //! model training management.
 
+#![deny(unsafe_code)]
 pub mod analytics;
 pub mod assistant;
 pub mod bandits;

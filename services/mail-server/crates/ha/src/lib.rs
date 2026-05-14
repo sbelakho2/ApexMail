@@ -1,6 +1,7 @@
 //! High Availability service — health checks, failover, backup, replication,
 //! multi-region routing, circuit breakers, and chaos engineering.
 
+#![deny(unsafe_code)]
 pub mod backup;
 pub mod chaos;
 pub mod circuit_breaker;

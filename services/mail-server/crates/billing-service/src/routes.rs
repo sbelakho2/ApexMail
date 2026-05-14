@@ -285,7 +285,10 @@ impl From<Plan> for LegacyPlanDto {
 #[serde(rename_all = "camelCase")]
 struct LegacyPlanLimitsDto {
     email_limit: i64,
-    api_call_limit: i64,
+    /// Monthly API call limit (not per-minute). The JSON field serializes as
+    /// `apiCallsPerMonth` to accurately reflect that this is a monthly quota,
+    /// not a per-minute rate limit.
+    api_calls_per_month: i64,
     features: LegacyPlanFeaturesPayload,
 }
 
@@ -293,7 +296,7 @@ impl From<&Plan> for LegacyPlanLimitsDto {
     fn from(plan: &Plan) -> Self {
         Self {
             email_limit: plan.email_limit,
-            api_call_limit: plan.api_call_limit,
+            api_calls_per_month: plan.api_call_limit,
             features: plan.features.clone().into(),
         }
     }
@@ -303,14 +306,20 @@ impl From<&Plan> for LegacyPlanLimitsDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPlanCreateLimitsInput {
     emails_per_month: i64,
-    api_calls_per_minute: i64,
+    /// Monthly API call limit (not per-minute). The JSON field serializes as
+    /// `apiCallsPerMonth` to accurately reflect that this is a monthly quota,
+    /// not a per-minute rate limit.
+    api_calls_per_month: i64,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPlanPatchLimitsInput {
     emails_per_month: Option<i64>,
-    api_calls_per_minute: Option<i64>,
+    /// Monthly API call limit (not per-minute). The JSON field serializes as
+    /// `apiCallsPerMonth` to accurately reflect that this is a monthly quota,
+    /// not a per-minute rate limit.
+    api_calls_per_month: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -492,7 +501,7 @@ async fn compare_plans(
                     "features": plan1_features,
                     "limits": {
                         "emailLimit": plan1.email_limit,
-                        "apiCallLimit": plan1.api_call_limit,
+                        "apiCallsPerMonth": plan1.api_call_limit,
                     }
                 },
                 "plan2": {
@@ -502,7 +511,7 @@ async fn compare_plans(
                     "features": plan2_features,
                     "limits": {
                         "emailLimit": plan2.email_limit,
-                        "apiCallLimit": plan2.api_call_limit,
+                        "apiCallsPerMonth": plan2.api_call_limit,
                     }
                 },
                 "differences": {
@@ -536,7 +545,7 @@ async fn create_plan(
             price_monthly: body.price_monthly,
             price_yearly: body.price_yearly,
             email_limit: body.limits.emails_per_month,
-            api_call_limit: body.limits.api_calls_per_minute,
+            api_call_limit: body.limits.api_calls_per_month,
             sort_order: 0,
             features: body.features.into(),
             stripe_price_id_monthly: body.stripe_price_id_monthly,
@@ -582,7 +591,7 @@ async fn update_plan(
             api_call_limit: body
                 .limits
                 .as_ref()
-                .and_then(|limits| limits.api_calls_per_minute)
+                .and_then(|limits| limits.api_calls_per_month)
                 .unwrap_or(existing.api_call_limit),
             sort_order: existing.sort_order,
             features: body.features.map(Into::into).unwrap_or(existing.features),
@@ -727,6 +736,7 @@ fn legacy_payg_cost(
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_non_negative(value: i64, field_name: &str) -> Result<u64, Response> {
     if value < 0 {
         return Err(error_response(
@@ -2304,6 +2314,7 @@ fn parse_token_scope(token: &str, service_token: &str) -> Option<TenantAuthScope
 /// Check that the auth scope allows access to the given tenant_id.
 /// Returns `Ok(())` if the scope is `Any` or matches the requested tenant.
 /// On failure, returns an HTTP 403 Forbidden response.
+#[allow(clippy::result_large_err)]
 fn check_tenant_access(scope: &TenantAuthScope, tenant_id: &str) -> Result<(), Response> {
     match scope {
         TenantAuthScope::Any => Ok(()),
@@ -2603,8 +2614,10 @@ mod tests {
 
     #[tokio::test]
     async fn stripe_webhook_route_rejects_invalid_signature_before_processing() {
-        let mut config = BillingConfig::default();
-        config.stripe_webhook_secret = "whsec_test_secret".into();
+        let config = BillingConfig {
+            stripe_webhook_secret: "whsec_test_secret".into(),
+            ..Default::default()
+        };
 
         let app = test_router_with_config(config).await;
         let signature = format!("t={},v1=deadbeef", chrono::Utc::now().timestamp());
@@ -2796,12 +2809,14 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
+        // Use a 365-day period (actual calendar days per proration.rs docs),
+        // not a fixed 360-day convention. 182 days elapsed + 183 remaining = 365 total.
         let subscription = RouteSubscription {
             plan_name: "starter".into(),
             billing_interval: BillingInterval::Yearly,
             status: "active".into(),
-            current_period_start: now - chrono::TimeDelta::days(180),
-            current_period_end: now + chrono::TimeDelta::days(180),
+            current_period_start: now - chrono::TimeDelta::days(182),
+            current_period_end: now + chrono::TimeDelta::days(183),
         };
 
         let payload = serde_json::to_value(
@@ -2815,17 +2830,21 @@ mod tests {
         )
         .expect("yearly proration preview should serialize");
 
-        assert_eq!(payload["creditAmount"], serde_json::json!(6000));
-        assert_eq!(payload["chargeAmount"], serde_json::json!(12000));
-        assert_eq!(payload["netAmount"], serde_json::json!(6000));
+        // With 365-day period and 183 remaining days:
+        // credit = (12000 × 183 + 182) / 365 = 6016
+        // charge = (24000 × 183 + 182) / 365 = 12033
+        // net   = 12033 - 6016 = 6017
+        assert_eq!(payload["creditAmount"], serde_json::json!(6016));
+        assert_eq!(payload["chargeAmount"], serde_json::json!(12033));
+        assert_eq!(payload["netAmount"], serde_json::json!(6017));
         assert!(payload["explanation"]
             .as_str()
             .expect("explanation should be a string")
-            .contains("$120.00 / 360 days × 180 days"));
+            .contains("$120.00 / 365 days × 183 days"));
         assert!(payload["explanation"]
             .as_str()
             .expect("explanation should be a string")
-            .contains("$240.00 / 360 days × 180 days"));
+            .contains("$240.00 / 365 days × 183 days"));
     }
 
     #[test]

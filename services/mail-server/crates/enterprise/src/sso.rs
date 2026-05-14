@@ -452,6 +452,7 @@ impl SSOService {
     }
 
     /// Create or update SSO session
+    #[allow(clippy::too_many_arguments)]
     async fn create_sso_session(
         &self,
         tenant_id: &str,
@@ -571,7 +572,7 @@ impl SSOService {
         let expected_entity_id = config
             .entity_id
             .as_deref()
-            .unwrap_or_else(|| self.config.sso.saml.entity_id.as_str());
+            .unwrap_or(self.config.sso.saml.entity_id.as_str());
         let expected_acs_url = &self.config.sso.saml.acs_url;
         // 0. Verify XML digital signature using the IdP's certificate
         let cert_raw = config.certificate.as_deref().ok_or_else(|| {

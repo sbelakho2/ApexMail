@@ -1,5 +1,9 @@
 # ADR 0003: Authentication and Authorization
 
+> **⚠️ SUPERSEDED BY ADR 0010**  
+> This ADR has been superseded by [ADR 0010: Security Architecture](./0010-security-architecture.md).  
+> All authentication and authorization concerns are now governed by ADR 0010.
+
 ## Status
 
 Superseded by ADR 0010 — see [0010-security-architecture.md](./0010-security-architecture.md).

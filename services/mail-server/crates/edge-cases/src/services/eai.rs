@@ -389,16 +389,14 @@ impl EAIService {
         // Try Redis
         if let Ok(mut conn) = self.redis.get().await {
             let key = format!("eai:support:{domain}");
-            if let Ok(val) = redis::cmd("GET")
+            if let Ok(Some(v)) = redis::cmd("GET")
                 .arg(&key)
                 .query_async::<Option<String>>(&mut *conn)
                 .await
             {
-                if let Some(v) = val {
-                    let supported = v == "1";
-                    self.eai_cache.insert(domain.to_string(), supported);
-                    return supported;
-                }
+                let supported = v == "1";
+                self.eai_cache.insert(domain.to_string(), supported);
+                return supported;
             }
         }
 

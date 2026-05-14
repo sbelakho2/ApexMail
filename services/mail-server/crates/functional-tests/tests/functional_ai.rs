@@ -179,7 +179,10 @@ fn segment_users_returns_k_clusters() {
     assert_eq!(assignments.len(), scores.len());
     let unique_clusters: std::collections::HashSet<_> = assignments.into_iter().collect();
     assert!(unique_clusters.len() <= k, "should have at most k clusters");
-    assert!(unique_clusters.len() >= 1, "should have at least 1 cluster");
+    assert!(
+        !unique_clusters.is_empty(),
+        "should have at least 1 cluster"
+    );
 }
 
 // ── STO ────────────────────────────────────────────────────────

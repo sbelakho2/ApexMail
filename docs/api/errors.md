@@ -11,16 +11,16 @@ Most ApexMail HTTP APIs return errors in this shape:
   "error": {
     "code": "ERROR_CODE",
     "message": "Human-readable error message",
-    "details": [
-      "Optional validation detail"
-    ]
+    "details": {
+      "...": "Additional error context as key-value pairs"
+    }
   }
 }
 ```
 
 Notes:
 
-- `details` is optional and currently appears as an array of validation messages when field-level validation fails.
+- `details` is optional and, when present, is a JSON object containing error-specific context (e.g., field-level validation messages, rate limit details). The exact keys vary by error code.
 - `requestId` is not universally emitted by every service, so clients should treat it as optional even when a proxy or gateway adds one out of band.
 - The canonical shared error-code list lives in `services/mail-server/crates/apexmail-lib/src/error_codes.rs`.
 - `api-server` also emits `BAD_REQUEST` for malformed requests that do not map to a shared domain-specific error code.

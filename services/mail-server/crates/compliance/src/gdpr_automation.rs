@@ -504,6 +504,7 @@ impl GdprAutomation {
 
     /// Record or update a consent. If consent_type is marketing and granted=false,
     /// cascade to analytics and profiling.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_consent<'a>(
         &'a self,
         tenant_id: &'a str,
@@ -1014,6 +1015,7 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
 /// Creates a JSON receipt that includes all consent details and an HMAC-SHA256
 /// signature over the canonical (sorted-key) JSON representation. The certificate
 /// can be independently verified by any party in possession of the signing key.
+#[allow(clippy::too_many_arguments)]
 fn build_consent_certificate(
     signing_key: &str,
     id: &str,

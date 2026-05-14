@@ -512,8 +512,10 @@ fn property_reputation_level_consistent_with_score() {
     use ddos_protection::reputation::ReputationLevel;
 
     for score in 0..=100u8 {
-        let mut rep = ReputationScore::default();
-        rep.score = score;
+        let rep = ReputationScore {
+            score,
+            ..Default::default()
+        };
 
         let level = rep.level();
         match score {

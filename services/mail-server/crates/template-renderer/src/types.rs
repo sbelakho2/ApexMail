@@ -198,17 +198,17 @@ pub struct ValidationError {
 pub const STARTER_TEMPLATE: &str = r#"<html>
   <head>
     <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; }
+      body { font-family: ui-monospace, 'JetBrains Mono', monospace; margin: 0; padding: 0; }
       .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-      .header { background-color: #3b82f6; color: white; padding: 24px; text-align: center; }
+      .header { background-color: #dc2626; color: white; padding: 24px; text-align: center; }
       .content { padding: 24px; }
-      .footer { padding: 16px; text-align: center; color: #6b7280; font-size: 12px; }
+      .footer { padding: 16px; text-align: center; color: #71717a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; }
     </style>
   </head>
   <body>
     <div class="container">
       <div class="header">
-        <h1>{{ title }}</h1>
+        <h1 style="margin:0;letter-spacing:0.05em">{{ title }}</h1>
       </div>
       <div class="content">
         <p>Hello {{ name }},</p>

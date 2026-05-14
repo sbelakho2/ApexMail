@@ -47,6 +47,7 @@ training:
   gradient_checkpointing: true
   gradient_checkpointing_kwargs:
     use_reentrant: false
+  cpu_offloading: false  # set true for QLoRA CPU offloading
   optim: "paged_adamw_8bit"
   bf16: true
   tf32: true
@@ -61,7 +62,7 @@ training:
   load_best_model_at_end: true
   metric_for_best_model: "eval_loss"
   greater_is_better: false
-  report_to: "tensorboard"
+  report_to: "wandb"
   seed: 42
   dataloader_num_workers: 4
   dataloader_pin_memory: true

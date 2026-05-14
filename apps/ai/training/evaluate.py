@@ -3,33 +3,61 @@
 Evaluate the trained LoRA adapter on test set + golden QA.
 Tests: generation quality, loss on test set, golden QA accuracy.
 """
-import os, json, time, torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
+import torch
 from datasets import load_dataset
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from common_paths import GOLDEN_QA_JSONL, TEST_JSONL
 from training_data import expand_system_prompt_refs
 
-MODEL_PATH  = "/workspace/models/Qwen3-Next-80B-A3B-Instruct"
-ADAPTER_DIR = "/workspace/output_agent"
-TEST_DATA   = "/workspace/data/test.jsonl"
-GOLDEN_QA   = "/workspace/data/golden_qa.jsonl"
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("evaluate")
 
 SEP = "=" * 70
 
+# Model / adapter paths — set via environment when running on cloud instances.
+# Falls back to paths matching the local config.yaml convention.
+MODEL_PATH: str = os.environ.get(
+    "MODEL_PATH",
+    "/workspace/models/Qwen3-Next-80B-A3B-Instruct",
+)
+ADAPTER_DIR: str = os.environ.get(
+    "ADAPTER_DIR",
+    "/workspace/output_agent",
+)
 
-def main():
-    print(SEP)
-    print("ApexMail Agent - Post-Training Evaluation")
-    print(SEP)
+_EVAL_RESULTS_DIR = Path(ADAPTER_DIR)
+_EVAL_RESULTS_PATH = _EVAL_RESULTS_DIR / "eval_results.json"
 
-    # Load tokenizer
-    print("\n[1/5] Loading tokenizer...")
+
+def main() -> None:
+    log.info(SEP)
+    log.info("ApexMail Agent — Post-Training Evaluation")
+    log.info(SEP)
+
+    # ── 1. Load tokenizer ──────────────────────────────────────────────────────
+    log.info("[1/5] Loading tokenizer …")
     tok = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    # Load base model + adapter
-    print("[2/5] Loading base model + LoRA adapter...")
+    # ── 2. Load base model + adapter ───────────────────────────────────────────
+    log.info("[2/5] Loading base model + LoRA adapter …")
     t0 = time.time()
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_PATH,
@@ -41,13 +69,17 @@ def main():
     )
     model = PeftModel.from_pretrained(model, ADAPTER_DIR)
     model.eval()
-    print(f"    Loaded in {time.time()-t0:.1f}s")
+    log.info("    Loaded in %.1fs", time.time() - t0)
 
-    # Evaluate test set loss
-    print("[3/5] Computing test set loss...")
-    test_ds = load_dataset("json", data_files=TEST_DATA, split="train")
-    test_ds = expand_system_prompt_refs(test_ds, TEST_DATA)
-    total_loss = 0
+    # ── 3. Evaluate test set loss ──────────────────────────────────────────────
+    log.info("[3/5] Computing test set loss …")
+    try:
+        test_ds = load_dataset("json", data_files=str(TEST_JSONL), split="train")
+    except Exception as exc:
+        log.error("Failed to load test dataset %s: %s", TEST_JSONL, exc)
+        sys.exit(1)
+    test_ds = expand_system_prompt_refs(test_ds, str(TEST_JSONL))
+    total_loss = 0.0
     total_tokens = 0
     num_samples = len(test_ds)
 
@@ -60,19 +92,23 @@ def main():
         total_loss += outputs.loss.item() * inputs["input_ids"].shape[1]
         total_tokens += inputs["input_ids"].shape[1]
         if (i + 1) % 10 == 0:
-            print(f"    Processed {i+1}/{num_samples} test examples...")
+            log.info("    Processed %d/%d test examples …", i + 1, num_samples)
 
     avg_loss = total_loss / total_tokens
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
-    print(f"    Test loss: {avg_loss:.4f}")
-    print(f"    Test perplexity: {perplexity:.2f}")
+    log.info("    Test loss:       %.4f", avg_loss)
+    log.info("    Test perplexity: %.2f", perplexity)
 
-    # Golden QA evaluation
-    print("[4/5] Evaluating on golden QA set...")
-    with open(GOLDEN_QA) as f:
-        golden = [json.loads(line) for line in f]
+    # ── 4. Golden QA evaluation ────────────────────────────────────────────────
+    log.info("[4/5] Evaluating on golden QA set …")
+    try:
+        with open(GOLDEN_QA_JSONL) as f:
+            golden = [json.loads(line) for line in f]
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        log.error("Failed to load golden QA set %s: %s", GOLDEN_QA_JSONL, exc)
+        sys.exit(1)
 
-    golden_results = []
+    golden_results: list[dict] = []
     correct = 0
     for i, qa in enumerate(golden):
         # Handle both 'text' (ChatML) and 'messages' (openai-style) formats
@@ -85,8 +121,7 @@ def main():
             expected = parts[1].replace("<|im_end|>", "").strip()[:200]
         elif "messages" in qa:
             msgs = qa["messages"]
-            # Build prompt from all messages except last assistant response
-            prompt_parts = []
+            prompt_parts: list[str] = []
             expected = ""
             for msg in msgs:
                 role = msg["role"]
@@ -94,9 +129,7 @@ def main():
                 if role == "assistant" and msg == msgs[-1]:
                     expected = content[:200]
                 else:
-                    prompt_parts.append(
-                        f"<|im_start|>{role}\n{content}<|im_end|>"
-                    )
+                    prompt_parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
             prompt = "\n".join(prompt_parts) + "\n<|im_start|>assistant\n"
         else:
             continue
@@ -118,7 +151,6 @@ def main():
             skip_special_tokens=True,
         ).strip()
 
-        # Check if key terms from expected are in generated
         expected_lower = expected.lower()
         generated_lower = generated.lower()
 
@@ -138,13 +170,18 @@ def main():
             "generated_prefix": generated[:100],
         })
         if (i + 1) % 10 == 0:
-            print(f"    Processed {i+1}/{len(golden)} golden QA examples...")
+            log.info("    Processed %d/%d golden QA examples …", i + 1, len(golden))
 
     golden_accuracy = correct / max(len(golden_results), 1) * 100
-    print(f"    Golden QA accuracy: {correct}/{len(golden_results)} ({golden_accuracy:.1f}%)")
+    log.info(
+        "    Golden QA accuracy: %d/%d (%.1f%%)",
+        correct,
+        len(golden_results),
+        golden_accuracy,
+    )
 
-    # Generation quality samples
-    print("[5/5] Generating sample responses...")
+    # ── 5. Generation quality samples ──────────────────────────────────────────
+    log.info("[5/5] Generating sample responses …")
     sample_prompts = [
         "What plans does ApexMail offer and what are the prices?",
         "How do I authenticate with the ApexMail API?",
@@ -181,10 +218,10 @@ def main():
             output_ids[0][inputs["input_ids"].shape[1]:],
             skip_special_tokens=True,
         ).strip()
-        print(f"\n  Q: {prompt_text}")
-        print(f"  A: {response[:300]}")
+        log.info("  Q: %s", prompt_text)
+        log.info("  A: %s", response[:300])
 
-    # Save results
+    # ── Save results ───────────────────────────────────────────────────────────
     results = {
         "test_loss": avg_loss,
         "test_perplexity": perplexity,
@@ -194,16 +231,17 @@ def main():
         "golden_qa_total": len(golden_results),
         "golden_qa_details": golden_results,
     }
-    with open("/workspace/output_agent/eval_results.json", "w") as f:
+    _EVAL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_EVAL_RESULTS_PATH, "w") as f:
         json.dump(results, f, indent=2)
 
-    print("\n" + SEP)
-    print("EVALUATION SUMMARY")
-    print(f"  Test Loss:        {avg_loss:.4f}")
-    print(f"  Test Perplexity:  {perplexity:.2f}")
-    print(f"  Golden QA:        {correct}/{len(golden_results)} ({golden_accuracy:.1f}%)")
-    print(f"  Results saved to: /workspace/output_agent/eval_results.json")
-    print(SEP)
+    log.info(SEP)
+    log.info("EVALUATION SUMMARY")
+    log.info("  Test Loss:        %.4f", avg_loss)
+    log.info("  Test Perplexity:  %.2f", perplexity)
+    log.info("  Golden QA:        %d/%d (%.1f%%)", correct, len(golden_results), golden_accuracy)
+    log.info("  Results saved to: %s", _EVAL_RESULTS_PATH)
+    log.info(SEP)
 
 
 if __name__ == "__main__":

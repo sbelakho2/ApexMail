@@ -6,7 +6,7 @@ description = "Multi-layer spam & phishing detection: Bayesian classifier, URL r
 license = "PROPRIETARY"
 
 [features]
-default = ["core"]
+default = ["full"]
 full = ["core", "phishing", "events"]
 core = []
 phishing = ["reqwest"]  # Enables deep URL and attachment analysis

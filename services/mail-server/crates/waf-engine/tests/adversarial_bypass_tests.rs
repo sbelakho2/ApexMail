@@ -345,7 +345,9 @@ mod graphql_evasion {
         // Should handle without crashing
         let result = extract_graphql_values(&query);
         // Verifies it looks like GraphQL
-        assert!(result.looks_like_graphql || !result.looks_like_graphql);
+        // This is always true by definition; we check the field is accessible
+        // This assertion is always true by definition (tautology)
+        let _ = result.looks_like_graphql;
     }
 
     #[test]
@@ -428,7 +430,7 @@ mod json_evasion {
         for _ in 0..200 {
             json.push_str(r#"{"a":"#);
         }
-        json.push_str("1");
+        json.push('1');
         for _ in 0..200 {
             json.push('}');
         }

@@ -83,12 +83,10 @@ pub async fn list_placement_tests(
         .fetch_one(&state.db)
         .await
     } else {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM placement_tests WHERE tenant_id = $1",
-        )
-        .bind(tenant_uuid)
-        .fetch_one(&state.db)
-        .await
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM placement_tests WHERE tenant_id = $1")
+            .bind(tenant_uuid)
+            .fetch_one(&state.db)
+            .await
     };
 
     let total = match count_query {
@@ -216,10 +214,15 @@ pub async fn get_placement_test(
     // Build summary from results.
     let total_accounts = results.iter().map(|r| r.accounts_tested).sum::<i32>();
     let summary = if total_accounts > 0 {
-        let inbox_pct = results.iter().map(|r| r.inbox).sum::<i32>() as f64 / total_accounts as f64 * 100.0;
-        let promotions_pct = results.iter().map(|r| r.promotions).sum::<i32>() as f64 / total_accounts as f64 * 100.0;
-        let spam_pct = results.iter().map(|r| r.spam).sum::<i32>() as f64 / total_accounts as f64 * 100.0;
-        let absent_pct = results.iter().map(|r| r.absent).sum::<i32>() as f64 / total_accounts as f64 * 100.0;
+        let inbox_pct =
+            results.iter().map(|r| r.inbox).sum::<i32>() as f64 / total_accounts as f64 * 100.0;
+        let promotions_pct = results.iter().map(|r| r.promotions).sum::<i32>() as f64
+            / total_accounts as f64
+            * 100.0;
+        let spam_pct =
+            results.iter().map(|r| r.spam).sum::<i32>() as f64 / total_accounts as f64 * 100.0;
+        let absent_pct =
+            results.iter().map(|r| r.absent).sum::<i32>() as f64 / total_accounts as f64 * 100.0;
         Some(serde_json::json!({
             "inbox_pct": (inbox_pct * 100.0).round() / 100.0,
             "promotions_pct": (promotions_pct * 100.0).round() / 100.0,
@@ -261,9 +264,7 @@ pub async fn get_placement_trends(
     let days = days.unwrap_or(30) as i32;
 
     // Parse optional provider filter.
-    let provider = provider
-        .as_deref()
-        .map(ProviderName::from_str);
+    let provider = provider.as_deref().map(ProviderName::from_str);
 
     match state.engine.get_trends(tenant_uuid, days, provider).await {
         Ok(trends) => ok(serde_json::json!({ "trends": trends })),
@@ -282,7 +283,10 @@ pub async fn list_seed_providers(
         Ok(providers) => ok(serde_json::json!({ "providers": providers })),
         Err(e) => {
             tracing::error!(error = %e, "inbox-placement: list providers failed");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "failed to list providers")
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to list providers",
+            )
         }
     }
 }

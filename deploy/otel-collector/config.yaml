@@ -1,3 +1,15 @@
+# =============================================================================
+# ApexMail OpenTelemetry Collector Configuration
+# =============================================================================
+# 🟡5: Added head-based probabilistic sampling to reduce observability costs
+# while maintaining representative trace coverage.
+#
+# Sampling strategy:
+#   - Traces: 10% head-based probabilistic sampling (adjust via env var)
+#   - Metrics: 100% (low volume, high value)
+#   - Logs: 100% (low volume, critical for debugging)
+# =============================================================================
+
 receivers:
   otlp:
     protocols:
@@ -16,6 +28,11 @@ receivers:
       load:
 
 processors:
+  # 🟡5: Head-based probabilistic sampling for traces
+  # Samples 10% of traces by default; override with OTEL_TRACES_SAMPLING_RATIO
+  probabilistic_sampler:
+    hash_seed: 42
+    sampling_percentage: ${env:OTEL_TRACES_SAMPLING_PERCENTAGE:-10}
   batch:
     timeout: 5s
     send_batch_size: 512
@@ -32,18 +49,43 @@ exporters:
       insecure: true
   prometheus:
     endpoint: 0.0.0.0:8889
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    tls:
+      insecure: true
+    default_labels_enabled:
+      - job
+      - instance
+      - service_name
+      - service_version
+      - environment
+    # Map OpenTelemetry log record attributes to Loki labels
+    attributes:
+      - action: upsert
+        key: service_name
+        from_attribute: service.name
+      - action: upsert
+        key: service_version
+        from_attribute: service.version
+      - action: upsert
+        key: environment
+        from_attribute: deployment.environment
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      # 🟡5: probabilistic_sampler added before batch/memory_limiter to drop
+      # traces early and reduce downstream load on Tempo
+      processors: [probabilistic_sampler, memory_limiter, batch]
       exporters: [otlp/tempo, debug]
     metrics:
       receivers: [otlp, hostmetrics]
+      # Metrics are not sampled — they're low-volume and high-value for alerting
       processors: [memory_limiter, batch]
       exporters: [prometheus, debug]
     logs:
       receivers: [otlp]
+      # Logs are not sampled — every log entry is important for debugging
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [loki, debug]

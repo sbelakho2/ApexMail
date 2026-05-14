@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 pub mod chunker;
 pub mod config;
 pub mod embeddings;

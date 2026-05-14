@@ -1,5 +1,7 @@
 package ee.apexmail;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -49,6 +51,26 @@ public final class Events {
      */
     public EventResponse get(String eventId) {
         return client.request("GET", "/v1/events/" + encode(eventId), null, EventResponse.class);
+    }
+
+    /** Return aggregate event counts with optional filters. */
+    public Map<String, Object> stats(Map<String, Object> options) {
+        String q = options != null && !options.isEmpty() ? "?" + buildQuery(options) : "";
+        return client.request("GET", "/v1/events/stats" + q, null, new TypeReference<Map<String, Object>>() {});
+    }
+
+    public Map<String, Object> stats() {
+        return stats(null);
+    }
+
+    /** Return event counts over time with optional filters. */
+    public Map<String, Object> timeseries(Map<String, Object> options) {
+        String q = options != null && !options.isEmpty() ? "?" + buildQuery(options) : "";
+        return client.request("GET", "/v1/events/timeseries" + q, null, new TypeReference<Map<String, Object>>() {});
+    }
+
+    public Map<String, Object> timeseries() {
+        return timeseries(null);
     }
 
     private static String encode(String s) {

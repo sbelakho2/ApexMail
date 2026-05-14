@@ -1,6 +1,7 @@
 //! Multi-region service — routing modes, region management, geo routing rules, traffic distribution.
 
 use chrono::Utc;
+use rand::Rng;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,7 +38,7 @@ fn select_active_region<'a>(
             .or_else(|| active.first().copied())
             .ok_or_else(|| "no primary or fallback region found".to_string()),
         RoutingMode::RoundRobin => {
-            let idx = (rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % active.len();
+            let idx = (rr_counter.fetch_add(1, Ordering::SeqCst) as usize) % active.len();
             active
                 .get(idx)
                 .copied()
@@ -55,7 +56,7 @@ fn select_active_region<'a>(
             .ok_or_else(|| "no region with latency data available".to_string()),
         RoutingMode::Weighted => {
             let total_weight: i32 = active.iter().map(|r| r.weight.max(1)).sum();
-            let pick = (Utc::now().timestamp_millis() as i32).rem_euclid(total_weight);
+            let pick = rand::rng().random_range(0..total_weight);
             let mut cumulative = 0;
 
             for region in active {
@@ -414,6 +415,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn test_routing_mode_active_passive_selects_primary() {
         let regions = vec![
             RegionInfo {
@@ -460,6 +462,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn test_routing_latency_based() {
         let regions = vec![
             RegionInfo {
@@ -506,6 +509,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn test_routing_active_active_selects_healthiest() {
         let regions = vec![
             RegionInfo {
@@ -551,6 +555,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::ifs_same_cond)]
     fn test_health_score_to_status() {
         assert_eq!(
             if 90.0 >= 80.0 {
@@ -585,6 +590,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn test_traffic_distribution_weights() {
         let regions = vec![
             RegionInfo {
@@ -678,6 +684,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn test_weighted_routing_logic() {
         let weights = vec![3, 1, 1]; // total = 5
         let total: i32 = weights.iter().sum();
@@ -711,6 +718,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn test_select_active_region_round_robin_advances() {
         let regions = vec![
             RegionInfo {
@@ -755,6 +763,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn test_select_active_region_weighted_single_region() {
         let regions = vec![RegionInfo {
             id: Uuid::new_v4(),

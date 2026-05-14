@@ -6,7 +6,7 @@ Welcome to ApexMail! This guide will help you get started with sending your firs
 
 ### 1. Sign Up
 
-1. Navigate to your ApexMail dashboard (e.g., `https://app.yourcompany.com`)
+1. Navigate to the ApexMail dashboard at [`https://app.apexmail.ee`](https://app.apexmail.ee)
 2. Click **Sign Up** and enter your details
 3. Verify your email address
 4. Complete the onboarding wizard
@@ -35,9 +35,29 @@ Before sending emails, you need to verify your domain:
 1. Go to **Settings** → **API Keys**
 2. Click **Create API Key**
 3. Give it a descriptive name (e.g., "Production Server")
-4. Select the required scopes:
-   - `messages:write` - Send and manage emails
-   - `templates:read` - Use templates
+4. Select the required scopes for your use case:
+
+   **Sending email:**
+   - `messages:send` — Send emails
+   - `messages:read` — Read message status and history
+   - `templates:read` — Use email templates
+   - `templates:write` — Create and edit templates
+
+   **Contact management:**
+   - `contacts:read` — View contacts and lists
+   - `contacts:write` — Import and manage contacts
+
+   **Analytics and events:**
+   - `analytics:read` — View analytics dashboards
+   - `events:read` — Read delivery and engagement events
+
+   **Advanced (Growth+ plans):**
+   - `webhooks:read` — View webhook configurations
+   - `webhooks:write` — Create and manage webhooks
+   - `suppressions:read` — View suppression lists
+   - `suppressions:write` — Manage suppressions
+
+   > 💡 **Tip:** Apply the principle of least privilege — only grant scopes your application needs. You can create multiple API keys for different services (e.g., a narrow key for your production app and a broader one for internal tooling). See the [full scope reference](../api/authentication.md#scopes) for a complete list.
 5. Optionally add IP restrictions
 6. Copy and securely store the generated key
 

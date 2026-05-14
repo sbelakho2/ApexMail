@@ -63,22 +63,21 @@ impl AggregatedStats {
 
     /// Increment the appropriate counter based on event type.
     pub fn increment(&mut self, event_type: &str) {
-        match event_type {
-            "sent" => self.sent += 1,
-            "delivered" => self.delivered += 1,
-            "opened" => self.opened += 1,
-            "clicked" => self.clicked += 1,
-            "bounced" => self.bounced += 1,
-            "unsubscribed" => self.unsubscribed += 1,
-            "complained" => self.complained += 1,
-            "failed" => self.failed += 1,
-            _ => {} // Ignore unknown event types
+        match event_type.parse::<EventType>() {
+            Ok(EventType::Sent) => self.sent += 1,
+            Ok(EventType::Delivered) => self.delivered += 1,
+            Ok(EventType::Opened) => self.opened += 1,
+            Ok(EventType::Clicked) => self.clicked += 1,
+            Ok(EventType::Bounced) => self.bounced += 1,
+            Ok(EventType::Unsubscribed) => self.unsubscribed += 1,
+            Ok(EventType::Complained) => self.complained += 1,
+            Ok(EventType::Failed) => self.failed += 1,
+            Err(_) => {}
         }
     }
 }
 
 /// Event type enumeration.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     Sent,

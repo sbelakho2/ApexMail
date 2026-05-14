@@ -1,0 +1,62 @@
+{
+  "meta": {
+    "version": "1.0",
+    "created_at": "2026-05-14T09:56:30Z",
+    "created_by": "platform-engineering",
+    "environment": "github-actions-ubuntu-latest-2vcpu",
+    "cpu": "2 vCPU (GitHub Actions)",
+    "notes": "HTTP journey performance baselines for k6 API load tests. Thresholds derived from load-tests/http-journey README expected values. These represent minimum acceptable performance on standard CI runners (2 vCPU, 7 GB RAM) with local PostgreSQL and Redis services."
+  },
+  "api_throughput": {
+    "sustained_rps": 300,
+    "p95_latency_ms": 500,
+    "p99_latency_ms": 1000,
+    "error_rate": 0.01,
+    "measured_at": "2026-05-14T09:56:30Z"
+  },
+  "auth_login": {
+    "sustained_rps": 500,
+    "p95_latency_ms": 500,
+    "p99_latency_ms": 1000,
+    "error_rate": 0.01,
+    "endpoint": "POST /v1/auth/login",
+    "test": "auth-load-test.js",
+    "threshold_type": "hard"
+  },
+  "email_send": {
+    "sustained_rps": 200,
+    "p95_latency_ms": 500,
+    "p99_latency_ms": 1000,
+    "error_rate": 0.01,
+    "endpoint": "POST /v1/email/send",
+    "test": "email-send-load-test.js",
+    "threshold_type": "hard"
+  },
+  "health_liveness": {
+    "sustained_rps": 2000,
+    "p95_latency_ms": 200,
+    "p99_latency_ms": 500,
+    "error_rate": 0.001,
+    "endpoint": "GET /v1/health/liveness",
+    "test": "health-load-test.js",
+    "threshold_type": "hard"
+  },
+  "health_readiness": {
+    "sustained_rps": 2000,
+    "p95_latency_ms": 200,
+    "p99_latency_ms": 500,
+    "error_rate": 0.001,
+    "endpoint": "GET /v1/health/readiness",
+    "test": "health-load-test.js",
+    "threshold_type": "hard"
+  },
+  "combined_journey": {
+    "sustained_rps": 300,
+    "p95_latency_ms": 500,
+    "p99_latency_ms": 1000,
+    "error_rate": 0.01,
+    "scenario": "weighted traffic mix (10% liveness, 10% readiness, 30% auth, 50% email)",
+    "test": "combined-journey-test.js",
+    "threshold_type": "hard"
+  }
+}

@@ -1,3 +1,5 @@
+#![allow(clippy::doc_lazy_continuation)]
+
 //! # ApexMail WAF Engine
 //!
 //! A pure-Rust Web Application Firewall providing://!
@@ -22,6 +24,7 @@
 //! Base64 Pattern Match Tautology Script Tags
 //! ```
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 

@@ -191,13 +191,13 @@ impl CostBasedLimiter {
         }
         // Use a CAS loop to prevent underflow past zero (wrapping to u64::MAX)
         loop {
-            let current = self.system_budget.load(Ordering::Relaxed);
+            let current = self.system_budget.load(Ordering::SeqCst);
             let new_val = current.saturating_sub(cost);
             match self.system_budget.compare_exchange(
                 current,
                 new_val,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
             ) {
                 Ok(_) => break,
                 Err(_) => continue,
@@ -215,7 +215,7 @@ impl CostBasedLimiter {
 
     /// Get system remaining capacity
     pub fn system_remaining(&self) -> u64 {
-        self.system_budget.load(Ordering::Relaxed)
+        self.system_budget.load(Ordering::SeqCst)
     }
 
     /// Background task to refill system budget.
@@ -228,7 +228,7 @@ impl CostBasedLimiter {
             // CAS loop to atomically clamp refill to available headroom
             let refill_rate = self.system_capacity / 60;
             loop {
-                let current = self.system_budget.load(Ordering::Relaxed);
+                let current = self.system_budget.load(Ordering::SeqCst);
                 if current >= self.system_capacity {
                     break; // Already at capacity
                 }
@@ -237,8 +237,8 @@ impl CostBasedLimiter {
                 match self.system_budget.compare_exchange(
                     current,
                     new_val,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
                 ) {
                     Ok(_) => break,
                     Err(_) => continue, // Value changed, retry
@@ -291,14 +291,14 @@ impl CostBasedLimiter {
 
     fn reserve_system_budget(&self, amount: u64) -> bool {
         loop {
-            let current = self.system_budget.load(Ordering::Relaxed);
+            let current = self.system_budget.load(Ordering::SeqCst);
             if current < amount {
                 return false;
             }
             let new_val = current - amount;
             if self
                 .system_budget
-                .compare_exchange(current, new_val, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
                 return true;
@@ -308,11 +308,11 @@ impl CostBasedLimiter {
 
     fn refund_system_budget(&self, amount: u64) {
         loop {
-            let current = self.system_budget.load(Ordering::Relaxed);
+            let current = self.system_budget.load(Ordering::SeqCst);
             let new_val = current.saturating_add(amount).min(self.system_capacity);
             if self
                 .system_budget
-                .compare_exchange(current, new_val, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
                 break;

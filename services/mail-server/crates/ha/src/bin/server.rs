@@ -18,7 +18,11 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    tracing_subscriber::fmt()
+        .json()
+        .with_target(true)
+        .with_env_filter("info")
+        .init();
 
     let config = Arc::new(Config::from_env());
     info!(

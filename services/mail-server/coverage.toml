@@ -81,17 +81,11 @@ description = "Common mail types - Shared security primitives"
 # Tier 2: Core Business Logic (80% required)
 # ==============================================================================
 
-[packages.smtp-server]
+[packages.smtp-edge]
 lines = 80
 branches = 75
 functions = 80
-description = "SMTP protocol implementation"
-
-[packages.imap-server]
-lines = 80
-branches = 75
-functions = 80
-description = "IMAP protocol implementation"
+description = "SMTP Edge protocol implementation"
 
 [packages.mta]
 lines = 80
@@ -99,13 +93,13 @@ branches = 75
 functions = 80
 description = "Mail Transfer Agent - Core routing"
 
-[packages.queue]
+[packages.outbound-queue]
 lines = 80
 branches = 75
 functions = 80
-description = "Message queue - Delivery management"
+description = "Outbound message queue - Delivery management"
 
-[packages.storage]
+[packages.mailstore-core]
 lines = 80
 branches = 75
 functions = 80
@@ -115,23 +109,11 @@ description = "Mail storage - Data persistence"
 # Tier 3: Support & Infrastructure (70% required)
 # ==============================================================================
 
-[packages.metrics]
+[packages.observability-service]
 lines = 70
 branches = 65
 functions = 70
-description = "Observability - Metrics collection"
-
-[packages.tracing]
-lines = 70
-branches = 65
-functions = 70
-description = "Distributed tracing"
-
-[packages.config]
-lines = 70
-branches = 65
-functions = 70
-description = "Configuration management"
+description = "Observability - Metrics, tracing, and monitoring"
 
 # ==============================================================================
 # Excluded from coverage (test code, examples, generated)

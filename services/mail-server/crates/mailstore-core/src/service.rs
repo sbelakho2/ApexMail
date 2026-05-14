@@ -219,6 +219,7 @@ impl MailstoreServiceImpl {
     }
 
     /// O-4.2:Check if the request should be rate-limited.
+    #[allow(clippy::result_large_err)]
     fn check_rate_limit<T>(&self, _request: &Request<T>) -> Result<(), Status> {
         if self.rate_limiter.check().is_err() {
             return Err(Status::resource_exhausted(

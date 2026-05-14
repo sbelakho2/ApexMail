@@ -1222,19 +1222,6 @@ fn spam_phrase_set() -> Option<&'static SpamPhraseSet> {
                     "LEGAL_DEBT",
                     "Legal threat: debt collection",
                 ),
-                // ═══ Unsubscribe tricks ═══
-                (
-                    "click below to unsubscribe",
-                    0.5,
-                    "UNSUB_BELOW",
-                    "Suspicious unsubscribe",
-                ),
-                (
-                    "to stop receiving",
-                    0.3,
-                    "UNSUB_STOP",
-                    "Generic unsubscribe language",
-                ),
             ];
 
             let (pats, penalties, ids, descs): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =

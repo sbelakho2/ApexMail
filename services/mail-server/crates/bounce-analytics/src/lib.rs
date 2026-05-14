@@ -15,6 +15,7 @@
 //! A [`BounceAnalyticsReport`](types::BounceAnalyticsReport) can be queried on
 //! demand to produce a full snapshot of bounce health for a tenant.
 
+#![deny(unsafe_code)]
 pub mod aggregator;
 pub mod config;
 pub mod types;

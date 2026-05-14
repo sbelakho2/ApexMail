@@ -330,19 +330,23 @@ mod sales {
             .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy("postgres://localhost/unused")
             .expect("lazy pool");
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+        // Use an unreachable Redis port so the rate limiter deterministically
+        // falls back to its in-memory limiter (no dependency on Redis auth).
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:16379")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Redis pool");
         router(AppState {
             db: db.clone(),
             redis,
             crm: CrmBackend::postgres(db.clone()),
-            enrichment: EnrichmentService::new("http://mock"),
+            enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db),
             service_token: "test-key".into(),
-            rate_limit_fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            rate_limit_fallback: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -371,19 +375,23 @@ mod sales {
             panic!("failed to initialize CRM schema for {test_name}: {error}")
         });
 
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+        // Use an unreachable Redis port so the rate limiter deterministically
+        // falls back to its in-memory limiter (no dependency on Redis auth).
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:16379")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Redis pool");
         Some(router(AppState {
             db: db.clone(),
             redis,
             crm,
-            enrichment: EnrichmentService::new("http://mock"),
+            enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db),
             service_token: "test-key".into(),
-            rate_limit_fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            rate_limit_fallback: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }))
     }
 
@@ -456,8 +464,11 @@ mod sales {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
+        let status = resp.status();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert_eq!(status, StatusCode::OK, "body: {body_str}");
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert!(json["name"].is_string());
         assert!(json["industry"].is_string());
     }

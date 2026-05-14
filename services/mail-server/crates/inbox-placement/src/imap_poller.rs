@@ -109,7 +109,10 @@ impl ImapPoller {
                             delivered: false,
                             folder: None,
                             response_time_ms: None,
-                            error: Some(format!("IMAP poll failed after {} attempts: {}", max_attempts, e)),
+                            error: Some(format!(
+                                "IMAP poll failed after {} attempts: {}",
+                                max_attempts, e
+                            )),
                         });
                     }
                 }
@@ -141,23 +144,22 @@ impl ImapPoller {
         // The `imap` crate's API is synchronous, so we wrap it in spawn_blocking.
         let host_owned = host.to_owned();
         let email = account.email.clone();
-        let username = account.imap_username.clone().unwrap_or_else(|| account.email.clone());
+        let username = account
+            .imap_username
+            .clone()
+            .unwrap_or_else(|| account.email.clone());
         let password_owned = password.to_owned();
         let subject_owned = subject_pattern.to_owned();
         let _timeout_secs = self.config.imap_connection_timeout_secs;
 
-    tokio::task::spawn_blocking(move || {
-        let tls = TlsConnector::builder()
-            .build()
-            .map_err(|e| format!("TLS connector build error: {}", e))?;
+        tokio::task::spawn_blocking(move || {
+            let tls = TlsConnector::builder()
+                .build()
+                .map_err(|e| format!("TLS connector build error: {}", e))?;
 
-        // Connect via TLS on the given port.
-            let client = imap::connect(
-                (host_owned.as_str(), port),
-                host_owned.as_str(),
-                &tls,
-            )
-            .map_err(|e| format!("IMAP connect error to {}:{}: {}", host_owned, port, e))?;
+            // Connect via TLS on the given port.
+            let client = imap::connect((host_owned.as_str(), port), host_owned.as_str(), &tls)
+                .map_err(|e| format!("IMAP connect error to {}:{}: {}", host_owned, port, e))?;
 
             let mut session = client
                 .login(&username, &password_owned)
@@ -170,10 +172,8 @@ impl ImapPoller {
                 match session.select(*folder) {
                     Ok(_) => {
                         // Search for messages from our own email address with matching subject.
-                        let search_query = format!(
-                            "(FROM \"{}\" SUBJECT \"{}\")",
-                            email, subject_owned
-                        );
+                        let search_query =
+                            format!("(FROM \"{}\" SUBJECT \"{}\")", email, subject_owned);
 
                         match session.search(&search_query) {
                             Ok(ids) if !ids.is_empty() => {
@@ -232,11 +232,7 @@ impl ImapPoller {
     /// Perform a lightweight liveness check against a seed account: connect,
     /// login, SELECT INBOX, then logout. Used by the placement scheduler's
     /// periodic health-check loop. Does not search for any messages.
-    pub async fn health_check(
-        &self,
-        account: &SeedAccount,
-        password: &str,
-    ) -> Result<(), String> {
+    pub async fn health_check(&self, account: &SeedAccount, password: &str) -> Result<(), String> {
         let domain = extract_domain(&account.email)
             .ok_or_else(|| format!("invalid email address: {}", account.email))?;
         let host = account

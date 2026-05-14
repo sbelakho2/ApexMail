@@ -1,5 +1,7 @@
 package ee.apexmail;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -45,6 +47,11 @@ public final class Webhooks {
     /** Delete a webhook endpoint. */
     public void delete(String id) {
         client.request("DELETE", "/v1/webhooks/" + encode(id), null, Void.class);
+    }
+
+    /** Send a signed test event to a registered webhook endpoint. */
+    public Map<String, Object> test(String id) {
+        return client.request("POST", "/v1/webhooks/" + encode(id) + "/test", Map.of(), new TypeReference<Map<String, Object>>() {});
     }
 
     private static String encode(String s) {

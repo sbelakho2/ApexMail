@@ -7,10 +7,30 @@ Provides:
   - EXAMPLE_CONTEXTS dict with all customer profile keys
   - Canonical pricing, tool definitions, and behavioral rules
 
-Pricing source of truth: data/train_agent.jsonl (from plans.ts)
+Pricing source of truth: docs/pricing.md
+
+## Sensitivity levels (H29 mitigation)
+The blocks below have different sensitivity levels for external data leakage risk:
+
+  Level 1 — Public (OK for external sharing):
+    PRICING_TABLE, PAYG_INFO, FEATURES_BY_PLAN
+    → Already published on apexmail.com/pricing
+
+  Level 2 — Internal (redact for external training data dumps):
+    TOOL_DEFINITIONS: Exposes internal API tool names, parameters, and escalation
+                     contacts (support@apexmail.ee). If leaked, reveals API surface.
+    BEHAVIOR_RULES:  Exposes agent decision logic, escalation procedures, and
+                     internal guidelines.
+
+  Level 3 — Synthetic Profiles:
+    EXAMPLE_CONTEXTS: Synthetic customer profiles with generated PII. Low risk
+                     individually but bulk exposure reveals training methodology.
+
+Set SENSITIVE_PROMPTS_ENABLED=false in environment to redact Level 2 blocks.
 """
 
 from __future__ import annotations
+import os as _os
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CANONICAL PRICING TABLE
@@ -35,9 +55,9 @@ FEATURES_BY_PLAN = """\
 ## Key features by plan
 - **Free**: Basic sending, 1 domain, NO webhooks, 7-day retention.
 - **Starter ($25)**: Webhooks (5), 5 domains, 5 team members, email support, 30-day retention. NO A/B testing, NO dedicated IP. 10,000 contacts.
-- **Pro ($65)**: A/B testing, send-time optimization (AI), custom tracking domain, 25 domains, 10 team members, email support, 60-day retention. Dedicated IP available as add-on ($30/mo). 50,000 contacts.
+- **Pro ($65)**: Send-time optimization (AI), custom tracking domain, 25 domains, 10 team members, email support, 60-day retention. Dedicated IP available as add-on ($30/mo). NO A/B testing. 50,000 contacts.
 - **Growth ($150)**: 1 dedicated IP included, 100 domains, 25 team members, audit logs, priority support, 90-day retention. 200,000 contacts.
-- **Scale ($350)**: 3 dedicated IPs, SSO/SAML, unlimited domains, 50 team members, phone support, subaccounts (10), inbound receiving, SLA 99.9% (10% credit), 365-day retention. 500,000 contacts.
+- **Scale ($350)**: 3 dedicated IPs, SSO/SAML, unlimited domains, 50 team members, priority async support, shared Slack hub, subaccounts (10), inbound receiving, SLA 99.9% (10% credit), 365-day retention. 500,000 contacts.
 - **Enterprise ($3,000)**: 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, unlimited team, dedicated CSM, SLA 99.9% (25% credit), 730-day retention. Unlimited contacts."""
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1038,16 +1058,27 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 # SYSTEM PROMPT BUILDER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_system_prompt(context_key: str) -> str:
+def build_system_prompt(context_key: str = "no_context", *, inline_context: str | None = None) -> str:
     """Build a full system prompt for the given customer context key.
 
     Args:
         context_key: One of the keys in EXAMPLE_CONTEXTS (e.g. "starter_healthy",
-                     "no_context", "growth_dkim_fail").
+                     "no_context", "growth_dkim_fail"). Defaults to "no_context".
+        inline_context: Optional inline customer context string. When provided,
+                       used directly as the customer block instead of looking up
+                       from EXAMPLE_CONTEXTS. Useful for training scripts that
+                       define inline contexts (e.g. generate_gap_training.py).
 
     Returns:
         Complete system prompt string matching the training data format.
+
+    Environment:
+        SENSITIVE_PROMPTS_ENABLED (default: true): When set to 'false' or '0',
+            redacts internal-only blocks (TOOL_DEFINITIONS, BEHAVIOR_RULES)
+            for safe external sharing of training data.
     """
+    sensitive_enabled = _os.environ.get("SENSITIVE_PROMPTS_ENABLED", "true").lower() not in ("false", "0", "no", "0")
+
     header = (
         "You are ApexMail Agent — the AI support agent for the ApexMail email "
         "platform (Bel Consulting OÜ, Tallinn, Estonia, founded 2022).\n\n"
@@ -1057,7 +1088,11 @@ def build_system_prompt(context_key: str) -> str:
         "actionable advice based on their actual situation.\n\n"
     )
 
-    if context_key == "no_context" or context_key not in EXAMPLE_CONTEXTS:
+    if inline_context is not None:
+        customer_block = inline_context
+        if not customer_block.endswith("\n"):
+            customer_block += "\n"
+    elif context_key == "no_context" or context_key not in EXAMPLE_CONTEXTS:
         customer_block = (
             "## Customer context\n"
             "No specific customer context available. Answer general questions about ApexMail.\n"
@@ -1073,14 +1108,34 @@ def build_system_prompt(context_key: str) -> str:
         f"{FEATURES_BY_PLAN}\n"
     )
 
+    # Level 2 blocks — redact when sensitive content is disabled
+    if sensitive_enabled:
+        tools_block = TOOL_DEFINITIONS
+        behavior_block = BEHAVIOR_RULES
+    else:
+        tools_block = (
+            "## Tools you can call\n"
+            "Consult the customer's account context and use the available API "
+            "to diagnose and resolve their issues. (Tool definitions omitted "
+            "from this redacted prompt — see internal documentation.)\n"
+        )
+        behavior_block = (
+            "## Behavior rules\n"
+            "1. Read the customer's context before answering.\n"
+            "2. Use available tools to diagnose issues.\n"
+            "3. Escalate to support@apexmail.ee if you cannot resolve.\n"
+            "4. Keep answers concise and specific to ApexMail.\n"
+            "(Full behavior rules omitted from this redacted prompt.)\n"
+        )
+
     parts = [
         header,
         customer_block,
         pricing_block,
         "\n",
-        TOOL_DEFINITIONS,
+        tools_block,
         "\n\n",
-        BEHAVIOR_RULES,
+        behavior_block,
     ]
     return "".join(parts)
 

@@ -1,3 +1,6 @@
+# =============================================================================
+# ApexMail Rust Workspace Check — Build, Test, Lint, Audit, Security Scan
+# =============================================================================
 name: Rust Workspace Check
 
 on:
@@ -5,12 +8,20 @@ on:
     paths:
       - .github/workflows/rust-check.yml
       - services/mail-server/**
+      - docs/security/ws-all-audit-coverage.md
+      - tools/check_audit_coverage.py
+      - tools/check_cargo_cycles.py
+      - tools/validate_security_feature_flags.py
   push:
     branches:
       - main
     paths:
       - .github/workflows/rust-check.yml
       - services/mail-server/**
+      - docs/security/ws-all-audit-coverage.md
+      - tools/check_audit_coverage.py
+      - tools/check_cargo_cycles.py
+      - tools/validate_security_feature_flags.py
   workflow_dispatch:
 
 permissions: {}
@@ -24,6 +35,61 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # ── Secret Scanning (H6) ──────────────────────────────────────────────────
+  # Uses Gitleaks to detect hardcoded secrets, API keys, and credentials
+  secret-scan:
+    name: Secret Scanning — Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Detect secrets with Gitleaks
+        uses: gitleaks/gitleaks-action@a3b5c5746c3844ced3104adef1d0dbac1c889ef4 # v2.3.7
+        with:
+          config-path: .gitleaks.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── SAST Scanning (🟡9) ──────────────────────────────────────────────────
+  # Uses Semgrep for static analysis of Python, JS, Dockerfile, YAML configs
+  sast-scan:
+    name: SAST — Semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Run Semgrep SAST
+        uses: semgrep/semgrep-action@8e1e17012ef52357ac3dfb1c38f255b831a07dd3 # v1.0.0
+        with:
+          publishToken: ${{ secrets.SEMGREP_APP_TOKEN || '' }}
+          publishDeployment: ${{ secrets.SEMGREP_APP_DEPLOYMENT_ID || '' }}
+          generateSarif: "1"
+          config: >-
+            p/default
+            p/rust
+            p/dockerfile
+            p/github-actions
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      - name: Upload SAST results to GitHub Security
+        uses: github/codeql-action/upload-sarif@6d2d8be6d8e16cfb1385b13e2b268e9ac3a9b63b # v3.28.13
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+
+  # ── Rust Build & Test ─────────────────────────────────────────────────────
   cargo-check-all-targets:
     name: cargo check --workspace --all-targets
     runs-on: ubuntu-latest
@@ -65,3 +131,63 @@ jobs:
       - name: Check workspace all targets
         working-directory: services/mail-server
         run: cargo check --workspace --all-targets
+
+      - name: Check workspace dependency cycles
+        run: python3 tools/check_cargo_cycles.py
+
+      - name: Check production security feature flags
+        run: python3 tools/validate_security_feature_flags.py
+
+      - name: Check WS-ALL audit coverage ledger
+        run: python3 tools/check_audit_coverage.py
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: Check unused Rust dependencies
+        working-directory: services/mail-server
+        run: cargo machete
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Check Rust dependency advisories
+        working-directory: services/mail-server
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2026-0119 \
+            --ignore RUSTSEC-2024-0437 \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104 \
+            --ignore RUSTSEC-2025-0141 \
+            --ignore RUSTSEC-2025-0057 \
+            --ignore RUSTSEC-2024-0384 \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2024-0370 \
+            --ignore RUSTSEC-2025-0134 \
+            --ignore RUSTSEC-2024-0320 \
+            --ignore RUSTSEC-2023-0086 \
+            --ignore RUSTSEC-2026-0002 \
+            2>&1 | tee cargo-audit-report.txt
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Check dependencies with cargo-deny
+        working-directory: services/mail-server
+        run: cargo deny check advisories bans sources
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@593f3af2173611cf1e511b8fad5cddb30e18de58 # v2.49.0
+        with:
+          tool: cargo-nextest
+
+      - name: Run tests
+        working-directory: services/mail-server
+        run: cargo nextest run --workspace --all-targets --profile ci
+
+      - name: Clippy lint check (deny warnings)
+        working-directory: services/mail-server
+        run: cargo clippy --workspace --all-targets -- -D warnings

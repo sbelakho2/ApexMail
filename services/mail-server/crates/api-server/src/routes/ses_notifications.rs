@@ -44,7 +44,6 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-#[allow(dead_code)]
 struct SnsMessage {
     /// "Notification", "SubscriptionConfirmation", "UnsubscribeConfirmation"
     #[serde(rename = "Type")]
@@ -82,7 +81,10 @@ struct SesEvent {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "SES mail envelope preserves AWS fields for signature/audit compatibility"
+)]
 struct SesMail {
     message_id: Option<String>,
     source: Option<String>,
@@ -101,7 +103,10 @@ struct SesHeader {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "SES common headers are retained for AWS event compatibility"
+)]
 struct SesCommonHeaders {
     from: Option<Vec<String>>,
     to: Option<Vec<String>>,
@@ -119,7 +124,10 @@ struct SesBounce {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "recipient status/action fields are retained for AWS bounce compatibility"
+)]
 struct BouncedRecipient {
     email_address: Option<String>,
     status: Option<String>,
@@ -129,7 +137,10 @@ struct BouncedRecipient {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "complaint subtype is retained for AWS complaint compatibility"
+)]
 struct SesComplaint {
     complaint_sub_type: Option<String>,
     complained_recipients: Option<Vec<ComplainedRecipient>>,
@@ -277,7 +288,7 @@ fn validate_sns_topic_arn(msg: &SnsMessage, allowed_arns_raw: &str) -> Result<()
     }
 
     let msg_arn = msg.topic_arn.as_deref().unwrap_or("");
-    if !allowed_arns.iter().any(|arn| *arn == msg_arn) {
+    if !allowed_arns.contains(&msg_arn) {
         warn!(topic_arn = %msg_arn, "Rejected SNS message from unknown topic ARN");
         return Err(ApiError::Forbidden("Unknown SNS topic ARN".into()));
     }

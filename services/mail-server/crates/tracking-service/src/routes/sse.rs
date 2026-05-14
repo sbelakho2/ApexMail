@@ -7,16 +7,18 @@
 //! happen. Events are scoped to the authenticated tenant via a JWT bearer
 //! token passed in the `Authorization: Bearer <token>` header.
 //!
-//! Architecture://! 1. Client connects with a short-lived JWT containing `tenant_id` + `sub` (user id).
+//! Architecture:
+//! 1. Client connects with a short-lived JWT containing `tenant_id` + `sub` (user id).
 //! 2. Handler validates token, subscribes to Redis Pub/Sub channel `events:{tenant_id}`.
 //! 3. The EventProcessor publishes each flushed event to `events:{tenant_id}` after
-//! successful Postgres write.
+//!    successful Postgres write.
 //! 4. This handler forwards matching events as SSE `data:` frames.
 //! 5. Keepalive comments (`:keepalive`) are sent every 15 seconds to prevent
-//! proxy/LB idle timeouts.
+//!    proxy/LB idle timeouts.
 //! 6. On disconnect, the Redis subscription is dropped automatically.
 //!
-//! Security://! - Token is validated with HMAC-SHA256 signature check (same signing key as API).
+//! Security:
+//! - Token is validated with HMAC-SHA256 signature check (same signing key as API).
 //! - Token must have `stream` scope.
 //! - Maximum connection duration:1 hour (server-side timeout).
 //! - Rate-limited to 5 concurrent SSE connections per tenant.
@@ -212,43 +214,6 @@ pub async fn handle_stream(
         .into_response()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_bearer_token_accepts_authorization_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            "Bearer stream.jwt".parse().unwrap(),
-        );
-
-        assert_eq!(
-            extract_bearer_token(&headers).as_deref(),
-            Some("stream.jwt")
-        );
-    }
-
-    #[test]
-    fn test_extract_bearer_token_rejects_missing_or_invalid_values() {
-        let mut headers = HeaderMap::new();
-        assert!(extract_bearer_token(&headers).is_none());
-
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            "Basic abc123".parse().unwrap(),
-        );
-        assert!(extract_bearer_token(&headers).is_none());
-
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            "Bearer   ".parse().unwrap(),
-        );
-        assert!(extract_bearer_token(&headers).is_none());
-    }
-}
-
 /// Create the SSE event stream backed by a Redis Pub/Sub subscription.
 /// This spawns a dedicated Redis connection (separate from the pool) for the
 /// Pub/Sub subscription, since subscribed connections cannot issue other commands.
@@ -282,7 +247,7 @@ fn make_event_stream(
                     error!(error = %e, "Failed to create Redis client for SSE");
                     yield Ok(Event::default()
                         .event("error")
-                        .data(r#"{"error":"internal_error","message":"Failed to connect to event bus"}"#.to_string()));
+                        .data(r#"{"error":"internal_error","message":"Failed to connect to event bus"}"#));
                     decrement_conn_count(&cleanup_redis, &cleanup_key).await;
                     return;
                 }
@@ -294,7 +259,7 @@ fn make_event_stream(
                     error!(error = %e, "Failed to get Pub/Sub connection");
                     yield Ok(Event::default()
                         .event("error")
-                        .data(r#"{"error":"internal_error","message":"Failed to subscribe to event bus"}"#.to_string()));
+                        .data(r#"{"error":"internal_error","message":"Failed to subscribe to event bus"}"#));
                     decrement_conn_count(&cleanup_redis, &cleanup_key).await;
                     return;
                 }
@@ -304,7 +269,7 @@ fn make_event_stream(
                 error!(error = %e, channel = %channel, "Failed to subscribe to channel");
                 yield Ok(Event::default()
                     .event("error")
-                    .data(r#"{"error":"internal_error","message":"Failed to subscribe to channel"}"#.to_string()));
+                    .data(r#"{"error":"internal_error","message":"Failed to subscribe to channel"}"#));
                 decrement_conn_count(&cleanup_redis, &cleanup_key).await;
                 return;
             }
@@ -324,7 +289,7 @@ fn make_event_stream(
                         info!(tenant_id = %tenant_id, "SSE stream max duration reached (1h)");
                         yield Ok(Event::default()
                             .event("timeout")
-                            .data(r#"{"message":"Maximum stream duration reached. Please reconnect."}"#.to_string()));
+                            .data(r#"{"message":"Maximum stream duration reached. Please reconnect."}"#));
                         break;
                     }
     // Receive message from Redis Pub/Sub
@@ -380,7 +345,7 @@ fn make_event_stream(
                                 warn!(tenant_id = %tenant_id, "Redis Pub/Sub stream ended");
                                 yield Ok(Event::default()
                                     .event("error")
-                                    .data(r#"{"error":"stream_ended","message":"Event stream connection lost. Please reconnect."}"#.to_string()));
+                                    .data(r#"{"error":"stream_ended","message":"Event stream connection lost. Please reconnect."}"#));
                                 break;
                             }
                         }
@@ -459,4 +424,41 @@ fn base64_url_decode(input: &str) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(input)
         .map_err(|e| format!("base64url decode: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_bearer_token_accepts_authorization_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer stream.jwt".parse().unwrap(),
+        );
+
+        assert_eq!(
+            extract_bearer_token(&headers).as_deref(),
+            Some("stream.jwt")
+        );
+    }
+
+    #[test]
+    fn test_extract_bearer_token_rejects_missing_or_invalid_values() {
+        let mut headers = HeaderMap::new();
+        assert!(extract_bearer_token(&headers).is_none());
+
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic abc123".parse().unwrap(),
+        );
+        assert!(extract_bearer_token(&headers).is_none());
+
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer   ".parse().unwrap(),
+        );
+        assert!(extract_bearer_token(&headers).is_none());
+    }
 }

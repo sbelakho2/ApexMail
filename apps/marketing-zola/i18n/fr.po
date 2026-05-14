@@ -1,0 +1,27 @@
+#
+# French translations for ApexMail marketing site.
+#
+msgid ""
+msgstr ""
+"Language: fr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "cookie_consent_heading"
+msgstr "Préférences de cookies"
+
+msgid "cookie_consent_copy"
+msgstr "Nous utilisons des cookies essentiels et des analyses respectueuses de la vie privée pour améliorer ApexMail."
+
+msgid "cookie_consent_necessary"
+msgstr "Essentiels uniquement"
+
+msgid "cookie_consent_dismiss"
+msgstr "Ignorer"
+
+msgid "cookie_consent_accept_all"
+msgstr "Tout accepter"
+
+msgid "cookie_consent_policy_link"
+msgstr "Politique de cookies"

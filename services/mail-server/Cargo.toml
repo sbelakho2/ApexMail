@@ -206,8 +206,22 @@ threat-intel = { path = "crates/threat-intel" }
 email-grader = { path = "crates/email-grader" }
 inbox-placement = { path = "crates/inbox-placement" }
 
+# Patch imap-proto to fix trailing-semicolon future-incompat warnings in macro bodies.
+# See https://github.com/rust-lang/rust/issues/79813
+[patch.crates-io]
+imap-proto = { path = "crates/imap-proto-patched" }
+
+[workspace.metadata]
+description = "ApexMail — Enterprise email delivery platform"
+homepage = "https://apexmail.ee"
+documentation = "https://docs.apexmail.ee"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# catch_unwind is used in production code (analytics.rs:451) for async task
+# isolation — panic = "abort" prevents catch_unwind from working and would
+# abort the entire process on panic. unwind ensures destructors run and logs
+# are flushed before the task-level panic propagates.
+panic = "unwind"

@@ -4,7 +4,7 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS notification_queue (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     type VARCHAR(50) NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -16,7 +16,7 @@ CREATE INDEX IF NOT EXISTS idx_notification_queue_status ON notification_queue(s
 
 CREATE TABLE IF NOT EXISTS usage_alert_configs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     metric_type VARCHAR(50) NOT NULL,
     threshold_percent INTEGER NOT NULL CHECK (threshold_percent BETWEEN 1 AND 100),
     notification_channel VARCHAR(20) NOT NULL DEFAULT 'email',
@@ -34,5 +34,24 @@ CREATE TRIGGER update_usage_alert_configs_updated_at
     BEFORE UPDATE ON usage_alert_configs
     FOR EACH ROW
     EXECUTE FUNCTION enterprise_billing_update_updated_at_column();
+
+-- ─── Conditional FK constraints ─────────────────────────────
+-- C-02: Add FK REFERENCES tenants(id) conditionally.
+
+DO $$
+BEGIN
+    IF to_regclass('public.tenants') IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_queue_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE notification_queue ADD CONSTRAINT notification_queue_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'usage_alert_configs_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE usage_alert_configs ADD CONSTRAINT usage_alert_configs_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+    ELSE
+        RAISE WARNING 'Migration 024: tenants table does not exist — skipping FK constraints.';
+    END IF;
+END $$;
 
 COMMIT;

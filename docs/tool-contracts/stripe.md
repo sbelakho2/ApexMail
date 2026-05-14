@@ -34,7 +34,7 @@
 ### Price Configuration
 
 - All prices are in **USD** (single currency).
-- Billing cycle: monthly, with annual option (2 months free) for Starter through Scale.
+- Billing cycle: monthly, with annual option (2 months free) for Starter through Scale and Enterprise annual contracts at $30,000/year.
 - Metered usage (overage emails) is tracked via Stripe Usage Records and billed at invoice time.
 - Overage rate: $0.40 per 1,000 emails, reported via the Stripe usage records API.
 

@@ -23,7 +23,10 @@ type HmacSha256 = Hmac<Sha256>;
 
 pub struct AuditLogger {
     db: PgPool,
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "audit config is retained for policy inspection and future dynamic updates"
+    )]
     config: AuditConfig,
     signing_key: Vec<u8>,
     /// In-memory cache of last hash per chain key. Primary source:/// Redis `audit:lasthash:{key}`, falling back to DB.
@@ -74,6 +77,7 @@ impl AuditLogger {
     // ── Core logging ────────────────────────────────────────
 
     /// Log a single audit event. Returns the persisted entry.
+    #[allow(clippy::too_many_arguments)]
     pub async fn log(
         &self,
         action: AuditAction,
@@ -651,6 +655,7 @@ impl AuditLogger {
 
     // ── Hash & Signature Computation ────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_hash(
         &self,
         id: &str,
@@ -745,13 +750,34 @@ pub struct ExportResult {
 
 fn csv_escape(value: &str) -> String {
     let mut escaped = value.replace('"', "\"\"");
-    if matches!(
+    // Protect against CSV formula injection:
+    // 1. Leading special characters (=, +, -, @, tab, CR) — prefix with single quote
+    // 2. Mid-string formulas containing these characters — also prefix
+    // 3. DDE (Dynamic Data Exchange) expressions like `=cmd|` anywhere in cell
+    let needs_formula_prefix = matches!(
         escaped.chars().next(),
-        Some('=') | Some('+') | Some('-') | Some('@')
-    ) {
+        Some('=') | Some('+') | Some('-') | Some('@') | Some('\t') | Some('\r')
+    ) || escaped.contains("\t=")
+        || escaped.contains("\t+")
+        || escaped.contains("\t-")
+        || escaped.contains("\t@")
+        || escaped.contains("\r=")
+        || escaped.contains("\r+")
+        || escaped.contains("\r-")
+        || escaped.contains("\r@")
+        || escaped.contains("|='")
+        || escaped.contains("|=\"")
+        || escaped.contains("=cmd|")
+        || escaped.contains("=compose|")
+        || escaped.contains("=HYPERLINK(")
+        || escaped.contains("=DDE(");
+    if needs_formula_prefix {
         escaped.insert(0, '\'');
     }
-    if escaped.contains(',')
+    // Always quote the field if it contains special CSV characters
+    // or if we just added a formula prefix
+    if needs_formula_prefix
+        || escaped.contains(',')
         || escaped.contains('"')
         || escaped.contains('\n')
         || escaped.contains('\r')
@@ -888,7 +914,7 @@ mod tests {
         AuditLogger::new(pool, config)
     }
 
-    #[allow(unused)]
+    #[allow(dead_code)]
     fn test_context() -> LogContext {
         LogContext {
             tenant_id: Some("tenant-1".into()),

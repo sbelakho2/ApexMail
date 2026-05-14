@@ -477,7 +477,7 @@ mod tests {
     fn test_phone_detection() {
         let text = "Call me at (555) 123-4567 or +1-555-987-6543.";
         let results = scan_pii(text, false, false, true, false);
-        assert!(results.len() >= 1, "Should detect phone numbers");
+        assert!(!results.is_empty(), "Should detect phone numbers");
     }
 
     #[test]
@@ -629,6 +629,9 @@ mod tests {
         }
         // Credit card must be detected and carry the configured CC base risk.
         let cc = cc.expect("Credit card PII should be detected in mixed-context input");
-        assert!(cc.base_risk > 0.0, "credit card detection must report a base risk");
+        assert!(
+            cc.base_risk > 0.0,
+            "credit card detection must report a base risk"
+        );
     }
 }

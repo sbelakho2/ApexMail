@@ -18,7 +18,7 @@ scrape_configs:
   # API server metrics
   - job_name: 'apexmail-api'
     static_configs:
-      - targets: ['api:9090']
+      - targets: ['api-server:9090']
     # The API server exposes Prometheus metrics on a dedicated recorder port.
     scrape_interval: 15s
 
@@ -30,24 +30,17 @@ scrape_configs:
     # Tracking request and latency signals are high-churn and back 1m availability alerts.
     scrape_interval: 10s
 
-  # MTA metrics
-  - job_name: 'apexmail-mta'
-    static_configs:
-      - targets: ['mta:9090']
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-
-  # Worker metrics
-  - job_name: 'apexmail-worker'
-    static_configs:
-      - targets: ['worker:9090']
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-
   # Enterprise metrics
   - job_name: 'apexmail-enterprise'
     static_configs:
       - targets: ['enterprise:3002']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'apexmail-internal-services'
+    file_sd_configs:
+      - files:
+          - targets.d/apexmail-internal.yml
     metrics_path: '/metrics'
     scrape_interval: 15s
 

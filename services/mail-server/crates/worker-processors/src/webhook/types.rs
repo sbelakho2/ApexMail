@@ -137,7 +137,7 @@ impl WebhookJob {
             2.0 // Default exponential backoff
         };
         let delay = self.retry_delay as f64 * multiplier.powi((self.attempt - 1).max(0));
-        (delay as i64).min(3600_000) // Cap at 1 hour
+        (delay as i64).min(3_600_000) // Cap at 1 hour
     }
 }
 

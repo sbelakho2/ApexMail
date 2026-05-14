@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnalyticsConfig {
     pub database_url: String,
     pub redis_url: String,
@@ -16,6 +17,7 @@ pub struct AnalyticsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactionConfig {
     pub enabled: bool,
     pub schedule_hour: u32,
@@ -25,12 +27,14 @@ pub struct CompactionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReconciliationConfig {
     pub enabled: bool,
     pub schedule_hour: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClickHouseConfig {
     pub url: String,
     pub database: String,
@@ -38,6 +42,10 @@ pub struct ClickHouseConfig {
     pub password: String,
     pub max_connections: u32,
     pub query_timeout_secs: u64,
+    /// Timeout in seconds for ClickHouse async insert operations (T-309).
+    /// Prevents unbounded waits when ClickHouse is slow or unresponsive.
+    /// Default: 30 seconds.
+    pub insert_timeout_seconds: u64,
     /// Enable TLS for ClickHouse connection (O-11.2).
     pub tls_enabled: bool,
     /// Path to CA certificate file for ClickHouse TLS verification (O-11.2).
@@ -70,12 +78,13 @@ impl Default for ReconciliationConfig {
 impl Default for ClickHouseConfig {
     fn default() -> Self {
         Self {
-            url: "http://localhost:8123".into(),
+            url: "http://clickhouse:8123".into(),
             database: "apexmail".into(),
             user: "default".into(),
             password: "".into(),
             max_connections: 20,
             query_timeout_secs: 30,
+            insert_timeout_seconds: 30,
             tls_enabled: false,
             ca_cert_path: String::new(),
         }
@@ -141,6 +150,10 @@ impl AnalyticsConfig {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(20),
                 query_timeout_secs: 30,
+                insert_timeout_seconds: std::env::var("CLICKHOUSE_INSERT_TIMEOUT_SECONDS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30),
                 tls_enabled: std::env::var("CLICKHOUSE_TLS_ENABLED")
                     .ok()
                     .and_then(|v| v.parse().ok())
@@ -152,10 +165,13 @@ impl AnalyticsConfig {
         if let Err(err) = config.validate() {
             tracing::error!(error = %err, "Invalid analytics config; applying safe defaults");
             if config.database_url.trim().is_empty() {
-                config.database_url = "postgres://localhost/apexmail".into();
+                config.database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                    "postgres://postgres:postgres@localhost:5432/apexmail".into()
+                });
             }
             if config.redis_url.trim().is_empty() {
-                config.redis_url = "redis://127.0.0.1:6379".into();
+                config.redis_url =
+                    std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
             }
             if config.storage_path.trim().is_empty() {
                 config.storage_path = "/var/lib/apexmail/analytics".into();
@@ -216,5 +232,6 @@ mod tests {
         assert_eq!(cfg.compaction.cold_retention_days, 730);
         assert_eq!(cfg.compaction.batch_size, 100_000);
         assert_eq!(cfg.clickhouse.max_connections, 20);
+        assert_eq!(cfg.clickhouse.insert_timeout_seconds, 30);
     }
 }

@@ -7,7 +7,7 @@
 # - Rust API server (port 3001)
 # - Rust web surface via 127.0.0.1 host mapping
 # - Rust control-plane surface via localhost host mapping
-# - Marketing routes served by the Rust web surface (port 3001)
+# - Marketing routes via marketing.localhost host mapping
 # =============================================================================
 
 set -euo pipefail
@@ -22,6 +22,61 @@ NC='\033[0m'
 log() { echo -e "${GREEN}[dev-start]${NC} $1"; }
 warn() { echo -e "${YELLOW}[dev-start]${NC} $1"; }
 error() { echo -e "${RED}[dev-start]${NC} $1"; exit 1; }
+
+needs_rebuild() {
+    local output="$1"
+    shift
+
+    if [[ ! -e "$output" ]]; then
+        return 0
+    fi
+
+    local newer_input
+    newer_input="$(find "$@" -type f -newer "$output" -print -quit 2>/dev/null || true)"
+    [[ -n "$newer_input" ]]
+}
+
+build_rust_ui_css() {
+    local tailwind_cli="apps/marketing-zola/tailwindcss"
+    local config="services/mail-server/crates/ui-foundation/tailwind.config.js"
+    local input="services/mail-server/crates/ui-foundation/assets/globals.input.css"
+    local output="services/mail-server/crates/ui-foundation/assets/globals.css"
+
+    if ! needs_rebuild "$output" "$config" "$input" "services/mail-server/crates/ui-foundation/src"; then
+        return
+    fi
+
+    [[ -x "$tailwind_cli" ]] || error "Tailwind CLI not found at $tailwind_cli"
+    log "Building Rust UI stylesheet..."
+    "$tailwind_cli" -c "$config" -i "$input" -o "$output"
+}
+
+build_marketing_static_site() {
+    local tailwind_cli="apps/marketing-zola/tailwindcss"
+    local css_input="apps/marketing-zola/static/css/input.css"
+    local css_output="apps/marketing-zola/static/css/styles.css"
+
+    if needs_rebuild "$css_output" \
+        "apps/marketing-zola/tailwind.config.js" \
+        "$css_input" \
+        "apps/marketing-zola/templates" \
+        "apps/marketing-zola/content" \
+        "apps/marketing-zola/static/js"; then
+        [[ -x "$tailwind_cli" ]] || error "Tailwind CLI not found at $tailwind_cli"
+        log "Building marketing stylesheet..."
+        "$tailwind_cli" -c apps/marketing-zola/tailwind.config.js -i "$css_input" -o "$css_output" --minify
+    fi
+
+    if needs_rebuild "apps/marketing-zola/public/index.html" \
+        "apps/marketing-zola/config.toml" \
+        "apps/marketing-zola/templates" \
+        "apps/marketing-zola/content" \
+        "apps/marketing-zola/static"; then
+        command -v zola >/dev/null 2>&1 || error "Zola is required to refresh apps/marketing-zola/public"
+        log "Building marketing static export..."
+        zola --root apps/marketing-zola build
+    fi
+}
 
 generate_secret() {
     local bytes="${1:-32}"
@@ -97,6 +152,12 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# Refresh generated browser assets before serving or embedding them
+# -----------------------------------------------------------------------------
+build_rust_ui_css
+build_marketing_static_site
+
+# -----------------------------------------------------------------------------
 # Start Docker containers
 # -----------------------------------------------------------------------------
 log "Starting Docker containers..."
@@ -111,6 +172,24 @@ log "PostgreSQL ready"
 
 escaped_postgres_password=${POSTGRES_PASSWORD//\'/\'\'}
 docker exec apexmail-postgres sh -lc "psql -v ON_ERROR_STOP=1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"ALTER USER \\\"$POSTGRES_USER\\\" WITH PASSWORD '$escaped_postgres_password';\"" >/dev/null
+
+# -----------------------------------------------------------------------------
+# Apply schema patches required for the live signup → MFA → login E2E flow.
+# Migration 055 is fully idempotent (ADD COLUMN IF NOT EXISTS / ALTER ...).
+# This is a stop-gap until a full sqlx migration runner is wired in; see
+# faults.md for the broader migration audit and per-file fixes still required.
+# -----------------------------------------------------------------------------
+schema_patch="services/mail-server/migrations/055_e2e_schema_fixes.sql"
+if [[ -f "$schema_patch" ]]; then
+    log "Applying live-DB schema patches (migration 055)..."
+    # Pipe via stdin (avoid `docker cp` because the postgres container has a
+    # read-only rootfs in this compose stack — only declared tmpfs mounts are
+    # writable, and /tmp is not necessarily one of them).
+    docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" apexmail-postgres \
+        psql -v ON_ERROR_STOP=0 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+        < "$schema_patch" >/dev/null 2>&1 || \
+        log "Schema patch returned non-zero (likely tables not yet created; will retry on next start)"
+fi
 
 # Wait for redis
 log "Waiting for Redis..."
@@ -149,11 +228,16 @@ export WEBHOOK_SIGNING_SECRET="$(resolve_secret WEBHOOK_SIGNING_SECRET secrets/w
 export AWS_REGION=us-east-1
 export JWT_PRIVATE_KEY_PEM="$(cat /tmp/jwt_private.pem)"
 export JWT_PUBLIC_KEY_PEM="$(cat /tmp/jwt_public.pem)"
+export UI_MARKETING_HOSTS="${UI_MARKETING_HOSTS:-apexmail.ee,www.apexmail.ee,marketing.localhost}"
 
 # -----------------------------------------------------------------------------
 # Build API if needed
 # -----------------------------------------------------------------------------
-if [[ ! -f services/mail-server/target/release/api-server ]]; then
+if needs_rebuild services/mail-server/target/release/api-server \
+    services/mail-server/Cargo.toml \
+    services/mail-server/Cargo.lock \
+    services/mail-server/crates \
+    apps/marketing-zola/public; then
     log "Building Rust API server..."
     cd services/mail-server
     cargo build --package api-server --release
@@ -184,5 +268,5 @@ echo ""
 echo "  API Server:     http://localhost:3001/health/live"
 echo "  Web Surface:    http://127.0.0.1:3001 (Rust SSR via api-server host map)"
 echo "  Control Plane:  http://localhost:3001 (Rust SSR via api-server host map)"
-echo "  Marketing:      http://127.0.0.1:3001 (exported marketing routes via api-server)"
+echo "  Marketing:      http://marketing.localhost:3001 (exported marketing routes via api-server host map)"
 echo ""

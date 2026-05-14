@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use anyhow::Context;
 use sales_autopilot::{
     calendar::CalendarService,
     campaigns::CampaignManager,
     config::SalesConfig,
     crm::CrmBackend,
-    enrichment::EnrichmentService,
+    enrichment::{EnrichmentService, HttpEnrichmentProvider},
     inbox::InboxManager,
     routes::{self, AppState},
 };
@@ -53,7 +55,10 @@ async fn main() -> anyhow::Result<()> {
         .context("Failed to initialize CRM storage")?;
 
     let state = AppState {
-        enrichment: EnrichmentService::new(&cfg.enrichment_api_url),
+        enrichment: EnrichmentService::new(Arc::new(HttpEnrichmentProvider::new(
+            &cfg.enrichment_api_url,
+            "",
+        ))),
         campaigns: CampaignManager::new(cfg.max_campaigns, db.clone()),
         calendar: CalendarService::new(db.clone()),
         inbox: InboxManager::new(db.clone()),
@@ -67,7 +72,9 @@ async fn main() -> anyhow::Result<()> {
             }
             token
         },
-        rate_limit_fallback: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        rate_limit_fallback: std::sync::Arc::new(parking_lot::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     };
 
     let app = routes::router(state);

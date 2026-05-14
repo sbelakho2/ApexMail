@@ -224,7 +224,11 @@ impl IdsEngine {
         }
 
         // 3. Connection tracking anomalies
-        let conn_anomalies = self.conn_tracker.record_syn(src_ip, dst_port);
+        let conn_anomalies = if is_syn_probe(protocol, payload) {
+            self.conn_tracker.record_syn(src_ip, dst_port)
+        } else {
+            Vec::new()
+        };
         for anomaly in &conn_anomalies {
             let (id, msg, sev) = match anomaly {
                 ConnectionAnomaly::PortScan { ip, unique_ports } => (
@@ -448,6 +452,16 @@ impl IdsEngine {
     }
 }
 
+fn is_syn_probe(protocol: &str, payload: &[u8]) -> bool {
+    let normalized = protocol.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "syn" | "tcp_syn" | "tcp-syn" | "tcp/syn" | "tcp_syn_packet"
+    ) || (normalized == "tcp" && payload.is_empty())
+        || payload.starts_with(b"SYN ")
+        || payload == b"SYN"
+}
+
 /// Normalize a payload for evasion-resistant signature matching.
 /// Performs a single pass of:/// 1. URL-decoding (`%XX` → byte)
 /// 2. HTML entity decoding (`&#NNN;`, `&#xHH;`, `&lt;`, `&gt;`, `&amp;`, `&quot;`)
@@ -556,6 +570,7 @@ mod tests {
         IdsEngine::new(IdsConfig::default()).expect("init IDS engine")
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     fn make_inline_engine() -> IdsEngine {
         let mut config = IdsConfig::default();
         config.inline_mode = true;
@@ -604,6 +619,38 @@ mod tests {
         for port in 1..=5 {
             let _ = engine.inspect(i, port, "tcp", b"");
         }
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn non_syn_inspection_does_not_record_connection_anomalies() {
+        let mut config = IdsConfig::default();
+        config.inline_mode = true;
+        config.syn_flood_threshold = 1;
+        let engine = IdsEngine::new(config).expect("init IDS engine");
+        let source = ip("10.0.0.42");
+
+        let (_, first_alerts) = engine.inspect(source, 25, "smtp", b"EHLO example\r\n");
+        let (_, second_alerts) =
+            engine.inspect(source, 25, "smtp", b"MAIL FROM:<a@example.com>\r\n");
+
+        assert!(!first_alerts.iter().any(|alert| alert.id == 4000002));
+        assert!(!second_alerts.iter().any(|alert| alert.id == 4000002));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn syn_probe_records_connection_anomalies() {
+        let mut config = IdsConfig::default();
+        config.inline_mode = true;
+        config.syn_flood_threshold = 1;
+        let engine = IdsEngine::new(config).expect("init IDS engine");
+        let source = ip("10.0.0.43");
+
+        let _ = engine.inspect(source, 25, "tcp_syn", b"");
+        let (_, alerts) = engine.inspect(source, 26, "tcp_syn", b"");
+
+        assert!(alerts.iter().any(|alert| alert.id == 4000002));
     }
 
     #[test]
@@ -916,6 +963,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_alert_counts_evict_least_recent_over_capacity() {
         let mut config = IdsConfig::default();
         config.max_alert_count_entries = 2;

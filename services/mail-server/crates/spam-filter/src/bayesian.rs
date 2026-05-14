@@ -1,3 +1,5 @@
+#![allow(clippy::doc_lazy_continuation)]
+
 //! Naive Bayes spam classifier with online learning
 //!
 //! Uses a multinomial Naive Bayes model with Laplace smoothing.
@@ -16,7 +18,6 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -286,10 +287,13 @@ impl BayesianModel {
 /// Includes training rate limits to prevent adversarial model poisoning.
 pub struct BayesianClassifier {
     model: RwLock<BayesianModel>,
-    /// Training count in current minute window.
-    training_count: AtomicU64,
-    /// Minute boundary for rate limiting.
-    rate_limit_minute: RwLock<Instant>,
+    rate_limit: parking_lot::Mutex<TrainingRateLimitState>,
+}
+
+#[derive(Debug)]
+struct TrainingRateLimitState {
+    window_start: Instant,
+    count: u64,
 }
 
 impl BayesianClassifier {
@@ -297,29 +301,28 @@ impl BayesianClassifier {
     pub fn new(model: BayesianModel) -> Self {
         Self {
             model: RwLock::new(model),
-            training_count: AtomicU64::new(0),
-            rate_limit_minute: RwLock::new(Instant::now()),
+            rate_limit: parking_lot::Mutex::new(TrainingRateLimitState {
+                window_start: Instant::now(),
+                count: 0,
+            }),
         }
     }
 
-    /// Check and update rate limit. Returns `true` if under limit.
+    /// Atomically check and consume one training slot.
     fn check_rate_limit(&self) -> bool {
         let now = Instant::now();
-        let minute_boundary = *self.rate_limit_minute.read();
-
-        // Check if we've entered a new minute
-        if now.duration_since(minute_boundary) >= Duration::from_secs(60) {
-            // Reset the counter
-            let mut boundary = self.rate_limit_minute.write();
-            if now.duration_since(*boundary) >= Duration::from_secs(60) {
-                *boundary = now;
-                self.training_count.store(1, Ordering::Relaxed);
-                return true;
-            }
+        let mut state = self.rate_limit.lock();
+        if now.duration_since(state.window_start) >= Duration::from_secs(60) {
+            state.window_start = now;
+            state.count = 0;
         }
 
-        let count = self.training_count.fetch_add(1, Ordering::Relaxed);
-        count < MAX_TRAINING_PER_MINUTE
+        if state.count >= MAX_TRAINING_PER_MINUTE {
+            return false;
+        }
+
+        state.count += 1;
+        true
     }
 
     /// Classify text
@@ -387,7 +390,7 @@ impl BayesianClassifier {
 
     /// Get current training count for this minute.
     pub fn current_training_rate(&self) -> u64 {
-        self.training_count.load(Ordering::Relaxed)
+        self.rate_limit.lock().count
     }
 }
 
@@ -682,7 +685,7 @@ mod tests {
 
         // Model should still function
         let prob = model.classify("regular email message");
-        assert!(prob >= 0.0 && prob <= 1.0, "Probability should be valid");
+        assert!((0.0..=1.0).contains(&prob), "Probability should be valid");
     }
 
     #[test]
@@ -739,6 +742,6 @@ mod tests {
 
         // Should still classify normally
         let prob = model.classify(special);
-        assert!(prob >= 0.0 && prob <= 1.0);
+        assert!((0.0..=1.0).contains(&prob));
     }
 }

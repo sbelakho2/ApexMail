@@ -6,7 +6,7 @@ pub struct GradeCalculator;
 
 impl GradeCalculator {
     /// Calculate the composite score using the default weight distribution.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // clippy: justified - public scoring API accepts individual score components (dns, auth, spam, content, reputation)
     pub fn calculate(
         dns_health_score: u16,
         dns_health_details: Option<serde_json::Value>,
@@ -35,7 +35,7 @@ impl GradeCalculator {
     /// Calculate the composite score using a tenant-supplied weight set. The
     /// caller is responsible for normalizing weights; this function will also
     /// renormalize defensively.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // clippy: justified - public scoring API accepts individual score components + custom weights
     pub fn calculate_with_weights(
         dns_health_score: u16,
         dns_health_details: Option<serde_json::Value>,
@@ -50,17 +50,36 @@ impl GradeCalculator {
     ) -> (u16, GradeLetter, GradeBreakdown, Vec<Finding>, Vec<String>) {
         let w = weights.normalized();
 
-        let dns_breakdown = ScoreBreakdown { score: dns_health_score, max: 100, details: dns_health_details };
-        let auth_breakdown = ScoreBreakdown { score: auth_score, max: 100, details: auth_details };
-        let spam_breakdown = ScoreBreakdown { score: spam_score, max: 100, details: None };
-        let content_breakdown = content_score.map(|s| ScoreBreakdown { score: s, max: 100, details: None });
-        let rep_breakdown = ScoreBreakdown { score: reputation_score, max: 100, details: reputation_details };
+        let dns_breakdown = ScoreBreakdown {
+            score: dns_health_score,
+            max: 100,
+            details: dns_health_details,
+        };
+        let auth_breakdown = ScoreBreakdown {
+            score: auth_score,
+            max: 100,
+            details: auth_details,
+        };
+        let spam_breakdown = ScoreBreakdown {
+            score: spam_score,
+            max: 100,
+            details: None,
+        };
+        let content_breakdown = content_score.map(|s| ScoreBreakdown {
+            score: s,
+            max: 100,
+            details: None,
+        });
+        let rep_breakdown = ScoreBreakdown {
+            score: reputation_score,
+            max: 100,
+            details: reputation_details,
+        };
 
-        let mut composite =
-            (dns_health_score as f64 * w.dns_health) +
-            (auth_score as f64 * w.authentication) +
-            (spam_score as f64 * w.spam_likelihood) +
-            (reputation_score as f64 * w.reputation);
+        let mut composite = (dns_health_score as f64 * w.dns_health)
+            + (auth_score as f64 * w.authentication)
+            + (spam_score as f64 * w.spam_likelihood)
+            + (reputation_score as f64 * w.reputation);
 
         if let Some(cs) = content_score {
             composite += cs as f64 * w.content_quality;
@@ -74,7 +93,8 @@ impl GradeCalculator {
         let final_score = composite.round().clamp(0.0, 100.0) as u16;
         let grade = GradeLetter::from_score(final_score);
 
-        let recommendations = Self::generate_recommendations(&findings, dns_health_score, auth_score, spam_score);
+        let recommendations =
+            Self::generate_recommendations(&findings, dns_health_score, auth_score, spam_score);
 
         let breakdown = GradeBreakdown {
             dns_health: dns_breakdown,
@@ -96,11 +116,19 @@ impl GradeCalculator {
         let mut recs: Vec<String> = Vec::new();
 
         if dns_score < 60 {
-            recs.push("Configure MX, SPF, DKIM, and DMARC DNS records to improve deliverability".into());
+            recs.push(
+                "Configure MX, SPF, DKIM, and DMARC DNS records to improve deliverability".into(),
+            );
         } else if dns_score < 80 {
-            recs.push("Review DNS records: ensure MX redundancy and correct SPF/DKIM/DMARC configuration".into());
+            recs.push(
+                "Review DNS records: ensure MX redundancy and correct SPF/DKIM/DMARC configuration"
+                    .into(),
+            );
         } else {
-            recs.push("DNS configuration looks good — maintain regular monitoring of your DNS records".into());
+            recs.push(
+                "DNS configuration looks good — maintain regular monitoring of your DNS records"
+                    .into(),
+            );
         }
 
         if auth_score < 60 {
@@ -118,10 +146,16 @@ impl GradeCalculator {
         for finding in findings {
             match finding.severity {
                 FindingSeverity::Critical | FindingSeverity::Error => {
-                    recs.push(format!("[Action Required] {}: {}", finding.category, finding.message));
+                    recs.push(format!(
+                        "[Action Required] {}: {}",
+                        finding.category, finding.message
+                    ));
                 }
                 FindingSeverity::Warning => {
-                    recs.push(format!("[Suggestion] {}: {}", finding.category, finding.message));
+                    recs.push(format!(
+                        "[Suggestion] {}: {}",
+                        finding.category, finding.message
+                    ));
                 }
                 _ => {}
             }
@@ -137,14 +171,21 @@ pub fn score_spf(spf_record: Option<&crate::grader::SpfInfo>) -> (u16, serde_jso
     match spf_record {
         Some(spf) => {
             let mut score = 15u16;
-            if spf.hard_fail { score += 10; }
-            if spf.soft_fail { score += 5; }
-            (score.min(30), serde_json::json!({
-                "exists": true,
-                "hard_fail": spf.hard_fail,
-                "soft_fail": spf.soft_fail,
-                "raw": spf.raw,
-            }))
+            if spf.hard_fail {
+                score += 10;
+            }
+            if spf.soft_fail {
+                score += 5;
+            }
+            (
+                score.min(30),
+                serde_json::json!({
+                    "exists": true,
+                    "hard_fail": spf.hard_fail,
+                    "soft_fail": spf.soft_fail,
+                    "raw": spf.raw,
+                }),
+            )
         }
         None => (0, serde_json::json!({"exists": false})),
     }
@@ -173,11 +214,14 @@ pub fn score_dkim(dkim_keys: &[crate::grader::DkimInfo]) -> (u16, serde_json::Va
     if has_strong {
         score = score.saturating_add(5);
     }
-    (score.min(20), serde_json::json!({
-        "keys_found": dkim_keys.len(),
-        "selectors": dkim_keys.iter().map(|k| k.selector.as_str()).collect::<Vec<_>>(),
-        "details": details,
-    }))
+    (
+        score.min(20),
+        serde_json::json!({
+            "keys_found": dkim_keys.len(),
+            "selectors": dkim_keys.iter().map(|k| k.selector.as_str()).collect::<Vec<_>>(),
+            "details": details,
+        }),
+    )
 }
 
 pub fn score_dmarc(dmarc_policy: Option<&crate::grader::DmarcInfo>) -> (u16, serde_json::Value) {
@@ -189,12 +233,17 @@ pub fn score_dmarc(dmarc_policy: Option<&crate::grader::DmarcInfo>) -> (u16, ser
                 "quarantine" => score += 5,
                 _ => {}
             }
-            if dmarc.pct == 100 { score += 5; }
-            (score.min(30), serde_json::json!({
-                "exists": true,
-                "policy": dmarc.policy,
-                "pct": dmarc.pct,
-            }))
+            if dmarc.pct == 100 {
+                score += 5;
+            }
+            (
+                score.min(30),
+                serde_json::json!({
+                    "exists": true,
+                    "policy": dmarc.policy,
+                    "pct": dmarc.pct,
+                }),
+            )
         }
         None => (0, serde_json::json!({"exists": false})),
     }
@@ -203,13 +252,22 @@ pub fn score_dmarc(dmarc_policy: Option<&crate::grader::DmarcInfo>) -> (u16, ser
 pub fn score_mx(mx_records: &[crate::grader::MxInfo]) -> (u16, serde_json::Value) {
     let priorities: Vec<u16> = mx_records.iter().map(|m| m.priority).collect();
     let mut score = 0u16;
-    if !mx_records.is_empty() { score += 25; }
-    if mx_records.len() >= 2 { score += 10; }
-    if priorities.iter().any(|&p| p <= 10) { score += 15; }
-    (score.min(50), serde_json::json!({
-        "count": mx_records.len(),
-        "priorities": priorities,
-    }))
+    if !mx_records.is_empty() {
+        score += 25;
+    }
+    if mx_records.len() >= 2 {
+        score += 10;
+    }
+    if priorities.iter().any(|&p| p <= 10) {
+        score += 15;
+    }
+    (
+        score.min(50),
+        serde_json::json!({
+            "count": mx_records.len(),
+            "priorities": priorities,
+        }),
+    )
 }
 
 pub fn score_dns_health(
@@ -221,10 +279,18 @@ pub fn score_dns_health(
 ) -> (u16, serde_json::Value) {
     let (mx_score, mx_details) = score_mx(mx_records);
     let mut dns_score = mx_score;
-    if spf_record.is_some() { dns_score += 15; }
-    if !dkim_keys.is_empty() { dns_score += 15; }
-    if dmarc_policy.is_some() { dns_score += 10; }
-    if mx_records.is_empty() && has_a_record { dns_score += 10; }
+    if spf_record.is_some() {
+        dns_score += 15;
+    }
+    if !dkim_keys.is_empty() {
+        dns_score += 15;
+    }
+    if dmarc_policy.is_some() {
+        dns_score += 10;
+    }
+    if mx_records.is_empty() && has_a_record {
+        dns_score += 10;
+    }
     let details = serde_json::json!({
         "mx": mx_details,
         "spf_record": spf_record.is_some(),
@@ -274,7 +340,10 @@ pub fn score_modern_security(
     (score.min(20), details)
 }
 
-pub fn score_reputation(blocklist_count: usize, highest_confidence: &str) -> (u16, serde_json::Value) {
+pub fn score_reputation(
+    blocklist_count: usize,
+    highest_confidence: &str,
+) -> (u16, serde_json::Value) {
     let score = if blocklist_count == 0 {
         100
     } else if blocklist_count == 1 && highest_confidence == "low" {
@@ -284,10 +353,13 @@ pub fn score_reputation(blocklist_count: usize, highest_confidence: &str) -> (u1
     } else {
         0
     };
-    (score, serde_json::json!({
-        "blocklists": blocklist_count,
-        "highest_confidence": highest_confidence,
-    }))
+    (
+        score,
+        serde_json::json!({
+            "blocklists": blocklist_count,
+            "highest_confidence": highest_confidence,
+        }),
+    )
 }
 
 pub fn invert_spam_score(spam_score: f64) -> u16 {
@@ -354,7 +426,10 @@ mod tests {
             max_age_seconds: 86400,
             mx_patterns: vec![],
         };
-        let tls = TlsRptInfo { raw: "v=TLSRPTv1".into(), rua: vec!["mailto:t@e".into()] };
+        let tls = TlsRptInfo {
+            raw: "v=TLSRPTv1".into(),
+            rua: vec!["mailto:t@e".into()],
+        };
         let (score, _) = score_modern_security(Some(&bimi), Some(&mta), Some(&tls));
         assert_eq!(score, 20);
     }
@@ -375,7 +450,16 @@ mod tests {
             reputation: 2.0,
         };
         let (score, grade, _, _, _) = GradeCalculator::calculate_with_weights(
-            100, None, 100, None, 100, Some(100), 100, None, vec![], &w,
+            100,
+            None,
+            100,
+            None,
+            100,
+            Some(100),
+            100,
+            None,
+            vec![],
+            &w,
         );
         assert_eq!(score, 100);
         assert_eq!(grade.to_string(), "A+");

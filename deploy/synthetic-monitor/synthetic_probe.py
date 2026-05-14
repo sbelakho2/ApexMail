@@ -59,7 +59,7 @@ def _probe_target(target: str) -> dict[str, float | int | str]:
     except urllib.error.HTTPError as exc:
         status_code = exc.code
         error = exc.reason or str(exc)
-    except Exception as exc:  # noqa: BLE001 - metrics should preserve probe failures.
+    except (urllib.error.URLError, TimeoutError, OSError, ssl.SSLError) as exc:
         error = exc.__class__.__name__
         print(
             f"synthetic probe failed for {target}: {exc!r}\n{traceback.format_exc()}",
@@ -107,7 +107,7 @@ def _probe_smtp_target(target: str) -> dict[str, float | int | str]:
                 raise RuntimeError(f"unexpected EHLO response: {ehlo[:80]!r}")
             sock.sendall(b"QUIT\r\n")
             success = 1
-    except Exception as exc:  # noqa: BLE001 - metrics should preserve probe failures.
+    except (OSError, TimeoutError, ssl.SSLError, RuntimeError, ValueError) as exc:
         error = exc.__class__.__name__
         print(
             f"synthetic SMTP probe failed for {target}: {exc!r}\n{traceback.format_exc()}",

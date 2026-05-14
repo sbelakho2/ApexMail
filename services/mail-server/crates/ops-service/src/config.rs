@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level configuration for the ops service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpsConfig {
     /// Interval in seconds between automatic health checks.
     pub health_check_interval_secs: u64,
@@ -31,7 +32,7 @@ impl Default for OpsConfig {
             incident_auto_resolve_mins: 120,
             warmup_default_days: 14,
             port: 4400,
-            database_url: "postgres://localhost/apexmail".to_string(),
+            database_url: "postgres://postgres:postgres@localhost:5432/apexmail".to_string(),
             ops_api_key: String::new(),
             ops_api_keys: Vec::new(),
             environment: "development".to_string(),
@@ -86,9 +87,11 @@ impl OpsConfig {
         };
         if let Err(err) = config.validate() {
             tracing::warn!("Invalid ops-service config: {err}; falling back to defaults");
-            let mut fallback = Self::default();
-            fallback.environment = config.environment;
-            fallback.ops_api_key = generated_ops_api_key();
+            let mut fallback = Self {
+                environment: config.environment,
+                ops_api_key: generated_ops_api_key(),
+                ..Self::default()
+            };
             fallback.harden_production();
             return fallback;
         }

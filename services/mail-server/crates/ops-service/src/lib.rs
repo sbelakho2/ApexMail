@@ -4,6 +4,7 @@
 //! SLO monitoring, status pages, IP warmup scheduling, trust scoring, and
 //! SES monitoring (VDM, quota, deliverability metrics).
 
+#![deny(unsafe_code)]
 pub mod config;
 pub mod health;
 pub mod incidents;

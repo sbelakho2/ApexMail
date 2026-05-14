@@ -460,8 +460,8 @@ mod sales_tests {
         assert_eq!(retrieved.unwrap().name, "John Doe");
     }
 
-    #[test]
-    fn test_sales_enrichment() {
+    #[tokio::test]
+    async fn test_sales_enrichment() {
         let domain =
             sales_autopilot::enrichment::EnrichmentService::extract_domain("user@example.com");
         assert_eq!(domain, Some("example.com".into()));
@@ -469,8 +469,8 @@ mod sales_tests {
         let no_domain = sales_autopilot::enrichment::EnrichmentService::extract_domain("invalid");
         assert!(no_domain.is_none());
 
-        let svc = sales_autopilot::enrichment::EnrichmentService::new("http://mock");
-        let company = svc.enrich_lead("cto@acme.com").unwrap();
+        let svc = sales_autopilot::enrichment::EnrichmentService::mock();
+        let company = svc.enrich_lead("cto@acme.com").await.unwrap();
         assert_eq!(company.name, "Acme Corp");
         assert_eq!(company.industry, "SaaS");
     }
@@ -513,7 +513,7 @@ mod ai_tests {
         let predictor = ai_service::analytics::AnalyticsPredictor::new();
         let rate = predictor.predict_open_rate("Check out our new feature", 10, 2);
         assert!(
-            rate >= 0.0 && rate <= 1.0,
+            (0.0..=1.0).contains(&rate),
             "open rate should be in [0, 1], got {}",
             rate
         );
@@ -616,7 +616,6 @@ mod compliance_tests {
         // Verify we can reference modules from the compliance crate
         let _ = std::any::type_name::<compliance::types::RiskLevel>();
         // The crate compiles and exports these modules
-        assert!(true, "compliance crate compiles successfully");
     }
 }
 
@@ -701,7 +700,6 @@ mod mta_tests {
         // Verify MtaConfig exists and can be referenced
         let _ = std::any::type_name::<mta::MtaConfig>();
         // The crate compiles with all auth modules
-        assert!(true, "MTA crate compiles successfully");
     }
 }
 
@@ -715,7 +713,6 @@ mod edge_cases_tests {
     fn test_edge_cases_config_type() {
         let _ = std::any::type_name::<edge_cases::config::EdgeCasesConfig>();
         // Verify the services module is accessible
-        assert!(true, "edge-cases crate compiles successfully");
     }
 }
 
@@ -731,7 +728,6 @@ mod worker_processors_tests {
         let _ = std::any::type_name::<worker_processors::ProcessorConfig>();
         let _ = std::any::type_name::<worker_processors::ProcessorError>();
         let _ = std::any::type_name::<worker_processors::ReplyClassification>();
-        assert!(true, "worker-processors crate compiles with all modules");
     }
 }
 
@@ -821,7 +817,6 @@ mod dns_resolver_tests {
         let _ = std::any::type_name::<apexmail_dns_resolver::DkimRecord>();
         let _ = std::any::type_name::<apexmail_dns_resolver::DmarcPolicy>();
         let _ = std::any::type_name::<apexmail_dns_resolver::TlsaRecord>();
-        assert!(true, "dns-resolver crate compiles with all record types");
     }
 }
 

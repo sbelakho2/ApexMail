@@ -46,4 +46,5 @@ deadpool-redis.workspace = true
 hyper = "1"
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
 dashmap = { workspace = true }
+parking_lot = { workspace = true }
 serial_test = "3"

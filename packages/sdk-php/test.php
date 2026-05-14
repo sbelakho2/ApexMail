@@ -183,8 +183,8 @@ expect('domains.health() returns healthy field', array_key_exists('healthy', $re
 echo "\nWebhooks\n";
 
 $client = new MockClient();
-$client->queueResponse(['webhook' => ['id' => 'wh_1', 'url' => 'https://ex.com/hook', 'events' => ['email.delivered']]]);
-$resp = $client->webhooks->create(['url' => 'https://ex.com/hook', 'events' => ['email.delivered']]);
+$client->queueResponse(['webhook' => ['id' => 'wh_1', 'url' => 'https://ex.com/hook', 'events' => ['message.delivered']]]);
+$resp = $client->webhooks->create(['url' => 'https://ex.com/hook', 'events' => ['message.delivered']]);
 expect('webhooks.create() POST /v1/webhooks', 
     $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/webhooks');
 expect('webhooks.create() returns webhook id', $resp['webhook']['id'] === 'wh_1');
@@ -204,12 +204,12 @@ expect('webhooks.get() GET /v1/webhooks/{id}',
 expect('webhooks.get() returns webhook', $resp['webhook']['id'] === 'wh_1');
 
 $client = new MockClient();
-$client->queueResponse(['webhook' => ['id' => 'wh_1', 'url' => 'https://new.com/hook', 'events' => ['email.bounced']]]);
-$resp = $client->webhooks->update('wh_1', ['url' => 'https://new.com/hook', 'events' => ['email.bounced']]);
+$client->queueResponse(['webhook' => ['id' => 'wh_1', 'url' => 'https://new.com/hook', 'events' => ['message.bounced']]]);
+$resp = $client->webhooks->update('wh_1', ['url' => 'https://new.com/hook', 'events' => ['message.bounced']]);
 expect('webhooks.update() PATCH /v1/webhooks/{id}',
     $client->calls[0]['method'] === 'PATCH' && $client->calls[0]['path'] === '/v1/webhooks/wh_1');
 expect('webhooks.update() body has url', $client->calls[0]['body']['url'] === 'https://new.com/hook');
-expect('webhooks.update() body has events', $client->calls[0]['body']['events'] === ['email.bounced']);
+expect('webhooks.update() body has events', $client->calls[0]['body']['events'] === ['message.bounced']);
 
 $client = new MockClient();
 $client->queueResponse([]);
@@ -264,8 +264,8 @@ expect('templates.list() returns templates', count($resp['templates']) === 2);
 $client = new MockClient();
 $client->queueResponse(['template' => ['id' => 'tpl_1', 'name' => 'Updated']]);
 $resp = $client->templates->update('tpl_1', ['name' => 'Updated', 'html' => '<p>new</p>']);
-expect('templates.update() PATCH /v1/templates/{id}',
-    $client->calls[0]['method'] === 'PATCH' && $client->calls[0]['path'] === '/v1/templates/tpl_1');
+expect('templates.update() PUT /v1/templates/{id}',
+    $client->calls[0]['method'] === 'PUT' && $client->calls[0]['path'] === '/v1/templates/tpl_1');
 expect('templates.update() body has name', $client->calls[0]['body']['name'] === 'Updated');
 
 $client = new MockClient();
@@ -330,7 +330,7 @@ expect('events.list() GET /v1/events', str_starts_with($client->calls[0]['path']
 expect('events.list() includes messageId', str_contains($client->calls[0]['path'], 'messageId=msg_123'));
 
 $client = new MockClient();
-$client->queueResponse(['events' => [['type' => 'email.delivered']]]);
+$client->queueResponse(['events' => [['type' => 'message.delivered']]]);
 $resp = $client->events->getByMessage('msg_123');
 expect('events.getByMessage() GET /v1/events?messageId=msg_123',
     $client->calls[0]['method'] === 'GET' && str_contains($client->calls[0]['path'], 'messageId=msg_123'));
@@ -338,7 +338,7 @@ expect('events.getByMessage() has limit=100', str_contains($client->calls[0]['pa
 expect('events.getByMessage() returns events', count($resp['events']) === 1);
 
 $client = new MockClient();
-$client->queueResponse(['event' => ['id' => 'evt_42', 'type' => 'email.opened']]);
+$client->queueResponse(['event' => ['id' => 'evt_42', 'type' => 'message.opened']]);
 $resp = $client->events->get('evt_42');
 expect('events.get() GET /v1/events/{id}',
     $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/events/evt_42');

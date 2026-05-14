@@ -31,7 +31,7 @@ class Suppressions
     /**
      * List suppressed addresses.
      *
-     * @param array $options { reason, limit, offset }
+     * @param array $options { reason, limit, offset, cursor, tag }
      */
     public function list(array $options = []): array
     {
@@ -39,6 +39,8 @@ class Suppressions
             'reason' => $options['reason'] ?? null,
             'limit'  => $options['limit']  ?? 50,
             'offset' => $options['offset'] ?? 0,
+            'cursor' => $options['cursor'] ?? null,
+            'tag'    => $options['tag']    ?? null,
         ], static fn ($v) => $v !== null && $v !== ''));
 
         return $this->client->request('GET', '/v1/suppressions' . ($query ? '?' . $query : ''));
@@ -67,5 +69,11 @@ class Suppressions
             'DELETE',
             '/v1/suppressions/' . urlencode($email)
         );
+    }
+
+    /** Add suppression entries through the API bulk endpoint. */
+    public function bulk(array $entries): array
+    {
+        return $this->client->request('POST', '/v1/suppressions/bulk', ['entries' => $entries]);
     }
 }

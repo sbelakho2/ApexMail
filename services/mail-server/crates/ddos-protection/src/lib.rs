@@ -32,6 +32,7 @@
 //! - `coordinator`:Cross-region threat intelligence sharing
 //! - `full`:All features enabled
 
+#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 
@@ -344,9 +345,9 @@ impl DdosProtector {
                         .pow_difficulty
                         .saturating_add(extra_bits)
                         .min(32); // Cap at 32 bits
-                    let expected_time = 1000_u64.saturating_mul(
-                        1u64.checked_shl(extra_bits.min(10) as u32).unwrap_or(1024),
-                    );
+                    let expected_time = 1000_u64
+                        .saturating_mul(1u64.checked_shl(extra_bits.min(10) as u32).unwrap_or(1024))
+                        .min(u32::MAX as u64) as u32;
                     return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
                         crate::decision::PowChallenge {
                             id: uuid::Uuid::new_v4().to_string(),
@@ -634,10 +635,12 @@ mod tests {
     #[tokio::test]
     async fn test_basic_protection() {
         let config = ProtectorConfig::default();
-        let protector = DdosProtector::new(config).await.unwrap();
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
 
         let ctx = RequestContext {
-            ip: "192.168.1.1".parse().unwrap(),
+            ip: "192.168.1.1".parse().expect("hardcoded test IP"),
             path: "/v1/health".to_string(),
             method: "GET".to_string(),
             tls_fingerprint: None,
@@ -655,9 +658,11 @@ mod tests {
     #[tokio::test]
     async fn test_blocklist() {
         let config = ProtectorConfig::default();
-        let protector = DdosProtector::new(config).await.unwrap();
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
 
-        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip: IpAddr = "10.0.0.1".parse().expect("hardcoded test IP");
         protector.block_ip(ip, Duration::from_secs(300), "test".to_string());
 
         assert!(protector.is_blocked(&ip));
@@ -681,10 +686,12 @@ mod tests {
     #[tokio::test]
     async fn test_evaluate_with_event() {
         let config = ProtectorConfig::default();
-        let protector = DdosProtector::new(config).await.unwrap();
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
 
         let ctx = RequestContext {
-            ip: "127.0.0.1".parse().unwrap(),
+            ip: "127.0.0.1".parse().expect("hardcoded test IP"),
             path: "/health".to_string(),
             method: "GET".to_string(),
             tls_fingerprint: None,
@@ -706,10 +713,12 @@ mod tests {
             system_cost_capacity: 120,
             ..ProtectorConfig::default()
         };
-        let protector = DdosProtector::new(config).await.unwrap();
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
 
         let ctx = RequestContext {
-            ip: "127.0.0.1".parse().unwrap(),
+            ip: "127.0.0.1".parse().expect("hardcoded test IP"),
             path: "/v1/health".to_string(),
             method: "GET".to_string(),
             tls_fingerprint: None,
@@ -740,9 +749,11 @@ mod tests {
             cleanup_interval: Duration::from_secs(1),
             ..ProtectorConfig::default()
         };
-        let protector = DdosProtector::new(config).await.unwrap();
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
 
-        let ip: IpAddr = "10.10.10.10".parse().unwrap();
+        let ip: IpAddr = "10.10.10.10".parse().expect("hardcoded test IP");
         protector.blocklist.insert(
             ip,
             BlockEntry {

@@ -8,6 +8,7 @@
 //! - **Audit** — audit log ID generation and hashing ([`audit`])
 //! - **CSV** — CSV value sanitisation ([`csv`])
 
+#![deny(unsafe_code)]
 pub mod audit;
 pub mod csv;
 pub mod proration;

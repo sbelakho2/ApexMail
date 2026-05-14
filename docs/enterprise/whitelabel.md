@@ -66,14 +66,14 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/branding \
       "favicon": "https://assets.yourcompany.com/favicon.ico"
     },
     "colors": {
-      "primary": "#2563eb",
-      "secondary": "#7c3aed",
+      "primary": "#dc2626",
+      "secondary": "#52525b",
       "accent": "#f59e0b",
       "background": "#ffffff",
-      "text": "#1f2937",
-      "success": "#10b981",
+      "text": "#18181b",
+      "success": "#16a34a",
       "warning": "#f59e0b",
-      "error": "#ef4444"
+      "error": "#dc2626"
     },
     "typography": {
       "fontFamily": "Inter, system-ui, sans-serif",
@@ -96,18 +96,18 @@ Configure light and dark mode themes:
 {
   "themes": {
     "light": {
-      "primary": "#2563eb",
+      "primary": "#dc2626",
       "background": "#ffffff",
-      "surface": "#f8fafc",
-      "text": "#1f2937",
-      "textSecondary": "#6b7280"
+      "surface": "#ffffff",
+      "text": "#18181b",
+      "textSecondary": "#71717a"
     },
     "dark": {
-      "primary": "#3b82f6",
-      "background": "#0f172a",
-      "surface": "#1e293b",
-      "text": "#f1f5f9",
-      "textSecondary": "#94a3b8"
+      "primary": "#dc2626",
+      "background": "#09090b",
+      "surface": "#18181b",
+      "text": "#f4f4f5",
+      "textSecondary": "#a1a1aa"
     }
   }
 }
@@ -163,7 +163,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/custom-css \
   -d '
     /* Custom button styles */
     .btn-primary {
-      border-radius: 8px;
+      border-radius: 0px;
       font-weight: 600;
     }
     

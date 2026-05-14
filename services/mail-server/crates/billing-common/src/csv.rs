@@ -112,7 +112,9 @@ mod tests {
     #[test]
     fn sanitize_csv_value_preserves_numbers() {
         assert_eq!(sanitize_csv_value(&serde_json::json!(42)), "42");
-        assert_eq!(sanitize_csv_value(&serde_json::json!(3.14)), "3.14");
+        #[allow(clippy::approx_constant)]
+        let val = serde_json::json!(3.14);
+        assert_eq!(sanitize_csv_value(&val), "3.14");
     }
 
     #[test]

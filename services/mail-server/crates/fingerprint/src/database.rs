@@ -223,12 +223,15 @@ impl FingerprintDb {
 
         db
     }
+}
 
-    /// Create with default config
-    pub fn default() -> Self {
+impl Default for FingerprintDb {
+    fn default() -> Self {
         Self::new(FingerprintDbConfig::default())
     }
+}
 
+impl FingerprintDb {
     /// Create as Arc for sharing
     pub fn new_shared(config: FingerprintDbConfig) -> Arc<Self> {
         Arc::new(Self::new(config))
@@ -441,7 +444,7 @@ mod tests {
     #[test]
     fn test_fingerprint_db_creation() {
         let db = FingerprintDb::default();
-        assert!(db.known.len() > 0);
+        assert!(!db.known.is_empty());
     }
 
     #[test]
@@ -453,13 +456,13 @@ mod tests {
             http2: None,
         };
 
-        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let ip: IpAddr = "192.168.1.1".parse().expect("hardcoded IP");
 
         db.observe(fp.clone(), Some(ip));
         db.observe(fp.clone(), Some(ip));
         db.observe(fp.clone(), Some(ip));
 
-        let obs = db.get_observation(&fp).unwrap();
+        let obs = db.get_observation(&fp).expect("observation should exist");
         assert_eq!(obs.request_count, 3);
         assert_eq!(obs.sample_ips.len(), 1);
     }
@@ -495,7 +498,7 @@ mod tests {
             http2: None,
         };
 
-        db.observe(fp, Some("1.2.3.4".parse().unwrap()));
+        db.observe(fp, Some("1.2.3.4".parse().expect("hardcoded IP")));
 
         let stats = db.stats();
         assert_eq!(stats.observed_fingerprints, 1);

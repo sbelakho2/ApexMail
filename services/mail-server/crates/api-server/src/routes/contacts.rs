@@ -209,7 +209,7 @@ async fn list_contacts(
             .status(StatusCode::NOT_MODIFIED)
             .header("ETag", &etag)
             .body(axum::body::Body::empty())
-            .unwrap());
+            .expect("invariant: Response builder with valid status/headers should not fail"));
     }
 
     Ok(axum::response::Response::builder()
@@ -218,7 +218,7 @@ async fn list_contacts(
         .header("Cache-Control", "private, max-age=0, must-revalidate")
         .header("Content-Type", "application/json")
         .body(axum::body::Body::from(body_bytes))
-        .unwrap())
+        .expect("invariant: Response builder with valid status/headers/body should not fail"))
 }
 
 async fn get_contact(

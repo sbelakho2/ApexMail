@@ -875,12 +875,10 @@ mod tests {
         }
 
         fn parse_smtp_response(&self, code: u16, message: &str) -> SMTPResponse {
-            let is_rate_limit = code >= 400
-                && code < 500
+            let is_rate_limit = (400..500).contains(&code)
                 && self.rate_limit_patterns.iter().any(|p| p.is_match(message));
             let is_greylist = !is_rate_limit
-                && code >= 400
-                && code < 500
+                && (400..500).contains(&code)
                 && self.greylist_patterns.iter().any(|p| p.is_match(message));
 
             let response_type = match code {

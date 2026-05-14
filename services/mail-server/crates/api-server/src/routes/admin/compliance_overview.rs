@@ -451,18 +451,27 @@ async fn compute_vat_summary(
     }
 
     let period_start = match chrono::NaiveDate::from_ymd_opt(year, month, 1) {
-        Some(d) => d.and_hms_opt(0, 0, 0).unwrap().and_utc(),
+        Some(d) => d
+            .and_hms_opt(0, 0, 0)
+            .expect("invariant: any NaiveDate supports 00:00:00")
+            .and_utc(),
         None => return Ok(empty_vat_widget(year, month)),
     };
 
     let period_end = if month == 12 {
         match chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1) {
-            Some(d) => d.and_hms_opt(0, 0, 0).unwrap().and_utc(),
+            Some(d) => d
+                .and_hms_opt(0, 0, 0)
+                .expect("invariant: any NaiveDate supports 00:00:00")
+                .and_utc(),
             None => return Ok(empty_vat_widget(year, month)),
         }
     } else {
         match chrono::NaiveDate::from_ymd_opt(year, month + 1, 1) {
-            Some(d) => d.and_hms_opt(0, 0, 0).unwrap().and_utc(),
+            Some(d) => d
+                .and_hms_opt(0, 0, 0)
+                .expect("invariant: any NaiveDate supports 00:00:00")
+                .and_utc(),
             None => return Ok(empty_vat_widget(year, month)),
         }
     };
@@ -572,8 +581,12 @@ async fn compute_vat_summary(
     // Due date for current period's VAT return
     let due_month = if month == 12 { 1 } else { month + 1 };
     let due_year = if month == 12 { year + 1 } else { year };
-    let due_date = chrono::NaiveDate::from_ymd_opt(due_year, due_month, 20)
-        .map(|d| d.and_hms_opt(23, 59, 59).unwrap().and_utc().to_rfc3339());
+    let due_date = chrono::NaiveDate::from_ymd_opt(due_year, due_month, 20).map(|d| {
+        d.and_hms_opt(23, 59, 59)
+            .expect("invariant: any NaiveDate supports 23:59:59")
+            .and_utc()
+            .to_rfc3339()
+    });
 
     Ok(VatSummaryWidget {
         has_data: invoice_count > 0,
@@ -603,7 +616,6 @@ fn empty_vat_widget(year: i32, month: u32) -> VatSummaryWidget {
 }
 
 /// Replaced by billing_common::vat_rates::{EU_COUNTRIES, get_eu_vat_rate}
-
 #[cfg(test)]
 mod tests {
     use super::*;

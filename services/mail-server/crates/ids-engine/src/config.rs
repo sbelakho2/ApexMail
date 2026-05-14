@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// IDS engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdsConfig {
     /// Enable inline prevention (IPS mode) vs detection-only (IDS mode)
     pub inline_mode: bool,

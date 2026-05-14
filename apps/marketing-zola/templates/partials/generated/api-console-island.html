@@ -1,54 +1,88 @@
 {# ── API Console Island (static SSR, zero JS) ────────────────── #}
 {# Interactive API console rendered as static HTML.                #}
 {# JS enhancement is layered on via data-api-console-* attributes.  #}
-<div data-api-console-root class="rounded-sm border border-surface-800 bg-surface-950 overflow-hidden">
-  <div class="flex flex-col sm:flex-row border-b border-surface-800">
-    {# ── Endpoints Sidebar ── #}
-    <div class="w-full sm:w-64 border-r border-surface-800 bg-surface-900/50">
-      <div class="p-4 text-[10px] font-bold text-surface-500 uppercase tracking-[0.2em]">Endpoints</div>
-      <div class="flex sm:flex-col overflow-x-auto sm:overflow-x-visible hide-scrollbar">
-        <button data-api-console-endpoint-button="0" class="flex-shrink-0 sm:w-full text-left px-4 py-3 text-xs font-bold uppercase tracking-widest flex items-center gap-3 transition-all bg-surface-800 text-white border-b sm:border-b-0 sm:border-l-2 border-brand-500">
-          <span class="font-mono text-[9px] font-bold px-1.5 py-0.5 rounded-sm bg-brand-600 text-white">POST</span><span class="truncate">Send Email</span>
+<div data-api-console-root class="rounded-sm border border-surface-800 bg-surface-950 overflow-hidden shadow-premium-black/30">
+  <div class="grid gap-0 xl:grid-cols-[19rem_1fr]">
+    {# ── Endpoint Command Rail ── #}
+    <aside class="border-b border-surface-800 bg-surface-900 xl:border-b-0 xl:border-r">
+      <div class="border-b border-surface-800 px-4 py-4">
+        <p class="text-[10px] font-bold tracking-[0.22em] text-surface-500">Endpoint Lanes</p>
+        <p class="mt-2 text-sm text-surface-300">Pick a lane, tune payload, execute, then inspect envelope and traces.</p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 hide-scrollbar">
+        <button data-api-console-endpoint-button="0" role="tab" aria-selected="true" aria-controls="api-console-panel-0" id="api-console-tab-0" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-b xl:border-l-brand-500 bg-surface-800 text-white">
+          <span class="flex items-center gap-3">
+            <span class="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded-sm bg-brand-600 text-white">POST</span>
+            <span class="text-xs font-bold tracking-[0.08em]">Send Email</span>
+          </span>
+          <span class="mt-2 block text-[11px] text-surface-300">Transactional send with idempotency safety</span>
         </button>
-        <button data-api-console-endpoint-button="1" class="flex-shrink-0 sm:w-full text-left px-4 py-3 text-xs font-bold uppercase tracking-widest flex items-center gap-3 transition-all text-surface-500 hover:text-white hover:bg-surface-800 border-b sm:border-b-0 sm:border-l-2 border-transparent">
-          <span class="font-mono text-[9px] font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">GET</span><span class="truncate">Messages</span>
+        <button data-api-console-endpoint-button="1" role="tab" aria-selected="false" aria-controls="api-console-panel-1" id="api-console-tab-1" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-l-transparent text-surface-300 hover:text-white hover:bg-surface-800">
+          <span class="flex items-center gap-3">
+            <span class="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">GET</span>
+            <span class="text-xs font-bold tracking-[0.08em]">Messages</span>
+          </span>
+          <span class="mt-2 block text-[11px] text-surface-500">Delivery stream and lifecycle lookup</span>
         </button>
-        <button data-api-console-endpoint-button="2" class="flex-shrink-0 sm:w-full text-left px-4 py-3 text-xs font-bold uppercase tracking-widest flex items-center gap-3 transition-all text-surface-500 hover:text-white hover:bg-surface-800 border-b sm:border-b-0 sm:border-l-2 border-transparent">
-          <span class="font-mono text-[9px] font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">GET</span><span class="truncate">Domains</span>
+        <button data-api-console-endpoint-button="2" role="tab" aria-selected="false" aria-controls="api-console-panel-2" id="api-console-tab-2" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-l-transparent text-surface-300 hover:text-white hover:bg-surface-800">
+          <span class="flex items-center gap-3">
+            <span class="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">GET</span>
+            <span class="text-xs font-bold tracking-[0.08em]">Domains</span>
+          </span>
+          <span class="mt-2 block text-[11px] text-surface-500">Identity posture and DNS verification status</span>
         </button>
-        <button data-api-console-endpoint-button="3" class="flex-shrink-0 sm:w-full text-left px-4 py-3 text-xs font-bold uppercase tracking-widest flex items-center gap-3 transition-all text-surface-500 hover:text-white hover:bg-surface-800 border-b sm:border-b-0 sm:border-l-2 border-transparent">
-          <span class="font-mono text-[9px] font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">POST</span><span class="truncate">Add Domain</span>
+        <button data-api-console-endpoint-button="3" role="tab" aria-selected="false" aria-controls="api-console-panel-3" id="api-console-tab-3" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-l-transparent text-surface-300 hover:text-white hover:bg-surface-800">
+          <span class="flex items-center gap-3">
+            <span class="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">POST</span>
+            <span class="text-xs font-bold tracking-[0.08em]">Add Domain</span>
+          </span>
+          <span class="mt-2 block text-[11px] text-surface-500">Provision sender domain with onboarding checks</span>
         </button>
       </div>
-    </div>
+    </aside>
 
-    {# ── Request/Response Pane ── #}
-    <div class="flex-1 flex flex-col min-h-[30rem]">
-      {# Request header #}
-      <div class="flex items-center gap-4 px-6 py-4 border-b border-surface-800 bg-surface-900">
-        <span data-api-console-method class="font-mono text-[10px] font-bold px-2 py-1 rounded-sm bg-brand-600 text-white">POST</span>
-        <span data-api-console-path class="font-mono text-xs text-surface-300 tracking-wider">/v1/messages</span>
-        <button data-api-console-send class="ml-auto btn-primary !px-6 !py-2 !text-[10px] !font-bold uppercase tracking-widest">Execute</button>
+    {# ── Unified Workbench ── #}
+    <section class="flex min-h-[34rem] flex-col bg-surface-950" role="tabpanel" id="api-console-panel-0" aria-labelledby="api-console-tab-0">
+      <div class="border-b border-surface-800 bg-surface-900 px-4 py-4 sm:px-6">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <div class="flex flex-wrap items-center gap-3">
+            <span data-api-console-method class="font-mono text-[10px] font-bold px-2 py-1 rounded-sm bg-brand-600 text-white">POST</span>
+            <span data-api-console-path class="max-w-full break-all font-mono text-xs text-surface-300 tracking-normal">/v1/messages</span>
+            <span class="rounded-sm border border-surface-700 px-2 py-1 text-[10px] font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
+          </div>
+          <button data-api-console-send class="btn-primary w-full !px-6 !py-2 !text-[10px] !font-bold tracking-widest lg:ml-auto lg:w-auto">Execute Request</button>
+        </div>
       </div>
 
-      {# Request body editor #}
-      <div data-api-console-request-editor class="px-6 py-6 border-b border-surface-800 bg-surface-950">
-        <div class="text-[9px] font-bold text-surface-600 uppercase tracking-[0.2em] mb-4">Request Payload</div>
-        <textarea data-api-console-request-body class="w-full bg-surface-900 text-white font-mono text-xs rounded-none p-6 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-none" rows="10" spellcheck="false">{
+      <div class="grid flex-1 gap-0 xl:grid-cols-[1fr_1fr]">
+        <div data-api-console-request-editor class="border-b border-surface-800 bg-surface-950 p-4 sm:p-6 xl:border-b-0 xl:border-r">
+          <div class="mb-4 flex items-center justify-between gap-3">
+            <p class="text-[10px] font-bold tracking-[0.2em] text-surface-600">Request Composer</p>
+            <span class="text-[10px] tracking-[0.16em] text-surface-500">JSON payload</span>
+          </div>
+          <textarea data-api-console-request-body class="w-full min-h-[17rem] bg-surface-900 text-white font-mono text-xs rounded-sm p-4 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-y" rows="10" spellcheck="false">{
   "from": "you@example.com",
   "to": "user@test.com",
   "subject": "Hello from ApexMail",
   "html": "<h1>Welcome!</h1>"
 }</textarea>
-      </div>
+        </div>
 
-      {# Response area #}
-      <div class="flex-1 px-6 py-6 bg-surface-950">
-        <div class="text-[9px] font-bold text-surface-600 uppercase tracking-[0.2em] mb-4">Server Response</div>
-        <div data-api-console-response class="font-mono text-[11px] text-surface-500 italic">
-          <p>Ready for execution.</p>
+        <div class="bg-surface-950 p-4 sm:p-6">
+          <div class="mb-4 flex items-center justify-between gap-3">
+            <p class="text-[10px] font-bold tracking-[0.2em] text-surface-600">Response Inspector</p>
+            <span class="text-[10px] tracking-[0.16em] text-surface-500">Envelope + diagnostics</span>
+          </div>
+          <div data-api-console-response class="min-h-[17rem] rounded-sm border border-surface-800 bg-surface-900 p-4 font-mono text-[11px] text-surface-400">
+            <p class="italic">Ready for execution.</p>
+          </div>
+          <div class="mt-4 grid gap-3 sm:grid-cols-3 text-[11px]">
+            <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">Latency target: &lt; 120ms</div>
+            <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">Schema validation enabled</div>
+            <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">No delivery side effects</div>
+          </div>
         </div>
       </div>
-    </div>
+    </section>
   </div>
 </div>

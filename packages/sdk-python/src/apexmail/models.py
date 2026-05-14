@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 class EmailStatus(str, Enum):
@@ -74,8 +74,8 @@ class Tag(BaseModel):
 class Attachment(BaseModel):
     """Email attachment."""
 
-    filename: str
-    content: str  # Base64 encoded
+    filename: str = Field(min_length=1)
+    content: str = Field(min_length=1)  # Base64 encoded
     content_type: Optional[str] = Field(default=None, alias="contentType")
 
 
@@ -103,6 +103,28 @@ class SendEmailRequest(BaseModel):
         if not self.html and not self.text:
             raise ValueError("Either 'html' or 'text' must be provided")
         return self
+
+
+class Envelope(BaseModel):
+    """Email delivery envelope with authentication results.
+
+    Attributes:
+        from_: Envelope MAIL FROM address (None for bounce/complaint notifications).
+        to: Envelope RCPT TO addresses.
+        dkim: DKIM authentication result (pass/fail/neutral/none).
+        spf: SPF authentication result (pass/fail/neutral/none).
+        dmarc: DMARC authentication result (pass/fail/neutral/none).
+        timestamp: ISO 8601 timestamp of the delivery event.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: Optional[str] = Field(default=None, alias="from")
+    to: list[str]
+    dkim: str
+    spf: str
+    dmarc: str
+    timestamp: datetime
 
 
 class SendEmailResponse(BaseModel):
@@ -178,9 +200,16 @@ class Webhook(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
-    name: str
-    url: str
+    name: str = Field(min_length=1)
+    url: str = Field(min_length=1)
     events: list[str]
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("url must start with http:// or https://")
+        return v
     enabled: bool
     secret: Optional[str] = None
     created_at: datetime = Field(alias="createdAt")
@@ -198,8 +227,8 @@ class Template(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
-    name: str
-    subject: str
+    name: str = Field(min_length=1)
+    subject: str = Field(min_length=1, max_length=998)
     html_body: str = Field(alias="htmlBody")
     text_body: Optional[str] = Field(default=None, alias="textBody")
     version: int
@@ -220,6 +249,8 @@ class TemplateListResponse(BaseModel):
     """Response from listing templates."""
 
     templates: list[Template]
+    cursor: Optional[str] = None
+    has_more: bool = Field(default=False, alias="hasMore")
 
 
 class Suppression(BaseModel):
@@ -246,6 +277,8 @@ class SuppressionListResponse(BaseModel):
     """Response from listing suppressions."""
 
     suppressions: list[Suppression]
+    cursor: Optional[str] = None
+    has_more: bool = Field(default=False, alias="hasMore")
 
 
 class BulkSuppressionResponse(BaseModel):
@@ -292,3 +325,5 @@ class EventListResponse(BaseModel):
     """Response from listing events."""
 
     events: list[Event]
+    cursor: Optional[str] = None
+    has_more: bool = Field(default=False, alias="hasMore")

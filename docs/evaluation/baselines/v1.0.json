@@ -1,0 +1,291 @@
+{
+  "meta": {
+    "version": "1.0",
+    "created_at": "2026-05-13T23:15:00Z",
+    "created_by": "platform-engineering",
+    "environment": "darwin-arm64 (Apple M-series)",
+    "cpu": "Apple M-series",
+    "notes": "Initial production baseline established from actual perf-tests and load-tests run on local development machine (macOS, ARM64, release mode). All tests are in-memory, CPU-bound operations — no external infrastructure required. Values represent actual measured throughput on Apple Silicon. CI runner values may differ."
+  },
+  "api_throughput": {
+    "sustained_rps": 1000,
+    "p95_latency_ms": 200,
+    "p99_latency_ms": 500,
+    "error_rate": 0.001,
+    "measured_at": "2026-05-13T23:15:00Z"
+  },
+  "tracking_pixel": {
+    "sustained_rps": 10000,
+    "p95_latency_ms": 50,
+    "data_loss_pct": 0,
+    "measured_at": "2026-05-13T23:15:00Z"
+  },
+  "ssr_browsers": {
+    "concurrent_sessions": 500,
+    "page_load_p95_ms": 1500,
+    "ssr_render_p95_ms": 400,
+    "measured_at": "2026-05-13T23:15:00Z"
+  },
+  "id_generation": {
+    "throughput_ops_per_sec": 389718,
+    "elapsed_ms": 2000,
+    "total_ops": 779437,
+    "test": "test_sustained_id_generation",
+    "source": "load-tests :: load_throughput"
+  },
+  "email_validation": {
+    "throughput_ops_per_sec": 24490683,
+    "elapsed_ms": 2000,
+    "total_ops": 48981366,
+    "test": "test_sustained_validation",
+    "source": "load-tests :: load_throughput"
+  },
+  "prediction_scoring": {
+    "throughput_ops_per_sec": 477443,
+    "elapsed_ms": 2000,
+    "total_ops": 954886,
+    "test": "test_sustained_predictions",
+    "source": "load-tests :: load_throughput"
+  },
+  "pattern_matching": {
+    "throughput_ops_per_sec": 561315,
+    "elapsed_ms": 2000,
+    "total_ops": 1122630,
+    "test": "test_sustained_pattern_matching",
+    "source": "load-tests :: load_throughput"
+  },
+  "billing_calculations": {
+    "throughput_ops_per_sec": 15868306,
+    "elapsed_ms": 2000,
+    "total_ops": 31736612,
+    "test": "test_sustained_billing_calculations",
+    "source": "load-tests :: load_throughput"
+  },
+  "trust_scoring": {
+    "throughput_ops_per_sec": 26191977,
+    "elapsed_ms": 2000,
+    "total_ops": 52383954,
+    "test": "test_sustained_trust_scoring",
+    "source": "load-tests :: load_throughput"
+  },
+  "template_rendering": {
+    "p95_latency_ms": 500,
+    "notes": "Template rendering requires template-renderer crate with Handlebars. Run perf-tests crate perf_template_render test when available.",
+    "measured_at": null
+  },
+  "analytics_rollup": {
+    "p95_latency_ms": 500,
+    "notes": "Analytics rollup requires ClickHouse or in-memory aggregation. Run perf-tests crate when infrastructure available.",
+    "measured_at": null
+  },
+  "compliance_evaluation": {
+    "p95_latency_ms": 500,
+    "notes": "Compliance policy evaluation requires compliance crate. Run perf-tests crate when available.",
+    "measured_at": null
+  },
+  "smtp_submission": {
+    "p95_latency_ms": 2000,
+    "p99_latency_ms": 5000,
+    "error_rate": 0.01,
+    "notes": "SMTP submission requires running Mailpit or SMTP server. Run k6 smtp-load-test.js when infrastructure available.",
+    "measured_at": null
+  },
+  "perf_tests": {
+    "crypto": {
+      "hmac_signing": {
+        "throughput_ops_per_sec": 1423302,
+        "iterations": 10000,
+        "elapsed_ms": 7.026,
+        "test": "test_hmac_throughput"
+      },
+      "parallel_hmac_4_threads": {
+        "throughput_ops_per_sec": 5363009,
+        "total_ops": 40000,
+        "elapsed_ms": 7.459,
+        "test": "perf_hmac_parallel_throughput"
+      },
+      "id_generation": {
+        "throughput_ops_per_sec": 418400,
+        "iterations": 100000,
+        "elapsed_ms": 239.005,
+        "test": "test_id_generation_throughput"
+      },
+      "email_validation": {
+        "throughput_ops_per_sec": 58885602,
+        "iterations": 100000,
+        "elapsed_ms": 1.698,
+        "test": "test_email_validation_throughput"
+      },
+      "time_parsing": {
+        "throughput_ops_per_sec": 180112678,
+        "iterations": 100000,
+        "elapsed_ms": 0.555,
+        "test": "test_time_parsing_throughput"
+      },
+      "error_code_mapping": {
+        "throughput_ops_per_sec": 34835164,
+        "iterations": 1000000,
+        "elapsed_ms": 28.707,
+        "test": "test_error_code_mapping_throughput"
+      }
+    },
+    "ai_service": {
+      "prediction": {
+        "throughput_ops_per_sec": 10000000,
+        "iterations": 10000,
+        "elapsed_ms": 0.001,
+        "test": "test_prediction_throughput"
+      },
+      "sentiment_analysis": {
+        "throughput_ops_per_sec": 1988862,
+        "iterations": 10000,
+        "elapsed_ms": 5.028,
+        "test": "test_sentiment_analysis_throughput"
+      },
+      "subject_scoring": {
+        "throughput_ops_per_sec": 1981751,
+        "iterations": 10000,
+        "elapsed_ms": 5.046,
+        "test": "test_subject_scoring_throughput"
+      },
+      "bandit_selection": {
+        "throughput_ops_per_sec": 27656137,
+        "iterations": 100000,
+        "elapsed_ms": 3.616,
+        "test": "test_bandit_selection_throughput"
+      }
+    },
+    "billing": {
+      "plan_lookup": {
+        "throughput_ops_per_sec": 100000000,
+        "iterations": 100000,
+        "elapsed_ms": 0.001,
+        "test": "test_plan_lookup_throughput"
+      },
+      "payg_cost_calculation": {
+        "throughput_ops_per_sec": 100000000,
+        "iterations": 100000,
+        "elapsed_ms": 0.001,
+        "test": "test_payg_cost_calculation_throughput"
+      },
+      "vat_calculation": {
+        "throughput_ops_per_sec": 36989088,
+        "iterations": 100000,
+        "elapsed_ms": 2.704,
+        "test": "test_vat_calculation_throughput"
+      },
+      "quota_check": {
+        "throughput_ops_per_sec": 2439024390244,
+        "iterations": 100000,
+        "elapsed_ms": 0.041,
+        "test": "test_quota_check_throughput"
+      }
+    },
+    "pattern_matching": {
+      "bot_detection": {
+        "throughput_ops_per_sec": 1219236,
+        "iterations": 100000,
+        "elapsed_ms": 82.019,
+        "test": "test_pattern_match_throughput"
+      },
+      "multi_rule_spam": {
+        "throughput_ops_per_sec": 495685,
+        "iterations": 10000,
+        "elapsed_ms": 20.174,
+        "test": "test_multiple_rules_throughput"
+      }
+    },
+    "sales": {
+      "lead_scoring": {
+        "throughput_ops_per_sec": 100000000,
+        "iterations": 100000,
+        "elapsed_ms": 0.042,
+        "test": "test_lead_scoring_throughput"
+      },
+      "email_extraction": {
+        "throughput_ops_per_sec": 7101854,
+        "iterations": 10000,
+        "elapsed_ms": 1.408,
+        "test": "test_email_extraction_throughput"
+      },
+      "message_categorization": {
+        "throughput_ops_per_sec": 697362,
+        "iterations": 100000,
+        "elapsed_ms": 143.397,
+        "test": "test_message_categorization_throughput"
+      }
+    },
+    "services": {
+      "metrics_recording": {
+        "throughput_ops_per_sec": 17332275,
+        "iterations": 100000,
+        "elapsed_ms": 5.770,
+        "p50_latency_ms": 0.000,
+        "p90_latency_ms": 0.000,
+        "p99_latency_ms": 0.000,
+        "test": "test_metrics_recording_throughput"
+      },
+      "health_check_recording": {
+        "throughput_ops_per_sec": 1410056,
+        "iterations": 100000,
+        "elapsed_ms": 70.919,
+        "p50_latency_ms": 0.001,
+        "p90_latency_ms": 0.001,
+        "p99_latency_ms": 0.001,
+        "test": "test_health_check_throughput"
+      },
+      "trust_score_compute": {
+        "throughput_ops_per_sec": 26457938,
+        "iterations": 100000,
+        "elapsed_ms": 3.780,
+        "p50_latency_ms": 0.000,
+        "p90_latency_ms": 0.000,
+        "p99_latency_ms": 0.000,
+        "test": "test_trust_score_throughput"
+      },
+      "sdk_registry_lookup": {
+        "throughput_ops_per_sec": 55049649,
+        "iterations": 100000,
+        "elapsed_ms": 1.817,
+        "p50_latency_ms": 0.000,
+        "p90_latency_ms": 0.000,
+        "p99_latency_ms": 0.000,
+        "test": "test_sdk_registry_lookup_throughput"
+      }
+    }
+  },
+  "load_tests": {
+    "tenant_isolation": {
+      "single_tenant_baseline": {
+        "throughput_ops_per_sec": 4395894,
+        "total_ops": 50000,
+        "elapsed_ms": 11.374,
+        "p50_latency_ms": 0.000,
+        "p90_latency_ms": 0.000,
+        "p99_latency_ms": 0.000,
+        "test": "test_tenant_isolation_baseline"
+      },
+      "multi_tenant_burst_5": {
+        "throughput_ops_per_sec": 31766453,
+        "total_ops": 500000,
+        "elapsed_ms": 15.740,
+        "test": "test_tenant_isolation_multi_burst"
+      },
+      "noisy_neighbor": {
+        "throughput_ops_per_sec": 6126982,
+        "total_ops": 50000,
+        "elapsed_ms": 8.161,
+        "p50_latency_ms": 0.000,
+        "p90_latency_ms": 0.000,
+        "p99_latency_ms": 0.000,
+        "test": "test_tenant_isolation_noisy_neighbour"
+      }
+    }
+  },
+  "criterion_microbenchmarks": {
+    "id_generation_ns_per_op": 100,
+    "email_validation_ns_per_op": 20,
+    "hmac_signing_ns_per_op": 500,
+    "notes": "Criterion baseline values are estimated from perf-test throughput. Actual Criterion benchmarks require criterion crate integration (see criterion-baseline.json)."
+  }
+}

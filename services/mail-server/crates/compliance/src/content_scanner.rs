@@ -7,6 +7,12 @@
 //! Malware:dangerous extensions, double extensions, magic byte mismatch, macros,
 //! password-protected archives, oversized attachments.
 //! Policy:tenant-specific rules from content_policies DB table + CAN-SPAM checks.
+//!
+//! # Security: Regex Compilation
+//! All statically-defined regex patterns are compiled at startup via `LazyLock`.
+//! Compilation failures for built-in patterns are logged at `error!` level
+//! and increment the `security_scanner_regex_failures_total` counter.
+//! Tenant-custom patterns return `Err` so callers must handle the failure.
 
 use aho_corasick::AhoCorasick;
 use chrono::Utc;
@@ -14,9 +20,10 @@ use regex::{Regex, RegexBuilder};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::error;
 
 use uuid::Uuid;
 
@@ -157,11 +164,18 @@ static FAST_SPAM_CHECK: LazyLock<Option<Regex>> = LazyLock::new(|| {
 static URL_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
     match RegexBuilder::new(r#"https?://[^\s<>"']+"#)
         .size_limit(1 << 20)
+        .dfa_size_limit(1 << 20)
         .build()
     {
         Ok(regex) => Some(regex),
         Err(e) => {
-            warn!(pattern = "url_regex", error = %e, "Invalid URL regex pattern; disabling matcher");
+            REGEX_FAILURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            error!(
+                pattern = "url_regex",
+                error = %e,
+                counter = REGEX_FAILURE_COUNTER.load(Ordering::Relaxed),
+                "CRITICAL: Invalid URL regex pattern — phishing URL detection degraded"
+            );
             None
         }
     }
@@ -276,11 +290,26 @@ static PHYSICAL_ADDRESS_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
     )
 });
 
+/// Global counter for regex compilation failures (for Prometheus exposition).
+static REGEX_FAILURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the current value of the regex failure counter.
+pub fn regex_failure_count() -> u64 {
+    REGEX_FAILURE_COUNTER.load(Ordering::Relaxed)
+}
+
 fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
     match Regex::new(pattern) {
         Ok(regex) => Some(regex),
         Err(e) => {
-            warn!(pattern = %pattern, label, error = %e, "Invalid regex pattern; disabling matcher");
+            REGEX_FAILURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            error!(
+                pattern = %pattern,
+                label,
+                error = %e,
+                counter = REGEX_FAILURE_COUNTER.load(Ordering::Relaxed),
+                "CRITICAL: Invalid regex pattern in static scanner — security scanner degraded"
+            );
             None
         }
     }
@@ -290,7 +319,13 @@ fn compile_aho(patterns: &[&str], label: &str) -> Option<AhoCorasick> {
     match AhoCorasick::new(patterns) {
         Ok(ac) => Some(ac),
         Err(e) => {
-            warn!(label, error = %e, "Invalid Aho-Corasick patterns; disabling matcher");
+            REGEX_FAILURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            error!(
+                label,
+                error = %e,
+                counter = REGEX_FAILURE_COUNTER.load(Ordering::Relaxed),
+                "CRITICAL: Invalid Aho-Corasick patterns in static scanner — security scanner degraded"
+            );
             None
         }
     }
@@ -318,6 +353,7 @@ fn is_password_protected_zip(header_bytes: &[u8]) -> bool {
 pub struct ContentScanner {
     db: PgPool,
     config: ContentScanningConfig,
+    #[allow(clippy::type_complexity)]
     policy_regex_cache: RwLock<HashMap<String, Arc<Vec<(String, Regex)>>>>,
 }
 

@@ -29,11 +29,7 @@ impl ChurnPredictionEngine {
     /// Predict churn probability for a subscriber.
     /// `tenant_id` is required to scope all queries to the correct tenant,
     /// preventing cross-tenant data leakage.
-    pub async fn predict(
-        &self,
-        tenant_id: &str,
-        email: &str,
-    ) -> anyhow::Result<ChurnPrediction> {
+    pub async fn predict(&self, tenant_id: &str, email: &str) -> anyhow::Result<ChurnPrediction> {
         // Include tenant_id in cache key to prevent cross-tenant cache poisoning
         let cache_key = format!("churn:{}:{}", tenant_id, hash_email(email, ""));
 
@@ -134,11 +130,7 @@ impl ChurnPredictionEngine {
     }
 
     /// Compute engagement decay rate, scoped to `tenant_id`.
-    async fn compute_decay(
-        &self,
-        tenant_id: &str,
-        email: &str,
-    ) -> anyhow::Result<f64> {
+    async fn compute_decay(&self, tenant_id: &str, email: &str) -> anyhow::Result<f64> {
         let now = Utc::now();
         let thirty_ago = now - Duration::days(30);
         let sixty_ago = now - Duration::days(60);
@@ -169,15 +161,11 @@ impl ChurnPredictionEngine {
         }
 
         let decline = 1.0 - (recent_count as f64 / prev_count as f64);
-        Ok(decline.max(0.0).min(1.0))
+        Ok(decline.clamp(0.0, 1.0))
     }
 
     /// Engagement velocity:(current − previous) / previous, scoped to `tenant_id`.
-    async fn engagement_velocity(
-        &self,
-        tenant_id: &str,
-        email: &str,
-    ) -> anyhow::Result<f64> {
+    async fn engagement_velocity(&self, tenant_id: &str, email: &str) -> anyhow::Result<f64> {
         let now = Utc::now();
         let thirty_ago = now - Duration::days(30);
         let sixty_ago = now - Duration::days(60);

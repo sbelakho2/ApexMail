@@ -1,5 +1,16 @@
-//! Request logging middleware that adds `X-Request-ID`, normalizes JSON
-//! error envelopes, and logs method, path, status, and duration.
+//! Request logging middleware that adds `X-Request-ID` and `X-Correlation-ID`,
+//! normalizes JSON error envelopes, and logs method, path, status, duration.
+//!
+//! # Correlation ID Propagation (OBS-08)
+//!
+//! This middleware reads the `x-correlation-id` header from incoming requests.
+//! If absent, it generates a new correlation ID (`corr-<uuid>`). The ID is:
+//! - Attached to request extensions for downstream handler access
+//! - Set as a tracing span attribute for OpenTelemetry correlation
+//! - Returned in the response as `x-correlation-id`
+//!
+//! Services making outbound HTTP calls should propagate the correlation ID
+//! via the `x-correlation-id` header using the shared `reqwest::Client`.
 
 use axum::body::{to_bytes, Body};
 use axum::extract::Request;
@@ -178,7 +189,14 @@ async fn normalize_error_response(response: Response, request_id: &str) -> Respo
     Response::from_parts(parts, Body::from(normalized_bytes))
 }
 
-/// Axum middleware:injects `X-Request-ID` and logs the request lifecycle.
+/// Axum middleware:injects `X-Request-ID` and `X-Correlation-ID`.
+///
+/// - `X-Request-ID`: unique per-request ID (generated if not provided)
+/// - `X-Correlation-ID`: trace-level correlation ID spanning request lifecycles
+///   across service boundaries (generated if not provided)
+///
+/// Both are attached to request extensions and set as tracing span attributes
+/// for OpenTelemetry correlation.
 pub async fn request_logger(mut req: Request, next: Next) -> Response {
     let request_id = req
         .headers()
@@ -187,8 +205,18 @@ pub async fn request_logger(mut req: Request, next: Next) -> Response {
         .map(String::from)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    // Attach to extensions so downstream handlers can read it.
+    // Extract or generate correlation ID for cross-service trace propagation
+    let correlation_id = req
+        .headers()
+        .get("x-correlation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .unwrap_or_else(|| format!("corr-{}", Uuid::new_v4()));
+
+    // Attach to extensions so downstream handlers can read them.
     req.extensions_mut().insert(RequestId(request_id.clone()));
+    req.extensions_mut()
+        .insert(CorrelationId(correlation_id.clone()));
 
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -201,8 +229,10 @@ pub async fn request_logger(mut req: Request, next: Next) -> Response {
 
     let status = response.status().as_u16();
 
+    // Log with both IDs for trace correlation
     tracing::info!(
         request_id = %request_id,
+        correlation_id = %correlation_id,
         method = %method,
         path = %path,
         status = status,
@@ -215,12 +245,21 @@ pub async fn request_logger(mut req: Request, next: Next) -> Response {
         response.headers_mut().insert("x-request-id", val);
     }
 
+    // Set X-Correlation-ID on response for downstream propagation
+    if let Ok(val) = HeaderValue::from_str(&correlation_id) {
+        response.headers_mut().insert("x-correlation-id", val);
+    }
+
     response
 }
 
 /// Newtype so handlers can extract the request ID from extensions.
 #[derive(Debug, Clone)]
 pub struct RequestId(pub String);
+
+/// Newtype so handlers can extract the correlation ID from extensions.
+#[derive(Debug, Clone)]
+pub struct CorrelationId(pub String);
 
 // ─── Tests ─────────────────────────────────────────────────────
 

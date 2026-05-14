@@ -89,7 +89,11 @@ fn test_message_categorization_throughput() {
     let start = Instant::now();
     for i in 0..iterations {
         let (from, subject) = messages[i % messages.len()];
-        let _ = InboxManager::classify_message("tenant-perf".to_string(), from.to_string(), subject.to_string());
+        let _ = InboxManager::classify_message(
+            "tenant-perf".to_string(),
+            from.to_string(),
+            subject.to_string(),
+        );
     }
     let elapsed = start.elapsed();
 

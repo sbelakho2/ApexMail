@@ -71,7 +71,10 @@ const DEFAULT_CIRCUITS: &[(&str, u32, u32, u64)] = &[
 /// CircuitBreakerService manages multiple named circuits.
 pub struct CircuitBreakerService {
     circuits: Arc<RwLock<HashMap<String, CircuitRuntime>>>,
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "config is retained for circuit policy inspection and future reload support"
+    )]
     config: Arc<Config>,
 }
 
@@ -149,13 +152,13 @@ impl CircuitBreakerService {
         circuit.total_calls += 1;
         circuit.last_success = Some(Utc::now());
 
-        if circuit.state == CircuitState::HalfOpen {
-            if circuit.success_count >= circuit.config.success_threshold as u64 {
-                circuit.state = CircuitState::Closed;
-                circuit.failure_count = 0;
-                circuit.state_changed_at = Utc::now();
-                info!(circuit = circuit_name, "Circuit closed after recovery");
-            }
+        if circuit.state == CircuitState::HalfOpen
+            && circuit.success_count >= circuit.config.success_threshold as u64
+        {
+            circuit.state = CircuitState::Closed;
+            circuit.failure_count = 0;
+            circuit.state_changed_at = Utc::now();
+            info!(circuit = circuit_name, "Circuit closed after recovery");
         }
         Ok(())
     }

@@ -199,17 +199,13 @@ impl PlacementEngine {
         .bind(test_id)
         .fetch_optional(&self.db)
         .await?
-        .ok_or_else(|| {
-            sqlx::Error::Protocol(format!("placement test {} not found", test_id))
-        })?;
+        .ok_or_else(|| sqlx::Error::Protocol(format!("placement test {} not found", test_id)))?;
 
         // 2. Mark as Running.
-        sqlx::query(
-            "UPDATE placement_tests SET status = 'Running' WHERE id = $1",
-        )
-        .bind(test_id)
-        .execute(&self.db)
-        .await?;
+        sqlx::query("UPDATE placement_tests SET status = 'Running' WHERE id = $1")
+            .bind(test_id)
+            .execute(&self.db)
+            .await?;
 
         let imp = ImapPoller::new(self.config.clone());
         let mut completed = 0i32;
@@ -250,14 +246,7 @@ impl PlacementEngine {
                 // Record as absent (no result).
                 let _ = self
                     .insert_placement_result(
-                        test_id,
-                        account_id,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        test_id, account_id, None, None, None, None, None, None,
                     )
                     .await;
                 completed += 1;
@@ -283,7 +272,9 @@ impl PlacementEngine {
                         "IMAP polling failed; recording as absent"
                     );
                     let _ = self
-                        .insert_placement_result(test_id, account_id, None, None, None, None, None, None)
+                        .insert_placement_result(
+                            test_id, account_id, None, None, None, None, None, None,
+                        )
                         .await;
                     completed += 1;
                     continue;
@@ -304,10 +295,10 @@ impl PlacementEngine {
                     account_id,
                     inbox_type.as_deref(),
                     poll_result.response_time_ms,
-                    None,  // raw_headers
-                    None,  // spf_pass
-                    None,  // dkim_pass
-                    None,  // dmarc_pass
+                    None, // raw_headers
+                    None, // spf_pass
+                    None, // dkim_pass
+                    None, // dmarc_pass
                 )
                 .await
             {
@@ -399,10 +390,7 @@ impl PlacementEngine {
 
         // Pull the per-provider summary so subscribers receive the score
         // alongside the event without an extra round-trip.
-        let summary = match self
-            .get_test_results(test.id, test.tenant_id)
-            .await
-        {
+        let summary = match self.get_test_results(test.id, test.tenant_id).await {
             Ok(results) => {
                 let score = PlacementScore::calculate(&results);
                 serde_json::json!({
@@ -530,15 +518,11 @@ impl PlacementEngine {
                     }
                     auth_count += 1;
                 }
-                if row.dkim_pass.is_some() {
-                    if row.dkim_pass == Some(true) {
-                        dkim_ok += 1;
-                    }
+                if row.dkim_pass.is_some() && row.dkim_pass == Some(true) {
+                    dkim_ok += 1;
                 }
-                if row.dmarc_pass.is_some() {
-                    if row.dmarc_pass == Some(true) {
-                        dmarc_ok += 1;
-                    }
+                if row.dmarc_pass.is_some() && row.dmarc_pass == Some(true) {
+                    dmarc_ok += 1;
                 }
             }
 
@@ -564,10 +548,8 @@ impl PlacementEngine {
                 0.0
             };
 
-            let recommendation = generate_recommendation(
-                inbox as f64 / accounts_tested as f64,
-                &provider,
-            );
+            let recommendation =
+                generate_recommendation(inbox as f64 / accounts_tested as f64, &provider);
 
             results.push(ProviderResult {
                 provider,
@@ -700,12 +682,11 @@ impl PlacementEngine {
     /// `ENC:v1:` prefix) are returned as-is to support gradual migration of
     /// legacy seed accounts.
     async fn fetch_account_password(&self, account_id: Uuid) -> Option<String> {
-        let row: Result<(Option<String>,), _> = sqlx::query_as(
-            "SELECT imap_password_encrypted FROM seed_accounts WHERE id = $1",
-        )
-        .bind(account_id)
-        .fetch_one(&self.db)
-        .await;
+        let row: Result<(Option<String>,), _> =
+            sqlx::query_as("SELECT imap_password_encrypted FROM seed_accounts WHERE id = $1")
+                .bind(account_id)
+                .fetch_one(&self.db)
+                .await;
 
         let raw = match row {
             Ok((Some(pw),)) if !pw.is_empty() => pw,
@@ -763,7 +744,7 @@ impl PlacementEngine {
     }
 
     /// Insert a single placement result row.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // clippy: justified - maps directly to 8 DB columns; a parameter struct would add indirection without reducing complexity
     async fn insert_placement_result(
         &self,
         test_id: Uuid,
@@ -805,7 +786,10 @@ impl PlacementEngine {
 
 /// Query row that joins `placement_results` with provider info.
 #[derive(Debug, Clone, sqlx::FromRow)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "sqlx row shape mirrors the placement_results join even when only response fields are read"
+)]
 struct PlacementResultRow {
     pub id: Uuid,
     pub test_id: Uuid,
@@ -832,6 +816,7 @@ struct TrendRow {
 
 impl ProviderName {
     /// Construct a [`ProviderName`] from a string (case-insensitive).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "gmail" => ProviderName::Gmail,

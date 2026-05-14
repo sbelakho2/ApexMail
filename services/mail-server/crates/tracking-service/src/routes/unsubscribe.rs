@@ -189,8 +189,11 @@ pub async fn handle_unsub_get(
 // ── GET /p/:token ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-#[allow(unused)] // `saved` populated by Serde from query params; field used in future confirmation-UX branch
 pub struct PrefsQuery {
+    #[expect(
+        dead_code,
+        reason = "query flag is accepted for confirmation-page UX state"
+    )]
     saved: Option<String>,
 }
 

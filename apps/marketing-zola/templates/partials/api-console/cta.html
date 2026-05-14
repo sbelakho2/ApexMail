@@ -3,8 +3,8 @@
 
 <section class="py-20 lg:py-32 relative bg-white">
   <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-    <div class="animate-in bg-white border border-surface-200   rounded-sm p-8 lg:p-12 text-center">
-      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-100/50 text-surface-950 border border-surface-200 text-xs font-medium mb-6">
+    <div class="animate-in bg-white border border-surface-200 rounded-sm p-8 lg:p-12 text-center">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-100/50 text-surface-950 border border-surface-200 text-xs font-medium mb-6 uppercase">
         <svg class="w-4 h-4 text-surface-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
         Ready to Build?
       </div>
@@ -18,18 +18,18 @@
       </p>
 
       <div class="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-        <a href="{{ config.extra.app_url }}/signup" class="btn-primary text-lg px-8 py-4 inline-flex items-center">
+        <a href="{{ config.extra.app_url }}/signup" class="btn-primary text-lg px-8 py-4 inline-flex items-center uppercase">
           Create Free Account
           <svg class="w-5 h-5 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="/docs" class="btn-secondary text-lg px-8 py-4 bg-white inline-flex items-center">
+        <a href="/docs" class="btn-secondary text-lg px-8 py-4 bg-white inline-flex items-center uppercase">
           <svg class="w-5 h-5 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           Read Documentation
         </a>
       </div>
 
       <div class="pt-10 border-t border-surface-100">
-        <div class="text-xs font-medium text-surface-500 mb-6">Available SDKs</div>
+        <div class="text-xs font-medium text-surface-500 mb-6 uppercase">Available SDKs</div>
         <div class="flex flex-wrap justify-center gap-3">
           {% for sdk in ["Python", "Ruby", "Go", "PHP", "Java"] %}
           <span class="px-3 py-1.5 bg-surface-100 text-surface-700 text-xs font-medium rounded-sm border border-surface-200">{{ sdk }}</span>

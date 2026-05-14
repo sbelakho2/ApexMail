@@ -47,14 +47,15 @@ impl BounceAggregator {
         // 3. Compute aggregates per tenant
         let tenants = group_by_tenant(&enriched);
         for (tenant_id, tenant_events) in &tenants {
-            let agg = self.compute_aggregation(tenant_id, &tenant_events, window_start, now);
+            let agg = self.compute_aggregation(tenant_id, tenant_events, window_start, now);
             self.persist_daily_aggregation(&agg).await?;
 
             // 4. Update domain reputation
-            self.update_domain_reputation(tenant_id, &tenant_events).await?;
+            self.update_domain_reputation(tenant_id, tenant_events)
+                .await?;
 
             // 5. Detect bursts
-            let bursts = detect_bursts(&tenant_events, self.config.burst_threshold_per_minute);
+            let bursts = detect_bursts(tenant_events, self.config.burst_threshold_per_minute);
             for burst in bursts {
                 self.persist_burst(&burst).await?;
             }
@@ -197,7 +198,9 @@ impl BounceAggregator {
 
         for event in events {
             *category_counts.entry(event.bounce_type).or_insert(0) += 1;
-            *subtype_counts.entry(event.bounce_subtype.clone()).or_insert(0) += 1;
+            *subtype_counts
+                .entry(event.bounce_subtype.clone())
+                .or_insert(0) += 1;
             if let Some(ref domain) = event.recipient_domain {
                 *domain_counts.entry(domain.clone()).or_insert(0) += 1;
             }
@@ -395,7 +398,7 @@ impl BounceAggregator {
                     BounceCategory::Soft => stats.soft_bounces += 1,
                     BounceCategory::Transient => {}
                 }
-                if stats.last_bounce.map_or(true, |t| event.timestamp > t) {
+                if stats.last_bounce.is_none_or(|t| event.timestamp > t) {
                     stats.last_bounce = Some(event.timestamp);
                 }
             }
@@ -461,11 +464,7 @@ impl BounceAggregator {
     }
 
     /// Fetch total sent count for a domain within the aggregation window.
-    async fn fetch_domain_send_count(
-        &self,
-        tenant_id: &str,
-        domain: &str,
-    ) -> anyhow::Result<i64> {
+    async fn fetch_domain_send_count(&self, tenant_id: &str, domain: &str) -> anyhow::Result<i64> {
         let result = sqlx::query_scalar::<_, Option<i64>>(
             r#"SELECT COUNT(*) FROM tracking_events
                WHERE tenant_id = $1
@@ -544,11 +543,14 @@ impl BounceAggregator {
             total_bounces += row.total_bounces;
             *category_counts.entry(BounceCategory::Hard).or_insert(0) += row.hard_bounces;
             *category_counts.entry(BounceCategory::Soft).or_insert(0) += row.soft_bounces;
-            *category_counts.entry(BounceCategory::Transient).or_insert(0) += row.transient_bounces;
+            *category_counts
+                .entry(BounceCategory::Transient)
+                .or_insert(0) += row.transient_bounces;
 
             // Parse JSON columns
             if let Some(ref subtypes) = row.top_subtypes {
-                if let Ok(arr) = serde_json::from_value::<Vec<serde_json::Value>>(subtypes.clone()) {
+                if let Ok(arr) = serde_json::from_value::<Vec<serde_json::Value>>(subtypes.clone())
+                {
                     for entry in arr {
                         if let (Some(st), Some(cnt)) = (
                             entry.get("subtype").and_then(|v| v.as_str()),
@@ -796,10 +798,7 @@ fn group_by_tenant(events: &[EnrichedBounceEvent]) -> HashMap<String, Vec<Enrich
 
 /// Detect bounce bursts: periods where the bounce rate from a domain spikes
 /// significantly above the expected baseline.
-fn detect_bursts(
-    events: &[EnrichedBounceEvent],
-    threshold_per_minute: u32,
-) -> Vec<BounceBurst> {
+fn detect_bursts(events: &[EnrichedBounceEvent], threshold_per_minute: u32) -> Vec<BounceBurst> {
     if events.is_empty() {
         return vec![];
     }
@@ -826,7 +825,14 @@ fn detect_bursts(
 
         // Compute baseline: average events per minute over the whole period
         let total_duration_minutes = if sorted.len() > 1 {
-            let duration = sorted.last().unwrap().timestamp - sorted.first().unwrap().timestamp;
+            let duration = sorted
+                .last()
+                .expect("invariant: sorted.len() > 1 confirmed")
+                .timestamp
+                - sorted
+                    .first()
+                    .expect("invariant: sorted.len() > 1 confirmed")
+                    .timestamp;
             let mins = duration.num_minutes().max(1);
             mins as f64
         } else {
@@ -844,25 +850,20 @@ fn detect_bursts(
             let window_start = window_end - chrono::Duration::minutes(window_minutes);
 
             // Advance start index to keep within the window
-            while window_start_idx < i
-                && sorted[window_start_idx].timestamp < window_start
-            {
+            while window_start_idx < i && sorted[window_start_idx].timestamp < window_start {
                 window_start_idx += 1;
             }
 
             let window_count = (i - window_start_idx + 1) as u32;
-            let expected_in_window =
-                (baseline_per_minute * window_minutes as f64).max(1.0);
+            let expected_in_window = (baseline_per_minute * window_minutes as f64).max(1.0);
 
             let burst_factor = window_count as f64 / expected_in_window;
 
             if burst_factor >= 3.0 && window_count >= threshold_per_minute {
                 // Find predominant subtype in the window
                 let mut subtype_counts: HashMap<&str, u32> = HashMap::new();
-                for j in window_start_idx..=i {
-                    *subtype_counts
-                        .entry(&sorted[j].bounce_subtype)
-                        .or_insert(0) += 1;
+                for item in sorted.iter().take(i + 1).skip(window_start_idx) {
+                    *subtype_counts.entry(&item.bounce_subtype).or_insert(0) += 1;
                 }
                 let predominant = subtype_counts
                     .into_iter()
@@ -929,9 +930,27 @@ mod tests {
     fn test_group_by_tenant() {
         let now = Utc::now();
         let events = vec![
-            make_event("example.com", BounceCategory::Hard, "no-mailbox", now, "tenant-a"),
-            make_event("test.org", BounceCategory::Soft, "mailbox-full", now, "tenant-b"),
-            make_event("example.com", BounceCategory::Hard, "no-mailbox", now, "tenant-a"),
+            make_event(
+                "example.com",
+                BounceCategory::Hard,
+                "no-mailbox",
+                now,
+                "tenant-a",
+            ),
+            make_event(
+                "test.org",
+                BounceCategory::Soft,
+                "mailbox-full",
+                now,
+                "tenant-b",
+            ),
+            make_event(
+                "example.com",
+                BounceCategory::Hard,
+                "no-mailbox",
+                now,
+                "tenant-a",
+            ),
         ];
         let grouped = group_by_tenant(&events);
         assert_eq!(grouped.len(), 2);

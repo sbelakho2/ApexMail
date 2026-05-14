@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Spam filter configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpamConfig {
     /// Score threshold below which email is considered ham (clean)
     pub ham_threshold: f64,
@@ -51,6 +52,7 @@ pub struct SpamConfig {
 
 /// A customer-specific phrase blocklist for industry-specific spam vocabulary
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomPhraseList {
     /// Category name for the phrase list (e.g., "financial", "healthcare")
     pub category: String,

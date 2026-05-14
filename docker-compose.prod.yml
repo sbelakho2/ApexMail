@@ -172,6 +172,11 @@ services:
       BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
       BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required in production}
+      # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
+      MCAPTCHA_ENABLED: ${MCAPTCHA_ENABLED:?MCAPTCHA_ENABLED is required in production}
+      MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:?MCAPTCHA_SITE_KEY is required in production}
+      MCAPTCHA_SECRET: ${MCAPTCHA_SECRET:?MCAPTCHA_SECRET is required in production}
+      MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:?MCAPTCHA_VERIFY_URL is required in production}
       METRICS_PORT: 9090
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro

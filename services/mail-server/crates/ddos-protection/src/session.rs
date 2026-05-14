@@ -337,7 +337,7 @@ mod tests {
         let tracker = SessionTracker::new(Duration::from_secs(300), 1000);
 
         let ctx = RequestContext {
-            ip: "192.168.1.1".parse().unwrap(),
+            ip: "192.168.1.1".parse().expect("hardcoded test IP"),
             path: "/v1/health".to_string(),
             method: "GET".to_string(),
             tls_fingerprint: None,
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn test_session_metrics() {
         let mut session = Session::new(SessionKey {
-            ip: "192.168.1.1".parse().unwrap(),
+            ip: "192.168.1.1".parse().expect("hardcoded test IP"),
             api_key_id: None,
         });
 

@@ -5,4 +5,8 @@ public final class RateLimitException extends ApexMailException {
     public RateLimitException(String message, String code, int statusCode) {
         super(message, code, statusCode);
     }
+
+    public RateLimitException(String message, String code, int statusCode, Object details) {
+        super(message, code, statusCode, details);
+    }
 }

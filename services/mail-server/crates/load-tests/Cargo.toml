@@ -21,3 +21,4 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
+tracing = { workspace = true }

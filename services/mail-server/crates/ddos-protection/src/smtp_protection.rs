@@ -708,27 +708,29 @@ mod tests {
 
         assert_eq!(prot.state(), SmtpState::Connected);
 
-        let action = prot.process_command("EHLO example.com").unwrap();
+        let action = prot
+            .process_command("EHLO example.com")
+            .expect("test should succeed");
         assert_eq!(action, SmtpAction::Continue);
         assert_eq!(prot.state(), SmtpState::GreetingReceived);
 
         let action = prot
             .process_command("MAIL FROM:<sender@example.com>")
-            .unwrap();
+            .expect("test should succeed");
         assert_eq!(action, SmtpAction::Continue);
         assert_eq!(prot.state(), SmtpState::MailFrom);
 
         let action = prot
             .process_command("RCPT TO:<recipient@example.com>")
-            .unwrap();
+            .expect("test should succeed");
         assert_eq!(action, SmtpAction::Continue);
         assert!(matches!(prot.state(), SmtpState::RcptTo { count: 1 }));
 
-        let action = prot.process_command("DATA").unwrap();
+        let action = prot.process_command("DATA").expect("test should succeed");
         assert_eq!(action, SmtpAction::Continue);
         assert!(matches!(prot.state(), SmtpState::DataReceiving { .. }));
 
-        let action = prot.process_command("QUIT").unwrap();
+        let action = prot.process_command("QUIT").expect("test should succeed");
         assert_eq!(action, SmtpAction::Disconnect);
         assert_eq!(prot.state(), SmtpState::Quit);
     }
@@ -746,7 +748,9 @@ mod tests {
         let mut config = default_config();
         config.strict_mode = false;
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, config);
-        let action = prot.process_command("MAIL FROM:<user@test.com>").unwrap();
+        let action = prot
+            .process_command("MAIL FROM:<user@test.com>")
+            .expect("test should succeed");
         assert_eq!(action, SmtpAction::Reject("503 Bad sequence of commands"));
     }
 
@@ -756,11 +760,16 @@ mod tests {
         config.max_rcpt = 3;
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, config);
 
-        prot.process_command("EHLO test.com").unwrap();
-        prot.process_command("MAIL FROM:<s@t.com>").unwrap();
-        prot.process_command("RCPT TO:<a@t.com>").unwrap();
-        prot.process_command("RCPT TO:<b@t.com>").unwrap();
-        prot.process_command("RCPT TO:<c@t.com>").unwrap();
+        prot.process_command("EHLO test.com")
+            .expect("test should succeed");
+        prot.process_command("MAIL FROM:<s@t.com>")
+            .expect("test should succeed");
+        prot.process_command("RCPT TO:<a@t.com>")
+            .expect("test should succeed");
+        prot.process_command("RCPT TO:<b@t.com>")
+            .expect("test should succeed");
+        prot.process_command("RCPT TO:<c@t.com>")
+            .expect("test should succeed");
         let result = prot.process_command("RCPT TO:<d@t.com>");
         assert!(matches!(
             result,
@@ -787,7 +796,7 @@ mod tests {
         let prot = SmtpConnectionProtection::new(test_ip(), 15, default_config());
         let delay = prot.should_tarpit();
         assert!(delay.is_some());
-        assert_eq!(delay.unwrap(), Duration::from_secs(2));
+        assert_eq!(delay.expect("test should succeed"), Duration::from_secs(2));
     }
 
     #[test]
@@ -804,14 +813,16 @@ mod tests {
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, config);
 
         // Send invalid commands
-        prot.process_command("XYZZY").unwrap();
-        prot.process_command("GARBAGE").unwrap();
+        prot.process_command("XYZZY").expect("test should succeed");
+        prot.process_command("GARBAGE")
+            .expect("test should succeed");
         assert!(prot.should_tarpit().is_none()); // At max_invalid, not over
 
-        prot.process_command("BOGUS").unwrap();
+        prot.process_command("BOGUS").expect("test should succeed");
         let tarpit = prot.should_tarpit();
         assert!(tarpit.is_some());
-        assert_eq!(tarpit.unwrap(), Duration::from_secs(5)); // 1 * base delay
+        assert_eq!(tarpit.expect("test should succeed"), Duration::from_secs(5));
+        // 1 * base delay
     }
 
     #[test]
@@ -820,13 +831,16 @@ mod tests {
         config.max_size = 1024;
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, config);
 
-        prot.process_command("EHLO test.com").unwrap();
-        prot.process_command("MAIL FROM:<s@t.com>").unwrap();
-        prot.process_command("RCPT TO:<r@t.com>").unwrap();
-        prot.process_command("DATA").unwrap();
+        prot.process_command("EHLO test.com")
+            .expect("test should succeed");
+        prot.process_command("MAIL FROM:<s@t.com>")
+            .expect("test should succeed");
+        prot.process_command("RCPT TO:<r@t.com>")
+            .expect("test should succeed");
+        prot.process_command("DATA").expect("test should succeed");
 
-        prot.record_data(500).unwrap();
-        prot.record_data(500).unwrap();
+        prot.record_data(500).expect("test should succeed");
+        prot.record_data(500).expect("test should succeed");
         let result = prot.record_data(100);
         assert!(matches!(result, Err(SmtpProtectionError::MessageTooLarge)));
     }
@@ -859,9 +873,11 @@ mod tests {
     #[test]
     fn test_rset_resets_state() {
         let mut prot = SmtpConnectionProtection::new(test_ip(), 50, default_config());
-        prot.process_command("EHLO test.com").unwrap();
-        prot.process_command("MAIL FROM:<s@t.com>").unwrap();
-        prot.process_command("RSET").unwrap();
+        prot.process_command("EHLO test.com")
+            .expect("test should succeed");
+        prot.process_command("MAIL FROM:<s@t.com>")
+            .expect("test should succeed");
+        prot.process_command("RSET").expect("test should succeed");
         assert_eq!(prot.state(), SmtpState::GreetingReceived);
     }
 
@@ -872,8 +888,12 @@ mod tests {
         let tracker = SmtpConnectionTracker::new(config);
         let ip = test_ip();
 
-        tracker.register_connection(ip).unwrap();
-        tracker.register_connection(ip).unwrap();
+        tracker
+            .register_connection(ip)
+            .expect("test should succeed");
+        tracker
+            .register_connection(ip)
+            .expect("test should succeed");
         let result = tracker.register_connection(ip);
         assert!(matches!(
             result,
@@ -888,11 +908,17 @@ mod tests {
         let tracker = SmtpConnectionTracker::new(config);
         let ip = test_ip();
 
-        tracker.register_connection(ip).unwrap();
-        tracker.register_connection(ip).unwrap();
+        tracker
+            .register_connection(ip)
+            .expect("test should succeed");
+        tracker
+            .register_connection(ip)
+            .expect("test should succeed");
         tracker.unregister_connection(&ip);
         // Should be able to register again
-        tracker.register_connection(ip).unwrap();
+        tracker
+            .register_connection(ip)
+            .expect("test should succeed");
     }
 
     #[test]
@@ -901,9 +927,13 @@ mod tests {
         let ip = test_ip();
 
         assert_eq!(tracker.active_count(&ip), 0);
-        tracker.register_connection(ip).unwrap();
+        tracker
+            .register_connection(ip)
+            .expect("test should succeed");
         assert_eq!(tracker.active_count(&ip), 1);
-        tracker.register_connection(ip).unwrap();
+        tracker
+            .register_connection(ip)
+            .expect("test should succeed");
         assert_eq!(tracker.active_count(&ip), 2);
         tracker.unregister_connection(&ip);
         assert_eq!(tracker.active_count(&ip), 1);

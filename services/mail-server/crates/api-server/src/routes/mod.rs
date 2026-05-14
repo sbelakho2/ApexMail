@@ -15,6 +15,7 @@ pub mod health;
 pub mod helpers;
 pub mod lists;
 pub mod messages;
+pub mod pagination;
 pub mod scim;
 pub mod self_hosted_bounces;
 pub mod ses_notifications;

@@ -1,3 +1,21 @@
+# =============================================================================
+# ApexMail Tempo Configuration
+# =============================================================================
+# 🟡3: S3-compatible object storage configured via env vars.
+# Falls back to local filesystem when S3 env vars are unset.
+#
+# Production (S3):
+#   TEMPO_STORAGE_BACKEND=s3
+#   TEMPO_S3_BUCKET=apexmail-tempo-traces
+#   TEMPO_S3_ENDPOINT=s3.amazonaws.com
+#   TEMPO_S3_ACCESS_KEY=<key>
+#   TEMPO_S3_SECRET_KEY=<secret>
+#   TEMPO_S3_REGION=us-east-1           (optional, default: us-east-1)
+#
+# Development (local filesystem — default):
+#   No env vars needed.
+# =============================================================================
+
 server:
   http_listen_port: 3200
 
@@ -21,9 +39,15 @@ compactor:
 
 storage:
   trace:
-    backend: local
+    # Env-var-driven backend: "s3" for production, "local" (default) for dev
+    backend: ${TEMPO_STORAGE_BACKEND:-local}
+    s3:
+      bucket: ${TEMPO_S3_BUCKET:}
+      endpoint: ${TEMPO_S3_ENDPOINT:-s3.amazonaws.com}
+      access_key: ${TEMPO_S3_ACCESS_KEY:}
+      secret_key: ${TEMPO_S3_SECRET_KEY:}
+      region: ${TEMPO_S3_REGION:-us-east-1}
     local:
-      # Mount this path on a PersistentVolumeClaim in Kubernetes deployments.
       path: /var/tempo/traces
     wal:
       path: /var/tempo/wal

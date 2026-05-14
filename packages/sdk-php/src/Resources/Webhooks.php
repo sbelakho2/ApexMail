@@ -18,7 +18,7 @@ class Webhooks
      *
      * @param array $params {
      *   @type string   $url     HTTPS endpoint URL
-     *   @type string[] $events  e.g. ["email.delivered", "email.bounced"]
+     *   @type string[] $events  e.g. ["message.delivered", "message.bounced"]
      *   @type string   $secret  Optional HMAC signing secret
      * }
      */
@@ -53,5 +53,11 @@ class Webhooks
     public function delete(string $id): array
     {
         return $this->client->request('DELETE', '/v1/webhooks/' . urlencode($id));
+    }
+
+    /** Send a signed test event to a registered webhook endpoint. */
+    public function test(string $id): array
+    {
+        return $this->client->request('POST', '/v1/webhooks/' . urlencode($id) . '/test');
     }
 }

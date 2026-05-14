@@ -64,10 +64,15 @@ services:
     restart: unless-stopped
     # SECURITY: Password read from Docker secret file, not visible via docker inspect
     entrypoint: ["sh", "/usr/local/bin/redis-entrypoint.sh"]
+    # Performance: Override maxmemory and eviction policy for production workloads.
+    # 512mb is appropriate for a dev instance; adjust for production based on
+    # available RAM and data volume.  allkeys-lru ensures stale keys are evicted
+    # rather than writes failing when memory is exhausted.
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
     environment:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
-      REDIS_MAXMEMORY: "256mb"
-      REDIS_MAXMEMORY_POLICY: "noeviction"
+      REDIS_MAXMEMORY: "512mb"
+      REDIS_MAXMEMORY_POLICY: "allkeys-lru"
     volumes:
       - redis_data:/data
       - ./deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
@@ -330,6 +335,16 @@ services:
       # ── Rate limiting ─────────────────────────────────────────────────────
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       RATE_LIMIT_MAX_PER_MINUTE: ${RATE_LIMIT_MAX_PER_MINUTE:-1000}
+      # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
+      # Enable mCaptcha PoW CAPTCHA. Set to "true" to enforce CAPTCHA
+      # challenges on login/signup. Defaults to "false" in development.
+      MCAPTCHA_ENABLED: ${MCAPTCHA_ENABLED:-false}
+      # Site key passed to the CAPTCHA widget. Use "dev" to bypass locally.
+      MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:-dev}
+      # Server-side secret for token verification. Use "dev" to bypass locally.
+      MCAPTCHA_SECRET: ${MCAPTCHA_SECRET:-dev}
+      # Verification endpoint URL for the mCaptcha server.
+      MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:-http://localhost:5001/api/v1/verify}
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
@@ -431,6 +446,48 @@ services:
     secrets:
       - postgres_password
       - redis_password
+
+  # ===========================================================================
+  # MTA (Mail Transfer Agent)
+  # ===========================================================================
+  mta:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: smtp-edge
+    container_name: apexmail-mta
+    restart: unless-stopped
+    ports:
+      - "${SMTP_PORT:-127.0.0.1:25}:25"
+      - "${SMTP_SUBMISSION_PORT:-127.0.0.1:587}:587"
+      - "${SMTP_SMTPS_PORT:-127.0.0.1:465}:465"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
+      METRICS_PORT: 9090
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 25"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apexmail_backend
+      - apexmail_data
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 768M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
 
   # ===========================================================================
   # PDF RENDERER (Typst-based PDF generation)
@@ -555,6 +612,7 @@ services:
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/alerting-rules.yml:/etc/prometheus/alerting-rules.yml:ro
+      - ./deploy/prometheus-targets.d:/etc/prometheus/targets.d:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -605,6 +663,37 @@ services:
       GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
     ports:
       - "${GRAFANA_PORT:-127.0.0.1:3003}:3000"
+    networks:
+      - apexmail_monitoring
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # =========================================================================
+  # LOKI (Log aggregation)
+  # =========================================================================
+  loki:
+    # SECURITY: Pin to specific version to ensure reproducible builds
+    image: grafana/loki:3.0.0
+    container_name: apexmail-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./deploy/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "127.0.0.1:${LOKI_PORT:-3100}:3100"
     networks:
       - apexmail_monitoring
     profiles:
@@ -825,6 +914,7 @@ volumes:
   grafana_data:
   alertmanager_data:
   tempo_data:
+  loki_data:
 
 # ===========================================================================
 # SECRETS

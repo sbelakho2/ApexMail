@@ -7,7 +7,7 @@ CREATE SEQUENCE IF NOT EXISTS contract_number_seq START WITH 1;
 
 CREATE TABLE IF NOT EXISTS enterprise_contracts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     contract_number VARCHAR(30) NOT NULL UNIQUE DEFAULT ('ENT-' || LPAD(nextval('contract_number_seq')::text, 6, '0')),
     name VARCHAR(255) NOT NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'draft'
@@ -41,7 +41,7 @@ CREATE INDEX IF NOT EXISTS idx_enterprise_contracts_end_date ON enterprise_contr
 CREATE TABLE IF NOT EXISTS contract_signatures (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     contract_id UUID NOT NULL REFERENCES enterprise_contracts(id) ON DELETE CASCADE,
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     signature_data TEXT NOT NULL,
     signer_name VARCHAR(255) NOT NULL,
     signer_title VARCHAR(255) NOT NULL,
@@ -54,7 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_contract_signatures_contract ON contract_signatur
 CREATE TABLE IF NOT EXISTS contract_amendments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     contract_id UUID NOT NULL REFERENCES enterprise_contracts(id) ON DELETE CASCADE,
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     reason TEXT NOT NULL,
     proposed_changes JSONB NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
@@ -69,7 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_contract_amendments_tenant ON contract_amendments
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     contract_id UUID REFERENCES enterprise_contracts(id) ON DELETE SET NULL,
     po_number VARCHAR(100) NOT NULL,
     amount INTEGER NOT NULL DEFAULT 0,
@@ -88,7 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_purchase_orders_contract ON purchase_orders(contr
 
 CREATE TABLE IF NOT EXISTS dunning_states (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     dunning_state VARCHAR(30) NOT NULL DEFAULT 'healthy',
     amount_owed INTEGER NOT NULL DEFAULT 0,
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
@@ -111,7 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_dunning_next_retry ON dunning_states(next_retry_a
 
 CREATE TABLE IF NOT EXISTS dunning_history (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     action VARCHAR(50) NOT NULL,
     details JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -121,7 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_dunning_history_tenant ON dunning_history(tenant_
 
 CREATE TABLE IF NOT EXISTS sla_metrics (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     period_month DATE NOT NULL,
     uptime_percent DECIMAL(6, 4) NOT NULL DEFAULT 100.0000,
     total_minutes INTEGER NOT NULL DEFAULT 0,
@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS sla_metrics (
 
 CREATE TABLE IF NOT EXISTS sla_credits (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     period_month DATE NOT NULL,
     breach_percent DECIMAL(6, 4) NOT NULL DEFAULT 0,
     credit_percent DECIMAL(5, 2) NOT NULL DEFAULT 0,
@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS sla_credits (
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
     applied_at TIMESTAMPTZ,
-    invoice_id UUID REFERENCES invoices(id),
+    invoice_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -151,7 +151,7 @@ CREATE INDEX IF NOT EXISTS idx_sla_credits_status ON sla_credits(status);
 
 CREATE TABLE IF NOT EXISTS wallets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     balance INTEGER NOT NULL DEFAULT 0,
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     reserved INTEGER NOT NULL DEFAULT 0,
@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS wallets (
 
 CREATE TABLE IF NOT EXISTS wallet_transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     wallet_id UUID NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
     type VARCHAR(10) NOT NULL DEFAULT 'credit'
         CHECK (type IN ('credit', 'debit')),
@@ -179,7 +179,7 @@ CREATE INDEX IF NOT EXISTS idx_wallet_transactions_created ON wallet_transaction
 
 CREATE TABLE IF NOT EXISTS wallet_reservations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     wallet_id UUID NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
     amount INTEGER NOT NULL DEFAULT 0,
     description TEXT NOT NULL DEFAULT '',
@@ -196,7 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_wallet_reservations_expires ON wallet_reservation
 
 CREATE TABLE IF NOT EXISTS tenant_costs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     recorded_at DATE NOT NULL,
     storage_gb DECIMAL(12, 4) NOT NULL DEFAULT 0,
     storage_cost INTEGER NOT NULL DEFAULT 0,
@@ -218,7 +218,7 @@ CREATE INDEX IF NOT EXISTS idx_tenant_costs_margin ON tenant_costs(margin_percen
 
 CREATE TABLE IF NOT EXISTS cost_alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL,
     alert_type VARCHAR(30) NOT NULL,
     margin_percent DECIMAL(5, 2),
     details JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -231,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_cost_alerts_unresolved ON cost_alerts(tenant_id) 
 
 CREATE TABLE IF NOT EXISTS billing_audit_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_id VARCHAR(26),
     action VARCHAR(100) NOT NULL,
     actor_id UUID,
     actor_type VARCHAR(20) NOT NULL DEFAULT 'system',
@@ -270,6 +270,102 @@ BEGIN
             table_name
         );
     END LOOP;
+END $$;
+
+-- ─── Conditional FK constraints ─────────────────────────────
+-- C-02: Add FK REFERENCES tenants(id) conditionally.
+-- Tables were created without inline FK constraints so this migration
+-- works even if the tenants table doesn't exist yet.
+
+DO $$
+BEGIN
+    IF to_regclass('public.tenants') IS NOT NULL THEN
+        -- enterprise_contracts
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'enterprise_contracts_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE enterprise_contracts ADD CONSTRAINT enterprise_contracts_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- contract_signatures
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contract_signatures_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE contract_signatures ADD CONSTRAINT contract_signatures_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- contract_amendments
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contract_amendments_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE contract_amendments ADD CONSTRAINT contract_amendments_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- purchase_orders
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'purchase_orders_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE purchase_orders ADD CONSTRAINT purchase_orders_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- dunning_states
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dunning_states_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE dunning_states ADD CONSTRAINT dunning_states_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- dunning_history
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dunning_history_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE dunning_history ADD CONSTRAINT dunning_history_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- sla_metrics
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sla_metrics_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE sla_metrics ADD CONSTRAINT sla_metrics_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- sla_credits
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sla_credits_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE sla_credits ADD CONSTRAINT sla_credits_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- wallets
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'wallets_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE wallets ADD CONSTRAINT wallets_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- wallet_transactions
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'wallet_transactions_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE wallet_transactions ADD CONSTRAINT wallet_transactions_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- wallet_reservations
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'wallet_reservations_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE wallet_reservations ADD CONSTRAINT wallet_reservations_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- tenant_costs
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tenant_costs_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE tenant_costs ADD CONSTRAINT tenant_costs_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- cost_alerts
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cost_alerts_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE cost_alerts ADD CONSTRAINT cost_alerts_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE';
+        END IF;
+        -- billing_audit_log
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_audit_log_tenant_id_fkey') THEN
+            EXECUTE 'ALTER TABLE billing_audit_log ADD CONSTRAINT billing_audit_log_tenant_id_fkey
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE SET NULL';
+        END IF;
+    ELSE
+        RAISE WARNING 'Migration 022: tenants table does not exist — skipping FK constraints.';
+    END IF;
+END $$;
+
+-- C-04: Add FK REFERENCES invoices(id) for sla_credits.
+DO $$
+BEGIN
+    IF to_regclass('public.invoices') IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sla_credits_invoice_id_fkey') THEN
+            EXECUTE 'ALTER TABLE sla_credits ADD CONSTRAINT sla_credits_invoice_id_fkey
+                FOREIGN KEY (invoice_id) REFERENCES invoices(id)';
+        END IF;
+    ELSE
+        RAISE WARNING 'Migration 022: invoices table does not exist — skipping FK on sla_credits.invoice_id.';
+    END IF;
 END $$;
 
 COMMIT;

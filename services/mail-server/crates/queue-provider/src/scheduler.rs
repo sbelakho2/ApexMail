@@ -164,7 +164,7 @@ mod tests {
         let dist = scheduler.tenant_distribution(&selected);
 
         // Each tenant should get at most 5 (30% of 15 = 4.5 → 5)
-        for (_tenant, count) in &dist {
+        for count in dist.values() {
             assert!(*count <= 5);
         }
     }

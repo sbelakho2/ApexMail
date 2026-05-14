@@ -1,0 +1,110 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly on Monday at 06:00 UTC
+  push:
+    paths:
+      - 'services/mail-server/**/Cargo.toml'
+      - 'services/mail-server/**/Cargo.lock'
+      - 'services/mail-server/**/Cargo.lock'
+      - '.github/workflows/security-audit.yml'
+  pull_request:
+    paths:
+      - 'services/mail-server/**/Cargo.toml'
+      - 'services/mail-server/**/Cargo.lock'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        working-directory: services/mail-server
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2026-0119 \
+            --ignore RUSTSEC-2024-0437 \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104 \
+            --ignore RUSTSEC-2025-0141 \
+            --ignore RUSTSEC-2025-0057 \
+            --ignore RUSTSEC-2024-0384 \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2024-0370 \
+            --ignore RUSTSEC-2025-0134 \
+            --ignore RUSTSEC-2024-0320 \
+            --ignore RUSTSEC-2023-0086 \
+            --ignore RUSTSEC-2026-0002 \
+            2>&1 | tee cargo-audit-report.txt
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cargo-audit-report
+          path: services/mail-server/cargo-audit-report.txt
+
+      - name: Notify on vulnerabilities
+        if: failure()
+        run: |
+          echo "::warning::Security vulnerabilities detected in dependencies. Check the audit report artifact for details."
+
+  outdated:
+    name: Cargo Outdated Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Install cargo-outdated
+        run: cargo install cargo-outdated --locked
+
+      - name: Check for outdated dependencies
+        working-directory: services/mail-server
+        run: cargo outdated --exit-code 1 2>&1 | tee cargo-outdated-report.txt
+        continue-on-error: true
+
+      - name: Upload outdated report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cargo-outdated-report
+          path: services/mail-server/cargo-outdated-report.txt
+
+  advisories:
+    name: Advisory Database
+    runs-on: ubuntu-latest
+    needs: audit
+    if: always()
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Summarize vulnerabilities
+        run: |
+          if [ -f services/mail-server/cargo-audit-report.txt ]; then
+            echo "## Security Audit Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat services/mail-server/cargo-audit-report.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi

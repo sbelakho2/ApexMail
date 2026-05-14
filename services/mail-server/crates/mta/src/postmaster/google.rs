@@ -133,10 +133,7 @@ impl GoogleClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("token endpoint {status}: {body}"));
         }
-        let tok: TokenResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("token JSON: {e}"))?;
+        let tok: TokenResponse = resp.json().await.map_err(|e| format!("token JSON: {e}"))?;
         // Refresh ~10 minutes before expiry so we don't race the deadline.
         let expiry = Instant::now() + Duration::from_secs(tok.expires_in.saturating_sub(600));
         let mut cached = self.cached_token.lock().await;
@@ -167,12 +164,7 @@ impl GoogleClient {
         Ok(parsed
             .domains
             .into_iter()
-            .filter(|d| {
-                d.permission
-                    .as_deref()
-                    .map(|p| p != "NONE")
-                    .unwrap_or(true)
-            })
+            .filter(|d| d.permission.as_deref().map(|p| p != "NONE").unwrap_or(true))
             .map(|d| {
                 // d.name is "domains/example.com" — strip the prefix.
                 d.name
@@ -184,10 +176,7 @@ impl GoogleClient {
     }
 
     /// Pull all traffic-stats pages for a domain.
-    pub async fn fetch_traffic_stats(
-        &self,
-        domain: &str,
-    ) -> Result<Vec<GoogleReputation>, String> {
+    pub async fn fetch_traffic_stats(&self, domain: &str) -> Result<Vec<GoogleReputation>, String> {
         let token = self.access_token().await?;
         let url = format!(
             "{POSTMASTER_BASE}/domains/{}/trafficStats",
@@ -236,10 +225,7 @@ impl GoogleClient {
 }
 
 /// Persist a batch of reputation rows; ON CONFLICT updates the existing day.
-pub async fn upsert_reputation(
-    db: &PgPool,
-    rows: &[GoogleReputation],
-) -> Result<usize, String> {
+pub async fn upsert_reputation(db: &PgPool, rows: &[GoogleReputation]) -> Result<usize, String> {
     let mut inserted = 0;
     for r in rows {
         sqlx::query(
@@ -289,7 +275,10 @@ pub async fn upsert_reputation(
 /// One full ingest cycle: list domains → fetch each → persist.
 pub async fn ingest_all(db: &PgPool, client: &GoogleClient) -> Result<usize, String> {
     let domains = client.list_domains().await?;
-    info!(domain_count = domains.len(), "Google Postmaster: starting ingest");
+    info!(
+        domain_count = domains.len(),
+        "Google Postmaster: starting ingest"
+    );
     let mut total = 0;
     for domain in &domains {
         match client.fetch_traffic_stats(domain).await {

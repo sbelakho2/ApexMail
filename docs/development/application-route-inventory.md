@@ -1,6 +1,19 @@
 # Current Application Route Inventory
 
 Validated: April 14, 2026
+Updated: 2026-05-10
+
+## Relationship to UI Baseline Manifest
+
+This inventory documents **backend API routes** (mounted under `/v1/*` and `/api/*` prefixes). The [UI Baseline Manifest](ui-baseline-manifest.json) documents **frontend browser routes** (e.g., `/dashboard`, `/campaigns`, `/settings`). These are complementary:
+
+| Layer | Document | What it covers |
+|-------|----------|----------------|
+| Backend API routes | This inventory | REST endpoints under `/v1/*`, `/api/*`, `/health` |
+| Frontend UI routes | `ui-baseline-manifest.json` | Browser-visible pages rendered by the Rust UI router |
+| Marketing pages | `ui-baseline-manifest.json` (marketing/ marketing-zola surfaces) | Public-facing marketing pages served by Zola |
+
+> **Validation:** All routes in `ui-baseline-manifest.json` for the `web` surface correspond to Rust UI router entries in `ui-foundation/src/routing.rs`. Backend API routes are validated via integration tests in `api-server/src/app.rs`. The manifest was last reconciled with the route inventory on 2026-04-14.
 
 ## Scope
 

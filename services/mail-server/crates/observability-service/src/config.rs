@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Tracing configuration (Jaeger / Zipkin / OTLP endpoints, sample rate).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TracingConfig {
     pub enabled: bool,
     pub service_name: String,
@@ -24,6 +25,7 @@ pub struct TracingConfig {
 
 /// Prometheus metrics collection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     pub enabled: bool,
     pub prometheus_port: u16,
@@ -34,6 +36,7 @@ pub struct MetricsConfig {
 
 /// Structured logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
     pub level: String,
     pub format: String,
@@ -45,6 +48,7 @@ pub struct LoggingConfig {
 
 /// Alert dispatch configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertConfig {
     pub enabled: bool,
     pub webhook_urls: Vec<String>,
@@ -62,6 +66,7 @@ pub struct AlertConfig {
 /// flush task runs every `flush_interval_ms` milliseconds and retains data
 /// for `retention_days` days.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PersistenceConfig {
     /// Whether periodic persistence to the database is enabled.
     pub enabled: bool,
@@ -77,6 +82,7 @@ pub struct PersistenceConfig {
 
 /// Root configuration for the observability service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// HTTP listen port.
     pub port: u16,
@@ -119,14 +125,14 @@ impl Default for ObservabilityConfig {
             version: "1.0.0".into(),
             internal_service_token: String::new(),
 
-            db_host: "localhost".into(),
+            db_host: "127.0.0.1".into(),
             db_port: 5432,
             database: "apexmail".into(),
             db_user: "apexmail".into(),
             db_password: String::new(),
             db_pool_max: 20,
 
-            redis_host: "localhost".into(),
+            redis_host: "127.0.0.1".into(),
             redis_port: 6379,
             redis_password: None,
 
@@ -136,9 +142,9 @@ impl Default for ObservabilityConfig {
                 service_version: "1.0.0".into(),
                 environment: "development".into(),
                 sample_rate: 1.0,
-                jaeger_endpoint: "http://localhost:14268/api/traces".into(),
-                zipkin_endpoint: "http://localhost:9411/api/v2/spans".into(),
-                otlp_endpoint: "http://localhost:4318".into(),
+                jaeger_endpoint: "http://jaeger:14268/api/traces".into(),
+                zipkin_endpoint: "http://zipkin:9411/api/v2/spans".into(),
+                otlp_endpoint: "http://otel-collector:4318".into(),
             },
 
             metrics: MetricsConfig {
@@ -316,6 +322,15 @@ impl ObservabilityConfig {
         if self.internal_service_token.trim().is_empty() {
             return Err("INTERNAL_SERVICE_TOKEN must be set".into());
         }
+        // F-07: Reject "off" log level — override to "warn" as minimum floor
+        let valid_levels = ["trace", "debug", "info", "warn", "error"];
+        if !valid_levels.contains(&self.logging.level.as_str()) {
+            return Err(format!(
+                "LOG_LEVEL '{}' is not valid; must be one of: {}",
+                self.logging.level,
+                valid_levels.join(", ")
+            ));
+        }
         if self.db_port == 0 {
             return Err("DB_PORT must be > 0".into());
         }
@@ -407,8 +422,10 @@ mod tests {
 
     #[test]
     fn test_validate_requires_internal_service_token() {
-        let mut cfg = ObservabilityConfig::default();
-        cfg.internal_service_token = "   ".into();
+        let cfg = ObservabilityConfig {
+            internal_service_token: "   ".into(),
+            ..Default::default()
+        };
 
         let err = cfg.validate().unwrap_err();
 

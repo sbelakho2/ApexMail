@@ -5,9 +5,57 @@
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
+
+const MAX_USED_RESPONSES: usize = 100_000;
+const USED_RESPONSE_TTL_SECS: u64 = 3600;
+
+#[derive(Debug, Default)]
+struct UsedResponseCache {
+    entries: HashMap<String, u64>,
+    order: VecDeque<String>,
+}
+
+impl UsedResponseCache {
+    fn contains(&mut self, key: &str, now: u64) -> bool {
+        self.prune(now);
+        self.entries.contains_key(key)
+    }
+
+    fn insert(&mut self, key: String, now: u64) -> bool {
+        self.prune(now);
+        if self.entries.contains_key(&key) {
+            return false;
+        }
+        self.entries.insert(key.clone(), now);
+        self.order.push_back(key);
+        while self.entries.len() > MAX_USED_RESPONSES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        true
+    }
+
+    fn prune(&mut self, now: u64) {
+        while let Some(oldest) = self.order.front() {
+            let expired = self
+                .entries
+                .get(oldest)
+                .is_none_or(|seen_at| now.saturating_sub(*seen_at) > USED_RESPONSE_TTL_SECS);
+            if !expired {
+                break;
+            }
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+}
 
 /// Verification outcome for replay-aware challenge checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +169,11 @@ impl JsChallenge {
 
         // Check solution hash
         let solution_hash = hash_result(solution);
-        self.expected_hash == solution_hash
+        self.expected_hash
+            .as_bytes()
+            .ct_eq(solution_hash.as_bytes())
+            .unwrap_u8()
+            == 1
     }
 }
 
@@ -336,6 +388,8 @@ pub enum CaptchaProvider {
     HCaptcha,
     /// Google reCAPTCHA
     ReCaptcha,
+    /// mCaptcha — privacy-preserving PoW-based CAPTCHA
+    MCaptcha,
 }
 
 impl CaptchaChallenge {
@@ -369,7 +423,7 @@ pub struct ChallengeManager {
     /// CAPTCHA provider
     captcha_provider: Option<CaptchaProvider>,
     /// Used challenge responses to prevent replay
-    used_responses: parking_lot::RwLock<HashSet<String>>,
+    used_responses: parking_lot::RwLock<UsedResponseCache>,
     /// Bounded in-memory audit log
     audit_log: parking_lot::RwLock<VecDeque<ChallengeAuditRecord>>,
     /// Max records retained in audit log
@@ -385,7 +439,7 @@ impl ChallengeManager {
             pow_difficulty: 16, // ~65K hashes average
             captcha_site_key: None,
             captcha_provider: None,
-            used_responses: parking_lot::RwLock::new(HashSet::new()),
+            used_responses: parking_lot::RwLock::new(UsedResponseCache::default()),
             audit_log: parking_lot::RwLock::new(VecDeque::new()),
             max_audit_records: 10_000,
         }
@@ -468,9 +522,10 @@ impl ChallengeManager {
         client_fingerprint: Option<&str>,
     ) -> ChallengeVerifyResult {
         let response_key = format!("pow:{}:{}", challenge.challenge_id, hash_result(nonce));
+        let now = current_timestamp();
         {
-            let used = self.used_responses.read();
-            if used.contains(&response_key) {
+            let mut used = self.used_responses.write();
+            if used.contains(&response_key, now) {
                 self.record_audit(ChallengeAuditRecord {
                     challenge_id: challenge.challenge_id.clone(),
                     challenge_type: "pow".into(),
@@ -486,12 +541,23 @@ impl ChallengeManager {
             }
         }
 
-        let now = current_timestamp();
         let expired = now > challenge.created_at + challenge.time_limit_secs as u64;
         let valid = !expired && challenge.verify(nonce);
 
-        if valid {
-            self.used_responses.write().insert(response_key);
+        let replayed = valid && !self.used_responses.write().insert(response_key, now);
+        if replayed {
+            self.record_audit(ChallengeAuditRecord {
+                challenge_id: challenge.challenge_id.clone(),
+                challenge_type: "pow".into(),
+                outcome: "replay".into(),
+                client_fingerprint: client_fingerprint.map(ToString::to_string),
+                timestamp: now,
+            });
+            return ChallengeVerifyResult {
+                valid: false,
+                replayed: true,
+                expired,
+            };
         }
 
         self.record_audit(ChallengeAuditRecord {
@@ -523,9 +589,10 @@ impl ChallengeManager {
         client_fingerprint: Option<&str>,
     ) -> ChallengeVerifyResult {
         let response_key = format!("js:{}:{}", challenge.challenge_id, hash_result(solution));
+        let now = current_timestamp();
         {
-            let used = self.used_responses.read();
-            if used.contains(&response_key) {
+            let mut used = self.used_responses.write();
+            if used.contains(&response_key, now) {
                 self.record_audit(ChallengeAuditRecord {
                     challenge_id: challenge.challenge_id.clone(),
                     challenge_type: "js".into(),
@@ -541,12 +608,23 @@ impl ChallengeManager {
             }
         }
 
-        let now = current_timestamp();
         let expired = now > challenge.created_at + challenge.time_limit_secs as u64;
         let valid = !expired && challenge.verify(solution);
 
-        if valid {
-            self.used_responses.write().insert(response_key);
+        let replayed = valid && !self.used_responses.write().insert(response_key, now);
+        if replayed {
+            self.record_audit(ChallengeAuditRecord {
+                challenge_id: challenge.challenge_id.clone(),
+                challenge_type: "js".into(),
+                outcome: "replay".into(),
+                client_fingerprint: client_fingerprint.map(ToString::to_string),
+                timestamp: now,
+            });
+            return ChallengeVerifyResult {
+                valid: false,
+                replayed: true,
+                expired,
+            };
         }
 
         self.record_audit(ChallengeAuditRecord {
@@ -730,5 +808,22 @@ mod tests {
         let audit = manager.audit_records();
         assert!(audit.iter().any(|r| r.outcome == "issued"));
         assert!(audit.iter().any(|r| r.outcome == "passed"));
+    }
+
+    #[test]
+    fn used_response_cache_evicts_oldest_entries() {
+        let mut cache = UsedResponseCache::default();
+        for idx in 0..=MAX_USED_RESPONSES {
+            assert!(cache.insert(format!("response-{idx}"), 10));
+        }
+        assert!(!cache.contains("response-0", 10));
+        assert!(cache.contains(&format!("response-{MAX_USED_RESPONSES}"), 10));
+    }
+
+    #[test]
+    fn used_response_cache_expires_old_entries() {
+        let mut cache = UsedResponseCache::default();
+        assert!(cache.insert("response".to_string(), 10));
+        assert!(!cache.contains("response", 10 + USED_RESPONSE_TTL_SECS + 1));
     }
 }

@@ -1,7 +1,7 @@
 //! Health-check endpoints.
 //!
 //! - `GET /health/live` — liveness probe (always 200)
-//! - `GET /health/ready` — readiness:DB + Redis
+//! - `GET /health/ready` — readiness:DB + Redis (uses circuit breaker for DB check)
 //! - `GET /health/deep` — comprehensive with response times
 
 use axum::extract::State;
@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 use std::time::Instant;
 
+use crate::resilience::CircuitBreakerError;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -30,10 +31,30 @@ async fn liveness() -> impl IntoResponse {
 // ─── Readiness ─────────────────────────────────────────────────
 
 async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
-    let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&state.db)
-        .await
-        .is_ok();
+    // Use circuit breaker for DB check — if the circuit is open, we fail fast
+    // instead of waiting for a connection timeout.
+    let db_result = state
+        .resilient
+        .db
+        .call(|| async {
+            sqlx::query_scalar::<_, i32>("SELECT 1")
+                .fetch_one(&state.db)
+                .await
+                .map_err(|e| anyhow::anyhow!("DB query failed: {e}"))
+        })
+        .await;
+
+    let db_ok = match &db_result {
+        Ok(_) => true,
+        Err(CircuitBreakerError::CircuitOpen { name }) => {
+            tracing::warn!(dependency = %name, "readiness: DB circuit breaker is open");
+            false
+        }
+        Err(CircuitBreakerError::Inner(e)) => {
+            tracing::warn!(error = %e, "readiness: DB check failed");
+            false
+        }
+    };
 
     let redis_ok = async {
         let mut conn = state.redis.get().await?;

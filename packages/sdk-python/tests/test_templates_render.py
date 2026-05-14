@@ -114,7 +114,7 @@ class TemplatesRenderTests(unittest.TestCase):
 
         response = resource.update("template-123", name="Welcome v2", subject="Hello")
 
-        self.assertEqual(client.calls[0]["method"], "PATCH")
+        self.assertEqual(client.calls[0]["method"], "PUT")
         self.assertEqual(client.calls[0]["path"], "/v1/templates/template-123")
         self.assertEqual(client.calls[0]["json"], {"name": "Welcome v2", "subject": "Hello"})
         self.assertEqual(response.data["name"], "Welcome v2")
@@ -147,7 +147,7 @@ class AsyncTemplatesRenderTests(unittest.IsolatedAsyncioTestCase):
 
         response = await resource.update("template-123", name="Welcome v2", subject="Hello")
 
-        self.assertEqual(client.calls[0]["method"], "PATCH")
+        self.assertEqual(client.calls[0]["method"], "PUT")
         self.assertEqual(client.calls[0]["path"], "/v1/templates/template-123")
         self.assertEqual(client.calls[0]["json"], {"name": "Welcome v2", "subject": "Hello"})
         self.assertEqual(response.data["name"], "Welcome v2")

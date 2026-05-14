@@ -11,14 +11,14 @@ from collections import defaultdict
 from common_paths import data_path
 from audit_output import emit
 
-# Canonical limits from plans.ts
+# Canonical limits from docs/pricing.md and billing-service/src/plans.rs
 CANONICAL = {
-    'Free': {'email': 3000, 'api': 50000, 'team': 1, 'domains': 1, 'price': 0},
+    'Free': {'email': 30000, 'api': 300000, 'team': 1, 'domains': 1, 'price': 0},
     'Starter': {'email': 50000, 'api': 500000, 'team': 5, 'domains': 5, 'price': 25},
     'Pro': {'email': 150000, 'api': 2000000, 'team': 10, 'domains': 25, 'price': 65},
     'Growth': {'email': 500000, 'api': 5000000, 'team': 25, 'domains': 100, 'price': 150},
     'Scale': {'email': 2000000, 'api': 20000000, 'team': 50, 'domains': -1, 'price': 350},
-    'Enterprise': {'email': 5000000, 'api': -1, 'team': -1, 'domains': -1, 'price': 800},
+    'Enterprise': {'email': 5000000, 'api': -1, 'team': -1, 'domains': -1, 'price': 3000},
 }
 
 # PAYG pricing tiers
@@ -42,10 +42,10 @@ def audit_training_data():
                 text = data.get('text', '')
                 
                 # Find plan in customer context
-                plan_match = re.search(r'Plan: (\w+) \(\$(\d+)/mo\)', text)
+                plan_match = re.search(r'Plan: (\w+) \(\$([\d,]+)/mo\)', text)
                 if plan_match:
                     plan = plan_match.group(1)
-                    price = int(plan_match.group(2))
+                    price = int(plan_match.group(2).replace(',', ''))
                     
                     if plan in CANONICAL:
                         plan_counts[plan] += 1
@@ -80,11 +80,11 @@ def audit_training_data():
                                 issues.append(f"Line {i}: {plan} team limit {found} should be {expected}")
                 
                 # Check pricing table consistency
-                if '| Free       | $0       | 3,000' not in text and 'Pricing' in text:
+                if '| Free       | $0       | 30,000' not in text and 'Pricing' in text:
                     if '| Free' in text:
                         free_row = re.search(r'\| Free\s+\|\s+\$(\d+)\s+\|\s+([\d,]+)', text)
                         if free_row:
-                            if free_row.group(1) != '0' or free_row.group(2).replace(',', '') != '3000':
+                            if free_row.group(1) != '0' or free_row.group(2).replace(',', '') != '30000':
                                 issues.append(f"Line {i}: Pricing table has wrong Free plan values")
                 
                 # Check assistant responses for wrong limit references

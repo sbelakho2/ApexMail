@@ -125,6 +125,22 @@ async fn send_time_optimization(
         recipient.unwrap_or("all"),
         &tz
     );
+
+    match sqlx::query("DELETE FROM ai_send_time_cache WHERE expires_at <= NOW()")
+        .execute(&state.db)
+        .await
+    {
+        Ok(result) => {
+            let deleted = result.rows_affected();
+            if deleted > 0 {
+                metrics::counter!("ai_send_time_cache_expired_deleted_total").increment(deleted);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to purge expired send-time cache rows");
+        }
+    }
+
     let cached: Option<(i32, f64)> = sqlx::query_as(
         "SELECT recommended_hour, confidence FROM ai_send_time_cache
          WHERE cache_key = $1 AND expires_at > NOW()",

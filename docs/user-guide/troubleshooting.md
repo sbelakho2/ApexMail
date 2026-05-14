@@ -133,7 +133,7 @@ All three checks must show `pass`. An auth score of 100 is ideal.
 
 | Record   | Purpose                                      | Fix if Missing                                     |
 | -------- | -------------------------------------------- | -------------------------------------------------- |
-| **SPF**  | Declares authorized sending IPs              | Add `v=spf1 include:spf.apexmail.dev ~all` as TXT  |
+| **SPF**  | Declares authorized sending IPs              | Add `v=spf1 include:_spf.apexmail.ee ~all` as TXT  |
 | **DKIM** | Cryptographic email signature                | Add the CNAME record from your domain settings     |
 | **DMARC**| Policy for handling auth failures             | Add `v=DMARC1; p=quarantine; rua=mailto:...` as TXT |
 
@@ -209,19 +209,19 @@ Response:
     {
       "type": "TXT",
       "host": "@",
-      "value": "v=spf1 include:spf.apexmail.dev ~all",
+      "value": "v=spf1 include:_spf.apexmail.ee ~all",
       "purpose": "SPF"
     },
     {
       "type": "CNAME",
       "host": "apexmail._domainkey",
-      "value": "dkim.apexmail.dev",
+      "value": "dkim.apexmail.ee",
       "purpose": "DKIM"
     },
     {
       "type": "TXT",
       "host": "_dmarc",
-      "value": "v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.dev",
+      "value": "v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee",
       "purpose": "DMARC"
     }
   ]
@@ -535,9 +535,9 @@ All ApexMail API errors follow a consistent format:
 {
   "error": {
     "code": "RATE_LIMIT_EXCEEDED",
-    "message": "You have exceeded the rate limit of 1000 requests per minute.",
+    "message": "Rate limit exceeded for this API key.",
     "details": {
-      "limit": 1000,
+      "limit": 100,
       "remaining": 0,
       "resetAt": "2026-02-09T12:01:00Z"
     }

@@ -129,12 +129,12 @@ impl AdaptiveRateLimiter {
 
     /// Get the current rate limit threshold
     pub fn current_threshold(&self) -> u64 {
-        self.threshold.load(Ordering::Relaxed)
+        self.threshold.load(Ordering::SeqCst)
     }
 
     /// Check if the system is under attack
     pub fn is_under_attack(&self) -> bool {
-        self.under_attack_flag.load(Ordering::Relaxed)
+        self.under_attack_flag.load(Ordering::SeqCst)
     }
 
     /// Update the limiter with a new traffic observation.
@@ -161,10 +161,9 @@ impl AdaptiveRateLimiter {
                     .clamp(self.config.min_threshold, self.config.max_threshold);
 
                 // Only lower threshold if it would be more restrictive than current
-                let current = self.threshold.load(Ordering::Relaxed);
+                let current = self.threshold.load(Ordering::SeqCst);
                 if cold_start_threshold < current {
-                    self.threshold
-                        .store(cold_start_threshold, Ordering::Relaxed);
+                    self.threshold.store(cold_start_threshold, Ordering::SeqCst);
                 }
             }
 
@@ -218,7 +217,7 @@ impl AdaptiveRateLimiter {
                     observations.iter().map(|o| o.error_rate).sum::<f64>()
                         / observations.len() as f64;
 
-                self.under_attack_flag.store(true, Ordering::Relaxed);
+                self.under_attack_flag.store(true, Ordering::SeqCst);
 
                 // Tighten threshold to attack_factor * baseline
                 let raw = rps_mean * self.config.attack_factor;
@@ -229,7 +228,7 @@ impl AdaptiveRateLimiter {
                 };
                 self.threshold.store(
                     new_threshold.clamp(self.config.min_threshold, self.config.max_threshold),
-                    Ordering::Relaxed,
+                    Ordering::SeqCst,
                 );
             }
         } else if attack_state.is_under_attack {
@@ -243,7 +242,7 @@ impl AdaptiveRateLimiter {
                     attack_state.attack_started = None;
                     attack_state.consecutive_alerts = 0;
 
-                    self.under_attack_flag.store(false, Ordering::Relaxed);
+                    self.under_attack_flag.store(false, Ordering::SeqCst);
 
                     // Gradually restore threshold
                     let raw = rps_mean * self.config.headroom_factor;
@@ -254,7 +253,7 @@ impl AdaptiveRateLimiter {
                     };
                     self.threshold.store(
                         new_threshold.clamp(self.config.min_threshold, self.config.max_threshold),
-                        Ordering::Relaxed,
+                        Ordering::SeqCst,
                     );
                 }
             }
@@ -262,7 +261,7 @@ impl AdaptiveRateLimiter {
             // Normal operation — smoothly adjust threshold
             attack_state.consecutive_alerts = 0;
 
-            let current_threshold = self.threshold.load(Ordering::Relaxed) as f64;
+            let current_threshold = self.threshold.load(Ordering::SeqCst) as f64;
             let ideal_threshold = rps_mean * self.config.headroom_factor;
 
             // EMA adjustment with proper rounding to avoid truncation bias
@@ -276,7 +275,7 @@ impl AdaptiveRateLimiter {
             };
             self.threshold.store(
                 rounded.clamp(self.config.min_threshold, self.config.max_threshold),
-                Ordering::Relaxed,
+                Ordering::SeqCst,
             );
         }
 
@@ -330,9 +329,9 @@ impl AdaptiveRateLimiter {
     pub fn reset(&self) {
         self.observations.write().clear();
         let initial = self.config.max_threshold / 2;
-        self.threshold.store(initial, Ordering::Relaxed);
+        self.threshold.store(initial, Ordering::SeqCst);
         *self.attack_state.write() = AttackDetection::default();
-        self.under_attack_flag.store(false, Ordering::Relaxed);
+        self.under_attack_flag.store(false, Ordering::SeqCst);
     }
 }
 
@@ -563,7 +562,9 @@ mod tests {
             limiter.update(make_observation(100.0 + (i as f64)));
         }
 
-        let stats = limiter.baseline_stats().unwrap();
+        let stats = limiter
+            .baseline_stats()
+            .expect("baseline stats should be available");
         assert!(stats.rps_mean > 100.0);
         assert!(stats.rps_std >= 0.0);
         assert_eq!(stats.sample_count, 15);

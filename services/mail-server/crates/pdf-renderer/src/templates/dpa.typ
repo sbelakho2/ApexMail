@@ -53,7 +53,7 @@
   ],
 )
 
-#set text(font: "Helvetica", size: 10pt)
+#set text(font: "Inter", "DejaVu Sans", sans-serif, size: 10pt)
 #set par(justify: true)
 #set heading(numbering: "1.1")
 
@@ -64,7 +64,7 @@
 #v(30mm)
 
 #align(center)[
-  #text(weight: "bold", size: 28pt, fill: rgb("#2563eb"))[
+  #text(weight: "bold", size: 28pt, fill: rgb("#dc2626"))[
     Data Processing Agreement
   ]
   #v(8pt)
@@ -72,7 +72,7 @@
     pursuant to Article 28 of the General Data Protection Regulation (GDPR)
   ]
   #v(24pt)
-  #line(length: 60%, stroke: 1pt + rgb("#2563eb"))
+  #line(length: 60%, stroke: 1pt + rgb("#000000"))
   #v(24pt)
   #text(size: 14pt)[
     Between
@@ -124,7 +124,7 @@ The following categories of personal data are processed under this Agreement:
 #block(
   fill: luma(248),
   inset: 12pt,
-  radius: 4pt,
+  radius: 0pt,
   width: 100%,
 )[
   #for (i, cat) in data.data_categories.enumerate() [
@@ -210,7 +210,7 @@ The Controller hereby provides general written authorisation for the Processor t
 #table(
   columns: (1fr, 1fr, auto),
   stroke: 0.5pt + luma(200),
-  fill: (x, y) => if y == 0 { rgb("#2563eb").lighten(90%) } else { none },
+  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
   inset: 8pt,
   align: (left, left, left),
   [*Sub-processor*], [*Purpose*], [*Location*],

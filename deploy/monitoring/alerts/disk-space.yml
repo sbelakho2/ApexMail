@@ -1,0 +1,269 @@
+# ==============================================================================
+# ApexMail — Disk Space Alerting Rules
+# ==============================================================================
+# MON-18: Comprehensive disk space monitoring for all persistent volumes
+# and node-level filesystems.
+#
+# This file defines Prometheus alerting rules for disk space monitoring across:
+#   - PostgreSQL persistent volumes (WAL, data, backups)
+#   - Redis persistent storage (AOF/RDB snapshots)
+#   - ClickHouse data volumes
+#   - Kubernetes node-level disk pressure and inode exhaustion
+#   - Container ephemeral storage
+#   - S3/object storage quotas (via push metrics)
+#   - Mail queue/spool disk usage
+#
+# Data sources:
+#   - Node exporter (node_filesystem_*)
+#   - kubelet volume metrics (kubelet_volume_stats_*)
+#   - cAdvisor container metrics (container_fs_*)
+#   - Prometheus PostgreSQL exporter
+#   - Custom push metrics from backup cron jobs
+#
+# Loaded by: prometheus.yml -> rule_files
+# ==============================================================================
+
+groups:
+  - name: apexmail-disk-space
+    rules:
+      # ── Node-Level Disk Pressure ───────────────────────────────────────────
+      # Monitors overall node filesystem usage.
+
+      - alert: NodeDiskSpaceWarning
+        expr: |
+          (1 - (node_filesystem_avail_bytes{mountpoint="/", fstype!="tmpfs"}
+          / node_filesystem_size_bytes{mountpoint="/", fstype!="tmpfs"})) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Node disk usage above 80% on {{ $labels.instance }}"
+          description: |
+            Node {{ $labels.instance }} mountpoint {{ $labels.mountpoint }}
+            is {{ $value | humanizePercentage }} full (over 80%).
+            Available: {{ $labels | humanize1024 "avail_bytes" }}
+            Review logs: kubectl top nodes
+            Cleanup: docker system prune, old container images, unused volumes.
+
+      - alert: NodeDiskSpaceCritical
+        expr: |
+          (1 - (node_filesystem_avail_bytes{mountpoint="/", fstype!="tmpfs"}
+          / node_filesystem_size_bytes{mountpoint="/", fstype!="tmpfs"})) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+          pagerduty: true
+        annotations:
+          summary: "CRITICAL: Node disk usage above 90% on {{ $labels.instance }}"
+          description: |
+            Node {{ $labels.instance }} mountpoint {{ $labels.mountpoint }}
+            is {{ $value | humanizePercentage }} full (over 90%).
+            IMMEDIATE ACTION REQUIRED.
+            * Check which directories are largest: du -sh /* | sort -rh | head -10
+            * Consider adding more node storage or cleaning up old data.
+          runbook_url: "https://apexmail.ee/docs/runbooks/disk-space-recovery"
+
+      - alert: NodeDiskPredictedFull
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{mountpoint="/", fstype!="tmpfs"}[6h], 86400) < 0
+        for: 30m
+        labels:
+          severity: critical
+          team: infrastructure
+          pagerduty: true
+        annotations:
+          summary: "Node {{ $labels.instance }} disk predicted to fill within 24 hours"
+          description: |
+            Based on the current rate of consumption, the disk on
+            {{ $labels.instance }} mountpoint {{ $labels.mountpoint }}
+            is expected to fill within 24 hours.
+            * Review log rotation: logs are the most common cause
+            * Check WAL accumulation in PostgreSQL
+            * Inspect queue directories for backlogs
+
+      # ── Inode Exhaustion ───────────────────────────────────────────────────
+      # Inode exhaustion can cause "No space left on device" even when
+      # disk usage appears normal (many small files).
+
+      - alert: NodeInodeExhaustionWarning
+        expr: |
+          (1 - (node_filesystem_files_free{mountpoint="/", fstype!="tmpfs"}
+          / node_filesystem_files{mountpoint="/", fstype!="tmpfs"})) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Inode usage above 80% on {{ $labels.instance }}"
+          description: |
+            Node {{ $labels.instance }} inode usage is {{ $value | humanizePercentage }}.
+            Check for many small files (cached emails, temp files).
+            * find / -xdev -printf '%h\n' | sort | uniq -c | sort -rn | head -10
+
+      - alert: NodeInodeExhaustionCritical
+        expr: |
+          (1 - (node_filesystem_files_free{mountpoint="/", fstype!="tmpfs"}
+          / node_filesystem_files{mountpoint="/", fstype!="tmpfs"})) * 100 > 95
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "CRITICAL: Inode usage above 95% on {{ $labels.instance }}"
+          description: |
+            Node {{ $labels.instance }} inode usage is {{ $value | humanizePercentage }}.
+            Risk of "No space left on device" due to inode exhaustion.
+            * Clean up stale temp files, old container logs, small cached items.
+
+      # ── Persistent Volume Claims ──────────────────────────────────────────
+
+      - alert: PersistentVolumeDiskWarning
+        expr: |
+          kubelet_volume_stats_used_bytes{namespace="apexmail"}
+          / kubelet_volume_stats_capacity_bytes{namespace="apexmail"} * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "PVC usage above 80% for {{ $labels.persistentvolumeclaim }}"
+          description: |
+            PersistentVolumeClaim {{ $labels.persistentvolumeclaim }}
+            in namespace {{ $labels.namespace }}
+            is {{ $value | humanizePercentage }} full.
+            * kubectl describe pvc {{ $labels.persistentvolumeclaim }} -n {{ $labels.namespace }}
+            * Consider increasing PVC size or cleaning up old data.
+
+      - alert: PersistentVolumeDiskCritical
+        expr: |
+          kubelet_volume_stats_used_bytes{namespace="apexmail"}
+          / kubelet_volume_stats_capacity_bytes{namespace="apexmail"} * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+          pagerduty: true
+        annotations:
+          summary: "CRITICAL: PVC usage above 90% for {{ $labels.persistentvolumeclaim }}"
+          description: |
+            PersistentVolumeClaim {{ $labels.persistentvolumeclaim }}
+            in namespace {{ $labels.namespace }}
+            is {{ $value | humanizePercentage }} full.
+            IMMEDIATE ACTION: Expand PVC or archive/clean data.
+            * kubectl edit pvc {{ $labels.persistentvolumeclaim }} -n {{ $labels.namespace }}
+            * Or: kubectl patch pvc {{ $labels.persistentvolumeclaim }} -n {{ $labels.namespace }} -p '{"spec":{"resources":{"requests":{"storage":"100Gi"}}}}'
+          runbook_url: "https://apexmail.ee/docs/runbooks/disk-space-recovery"
+
+      # ── PostgreSQL Specific ────────────────────────────────────────────────
+      # WAL accumulation and table bloat are the most common causes of
+      # disk space issues in PostgreSQL deployments.
+
+      - alert: PostgresWalDiskWarning
+        expr: |
+          sum(node_filesystem_avail_bytes{mountpoint=~".*pgdata.*|.*postgres.*"})
+          / sum(node_filesystem_size_bytes{mountpoint=~".*pgdata.*|.*postgres.*"}) < 0.2
+        for: 10m
+        labels:
+          severity: warning
+          team: database
+        annotations:
+          summary: "PostgreSQL WAL/data disk below 20% free"
+          description: |
+            PostgreSQL storage is running low on space.
+            * Check WAL accumulation: SELECT * FROM pg_ls_waldir() ORDER BY name;
+            * Verify replication is working (WAL not accumulating on primary)
+            * Run: SELECT pg_size_pretty(pg_database_size('apexmail'));
+            * Run VACUUM: VACUUM ANALYZE;
+
+      - alert: PostgresWalDiskCritical
+        expr: |
+          sum(node_filesystem_avail_bytes{mountpoint=~".*pgdata.*|.*postgres.*"})
+          / sum(node_filesystem_size_bytes{mountpoint=~".*pgdata.*|.*postgres.*"}) < 0.10
+        for: 5m
+        labels:
+          severity: critical
+          team: database
+          pagerduty: true
+        annotations:
+          summary: "CRITICAL: PostgreSQL disk below 10% free"
+          description: |
+            PostgreSQL storage is critically low.
+            Risk of transaction failure and database crash.
+            * Remove old WAL: SELECT pg_switch_wal(); SELECT pg_reload_conf();
+            * Check for replication slot issues: SELECT * FROM pg_replication_slots;
+            * Consider emergency pg_dump and restore to larger volume.
+          runbook_url: "https://apexmail.ee/docs/runbooks/disk-space-recovery"
+
+      # ── Redis AOF/RDB ─────────────────────────────────────────────────────
+
+      - alert: RedisDiskWarning
+        expr: |
+          kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*redis.*", namespace="apexmail"}
+          / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~".*redis.*", namespace="apexmail"} * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Redis persistent volume usage above 80%"
+          description: |
+            Redis AOF/RDB storage is {{ $value | humanizePercentage }} full.
+            * Check: redis-cli INFO persistence
+            * Consider: CONFIG SET auto-aof-rewrite-percentage 100
+            * Verify AOF rewrite is working
+
+      # ── Container Ephemeral Storage ────────────────────────────────────────
+      # Each pod's emptyDir and container layer storage.
+
+      - alert: ContainerEphemeralStorageWarning
+        expr: |
+          container_fs_usage_bytes{container!="", pod=~".*apexmail.*"}
+          / container_fs_limit_bytes{container!="", pod=~".*apexmail.*"} * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Ephemeral storage above 80% for container {{ $labels.container }}"
+          description: |
+            Container {{ $labels.container }} in pod {{ $labels.pod }}
+            is using {{ $value | humanizePercentage }} of ephemeral storage.
+            * Check for log accumulation in emptyDir volumes
+            * Review container disk limits: kubectl describe pod {{ $labels.pod }}
+
+      - alert: ContainerEphemeralStorageCritical
+        expr: |
+          container_fs_usage_bytes{container!="", pod=~".*apexmail.*"}
+          / container_fs_limit_bytes{container!="", pod=~".*apexmail.*"} * 100 > 95
+        for: 3m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "CRITICAL: Ephemeral storage above 95% for container {{ $labels.container }}"
+          description: |
+            Container {{ $labels.container }} in pod {{ $labels.pod }}
+            is using {{ $value | humanizePercentage }} of ephemeral storage.
+            Pod is at risk of being evicted.
+            * kubectl exec {{ $labels.pod }} -- du -sh /tmp /var/log
+            * Clean temp files: kubectl exec {{ $labels.pod }} -- rm -rf /tmp/*
+
+      # ── Backup Volume ─────────────────────────────────────────────────────
+
+      - alert: BackupVolumeDiskWarning
+        expr: |
+          kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*backup.*", namespace="apexmail"}
+          / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~".*backup.*", namespace="apexmail"} * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Backup volume usage above 80%"
+          description: |
+            Backup storage is {{ $value | humanizePercentage }} full.
+            * Verify backup retention policy is being enforced
+            * Check backup age: ls -la /path/to/backups/
+            * Old backups may need manual pruning
