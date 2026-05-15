@@ -124,6 +124,31 @@ jobs:
           EOF_ENV
           ssh hetzner "chmod 600 ${DEPLOY_DIR}/.env && wc -l ${DEPLOY_DIR}/.env"
 
+      - name: Render docker secret files from .env (postgres/redis/clickhouse)
+        run: |
+          set -euo pipefail
+          ssh hetzner "DEPLOY_DIR='${DEPLOY_DIR}' bash -s" <<'REMOTE_SH'
+          set -euo pipefail
+          cd "${DEPLOY_DIR}"
+          install -d -m 700 secrets
+          # Source .env values for the three docker-compose secret files.
+          # The .env must define POSTGRES_PASSWORD, REDIS_PASSWORD, CLICKHOUSE_PASSWORD.
+          set -a; . ./.env; set +a
+          for name in POSTGRES_PASSWORD REDIS_PASSWORD CLICKHOUSE_PASSWORD; do
+            val="${!name:-}"
+            if [[ -z "$val" ]]; then
+              echo "::error::$name missing from APEXMAIL_PROD_ENV" >&2
+              exit 1
+            fi
+          done
+          umask 177
+          printf '%s' "$POSTGRES_PASSWORD"   > secrets/postgres_password.txt
+          printf '%s' "$REDIS_PASSWORD"      > secrets/redis_password.txt
+          printf '%s' "$CLICKHOUSE_PASSWORD" > secrets/clickhouse_password.txt
+          chmod 600 secrets/*.txt
+          ls -l secrets/
+          REMOTE_SH
+
       - name: Authenticate host to GHCR
         run: |
           ssh hetzner "echo '${{ secrets.GHCR_DEPLOY_TOKEN }}' | \
