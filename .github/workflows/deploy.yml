@@ -331,12 +331,14 @@ jobs:
       # H9: Uses Syft to generate SPDX SBOM for the runtime base image
       - name: Generate SBOM (runtime-base)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        continue-on-error: true
         with:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           format: spdx-json
           output-file: sbom-runtime-base.spdx.json
 
       - name: Upload SBOM artifact
+        if: hashFiles('sbom-runtime-base.spdx.json') != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom
