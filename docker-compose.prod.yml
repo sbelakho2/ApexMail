@@ -164,6 +164,12 @@ services:
       RUST_LOG: info
       TRACKING_SECRET_KEY: ${TRACKING_SECRET_KEY:?TRACKING_SECRET_KEY is required in production}
     ports: []
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3001' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     deploy:
       replicas: 1
       resources:
@@ -251,6 +257,12 @@ services:
       RUST_LOG: info
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
     ports: []
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3002' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     deploy:
       replicas: 1
       resources:
