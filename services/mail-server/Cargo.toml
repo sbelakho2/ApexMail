@@ -143,7 +143,7 @@ hyper-util = { version = "0.1" }
 # Leptos UI framework (SSR + islands hydration)
 leptos = { version = "0.6", features = ["csr", "ssr", "nightly"] }
 leptos_axum = { version = "0.6" }
-leptos_router = { version = "0.6", features = ["ssr"] }
+leptos_router = { version = "0.8", features = ["ssr"] }
 leptos_meta = { version = "0.6", features = ["ssr"] }
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["HtmlElement", "Element", "Document", "Window", "DomRect", "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry", "KeyboardEvent", "MouseEvent", "FocusEvent", "ResizeObserver", "ResizeObserverEntry", "MutationObserver", "MutationObserverInit", "MutationRecord", "CssStyleDeclaration", "MediaQueryList"] }
