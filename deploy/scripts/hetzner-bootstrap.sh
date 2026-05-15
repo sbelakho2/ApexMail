@@ -13,7 +13,25 @@
 # =============================================================================
 set -euo pipefail
 
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/apexmail}"
+
+# Preseed grub-efi-amd64 install-devices so postinst never blocks on TTY
+preseed_grub() {
+  if command -v debconf-set-selections >/dev/null 2>&1; then
+    debconf-set-selections <<'EOF'
+grub-efi-amd64 grub-efi/install_devices multiselect /dev/nvme0n1, /dev/nvme1n1
+grub-efi-amd64-signed grub-efi/install_devices multiselect /dev/nvme0n1, /dev/nvme1n1
+grub2-common grub-efi/install_devices multiselect /dev/nvme0n1, /dev/nvme1n1
+grub-efi-amd64 grub-efi/install_devices_disks_changed multiselect /dev/nvme0n1, /dev/nvme1n1
+grub-efi-amd64-signed grub-efi/install_devices_disks_changed multiselect /dev/nvme0n1, /dev/nvme1n1
+EOF
+  fi
+}
 
 log() { printf '[bootstrap] %s\n' "$*"; }
 
@@ -33,11 +51,17 @@ install_docker() {
   apt-get update -y
   apt-get install -y ca-certificates curl gnupg lsb-release
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/debian/gpg \
+  os_id="$(. /etc/os-release && echo "${ID}")"
+  case "${os_id}" in
+    ubuntu) docker_repo="https://download.docker.com/linux/ubuntu" ;;
+    debian) docker_repo="https://download.docker.com/linux/debian" ;;
+    *)      docker_repo="https://download.docker.com/linux/debian" ;;
+  esac
+  curl -fsSL "${docker_repo}/gpg" \
     | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
   codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${codename} stable" \
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] ${docker_repo} ${codename} stable" \
     > /etc/apt/sources.list.d/docker.list
   apt-get update -y
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
@@ -83,6 +107,7 @@ harden_sshd() {
 
 main() {
   require_root
+  preseed_grub
   install_baseline_tools
   install_docker
   configure_firewall
