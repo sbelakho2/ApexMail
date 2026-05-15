@@ -68,12 +68,17 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.sha }}
 
       - name: Validate required secrets are present
+        env:
+          HETZNER_SSH_PRIVATE_KEY: ${{ secrets.HETZNER_SSH_PRIVATE_KEY }}
+          HETZNER_KNOWN_HOSTS: ${{ secrets.HETZNER_KNOWN_HOSTS }}
+          APEXMAIL_PROD_ENV: ${{ secrets.APEXMAIL_PROD_ENV }}
+          GHCR_DEPLOY_TOKEN: ${{ secrets.GHCR_DEPLOY_TOKEN }}
         run: |
           missing=()
-          [[ -n "${{ secrets.HETZNER_SSH_PRIVATE_KEY }}" ]] || missing+=("HETZNER_SSH_PRIVATE_KEY")
-          [[ -n "${{ secrets.HETZNER_KNOWN_HOSTS }}"     ]] || missing+=("HETZNER_KNOWN_HOSTS")
-          [[ -n "${{ secrets.APEXMAIL_PROD_ENV }}"       ]] || missing+=("APEXMAIL_PROD_ENV")
-          [[ -n "${{ secrets.GHCR_DEPLOY_TOKEN }}"       ]] || missing+=("GHCR_DEPLOY_TOKEN")
+          [[ -n "${HETZNER_SSH_PRIVATE_KEY:-}" ]] || missing+=("HETZNER_SSH_PRIVATE_KEY")
+          [[ -n "${HETZNER_KNOWN_HOSTS:-}"     ]] || missing+=("HETZNER_KNOWN_HOSTS")
+          [[ -n "${APEXMAIL_PROD_ENV:-}"       ]] || missing+=("APEXMAIL_PROD_ENV")
+          [[ -n "${GHCR_DEPLOY_TOKEN:-}"       ]] || missing+=("GHCR_DEPLOY_TOKEN")
           if (( ${#missing[@]} > 0 )); then
             printf '::error::Missing required secret: %s\n' "${missing[@]}"
             exit 1
