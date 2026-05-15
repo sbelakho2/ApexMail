@@ -29,7 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "ids_bench"
