@@ -193,12 +193,15 @@ jobs:
         if: ${{ github.event.inputs.skip_pull != 'true' }}
         run: |
           ssh hetzner "cd ${DEPLOY_DIR} && \
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env pull"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
+              pull marketing nginx api enterprise tracking postgres redis clickhouse || true"
 
-      - name: Apply stack (up -d --remove-orphans)
+      - name: Apply stack (minimal public-facing subset)
         run: |
           ssh hetzner "cd ${DEPLOY_DIR} && \
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --remove-orphans"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
+              up -d --remove-orphans --no-build \
+              postgres redis clickhouse marketing nginx api enterprise tracking"
 
       - name: Verify rollout
         run: |

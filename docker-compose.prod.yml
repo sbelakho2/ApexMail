@@ -113,6 +113,7 @@ services:
       - apexmail_frontend
 
   observability:
+    image: ghcr.io/sbelakho2/apexmail/observability:latest
     environment:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required in production}
 
@@ -158,6 +159,7 @@ services:
         max-file: "5"
 
   tracking:
+    image: ghcr.io/sbelakho2/apexmail/tracking-service:latest
     environment:
       RUST_LOG: info
       TRACKING_SECRET_KEY: ${TRACKING_SECRET_KEY:?TRACKING_SECRET_KEY is required in production}
@@ -176,10 +178,7 @@ services:
         max_attempts: 5
 
   api:
-    build:
-      context: .
-      dockerfile: services/mail-server/Dockerfile
-      target: api-server
+    image: ghcr.io/sbelakho2/apexmail/api-server:latest
     entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "--", "/usr/bin/tini", "--", "/usr/local/bin/api-server"]
     restart: unless-stopped
     environment:
@@ -247,6 +246,7 @@ services:
       - redis_password
 
   enterprise:
+    image: ghcr.io/sbelakho2/apexmail/enterprise:latest
     environment:
       RUST_LOG: info
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
