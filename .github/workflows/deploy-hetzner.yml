@@ -1,0 +1,153 @@
+# =============================================================================
+# ApexMail — Hetzner Production Deploy (SSH + Docker Compose)
+# =============================================================================
+# Deploys the docker-compose.yml + docker-compose.prod.yml stack onto the
+# Hetzner host (37.27.119.181 by default) over SSH. Pulls images from GHCR
+# (built by deploy.yml) and renders production secrets from a single
+# repository/org secret APEXMAIL_PROD_ENV.
+#
+# Required GitHub secrets (repository OR Bel-Consulting-OU org level):
+#   HETZNER_SSH_PRIVATE_KEY  — private key matching ~/.ssh/hetzner-db-mac.pub
+#   HETZNER_KNOWN_HOSTS      — output of `ssh-keyscan -H 37.27.119.181`
+#   APEXMAIL_PROD_ENV        — full .env contents (see deploy/scripts/HETZNER_DEPLOY.md)
+#   GHCR_DEPLOY_TOKEN        — PAT with read:packages for the host's `docker login ghcr.io`
+#                              (must own the package or be granted read access).
+#
+# Optional secrets (with defaults):
+#   HETZNER_SSH_HOST         — defaults to 37.27.119.181
+#   HETZNER_SSH_USER         — defaults to root
+#   HETZNER_DEPLOY_DIR       — defaults to /opt/apexmail
+# =============================================================================
+name: Deploy — Hetzner
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref / image tag to deploy (defaults to latest main)"
+        required: false
+        default: ""
+      skip_pull:
+        description: "Skip docker compose pull (use existing local images)"
+        required: false
+        default: "false"
+  workflow_run:
+    workflows: ["Deploy — Docker Build & Push"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-hetzner
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Hetzner
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    environment:
+      name: production
+      url: https://app.apexmail.ee
+
+    env:
+      DEPLOY_HOST: ${{ secrets.HETZNER_SSH_HOST || '37.27.119.181' }}
+      DEPLOY_USER: ${{ secrets.HETZNER_SSH_USER || 'root' }}
+      DEPLOY_DIR:  ${{ secrets.HETZNER_DEPLOY_DIR || '/opt/apexmail' }}
+      DEPLOY_REF:  ${{ github.event.inputs.ref || github.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.inputs.ref || github.sha }}
+
+      - name: Validate required secrets are present
+        run: |
+          missing=()
+          [[ -n "${{ secrets.HETZNER_SSH_PRIVATE_KEY }}" ]] || missing+=("HETZNER_SSH_PRIVATE_KEY")
+          [[ -n "${{ secrets.HETZNER_KNOWN_HOSTS }}"     ]] || missing+=("HETZNER_KNOWN_HOSTS")
+          [[ -n "${{ secrets.APEXMAIL_PROD_ENV }}"       ]] || missing+=("APEXMAIL_PROD_ENV")
+          [[ -n "${{ secrets.GHCR_DEPLOY_TOKEN }}"       ]] || missing+=("GHCR_DEPLOY_TOKEN")
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Missing required secret: %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Configure SSH client
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          umask 077
+          printf '%s\n' "${{ secrets.HETZNER_SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "${{ secrets.HETZNER_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          cat <<EOF > ~/.ssh/config
+          Host hetzner
+            HostName ${DEPLOY_HOST}
+            User ${DEPLOY_USER}
+            IdentityFile ~/.ssh/id_deploy
+            IdentitiesOnly yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+            ConnectTimeout 15
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Probe host reachability
+        run: ssh hetzner 'set -e; uname -a; docker --version; docker compose version'
+
+      - name: Sync deploy artifacts to host
+        run: |
+          set -euo pipefail
+          ssh hetzner "install -d -m 750 ${DEPLOY_DIR}"
+          rsync -az --delete \
+            --exclude='.git' --exclude='target' --exclude='node_modules' \
+            -e 'ssh' \
+            docker-compose.yml docker-compose.prod.yml \
+            deploy/ \
+            "hetzner:${DEPLOY_DIR}/"
+
+      - name: Render production .env on host (mode 0600)
+        run: |
+          set -euo pipefail
+          # Pipe secret directly to the remote host without it touching the runner FS.
+          ssh hetzner "umask 177 && cat > ${DEPLOY_DIR}/.env" <<'EOF_ENV'
+          ${{ secrets.APEXMAIL_PROD_ENV }}
+          EOF_ENV
+          ssh hetzner "chmod 600 ${DEPLOY_DIR}/.env && wc -l ${DEPLOY_DIR}/.env"
+
+      - name: Authenticate host to GHCR
+        run: |
+          ssh hetzner "echo '${{ secrets.GHCR_DEPLOY_TOKEN }}' | \
+            docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin"
+
+      - name: Pull updated images
+        if: ${{ github.event.inputs.skip_pull != 'true' }}
+        run: |
+          ssh hetzner "cd ${DEPLOY_DIR} && \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env pull"
+
+      - name: Apply stack (up -d --remove-orphans)
+        run: |
+          ssh hetzner "cd ${DEPLOY_DIR} && \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --remove-orphans"
+
+      - name: Verify rollout
+        run: |
+          ssh hetzner "cd ${DEPLOY_DIR} && \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml ps && \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml ps --status running --quiet | wc -l"
+
+      - name: Cleanup SSH material
+        if: always()
+        run: |
+          shred -u ~/.ssh/id_deploy 2>/dev/null || rm -f ~/.ssh/id_deploy
+          rm -f ~/.ssh/config ~/.ssh/known_hosts
