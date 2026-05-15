@@ -55,6 +55,12 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # When try_files lands on a directory, nginx issues a 301 to <uri>/.
+    # We sit behind a TLS-terminating reverse proxy, so emit relative
+    # redirects (no scheme, no host:port leak).
+    absolute_redirect off;
+    port_in_redirect off;
+
     # Security headers
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
@@ -84,9 +90,10 @@ server {
         font/otf;
 
     # Long-cache static assets (fingerprinted by Zola where applicable).
+    # Use add_header (not `expires`) so we emit exactly one Cache-Control
+    # header that includes `immutable`.
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2|ttf|eot|otf)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
         try_files $uri =404;
         access_log off;
     }
