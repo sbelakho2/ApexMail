@@ -296,20 +296,35 @@ impl FingerprintDb {
 
     /// Look up a fingerprint
     pub fn lookup(&self, fingerprint: &CombinedFingerprint) -> Option<FingerprintClassification> {
-        // Try exact match first
         if let Some(ja4) = &fingerprint.ja4 {
-            if let Some(class) = self.known.get(ja4) {
-                return Some(class.clone());
+            if let Some(classification) = self.lookup_known_value(ja4) {
+                return Some(classification);
             }
 
-            // Try JA4_a prefix match
             let ja4_a = ja4.split('_').next().unwrap_or("");
-            if let Some(class) = self.known.get(ja4_a) {
-                return Some(class.clone());
+            if let Some(classification) = self.lookup_known_value(ja4_a) {
+                return Some(classification);
+            }
+        }
+
+        if let Some(http2) = &fingerprint.http2 {
+            if let Some(classification) = self.lookup_known_value(http2) {
+                return Some(classification);
+            }
+
+            let settings_fingerprint = http2.split('|').next().unwrap_or("");
+            if let Some(classification) = self.lookup_known_value(settings_fingerprint) {
+                return Some(classification);
             }
         }
 
         None
+    }
+
+    fn lookup_known_value(&self, value: &str) -> Option<FingerprintClassification> {
+        self.known
+            .get(value)
+            .map(|classification| classification.clone())
     }
 
     /// Record an observation
@@ -324,8 +339,13 @@ impl FingerprintDb {
                 if let Some(ip) = ip {
                     obs.sample_ips.push(ip);
                 }
+                obs.classification = self.lookup(&fingerprint);
                 obs
             });
+
+        if self.observed.len() > self.config.max_observed {
+            self.cleanup();
+        }
     }
 
     /// Get observation for a fingerprint
@@ -346,6 +366,14 @@ impl FingerprintDb {
 
         // Check observations
         if let Some(obs) = self.get_observation(fingerprint) {
+            if obs.request_count < self.config.min_requests_for_classification {
+                return SuspicionLevel::Unknown;
+            }
+
+            if let Some(classification) = obs.classification {
+                return classification.suspicion;
+            }
+
             // High request count from many IPs might indicate botnet
             if obs.request_count > 10000 && obs.sample_ips.len() > 50 {
                 return SuspicionLevel::Suspicious;
@@ -373,7 +401,8 @@ impl FingerprintDb {
 
     /// Clean up old observations
     pub fn cleanup(&self) {
-        let cutoff = Instant::now() - self.config.observation_ttl;
+        let now = Instant::now();
+        let cutoff = now.checked_sub(self.config.observation_ttl).unwrap_or(now);
 
         self.observed.retain(|_, obs| obs.last_seen > cutoff);
 
@@ -503,5 +532,67 @@ mod tests {
         let stats = db.stats();
         assert_eq!(stats.observed_fingerprints, 1);
         assert_eq!(stats.total_requests, 1);
+    }
+
+    #[test]
+    fn lookup_matches_http2_only_fingerprints() {
+        let db = FingerprintDb::default();
+        db.add_classification(
+            "settings123",
+            FingerprintClassification::suspicious(
+                "HTTP/2 scanner settings",
+                vec!["automation".to_string()],
+            ),
+        );
+
+        let fp = CombinedFingerprint {
+            ja4: None,
+            http2: Some("settings123|frames456|none".to_string()),
+        };
+
+        assert_eq!(db.classify(&fp), SuspicionLevel::Suspicious);
+    }
+
+    #[test]
+    fn observation_classification_honors_minimum_request_threshold() {
+        let config = FingerprintDbConfig {
+            min_requests_for_classification: 3,
+            ..FingerprintDbConfig::default()
+        };
+        let db = FingerprintDb::new(config);
+        let fp = CombinedFingerprint {
+            ja4: Some("new_ja4".to_string()),
+            http2: None,
+        };
+
+        for _ in 0..2 {
+            db.observe(
+                fp.clone(),
+                Some("198.51.100.10".parse().expect("hardcoded IP")),
+            );
+        }
+
+        assert_eq!(db.classify(&fp), SuspicionLevel::Unknown);
+    }
+
+    #[test]
+    fn observe_enforces_max_observed_limit() {
+        let config = FingerprintDbConfig {
+            max_observed: 2,
+            ..FingerprintDbConfig::default()
+        };
+        let db = FingerprintDb::new(config);
+
+        for index in 0..3 {
+            db.observe(
+                CombinedFingerprint {
+                    ja4: Some(format!("fp_{index}")),
+                    http2: None,
+                },
+                None,
+            );
+        }
+
+        assert_eq!(db.stats().observed_fingerprints, 2);
     }
 }

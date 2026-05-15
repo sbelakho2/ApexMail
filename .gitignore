@@ -112,6 +112,9 @@ apps/ai/training/data/golden_qa.jsonl
 cp_colors.txt
 marketing_colors.txt
 web_colors.txt
+.tmp/
+cargo_log.txt
+cargo_output.txt
 
 # ─── Misc ─────────────────────────────────────────────────────────────────────
 .vercel/

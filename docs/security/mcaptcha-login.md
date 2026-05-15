@@ -34,7 +34,7 @@ Error semantics:
 |----------|----------|-------------|
 | `MCAPTCHA_ENABLED` | No | Enables server-side verification when `true` |
 | `MCAPTCHA_SITE_KEY` | Yes when enabled | mCaptcha site key sent to verification endpoint |
-| `MCAPTCHA_SECRET` | Yes when enabled | mCaptcha secret sent to verification endpoint |
+| `MCAPTCHA_SECRET_KEY` | Yes when enabled | mCaptcha secret sent to verification endpoint |
 | `MCAPTCHA_VERIFY_URL` | No | Verification endpoint (default: `https://demo.mcaptcha.org/api/v1/pow/siteverify`) |
 
 ## Configuration Example
@@ -42,7 +42,7 @@ Error semantics:
 ```env
 MCAPTCHA_ENABLED=true
 MCAPTCHA_SITE_KEY=your-site-key
-MCAPTCHA_SECRET=your-secret
+MCAPTCHA_SECRET_KEY=your-secret
 MCAPTCHA_VERIFY_URL=https://demo.mcaptcha.org/api/v1/pow/siteverify
 ```
 

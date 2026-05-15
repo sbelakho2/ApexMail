@@ -12,12 +12,33 @@ global:
   # Container image registry — set to your own registry before deploying.
   # Example: your-registry.example.com/apexmail
   imageRegistry: "apexmail"
+  # Optional global tag for helper/toolbox images; service images can still override per workload.
+  imageTag: ""
   # Pull policy: Always for production, IfNotPresent for dev
   imagePullPolicy: IfNotPresent
   # Image pull secrets (for private registries)
   imagePullSecrets: []
   # Storage class for persistent volumes (override per cloud provider)
   storageClass: ""
+
+# ── Cache Warming ───────────────────────────────────────────────────────────
+
+cacheWarming:
+  enabled: false
+  timeout: 30
+  dns: true
+  rateLimiter: true
+  dbQueryCache: true
+  scriptPath: /usr/local/bin/cache-warm.sh
+  job:
+    enabled: false
+    ttlSecondsAfterFinished: 3600
+
+# ── Optional Custom Metrics Autoscaling ─────────────────────────────────────
+
+customMetrics:
+  enabled: false
+  services: []
 
 # ── Namespace ────────────────────────────────────────────────────────────────
 
@@ -138,6 +159,14 @@ mta:
     limits:
       cpu: 500m
       memory: 512Mi
+  ports:
+    smtp: 25
+    submission: 587
+    smtps: 465
+    metrics: 9090
+  service:
+    type: ClusterIP
+    annotations: {}
   healthPort: 9090
   autoscaling:
     enabled: true
@@ -409,7 +438,7 @@ secrets:
   #   CSRF_SECRET
   #   MCAPTCHA_ENABLED          — "true" to enforce CAPTCHA on login/signup
   #   MCAPTCHA_SITE_KEY         — Site key rendered in the CAPTCHA widget
-  #   MCAPTCHA_SECRET           — Server-side secret for token verification
+  #   MCAPTCHA_SECRET_KEY       — Server-side secret for token verification
   #   MCAPTCHA_VERIFY_URL       — mCaptcha verification endpoint URL
 
 # ── HIPAA Compliance ─────────────────────────────────────────────────────────

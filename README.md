@@ -230,7 +230,7 @@ See `.env.example` for all available configuration options.
 | `JWT_PUBLIC_KEY_PEM` | RSA public key used for JWT verification | Yes |
 | `MCAPTCHA_ENABLED` | Enable server-side login CAPTCHA verification (`true`/`false`) | No |
 | `MCAPTCHA_SITE_KEY` | mCaptcha site key for verification API | When enabled |
-| `MCAPTCHA_SECRET` | mCaptcha secret for verification API | When enabled |
+| `MCAPTCHA_SECRET_KEY` | mCaptcha secret for verification API | When enabled |
 | `TRACKING_ENCRYPTION_KEY` | 128-bit key for tracking IDs | Yes |
 | `TRACKING_SIGNATURE_KEY` | 256-bit key for signatures | Yes |
 | `S3_ENDPOINT` | S3-compatible storage endpoint | Yes |

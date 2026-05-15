@@ -63,7 +63,7 @@ TRACKING_BASE_URL=http://localhost:3001
 MCAPTCHA_ENABLED=false
 # Required only when enabling CAPTCHA
 # MCAPTCHA_SITE_KEY=...
-# MCAPTCHA_SECRET=...
+# MCAPTCHA_SECRET_KEY=...
 ```
 
 For the repo Docker Compose stack, store the Postgres password in the repo-local secret file:
@@ -146,7 +146,7 @@ If you enable mCaptcha, verify both login surfaces:
 ```env
 MCAPTCHA_ENABLED=true
 MCAPTCHA_SITE_KEY=your-site-key
-MCAPTCHA_SECRET=your-secret
+MCAPTCHA_SECRET_KEY=your-secret
 ```
 
 2. Open both login pages:

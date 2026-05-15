@@ -30,6 +30,12 @@
       "type": "string",
       "minLength": 1
     },
+    "db_cluster_connection_budget": {
+      "type": [
+        "string",
+        "integer"
+      ]
+    },
     "global": {
       "type": "object",
       "additionalProperties": false,
@@ -41,6 +47,9 @@
       ],
       "properties": {
         "imageRegistry": {
+          "type": "string"
+        },
+        "imageTag": {
           "type": "string"
         },
         "imagePullPolicy": {
@@ -60,6 +69,91 @@
         },
         "storageClass": {
           "type": "string"
+        }
+      }
+    },
+    "cacheWarming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "timeout",
+        "dns",
+        "rateLimiter",
+        "dbQueryCache",
+        "scriptPath",
+        "job"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dns": {
+          "type": "boolean"
+        },
+        "rateLimiter": {
+          "type": "boolean"
+        },
+        "dbQueryCache": {
+          "type": "boolean"
+        },
+        "scriptPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "job": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "ttlSecondsAfterFinished": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "customMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "services"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "name",
+              "autoscaling"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "autoscaling": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
         }
       }
     },
@@ -445,6 +539,63 @@
               }
             }
           }
+        },
+        "loki": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "config",
+            "persistence"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "string",
+              "minLength": 1
+            },
+            "config": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "auth_enabled",
+                "retention_period"
+              ],
+              "properties": {
+                "auth_enabled": {
+                  "type": "boolean"
+                },
+                "retention_period": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "persistence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "enabled",
+                "size",
+                "storageClass"
+              ],
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "size": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "storageClass": {
+                  "type": "string"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -591,6 +742,14 @@
           }
         }
       }
+    },
+    "serviceMesh": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "productionDefaults": {
+      "type": "object",
+      "additionalProperties": true
     }
   },
   "required": [
@@ -600,6 +759,8 @@
     "apiBaseUrl",
     "oauthRedirectBaseUrl",
     "corsOrigins",
+    "cacheWarming",
+    "customMetrics",
     "apiServer",
     "trackingService",
     "mta",
@@ -621,7 +782,9 @@
     "tolerations",
     "nodeSelector",
     "affinity",
-    "topologySpreadConstraints"
+    "topologySpreadConstraints",
+    "serviceMesh",
+    "productionDefaults"
   ],
   "allOf": [
     {
@@ -809,8 +972,17 @@
     "podDisruptionBudget": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "minAvailable"
+      "anyOf": [
+        {
+          "required": [
+            "minAvailable"
+          ]
+        },
+        {
+          "required": [
+            "maxUnavailable"
+          ]
+        }
       ],
       "properties": {
         "minAvailable": {
@@ -818,6 +990,60 @@
             "integer",
             "string"
           ]
+        },
+        "maxUnavailable": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        }
+      }
+    },
+    "probeTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "initialDelaySeconds",
+        "periodSeconds",
+        "timeoutSeconds",
+        "failureThreshold"
+      ],
+      "properties": {
+        "initialDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "readiness",
+        "liveness",
+        "startup"
+      ],
+      "properties": {
+        "readiness": {
+          "$ref": "#/definitions/probeTiming"
+        },
+        "liveness": {
+          "$ref": "#/definitions/probeTiming"
+        },
+        "startup": {
+          "$ref": "#/definitions/probeTiming"
         }
       }
     },
@@ -833,6 +1059,8 @@
         "service",
         "autoscaling",
         "podDisruptionBudget",
+        "tmpEmptyDirSizeLimit",
+        "probes",
         "env",
         "envFrom"
       ],
@@ -873,6 +1101,13 @@
         "podDisruptionBudget": {
           "$ref": "#/definitions/podDisruptionBudget"
         },
+        "tmpEmptyDirSizeLimit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "probes": {
+          "$ref": "#/definitions/probes"
+        },
         "env": {
           "$ref": "#/definitions/envMap"
         },
@@ -899,8 +1134,11 @@
         "resources",
         "ports",
         "service",
+        "healthPort",
         "autoscaling",
         "podDisruptionBudget",
+        "tmpEmptyDirSizeLimit",
+        "probes",
         "env",
         "envFrom"
       ],
@@ -917,6 +1155,11 @@
         },
         "resources": {
           "$ref": "#/definitions/resources"
+        },
+        "healthPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
         },
         "ports": {
           "type": "object",
@@ -978,6 +1221,13 @@
         "podDisruptionBudget": {
           "$ref": "#/definitions/podDisruptionBudget"
         },
+        "tmpEmptyDirSizeLimit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "probes": {
+          "$ref": "#/definitions/probes"
+        },
         "env": {
           "$ref": "#/definitions/envMap"
         },
@@ -997,6 +1247,8 @@
         "healthPort",
         "autoscaling",
         "podDisruptionBudget",
+        "tmpEmptyDirSizeLimit",
+        "probes",
         "env",
         "envFrom"
       ],
@@ -1025,6 +1277,13 @@
         "podDisruptionBudget": {
           "$ref": "#/definitions/podDisruptionBudget"
         },
+        "tmpEmptyDirSizeLimit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "probes": {
+          "$ref": "#/definitions/probes"
+        },
         "env": {
           "$ref": "#/definitions/envMap"
         },
@@ -1045,6 +1304,8 @@
         "service",
         "autoscaling",
         "podDisruptionBudget",
+        "tmpEmptyDirSizeLimit",
+        "probes",
         "env",
         "envFrom"
       ],
@@ -1075,6 +1336,13 @@
         },
         "podDisruptionBudget": {
           "$ref": "#/definitions/podDisruptionBudget"
+        },
+        "tmpEmptyDirSizeLimit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "probes": {
+          "$ref": "#/definitions/probes"
         },
         "env": {
           "$ref": "#/definitions/envMap"

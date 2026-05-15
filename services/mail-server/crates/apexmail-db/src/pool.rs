@@ -64,6 +64,10 @@ pub fn get_query_timeout() -> Duration {
     Duration::from_secs(QUERY_TIMEOUT.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+fn normalized_min_connections(max_connections: u32, requested_min_connections: u32) -> u32 {
+    requested_min_connections.min(max_connections)
+}
+
 /// Type alias for the database pool.
 pub type DatabasePool = PgPool;
 
@@ -251,6 +255,8 @@ pub async fn create_pool(
     database_url: &str,
     max_connections: u32,
 ) -> Result<DatabasePool, sqlx::Error> {
+    let min_connections = normalized_min_connections(max_connections, 2);
+
     // DB-09: acquire_timeout=10s aligned with worker pool recommendation;
     // test_before_acquire(true) prevents handing out stale connections.
     // DB-10: To configure statement caching, use PgConnectOptions:
@@ -268,7 +274,7 @@ pub async fn create_pool(
     //   metrics::gauge!("db_pool_idle", pool.num_idle() as f64);
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
-        .min_connections(2)
+        .min_connections(min_connections)
         // DI-010 / PP-001: Prevent connection pool exhaustion and indefinite stalls
         .acquire_timeout(Duration::from_secs(10))
         // DI-010: Validate connections before handing them out to detect stale connections
@@ -278,7 +284,7 @@ pub async fn create_pool(
         .connect(database_url)
         .await?;
 
-    info!(max_connections, "Database connection pool created");
+    info!(max_connections, min_connections, "Database connection pool created");
     Ok(pool)
 }
 
@@ -352,6 +358,8 @@ pub async fn create_pool_with_config(
 /// This is the canonical pool creation function. [`create_pool_with_config`] delegates
 /// to this function with default budget values.
 pub async fn create_pool_with_opts(config: &PoolConfig<'_>) -> Result<DatabasePool, sqlx::Error> {
+    let min_connections = normalized_min_connections(config.max_connections, config.min_connections);
+
     // T-304: When statement_cache_capacity > 0, parse the URL into PgConnectOptions
     // so we can set the statement cache capacity before connecting. Otherwise fall
     // back to the simple connect() path for backward compatibility.
@@ -362,7 +370,7 @@ pub async fn create_pool_with_opts(config: &PoolConfig<'_>) -> Result<DatabasePo
             .statement_cache_capacity(config.statement_cache_capacity);
         PgPoolOptions::new()
             .max_connections(config.max_connections)
-            .min_connections(config.min_connections)
+            .min_connections(min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .test_before_acquire(true)
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
@@ -372,7 +380,7 @@ pub async fn create_pool_with_opts(config: &PoolConfig<'_>) -> Result<DatabasePo
     } else {
         PgPoolOptions::new()
             .max_connections(config.max_connections)
-            .min_connections(config.min_connections)
+            .min_connections(min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .test_before_acquire(true)
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
@@ -438,7 +446,7 @@ pub async fn create_pool_with_opts(config: &PoolConfig<'_>) -> Result<DatabasePo
 
     info!(
         max_connections = config.max_connections,
-        min_connections = config.min_connections,
+        min_connections,
         acquire_timeout_secs = config.acquire_timeout_secs,
         pool = %pool_label,
         "Database connection pool created with custom config"
@@ -499,6 +507,13 @@ pub async fn create_pool_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalized_min_connections_clamps_to_max() {
+        assert_eq!(normalized_min_connections(1, 2), 1);
+        assert_eq!(normalized_min_connections(4, 2), 2);
+        assert_eq!(normalized_min_connections(0, 2), 0);
+    }
 
     #[tokio::test]
     async fn test_lazy_pool_creation() {

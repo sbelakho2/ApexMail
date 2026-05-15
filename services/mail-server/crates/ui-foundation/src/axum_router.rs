@@ -818,6 +818,11 @@ mod tests {
                     let is_allowed_marketing_js = opening_tag
                         .contains("src=\"/js/apexmail-site.js")
                         && opening_tag.contains("defer");
+                    // Inline theme bootstrap script emitted by marketing pages
+                    // to avoid flash-of-incorrect-theme before CSS is applied.
+                    let is_marketing_theme_bootstrap = !opening_tag.contains("src=")
+                        && script.contains("apexmail-theme")
+                        && script.contains("prefers-color-scheme:dark");
                     // Inline mobile-menu toggle script injected by shell::mobile_menu_script()
                     // into both web and control-plane shells. It is an inline self-contained IIFE
                     // with no external dependencies and requires no separate CSP nonce exemption
@@ -838,7 +843,9 @@ mod tests {
                         && script.contains("mfaChallengeToken")
                         && script.contains("/v1/auth/mfa/");
                     let allowed = match route.surface {
-                        "marketing" | "marketing-zola" => is_json_ld || is_allowed_marketing_js,
+                        "marketing" | "marketing-zola" => {
+                            is_json_ld || is_allowed_marketing_js || is_marketing_theme_bootstrap
+                        }
                         "web" | "control-plane" => {
                             is_mobile_menu_script || is_auth_form_script || is_mfa_management_script
                         }

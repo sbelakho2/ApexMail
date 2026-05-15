@@ -150,7 +150,9 @@ jobs:
           printf '%s' "$POSTGRES_PASSWORD"   > secrets/postgres_password.txt
           printf '%s' "$REDIS_PASSWORD"      > secrets/redis_password.txt
           printf '%s' "$CLICKHOUSE_PASSWORD" > secrets/clickhouse_password.txt
-          chmod 600 secrets/*.txt
+          # Secrets directory stays 700 (root-only); files are 644 so container
+          # users (non-root, uid varies per image) can read them through bind mounts.
+          chmod 644 secrets/*.txt
           ls -l secrets/
           REMOTE_SH
 

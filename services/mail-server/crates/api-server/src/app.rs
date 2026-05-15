@@ -600,7 +600,18 @@ fn generate_csp_nonce() -> String {
 
 fn browser_csp_header(nonce: &str) -> HeaderValue {
     let analytics_img_src = std::env::var("ANALYTICS_IMAGE_SRC").ok();
-    let mcaptcha_base_url = std::env::var("MCAPTCHA_BASE_URL").ok();
+    let mcaptcha_enabled = std::env::var("MCAPTCHA_ENABLED")
+        .ok()
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(false);
+    let mcaptcha_site_key = std::env::var("MCAPTCHA_SITE_KEY").unwrap_or_else(|_| "dev".into());
+    let mcaptcha_secret_key = std::env::var("MCAPTCHA_SECRET_KEY").unwrap_or_else(|_| "dev".into());
+    let mcaptcha_base_url =
+        if mcaptcha_enabled && mcaptcha_site_key != "dev" && mcaptcha_secret_key != "dev" {
+            std::env::var("MCAPTCHA_BASE_URL").ok()
+        } else {
+            None
+        };
     browser_csp_header_with_sources(
         nonce,
         analytics_img_src.as_deref(),
@@ -629,28 +640,37 @@ fn browser_csp_header_with_sources(
         .map(|src| format!(" {src}"))
         .unwrap_or_default();
 
-    let mcaptcha_connect_src = mcaptcha_base_url
-        .map(str::trim)
-        .filter(|src| !src.is_empty())
+    let mcaptcha_source = mcaptcha_base_url.and_then(valid_https_csp_source);
+
+    let mcaptcha_connect_src = mcaptcha_source
         .map(|src| format!(" {src}"))
         .unwrap_or_default();
 
-    let mcaptcha_script_src = mcaptcha_base_url
-        .map(str::trim)
-        .filter(|src| !src.is_empty())
+    let mcaptcha_script_src = mcaptcha_source
         .map(|src| format!(" {src}"))
         .unwrap_or_default();
 
-    let mcaptcha_frame_src = mcaptcha_base_url
-        .map(str::trim)
-        .filter(|src| !src.is_empty())
-        .map(|src| src.to_string())
+    let mcaptcha_frame_src = mcaptcha_source
+        .map(str::to_string)
         .unwrap_or_else(|| "'none'".to_string());
 
     HeaderValue::from_str(&format!(
         "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'{mcaptcha_connect_src}; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; script-src 'self' 'nonce-{nonce}'{mcaptcha_script_src}; frame-src {mcaptcha_frame_src}; object-src 'none'"
     ))
     .expect("browser CSP should be valid")
+}
+
+fn valid_https_csp_source(source: &str) -> Option<&str> {
+    let source = source.trim().trim_end_matches('/');
+    if source.starts_with("https://")
+        && !source.chars().any(char::is_whitespace)
+        && !source.contains(';')
+        && HeaderValue::from_str(source).is_ok()
+    {
+        Some(source)
+    } else {
+        None
+    }
 }
 
 fn inject_script_nonce(html: &str, nonce: &str) -> String {
@@ -926,9 +946,17 @@ fn render_ui_response(
     let surface = config.ui_surface_for_host(host)?;
     // Pass CSRF secret so auth forms receive real tokens during SSR
     let csrf_secret = Some(config.csrf_secret.as_str());
-    // Pass mCaptcha config so auth forms include the CAPTCHA widget
-    let mcaptcha_base_url = Some(config.mcaptcha_base_url.as_str());
-    let mcaptcha_site_key = Some(config.mcaptcha_site_key.as_str());
+    let (mcaptcha_base_url, mcaptcha_site_key) = if config.mcaptcha_enabled
+        && config.mcaptcha_site_key != "dev"
+        && config.mcaptcha_secret_key != "dev"
+    {
+        (
+            Some(config.mcaptcha_base_url.as_str()),
+            Some(config.mcaptcha_site_key.as_str()),
+        )
+    } else {
+        (None, None)
+    };
     let html = ui_router::render_route_with_query(
         surface,
         uri.path(),
@@ -1052,9 +1080,10 @@ mod tests {
             "us-east-1".into(),
         );
 
-        let pools = apexmail_db::pool::create_pool_pair(&database_url, None, 1, 0)
-            .await
-            .expect("failed to create test pool pair");
+        let pools = apexmail_db::pool::PoolPair {
+            rw: db.clone(),
+            ro: db.clone(),
+        };
 
         build_app(AppStateInner::with_ddos_protector(
             db,
@@ -1625,6 +1654,34 @@ mod tests {
 
         assert!(csp.contains("img-src 'self' data:"));
         assert!(!csp.contains("http://analytics.example.com"));
+    }
+
+    #[test]
+    fn browser_csp_accepts_https_mcaptcha_source() {
+        let csp = browser_csp_header_with_sources(
+            "test-nonce",
+            None,
+            Some("https://mcaptcha.example.com/"),
+        );
+        let csp = csp.to_str().expect("csp header should be utf-8");
+
+        assert!(csp.contains("connect-src 'self' https://mcaptcha.example.com"));
+        assert!(csp.contains("script-src 'self' 'nonce-test-nonce' https://mcaptcha.example.com"));
+        assert!(csp.contains("frame-src https://mcaptcha.example.com"));
+    }
+
+    #[test]
+    fn browser_csp_rejects_non_https_mcaptcha_source() {
+        let csp = browser_csp_header_with_sources(
+            "test-nonce",
+            None,
+            Some("http://mcaptcha.example.com"),
+        );
+        let csp = csp.to_str().expect("csp header should be utf-8");
+
+        assert!(csp.contains("connect-src 'self';"));
+        assert!(csp.contains("frame-src 'none'"));
+        assert!(!csp.contains("http://mcaptcha.example.com"));
     }
 
     #[tokio::test]

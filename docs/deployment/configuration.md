@@ -76,14 +76,14 @@ Server-side verification variables:
 |----------|----------|---------|-------------|
 | `MCAPTCHA_ENABLED` | | `false` | Enforce CAPTCHA verification in login API routes |
 | `MCAPTCHA_SITE_KEY` | ✓ when enabled | - | Site key sent to verification API |
-| `MCAPTCHA_SECRET` | ✓ when enabled | - | Secret sent to verification API |
+| `MCAPTCHA_SECRET_KEY` | ✓ when enabled | - | Secret sent to verification API |
 | `MCAPTCHA_VERIFY_URL` | | `https://demo.mcaptcha.org/api/v1/pow/siteverify` | Verification endpoint |
 
 ```env
 # Server-side enforcement
 MCAPTCHA_ENABLED=true
 MCAPTCHA_SITE_KEY=your-site-key
-MCAPTCHA_SECRET=your-secret
+MCAPTCHA_SECRET_KEY=your-secret
 MCAPTCHA_VERIFY_URL=https://demo.mcaptcha.org/api/v1/pow/siteverify
 ```
 

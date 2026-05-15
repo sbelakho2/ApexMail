@@ -210,6 +210,15 @@ fn env_required_pem(key: &str) -> Result<String, ConfigError> {
     Ok(raw.replace("\\n", "\n"))
 }
 
+fn resolve_mcaptcha_secret_key(
+    secret_key: Option<String>,
+    legacy_secret: Option<String>,
+) -> String {
+    secret_key
+        .or(legacy_secret)
+        .unwrap_or_else(|| "dev".to_string())
+}
+
 fn parse_optional_pem_list(value: Option<String>) -> Vec<String> {
     value
         .unwrap_or_default()
@@ -438,6 +447,20 @@ fn validate_required_setting(
     Ok(())
 }
 
+fn validate_https_url(name: &str, value: &str) -> Result<(), ConfigError> {
+    let parsed = url::Url::parse(value).map_err(|error| {
+        ConfigError::SecurityCheck(format!(
+            "{name} must be a valid HTTPS URL in production: {error}"
+        ))
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(ConfigError::SecurityCheck(format!(
+            "{name} must use https in production"
+        )));
+    }
+    Ok(())
+}
+
 fn normalize_host(host: &str) -> String {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if let Some(stripped) = host.strip_prefix('[') {
@@ -600,7 +623,10 @@ impl Config {
 
         let mcaptcha_base_url = env_or("MCAPTCHA_BASE_URL", "https://mcaptcha.example.com");
         let mcaptcha_site_key = env_or("MCAPTCHA_SITE_KEY", "dev");
-        let mcaptcha_secret_key = env_or("MCAPTCHA_SECRET_KEY", "dev");
+        let mcaptcha_secret_key = resolve_mcaptcha_secret_key(
+            env::var("MCAPTCHA_SECRET_KEY").ok(),
+            env::var("MCAPTCHA_SECRET").ok(),
+        );
         let mcaptcha_enabled = env_or("MCAPTCHA_ENABLED", "false").parse().unwrap_or(false);
         let mcaptcha_verify_url = env_or(
             "MCAPTCHA_VERIFY_URL",
@@ -934,6 +960,18 @@ impl Config {
             &self.billing_company_phone,
             &["UNCONFIGURED"],
         )?;
+        if self.mcaptcha_enabled {
+            validate_required_setting("MCAPTCHA_BASE_URL", &self.mcaptcha_base_url, &[""])?;
+            validate_required_setting("MCAPTCHA_SITE_KEY", &self.mcaptcha_site_key, &["dev"])?;
+            validate_secret(
+                "MCAPTCHA_SECRET_KEY",
+                &self.mcaptcha_secret_key,
+                16,
+                &["dev"],
+            )?;
+            validate_https_url("MCAPTCHA_BASE_URL", &self.mcaptcha_base_url)?;
+            validate_https_url("MCAPTCHA_VERIFY_URL", &self.mcaptcha_verify_url)?;
+        }
         Ok(())
     }
 }
@@ -1111,6 +1149,36 @@ mod tests {
         let mut config = valid_production_config();
         config.billing_company_phone.clear();
         assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.mcaptcha_site_key = "dev".into();
+        assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.mcaptcha_secret_key = "dev".into();
+        assert!(config.validate_production().is_err());
+
+        assert_eq!(
+            resolve_mcaptcha_secret_key(None, Some("legacy-secret-value".into())),
+            "legacy-secret-value"
+        );
+        assert_eq!(
+            resolve_mcaptcha_secret_key(
+                Some("preferred-secret-value".into()),
+                Some("legacy-secret-value".into())
+            ),
+            "preferred-secret-value"
+        );
+
+        let mut config = valid_production_config();
+        config.mcaptcha_base_url = "http://mcaptcha.example.com".into();
+        assert!(config.validate_production().is_err());
+
+        let mut config = valid_production_config();
+        config.mcaptcha_enabled = false;
+        config.mcaptcha_site_key = "dev".into();
+        config.mcaptcha_secret_key = "dev".into();
+        assert!(config.validate_production().is_ok());
     }
 
     #[test]

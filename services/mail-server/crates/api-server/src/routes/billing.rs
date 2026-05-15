@@ -4492,9 +4492,10 @@ mod tests {
             "us-east-1".into(),
         );
 
-        let pools = apexmail_db::pool::create_pool_pair(&database_url, None, 1, 0)
-            .await
-            .expect("failed to create test pool pair");
+        let pools = apexmail_db::pool::PoolPair {
+            rw: db.clone(),
+            ro: db.clone(),
+        };
 
         build_app(
             AppStateInner::new(

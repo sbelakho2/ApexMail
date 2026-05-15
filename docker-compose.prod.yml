@@ -19,9 +19,9 @@ services:
     restart: unless-stopped
     read_only: true
     tmpfs:
-      - /tmp
-      - /var/cache/nginx
-      - /var/run
+      - /tmp:mode=1777
+      - /var/cache/nginx:mode=0777
+      - /var/run:mode=0777
     security_opt:
       - no-new-privileges:true
     networks:
