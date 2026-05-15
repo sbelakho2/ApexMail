@@ -29,4 +29,4 @@ This repository includes ApexMail SDKs for the following languages:
 
 ## Getting Started
 
-Use the [API Reference](/docs/api) for the wire contract, then choose the SDK that matches your runtime and rollout path. The [API Console](/api-console) is the fastest place to validate payload shape before you move into typed client code.
+Use the [API Reference](/docs/api/) for the wire contract, then choose the SDK that matches your runtime and rollout path. The [API Console](/api-console/) is the fastest place to validate payload shape before you move into typed client code.

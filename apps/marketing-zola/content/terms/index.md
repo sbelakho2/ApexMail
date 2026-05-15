@@ -37,11 +37,11 @@ You must provide accurate and complete information when creating an account. You
 
 ## 5. Acceptable Use
 
-Use of the Service is subject to our [Acceptable Use Policy](/acceptable-use). Violation may result in immediate suspension or termination.
+Use of the Service is subject to our [Acceptable Use Policy](/acceptable-use/). Violation may result in immediate suspension or termination.
 
 ## 6. Data Processing
 
-We process data in accordance with our [Privacy Policy](/privacy) and [Data Processing Agreement](/dpa), compliant with GDPR and applicable Estonian and EU data protection law.
+We process data in accordance with our [Privacy Policy](/privacy/) and [Data Processing Agreement](/dpa/), compliant with GDPR and applicable Estonian and EU data protection law.
 
 ## 7. Payment Terms
 
@@ -80,7 +80,7 @@ In accordance with Article 16(m) of Directive 2011/83/EU, the right of withdrawa
 
 ## 9. SLA
 
-Scale and Enterprise plan customers are covered by our [Service Level Agreement](/sla). Other plans are provided on a best-effort basis with no guaranteed uptime commitment unless otherwise agreed in writing.
+Scale and Enterprise plan customers are covered by our [Service Level Agreement](/sla/). Other plans are provided on a best-effort basis with no guaranteed uptime commitment unless otherwise agreed in writing.
 
 ## 10. Limitation of Liability
 

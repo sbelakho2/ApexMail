@@ -21,6 +21,6 @@ ApexMail exposes message-level analytics so you can follow delivery and recipien
 
 ## Next Steps
 
-- Use the [API Reference](/docs/api) to send a tracked message.
-- Exercise a request interactively in the [API Console](/api-console).
-- Pair analytics with [Webhooks](/docs/webhooks) when you need downstream processing from delivery events.
+- Use the [API Reference](/docs/api/) to send a tracked message.
+- Exercise a request interactively in the [API Console](/api-console/).
+- Pair analytics with [Webhooks](/docs/webhooks/) when you need downstream processing from delivery events.

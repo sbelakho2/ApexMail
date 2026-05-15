@@ -9,8 +9,8 @@ template = "section.html"
 Need a deployment review, procurement answer, or compliance walkthrough?
 
 - General enquiries: [hello@apexmail.ee](mailto:hello@apexmail.ee)
-- Documentation: [ApexMail docs](/docs)
-- Private cloud and enterprise options: [Sales conversations](/contact/sales)
+- Documentation: [ApexMail docs](/docs/)
+- Private cloud and enterprise options: [Sales conversations](/contact/sales/)
 
 ## What We Can Help With
 

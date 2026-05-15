@@ -5,7 +5,7 @@
 # =============================================================================
 # Build Stage
 # =============================================================================
-FROM debian:bookworm-slim AS builder
+FROM --platform=linux/amd64 debian:bookworm-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -15,14 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Zola
-RUN curl -sL https://github.com/getzola/zola/releases/download/v0.19.2/zola-v0.19.2-x86_64-unknown-linux-gnu.tar.gz \
-    | tar xz -C /usr/local/bin
-
-# Install Tailwind CSS standalone CLI
-RUN curl -sLo /usr/local/bin/tailwindcss \
-    https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-linux-x64 \
-    && chmod +x /usr/local/bin/tailwindcss
+# Zola v0.19.2 only publishes a Linux x86_64 binary. Pin the builder stage to
+# linux/amd64 so local Apple Silicon builds and CI builds use the same toolchain.
+RUN set -eux; \
+        curl -sL "https://github.com/getzola/zola/releases/download/v0.19.2/zola-v0.19.2-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C /usr/local/bin; \
+        curl -sLo /usr/local/bin/tailwindcss \
+            "https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-linux-x64"; \
+        chmod +x /usr/local/bin/tailwindcss
 
 # Copy source
 COPY . .
@@ -105,11 +105,21 @@ server {
         return 200 "OK";
     }
 
-    # Default: serve file, directory index, or .html fallback (Zola layout).
-    # Also redirect /foo -> /foo/ when /foo is a directory so trailing slashes
-    # are canonical without nuking asset URLs.
+    # Serve the home page with a one-time browser cache clear. The previous
+    # broken deployment emitted permanent redirects for slashless pages; this
+    # clears cached redirects for users who already loaded the front page.
+    location = / {
+        add_header Cache-Control "no-store" always;
+        add_header Clear-Site-Data '"cache"' always;
+        try_files /index.html =404;
+    }
+
+    # Default: serve file, slashless directory index, directory index, or .html
+    # fallback (Zola layout). Checking $uri/index.html before $uri/ keeps
+    # /pricing and /pricing/ both as 200 responses, so browsers never receive
+    # another cacheable /pricing -> /pricing/ directory redirect.
     location / {
-        try_files $uri $uri/ $uri.html $uri/index.html =404;
+        try_files $uri.html $uri/index.html $uri $uri/ =404;
     }
 }
 EOF

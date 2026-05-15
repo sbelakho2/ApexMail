@@ -97,7 +97,7 @@
       {% endif %}
     </div>
     <div class="mt-1">
-      <a href="{{ config.extra.cookie_consent_policy_path | default(value='/cookies') }}" data-focus-final="true" class="text-[10px] text-surface-500 underline hover:text-brand-600 transition-colors">
+      <a href="{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" data-focus-final="true" class="text-[10px] text-surface-500 underline hover:text-brand-600 transition-colors">
         {{- consent_policy_link -}}
       </a>
     </div>

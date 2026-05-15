@@ -68,7 +68,7 @@ analytics_pixel_url = ""          # Legacy pixel URL (kept for backward compat)
 
 support_email = "support@apexmail.ee"
 cookie_consent_cookie_name = "apexmail_cookie_consent"
-cookie_consent_policy_path = "/cookies"
+cookie_consent_policy_path = "/cookies/"
 cookie_consent_policy_label = "Cookie Policy"
 
 [[extra.cookie_consent_choices]]

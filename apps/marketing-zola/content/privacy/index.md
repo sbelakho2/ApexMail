@@ -41,7 +41,7 @@ We retain personal data only as long as necessary for the purposes for which it 
 | Event logs | 90 days (730 days for Enterprise) |
 | Support tickets | 2 years after resolution |
 
-See our [Data Retention Policy](/compliance#data-retention) for full details.
+See our [Data Retention Policy](/compliance/#data-retention) for full details.
 
 ## 6. Your Rights
 
@@ -66,7 +66,7 @@ If you believe that our processing of your personal data infringes the GDPR, you
 
 ## 8. Cookies
 
-See our [Cookie Policy](/cookies) for details on cookies and tracking.
+See our [Cookie Policy](/cookies/) for details on cookies and tracking.
 
 ## 9. Contact
 

@@ -21,4 +21,4 @@ Polling works for debugging, but production systems usually want event delivery 
 - Verify request authenticity before processing payloads.
 - Hand off heavy downstream work to an internal queue instead of doing it inline in the webhook handler.
 
-For request-driven inspection alongside event delivery, use the [API Reference](/docs/api) and [Analytics](/docs/analytics) guides together.
+For request-driven inspection alongside event delivery, use the [API Reference](/docs/api/) and [Analytics](/docs/analytics/) guides together.

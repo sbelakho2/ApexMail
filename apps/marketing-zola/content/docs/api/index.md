@@ -34,4 +34,4 @@ curl -X POST https://api.apexmail.ee/v1/messages \
 
 - Use idempotency keys when your sender may retry the same write request.
 - Keep API keys server-side; never embed them in browser code.
-- Use the [API Console](/api-console) to test payloads before wiring them into your application.
+- Use the [API Console](/api-console/) to test payloads before wiring them into your application.
