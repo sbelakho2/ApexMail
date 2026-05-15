@@ -56,10 +56,10 @@ services:
       - NET_BIND_SERVICE
     read_only: true
     tmpfs:
-      - /tmp
-      - /var/log/nginx
-      - /var/cache/nginx
-      - /var/run
+      - /tmp:mode=1777
+      - /var/log/nginx:mode=0777
+      - /var/cache/nginx:mode=0777
+      - /var/run:mode=0777
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default

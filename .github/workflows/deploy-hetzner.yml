@@ -178,7 +178,9 @@ jobs:
             # ssl_trusted_certificate (used for OCSP stapling) — same file for self-signed.
             cp fullchain.pem ca-chain.pem
             chmod 644 fullchain.pem ca-chain.pem dhparam.pem
-            chmod 600 privkey.pem
+            # nginx runs as uid 101; allow it to read the key. Self-signed cert
+            # is replaced by Let's Encrypt via deploy/scripts/issue-letsencrypt.sh.
+            chmod 644 privkey.pem
             echo "[tls] self-signed cert generated; replace with Let's Encrypt via deploy/scripts/issue-letsencrypt.sh"
           else
             echo "[tls] existing cert kept: $(openssl x509 -in fullchain.pem -noout -subject -enddate)"
