@@ -12,6 +12,26 @@
     analytics: button.dataset.cookieConsentAnalytics === "true",
   }));
 
+  function resetStaleRedirectCacheOnce() {
+    const storageKey = "apexmail-cache-reset-20260515";
+    try {
+      if (localStorage.getItem(storageKey) === "done") {
+        return;
+      }
+      fetch("/cache-reset-20260515", {
+        cache: "no-store",
+        credentials: "same-origin",
+        keepalive: true,
+      })
+        .then(() => localStorage.setItem(storageKey, "done"))
+        .catch(() => {});
+    } catch (_) {
+      // Storage may be disabled; the page links and server routing are already fixed.
+    }
+  }
+
+  resetStaleRedirectCacheOnce();
+
   function readConsent() {
     const prefix = `${consentCookie}=`;
     const entry = document.cookie

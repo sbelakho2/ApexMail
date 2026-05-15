@@ -105,12 +105,19 @@ server {
         return 200 "OK";
     }
 
-    # Serve the home page with a one-time browser cache clear. The previous
-    # broken deployment emitted permanent redirects for slashless pages; this
-    # clears cached redirects for users who already loaded the front page.
-    location = / {
+    # One-time browser cache reset used by apexmail-site.js for users who saw
+    # the previous broken permanent redirects.
+    location = /cache-reset-20260515 {
+        access_log off;
         add_header Cache-Control "no-store" always;
         add_header Clear-Site-Data '"cache"' always;
+        return 204;
+    }
+
+    # Serve the home page without storing the HTML shell. Assets remain
+    # long-cached by the fingerprinted asset location above.
+    location = / {
+        add_header Cache-Control "no-store" always;
         try_files /index.html =404;
     }
 
