@@ -113,8 +113,32 @@ jobs:
         run: |
           set -euo pipefail
           ssh hetzner "install -d -m 750 ${DEPLOY_DIR}"
+          # rsync --delete is destructive: it removes anything on the host that
+          # doesn't exist locally. The Let's Encrypt store lives under
+          # deploy/nginx/ssl/{live,archive,accounts,renewal,renewal-hooks,csr,
+          # keys} as well as the live cert files (fullchain.pem, privkey.pem,
+          # ca-chain.pem) that the certbot deploy-hook writes there. Protect
+          # those paths from deletion (rsync still copies anything new from
+          # the source — we just don't let it nuke runtime state).
           rsync -az --delete \
             --exclude='.git' --exclude='target' --exclude='node_modules' \
+            --filter='protect /deploy/nginx/ssl/fullchain.pem' \
+            --filter='protect /deploy/nginx/ssl/privkey.pem' \
+            --filter='protect /deploy/nginx/ssl/ca-chain.pem' \
+            --filter='protect /deploy/nginx/ssl/live' \
+            --filter='protect /deploy/nginx/ssl/live/**' \
+            --filter='protect /deploy/nginx/ssl/archive' \
+            --filter='protect /deploy/nginx/ssl/archive/**' \
+            --filter='protect /deploy/nginx/ssl/accounts' \
+            --filter='protect /deploy/nginx/ssl/accounts/**' \
+            --filter='protect /deploy/nginx/ssl/renewal' \
+            --filter='protect /deploy/nginx/ssl/renewal/**' \
+            --filter='protect /deploy/nginx/ssl/renewal-hooks' \
+            --filter='protect /deploy/nginx/ssl/renewal-hooks/**' \
+            --filter='protect /deploy/nginx/ssl/csr' \
+            --filter='protect /deploy/nginx/ssl/csr/**' \
+            --filter='protect /deploy/nginx/ssl/keys' \
+            --filter='protect /deploy/nginx/ssl/keys/**' \
             -e 'ssh' \
             docker-compose.yml docker-compose.prod.yml \
             deploy \
@@ -205,7 +229,26 @@ jobs:
           ssh hetzner "cd ${DEPLOY_DIR} && \
             docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
               up -d --remove-orphans --no-build \
-              postgres redis clickhouse marketing nginx api enterprise tracking"
+              postgres redis clickhouse marketing nginx api enterprise tracking certbot"
+
+      - name: Reload nginx to re-resolve upstream container IPs
+        run: |
+          # When docker compose recreates a backend container (api/tracking/
+          # enterprise/marketing) it gets a new container IP on the user
+          # network. nginx's `upstream { server <name>:port; }` blocks resolve
+          # the name ONCE at worker start and then cache it forever, so any
+          # recreation leaves nginx connecting to a dead IP (502/connection
+          # refused/host unreachable). A graceful reload makes nginx re-resolve
+          # all upstream hostnames without dropping in-flight requests.
+          ssh hetzner "cd ${DEPLOY_DIR} && \
+            for i in 1 2 3 4 5; do \
+              if docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+                   --env-file .env exec -T nginx nginx -s reload 2>&1; then \
+                echo '[nginx] reload OK'; break; \
+              fi; \
+              echo '[nginx] reload attempt '\$i' failed; nginx may still be starting'; \
+              sleep 3; \
+            done"
 
       - name: Verify rollout
         run: |
