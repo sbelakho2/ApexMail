@@ -12,6 +12,40 @@
 
 services:
   # ===========================================================================
+  # MARKETING SITE (Zola static site, served by nginx-alpine on 8080)
+  # ===========================================================================
+  marketing:
+    image: ghcr.io/sbelakho2/apexmail/marketing:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - apexmail_frontend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+        reservations:
+          memory: 32M
+
+  # ===========================================================================
   # REVERSE PROXY (TLS termination)
   # ===========================================================================
   nginx:
@@ -35,6 +69,8 @@ services:
       enterprise:
         condition: service_healthy
       tracking:
+        condition: service_healthy
+      marketing:
         condition: service_healthy
     ports:
       - "80:80"
@@ -174,9 +210,9 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN is required in production}
       # ── mCaptcha (login CAPTCHA protection) ───────────────────────────────
       MCAPTCHA_ENABLED: ${MCAPTCHA_ENABLED:?MCAPTCHA_ENABLED is required in production}
-      MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:?MCAPTCHA_SITE_KEY is required in production}
-      MCAPTCHA_SECRET: ${MCAPTCHA_SECRET:?MCAPTCHA_SECRET is required in production}
-      MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:?MCAPTCHA_VERIFY_URL is required in production}
+      MCAPTCHA_SITE_KEY: ${MCAPTCHA_SITE_KEY:-dev}
+      MCAPTCHA_SECRET_KEY: ${MCAPTCHA_SECRET_KEY:-${MCAPTCHA_SECRET:-dev}}
+      MCAPTCHA_VERIFY_URL: ${MCAPTCHA_VERIFY_URL:-https://demo.mcaptcha.org/api/v1/pow/siteverify}
       METRICS_PORT: 9090
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro

@@ -149,6 +149,36 @@ jobs:
           ls -l secrets/
           REMOTE_SH
 
+      - name: Bootstrap TLS material (self-signed fallback so nginx can start)
+        run: |
+          set -euo pipefail
+          ssh hetzner "DEPLOY_DIR='${DEPLOY_DIR}' bash -s" <<'REMOTE_SH'
+          set -euo pipefail
+          cd "${DEPLOY_DIR}/deploy/nginx"
+          install -d -m 755 ssl
+          cd ssl
+          # dhparam (2048-bit, generated once; ~30s).
+          if [[ ! -s dhparam.pem ]]; then
+            openssl dhparam -out dhparam.pem 2048
+          fi
+          # Generate a self-signed cert ONLY if no real cert is present.
+          # Once certbot issues real LE certs, they overwrite fullchain.pem/privkey.pem.
+          if [[ ! -s fullchain.pem || ! -s privkey.pem ]]; then
+            openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+              -keyout privkey.pem -out fullchain.pem \
+              -subj "/CN=apexmail.ee/O=ApexMail/C=EE" \
+              -addext "subjectAltName=DNS:apexmail.ee,DNS:www.apexmail.ee,DNS:api.apexmail.ee,DNS:app.apexmail.ee,DNS:admin.apexmail.ee,DNS:control.apexmail.ee,DNS:enterprise.apexmail.ee,DNS:track.apexmail.ee,DNS:mail.apexmail.ee"
+            # ssl_trusted_certificate (used for OCSP stapling) — same file for self-signed.
+            cp fullchain.pem ca-chain.pem
+            chmod 644 fullchain.pem ca-chain.pem dhparam.pem
+            chmod 600 privkey.pem
+            echo "[tls] self-signed cert generated; replace with Let's Encrypt via deploy/scripts/issue-letsencrypt.sh"
+          else
+            echo "[tls] existing cert kept: $(openssl x509 -in fullchain.pem -noout -subject -enddate)"
+          fi
+          ls -l
+          REMOTE_SH
+
       - name: Authenticate host to GHCR
         run: |
           ssh hetzner "echo '${{ secrets.GHCR_DEPLOY_TOKEN }}' | \

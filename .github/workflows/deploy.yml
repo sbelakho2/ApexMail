@@ -10,6 +10,7 @@ on:
       - main
     paths:
       - services/mail-server/**
+      - apps/marketing-zola/**
       - deploy/**
       - .github/workflows/deploy.yml
   push:
@@ -17,6 +18,7 @@ on:
       - main
     paths:
       - services/mail-server/**
+      - apps/marketing-zola/**
       - deploy/**
       - .github/workflows/deploy.yml
   workflow_dispatch:
@@ -260,6 +262,20 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/ops-service:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/ops-service:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: mode=max
+          attestations: |
+            type=sbom,enabled=true
+            type=provenance,enabled=true
+
+      - name: Build and push marketing site image
+        uses: docker/build-push-action@67a2d409c0a876cbe6b11854e3e25193efe4e62d # v6.12.0
+        with:
+          context: ./apps/marketing-zola
+          file: ./apps/marketing-zola/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/marketing:${{ github.sha }},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/marketing:latest
+          cache-from: type=gha,scope=marketing
+          cache-to: type=gha,mode=max,scope=marketing
           provenance: mode=max
           attestations: |
             type=sbom,enabled=true
