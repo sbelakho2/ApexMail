@@ -256,7 +256,7 @@ jobs:
             2>&1 | tee k6-journey-output.log
 
       - name: Store k6 results as artifacts
-        uses: actions/upload-artifact@65c4c4a1d7e2c2c0f0c7a6c6f9b3e7a1c6b7a8e9 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: k6-test-results
           path: |
