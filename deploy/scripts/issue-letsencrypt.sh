@@ -46,8 +46,10 @@ if [[ "$STAGING" == "true" ]]; then
 fi
 
 echo "[letsencrypt] issuing cert for: ${DOMAINS[*]}"
+# --user root: certbot needs to write /var/log/letsencrypt and chown
+# /etc/letsencrypt/{accounts,archive,live} which the compose service runs as 1000:1000.
 docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
-  run --rm --entrypoint certbot certbot \
+  run --rm --user root --entrypoint certbot certbot \
   certonly --webroot -w /var/www/certbot \
   --email "$EMAIL" --agree-tos --no-eff-email \
   --non-interactive --keep-until-expiring --expand \
@@ -61,8 +63,11 @@ if [[ ! -d "$SRC" ]]; then
   exit 1
 fi
 
+# privkey is 644 (not 600) because the front nginx container runs as uid 101
+# and reads these files via read-only bind mount. The directory itself is
+# host-only (root:root) so the key is not exposed beyond the box.
 install -m 644 "$SRC/fullchain.pem" "$LIVE/fullchain.pem"
-install -m 600 "$SRC/privkey.pem"   "$LIVE/privkey.pem"
+install -m 644 "$SRC/privkey.pem"   "$LIVE/privkey.pem"
 install -m 644 "$SRC/chain.pem"     "$LIVE/ca-chain.pem"
 
 echo "[letsencrypt] reloading nginx with new cert"

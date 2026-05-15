@@ -45,8 +45,9 @@ RUN apk add --no-cache curl \
 # Copy built site
 COPY --from=builder /app/public /usr/share/nginx/html
 
-# Nginx config for SPA + static
-COPY <<EOF /etc/nginx/conf.d/default.conf
+# Nginx config for static Zola site.
+# Heredoc is quoted ('EOF') so $uri / \. are written literally.
+COPY <<'EOF' /etc/nginx/conf.d/default.conf
 server {
     listen 8080;
     server_name _;
@@ -61,36 +62,48 @@ server {
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-    # Cache static assets
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+    # Gzip (must be at server/http level, before location matching)
+    gzip on;
+    gzip_comp_level 6;
+    gzip_min_length 256;
+    gzip_proxied any;
+    gzip_vary on;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/javascript
+        application/json
+        application/xml
+        application/rss+xml
+        application/atom+xml
+        application/wasm
+        image/svg+xml
+        font/ttf
+        font/otf;
+
+    # Long-cache static assets (fingerprinted by Zola where applicable).
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2|ttf|eot|otf)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
-    }
-
-    # Canonicalize directory URLs to the trailing-slash form Zola emits.
-    location ~ ^(.+[^/])$ {
-        if (-d /usr/share/nginx/html$uri) {
-            return 301 $uri/;
-        }
-        try_files $uri $uri.html =404;
-    }
-
-    # Serve files or fallback to index.html
-    location / {
-        try_files \$uri \$uri/index.html \$uri.html =404;
+        try_files $uri =404;
+        access_log off;
     }
 
     # Health check
-    location /health {
+    location = /health {
         access_log off;
         default_type text/plain;
         return 200 "OK";
     }
 
-    # Gzip
-    gzip on;
-    gzip_types text/plain text/css application/json text/xml application/xml;
-    gzip_vary on;
+    # Default: serve file, directory index, or .html fallback (Zola layout).
+    # Also redirect /foo -> /foo/ when /foo is a directory so trailing slashes
+    # are canonical without nuking asset URLs.
+    location / {
+        try_files $uri $uri/ $uri.html $uri/index.html =404;
+    }
 }
 EOF
 

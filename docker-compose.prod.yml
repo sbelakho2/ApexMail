@@ -103,12 +103,14 @@ services:
   certbot:
     image: certbot/certbot:v2.11.0
     restart: unless-stopped
-    user: "1000:1000"
+    # Must run as root: certbot writes /var/log/letsencrypt and chowns
+    # /etc/letsencrypt/{accounts,archive,live,renewal}.
+    user: "0:0"
     volumes:
       - certbot_webroot:/var/www/certbot
       - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/letsencrypt:rw
-    entrypoint: >
-      sh -c "while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h; done"
+      - ./deploy/scripts/certbot-renew-loop.sh:/usr/local/bin/certbot-renew-loop.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/certbot-renew-loop.sh"]
     networks:
       - apexmail_frontend
 
