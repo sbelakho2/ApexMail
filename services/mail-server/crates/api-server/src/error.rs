@@ -101,6 +101,9 @@ pub enum ApiError {
     RateLimited,
 
     #[error("{0}")]
+    RateLimitedMessage(String),
+
+    #[error("{0}")]
     PayloadTooLarge(String),
 
     #[error("request timeout")]
@@ -124,7 +127,7 @@ impl ApiError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited | Self::RateLimitedMessage(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -140,7 +143,7 @@ impl ApiError {
             Self::Forbidden(_) => "FORBIDDEN",
             Self::NotFound(_) => "NOT_FOUND",
             Self::Conflict(_) => "CONFLICT",
-            Self::RateLimited => "RATE_LIMIT_EXCEEDED",
+            Self::RateLimited | Self::RateLimitedMessage(_) => "RATE_LIMIT_EXCEEDED",
             Self::PayloadTooLarge(_) => "PAYLOAD_TOO_LARGE",
             Self::Timeout => "REQUEST_TIMEOUT",
             Self::Internal(_) => "INTERNAL_ERROR",
@@ -272,6 +275,18 @@ mod tests {
 
         assert_eq!(status, HttpStatus::TOO_MANY_REQUESTS);
         assert_eq!(json["error"]["code"], "RATE_LIMIT_EXCEEDED");
+        assert!(json["data"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_rate_limited_message_response() {
+        let resp =
+            ApiError::RateLimitedMessage("try again in a few minutes".into()).into_response();
+        let (status, json) = response_json(resp).await;
+
+        assert_eq!(status, HttpStatus::TOO_MANY_REQUESTS);
+        assert_eq!(json["error"]["code"], "RATE_LIMIT_EXCEEDED");
+        assert_eq!(json["error"]["message"], "try again in a few minutes");
         assert!(json["data"].is_null());
     }
 
