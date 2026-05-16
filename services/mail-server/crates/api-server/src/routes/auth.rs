@@ -655,11 +655,15 @@ async fn enqueue_verification_email(
         "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours.\n\n© 2026 ApexMail — https://apexmail.ee",
     );
 
+    // Generate a message ID used in both the messages log and the email_queue
+    let message_id = apexmail_lib::id::generate_id("msg", 22);
+
+    // 1. Insert into messages table (audit/log)
     sqlx::query(
         "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at)
          VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
     )
-    .bind(apexmail_lib::id::generate_id("msg", 22))
+    .bind(&message_id)
     .bind(SYSTEM_TENANT_ID)
     .bind("noreply@apexmail.ee")
     .bind(serde_json::json!([email]))
@@ -667,6 +671,45 @@ async fn enqueue_verification_email(
     .bind(&html_body)
     .bind(&text_body)
     .bind(serde_json::json!(["system", "verification"]))
+    .execute(db)
+    .await?;
+
+    // 2. Look up the domain_id for "apexmail.ee" via the system domain alias.
+    //    System-internal emails use a well-known tenant-less domain; if it is
+    //    not yet registered in the domains table we generate a synthetic ID
+    //    so the email_queue worker can still pick up the row (DKIM will be
+    //    skipped gracefully for unknown domains).
+    let domain_id: String = sqlx::query_scalar(
+        "SELECT id FROM domains WHERE domain = 'apexmail.ee' LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await?
+    .unwrap_or_else(|| apexmail_lib::id::generate_id("dom", 22));
+
+    // 3. Insert into email_queue for the worker processor to pick up
+    let now = chrono::Utc::now();
+    sqlx::query(
+        "INSERT INTO email_queue (
+            id, message_id, tenant_id, domain_id, \"from\", \"to\", subject,
+            html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12, 5, 'pending', $13, $13
+         )",
+    )
+    .bind(apexmail_lib::id::generate_id("emq", 22))
+    .bind(&message_id)
+    .bind(SYSTEM_TENANT_ID)
+    .bind(&domain_id)
+    .bind("noreply@apexmail.ee")
+    .bind(email)
+    .bind("Verify your ApexMail account")
+    .bind(&html_body)
+    .bind(&text_body)
+    .bind(serde_json::json!(["system", "verification"]))
+    .bind(Option::<serde_json::Value>::None) // metadata
+    .bind(Option::<chrono::DateTime<chrono::Utc>>::None) // scheduled_at
+    .bind(now)
     .execute(db)
     .await?;
 

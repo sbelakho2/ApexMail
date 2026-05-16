@@ -284,7 +284,10 @@ pub async fn create_pool(
         .connect(database_url)
         .await?;
 
-    info!(max_connections, min_connections, "Database connection pool created");
+    info!(
+        max_connections,
+        min_connections, "Database connection pool created"
+    );
     Ok(pool)
 }
 
@@ -358,7 +361,8 @@ pub async fn create_pool_with_config(
 /// This is the canonical pool creation function. [`create_pool_with_config`] delegates
 /// to this function with default budget values.
 pub async fn create_pool_with_opts(config: &PoolConfig<'_>) -> Result<DatabasePool, sqlx::Error> {
-    let min_connections = normalized_min_connections(config.max_connections, config.min_connections);
+    let min_connections =
+        normalized_min_connections(config.max_connections, config.min_connections);
 
     // T-304: When statement_cache_capacity > 0, parse the URL into PgConnectOptions
     // so we can set the statement cache capacity before connecting. Otherwise fall

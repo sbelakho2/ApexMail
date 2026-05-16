@@ -5,7 +5,7 @@
 # =============================================================================
 # Build Stage
 # =============================================================================
-FROM --platform=linux/amd64 debian:bookworm-slim AS builder
+FROM debian:bookworm-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -47,89 +47,7 @@ COPY --from=builder /app/public /usr/share/nginx/html
 
 # Nginx config for static Zola site.
 # Heredoc is quoted ('EOF') so $uri / \. are written literally.
-COPY <<'EOF' /etc/nginx/conf.d/default.conf
-server {
-    listen 8080;
-    server_name _;
-
-    root /usr/share/nginx/html;
-    index index.html;
-
-    # When try_files lands on a directory, nginx issues a 301 to <uri>/.
-    # We sit behind a TLS-terminating reverse proxy, so emit relative
-    # redirects (no scheme, no host:port leak).
-    absolute_redirect off;
-    port_in_redirect off;
-
-    # Security headers
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-    # Gzip (must be at server/http level, before location matching)
-    gzip on;
-    gzip_comp_level 6;
-    gzip_min_length 256;
-    gzip_proxied any;
-    gzip_vary on;
-    gzip_types
-        text/plain
-        text/css
-        text/xml
-        text/javascript
-        application/javascript
-        application/json
-        application/xml
-        application/rss+xml
-        application/atom+xml
-        application/wasm
-        image/svg+xml
-        font/ttf
-        font/otf;
-
-    # Long-cache static assets (fingerprinted by Zola where applicable).
-    # Use add_header (not `expires`) so we emit exactly one Cache-Control
-    # header that includes `immutable`.
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2|ttf|eot|otf)$ {
-        add_header Cache-Control "public, max-age=31536000, immutable" always;
-        try_files $uri =404;
-        access_log off;
-    }
-
-    # Health check
-    location = /health {
-        access_log off;
-        default_type text/plain;
-        return 200 "OK";
-    }
-
-    # One-time browser cache reset used by apexmail-site.js for users who saw
-    # the previous broken permanent redirects.
-    location = /cache-reset-20260515 {
-        access_log off;
-        add_header Cache-Control "no-store" always;
-        add_header Clear-Site-Data '"cache"' always;
-        return 204;
-    }
-
-    # Serve the home page without storing the HTML shell. Assets remain
-    # long-cached by the fingerprinted asset location above.
-    location = / {
-        add_header Cache-Control "no-store" always;
-        try_files /index.html =404;
-    }
-
-    # Default: serve file, slashless directory index, directory index, or .html
-    # fallback (Zola layout). Checking $uri/index.html before $uri/ keeps
-    # /pricing and /pricing/ both as 200 responses, so browsers never receive
-    # another cacheable /pricing -> /pricing/ directory redirect.
-    location / {
-        try_files $uri.html $uri/index.html $uri $uri/ =404;
-    }
-}
-EOF
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 USER apexmail
 EXPOSE 8080

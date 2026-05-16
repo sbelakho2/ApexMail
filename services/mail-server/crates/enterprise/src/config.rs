@@ -538,7 +538,7 @@ mod tests {
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.port, 3000);
         assert_eq!(cfg.host, "0.0.0.0");
-        assert_eq!(cfg.db.host, "localhost");
+        assert_eq!(cfg.db.host, "127.0.0.1");
         assert_eq!(cfg.db.port, 5432);
         assert_eq!(cfg.db.name, "apexmail");
         assert_eq!(cfg.db.max_connections, 20);

@@ -150,6 +150,10 @@ ENTRYPOINT ["/usr/bin/tini", "--", "send-email"]
 FROM runtime-base AS api-server
 
 COPY --from=api-server-builder /app/target/release/api-server /usr/local/bin/
+COPY --from=api-server-builder /app/apps/marketing-zola/public /app/apps/marketing-zola/public
+
+ENV MARKETING_PUBLIC_DIR=/app/apps/marketing-zola/public
+WORKDIR /app
 
 USER apexmail
 EXPOSE 3000

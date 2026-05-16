@@ -1,0 +1,1164 @@
+[
+  {
+    "url": "https://apexmail.ee/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 112,
+        "y": 24,
+        "width": 122.65625,
+        "height": 32,
+        "top": 24,
+        "right": 234.65625,
+        "bottom": 56,
+        "left": 112
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "api/request.ts",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "// Server-side send example",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "// That's it. Email delivered with full tracking.",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "// { id: \"msg_abc123\", status: \"queued\" }",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Endpoint Lanes",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Pick a lane, tune payload, execute, then inspect e",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "POST\nSend Email\nTransactional send with idempotenc",
+        "ratio": 1.27,
+        "threshold": 4.5
+      },
+      {
+        "text": "Transactional send with idempotency safety",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "GET\nMessages\nDelivery stream and lifecycle lookup",
+        "ratio": 1.91,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/https:__apexmail.ee_desktop.png"
+  },
+  {
+    "url": "https://apexmail.ee/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 16,
+        "y": 16,
+        "width": 122.65625,
+        "height": 32,
+        "top": 16,
+        "right": 138.65625,
+        "bottom": 48,
+        "left": 16
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "api/request.ts",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "// Server-side send example",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "// That's it. Email delivered with full tracking.",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "// { id: \"msg_abc123\", status: \"queued\" }",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Endpoint Lanes",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Pick a lane, tune payload, execute, then inspect e",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "POST\nSend Email\nTransactional send with idempotenc",
+        "ratio": 1.27,
+        "threshold": 4.5
+      },
+      {
+        "text": "Transactional send with idempotency safety",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "GET\nMessages\nDelivery stream and lifecycle lookup",
+        "ratio": 1.91,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/https:__apexmail.ee_mobile.png"
+  },
+  {
+    "url": "https://apexmail.ee/pricing/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 112,
+        "y": 24,
+        "width": 122.65625,
+        "height": 32,
+        "top": 24,
+        "right": 234.65625,
+        "bottom": 56,
+        "left": 112
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "forever",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "MOST POPULAR",
+        "ratio": 3.76,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "ENTERPRISE",
+        "ratio": 1.36,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 2.57,
+        "threshold": 4.5
+      },
+      {
+        "text": "Annual-contract platform plan for regulated sender",
+        "ratio": 2.57,
+        "threshold": 3.0
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/pricing_desktop.png"
+  },
+  {
+    "url": "https://apexmail.ee/pricing/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 16,
+        "y": 16,
+        "width": 122.65625,
+        "height": 32,
+        "top": 16,
+        "right": 138.65625,
+        "bottom": 48,
+        "left": 16
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "forever",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "MOST POPULAR",
+        "ratio": 3.76,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "ENTERPRISE",
+        "ratio": 1.36,
+        "threshold": 4.5
+      },
+      {
+        "text": "/month",
+        "ratio": 2.57,
+        "threshold": 4.5
+      },
+      {
+        "text": "Annual-contract platform plan for regulated sender",
+        "ratio": 2.57,
+        "threshold": 3.0
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/pricing_mobile.png"
+  },
+  {
+    "url": "https://apexmail.ee/docs/",
+    "title": "ApexMail Documentation | ApexMail",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 112,
+        "y": 24,
+        "width": 122.65625,
+        "height": 32,
+        "top": 24,
+        "right": 234.65625,
+        "bottom": 56,
+        "left": 112
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "DEVELOPER DOCUMENTATION",
+        "ratio": 3.07,
+        "threshold": 4.5
+      },
+      {
+        "text": "Enterprise email infrastructure that keeps you com",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "\u00a9 2026 Bel Consulting O\u00dc.",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Apex Style v1.0",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Sakala 7-2 \u00b7 10141 Tallinn \u00b7 Estonia",
+        "ratio": 2.57,
+        "threshold": 4.5
+      },
+      {
+        "text": "VAT EE102951727 \u00b7 Reg. 16942833",
+        "ratio": 2.57,
+        "threshold": 4.5
+      },
+      {
+        "text": "Infrastructure Operational",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Infrastructure Operational",
+        "ratio": 4.12,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/docs_desktop.png"
+  },
+  {
+    "url": "https://apexmail.ee/docs/",
+    "title": "ApexMail Documentation | ApexMail",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 16,
+        "y": 16,
+        "width": 122.65625,
+        "height": 32,
+        "top": 16,
+        "right": 138.65625,
+        "bottom": 48,
+        "left": 16
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "DEVELOPER DOCUMENTATION",
+        "ratio": 3.07,
+        "threshold": 4.5
+      },
+      {
+        "text": "Enterprise email infrastructure that keeps you com",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "\u00a9 2026 Bel Consulting O\u00dc.",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Apex Style v1.0",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Sakala 7-2 \u00b7 10141 Tallinn \u00b7 Estonia",
+        "ratio": 2.57,
+        "threshold": 4.5
+      },
+      {
+        "text": "VAT EE102951727 \u00b7 Reg. 16942833",
+        "ratio": 2.57,
+        "threshold": 4.5
+      },
+      {
+        "text": "Infrastructure Operational",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Infrastructure Operational",
+        "ratio": 4.12,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/docs_mobile.png"
+  },
+  {
+    "url": "https://apexmail.ee/private-cloud/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 112,
+        "y": 24,
+        "width": 122.65625,
+        "height": 32,
+        "top": 24,
+        "right": 234.65625,
+        "bottom": 56,
+        "left": 112
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "Your Cloud.",
+        "ratio": 1.06,
+        "threshold": 3.0
+      },
+      {
+        "text": "Dedicated IP Pool",
+        "ratio": 3.97,
+        "threshold": 4.5
+      },
+      {
+        "text": "Illustrative deployment scenarios. Actual latency",
+        "ratio": 2.57,
+        "threshold": 4.5
+      },
+      {
+        "text": "Same VPC",
+        "ratio": 3.67,
+        "threshold": 4.5
+      },
+      {
+        "text": "Sub-millisecond \u2014 app and API share the same netwo",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Same Region",
+        "ratio": 3.67,
+        "threshold": 4.5
+      },
+      {
+        "text": "Low single-digit milliseconds \u2014 minimal cross-AZ h",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Cross-region API",
+        "ratio": 3.67,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tens to hundreds of milliseconds \u2014 public internet",
+        "ratio": 4.12,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/private-cloud_desktop.png"
+  },
+  {
+    "url": "https://apexmail.ee/private-cloud/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 16,
+        "y": 16,
+        "width": 122.65625,
+        "height": 32,
+        "top": 16,
+        "right": 138.65625,
+        "bottom": 48,
+        "left": 16
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "Your Cloud.",
+        "ratio": 1.06,
+        "threshold": 3.0
+      },
+      {
+        "text": "Dedicated IP Pool",
+        "ratio": 3.97,
+        "threshold": 4.5
+      },
+      {
+        "text": "Illustrative deployment scenarios. Actual latency",
+        "ratio": 2.57,
+        "threshold": 4.5
+      },
+      {
+        "text": "Same VPC",
+        "ratio": 3.67,
+        "threshold": 4.5
+      },
+      {
+        "text": "Sub-millisecond \u2014 app and API share the same netwo",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Same Region",
+        "ratio": 3.67,
+        "threshold": 4.5
+      },
+      {
+        "text": "Low single-digit milliseconds \u2014 minimal cross-AZ h",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Cross-region API",
+        "ratio": 3.67,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tens to hundreds of milliseconds \u2014 public internet",
+        "ratio": 4.12,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/private-cloud_mobile.png"
+  },
+  {
+    "url": "https://apexmail.ee/status/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 112,
+        "y": 24,
+        "width": 122.65625,
+        "height": 32,
+        "top": 24,
+        "right": 234.65625,
+        "bottom": 56,
+        "left": 112
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "System Status",
+        "ratio": 1.06,
+        "threshold": 3.0
+      },
+      {
+        "text": "View live ApexMail status",
+        "ratio": 2.39,
+        "threshold": 3.0
+      },
+      {
+        "text": "Open Status Page",
+        "ratio": 1.04,
+        "threshold": 4.5
+      },
+      {
+        "text": "This page shows services tracked for monitoring,",
+        "ratio": 2.81,
+        "threshold": 4.5
+      },
+      {
+        "text": "status.apexmail.ee",
+        "ratio": 2.81,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tracked live",
+        "ratio": 3.07,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tracked live",
+        "ratio": 3.07,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tracked live",
+        "ratio": 3.07,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tracked live",
+        "ratio": 3.07,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/status_desktop.png"
+  },
+  {
+    "url": "https://apexmail.ee/status/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 16,
+        "y": 16,
+        "width": 122.65625,
+        "height": 32,
+        "top": 16,
+        "right": 138.65625,
+        "bottom": 48,
+        "left": 16
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "System Status",
+        "ratio": 1.06,
+        "threshold": 3.0
+      },
+      {
+        "text": "View live ApexMail status",
+        "ratio": 2.39,
+        "threshold": 3.0
+      },
+      {
+        "text": "Open Status Page",
+        "ratio": 1.04,
+        "threshold": 4.5
+      },
+      {
+        "text": "This page shows services tracked for monitoring,",
+        "ratio": 2.81,
+        "threshold": 4.5
+      },
+      {
+        "text": "status.apexmail.ee",
+        "ratio": 2.81,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tracked live",
+        "ratio": 3.07,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tracked live",
+        "ratio": 3.07,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tracked live",
+        "ratio": 3.07,
+        "threshold": 4.5
+      },
+      {
+        "text": "Tracked live",
+        "ratio": 3.07,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/status_mobile.png"
+  },
+  {
+    "url": "https://apexmail.ee/api-console/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 112,
+        "y": 24,
+        "width": 122.65625,
+        "height": 32,
+        "top": 24,
+        "right": 234.65625,
+        "bottom": 56,
+        "left": 112
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "Endpoint Lanes",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Pick a lane, tune payload, execute, then inspect e",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "POST\nSend Email\nTransactional send with idempotenc",
+        "ratio": 1.27,
+        "threshold": 4.5
+      },
+      {
+        "text": "Transactional send with idempotency safety",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "GET\nMessages\nDelivery stream and lifecycle lookup",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "GET\nMessages",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "Messages",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "Delivery stream and lifecycle lookup",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "GET\nDomains\nIdentity posture and DNS verification",
+        "ratio": 1.91,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/api-console_desktop.png"
+  },
+  {
+    "url": "https://apexmail.ee/api-console/",
+    "title": "ApexMail - Enterprise Email API for Developers",
+    "htmlClass": "scroll-smooth dark",
+    "bodyBg": "rgb(9, 9, 11)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": {
+      "text": "ApexMail",
+      "box": {
+        "x": 16,
+        "y": 16,
+        "width": 122.65625,
+        "height": 32,
+        "top": 16,
+        "right": 138.65625,
+        "bottom": 48,
+        "left": 16
+      },
+      "styles": {
+        "color": "rgb(250, 250, 250)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(229, 231, 235)",
+        "fill": "rgb(0, 0, 0)",
+        "stroke": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "visibility": "visible",
+        "display": "flex",
+        "opacity": "1"
+      }
+    },
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SKIP TO MAIN CONTENT",
+        "ratio": 1.0,
+        "threshold": 4.5
+      },
+      {
+        "text": "Endpoint Lanes",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "Pick a lane, tune payload, execute, then inspect e",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "POST\nSend Email\nTransactional send with idempotenc",
+        "ratio": 1.27,
+        "threshold": 4.5
+      },
+      {
+        "text": "Transactional send with idempotency safety",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "GET\nMessages\nDelivery stream and lifecycle lookup",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "GET\nMessages",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "Messages",
+        "ratio": 1.91,
+        "threshold": 4.5
+      },
+      {
+        "text": "Delivery stream and lifecycle lookup",
+        "ratio": 4.12,
+        "threshold": 4.5
+      },
+      {
+        "text": "GET\nDomains\nIdentity posture and DNS verification",
+        "ratio": 1.91,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/api-console_mobile.png"
+  },
+  {
+    "url": "https://app.apexmail.ee/login",
+    "title": "ApexMail",
+    "htmlClass": "__variable_712c26 __variable_60443c",
+    "bodyBg": "rgb(255, 255, 255)",
+    "mainBg": "rgb(255, 255, 255)",
+    "logo": null,
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SIGN IN",
+        "ratio": 1.0,
+        "threshold": 3.0
+      },
+      {
+        "text": "SECURITY CHECK ACTIVE",
+        "ratio": 2.56,
+        "threshold": 4.5
+      },
+      {
+        "text": "OR CONTINUE WITH",
+        "ratio": 2.56,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/https:__app.apexmail.ee_login_desktop.png"
+  },
+  {
+    "url": "https://app.apexmail.ee/login",
+    "title": "ApexMail",
+    "htmlClass": "__variable_712c26 __variable_60443c",
+    "bodyBg": "rgb(255, 255, 255)",
+    "mainBg": "rgb(255, 255, 255)",
+    "logo": null,
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "SIGN IN",
+        "ratio": 1.0,
+        "threshold": 3.0
+      },
+      {
+        "text": "SECURITY CHECK ACTIVE",
+        "ratio": 2.56,
+        "threshold": 4.5
+      },
+      {
+        "text": "OR CONTINUE WITH",
+        "ratio": 2.56,
+        "threshold": 4.5
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/https:__app.apexmail.ee_login_mobile.png"
+  },
+  {
+    "url": "https://apexmail.ee/signup",
+    "title": "404 Not Found",
+    "htmlClass": "",
+    "bodyBg": "rgba(0, 0, 0, 0)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": null,
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "404 Not Found",
+        "ratio": 1.0,
+        "threshold": 3.0
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/signup_desktop.png"
+  },
+  {
+    "url": "https://apexmail.ee/signup",
+    "title": "404 Not Found",
+    "htmlClass": "",
+    "bodyBg": "rgba(0, 0, 0, 0)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": null,
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "404 Not Found",
+        "ratio": 1.0,
+        "threshold": 3.0
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/signup_mobile.png"
+  },
+  {
+    "url": "https://apexmail.ee/campaigns",
+    "title": "404 Not Found",
+    "htmlClass": "",
+    "bodyBg": "rgba(0, 0, 0, 0)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": null,
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "404 Not Found",
+        "ratio": 1.0,
+        "threshold": 3.0
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/campaigns_desktop.png"
+  },
+  {
+    "url": "https://apexmail.ee/campaigns",
+    "title": "404 Not Found",
+    "htmlClass": "",
+    "bodyBg": "rgba(0, 0, 0, 0)",
+    "mainBg": "rgba(0, 0, 0, 0)",
+    "logo": null,
+    "images": [],
+    "horizontalOverflow": false,
+    "low_contrast_elements": [
+      {
+        "text": "404 Not Found",
+        "ratio": 1.0,
+        "threshold": 3.0
+      }
+    ],
+    "screenshot": "reports/live-dark-audit/current/screenshots/campaigns_mobile.png"
+  }
+]

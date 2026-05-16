@@ -147,8 +147,8 @@ async fn forgot_password(
             "Password reset token generated"
         );
 
-        // Enqueue the password reset email into the messages table so the
-        // MTA worker picks it up for delivery.
+        // Enqueue the password reset email into both the messages audit log
+        // and the email_queue so the worker processor delivers it.
         let encoded_token = percent_encode_component(&token);
         let encoded_email_param = percent_encode_component(&email);
         let reset_link = format!(
@@ -173,6 +173,7 @@ async fn forgot_password(
             "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.\n\n© 2026 ApexMail — https://apexmail.ee",
         );
 
+        // 1. Insert into messages table (audit/log)
         sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, tags, created_at)
              VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, 'queued', $8::jsonb, NOW())",
@@ -189,6 +190,50 @@ async fn forgot_password(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to enqueue password reset email");
+            ApiError::Internal("Failed to send reset email".into())
+        })?;
+
+        // 2. Look up the domain_id for "apexmail.ee" (system domain).
+        //    Falls back to a synthetic ID if the domain is not yet registered.
+        let domain_id: String = sqlx::query_scalar(
+            "SELECT id FROM domains WHERE domain = 'apexmail.ee' LIMIT 1",
+        )
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to look up system domain");
+            ApiError::Internal("Failed to send reset email".into())
+        })?
+        .unwrap_or_else(|| apexmail_lib::id::generate_id("dom", 22));
+
+        // 3. Insert into email_queue for the worker processor to pick up
+        let now = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO email_queue (
+                id, message_id, tenant_id, domain_id, \"from\", \"to\", subject,
+                html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, 5, 'pending', $13, $13
+             )",
+        )
+        .bind(apexmail_lib::id::generate_id("emq", 22))
+        .bind(&msg_id)
+        .bind(SYSTEM_TENANT_ID)
+        .bind(&domain_id)
+        .bind("noreply@apexmail.ee")
+        .bind(&email)
+        .bind("Reset your ApexMail password")
+        .bind(&html_body)
+        .bind(&text_body)
+        .bind(serde_json::json!(["system", "password-reset"]))
+        .bind(Option::<serde_json::Value>::None) // metadata
+        .bind(Option::<chrono::DateTime<chrono::Utc>>::None) // scheduled_at
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to enqueue password reset email to worker queue");
             ApiError::Internal("Failed to send reset email".into())
         })?;
 

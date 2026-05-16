@@ -1520,9 +1520,9 @@ impl<'a> Card<'a> {
 fn button_variant_class(variant: &str) -> &'static str {
     match variant {
         "destructive" => "bg-primary text-white hover:bg-brand-700",
-        "outline" => "border border-surface-200 bg-white text-surface-950 hover:border-surface-950 hover:bg-surface-50",
-        "secondary" => "bg-surface-100 text-surface-950 border border-surface-200 hover:border-surface-950 hover:bg-surface-200",
-        "ghost" => "hover:bg-surface-100 text-surface-600 hover:text-surface-950",
+        "outline" => "border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground",
+        "secondary" => "bg-secondary text-secondary-foreground border border-input hover:bg-accent hover:text-accent-foreground",
+        "ghost" => "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
         "link" => "text-primary font-bold underline decoration-brand-200 underline-offset-4 hover:decoration-primary",
         _ => "bg-primary text-white border border-brand-700 hover:bg-brand-700",
     }
@@ -2624,6 +2624,24 @@ mod tests {
         assert!(!loading.contains("<span class=\"mr-2\"><svg></svg></span>"));
         assert!(icon_only.contains("data-size=\"icon\""));
         assert!(icon_only.contains("h-10 w-10"));
+    }
+
+    #[test]
+    fn outline_button_uses_dark_mode_safe_tokens() {
+        let html = Button {
+            label: "Duplicate",
+            variant: "outline",
+            size: "default",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None,
+        }
+        .render_html();
+
+        assert!(html.contains("bg-background"));
+        assert!(html.contains("text-foreground"));
+        assert!(!html.contains("bg-white text-surface-950"));
     }
 
     #[test]
