@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+    <channel>
+      <title>ApexMail - Enterprise Email API for Developers</title>
+      <link>https://apexmail.ee</link>
+      <description>Enterprise email API with compliance workflow support, delivery tracking, and developer-first APIs. EU-hosted, GDPR-ready, with Enterprise private deployment options.</description>
+      <generator>Zola</generator>
+      <language>en</language>
+      <atom:link href="https://apexmail.ee/rss.xml" rel="self" type="application/rss+xml"/>
+      
+    </channel>
+</rss>

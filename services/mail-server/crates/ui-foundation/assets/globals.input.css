@@ -161,6 +161,36 @@
     --surface-950: 250 250 250;
   }
 
+  @media (prefers-color-scheme: dark) {
+    :root:not(.light) {
+      --background: 9 9 11;
+      --foreground: 250 250 250;
+      --card: 18 18 21;
+      --card-foreground: 250 250 250;
+      --popover: 9 9 11;
+      --popover-foreground: 250 250 250;
+      --secondary: 24 24 27;
+      --secondary-foreground: 250 250 250;
+      --muted: 24 24 27;
+      --muted-foreground: 161 161 170;
+      --accent: 24 24 27;
+      --accent-foreground: 250 250 250;
+      --border: 39 39 42;
+      --input: 39 39 42;
+      --surface-50: 9 9 11;
+      --surface-100: 24 24 27;
+      --surface-200: 39 39 42;
+      --surface-300: 63 63 70;
+      --surface-400: 82 82 91;
+      --surface-500: 113 113 122;
+      --surface-600: 161 161 170;
+      --surface-700: 212 212 216;
+      --surface-800: 228 228 231;
+      --surface-900: 244 244 245;
+      --surface-950: 250 250 250;
+    }
+  }
+
   html {
     min-height: 100%;
     overflow-x: hidden;
@@ -758,7 +788,7 @@
 
   .apex-table thead th {
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: inset 0 -1px 0 rgba(var(--primary), 0.45);
+    box-shadow: inset 0 -1px 0 rgb(var(--primary) / 0.45);
   }
 
   .apex-table th {
@@ -803,7 +833,7 @@
   .apex-empty-state {
     min-height: 240px;
     background:
-      radial-gradient(80% 80% at 50% 0%, rgba(var(--primary), 0.04), transparent 70%);
+      radial-gradient(80% 80% at 50% 0%, rgb(var(--primary) / 0.04), transparent 70%);
     border: 1px dashed rgba(9, 9, 11, 0.14);
     border-radius: 0.125rem;
   }
@@ -1126,6 +1156,646 @@
 
   .apex-cp-sales table tbody tr:hover {
     background-color: rgba(255, 255, 255, 0.04);
+  }
+}
+
+@layer utilities {
+  .dark .bg-white {
+    background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
+  }
+
+  .dark .bg-white\/80 {
+    background-color: rgb(var(--card) / 0.8);
+  }
+
+  .dark .bg-white\/90 {
+    background-color: rgb(var(--card) / 0.9);
+  }
+
+  .dark .bg-surface-950 {
+    background-color: rgb(9 9 11 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  .dark .bg-surface-900 {
+    background-color: rgb(24 24 27 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  .dark .bg-surface-800 {
+    background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  .dark [class~="bg-surface-950/50"] {
+    background-color: rgb(9 9 11 / 0.5) !important;
+  }
+
+  .dark [class~="bg-surface-900/50"] {
+    background-color: rgb(24 24 27 / 0.5) !important;
+  }
+
+  .dark [class~="bg-surface-100/50"],
+  .dark [class~="hover:bg-surface-100/50"]:hover {
+    background-color: rgb(24 24 27 / 0.5) !important;
+  }
+
+  .dark .bg-success-300.text-surface-950,
+  .dark .bg-success-200.text-surface-950,
+  .dark .bg-success-100.text-surface-950 {
+    color: rgb(9 9 11) !important;
+    -webkit-text-fill-color: rgb(9 9 11) !important;
+  }
+
+  .dark .hover\:bg-surface-950:hover {
+    background-color: rgb(9 9 11 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  .dark .hover\:bg-surface-900:hover {
+    background-color: rgb(24 24 27 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  .dark .hover\:bg-surface-800:hover {
+    background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+  }
+
+  .dark .border-surface-950,
+  .dark .border-surface-900,
+  .dark .border-surface-800 {
+    border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
+  }
+
+  .dark .text-brand-700 {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+  }
+
+  .dark .text-warning-700 {
+    color: rgb(var(--warning-400) / var(--tw-text-opacity, 1));
+  }
+
+  .dark .text-success-700 {
+    color: rgb(var(--success-400) / var(--tw-text-opacity, 1));
+  }
+
+  .dark .text-info-700 {
+    color: rgb(var(--info-400) / var(--tw-text-opacity, 1));
+  }
+
+  .dark .text-primary {
+    color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  .dark .apex-auth-notice {
+    color: rgb(var(--foreground)) !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    background-color: rgb(var(--card) / 0.92) !important;
+  }
+
+  .dark .apex-auth-notice p {
+    color: inherit !important;
+  }
+
+  .dark .apex-auth-notice[data-intent="success"] {
+    color: rgb(220 252 231) !important;
+    border-color: rgb(var(--success-400) / 0.5) !important;
+    background-color: rgb(20 83 45 / 0.28) !important;
+  }
+
+  .dark .apex-auth-notice[data-intent="warning"] {
+    color: rgb(254 243 199) !important;
+    border-color: rgb(var(--warning-400) / 0.52) !important;
+    background-color: rgb(120 53 15 / 0.3) !important;
+  }
+
+  .dark .apex-auth-notice[data-intent="error"] {
+    color: rgb(254 226 226) !important;
+    border-color: rgb(var(--brand-400) / 0.58) !important;
+    background-color: rgb(127 29 29 / 0.3) !important;
+  }
+
+  .dark .apex-auth-notice[data-intent="info"] {
+    color: rgb(254 226 226) !important;
+    border-color: rgb(var(--brand-400) / 0.5) !important;
+    background-color: rgb(69 10 10 / 0.32) !important;
+  }
+
+  .dark .text-surface-50,
+  .dark .text-surface-100,
+  .dark .text-surface-200,
+  .dark .text-surface-300 {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  .dark .text-surface-400,
+  .dark .text-surface-500 {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  .dark .apex-console-shell .text-surface-50,
+  .dark .apex-console-shell .text-surface-100,
+  .dark .apex-console-shell .text-surface-200,
+  .dark .apex-console-shell .text-surface-300,
+  .dark .apex-cp-shell .text-surface-50,
+  .dark .apex-cp-shell .text-surface-100,
+  .dark .apex-cp-shell .text-surface-200,
+  .dark .apex-cp-shell .text-surface-300 {
+    color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  .dark .apex-console-shell .text-surface-400,
+  .dark .apex-console-shell .text-surface-500,
+  .dark .apex-cp-shell .text-surface-400,
+  .dark .apex-cp-shell .text-surface-500 {
+    color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+  }
+
+  .dark .apex-console-shell,
+  .dark .apex-cp-shell {
+    color: rgb(var(--foreground));
+    background: rgb(var(--background));
+  }
+
+  .dark .apex-console-main,
+  .dark .apex-cp-main {
+    background-color: rgb(var(--background));
+    background-image:
+      radial-gradient(circle at top, rgb(var(--primary) / 0.12), transparent 38%),
+      linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+    background-size: 100% 520px, 80px 80px, 80px 80px;
+    background-attachment: scroll, local, local;
+  }
+
+  .dark .apex-console-header {
+    background: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.1);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .dark .apex-console-search input,
+  .dark .apex-console-shell input,
+  .dark .apex-console-shell textarea,
+  .dark .apex-console-shell select,
+  .dark .apex-cp-shell input,
+  .dark .apex-cp-shell textarea,
+  .dark .apex-cp-shell select {
+    background-color: rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.12);
+    color: rgb(var(--foreground));
+    -webkit-text-fill-color: rgb(var(--foreground));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .dark .apex-console-search input:focus,
+  .dark .apex-console-shell input:focus,
+  .dark .apex-console-shell textarea:focus,
+  .dark .apex-console-shell select:focus,
+  .dark .apex-cp-shell input:focus,
+  .dark .apex-cp-shell textarea:focus,
+  .dark .apex-cp-shell select:focus {
+    border-color: rgb(var(--primary));
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 0 0 3px rgb(var(--primary) / 0.22);
+  }
+
+  .dark .apex-card.apex-card,
+  .dark .apex-panel,
+  .dark .apex-signal-card,
+  .dark .apex-ops-board {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+      rgb(var(--card));
+    border-color: rgba(255, 255, 255, 0.1) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 18px 44px rgba(0, 0, 0, 0.36),
+      0 2px 8px rgba(0, 0, 0, 0.24);
+  }
+
+  .dark .apex-card.apex-card:hover,
+  .dark .apex-panel:hover,
+  .dark .apex-signal-card:hover {
+    border-color: rgba(255, 255, 255, 0.18) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 24px 58px rgba(0, 0, 0, 0.44),
+      0 4px 12px rgba(0, 0, 0, 0.28);
+  }
+
+  .dark .apex-table thead,
+  .dark .apex-table thead tr,
+  .dark .apex-table thead th {
+    background: linear-gradient(180deg, #18181b 0%, #0b0b0d 100%);
+  }
+
+  .dark .apex-table th {
+    color: rgba(255, 255, 255, 0.78);
+  }
+
+  .dark .apex-table td {
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .dark .apex-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .dark .apex-inventory-head {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+      rgb(var(--card));
+  }
+
+  .dark .apex-inventory-empty,
+  .dark .apex-chart-empty {
+    background:
+      radial-gradient(70% 70% at 50% 20%, rgb(var(--primary) / 0.08), transparent 70%);
+  }
+
+  .dark .apex-empty-state {
+    background:
+      radial-gradient(80% 80% at 50% 0%, rgb(var(--primary) / 0.10), transparent 70%);
+    border-color: rgba(255, 255, 255, 0.16);
+  }
+
+  .dark .apex-chart-card {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+      rgb(var(--card));
+  }
+
+  .dark .apex-cp-hero {
+    border-color: rgba(255, 255, 255, 0.1);
+    background:
+      radial-gradient(120% 80% at 0% 0%, rgb(var(--primary) / 0.12), transparent 56%),
+      linear-gradient(180deg, #18181b 0%, #101012 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      0 24px 58px rgba(0, 0, 0, 0.42),
+      0 2px 8px rgba(0, 0, 0, 0.28);
+  }
+
+  .dark .apex-cp-hero-side {
+    border-color: rgba(255, 255, 255, 0.1);
+    background:
+      radial-gradient(120% 100% at 100% 0%, rgb(var(--primary) / 0.12), transparent 60%),
+      linear-gradient(135deg, #111114 0%, #09090b 66%, #050507 100%);
+  }
+
+  .dark .apex-cp-stat-tile,
+  .dark .apex-cp-region-row {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.018) 100%),
+      rgb(24 24 27);
+    border-color: rgba(255, 255, 255, 0.1);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .dark .apex-cp-stat-tile:hover {
+    border-color: rgba(255, 255, 255, 0.18);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 12px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  .dark .apex-cp-stat-label,
+  .dark .apex-cp-stat-help {
+    color: rgb(var(--muted-foreground));
+  }
+
+  .dark .apex-cp-stat-value {
+    color: rgb(var(--foreground));
+  }
+
+  .dark .apex-cp-launch-step:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .dark input.bg-background,
+  .dark input.bg-white\/90,
+  .dark textarea.bg-background,
+  .dark select.bg-background {
+    background-color: rgb(var(--background) / var(--tw-bg-opacity, 1)) !important;
+    color: rgb(var(--foreground) / var(--tw-text-opacity, 1)) !important;
+    -webkit-text-fill-color: rgb(var(--foreground) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not(.light) .bg-white {
+      background-color: rgb(var(--card) / var(--tw-bg-opacity, 1));
+    }
+
+    :root:not(.light) .bg-white\/80 {
+      background-color: rgb(var(--card) / 0.8);
+    }
+
+    :root:not(.light) .bg-white\/90 {
+      background-color: rgb(var(--card) / 0.9);
+    }
+
+    :root:not(.light) .bg-surface-950 {
+      background-color: rgb(9 9 11 / var(--tw-bg-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .bg-surface-900 {
+      background-color: rgb(24 24 27 / var(--tw-bg-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .bg-surface-800 {
+      background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+    }
+
+    :root:not(.light) [class~="bg-surface-950/50"] {
+      background-color: rgb(9 9 11 / 0.5) !important;
+    }
+
+    :root:not(.light) [class~="bg-surface-900/50"] {
+      background-color: rgb(24 24 27 / 0.5) !important;
+    }
+
+    :root:not(.light) [class~="bg-surface-100/50"],
+    :root:not(.light) [class~="hover:bg-surface-100/50"]:hover {
+      background-color: rgb(24 24 27 / 0.5) !important;
+    }
+
+    :root:not(.light) .bg-success-300.text-surface-950,
+    :root:not(.light) .bg-success-200.text-surface-950,
+    :root:not(.light) .bg-success-100.text-surface-950 {
+      color: rgb(9 9 11) !important;
+      -webkit-text-fill-color: rgb(9 9 11) !important;
+    }
+
+    :root:not(.light) .hover\:bg-surface-950:hover {
+      background-color: rgb(9 9 11 / var(--tw-bg-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .hover\:bg-surface-900:hover {
+      background-color: rgb(24 24 27 / var(--tw-bg-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .hover\:bg-surface-800:hover {
+      background-color: rgb(39 39 42 / var(--tw-bg-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .border-surface-950,
+    :root:not(.light) .border-surface-900,
+    :root:not(.light) .border-surface-800 {
+      border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .text-brand-700 {
+      color: rgb(var(--brand-400) / var(--tw-text-opacity, 1));
+    }
+
+    :root:not(.light) .text-warning-700 {
+      color: rgb(var(--warning-400) / var(--tw-text-opacity, 1));
+    }
+
+    :root:not(.light) .text-success-700 {
+      color: rgb(var(--success-400) / var(--tw-text-opacity, 1));
+    }
+
+    :root:not(.light) .text-info-700 {
+      color: rgb(var(--info-400) / var(--tw-text-opacity, 1));
+    }
+
+    :root:not(.light) .text-primary {
+      color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .apex-auth-notice {
+      color: rgb(var(--foreground)) !important;
+      border-color: rgba(255, 255, 255, 0.14) !important;
+      background-color: rgb(var(--card) / 0.92) !important;
+    }
+
+    :root:not(.light) .apex-auth-notice p {
+      color: inherit !important;
+    }
+
+    :root:not(.light) .apex-auth-notice[data-intent="success"] {
+      color: rgb(220 252 231) !important;
+      border-color: rgb(var(--success-400) / 0.5) !important;
+      background-color: rgb(20 83 45 / 0.28) !important;
+    }
+
+    :root:not(.light) .apex-auth-notice[data-intent="warning"] {
+      color: rgb(254 243 199) !important;
+      border-color: rgb(var(--warning-400) / 0.52) !important;
+      background-color: rgb(120 53 15 / 0.3) !important;
+    }
+
+    :root:not(.light) .apex-auth-notice[data-intent="error"] {
+      color: rgb(254 226 226) !important;
+      border-color: rgb(var(--brand-400) / 0.58) !important;
+      background-color: rgb(127 29 29 / 0.3) !important;
+    }
+
+    :root:not(.light) .apex-auth-notice[data-intent="info"] {
+      color: rgb(254 226 226) !important;
+      border-color: rgb(var(--brand-400) / 0.5) !important;
+      background-color: rgb(69 10 10 / 0.32) !important;
+    }
+
+    :root:not(.light) .text-surface-50,
+    :root:not(.light) .text-surface-100,
+    :root:not(.light) .text-surface-200,
+    :root:not(.light) .text-surface-300 {
+      color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .text-surface-400,
+    :root:not(.light) .text-surface-500 {
+      color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .apex-console-shell .text-surface-50,
+    :root:not(.light) .apex-console-shell .text-surface-100,
+    :root:not(.light) .apex-console-shell .text-surface-200,
+    :root:not(.light) .apex-console-shell .text-surface-300,
+    :root:not(.light) .apex-cp-shell .text-surface-50,
+    :root:not(.light) .apex-cp-shell .text-surface-100,
+    :root:not(.light) .apex-cp-shell .text-surface-200,
+    :root:not(.light) .apex-cp-shell .text-surface-300 {
+      color: rgb(228 228 231 / var(--tw-text-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .apex-console-shell .text-surface-400,
+    :root:not(.light) .apex-console-shell .text-surface-500,
+    :root:not(.light) .apex-cp-shell .text-surface-400,
+    :root:not(.light) .apex-cp-shell .text-surface-500 {
+      color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+    }
+
+    :root:not(.light) .apex-console-shell,
+    :root:not(.light) .apex-cp-shell {
+      color: rgb(var(--foreground));
+      background: rgb(var(--background));
+    }
+
+    :root:not(.light) .apex-console-main,
+    :root:not(.light) .apex-cp-main {
+      background-color: rgb(var(--background));
+      background-image:
+        radial-gradient(circle at top, rgb(var(--primary) / 0.12), transparent 38%),
+        linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+      background-size: 100% 520px, 80px 80px, 80px 80px;
+      background-attachment: scroll, local, local;
+    }
+
+    :root:not(.light) .apex-console-header {
+      background: rgb(var(--card));
+      border-color: rgba(255, 255, 255, 0.1);
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    :root:not(.light) .apex-console-search input,
+    :root:not(.light) .apex-console-shell input,
+    :root:not(.light) .apex-console-shell textarea,
+    :root:not(.light) .apex-console-shell select,
+    :root:not(.light) .apex-cp-shell input,
+    :root:not(.light) .apex-cp-shell textarea,
+    :root:not(.light) .apex-cp-shell select {
+      background-color: rgb(var(--card));
+      border-color: rgba(255, 255, 255, 0.12);
+      color: rgb(var(--foreground));
+      -webkit-text-fill-color: rgb(var(--foreground));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    :root:not(.light) .apex-console-search input:focus,
+    :root:not(.light) .apex-console-shell input:focus,
+    :root:not(.light) .apex-console-shell textarea:focus,
+    :root:not(.light) .apex-console-shell select:focus,
+    :root:not(.light) .apex-cp-shell input:focus,
+    :root:not(.light) .apex-cp-shell textarea:focus,
+    :root:not(.light) .apex-cp-shell select:focus {
+      border-color: rgb(var(--primary));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.04),
+        0 0 0 3px rgb(var(--primary) / 0.22);
+    }
+
+    :root:not(.light) .apex-card.apex-card,
+    :root:not(.light) .apex-panel,
+    :root:not(.light) .apex-signal-card,
+    :root:not(.light) .apex-ops-board {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+        rgb(var(--card));
+      border-color: rgba(255, 255, 255, 0.1) !important;
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 18px 44px rgba(0, 0, 0, 0.36),
+        0 2px 8px rgba(0, 0, 0, 0.24);
+    }
+
+    :root:not(.light) .apex-card.apex-card:hover,
+    :root:not(.light) .apex-panel:hover,
+    :root:not(.light) .apex-signal-card:hover {
+      border-color: rgba(255, 255, 255, 0.18) !important;
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 24px 58px rgba(0, 0, 0, 0.44),
+        0 4px 12px rgba(0, 0, 0, 0.28);
+    }
+
+    :root:not(.light) .apex-table thead,
+    :root:not(.light) .apex-table thead tr,
+    :root:not(.light) .apex-table thead th {
+      background: linear-gradient(180deg, #18181b 0%, #0b0b0d 100%);
+    }
+
+    :root:not(.light) .apex-table th {
+      color: rgba(255, 255, 255, 0.78);
+    }
+
+    :root:not(.light) .apex-table td {
+      border-color: rgba(255, 255, 255, 0.08);
+    }
+
+    :root:not(.light) .apex-table tbody tr:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    :root:not(.light) .apex-inventory-head {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+        rgb(var(--card));
+    }
+
+    :root:not(.light) .apex-inventory-empty,
+    :root:not(.light) .apex-chart-empty {
+      background:
+        radial-gradient(70% 70% at 50% 20%, rgb(var(--primary) / 0.08), transparent 70%);
+    }
+
+    :root:not(.light) .apex-empty-state {
+      background:
+        radial-gradient(80% 80% at 50% 0%, rgb(var(--primary) / 0.10), transparent 70%);
+      border-color: rgba(255, 255, 255, 0.16);
+    }
+
+    :root:not(.light) .apex-chart-card {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.035) 0%, rgba(255, 255, 255, 0.015) 100%),
+        rgb(var(--card));
+    }
+
+    :root:not(.light) .apex-cp-hero {
+      border-color: rgba(255, 255, 255, 0.1);
+      background:
+        radial-gradient(120% 80% at 0% 0%, rgb(var(--primary) / 0.12), transparent 56%),
+        linear-gradient(180deg, #18181b 0%, #101012 100%);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.07),
+        0 24px 58px rgba(0, 0, 0, 0.42),
+        0 2px 8px rgba(0, 0, 0, 0.28);
+    }
+
+    :root:not(.light) .apex-cp-hero-side {
+      border-color: rgba(255, 255, 255, 0.1);
+      background:
+        radial-gradient(120% 100% at 100% 0%, rgb(var(--primary) / 0.12), transparent 60%),
+        linear-gradient(135deg, #111114 0%, #09090b 66%, #050507 100%);
+    }
+
+    :root:not(.light) .apex-cp-stat-tile,
+    :root:not(.light) .apex-cp-region-row {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.018) 100%),
+        rgb(24 24 27);
+      border-color: rgba(255, 255, 255, 0.1);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+
+    :root:not(.light) .apex-cp-stat-tile:hover {
+      border-color: rgba(255, 255, 255, 0.18);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 12px 24px rgba(0, 0, 0, 0.28);
+    }
+
+    :root:not(.light) .apex-cp-stat-label,
+    :root:not(.light) .apex-cp-stat-help {
+      color: rgb(var(--muted-foreground));
+    }
+
+    :root:not(.light) .apex-cp-stat-value {
+      color: rgb(var(--foreground));
+    }
+
+    :root:not(.light) .apex-cp-launch-step:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    :root:not(.light) input.bg-background,
+    :root:not(.light) input.bg-white\/90,
+    :root:not(.light) textarea.bg-background,
+    :root:not(.light) select.bg-background {
+      background-color: rgb(var(--background) / var(--tw-bg-opacity, 1)) !important;
+      color: rgb(var(--foreground) / var(--tw-text-opacity, 1)) !important;
+      -webkit-text-fill-color: rgb(var(--foreground) / var(--tw-text-opacity, 1)) !important;
+    }
   }
 }
 

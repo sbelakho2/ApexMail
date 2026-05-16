@@ -1,6 +1,7 @@
 //! Application builder — assembles all middleware and routes into an Axum `Router`.
 
 use axum::error_handling::HandleErrorLayer;
+use axum::extract::FromRequestParts;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{
     header::{self, ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST},
@@ -866,6 +867,7 @@ fn auth_page_error_message(error: &crate::error::ApiError) -> String {
         crate::error::ApiError::RateLimited => {
             "Too many verification attempts. Please wait and try again.".into()
         }
+        crate::error::ApiError::RateLimitedMessage(message) => message.clone(),
         crate::error::ApiError::Timeout => {
             "The verification request timed out. Please try again.".into()
         }
@@ -968,6 +970,99 @@ fn render_ui_response(
     Some(browser_html_response(html))
 }
 
+fn ui_route_requires_auth(surface: &str, path: &str) -> bool {
+    if let Some(auth_required) = ui_foundation::routing::auth_required(surface, path) {
+        return auth_required;
+    }
+
+    ui_foundation::routing::surface_routes(surface)
+        .into_iter()
+        .filter(|route| route.auth_required)
+        .filter_map(|route| route.canonical_pattern)
+        .any(|pattern| ui_route_pattern_matches(pattern, path))
+}
+
+fn ui_route_pattern_matches(pattern: &str, path: &str) -> bool {
+    let pattern_segments: Vec<&str> = pattern
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let path_segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    pattern_segments.len() == path_segments.len()
+        && pattern_segments.iter().zip(path_segments.iter()).all(
+            |(pattern_segment, path_segment)| {
+                (pattern_segment.starts_with('[') && pattern_segment.ends_with(']'))
+                    || pattern_segment == path_segment
+            },
+        )
+}
+
+async fn browser_request_is_authenticated(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    method: &Method,
+) -> bool {
+    let mut request_builder = axum::http::Request::builder()
+        .method(method.clone())
+        .uri(uri.clone());
+
+    for (name, value) in headers {
+        request_builder = request_builder.header(name, value);
+    }
+
+    let Ok(request) = request_builder.body(axum::body::Body::empty()) else {
+        return false;
+    };
+    let (mut parts, _) = request.into_parts();
+    auth::AuthUser::from_request_parts(&mut parts, state)
+        .await
+        .is_ok()
+}
+
+fn login_redirect_response(uri: &Uri) -> Response {
+    let next_path = uri
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str())
+        .unwrap_or(uri.path());
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("next", next_path);
+    let location = format!("/login?{}", serializer.finish());
+
+    (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
+}
+
+async fn ui_auth_redirect_if_required(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    method: &Method,
+) -> Option<Response> {
+    if !matches!(method, &Method::GET | &Method::HEAD) {
+        return None;
+    }
+
+    if uri.path() == "/v1" || uri.path().starts_with("/v1/") {
+        return None;
+    }
+
+    let host = headers.get(HOST).and_then(|value| value.to_str().ok());
+    let surface = state.config.ui_surface_for_host(host)?;
+    if !ui_route_requires_auth(surface, uri.path()) {
+        return None;
+    }
+
+    if browser_request_is_authenticated(state, headers, uri, method).await {
+        None
+    } else {
+        Some(login_redirect_response(uri))
+    }
+}
+
 fn not_found_response() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -985,6 +1080,13 @@ async fn fallback_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: axum::extract::Request,
 ) -> Response {
+    if let Some(response) =
+        ui_auth_redirect_if_required(&state, request.headers(), request.uri(), request.method())
+            .await
+    {
+        return response;
+    }
+
     if let Some(response) = render_ui_response(
         &state.config,
         request.headers(),
@@ -1360,6 +1462,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unauthenticated_protected_ui_routes_redirect_to_login() {
+        let app = test_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/campaigns?status=draft")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/login?next=%2Fcampaigns%3Fstatus%3Ddraft"
+        );
+    }
+
+    #[test]
+    fn dynamic_ui_routes_match_auth_manifest_patterns() {
+        assert!(ui_route_requires_auth("web", "/campaigns/real-campaign-id"));
+        assert!(ui_route_requires_auth(
+            "web",
+            "/campaigns/real-campaign-id/edit"
+        ));
+        assert!(!ui_route_requires_auth("web", "/login"));
+    }
+
+    #[tokio::test]
     async fn render_ui_response_preserves_auth_query_state() {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("app.apexmail.ee"));
@@ -1422,18 +1556,36 @@ mod tests {
                     .await
                     .unwrap();
 
-                assert_eq!(
-                    response.status(),
-                    StatusCode::OK,
-                    "{surface} route {} did not render through the app router",
-                    route.path,
-                );
-                assert_eq!(
-                    response.headers().get("content-type").unwrap(),
-                    "text/html; charset=utf-8",
-                    "{surface} route {} did not return HTML",
-                    route.path,
-                );
+                if route.auth_required {
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::SEE_OTHER,
+                        "{surface} route {} should require a browser session",
+                        route.path,
+                    );
+                    assert!(
+                        response
+                            .headers()
+                            .get(header::LOCATION)
+                            .and_then(|value| value.to_str().ok())
+                            .is_some_and(|location| location.starts_with("/login?next=")),
+                        "{surface} route {} did not redirect to login",
+                        route.path,
+                    );
+                } else {
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{surface} route {} did not render through the app router",
+                        route.path,
+                    );
+                    assert_eq!(
+                        response.headers().get("content-type").unwrap(),
+                        "text/html; charset=utf-8",
+                        "{surface} route {} did not return HTML",
+                        route.path,
+                    );
+                }
             }
         }
     }

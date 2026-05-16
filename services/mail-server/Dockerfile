@@ -35,6 +35,16 @@ COPY apps/marketing-zola/public /app/apps/marketing-zola/public
 
 RUN cargo build --release
 
+# Dedicated API builder used by the api-server target. The shared builder above
+# produces every service binary, but the API image should not spend deployment
+# time compiling workspace test/load/fuzz binaries.
+FROM deps AS api-server-builder
+
+COPY docs /app/docs
+COPY apps/marketing-zola/public /app/apps/marketing-zola/public
+
+RUN cargo build --release --bin api-server
+
 # =============================================================================
 # Runtime Base
 # =============================================================================
@@ -139,7 +149,7 @@ ENTRYPOINT ["/usr/bin/tini", "--", "send-email"]
 # =============================================================================
 FROM runtime-base AS api-server
 
-COPY --from=builder /app/target/release/api-server /usr/local/bin/
+COPY --from=api-server-builder /app/target/release/api-server /usr/local/bin/
 
 USER apexmail
 EXPOSE 3000

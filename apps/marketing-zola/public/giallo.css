@@ -89,3 +89,221 @@
 .z-meta.z-diff.z-header.z-to-file { color: #22863A; background-color: #F0FFF4; }
 .z-constant.z-other.z-reference.z-link { color: #032F62; text-decoration: underline; }
 .z-punctuation.z-definition.z-list.z-begin.z-markdown { color: #E36209; }
+
+@media (prefers-color-scheme: dark) {
+  .z-code {
+    color: #f4f4f5;
+    background-color: #09090b;
+  }
+
+  .z-hl {
+    background-color: #18181b;
+  }
+
+  .giallo-ln,
+  .z-comment,
+  .z-brackethighlighter.z-tag,
+  .z-brackethighlighter.z-curly,
+  .z-brackethighlighter.z-round,
+  .z-brackethighlighter.z-square,
+  .z-brackethighlighter.z-angle,
+  .z-brackethighlighter.z-quote {
+    color: #a1a1aa;
+  }
+
+  .z-constant,
+  .z-support,
+  .z-support.z-constant,
+  .z-support.z-variable,
+  .z-meta.z-module-reference,
+  .z-markup.z-heading,
+  .z-meta.z-separator,
+  .z-meta.z-output,
+  .z-markup.z-inline.z-raw,
+  .z-entity.z-name,
+  .z-entity.z-name.z-constant,
+  .z-variable.z-other.z-constant,
+  .z-variable.z-other.z-enummember {
+    color: #93c5fd;
+  }
+
+  .z-keyword,
+  .z-storage,
+  .z-storage.z-type,
+  .z-storage.z-modifier.z-package,
+  .z-storage.z-modifier.z-import,
+  .z-storage.z-type.z-java {
+    color: #f87171;
+  }
+
+  .z-string,
+  .z-source,
+  .z-string.z-regexp,
+  .z-source.z-regexp,
+  .z-punctuation.z-definition.z-string,
+  .z-string.z-regexp.z-character-class,
+  .z-source.z-ruby.z-embedded,
+  .z-string.z-regexp.z-arbitrary-repitition,
+  .z-string.z-other.z-link {
+    color: #fde68a;
+  }
+
+  .z-entity,
+  .z-entity.z-name.z-tag,
+  .z-markup.z-quote {
+    color: #86efac;
+  }
+
+  .z-variable,
+  .z-variable.z-other,
+  .z-variable.z-language,
+  .z-variable.z-parameter.z-function,
+  .z-meta.z-property-name,
+  .z-markup.z-italic,
+  .z-markup.z-bold,
+  .z-punctuation.z-definition.z-list.z-begin.z-markdown {
+    color: #f4f4f5;
+  }
+
+  .z-invalid.z-broken,
+  .z-invalid.z-deprecated,
+  .z-invalid.z-illegal,
+  .z-invalid.z-unimplemented,
+  .z-message.z-error,
+  .z-brackethighlighter.z-unmatched {
+    color: #fca5a5;
+  }
+
+  .z-markup.z-deleted,
+  .z-punctuation.z-definition.z-deleted,
+  .z-meta.z-diff.z-header.z-from-file {
+    color: #fecaca;
+    background-color: #450a0a;
+  }
+
+  .z-markup.z-inserted,
+  .z-punctuation.z-definition.z-inserted {
+    color: #bbf7d0;
+    background-color: #052e16;
+  }
+
+  .z-markup.z-changed,
+  .z-punctuation.z-definition.z-changed {
+    color: #fed7aa;
+    background-color: #431407;
+  }
+
+  .z-markup.z-ignored,
+  .z-markup.z-untracked {
+    color: #eff6ff;
+    background-color: #1d4ed8;
+  }
+}
+
+html.dark .z-code {
+  color: #f4f4f5;
+  background-color: #09090b;
+}
+
+html.dark .z-hl {
+  background-color: #18181b;
+}
+
+html.dark .giallo-ln,
+html.dark .z-comment,
+html.dark .z-brackethighlighter.z-tag,
+html.dark .z-brackethighlighter.z-curly,
+html.dark .z-brackethighlighter.z-round,
+html.dark .z-brackethighlighter.z-square,
+html.dark .z-brackethighlighter.z-angle,
+html.dark .z-brackethighlighter.z-quote {
+  color: #a1a1aa;
+}
+
+html.dark .z-constant,
+html.dark .z-support,
+html.dark .z-support.z-constant,
+html.dark .z-support.z-variable,
+html.dark .z-meta.z-module-reference,
+html.dark .z-markup.z-heading,
+html.dark .z-meta.z-separator,
+html.dark .z-meta.z-output,
+html.dark .z-markup.z-inline.z-raw,
+html.dark .z-entity.z-name,
+html.dark .z-entity.z-name.z-constant,
+html.dark .z-variable.z-other.z-constant,
+html.dark .z-variable.z-other.z-enummember {
+  color: #93c5fd;
+}
+
+html.dark .z-keyword,
+html.dark .z-storage,
+html.dark .z-storage.z-type,
+html.dark .z-storage.z-modifier.z-package,
+html.dark .z-storage.z-modifier.z-import,
+html.dark .z-storage.z-type.z-java {
+  color: #f87171;
+}
+
+html.dark .z-string,
+html.dark .z-source,
+html.dark .z-string.z-regexp,
+html.dark .z-source.z-regexp,
+html.dark .z-punctuation.z-definition.z-string,
+html.dark .z-string.z-regexp.z-character-class,
+html.dark .z-source.z-ruby.z-embedded,
+html.dark .z-string.z-regexp.z-arbitrary-repitition,
+html.dark .z-string.z-other.z-link {
+  color: #fde68a;
+}
+
+html.dark .z-entity,
+html.dark .z-entity.z-name.z-tag,
+html.dark .z-markup.z-quote {
+  color: #86efac;
+}
+
+html.dark .z-variable,
+html.dark .z-variable.z-other,
+html.dark .z-variable.z-language,
+html.dark .z-variable.z-parameter.z-function,
+html.dark .z-meta.z-property-name,
+html.dark .z-markup.z-italic,
+html.dark .z-markup.z-bold,
+html.dark .z-punctuation.z-definition.z-list.z-begin.z-markdown {
+  color: #f4f4f5;
+}
+
+html.dark .z-invalid.z-broken,
+html.dark .z-invalid.z-deprecated,
+html.dark .z-invalid.z-illegal,
+html.dark .z-invalid.z-unimplemented,
+html.dark .z-message.z-error,
+html.dark .z-brackethighlighter.z-unmatched {
+  color: #fca5a5;
+}
+
+html.dark .z-markup.z-deleted,
+html.dark .z-punctuation.z-definition.z-deleted,
+html.dark .z-meta.z-diff.z-header.z-from-file {
+  color: #fecaca;
+  background-color: #450a0a;
+}
+
+html.dark .z-markup.z-inserted,
+html.dark .z-punctuation.z-definition.z-inserted {
+  color: #bbf7d0;
+  background-color: #052e16;
+}
+
+html.dark .z-markup.z-changed,
+html.dark .z-punctuation.z-definition.z-changed {
+  color: #fed7aa;
+  background-color: #431407;
+}
+
+html.dark .z-markup.z-ignored,
+html.dark .z-markup.z-untracked {
+  color: #eff6ff;
+  background-color: #1d4ed8;
+}

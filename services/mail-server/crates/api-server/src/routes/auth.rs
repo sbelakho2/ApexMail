@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -32,9 +32,15 @@ const LOGIN_LOCKOUT_MAX_SECS: u64 = 24 * 60 * 60;
 const LOGIN_LOCKOUT_ESCALATION_WINDOW_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_API_KEY_EXPIRY_DAYS: i64 = 90;
 const MAX_API_KEY_EXPIRY_DAYS: i64 = 365;
+const REGISTER_RATE_LIMIT_WINDOW_SECS: u64 = 10 * 60;
+const REGISTER_RATE_LIMIT_MAX_REQUESTS: i64 = 20;
 const MFA_CHALLENGE_TTL_SECS: u64 = 10 * 60;
 const MFA_CHALLENGE_PREFIX: &str = "apexmail:auth:mfa_challenge:";
 const MFA_SECRET_BYTES: usize = 20;
+
+fn register_rate_limit_message() -> String {
+    "Too many sign-up attempts from this network. Please wait a few minutes and try again.".into()
+}
 
 // ─── mCaptcha token verification ───────────────────────────────
 
@@ -287,7 +293,8 @@ fn validate_password_strength(password: &str) -> Result<(), ApiError> {
     let has_special = password.chars().any(|c| c.is_ascii_punctuation());
     if !has_lower || !has_upper || !has_digit || !has_special {
         return Err(ApiError::Validation(vec![
-            "password must include uppercase, lowercase, number, and special character".into(),
+            "password must include uppercase, lowercase, number, and an ASCII punctuation mark"
+                .into(),
         ]));
     }
 
@@ -612,7 +619,7 @@ async fn revoke_user_sessions(
     tenant_id: &str,
     user_id: &str,
     ttl_secs: u64,
-) -> Result<(), ApiError> {
+) -> Result<i64, ApiError> {
     let mut conn = redis_pool.get().await?;
     let key = session_revocation_key(tenant_id, user_id);
     let revoked_after = Utc::now().timestamp();
@@ -621,7 +628,7 @@ async fn revoke_user_sessions(
         deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &key, revoked_after, ttl_secs)
             .await?;
 
-    Ok(())
+    Ok(revoked_after)
 }
 
 async fn enqueue_verification_email(
@@ -858,18 +865,45 @@ fn build_user_info(user: &UserRow) -> UserInfo {
     }
 }
 
-fn issue_session_response(state: &AppState, user: &UserRow) -> Result<Response, ApiError> {
-    issue_session_response_with_codes(state, user, None)
+fn session_issue_time_after_revocation(
+    now: DateTime<Utc>,
+    revoked_after: Option<i64>,
+) -> DateTime<Utc> {
+    if let Some(cutoff) = revoked_after {
+        if now.timestamp() <= cutoff {
+            return DateTime::<Utc>::from_timestamp(cutoff + 1, 0).unwrap_or(now);
+        }
+    }
+
+    now
 }
 
-fn issue_session_response_with_codes(
+fn issue_session_response_after_revocation(
+    state: &AppState,
+    user: &UserRow,
+    revoked_after: i64,
+) -> Result<Response, ApiError> {
+    issue_session_response_with_codes_after_revocation(state, user, None, revoked_after)
+}
+
+fn issue_session_response_with_codes_after_revocation(
     state: &AppState,
     user: &UserRow,
     recovery_codes: Option<Vec<String>>,
+    revoked_after: i64,
+) -> Result<Response, ApiError> {
+    let issued_at = session_issue_time_after_revocation(Utc::now(), Some(revoked_after));
+    issue_session_response_with_codes_at(state, user, recovery_codes, issued_at)
+}
+
+fn issue_session_response_with_codes_at(
+    state: &AppState,
+    user: &UserRow,
+    recovery_codes: Option<Vec<String>>,
+    issued_at: DateTime<Utc>,
 ) -> Result<Response, ApiError> {
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
-    let now = Utc::now();
-    let exp = now + ChronoDuration::seconds(expiry_secs);
+    let exp = issued_at + ChronoDuration::seconds(expiry_secs);
 
     let session_id = Uuid::new_v4().to_string();
 
@@ -878,7 +912,7 @@ fn issue_session_response_with_codes(
         tenant_id: user.tenant_id.to_string(),
         scopes: scopes_for_role(&user.role),
         exp: exp.timestamp(),
-        iat: now.timestamp(),
+        iat: issued_at.timestamp(),
         jti: session_id.clone(),
     };
 
@@ -1106,9 +1140,9 @@ async fn login(
     // This prevents session fixation attacks where an attacker could reuse a
     // pre-authentication session after privilege escalation.
     let ttl = state.config.jwt_expiry.as_secs();
-    revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
+    let revoked_after = revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
 
-    issue_session_response(&state, &user)
+    issue_session_response_after_revocation(&state, &user, revoked_after)
 }
 
 /// Try to verify a code as a recovery/backup code and consume it if valid.
@@ -1305,9 +1339,15 @@ async fn complete_mfa_challenge(
 
             // AR-005: Rotate session after MFA setup (privilege escalation)
             let ttl = state.config.jwt_expiry.as_secs();
-            revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
+            let revoked_after =
+                revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
 
-            issue_session_response_with_codes(&state, &user, Some(recovery_codes))
+            issue_session_response_with_codes_after_revocation(
+                &state,
+                &user,
+                Some(recovery_codes),
+                revoked_after,
+            )
         }
         MfaChallengeKind::Verify => {
             let current_secret = user
@@ -1362,9 +1402,10 @@ async fn complete_mfa_challenge(
 
             // AR-005: Rotate session after MFA verification (privilege escalation)
             let ttl = state.config.jwt_expiry.as_secs();
-            revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
+            let revoked_after =
+                revoke_user_sessions(&state.redis, &user.tenant_id, &user.id, ttl).await?;
 
-            issue_session_response(&state, &user)
+            issue_session_response_after_revocation(&state, &user, revoked_after)
         }
     }
 }
@@ -1630,40 +1671,6 @@ async fn register(
     // Validate CSRF token from X-CSRF-Token header (auth form protection)
     validate_form_csrf(&headers, &state.config.csrf_secret)?;
 
-    // Rate-limit by client IP using Redis (stricter: 3 sign-ups per 15 min per IP)
-    let client_ip = connect_info
-        .map(|ConnectInfo(addr)| {
-            extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
-        })
-        .unwrap_or_else(|| {
-            tracing::warn!("register request missing ConnectInfo; using shared rate-limit bucket");
-            "unknown".to_string()
-        });
-
-    let rate_key = format!("apexmail:register_rate:{client_ip}");
-    let window_secs: u64 = 15 * 60; // 15 minutes
-    let max_requests: i64 = 3;
-
-    if let Ok(mut conn) = state.redis.get().await {
-        let count: i64 = deadpool_redis::redis::cmd("INCR")
-            .arg(&rate_key)
-            .query_async(&mut *conn)
-            .await
-            .unwrap_or(1);
-
-        if count == 1 {
-            let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
-                .arg(&rate_key)
-                .arg(window_secs)
-                .query_async(&mut *conn)
-                .await;
-        }
-
-        if count > max_requests {
-            return Err(ApiError::RateLimited);
-        }
-    }
-
     // Verify mCaptcha proof-of-work token before processing registration.
     verify_mcaptcha_token(
         &state.config,
@@ -1703,6 +1710,40 @@ async fn register(
             "invalid plan: {}",
             body.plan
         )]));
+    }
+
+    // Rate-limit only after cheap validation so ordinary form mistakes do not
+    // burn the user's sign-up attempts. The limit still protects the database
+    // and email queue from repeated valid registration submissions.
+    let client_ip = connect_info
+        .map(|ConnectInfo(addr)| {
+            extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+        })
+        .unwrap_or_else(|| {
+            tracing::warn!("register request missing ConnectInfo; using shared rate-limit bucket");
+            "unknown".to_string()
+        });
+
+    let rate_key = format!("apexmail:register_rate:{client_ip}");
+
+    if let Ok(mut conn) = state.redis.get().await {
+        let count: i64 = deadpool_redis::redis::cmd("INCR")
+            .arg(&rate_key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(1);
+
+        if count == 1 {
+            let _: Result<(), _> = deadpool_redis::redis::cmd("EXPIRE")
+                .arg(&rate_key)
+                .arg(REGISTER_RATE_LIMIT_WINDOW_SECS)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        if count > REGISTER_RATE_LIMIT_MAX_REQUESTS {
+            return Err(ApiError::RateLimitedMessage(register_rate_limit_message()));
+        }
     }
 
     let email_lower = body.email.to_lowercase();
@@ -2489,10 +2530,19 @@ mod tests {
     #[test]
     fn test_validate_password_strength_requires_ascii_special_character() {
         assert!(validate_password_strength("StrongPassword1!").is_ok());
+        assert!(validate_password_strength("ValidPass9?Z").is_ok());
+        assert!(validate_password_strength("ValidPass9~Z").is_ok());
         assert!(matches!(
             validate_password_strength("Password123é"),
             Err(ApiError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn test_register_rate_limit_is_not_tiny_retry_bucket() {
+        assert!(REGISTER_RATE_LIMIT_MAX_REQUESTS >= 20);
+        assert!(REGISTER_RATE_LIMIT_WINDOW_SECS <= 10 * 60);
+        assert!(register_rate_limit_message().contains("sign-up attempts"));
     }
 
     #[test]
@@ -2852,6 +2902,26 @@ mod tests {
     fn test_issued_before_or_at_revocation_token_issued_at_same_time() {
         // Token issued at t=200, revocation at t=200 → issued AT revocation → REJECT
         assert!(issued_before_or_at_revocation(200, Some(200)));
+    }
+
+    #[test]
+    fn test_session_issue_time_moves_past_revocation_cutoff() {
+        let now = DateTime::<Utc>::from_timestamp(200, 0).unwrap();
+        let issued_at = session_issue_time_after_revocation(now, Some(200));
+
+        assert_eq!(issued_at.timestamp(), 201);
+        assert!(!issued_before_or_at_revocation(
+            issued_at.timestamp(),
+            Some(200)
+        ));
+    }
+
+    #[test]
+    fn test_session_issue_time_keeps_later_timestamps() {
+        let now = DateTime::<Utc>::from_timestamp(201, 0).unwrap();
+        let issued_at = session_issue_time_after_revocation(now, Some(200));
+
+        assert_eq!(issued_at, now);
     }
 
     #[test]

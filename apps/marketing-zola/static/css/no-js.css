@@ -189,6 +189,24 @@ details.faq-item[open] .faq-icon {
   color: white;
   box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
 }
+html.dark #deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
+html.dark #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
+html.dark #deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
+html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
+  background-color: rgb(var(--brand-700));
+  border-color: rgb(var(--brand-500));
+  color: rgb(255 255 255);
+}
+@media (prefers-color-scheme: dark) {
+  html:not(.light) #deploy-shared:checked ~ .deploy-tabs [for="deploy-shared"],
+  html:not(.light) #deploy-dedicated:checked ~ .deploy-tabs [for="deploy-dedicated"],
+  html:not(.light) #deploy-private:checked ~ .deploy-tabs [for="deploy-private"],
+  html:not(.light) #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
+    background-color: rgb(var(--brand-700));
+    border-color: rgb(var(--brand-500));
+    color: rgb(255 255 255);
+  }
+}
 #deploy-shared:checked ~ .deploy-panels #panel-shared,
 #deploy-dedicated:checked ~ .deploy-panels #panel-dedicated,
 #deploy-private:checked ~ .deploy-panels #panel-private,

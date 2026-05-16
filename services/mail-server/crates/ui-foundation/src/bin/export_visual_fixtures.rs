@@ -72,6 +72,23 @@ const MARKETING_VIEWPORTS: [(&str, Viewport); 2] = [
     ),
 ];
 
+const FULL_ROUTE_VIEWPORTS: [(&str, Viewport); 2] = [
+    (
+        "desktop",
+        Viewport {
+            width: 1440,
+            height: 900,
+        },
+    ),
+    (
+        "mobile",
+        Viewport {
+            width: 390,
+            height: 844,
+        },
+    ),
+];
+
 const DEFAULT_MARKETING_PUBLIC_DIR: &str = "apps/marketing-zola/public";
 
 fn route_file_stem(route: &str) -> String {
@@ -87,6 +104,10 @@ fn auth_html_file(id: &str) -> String {
 }
 
 fn marketing_html_file(surface: &str, route: &str) -> String {
+    format!("{}-{}.html", surface, route_file_stem(route))
+}
+
+fn full_route_html_file(surface: &str, route: &str) -> String {
     format!("{}-{}.html", surface, route_file_stem(route))
 }
 
@@ -108,6 +129,10 @@ fn normalize_fixture_html(html: &str) -> String {
         ("href=/css/", "href=css/"),
         ("href=\"https://apexmail.ee/css/", "href=\"css/"),
         ("href=https://apexmail.ee/css/", "href=css/"),
+        ("href=\"/giallo.css", "href=\"giallo.css"),
+        ("href=/giallo.css", "href=giallo.css"),
+        ("href=\"https://apexmail.ee/giallo.css", "href=\"giallo.css"),
+        ("href=https://apexmail.ee/giallo.css", "href=giallo.css"),
         ("href=\"/fonts/", "href=\"fonts/"),
         ("href=/fonts/", "href=fonts/"),
         ("href=\"https://apexmail.ee/fonts/", "href=\"fonts/"),
@@ -202,7 +227,13 @@ fn export_fixture_assets(out_dir: &Path) -> Result<(), Box<dyn std::error::Error
         )?;
     }
 
-    for file_name in ["icon.svg", "manifest.json", "robots.txt", "sitemap.xml"] {
+    for file_name in [
+        "giallo.css",
+        "icon.svg",
+        "manifest.json",
+        "robots.txt",
+        "sitemap.xml",
+    ] {
         let source = marketing_public_dir.join(file_name);
         if source.exists() {
             fs::copy(source, out_dir.join(file_name))?;
@@ -275,6 +306,35 @@ fn export_marketing_fixtures(
     Ok(())
 }
 
+fn export_full_route_fixtures(
+    out_dir: &std::path::Path,
+    manifest: &mut FixtureManifest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for surface in ui_foundation::routing::surface_ids() {
+        for route in ui_foundation::routing::surface_routes(surface) {
+            let html_file = full_route_html_file(surface, route.path);
+            let html = axum_router::render_route(surface, route.path)
+                .unwrap_or_else(|| panic!("missing renderer for [{}] {}", surface, route.path));
+            write_fixture_html(out_dir, &html_file, &html)?;
+
+            let route_stem = route_file_stem(route.path);
+            for (viewport_name, viewport) in FULL_ROUTE_VIEWPORTS {
+                let id = format!("{}-{}-{}", surface, route_stem, viewport_name);
+                manifest.fixtures.push(FixtureManifestEntry {
+                    id: id.clone(),
+                    surface,
+                    route: route.path,
+                    html_file: html_file.clone(),
+                    snapshot_file: format!("{id}.png"),
+                    viewport,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = std::env::args()
         .nth(1)
@@ -290,8 +350,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fixtures: Vec::new(),
     };
 
-    export_auth_fixtures(&out_dir, &mut manifest)?;
-    export_marketing_fixtures(&out_dir, &mut manifest)?;
+    if std::env::var("APEX_EXPORT_ALL_UI_ROUTES").as_deref() == Ok("1") {
+        export_full_route_fixtures(&out_dir, &mut manifest)?;
+    } else {
+        export_auth_fixtures(&out_dir, &mut manifest)?;
+        export_marketing_fixtures(&out_dir, &mut manifest)?;
+    }
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     fs::write(out_dir.join("manifest.json"), manifest_json)?;

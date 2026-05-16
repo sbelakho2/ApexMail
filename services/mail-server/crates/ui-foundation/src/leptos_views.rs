@@ -964,7 +964,7 @@ var ALLOWED={\
 '/v1/auth/signup':['name','email','password','company_name','plan','mcaptcha__token'],\
 '/v1/auth/register':['name','email','password','company_name','plan','mcaptcha__token'],\
 '/v1/auth/forgot-password':['email','mcaptcha__token'],\
-'/v1/auth/reset-password':['token','password','mcaptcha__token']\
+'/v1/auth/reset-password':['token','email','password','confirmPassword','mcaptcha__token']\
 };\
 function destFor(action){\
 if(action.indexOf('/login')>-1)return '/dashboard';\
@@ -984,6 +984,22 @@ var box=form.querySelector('[data-success]');\
 if(!box){box=document.createElement('div');box.setAttribute('data-success','true');box.className='text-sm text-success-700 font-bold uppercase tracking-tight';form.appendChild(box);}\
 box.classList.remove('hidden');\
 box.textContent=msg||'Done.';\
+}\
+function togglePassword(btn){\
+var id=btn.getAttribute('data-password-toggle')||btn.getAttribute('aria-controls');\
+var input=id?document.getElementById(id):null;if(!input)return;\
+var showing=input.type==='text';input.type=showing?'password':'text';\
+btn.setAttribute('aria-pressed',showing?'false':'true');\
+btn.setAttribute('aria-label',showing?'Show password':'Hide password');\
+btn.textContent=showing?'Show':'Hide';\
+}\
+function bindPasswordToggles(){\
+document.querySelectorAll('[data-password-toggle]').forEach(function(btn){btn.dataset.passwordToggleBound='1';});\
+if(document.documentElement.dataset.passwordTogglesBound==='1')return;document.documentElement.dataset.passwordTogglesBound='1';\
+document.addEventListener('click',function(ev){\
+var target=ev.target&&ev.target.closest?ev.target.closest('[data-password-toggle]'):null;\
+if(!target)return;ev.preventDefault();togglePassword(target);\
+});\
 }\
 async function submitForm(ev){\
 var form=ev.currentTarget;\
@@ -1016,12 +1032,28 @@ if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.data
 }catch(err){showError(form,'Network error. Please try again.');if(btn){btn.disabled=false;if(btn.dataset.originalLabel)btn.textContent=btn.dataset.originalLabel;}}\
 }\
 function bind(){\
+bindPasswordToggles();\
 document.querySelectorAll('form[action^=\"/v1/auth/\"],form[action^=\"/api/auth/\"]').forEach(function(f){\
 if(f.dataset.authBound==='1')return;f.dataset.authBound='1';f.addEventListener('submit',submitForm);\
 });\
 }\
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind);}else{bind();}\
 })();</script>"
+}
+
+fn password_pattern() -> &'static str {
+    r"(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]).{12,128}"
+}
+
+fn password_requirements_text() -> &'static str {
+    "Use 12-128 characters with uppercase, lowercase, a number, and ASCII punctuation such as ! @ # $ % ^ & * ? - _ ."
+}
+
+fn password_requirements_hint() -> String {
+    format!(
+        "<p class=\"text-xs text-muted-foreground leading-relaxed\">{}</p>",
+        password_requirements_text()
+    )
 }
 
 fn web_auth_hidden_input(name: &str, value: &str) -> String {
@@ -1064,7 +1096,7 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
     };
 
     format!(
-        "<div class=\"rounded-sm border px-4 py-4 {classes}\">\
+        "<div class=\"apex-auth-notice rounded-sm border px-4 py-4 {classes}\" data-intent=\"{intent}\">\
 <p class=\"text-sm font-bold\">{title}</p>\
 <p class=\"mt-1 text-sm leading-relaxed\">{description}</p></div>",
     )
@@ -1078,6 +1110,7 @@ pub fn web_signup_page(
 ) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     let mcaptcha_html = mcaptcha_widget_html(mcaptcha_site_key, mcaptcha_base_url);
+    let password_hint = password_requirements_hint();
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/v1/auth/signup\" method=\"POST\">\
 {csrf}\
@@ -1098,9 +1131,10 @@ pub fn web_signup_page(
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"signup-password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" pattern=\"(?=.*\\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*]).{{12,}}\" title=\"Must contain at least 12 characters with uppercase, lowercase, number, and special character\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-white/90 text-foreground pr-10\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-tight text-muted-foreground hover:text-foreground\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"signup-password\" aria-controls=\"signup-password\">Show</button>\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-background text-foreground pr-10\" />\
+<button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"signup-password\" aria-controls=\"signup-password\">Show</button>\
 </div>\
+{password_hint}\
 </div>\
 {mcaptcha_html}\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all\"><span>Create Account</span>{arrow}</button>\
@@ -1109,6 +1143,9 @@ pub fn web_signup_page(
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
         mcaptcha_html = mcaptcha_html,
+        password_pattern = password_pattern(),
+        password_title = password_requirements_text(),
+        password_hint = password_hint,
     );
 
     web_auth_shell(
@@ -1191,6 +1228,7 @@ pub fn web_reset_password_page_with_state(
     };
 
     let csrf = csrf_hidden_input(csrf_token);
+    let password_hint = password_requirements_hint();
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/v1/auth/reset-password\" method=\"POST\" autocomplete=\"off\">\
 {csrf}\
@@ -1199,16 +1237,16 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" pattern=\"(?=.*\\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*]).{{12,}}\" title=\"Must contain at least 12 characters with uppercase, lowercase, number, and special character\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-white/90 text-foreground pr-10\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-tight text-muted-foreground hover:text-foreground\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"new-password\" aria-controls=\"new-password\">Show</button>\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-background text-foreground pr-10\" />\
+<button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"new-password\" aria-controls=\"new-password\">Show</button>\
 </div>\
-<p class=\"text-xs text-muted-foreground\">Use at least 12 characters with uppercase, lowercase, a number, and a special character.</p>\
+{password_hint}\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" pattern=\"(?=.*\\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*]).{{12,}}\" title=\"Must contain at least 12 characters with uppercase, lowercase, number, and special character\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-white/90 text-foreground pr-10\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-tight text-muted-foreground hover:text-foreground\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-background text-foreground pr-10\" />\
+<button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"confirm-password\" aria-controls=\"confirm-password\">Show</button>\
 </div>\
 </div>\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white font-bold flex items-center justify-center gap-2 py-3 rounded-sm shadow-premium-primary/25 mt-2 transition-all disabled:cursor-not-allowed disabled:bg-surface-300 disabled:text-surface-600 disabled:shadow-premium-none\"{submit_state}><span>Reset Password</span>{arrow}</button>\
@@ -1220,6 +1258,9 @@ pub fn web_reset_password_page_with_state(
         header_notice = header_notice,
         submit_state = submit_state,
         arrow = web_auth_arrow_icon(),
+        password_pattern = password_pattern(),
+        password_title = password_requirements_text(),
+        password_hint = password_hint,
     );
 
     let footer_html = "<div class=\"px-8 pb-8\"><p class=\"text-center text-xs text-muted-foreground\">Still having trouble? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>";
@@ -3598,8 +3639,8 @@ pub fn web_login_page(
 <a href=\"/forgot-password\" class=\"text-[11px] font-bold text-primary hover:text-brand-700 uppercase tracking-tight\">Forgot password?</a>\
 </div>\
 <div class=\"relative\">\
-<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" minlength=\"12\" pattern=\"(?=.*\\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*]).{{12,}}\" title=\"Must contain at least 12 characters with uppercase, lowercase, number, and special character\" placeholder=\"••••••••\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-600\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"password\" aria-controls=\"password\">Show</button>\
+<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"••••••••\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50/30 text-surface-950\" />\
+<button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"password\" aria-controls=\"password\">Show</button>\
 </div>\
 <p class=\"hidden text-xs text-warning-700 font-bold uppercase tracking-tight\" role=\"status\" aria-live=\"polite\" data-capslock-warning=\"true\">Caps Lock is on</p>\
 </div>\
@@ -3657,8 +3698,8 @@ pub fn control_plane_login_page(
 <div class=\"space-y-2\">\
 <label for=\"login-password\" class=\"text-[11px] font-bold uppercase tracking-tight text-surface-950\">Password</label>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" minlength=\"12\" pattern=\"(?=.*\\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*]).{{12,}}\" title=\"Must contain at least 12 characters with uppercase, lowercase, number, and special character\" placeholder=\"••••••••\" class=\"flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm focus:border-primary outline-none transition-all pr-12\" />\
-<button type=\"button\" class=\"absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-tight text-surface-400 hover:text-surface-600\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"login-password\" aria-controls=\"login-password\">Show</button>\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"••••••••\" class=\"flex h-12 w-full rounded-sm border border-surface-200 bg-background px-4 py-2 text-sm focus:border-primary outline-none transition-all pr-12\" />\
+<button type=\"button\" class=\"absolute right-2 top-1/2 z-10 -translate-y-1/2 cursor-pointer select-none rounded-sm bg-background px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-foreground hover:bg-surface-100\" aria-label=\"Show password\" aria-pressed=\"false\" data-password-toggle=\"login-password\" aria-controls=\"login-password\">Show</button>\
 </div>\
 </div>\
 {mcaptcha_html}\
@@ -3809,6 +3850,8 @@ mod tests {
         assert!(html.contains("Additional verification required. Enter your MFA code."));
         // CSRF endpoint
         assert!(html.contains("action=\"/v1/auth/login\""));
+        assert!(html.contains("bg-background px-2 py-1"));
+        assert!(html.contains("text-foreground hover:bg-surface-100"));
         // Form structure
         assert!(html.contains("Forgot password?"));
         assert!(html.contains("Welcome back"));
@@ -3828,6 +3871,8 @@ mod tests {
         assert!(html.contains("MFA Verification"));
         // Auth endpoint
         assert!(html.contains("action=\"/api/auth/login\""));
+        assert!(html.contains("bg-background px-2 py-1"));
+        assert!(html.contains("text-foreground hover:bg-surface-100"));
     }
 
     /// Regression guard: login pages must not carry US-style "federal crime /
@@ -3899,9 +3944,26 @@ mod tests {
         assert!(html.contains("id=\"signup-name\""));
         assert!(html.contains("id=\"signup-email\""));
         assert!(html.contains("id=\"signup-password\""));
+        assert!(html.contains("bg-background text-foreground pr-10"));
+        assert!(!html.contains("bg-white/90 text-foreground pr-10"));
+        assert!(html.contains("bg-background px-2 py-1"));
+        assert!(html.contains("text-foreground hover:bg-surface-100"));
+        assert!(html.contains(r"\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E"));
+        assert!(html.contains("ASCII punctuation"));
         assert!(html.contains("action=\"/v1/auth/signup\""));
         assert!(html.contains("Create Account"));
         assert!(html.contains("Already have an account?"));
+    }
+
+    #[test]
+    fn web_auth_script_binds_password_toggles_and_json_forms() {
+        let script = web_auth_form_script();
+        assert!(script.contains("application/json"));
+        assert!(script.contains("passwordToggleBound"));
+        assert!(script.contains("passwordTogglesBound"));
+        assert!(script.contains("document.addEventListener('click'"));
+        assert!(script.contains("[data-password-toggle]"));
+        assert!(script.contains("'token','email','password','confirmPassword','mcaptcha__token'"));
     }
 
     #[test]
