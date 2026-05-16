@@ -26,24 +26,24 @@ COPY services/mail-server/crates ./crates
 RUN cargo fetch --locked
 
 # =============================================================================
-# Build Stage
+# Build Stage (API-only first)
 # =============================================================================
-FROM deps AS builder
-
-COPY docs /app/docs
-COPY apps/marketing-zola/public /app/apps/marketing-zola/public
-
-RUN cargo build --release
-
-# Dedicated API builder used by the api-server target. The shared builder above
-# produces every service binary, but the API image should not spend deployment
-# time compiling workspace test/load/fuzz binaries.
+# Keep the API-focused builder before the full workspace builder so legacy
+# Docker builds using --target api-server don't compile every binary first.
 FROM deps AS api-server-builder
 
 COPY docs /app/docs
 COPY apps/marketing-zola/public /app/apps/marketing-zola/public
 
 RUN cargo build --release --bin api-server
+
+# Shared builder for non-API runtime targets.
+FROM deps AS builder
+
+COPY docs /app/docs
+COPY apps/marketing-zola/public /app/apps/marketing-zola/public
+
+RUN cargo build --release
 
 # =============================================================================
 # Runtime Base
